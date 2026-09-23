@@ -1,0 +1,997 @@
+{
+  "version": "0.200.0",
+  "command": {
+    "name": "nxf",
+    "about": "nexus-flow agent CLI",
+    "args": [
+      {
+        "name": "json",
+        "long": "json",
+        "short": null,
+        "required": false,
+        "takes_value": false,
+        "help": "Emit machine-readable JSON instead of human output. `priority` and `type` carry canonical keys (stable ordinals / declared type keys), not display labels; the labels are available via `nxf schema` and, on `show`/`list`/`next`, the additive `priority_label`/`type_label` fields. `create`/`update` accept either the key or the label"
+      },
+      {
+        "name": "db",
+        "long": "db",
+        "short": null,
+        "required": false,
+        "takes_value": true,
+        "help": "Use this sqlite db file directly instead of discovering `.nxs/`"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "agent-manifest",
+        "about": "Emit nxf's declared contribution to the shared agent file (the AGENTS.md section, the prime command, the SessionStart hook) as data. The `nxs` umbrella assembles the shared files from each active module's manifest; `--json` is the machine contract",
+        "args": [],
+        "subcommands": []
+      },
+      {
+        "name": "archive",
+        "about": "Archive one or more items — \"closed and put away\". Cascades DOWN: each root and its whole `belongs_to` subtree are archived, but only when the root is closed and every descendant is closed (already-archived counts as closed). Atomic per root, independent between roots; the result reports each root's outcome plus the full list of ids actually archived (incl. cascaded). Archiving is reversible — see `unarchive`",
+        "args": [
+          {
+            "name": "ids",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item ids to archive (each a cascade root). At least one is required"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "archived",
+        "about": "List archived items (any status). Ordered by archive-date descending (most recent first); override with `--sort`",
+        "args": [
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `archived` | `id` | `rank` (default `archived`). An unknown key is a loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "blocked",
+        "about": "List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `--sort id`",
+        "args": [
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "claim",
+        "about": "Claim an item: mark it in progress (and optionally assign it)",
+        "args": [
+          {
+            "name": "id",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item id"
+          },
+          {
+            "name": "assignee",
+            "long": "assignee",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Assignee to record"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "close",
+        "about": "Close an item, recording why. Closing is final (no hard delete), so a reason is required",
+        "args": [
+          {
+            "name": "id",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item id"
+          },
+          {
+            "name": "reason",
+            "long": "reason",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Closing comment — required: why this item is being closed. `-` reads it from STDIN"
+          },
+          {
+            "name": "reason_file",
+            "long": "reason-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Read the closing comment from this file (UTF-8, verbatim); `-` reads STDIN. Mutually exclusive with `--reason`"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "closed",
+        "about": "List closed items (excluding archived). Ordered by close-date descending (most recent first); override with `--sort`",
+        "args": [
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `closed` | `id` | `rank` (default `closed`). An unknown key is a loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "contributes",
+        "about": "Add, remove, or list contributes-to edges: `from` contributes to `to` (n:m). Like a mention it never blocks — it records a structural \"feeds into\" relation, not a dependency",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Record that `from` contributes to `to` (both must exist; never blocks)",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List the items `id` contributes to",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove the `from -> to` contributes-to edge",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "create",
+        "about": "Create a new item — a complete item in one call. Title, description, and priority are required; design, the definition of done, a parent, and dependencies are optional. Run `nxf schema` for the active plugin's field model (labels, constraints, required fields)",
+        "args": [
+          {
+            "name": "ty",
+            "long": "type",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Item type, from the active plugin's own vocabulary (under `issue-tracker`: `epic`, `feature`, `bug`, `chore`, `decision`). The set is plugin-declared, so run `nxf schema` for the one this workspace actually accepts"
+          },
+          {
+            "name": "title",
+            "long": "title",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Item title (required)"
+          },
+          {
+            "name": "description",
+            "long": "description",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Description — why this item exists and its goal (required). Pass `-` to read it from STDIN (escaping-free, multi-line; e.g. `cat desc.md | nxf create … --description -`), or supply it via `--description-file` instead"
+          },
+          {
+            "name": "description_file",
+            "long": "description-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Read the description from this file (UTF-8, verbatim); `-` reads STDIN. Mutually exclusive with `--description`"
+          },
+          {
+            "name": "priority",
+            "long": "priority",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Priority — the plugin's named variant (e.g. P0..P4) OR its canonical ordinal key (0..4, the form `--json` emits), required; run `nxs prime`/`nxf schema` to see the set. Validated against it; ranks `next` by the variant order"
+          },
+          {
+            "name": "design",
+            "long": "design",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Design — the path to the goal; can be filled in later (optional). `-` reads it from STDIN"
+          },
+          {
+            "name": "design_file",
+            "long": "design-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Read the design from this file (UTF-8, verbatim); `-` reads STDIN"
+          },
+          {
+            "name": "dod",
+            "long": "dod",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Definition of done — what \"done\" means for this item (optional). `-` reads it from STDIN"
+          },
+          {
+            "name": "dod_file",
+            "long": "dod-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Read the definition of done from this file (UTF-8, verbatim); `-` reads STDIN"
+          },
+          {
+            "name": "due",
+            "long": "due",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Due date (ISO-8601 / RFC3339)"
+          },
+          {
+            "name": "defer",
+            "long": "defer",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Defer-until date (ISO-8601 / RFC3339)"
+          },
+          {
+            "name": "parent",
+            "long": "parent",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Parent item id (sets belongs-to); must exist"
+          },
+          {
+            "name": "depends_on",
+            "long": "depends-on",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "This item depends on <id> (repeatable): <id> must exist and blocks this item until it closes. Same direction as `dep add <this> <id>`"
+          },
+          {
+            "name": "set",
+            "long": "set",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `--set` carries the active plugin's declared custom fields (run `nxf schema` for the set). Validated against the field's type; a value of `-` reads STDIN"
+          },
+          {
+            "name": "set_file",
+            "long": "set-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Set a custom field from a file: `name=path` (UTF-8, verbatim); `path` of `-` reads STDIN. Repeatable. A field may be set by `--set` or `--set-file`, not both"
+          },
+          {
+            "name": "id_only",
+            "long": "id-only",
+            "short": "q",
+            "required": false,
+            "takes_value": false,
+            "help": "Print ONLY the new item's id — one line, no JSON, no output framing — so it can be captured straight into the next command (`id=$(nxf create … -q)`) without parsing JSON. Takes precedence over `--json` (the id wins; `--json` is ignored, not an error)"
+          },
+          {
+            "name": "json_stdin",
+            "long": null,
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "`-` reads the whole item as one JSON object from STDIN (every field in one piped payload — no escaping, no flag combinatorics; pair with `--json` for JSON output too, the canonical form `nxf create --json -`). The only accepted value is `-`, and it is mutually exclusive with the field flags"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "deferred",
+        "about": "List deferred items (open, unblocked, with a future defer date) — the lane that is neither ready nor blocked. Ordered by defer-date ascending (soonest first); override with `--sort`",
+        "args": [
+          {
+            "name": "now",
+            "long": "now",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Reference time (ISO-8601 / RFC3339); defaults to now. Sets the defer boundary"
+          },
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `defer` | `id` | `rank` (default `defer`). An unknown key is a loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "dep",
+        "about": "Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B blocks A — A cannot be ready until B closes",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Make `from` depend on `to`: `to` blocks `from`, so `from` stays blocked until `to` closes. Rejected if it would create a cycle",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove the dependency where `from` depends on `to`",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "guide",
+        "about": "Print an embedded, offline guide. Omit the topic to list the available ones",
+        "args": [
+          {
+            "name": "topic",
+            "long": null,
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Guide topic; omit to list topics"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "init",
+        "about": "Initialize a `.nxs` workspace in the current directory: set up flow, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler. To set up the whole suite (and pick tools interactively), use `nxs init` instead",
+        "args": [
+          {
+            "name": "plugin",
+            "long": "plugin",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Plugin to activate (vocabulary + ranking): `issue-tracker` | `personal-todo`. Required when non-interactive (`--json`/piped/`--quiet`); on a TTY, omitting it prompts"
+          },
+          {
+            "name": "quiet",
+            "long": "quiet",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Driven/quiet mode: set up the workspace and delegate the agent files + the SessionStart hooks, but render no banner or prompt. The seam the `nxs` umbrella uses to drive `nxf init` without its output bleeding through; implies a non-interactive plugin choice (`--plugin`)"
+          },
+          {
+            "name": "from_beads",
+            "long": "from-beads",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Consent to the beads → nxs migration: in a project that still uses beads, import its tickets + memories and roll back beads' config. Routed through the `nxs` umbrella, which owns the migration"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "label",
+        "about": "Add, remove, or list user labels (free-text tags) on an item. A label is user vocabulary, distinct from the plugin's display type; filter `list`/`next` with `--label`",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Attach a label to an item (idempotent). The label is trimmed; a blank label is rejected",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "label",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List an item's labels (sorted)",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Detach a label from an item (observed-remove)",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "label",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "list",
+        "about": "List items, optionally filtered by status and/or type. Id-ordered by default (so the `--json` record stays plugin-independent); override with `--sort rank`",
+        "args": [
+          {
+            "name": "status",
+            "long": "status",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter by status"
+          },
+          {
+            "name": "ty",
+            "long": "type",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter by type, using the active plugin's vocabulary (see `nxf schema`)"
+          },
+          {
+            "name": "label",
+            "long": "label",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter to items carrying this label (user vocabulary, not the display type)"
+          },
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `rank` | `id` (default `id`). An unknown key is a loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "mention",
+        "about": "Add, remove, or list reference edges (free-text short-id citations)",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Record that `from` cites the short-id `to` in its free text (no blocking)",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List the short-ids `id` mentions",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove the `from -> to` reference",
+            "args": [
+              {
+                "name": "from",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "to",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "next",
+        "about": "List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--limit` shows only the head of it, and says so",
+        "args": [
+          {
+            "name": "now",
+            "long": "now",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Reference time (ISO-8601 / RFC3339); defaults to now"
+          },
+          {
+            "name": "label",
+            "long": "label",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter to ready items carrying this label (user vocabulary, not the display type)"
+          },
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error"
+          },
+          {
+            "name": "limit",
+            "long": "limit",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Max items to show (default: no limit). Applied last — after `--sort` and `--label` — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{\"items\": [...], \"total\": <n>}` so a consumer reads the untruncated total instead of inferring it from the array's length"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "note",
+        "about": "Add or list notes (the change/worklog stream) on an item",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Append a note to an item. Pass `-` as the text to read the note body from STDIN (escaping-free, multi-line)",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "text",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List an item's notes",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "recap",
+        "about": "Recap the most recently closed work — \"what got finished lately\" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `--limit` caps the count (default 10); `--since` keeps only later closes",
+        "args": [
+          {
+            "name": "limit",
+            "long": "limit",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Max items to show (default 10)"
+          },
+          {
+            "name": "since",
+            "long": "since",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Only closes on/after this ISO-8601 date (`YYYY-MM-DD` or RFC3339); filters `closed_at >= since`"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "schema",
+        "about": "Describe the active plugin's field model — vocabulary, priorities, and per field whether it is required on create / settable on update and how. `--json` is the machine contract; run it to learn what `create`/`update` accept in this workspace (the static `--help` cannot carry the active plugin's vocabulary)",
+        "args": [],
+        "subcommands": []
+      },
+      {
+        "name": "search",
+        "about": "Search items by substring over title, description, design, DoD, and notes. Results are grouped by lane priority (next+in-progress → blocked → deferred → closed), each group in its natural order; archived items are excluded by default",
+        "args": [
+          {
+            "name": "query",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Query string"
+          },
+          {
+            "name": "status",
+            "long": "status",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter by status"
+          },
+          {
+            "name": "ty",
+            "long": "type",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Filter by type, using the active plugin's vocabulary (see `nxf schema`)"
+          },
+          {
+            "name": "now",
+            "long": "now",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Reference time (ISO-8601 / RFC3339); defaults to now. Sets the defer boundary used to group deferred matches"
+          },
+          {
+            "name": "include_archived",
+            "long": "include-archived",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Append the archived group (lowest priority) instead of excluding it"
+          },
+          {
+            "name": "archived_only",
+            "long": "archived-only",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Search ONLY the archive; the live lanes are skipped"
+          },
+          {
+            "name": "sort",
+            "long": "sort",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Flatten the lane grouping into one order by this key (`rank` | `id` | …). Unknown = loud error"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "setup",
+        "about": "Wire host-specific agent integration (idempotent, merge-only). `nxf init` stays tool-agnostic; this opts a project into a host's deterministic delivery",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "claude",
+            "about": "Wire Claude Code: (re)assemble the shared agent file (AGENTS.md) and one SessionStart hook per active module (`nxf prime`, `nxm prime`, `nxc prime`) plus the `nxs`/module permission allowlist, merged into `.claude/settings.json` (idempotent, never overwriting). The canonical verb is `nxs setup claude`; this delegates to it (host setup is an umbrella responsibility)",
+            "args": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "show",
+        "about": "Show one item with its dependencies and notes",
+        "args": [
+          {
+            "name": "id",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item id"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "thread",
+        "about": "Link a chat thread to a board item, or list what a thread is about. This is how the conversation that did the work and the ticket it was about stop being two artefacts: a later reader of the item sees that there are conversations, without having to go looking",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "link",
+            "about": "Link `thread` to `item`. Re-running with different attributes UPDATES the link rather than adding a second one — that is how a link firms up once a passing mention turns out to be the subject",
+            "args": [
+              {
+                "name": "thread",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": "The chat thread's own id. Not resolved or shape-checked: the thread lives in the chat store's id space, which flow holds the address of but does not own"
+              },
+              {
+                "name": "item",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": "The board item"
+              },
+              {
+                "name": "relation",
+                "long": "relation",
+                "short": null,
+                "required": false,
+                "takes_value": true,
+                "help": "What the link consists in: `worked_on` (this thread is working on the item) or `cited` (it refers to the item without working on it). Default `worked_on` — the deterministic case, the one a work order's ticket set produces with no judgement involved"
+              },
+              {
+                "name": "weight",
+                "long": "weight",
+                "short": null,
+                "required": false,
+                "takes_value": true,
+                "help": "How much the thread is about the item: `bearing` (the item is its subject) or `passing` (it came up, no more). Default `bearing`. Only `bearing` links are advertised by `next`; a `passing` one shows on the item itself, so a wandering conversation cannot flood the work list with items it merely touched"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List the board items `thread` is linked to",
+            "args": [
+              {
+                "name": "thread",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "unlink",
+            "about": "Unlink `thread` from `item`, whatever attributes the link currently carries",
+            "args": [
+              {
+                "name": "thread",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "item",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "unarchive",
+        "about": "Unarchive one or more items, making them visible again. Cascades UP only: each item and its ancestor chain resurface, but its children/siblings stay archived. Partial per root; the result reports each root's outcome plus the full list of ids actually unarchived",
+        "args": [
+          {
+            "name": "ids",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item ids to unarchive (each surfaces its ancestor chain). At least one is required"
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "update",
+        "about": "Update item fields via `--set field=value` (repeatable). The long-form `description`/`design`/`completion_criterion` are ordinary `--set` fields. Run `nxf schema` for the settable fields and their plugin names. Convention: correct the field model once shortly after creation; once it is stable, record what you learn as append-only notes (`nxf note add`) rather than further field edits",
+        "args": [
+          {
+            "name": "id",
+            "long": null,
+            "short": null,
+            "required": true,
+            "takes_value": true,
+            "help": "Item id"
+          },
+          {
+            "name": "json_stdin",
+            "long": null,
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "`-` reads the fields to set as one JSON object from STDIN (`{\"description\":\"…\", \"design\":\"…\"}`) — every field in one piped payload, no escaping. The only accepted value is `-` (canonical form `nxf update <id> --json -`), mutually exclusive with `--set`/`--set-file`"
+          },
+          {
+            "name": "set",
+            "long": "set",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `-` reads that field from STDIN (escaping-free, multi-line); at most one field per call may read STDIN"
+          },
+          {
+            "name": "set_file",
+            "long": "set-file",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "A `field=path` assignment that reads the field's value from a file (UTF-8, verbatim); `path` of `-` reads STDIN. Repeatable; lets several long-text fields each come from their own file in one call. A field may be set by `--set` or `--set-file`, not both"
+          }
+        ],
+        "subcommands": []
+      }
+    ]
+  }
+}

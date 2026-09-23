@@ -1,0 +1,68 @@
+name: content-ci
+
+# PR gate for the content provider (REPLACES site-ci.yml — the site/ renderer is retired,
+# nxsflow.com migration §4, 6j6v.0a6p). A PR touching the content sources must: install locked
+# (a drifted lockfile fails closed), pass the provider unit tests, assemble content.json/docs.json,
+# and validate the assembled content.json against the vendored content-contract mirror — so a
+# contract-breaking edit, a missing guide H1, or a malformed feed is caught on the PR, never at
+# publish or at the consumer. The authoritative fetch of the landing-published schema runs in
+# publish-content.yml (this gate stays offline + fast, with no credentials).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "content/**"
+      # One guide tree per building block since 6j6v.9e3r — a topic added under ANY of
+      # them changes the published docs, so all three gate this workflow.
+      - "crates/cli/docs/guide/**"
+      - "crates/memory/docs/guide/**"
+      - "crates/chat/docs/guide/**"
+      - "release-notes.json"
+      - ".github/workflows/content-ci.yml"
+  pull_request:
+    paths:
+      - "content/**"
+      # One guide tree per building block since 6j6v.9e3r — a topic added under ANY of
+      # them changes the published docs, so all three gate this workflow.
+      - "crates/cli/docs/guide/**"
+      - "crates/memory/docs/guide/**"
+      - "crates/chat/docs/guide/**"
+      - "release-notes.json"
+      - ".github/workflows/content-ci.yml"
+
+# Least-privilege: read-only CI gate — checkout is all it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: content-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  content-quality-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: content
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: content/package-lock.json
+
+      # `npm ci` (not install): exact, lockfile-pinned — fails closed if package.json and the
+      # lockfile drift (the same class of incident site-ci was built to catch).
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Unit tests
+        run: node --test
+
+      - name: Assemble
+        run: node assemble.mjs
+
+      - name: Validate against the vendored contract mirror
+        run: node validate.mjs --schema schema/content-contract-v1.json

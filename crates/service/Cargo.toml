@@ -1,0 +1,45 @@
+[package]
+name = "nxs-service"
+version.workspace = true
+edition = "2021"
+description = "nxs background service seam: the machine-wide ~/.nexusflow home, the workspace registry the service attends, and the single-instance lock + heartbeat it publishes"
+publish = false
+
+# WHY THIS CRATE EXISTS (6j6v.5zst). The service's registry lived in `crates/nxs` — the umbrella
+# binary. An embedding app links `nexus-chat` with `default-features = false` precisely to keep the
+# CLI/TUI closure (clap, nxs-ui, inquire, crossterm, nxs-init, inventory) out of its graph, so it
+# never links `nxs` and had no way to tell the service about a workspace at all. The answer to
+# "how does an app do X?" cannot keep being "it shells out to a binary it does not have."
+#
+# So the seam sits BELOW everything that has a CLI: `nxs` and `nexus-chat` both depend on this, and
+# it depends on nothing but the shared error type and three serialization crates. Nothing in here
+# parses argv, prints, or knows a product vocabulary.
+[dependencies]
+# The shared structured error (`NxfError`/`Result`) — the same closed `kind` + human `msg` envelope
+# every other nxs crate returns, so an embedder handles one error type across all of them.
+nxs-foundation = { path = "../foundation" }
+serde = { version = "1", features = ["derive"] }
+# The heartbeat is JSON (`~/.nexusflow/<service>.json`); the registry's canonical list value is a
+# JSON array both the MCP `list_workspaces` tool and `nxs mcp workspaces --json` render.
+serde_json = "1"
+# The registry itself is hand-editable TOML (`~/.nexusflow/workspaces.toml`).
+toml = "0.8"
+# Cross-platform `$HOME` resolution, the same resolver every consumer of `~/.nexusflow/` already
+# used before this crate collected them into one place.
+directories = "6"
+# Deadlines are compared as INSTANTS, not as strings: the book is written by one binary and read by
+# another (and by a human), and two RFC3339 spellings of the same moment must not sort differently.
+# Parsing at the arming seam is also what keeps an unreadable stamp out of the book entirely.
+time = { version = "0.3", features = ["parsing", "formatting"] }
+# This machine's id (`machine.toml`, nxf 6j6v.f0b5) — a ULID minted once per service home.
+# The same crate `nxs-foundation` already mints replica ids with, so no new crate in any graph.
+ulid = "1"
+
+[target.'cfg(unix)'.dependencies]
+# `flock` for the single-instance lock and `kill(pid, 0)` for the liveness probe. `std` has no API
+# for either; this is the same unix-only dependency `crates/nxs` already carried for exactly these
+# two calls.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

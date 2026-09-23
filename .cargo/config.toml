@@ -1,0 +1,4 @@
+# `cargo xtask <...>` → run the repo-automation crate. Convention alias so the version /
+# changelog tooling is invoked the same way everywhere (CI, dev, release). Spec §4.2.
+[alias]
+xtask = "run --quiet --package xtask --"

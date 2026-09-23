@@ -1,0 +1,39 @@
+# Repo automation (matklad's cargo-xtask convention): keeps version/changelog tooling
+# in Rust so no second toolchain (Node) enters the core workflow (spec §4.2, TB-7).
+# Invoked via the `.cargo/config.toml` alias: `cargo xtask <...>`. NOT shipped — it keeps
+# its own fixed version and does NOT inherit [workspace.package].
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+description = "nexus-flow repo automation: version + changelog tooling (cargo xtask)"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# NOTE: do NOT enable `preserve_order` here. xtask serializes its artifacts (commands.json,
+# the release-notes feed) DIRECTLY from `#[derive(Serialize)]` structs, whose field order serde
+# already preserves — the feature is a no-op for that. But because cargo unifies features across
+# the workspace, enabling it leaked into the `nxf` binary under `cargo test --all` and flipped
+# its `serde_json::Value` key order from lexicographic (production) to insertion order, breaking
+# the golden-example harness (nexus-flow-4oa.2). Keeping it off makes nxf's JSON deterministic
+# in every build configuration.
+serde_json = "1"
+# Workflow files are read as real YAML, not scraped line by line (nexus-flow-6j6v.2sb1): the
+# self-hosted-runner guard has to read a job's `if:` and `strategy.matrix`, and a hand-rolled
+# subset reader is exactly the kind of check that stays green where it should bite. Same version
+# the chat crate already links for persona declarations, so the workspace gains no new dependency.
+serde_yaml = "0.9"
+# Edit Cargo.toml / Cargo.lock in place preserving formatting (same crate cargo itself uses).
+toml_edit = "0.22"
+anyhow = "1"
+# Living-documentation generation (nexus-flow-4oa.1): render the nxf clap command tree
+# (the single source of truth) into man-pages and Markdown. The cli crate is depended on
+# as a library purely to reach its `command()` factory.
+nexus-flow-cli = { path = "../crates/cli" }
+clap-markdown = "0.1"
+clap_mangen = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

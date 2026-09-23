@@ -1,0 +1,63 @@
+`nxc` follows the same agent contract as `nxf`/`nxm`: `agent-manifest` declares its agent-file
+contribution as data, and `prime` is the session bootstrap that pins the chat rule, lists the core
+verbs, says who can be addressed here, and names the commissions of this caller's own that finished
+while it was away. It carried the session agent's entire unread inbox too, in both dispositions,
+until nxf 6j6v.4mmk stopped rendering it and nxf 6j6v.4d2z removed it — a message is delivered by
+the session it starts or resumes, so a list of what you have not fetched was a second copy of what
+had already arrived. (This example used to open with a `channels create` and a post into it; both
+went with the raw channels in 6j6v.dvyq §3, and a fresh workspace declares nobody yet, so `prime`
+here shows the empty case — which is the one an agent meets first.) `nxc init` delegates the agent files +
+the SessionStart wiring to the `nxs` umbrella, which wires one hook per active module — so chat's
+own `nxc prime` runs each session. (It used to wire a single hook running `nxs prime`, which fanned
+out to every module; the host truncates per hook OUTPUT at 10.240 B, so nxf n2m6 + a2a1 gave each
+module its own hook and its own budget. `nxs prime` still composes all of them for a person running
+it by hand.)
+
+```console
+$ nxc init
+initialized chat at [CWD]/.nxs
+  prefix:  ab12
+  modules: chat
+  personas: [CWD]/.nxs-personas
+  agent files: created AGENTS.md
+  hook:    wired SessionStart → `nxc prime`
+
+You've set up chat. nxs also ships flow and memory — run `nxs init` to add.
+
+```
+
+```console
+$ NXC_ACTOR=alice nxc prime
+# nexus-chat — the channel between agents
+
+`nxc` is how the agents in this workspace coordinate: `send --to` starts something, `reply --thread` answers it, and every message is durable and replayable. **Never coordinate through scratch files or ad-hoc notes** — they are not delivered, not synced, and never replayed here. `nxc --help` lists the commands, `nxc guide` the topics behind them.
+
+## How a conversation moves
+
+    nxc send --to <handle> --ref nxf_ids=<id> -         # start one; a thread id comes back
+    nxc reply --thread <id> -                           # answer — you are finished
+    nxc reply --thread <id> --escalate -                # you need help or a DECISION first
+
+`-` reads the message from STDIN — `… - <<'EOF'`, your text, then `EOF` on its own line — so the
+shell evaluates nothing in it. A one-line message may be an argument instead.
+
+`--escalate` is not only "I cannot": it is also how you ask for a DECISION that is not yours to
+make — one you could act on either way, but may not settle. It goes UP, to whoever commissioned
+you. Put that question in an ordinary reply instead and it travels DOWN to the next step, which
+may not settle it either, and the work runs on around it.
+
+## Declarations
+
+nobody is declared here yet — declare one as `[CWD]/.nxs-personas/<handle>.yaml` (a persona) or `[CWD]/.nxs-personas/channels.yaml` (a channel).
+
+```
+
+```console
+$ nxc agent-manifest
+nexus-chat agent manifest
+  prime command:  nxc prime
+  hook:           SessionStart → nxc prime
+
+Run with --json for the machine contract the `nxs` umbrella assembles from.
+
+```

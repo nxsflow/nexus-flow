@@ -1,0 +1,17 @@
+{
+  "_note": "Generated and drift-guarded by crates/cli/tests/terminal_demo.rs — do not edit by hand. Regenerate with `UPDATE_DEMO=1 cargo test -p nexus-flow-cli --test terminal_demo`.",
+  "session": [
+    {
+      "cmd": "nxf next",
+      "out": "\n0001  P1  open  [epic]  Payments revamp\n0002  P1  open  [feature]  Design new checkout flow\n    ↳ 0001 · Payments revamp\n\n"
+    },
+    {
+      "cmd": "nxf blocked",
+      "out": "\n0003  P2  open  [chore]  Migrate billing webhooks\n    ↳ blocked by: 0002 (open)\n\n"
+    },
+    {
+      "cmd": "nxf next --json",
+      "out": "[{\"archived\":null,\"assignee\":null,\"belongs_to\":null,\"closed_at\":null,\"closing_comment\":null,\"completion_criterion\":null,\"created_at\":\"2026-06-23T00:00:00Z\",\"defer_until\":null,\"deleted\":null,\"description\":\"Rework the payments stack for v2.\",\"design\":null,\"due\":null,\"id\":\"ab12.0001\",\"parent\":null,\"priority\":\"1\",\"priority_label\":\"P1\",\"status\":\"open\",\"title\":\"Payments revamp\",\"type\":\"epic\",\"type_label\":\"epic\",\"updated_at\":\"2026-06-23T00:00:00Z\"},{\"archived\":null,\"assignee\":null,\"belongs_to\":\"ab12.0001\",\"closed_at\":null,\"closing_comment\":null,\"completion_criterion\":null,\"created_at\":\"2026-06-23T00:00:00Z\",\"defer_until\":null,\"deleted\":null,\"description\":\"One-page checkout with saved cards.\",\"design\":null,\"due\":null,\"id\":\"ab12.0002\",\"parent\":{\"id\":\"ab12.0001\",\"title\":\"Payments revamp\",\"type\":\"epic\",\"type_label\":\"epic\"},\"priority\":\"1\",\"priority_label\":\"P1\",\"status\":\"open\",\"title\":\"Design new checkout flow\",\"type\":\"feature\",\"type_label\":\"feature\",\"updated_at\":\"2026-06-23T00:00:00Z\"}]\n"
+    }
+  ]
+}

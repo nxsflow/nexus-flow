@@ -1,0 +1,16 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH blocked 1  "blocked " 
+.SH NAME
+blocked \- List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `\-\-sort id`
+.SH SYNOPSIS
+\fBblocked\fR [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `\-\-sort id`
+.SH OPTIONS
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

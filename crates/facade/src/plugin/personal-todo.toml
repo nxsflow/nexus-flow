@@ -1,0 +1,61 @@
+name = "personal-todo"
+
+# The predicate `prime` renders after "nexus-flow is …" (agent-facing; not the chooser one-liner).
+# Must stay above the first table header so it is a top-level key, not a `description` field.
+tagline = "a personal to-do list for projects and todos"
+
+[description]
+en = "Personal to-do list: projects and todos, now/soon/later priorities for everyday tasks."
+de = "Persönliche To-do-Liste: Projekte und Todos, Prioritäten jetzt/bald/später für den Alltag."
+
+# Not just a vocabulary remap: personal-todo also declares a DIFFERENT hierarchy shape than
+# issue-tracker (multi-parent below), so the seam is proven against behaviour, not only labels.
+
+# Named priority variants, highest first (8qv.2): the ordered list is both the valid set and
+# the ranking order. "later" must not sort before "now" — ranking uses the index, not the bytes.
+[priority]
+labels = ["now", "soon", "later", "someday", "icebox"]
+
+# The plugin's type system (sp6.4). Like issue-tracker it is 2 levels, but its parent CARDINALITY
+# differs: only `project` is a container, and a `todo`/`termin` may belong to ANY NUMBER of projects
+# (`max = "many"`) — or be an orphan. That n-cardinality (vs issue-tracker's single parent) is the
+# seam proof that the rules are plugin-driven, not hardcoded. A `project` has no rule, so it can
+# never be parented (no project-under-project, no third level).
+[types]
+list = ["project", "todo", "termin"]
+max_depth = 2
+
+[types.rules.todo]
+parents = ["project"]
+max = "many"
+
+[types.rules.termin]
+parents = ["project"]
+max = "many"
+
+[vocabulary.status]
+open = "todo"
+in_progress = "doing"
+closed = "done"
+
+# Casual field headings — the same core fields named in this plugin's voice (proves the
+# field-label seam: issue-tracker calls these Description / Definition of Done / Design / Notes).
+[vocabulary.fields]
+description = "Why"
+completion_criterion = "Done when"
+design = "Plan"
+notes = "Log"
+
+# `next` ranking — field-based, with NO type precedence (a deliberate contrast to issue-tracker:
+# personal-todo does not rank by kind). The leading status-precedence key keeps claimed work first
+# (`next` always includes it) — declared, not hardcoded (sp6.5).
+# Order: status → priority → id.
+[ranking.next]
+order = [
+    { field = "status", precedence = ["in_progress", "open"] },
+    { field = "priority", dir = "asc" },
+    { field = "id", dir = "asc" },
+]
+
+[presentation.list]
+columns = ["id", "priority", "status", "type", "title"]

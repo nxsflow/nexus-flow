@@ -1,0 +1,86 @@
+name: example-check
+
+# `cargo check` on the in-repo example app, which NO other gate builds.
+#
+# WHY IT EXISTS, measured rather than assumed: `examples/tauri-board` is deliberately outside the
+# workspace (root `Cargo.toml` `exclude`) so that `cargo test --all` never compiles Tauri + WebKit
+# on every contributor's machine. The cost of that is real and it has now been paid twice — the
+# example silently stopped compiling when a facade signature moved under it, and nothing said so:
+#
+#   - 2026-07-14, commit 3229bbf4, titled "fix API drift" — the first time.
+#   - 2026-09-03: `Engine::next` had dropped its second argument. Seven weeks and eight releases
+#     of a public example that did not build, found by hand rather than by a gate.
+#
+# The second one was worse than a build error. `next` also changed MEANING in that window — it is
+# `ready ∪ in_progress` now, unconditionally — so a compile-only repair would have left the window
+# listing claimed work under a heading that said "Ready". A gate that only says "it compiles" would
+# not have caught that either; what it buys is the SIGNAL, early enough that somebody reads the
+# seam's docs while the change is still in hand.
+#
+# WHAT IT IS NOT: this does not build a bundle, link a real WebView, or run the app. `cargo check`
+# is the whole point — it is the cheapest thing that would have gone red on both occasions above.
+#
+# The two path lists below are DUPLICATED on purpose: GitHub Actions does not support YAML anchors,
+# and no other workflow in this repo uses them. Keep the two lists in step by hand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/tauri-board/**"
+      # Everything the example links. It depends on the facade and core by path, and both stand on
+      # the foundation — a signature that moves in any of the three is exactly the drift this gate
+      # exists for. The root manifest is here because it carries the workspace `exclude`.
+      - "crates/facade/**"
+      - "crates/core/**"
+      - "crates/foundation/**"
+      - "Cargo.toml"
+      - ".github/workflows/example-check.yml"
+  pull_request:
+    paths:
+      - "examples/tauri-board/**"
+      - "crates/facade/**"
+      - "crates/core/**"
+      - "crates/foundation/**"
+      - "Cargo.toml"
+      - ".github/workflows/example-check.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: example-check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own cache key: this crate is not in the workspace, so it shares no target dir with
+          # the CI job that builds everything else. Without this the two would fight over one key.
+          workspaces: examples/tauri-board/src-tauri
+
+      # Tauri's `tao`/`wry` build scripts resolve the platform WebView through pkg-config, so even
+      # `cargo check` needs the headers present. macOS ships WebKit and would need none of this —
+      # but a Linux runner is the cheaper minute, and what is under test here is our own code
+      # against our own seams, not the platform.
+      - name: WebView development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+                                  librsvg2-dev patchelf
+
+      # NOT `--locked`: the example's `Cargo.lock` is git-ignored on purpose (its `.gitignore` keeps
+      # "only sources under version control"), so there is none in a fresh checkout. The trade is
+      # named rather than hidden: dependencies resolve fresh here, so this job can also go red for
+      # an upstream release rather than for our own drift. Read a failure by looking at WHICH crate
+      # the error names before assuming it is ours.
+      - name: cargo check (example)
+        run: cargo check --manifest-path examples/tauri-board/src-tauri/Cargo.toml

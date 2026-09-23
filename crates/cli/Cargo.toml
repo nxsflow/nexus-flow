@@ -1,0 +1,91 @@
+[package]
+name = "nexus-flow-cli"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow agent CLI (nxf): thin deterministic interface over the engine core"
+publish = false
+
+# Library-only since the multicall collapse (nexus-flow-5jz.7): `nxf` is no longer its own bin —
+# it is an `argv[0]` symlink to the single `nxs` binary, which links this crate and routes to it.
+# The parser/dispatch live here so the umbrella can call `run_from`, and repo tooling
+# (`cargo xtask docs`) can reach the clap command tree.
+[lib]
+name = "nexus_flow_cli"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-flow-core = { path = "../core" }
+nexus-flow-facade = { path = "../facade" }
+# The substrate this CLI's writes land on — depended on directly for ONE thing: `model::resolve_author`,
+# the single place that decides what counts as an op author (forward-compat invariant 1, 6j6v.xsf3).
+# Every product CLI resolves its actor through it so the rule cannot drift per binary.
+nxs-foundation = { path = "../foundation" }
+# The background-service seam (6j6v.dcpk): `self-update` swaps the binary the suite runs, and the
+# ONE service runs a separate `~/.nexusflow/bin/nexus-flow` alias that no update touches. Comparing
+# the two after an update is the whole of this dependency — it links no launchd and starts nothing.
+nxs-service = { path = "../service" }
+# The shared init/compose library (5jz.1): the agent-file assembler `nxf init` delegates to, plus
+# the `ModuleInit` registry flow SELF-REGISTERS into (inventory). flow depends on `nxs-init`, NOT on
+# `nxs` — the seam that lets `nxs` link flow as the compile-time composition root without a cycle.
+nxs-init = { path = "../nxs-init" }
+# The retrieval rule's board-item half (6j6v.srpg): `nxf show`/`nxf next` surface the memories filed
+# against an item, so flow READS memory's `memories` view over the ONE shared `.nxs/` store. The
+# dependency points this way only — memory stays flow-free (spec §4.4), and the read is gated on the
+# memory module being active, so a flow-only workspace never opens (or creates) memory's view.
+nexus-memory = { path = "../memory" }
+# Self-registration: flow `inventory::submit!`s its `ModuleInit` into the registry `nxs-init`
+# collects, so the umbrella sees flow without hardcoding it. Same crate/version as `nxs-init`.
+inventory = "0.3"
+# The shared presentation layer: the manufakt-Forge Theme (TTY-gated so non-terminal/golden output
+# stays byte-stable plain).
+nxs-ui = { path = "../nxs-ui" }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+ulid = "1"
+time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+# Embed the EN guide docs into the binary at compile time, so `nxf guide` works fully
+# offline with no filesystem dependency (E7-S3). A drift unit test asserts the embedded
+# dir and the in-code TOPICS list stay in sync — divergence is a build/test failure.
+# The macro must be expanded HERE (it resolves `$CARGO_MANIFEST_DIR`); everything the three
+# building blocks do with the result is shared in `nxs-guide` below.
+include_dir = "0.7"
+# The ONE embedded-guide mechanism (6j6v.9e3r): listing, lookup, the frozen `--json` contract, the
+# terminal markdown renderer and the TOPICS<->directory parity rule, shared with `nxm`/`nxc` so the
+# three blocks' guide verbs cannot drift apart.
+nxs-guide = { path = "../guide" }
+# Verify-only minisign: pure Rust, no C deps — keeps the musl static-binary guarantee
+# (spec §5.2). The signing half (private key) lives only in CI + the operator's backup.
+minisign-verify = "0.2"
+# `self-update` (85y.18): talk to /updater, download + unpack + verify a release tarball.
+# All pure-Rust to preserve the musl static-binary guarantee (spec §5.2): ureq keeps its
+# default rustls TLS (HTTPS to the updater), flate2 defaults to the miniz_oxide backend
+# (no zlib C dep), tar is pure Rust, sha2 is the mandatory integrity gate alongside minisign.
+ureq = { version = "2", features = ["json"] }
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+# Build a fields-declaring PluginConfig from inline TOML in unit tests (the same shape the facade
+# read tests use), so `attach_prime_custom` can be exercised with a plugin that declares `[fields]`.
+toml = "0.8"
+# Spawn a real relay in-process so the sync e2e (`nxs sync`, a child process) syncs over loopback
+# HTTP. The harness only needs the wire/protocol types, so default features (no `engine`).
+nxs-sync = { path = "../sync" }
+nxs-server = { path = "../server" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt", "net"] }
+# Full minisign (keygen + sign) — TEST ONLY, never in the shipped binary: lets the unit
+# tests mint an ephemeral keypair and a real signature to exercise the verifier end-to-end
+# without ever touching the production key.
+minisign = "0.7"
+trycmd = "1.2.0"
+# The stale-multicall-binary gate (0yyw): `nxf` is an argv[0] symlink to `nxs`, which `-p
+# nexus-flow-cli` never rebuilds — without this the suite silently asserts against an old binary.
+nxs-test-support = { path = "../test-support" }

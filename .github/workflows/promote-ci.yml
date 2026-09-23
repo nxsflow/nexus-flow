@@ -1,0 +1,53 @@
+name: promote-ci
+
+# `promote-release.sh` carries the beta→stable promotion contract (spec §5.5, nexus-flow-85y.15):
+# fail-closed head-object guards (404≠403), server-side copy, stable-manifest assembly. Every
+# other language surface here has its own gate — ci.yml the Rust crates (and the sidecar's
+# JavaScript), content-ci.yml and npm-mcp-ci.yml the rest; without this job the shell promotion
+# tooling would ship ungated, and a regression in the guard (e.g. a 403 swallowed as "missing")
+# could promote an incomplete/unsigned stable ring. Runs shellcheck + the hermetic harness
+# (tests/promote-release.test.sh, fake `aws`, no network/AWS). Fail-closed. Spec §9.
+#
+# This line named `infra-ci.yml` and "the TypeScript" until 6j6v.sgfr. Both halves went together:
+# the gate with `infra/`, and the language with it — the repo ships no TypeScript at all now.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/promote-release.sh"
+      - ".github/workflows/promote.yml"
+      - "tests/promote-release.test.sh"
+      - ".github/workflows/promote-ci.yml"
+  pull_request:
+    paths:
+      - ".github/scripts/promote-release.sh"
+      - ".github/workflows/promote.yml"
+      - "tests/promote-release.test.sh"
+      - ".github/workflows/promote-ci.yml"
+
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. Cancels PR runs only — the push run on `main` is that ref's standing record of green
+# and must always finish.
+concurrency:
+  group: promote-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  promote-quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        # jq is preinstalled on ubuntu-latest (the harness needs it for manifest assembly).
+
+      - name: Lint (shellcheck)
+        run: shellcheck .github/scripts/promote-release.sh tests/promote-release.test.sh
+
+      - name: Test (hermetic harness, fake aws)
+        run: tests/promote-release.test.sh

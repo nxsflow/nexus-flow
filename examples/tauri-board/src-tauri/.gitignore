@@ -1,0 +1,4 @@
+# Standalone (workspace-excluded) example — keep only sources under version control.
+/target
+/gen
+/Cargo.lock

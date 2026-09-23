@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nxsflow.com/schema/content-contract-v1.json",
+  "title": "nxsflow content-federation contract",
+  "type": "object",
+  "required": [
+    "contract",
+    "product",
+    "slug",
+    "locales",
+    "content"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "contract": {
+      "type": "string",
+      "enum": [
+        "1"
+      ],
+      "description": "Integer-major as a string; bump only on a breaking change."
+    },
+    "product": {
+      "type": "string"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "locales": {
+      "type": "object",
+      "required": [
+        "default",
+        "required"
+      ],
+      "properties": {
+        "default": {
+          "type": "string"
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "meta",
+          "sections"
+        ],
+        "properties": {
+          "meta": {
+            "type": "object",
+            "required": [
+              "title",
+              "description"
+            ],
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "ogImage": {
+                "type": "string"
+              }
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/section"
+            }
+          }
+        }
+      }
+    },
+    "docs": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "section": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "hero"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/heroSection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "terminal-demo"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/terminalDemoSection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "feature-grid"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/featureGridSection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "changelog"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/changelogSection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "powered-by"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/poweredBySection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "download-cta"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/downloadCtaSection"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "suite-breakdown"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/suiteBreakdownSection"
+          }
+        }
+      ]
+    },
+    "heroSection": {
+      "type": "object",
+      "required": [
+        "type",
+        "headline"
+      ],
+      "properties": {
+        "type": {
+          "const": "hero"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "sub": {
+          "type": "string"
+        },
+        "install": {
+          "type": "string"
+        },
+        "platforms": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "object",
+          "required": [
+            "label",
+            "href"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "terminalDemoSection": {
+      "type": "object",
+      "required": [
+        "type",
+        "transcript"
+      ],
+      "properties": {
+        "type": {
+          "const": "terminal-demo"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "transcript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "text"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "cmd",
+                  "out"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "featureGridSection": {
+      "type": "object",
+      "required": [
+        "type",
+        "items"
+      ],
+      "properties": {
+        "type": {
+          "const": "feature-grid"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "title",
+              "body"
+            ],
+            "properties": {
+              "index": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "changelogSection": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "changelog"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "feed": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "version"
+            ],
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "text"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "poweredBySection": {
+      "type": "object",
+      "required": [
+        "type",
+        "items"
+      ],
+      "properties": {
+        "type": {
+          "const": "powered-by"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "href",
+              "description"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "href": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "downloadCtaSection": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "download-cta"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "suiteBreakdownSection": {
+      "type": "object",
+      "required": [
+        "type",
+        "items"
+      ],
+      "properties": {
+        "type": {
+          "const": "suite-breakdown"
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "body"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "tagline": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

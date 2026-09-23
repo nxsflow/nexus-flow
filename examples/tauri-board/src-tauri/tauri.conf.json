@@ -1,0 +1,36 @@
+{
+  "productName": "nexus-flow board",
+  "version": "0.1.0",
+  "identifier": "com.nxsflow.example.board",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "nexus-flow — next / blocked (live)",
+        "width": 760,
+        "height": 760,
+        "minWidth": 420,
+        "minHeight": 360,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

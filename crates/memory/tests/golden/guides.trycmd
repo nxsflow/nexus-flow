@@ -1,0 +1,295 @@
+The worked examples `nxm`'s narrative guides quote (6j6v.h4k0) — chat's `messaging.trycmd` for the
+memory line. Every block here is executed, and every block here is shown by some guide:
+`guide_examples.rs` asserts both directions, so a guide can never print a command or an output that
+is not real, and a case nobody quotes cannot quietly become a second, unread corpus.
+
+One workspace, built up in the order the guides read it: activate, remember, evolve, file, order,
+forget. The blocks are deliberately ONE command each wherever a guide might want that command on its
+own — a guide can only quote a block whole.
+
+```console
+$ nxm init --quiet
+
+```
+
+The first fact, under a stable key:
+
+```console
+$ nxm remember "auth uses JWT, not sessions" --key auth-jwt --introduction "auth is JWT, not sessions"
+remembered auth-jwt
+
+```
+
+```console
+$ nxm memories
+auth-jwt  auth uses JWT, not sessions
+
+```
+
+Recall reads one memory's text; `--json` is the record every seam returns.
+
+```console
+$ nxm recall auth-jwt
+auth uses JWT, not sessions
+
+```
+
+```console
+$ nxm recall auth-jwt --json
+{"key":"auth-jwt","body":"auth uses JWT, not sessions","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"project","refs":[],"ordinal":null,"introduction":"auth is JWT, not sessions"}
+
+```
+
+The same key again is an update in place, not a second memory:
+
+```console
+$ nxm remember "auth uses JWT; the session table was dropped in v3" --key auth-jwt --introduction "auth is JWT; the session table went away in v3" --json
+{"key":"auth-jwt","body":"auth uses JWT; the session table was dropped in v3","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"project","refs":[],"ordinal":null,"introduction":"auth is JWT; the session table went away in v3"}
+
+```
+
+```console
+$ nxm memories
+auth-jwt  auth uses JWT; the session table was dropped in v3
+
+```
+
+With no `--key` the key is a content hash: byte-identical text dedups, reworded text is a new fact.
+The three writes belong together — the comparison IS the point.
+
+```console
+$ nxm remember "the export endpoint pages at 500 rows" --introduction "the export endpoint pages at 500 rows"
+remembered f-bf8fe5f872591385
+
+$ nxm remember "the export endpoint pages at 500 rows" --introduction "the export endpoint pages at 500 rows"
+remembered f-bf8fe5f872591385
+
+$ nxm remember "the export endpoint pages at 500 rows, so --since must page too" --introduction "the export endpoint pages at 500 rows, so --since must page too"
+remembered f-f64a6f027ce71533
+
+```
+
+Filing sets the registers and never touches the text:
+
+```console
+$ nxm classify auth-jwt --category architecture
+classified auth-jwt
+  category: architecture
+  scope:    project
+  refs:     none
+  intro:    auth is JWT; the session table went away in v3
+
+```
+
+```console
+$ nxm memories --category architecture
+auth-jwt  auth uses JWT; the session table was dropped in v3
+
+```
+
+An `item` reach plus the items it names is how a memory is taken OUT of the session bootstrap and
+put on the board items instead:
+
+```console
+$ nxm remember "the --since cutoff is exclusive" --key since-cutoff --scope item --refs ab12.0001 --introduction "the --since cutoff is exclusive" --json
+{"key":"since-cutoff","body":"the --since cutoff is exclusive","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"item","refs":["ab12.0001"],"ordinal":null,"introduction":"the --since cutoff is exclusive"}
+
+```
+
+```console
+$ nxm memories --scope item
+since-cutoff  the --since cutoff is exclusive
+
+```
+
+Clearing the references leaves the reach alone — and an `item` memory that names no item has no
+board item to read on, so the bootstrap keeps replaying it rather than hiding it everywhere:
+
+```console
+$ nxm classify since-cutoff --refs "" --json
+{"key":"since-cutoff","body":"the --since cutoff is exclusive","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"item","refs":[],"ordinal":null,"introduction":"the --since cutoff is exclusive"}
+
+```
+
+Reading order is a deliberate, rare write; the category still decides the section:
+
+```console
+$ nxm reorder auth-jwt since-cutoff
+reordered 2 memories
+  1  auth-jwt
+  2  since-cutoff
+
+```
+
+```console
+$ nxm memories --ordered
+auth-jwt  auth uses JWT; the session table was dropped in v3
+since-cutoff  the --since cutoff is exclusive
+f-bf8fe5f872591385  the export endpoint pages at 500 rows
+f-f64a6f027ce71533  the export endpoint pages at 500 rows, so --since must page too
+
+```
+
+`forget` is a reversible tombstone: the memory drops out of the reads, asking for it is a
+`not_found`, and a later `remember` under the same key revives it.
+
+```console
+$ nxm forget since-cutoff
+forgot since-cutoff
+
+```
+
+```console
+$ nxm recall since-cutoff --json
+? 1
+{"error":{"kind":"not_found","msg":"no memory 'since-cutoff'"}}
+
+```
+
+```console
+$ nxm remember "the --since cutoff is exclusive" --key since-cutoff --introduction "the --since cutoff is exclusive"
+remembered since-cutoff
+
+```
+
+The refusals a caller has to be able to tell apart — an empty body, a filing that files nothing, a
+category that is not a slug, and an unknown key:
+
+```console
+$ nxm remember "" --introduction "an empty body" --json
+? 1
+{"error":{"kind":"validation","msg":"a memory body must not be empty"}}
+
+```
+
+```console
+$ nxm classify auth-jwt --json
+? 1
+{"error":{"kind":"validation","msg":"classify needs at least one of --category, --scope, --refs or --introduction"}}
+
+```
+
+```console
+$ nxm classify auth-jwt --category "Not A Slug" --json
+? 1
+{"error":{"kind":"validation","msg":"invalid category 'Not A Slug': use a lower-case slug like 'introduction' (letters, digits, '-' and '_')"}}
+
+```
+
+```console
+$ nxm recall ghost --json
+? 1
+{"error":{"kind":"not_found","msg":"no memory 'ghost'"}}
+
+```
+
+Where the migration stands:
+
+```console
+$ nxm migrate status
+3 unfiled memories — run `nxm migrate plan --with-judge`
+
+```
+
+```console
+$ nxm migrate status --json
+{"unsorted":3}
+
+```
+
+The whole active set, human and as the array an app lists from:
+
+```console
+$ nxm memories
+auth-jwt  auth uses JWT; the session table was dropped in v3
+f-bf8fe5f872591385  the export endpoint pages at 500 rows
+f-f64a6f027ce71533  the export endpoint pages at 500 rows, so --since must page too
+since-cutoff  the --since cutoff is exclusive
+
+```
+
+```console
+$ nxm memories --json
+[{"key":"auth-jwt","body":"auth uses JWT; the session table was dropped in v3","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"architecture","scope":"project","refs":[],"ordinal":1,"introduction":"auth is JWT; the session table went away in v3"},{"key":"f-bf8fe5f872591385","body":"the export endpoint pages at 500 rows","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"project","refs":[],"ordinal":null,"introduction":"the export endpoint pages at 500 rows"},{"key":"f-f64a6f027ce71533","body":"the export endpoint pages at 500 rows, so --since must page too","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"project","refs":[],"ordinal":null,"introduction":"the export endpoint pages at 500 rows, so --since must page too"},{"key":"since-cutoff","body":"the --since cutoff is exclusive","author":"alice","updated":"2026-06-20T10:00:00Z","active":true,"category":"unsorted","scope":"item","refs":[],"ordinal":2,"introduction":"the --since cutoff is exclusive"}]
+
+```
+
+`forget`'s receipt is a plain acknowledgement, not the tombstone record:
+
+```console
+$ nxm forget f-bf8fe5f872591385 --json
+{"key":"f-bf8fe5f872591385","ok":true}
+
+```
+
+The whole index — one written line per memory, in the reading order the session start replays.
+`nxm prime` shows as much of this as its byte budget allows and names this verb for the rest:
+
+```console
+$ nxm index
+# nexus-memory — the whole index (3)
+
+**One line per memory — this is an index, not the memories.** Each line is the introduction its author wrote for it. Read one in full with `nxm recall <key>`, or search their bodies with `nxm memories <text>`.
+
+- **auth-jwt**: auth is JWT; the session table went away in v3
+- **since-cutoff**: the --since cutoff is exclusive
+- **f-f64a6f027ce71533**: the export endpoint pages at 500 rows, so --since must page too
+
+```
+
+```console
+$ nxm index --json
+{"count":3,"memories":[{"active":true,"author":"alice","body":"auth uses JWT; the session table was dropped in v3","category":"architecture","introduction":"auth is JWT; the session table went away in v3","key":"auth-jwt","ordinal":1,"refs":[],"scope":"project","updated":"2026-06-20T10:00:00Z"},{"active":true,"author":"alice","body":"the --since cutoff is exclusive","category":"unsorted","introduction":"the --since cutoff is exclusive","key":"since-cutoff","ordinal":2,"refs":[],"scope":"item","updated":"2026-06-20T10:00:00Z"},{"active":true,"author":"alice","body":"the export endpoint pages at 500 rows, so --since must page too","category":"unsorted","introduction":"the export endpoint pages at 500 rows, so --since must page too","key":"f-f64a6f027ce71533","ordinal":null,"refs":[],"scope":"project","updated":"2026-06-20T10:00:00Z"}]}
+
+```
+
+The generated project-memory document, in the same reading order the bootstrap replays:
+
+```console
+$ nxm doc
+<!-- generated by nexus-flow — do not edit; run `nxm remember` instead -->
+# Project memory
+
+> **Generated file — do not edit.** Every entry below is a memory in this project's `nxm` store, projected here so the context survives without nexus-flow installed. Change it with `nxm remember` / `nxm forget`; an edit made here is overwritten by the next write. `nxm doc --check` reports drift.
+
+> **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
+
+## Index (3)
+
+- **auth-jwt**: auth is JWT; the session table went away in v3
+- **since-cutoff**: the --since cutoff is exclusive
+- **f-f64a6f027ce71533**: the export endpoint pages at 500 rows, so --since must page too
+
+## Full text
+
+### `auth-jwt`
+
+auth uses JWT; the session table was dropped in v3
+
+---
+
+### `since-cutoff`
+
+the --since cutoff is exclusive
+
+---
+
+### `f-f64a6f027ce71533`
+
+the export endpoint pages at 500 rows, so --since must page too
+
+```
+
+What a migration proposes, before anybody has judged it:
+
+```console
+$ nxm migrate plan
+migration plan: 2 unfiled memories, 0 document sections
+  classify   f-f64a6f027ce71533       unsorted / project
+  classify   since-cutoff             unsorted / item
+  skipped    AGENTS.md (generated)
+  skipped    NEXUS_MEMORY.md (generated)
+
+Nothing is judged yet. Run `nxm migrate plan --with-judge --json > migration.json` to have a coding assistant propose the filing, review it, then `nxm migrate apply --plan migration.json`.
+
+```

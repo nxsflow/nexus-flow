@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH link 1  "link " 
+.SH NAME
+link \- Link `thread` to `item`. Re\-running with different attributes UPDATES the link rather than adding a second one — that is how a link firms up once a passing mention turns out to be the subject
+.SH SYNOPSIS
+\fBlink\fR [\fB\-\-relation\fR] [\fB\-\-weight\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITHREAD\fR> <\fIITEM\fR> 
+.SH DESCRIPTION
+Link `thread` to `item`. Re\-running with different attributes UPDATES the link rather than adding a second one — that is how a link firms up once a passing mention turns out to be the subject
+.SH OPTIONS
+.TP
+\fB\-\-relation\fR \fI<RELATION>\fR [default: worked_on]
+What the link consists in: `worked_on` (this thread is working on the item) or `cited` (it refers to the item without working on it). Default `worked_on` — the deterministic case, the one a work order\*(Aqs ticket set produces with no judgement involved
+.TP
+\fB\-\-weight\fR \fI<WEIGHT>\fR [default: bearing]
+How much the thread is about the item: `bearing` (the item is its subject) or `passing` (it came up, no more). Default `bearing`. Only `bearing` links are advertised by `next`; a `passing` one shows on the item itself, so a wandering conversation cannot flood the work list with items it merely touched
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fITHREAD\fR>
+The chat thread\*(Aqs own id. Not resolved or shape\-checked: the thread lives in the chat store\*(Aqs id space, which flow holds the address of but does not own
+.TP
+<\fIITEM\fR>
+The board item

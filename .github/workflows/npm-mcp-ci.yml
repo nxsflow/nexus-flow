@@ -1,0 +1,67 @@
+name: npm-mcp-ci
+
+# The `@nexus-flow/mcp` runner shim (npm/mcp) is a security-critical distribution path: a host
+# launches `npx -y @nexus-flow/mcp`, and the shim fetches + signature-verifies + execs the signed
+# `nxs` prebuilt. A regression in its verify path is exactly the kind of bug that must never reach a
+# user, so its tests (node's built-in runner, zero deps) are a fail-closed gate — the analogue of
+# install-sh-ci.yml for the npm delivery path (nexus-flow-kz8).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "npm/mcp/**"
+      - ".github/workflows/npm-mcp-ci.yml"
+  pull_request:
+    paths:
+      - "npm/mcp/**"
+      - ".github/workflows/npm-mcp-ci.yml"
+
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. Cancels PR runs only — the push run on `main` is that ref's standing record of green
+# and must always finish.
+concurrency:
+  group: npm-mcp-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  npm-mcp-quality-gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: npm/mcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The shim's embedded minisign pubkey IS its authenticity anchor — a typo or a missed rotation
+      # would ship a shim whose signature gate can never pass. Assert the literal equals the repo
+      # variable release.yml bakes into `nxs` (the same guarantee install-sh-ci.yml enforces for
+      # install.sh). vars is empty on fork PRs, which can't read it — warn+skip there; enforced on main.
+      - name: Embedded minisign pubkey matches the repo variable
+        env:
+          EXPECTED: ${{ vars.NXF_MINISIGN_PUBKEY }}
+        run: |
+          set -euo pipefail
+          embedded="$(sed -n "s/^const EMBEDDED_MINISIGN_PUBKEY = '\(.*\)';\$/\1/p" lib/constants.js)"
+          [ -n "$embedded" ] || { echo "::error::could not read EMBEDDED_MINISIGN_PUBKEY from npm/mcp/lib/constants.js"; exit 1; }
+          if [ -z "${EXPECTED:-}" ]; then
+            echo "::warning::vars.NXF_MINISIGN_PUBKEY unavailable in this context — skipping cross-check"
+            exit 0
+          fi
+          if [ "$embedded" != "$EXPECTED" ]; then
+            echo "::error::npm/mcp EMBEDDED_MINISIGN_PUBKEY != vars.NXF_MINISIGN_PUBKEY (rotation/typo?)"
+            exit 1
+          fi
+          echo "embedded pubkey matches the repo variable (${#embedded} chars)"
+
+      # Zero runtime dependencies → no install step; the node test runner exercises platform mapping,
+      # sha256 + minisign verification (pass/tamper/wrong-key/wrong-algo), tar extraction, cache
+      # atomicity, the full download→verify→cache orchestration, and the CLI exec + fail-closed path.
+      - name: Test (node --test)
+        run: node --test

@@ -1,0 +1,220 @@
+name: publish-content
+
+# Assemble → validate → publish the federated /open-source content (content.json + docs.json +
+# per-URL docs pages) to the manufakt content prefix, then dispatch a landing rebuild. REPLACES
+# site.yml: the site/ renderer is retired — this repo now delivers DATA, the nxsflow-landing-page
+# owns shell/design and renders it (nxsflow.com migration, spec §4, 6j6v.0a6p).
+#
+# Triggers:
+#   - push to main touching content sources → PROD (nxs-prod content prefix) + `content-updated`
+#     dispatch to the landing (a content edit rebuilds the landing without a shell commit, §4.5).
+#   - workflow_dispatch(env=staging|prod)   → manual publish / rehearsal (staging is the §6-step-3
+#     rehearsal environment).
+#
+# FAIL-CLOSED AT THE SOURCE (§4): the assembled content.json is validated against the landing's
+# content-contract schema BEFORE any upload — a contract break stops here, not at the consumer.
+# Two gates: always the vendored contract mirror (offline), and — when its URL is configured — the
+# landing-PUBLISHED schema (catches a landing-side contract change in THIS repo's CI).
+#
+# TRUST: push (main) and workflow_dispatch are inherently trusted (write-access gated). There is no
+# PR-head deploy path here — PR validation is content-ci.yml (no credentials). This rests on `main`
+# being branch-protected (PR-only); treat that as a hard requirement.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "content/**"
+      # One guide tree per building block since 6j6v.9e3r — a topic added under ANY of
+      # them changes the published docs, so all FOUR gate this workflow. The umbrella's tree
+      # arrived with 6j6v.0fvt and was missed here: an edit to an `nxs` guide page alone
+      # published nothing, silently, because a paths filter that does not match is not an
+      # error (6j6v.jepw follow-up). `publish_trigger_covers_every_published_source` in
+      # content/test/docs.test.mjs is what keeps this list and BUILDING_BLOCKS in step now.
+      - "crates/nxs/docs/guide/**"
+      # The umbrella crate carries a SECOND tree: the develop group (6j6v.jepw). One entry per
+      # `include_dir!`, not one per crate — the parity test derives this list from BUILDING_BLOCKS.
+      - "crates/nxs/docs/develop/**"
+      - "crates/cli/docs/guide/**"
+      - "crates/memory/docs/guide/**"
+      - "crates/chat/docs/guide/**"
+      # The binary assets a page embeds are published from here too (DOCS_ASSETS), so a
+      # re-exported diagram must trigger the same way a re-worded page does.
+      - "docs/architecture/**"
+      - "release-notes.json"
+      - ".github/workflows/publish-content.yml"
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        type: choice
+        options: [staging, prod]
+        default: staging
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC: assume nxs-<env>-content-publish
+
+concurrency:
+  # One content publish at a time per ref; never cancel mid-upload.
+  group: publish-content-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Resolve env + the changelog ring the assembler embeds: prod shows the stable ring, staging
+      # previews beta (§4, "as today").
+      - name: Resolve env
+        id: ctx
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_ENV: ${{ github.event.inputs.env }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then env=prod; else env="$DISPATCH_ENV"; fi
+          case "$env" in
+            prod)    channel=stable ;;
+            staging) channel=beta ;;
+            *) echo "::error::unknown env '$env'"; exit 1 ;;
+          esac
+          { echo "env=$env"; echo "channel=$channel"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: content/package-lock.json
+
+      - name: Install (locked)
+        working-directory: content
+        run: npm ci
+
+      # The provider unit tests are a fail-closed gate here too (same suite content-ci runs on PRs).
+      - name: Test the provider
+        working-directory: content
+        run: node --test
+
+      - name: Assemble content
+        working-directory: content
+        env:
+          CHANNEL: ${{ steps.ctx.outputs.channel }}
+        run: node assemble.mjs --channel "$CHANNEL"
+
+      # Baseline fail-closed gate: the vendored contract mirror (offline, always present).
+      - name: Validate — vendored contract mirror
+        working-directory: content
+        run: node validate.mjs --schema schema/content-contract-v1.json
+
+      # Authoritative fail-closed-at-source gate: validate against the landing-PUBLISHED schema when
+      # its URL is configured. Until the apex go-live this repo var is the prod-distribution schema
+      # URL; after go-live it is https://nxsflow.com/schema/content-contract-v1.json.
+      - name: Validate — landing-published schema
+        if: vars.CONTENT_CONTRACT_SCHEMA_URL != ''
+        working-directory: content
+        env:
+          CONTENT_CONTRACT_SCHEMA_URL: ${{ vars.CONTENT_CONTRACT_SCHEMA_URL }}
+        run: node validate.mjs --schema "$CONTENT_CONTRACT_SCHEMA_URL"
+      - name: Notice — published-schema validation skipped
+        if: vars.CONTENT_CONTRACT_SCHEMA_URL == ''
+        run: |
+          echo "::warning::CONTENT_CONTRACT_SCHEMA_URL is unset — content was validated only against the vendored contract mirror. Set the repo var to the landing-published schema URL (prod distribution until apex go-live) to catch contract drift at the source (spec §4)."
+
+      - name: Resolve target (env → content-publish role / bucket)
+        id: tgt
+        env:
+          STAGING_ACCOUNT: ${{ secrets.NXS_STAGING_ACCOUNT_ID }}
+          PROD_ACCOUNT: ${{ secrets.NXS_PROD_ACCOUNT_ID }}
+          ENV: ${{ steps.ctx.outputs.env }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV" = "prod" ]; then acct="$PROD_ACCOUNT"; else acct="$STAGING_ACCOUNT"; fi
+          : "${acct:?NXS_${ENV^^}_ACCOUNT_ID secret is required to publish content}"
+          # acct is a masked secret ⇒ it stays masked everywhere it appears, incl. the bucket.
+          {
+            echo "role=arn:aws:iam::${acct}:role/nxs-${ENV}-content-publish"
+            echo "bucket=nxs-${ENV}-artifacts-${acct}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (content-publish role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ steps.tgt.outputs.role }}
+          aws-region: eu-central-1
+
+      # Upload with `aws s3 cp` ONLY: the content-publish role is PutObject-scoped (no ListBucket),
+      # so `s3 sync`'s destination diff would 403. `cp --recursive` lists the LOCAL tree and
+      # PutObjects each file — no destination read. Short TTL on everything so a content edit is
+      # visible fast. (Removed docs pages linger until the role is widened to DeleteObject — a
+      # documented, deliberate trade-off in lib/delivery-stack.ts.)
+      - name: Publish to the content prefix
+        working-directory: content
+        env:
+          BUCKET: ${{ steps.tgt.outputs.bucket }}
+        run: |
+          set -euo pipefail
+          aws s3 cp dist/content.json "s3://$BUCKET/content.json" \
+            --content-type application/json --cache-control "max-age=300"
+          aws s3 cp dist/docs.json "s3://$BUCKET/docs.json" \
+            --content-type application/json --cache-control "max-age=300"
+          # `--exclude "assets/*"`: the assets subtree is NOT markdown. Without this it would go up
+          # under the hardcoded `text/markdown` type below and an <img> pointing at it would
+          # download instead of render (6j6v.jepw).
+          aws s3 cp dist/docs "s3://$BUCKET/docs" --recursive --exclude "assets/*" \
+            --content-type "text/markdown; charset=utf-8" --cache-control "max-age=300"
+          # Assets, each with the content type `dist/docs-assets.json` declares for it. That
+          # manifest is written by assemble.mjs from DOCS_ASSETS in content/lib/docs.mjs, and it
+          # is the ONLY thing consulted here — there is no second type literal in this file to
+          # drift from that list (6j6v.jepw review, Code Quality #1).
+          #
+          # VALIDATE FIRST, UPLOAD SECOND. The previous order ran the cp and only then looked for
+          # files nothing had typed, so tripping the guard left a partially published bucket
+          # behind and — because the dispatch step below carries no `if: always()` — skipped the
+          # rebuild that would have cleaned up after it (review, Integrity #1). Now a disagreement
+          # between the manifest and what is on disk stops the publish with NOTHING sent.
+          declared=$(jq -r '.[].file' dist/docs-assets.json | sort)
+          present=$(if [ -d dist/docs/assets ]; then
+                      (cd dist/docs/assets && find . -type f | sed 's|^\./||' | sort)
+                    fi)
+          if [ "$declared" != "$present" ]; then
+            echo "::error::docs-assets.json and dist/docs/assets disagree — nothing uploaded" >&2
+            diff <(echo "$declared") <(echo "$present") >&2 || true
+            exit 1
+          fi
+          while IFS=$'\t' read -r file ctype; do
+            [ -n "$file" ] || continue
+            aws s3 cp "dist/docs/assets/$file" "s3://$BUCKET/docs/assets/$file" \
+              --content-type "$ctype" --cache-control "max-age=300"
+          done < <(jq -r '.[] | "\(.file)\t\(.contentType)"' dist/docs-assets.json)
+          echo "published content.json + docs.json + $(find dist/docs -type f | wc -l | tr -d ' ') docs files → s3://$BUCKET/"
+
+      # Dispatch a landing rebuild. `content-updated` maps to the landing PROD rebuild (§4.5);
+      # staging is refreshed by the landing's own staging path + staleness backstop, so we dispatch
+      # only on prod. BEST-EFFORT: the upload above is load-bearing and the landing's staleness
+      # backstop catches a missed dispatch, so a dispatch hiccup must not fail an already-published
+      # run. Needs a cross-repo token (LANDING_DISPATCH_TOKEN) — GITHUB_TOKEN cannot dispatch to
+      # another repo; unset ⇒ skip cleanly (the backstop covers it).
+      - name: Dispatch landing rebuild (prod content-updated)
+        if: steps.ctx.outputs.env == 'prod'
+        env:
+          DISPATCH_TOKEN: ${{ secrets.LANDING_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::warning::LANDING_DISPATCH_TOKEN unset — skipping landing dispatch (the landing staleness backstop will pick the content up)."
+            exit 0
+          fi
+          code="$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/nxsflow/nxsflow-landing-page/dispatches \
+            -d '{"event_type":"content-updated"}')" || true
+          if [ "$code" = "204" ]; then
+            echo "dispatched content-updated → nxsflow/nxsflow-landing-page"
+          else
+            echo "::warning::landing dispatch returned HTTP ${code:-000} (content is already published; the landing staleness backstop will rebuild). Body: $(cat /tmp/dispatch.out 2>/dev/null || true)"
+          fi

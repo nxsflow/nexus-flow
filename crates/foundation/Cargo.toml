@@ -1,0 +1,32 @@
+[package]
+name = "nxs-foundation"
+version.workspace = true
+edition = "2021"
+description = "nxs platform foundation: the domain-agnostic op-log CRDT substrate (op-log + reducer registry + schema/version spine + replica identity) shared by every nxs product"
+publish = false
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+ulid = "1"
+# Replica identity + workspace config are persisted as TOML in the `.nxs/` directory.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Every op is signed by the replica that appends it and verified by every replica that receives it
+# (nxf 6j6v.pzkb). Ed25519: small keys, deterministic signatures, no parameters to get wrong.
+# Default features only (`fast` + `zeroize`) — the secret is wiped when a key is dropped.
+ed25519-dalek = "3"
+# The replica's key seed comes straight from the operating system's generator, not from a
+# userspace RNG, so no second randomness crate is needed beside it.
+getrandom = "0.3"
+# Key ids and signatures are text on the wire and in the log: base64url without padding.
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+# `hooks` exposes `Connection::authorizer`, which the squatted-run test counts insert attempts
+# through (review of PR #489, Integrity #1) — DEV-ONLY, like the chat crate's identical line: the
+# library installs no callback and its own build of `rusqlite` is unchanged.
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+# The manifest contract is serialized to JSON by each module CLI; the foundation owns only the
+# typed shape, but its field-order contract test asserts the `--json` form here.
+serde_json = "1"

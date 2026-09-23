@@ -1,0 +1,13 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH claude 1  "claude " 
+.SH NAME
+claude \- Wire Claude Code: (re)assemble the shared agent file (AGENTS.md) and one SessionStart hook per active module (`nxf prime`, `nxm prime`, `nxc prime`) plus the `nxs`/module permission allowlist, merged into `.claude/settings.json` (idempotent, never overwriting). The canonical verb is `nxs setup claude`; this delegates to it (host setup is an umbrella responsibility)
+.SH SYNOPSIS
+\fBclaude\fR [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Wire Claude Code: (re)assemble the shared agent file (AGENTS.md) and one SessionStart hook per active module (`nxf prime`, `nxm prime`, `nxc prime`) plus the `nxs`/module permission allowlist, merged into `.claude/settings.json` (idempotent, never overwriting). The canonical verb is `nxs setup claude`; this delegates to it (host setup is an umbrella responsibility)
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

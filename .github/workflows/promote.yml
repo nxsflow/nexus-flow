@@ -1,0 +1,244 @@
+name: promote
+
+# Promote a beta-ring release to stable (spec §5.5, nexus-flow-85y.15). build-once-promote:
+# the same bytes & signatures that release.yml published to beta are SERVER-SIDE COPIED to
+# stable — nothing is rebuilt or re-signed (promote-release.sh).
+#
+# ONE DELIVERY CHAIN (6j6v.hy2f): the copy lands in the `nxs-prod` bucket, fronted by the landing
+# distribution under `https://nxsflow.com/nxs`. The old `nxf-prod` chain is gone, so the
+# dual-publish window's second job (6j6v.g6wg) folded back into this one — a stable ring that
+# fails to publish now fails the promotion, as it should. The bucket and role are derived from
+# `secrets.NXS_PROD_ACCOUNT_ID` at run time, so the delivery move to the nxsflowcom accounts
+# (cyb7.xb8f) reached this workflow without an edit; the stack behind them lives in
+# nxsflow-landing-page since 6j6v.sgfr.
+#
+# Trigger: the GitHub event `release: released`. A tag build always cuts a **Pre-Release**
+# (release.yml), so the ONLY way this event fires is an operator flipping that pre-release to
+# "latest" — a deliberate, human promotion gesture. The defensive guard below re-asserts
+# prerelease==false && draft==false so a draft/pre-release edit can never trip it.
+#
+# This path is inherently PROD (GitHub Releases live on the prod repo); there is no staging
+# GitHub release. PROD is LOCKED until the account split (nexus-flow-85y.23): the job fails
+# closed unless `vars.NXF_PROD_RELEASE_ENABLED == 'true'`. The promotion/copy logic itself is
+# proven on staging by running promote-release.sh directly against the staging bucket (the
+# 404≠403 guard + a missing-sidecar fail-closed are unit- and live-verified there).
+on:
+  release:
+    types: [released]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    # Defensive guard (the trigger already implies it): only a real, published release.
+    if: github.event.release.prerelease == false && github.event.release.draft == false
+    permissions:
+      contents: write # commit the regenerated feed back to main (best-effort)
+      id-token: write # OIDC: assume nxs-prod-release (copy + manifest write)
+      actions: write # dispatch publish-content.yml after the feed commit (85y.19; re-homed by 6j6v.0a6p)
+    env:
+      # Tag/release data flows ONLY through env, never `${{ }}`-interpolated into a shell
+      # (security hygiene, spec §2). version-check.yml enforces tag == v<workspace-version>.
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      # Fail closed until the account split lands (nexus-flow-85y.23).
+      - name: PROD release lock (account split — nexus-flow-85y.23)
+        env:
+          UNLOCKED: ${{ vars.NXF_PROD_RELEASE_ENABLED }}
+        run: |
+          if [ "$UNLOCKED" != "true" ]; then
+            echo "::error::PROD promotion is locked until the account split (nexus-flow-85y.23). Set repo var NXF_PROD_RELEASE_ENABLED=true to unlock after the split."
+            exit 1
+          fi
+
+      # Resolve the release LINE (maintenance-branch aware — nexus-flow-aye.18). A backport is
+      # released from its `release/x.Y` branch, whose feed carries that line's beta entry; every
+      # other release promotes from `main` (the canonical feed). Guarding strictly on the
+      # `release/` prefix keeps the main path BYTE-IDENTICAL to before — no current release has a
+      # `release/*` target_commitish, so this cannot regress the main-tag path (spec §4.5).
+      # target_commitish flows through env, never `${{ }}`-interpolated into shell (hygiene).
+      - name: Resolve the release line
+        id: line
+        env:
+          TARGET_COMMITISH: ${{ github.event.release.target_commitish }}
+        run: |
+          set -euo pipefail
+          # Validate, don't just prefix-match: a release-line ref must be exactly
+          # `release/<major>.<minor>`. A malformed `release/*` (typo, stray ref) fails CLOSED
+          # rather than pushing the regenerated feed to an unintended branch. Anything that is
+          # not a release line (a normal release: `main`, or a commit SHA) → main, unchanged.
+          case "$TARGET_COMMITISH" in
+            release/*)
+              if printf '%s' "$TARGET_COMMITISH" | grep -Eq '^release/[0-9]+\.[0-9]+$'; then
+                ref="$TARGET_COMMITISH"
+              else
+                echo "::error::release target '$TARGET_COMMITISH' is not a valid maintenance line (expected release/<major>.<minor>) — refusing to promote to an unintended branch"
+                exit 1
+              fi
+              ;;
+            *) ref="main" ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Promoting from line ref: $ref"
+
+      # Check out the LINE branch (main for a normal release; release/x.Y for a backport): its
+      # committed feed holds the version's beta entry, and we push the regenerated feed straight
+      # back to that same line. Full history so `changelog prev-stable` sees the line's earlier
+      # stable entries. The version to promote comes from the tag (env), not this ref.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.line.outputs.ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Resolve + validate version
+        id: v
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # Plain SemVer only — suffixes are a channel concept, never part of the version (§4.3).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release tag '$TAG' is not v<plain-SemVer>"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Fail-fast pre-flight (tnce): assert the released version HAS a beta feed entry before any
+      # mutation — the aggregate/promote step below, the S3 server-side copy, or the feed commit.
+      # `version set` now writes a beta entry for every released version (even a no-fragment re-ship),
+      # so this normally passes; if the invariant is ever violated the job fails CLEANLY here instead
+      # of half-way, so it can never leave GitHub-says-stable while S3 stable is empty. Read-only.
+      - name: Pre-flight — released version is in the feed (tnce)
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: cargo xtask changelog assert-beta "$VERSION"
+
+      # Aggregate the stable notes from the COMMITTED feed (NOT the S3 manifest — the reference
+      # learned that can come back empty), then lift the version into the stable ring. `prev`
+      # empty (first stable) ⇒ 0.0.0, so the aggregate spans from the beginning.
+      - name: Aggregate stable notes + promote the feed
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          prev="$(cargo xtask changelog prev-stable "$VERSION")"
+          prev="${prev:-0.0.0}"
+          # Write the notes to a FILE, not GITHUB_OUTPUT. The notes are author-controlled
+          # changelog content; a fixed heredoc delimiter in GITHUB_OUTPUT could be terminated
+          # early by a crafted body line (output injection). A file sidesteps the delimiter
+          # entirely — the promote step reads NOTES from it verbatim.
+          cargo xtask changelog aggregate "$prev" "$VERSION" en > "$RUNNER_TEMP/stable-notes.txt"
+          cargo xtask changelog promote "$VERSION"   # rewrites release-notes.json (stable ring)
+
+      # `DOMAIN` is log context only: the manifest stores RELATIVE `path` keys and the updater
+      # Lambda renders the public URL from its own PUBLIC_BASE_URL.
+      - name: Resolve target (nxs prod release role / bucket)
+        id: tgt
+        env:
+          PROD_ACCOUNT: ${{ secrets.NXS_PROD_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # Fail-closed: a missing account secret would otherwise synthesize a broken role ARN and
+          # fail obscurely in configure-aws-credentials. (`:?` trips under `set -u` on unset OR empty.)
+          : "${PROD_ACCOUNT:?NXS_PROD_ACCOUNT_ID secret is required to promote a release}"
+          # acct is a masked secret ⇒ it stays masked everywhere it appears, incl. the bucket.
+          {
+            echo "role=arn:aws:iam::${PROD_ACCOUNT}:role/nxs-prod-release"
+            echo "bucket=nxs-prod-artifacts-${PROD_ACCOUNT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC nxs release role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ steps.tgt.outputs.role }}
+          aws-region: eu-central-1
+
+      # The promotion proper: head-object guards (404≠403, fail-closed) → server-side copy
+      # beta→stable → manifests/stable.json → release-notes.json to S3. build-once-promote holds:
+      # the beta BYTES are already in this bucket (release.yml published them), so nothing is
+      # rebuilt or re-signed — the signatures are the ones the single signing pass produced.
+      - name: Promote beta → stable (server-side copy)
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          ARTIFACT_BUCKET: ${{ steps.tgt.outputs.bucket }}
+          DOMAIN: https://nxsflow.com/nxs
+        run: |
+          set -euo pipefail
+          # The PATH, never the content: a stable aggregate is "everything since the last stable"
+          # and grows with how far stable lags behind. At v0.63.0 (0.35.0 → 0.63.0) it was 201 KiB
+          # and blew past Linux's 128 KiB per-variable limit — the promotion failed with
+          # "Argument list too long" before the script started, and it would have failed harder the
+          # longer we waited. See `notes_arg` in promote-release.sh.
+          NOTES_FILE="$RUNNER_TEMP/stable-notes.txt" ./.github/scripts/promote-release.sh
+
+      # Postcondition: every stable tarball has BOTH sidecars in S3 (head-object, not `s3 ls`).
+      - name: Verify stable sidecars in S3
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          ARTIFACT_BUCKET: ${{ steps.tgt.outputs.bucket }}
+        run: |
+          set -euo pipefail
+          for p in darwin-aarch64 darwin-x86_64 linux-x86_64 linux-aarch64; do
+            base="nxf_${VERSION}_${p}.tar.gz"
+            for ext in "" .sha256 .minisig; do
+              key="download/stable/${VERSION}/${base}${ext}"
+              aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$key" >/dev/null \
+                || { echo "::error::missing stable s3 object $key"; exit 1; }
+            done
+          done
+          echo "All 4 tarballs + .sha256 + .minisig present in s3://.../download/stable/${VERSION}/"
+
+      # Best-effort: commit the regenerated feed back to main. `continue-on-error` is scoped to
+      # THIS step only — a branch-protection reject of the feed push must NOT fail an already-
+      # done promotion. The push outcome drives `dispatch`: only a landed feed commit should
+      # trigger the site refresh.
+      - name: Commit + push regenerated feed (best-effort)
+        id: feed
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          LINE_REF: ${{ steps.line.outputs.ref }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- release-notes.json; then
+            echo "feed unchanged — nothing to commit"
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-notes.json
+          git commit -m "chore(release-notes): promote ${VERSION} to stable"
+          # Push back to the LINE it came from (main for a normal release; release/x.Y for a
+          # backport). A backport's stable entry reaches main + the public site via the
+          # forward-port step in the backport runbook (docs/specs/maintenance-and-backports.md).
+          if git push origin "HEAD:${LINE_REF}"; then
+            echo "dispatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::feed commit rejected (branch protection?) — promotion already succeeded, skipping content refresh"
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Refresh the public changelog from the just-pushed feed (spec §8, 85y.19; re-homed to the
+      # content provider by 6j6v.0a6p). The dispatch is EXPLICIT because a GITHUB_TOKEN push never
+      # triggers `on: push` workflows (Actions loop prevention) — publish-content.yml's push trigger
+      # only catches human commits. NOT best-effort: unlike the feed push, a failed dispatch means
+      # the public changelog silently never refreshes, so let it fail the job and surface (the
+      # promotion itself already landed).
+      #
+      # ONLY for the main line. The public landing builds from main's feed; a backport commits its
+      # feed entry to release/x.Y, which is NOT yet on main, so dispatching here would refresh the
+      # content to the SAME (backport-less) state — a misleading, wasted run. A backport's entry
+      # reaches main + the landing via the forward-port PR (backport runbook §4.6), whose merge fires
+      # publish-content.yml on main naturally.
+      - name: Publish content (refresh public changelog)
+        if: steps.feed.outputs.dispatch == 'true' && steps.line.outputs.ref == 'main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish-content.yml --ref main -f env=prod

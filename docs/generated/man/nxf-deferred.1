@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH deferred 1  "deferred " 
+.SH NAME
+deferred \- List deferred items (open, unblocked, with a future defer date) — the lane that is neither ready nor blocked. Ordered by defer\-date ascending (soonest first); override with `\-\-sort`
+.SH SYNOPSIS
+\fBdeferred\fR [\fB\-\-now\fR] [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List deferred items (open, unblocked, with a future defer date) — the lane that is neither ready nor blocked. Ordered by defer\-date ascending (soonest first); override with `\-\-sort`
+.SH OPTIONS
+.TP
+\fB\-\-now\fR \fI<NOW>\fR
+Reference time (ISO\-8601 / RFC3339); defaults to now. Sets the defer boundary
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `defer` | `id` | `rank` (default `defer`). An unknown key is a loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

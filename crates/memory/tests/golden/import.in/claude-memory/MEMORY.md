@@ -1,0 +1,2 @@
+- [Auth](auth-jwt.md) — auth uses JWT
+- [Race](race.md) — testing flag

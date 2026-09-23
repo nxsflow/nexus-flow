@@ -1,0 +1,67 @@
+name: changelog-check
+
+# Require a well-formed changes/ fragment (EN+DE) on every PR with user impact. A PR that touches
+# only paths that never ship (docs, CI, tests, tooling — the allowlist in xtask/src/changelog.rs)
+# passes without one on its own (6j6v.c37e): an outside contributor cannot set a label, so the gate
+# has to see that itself. The `skip-changelog` label remains the maintainer's override. The
+# labeled/unlabeled triggers make a label toggle re-evaluate the gate. Spec §9.
+#
+# It also carries the explicit-facade-verdict rule (6j6v.gmjd): when the PR's diff touches a
+# consumed library surface (facade::CONSUMED_SURFACES), every fragment the PR touches must state
+# a `facade:` value — `none` | `changed` | `breaking`. A BEHAVIOURAL break behind unchanged
+# signatures is invisible to facade-semver.yml, so this marker is the only thing that can carry
+# it; before the rule, an omitted marker was indistinguishable from "checked, no impact".
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege, matching every sibling gate (PR #271 review, Integrity & Robustness #3 — a
+# pre-existing omission, fixed here because this file was already open). Read is all the job can
+# need: it checks out, fetches the base branch, and runs `cargo xtask`. The `skip-changelog` label it
+# keys on comes from the event payload, not from an API call, so no token scope is required for it.
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. This workflow only runs on `pull_request`, so the group only ever holds PR runs.
+concurrency:
+  group: changelog-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history so the three-dot diff against the base branch has a merge base.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The `skip-changelog` label makes the gate green by skipping the enforcing step (the
+      # job still succeeds). Base-ref data flows through env, never interpolated into shell.
+      - name: Fetch base branch
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "$BASE_REF"
+
+      - name: Require changelog fragment (EN+DE)
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: cargo xtask changelog check "origin/$BASE_REF"
+
+      # Every entry's stored `notes` must still render from its own `items` (PR #326 review, Code
+      # Quality #2). `notes` is derived but STORED, and `show` — and through it the GitHub release
+      # body — serves the stored copy verbatim, while `aggregate` and the website read `items`. So
+      # correcting an item's prose alone fixes the promotion path and silently keeps shipping the
+      # old text per version. Unlabelled by `skip-changelog`: this checks the committed feed, not
+      # whether the PR carries a fragment, so a no-impact PR must not be able to opt out of it.
+      - name: Feed notes still render from their items
+        run: cargo xtask changelog rerender --check

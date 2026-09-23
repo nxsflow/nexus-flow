@@ -1,0 +1,60 @@
+`nxm` follows the same agent contract as `nxf`: `agent-manifest` declares its agent-file
+contribution as data, and `prime` is the session bootstrap that states the memory rule, lists the
+commands, and replays every stored memory. `nxm init` delegates the agent files + the
+SessionStart wiring to the `nxs` umbrella, which wires one hook per active module — so memory's own
+`nxm prime` runs each session. (It used to wire a single hook running `nxs prime`, which fanned out
+to every module; the host truncates per hook OUTPUT at 10.240 B, so nxf n2m6 + a2a1 gave each module
+its own hook and its own budget. `nxs prime` still composes all of them for a person running it by
+hand.)
+
+```console
+$ nxm init
+initialized memory at [CWD]/.nxs
+  prefix:  ab12
+  modules: memory
+  agent files: created AGENTS.md
+  hook:    wired SessionStart → `nxm prime || cat NEXUS_MEMORY.md 2>/dev/null`
+  service: registered with the background service, which keeps this workspace's deadlines
+
+You've set up memory. nxs also ships flow and chat — run `nxs init` to add.
+
+```
+
+```console
+$ nxm remember "auth uses JWT, not sessions" --key auth-jwt --introduction "auth is JWT, not sessions"
+remembered auth-jwt
+
+$ nxm prime
+# nexus-memory — what this project knows
+
+`nxm` carries durable project knowledge — conventions, gotchas, decisions — and replays it into every session. **Never write a `MEMORY.md`** or any other ad-hoc memory file: nothing reads it, so it is never replayed and the knowledge is silently lost. `nxm remember` is the one durable channel, and reusing a stable `--key` evolves a fact in place. `nxm --help` lists the commands, `nxm guide` the topics behind them.
+
+**Keep them true.** Each memory below is named by its key. If you apply one and the project says otherwise, do not read past it: correct it in place with `nxm remember "<the corrected fact>" --key <key>`, or `nxm forget <key>` if it no longer holds at all. You are the best-informed corrector this memory will ever have.
+
+## How a memory is written
+
+    nxm remember "<fact>" --introduction "<one line>" --key <key>
+    nxm recall <key>                     # read one memory in full
+    nxm memories [<search>]              # list or search them
+
+`--introduction` is ONE line, at most 200 characters, and it says what the memory SAYS — under `--category rules` it speaks the rule ("Never X, always Y", not "Rules about X"), because nobody looks a prohibition up before breaking it.
+
+## Memories (1)
+
+**One line per memory — this is an index, not the memories.** Each line is the introduction its author wrote for it. Read one in full with `nxm recall <key>`, or search their bodies with `nxm memories <text>`.
+
+- **auth-jwt**: auth is JWT, not sessions
+
+> **Open migration:** 1 memory is still filed as `unsorted`, so this project's memory document cannot read as an argument yet. Run `nxm migrate plan --with-judge --json > migration.json`, read the plan, then `nxm migrate apply --plan migration.json`.
+
+```
+
+```console
+$ nxm agent-manifest
+nexus-memory agent manifest
+  prime command:  nxm prime
+  hook:           SessionStart → nxm prime
+
+Run with --json for the machine contract the `nxs` umbrella assembles from.
+
+```

@@ -1,0 +1,34 @@
+[package]
+name = "nxs-ui"
+version.workspace = true
+edition = "2021"
+description = "nxs shared CLI presentation layer: manufakt-Forge styling (Ember-Red on graphite, TTY-gated) + a reusable arrow-key chooser widget shared by every nxs init entrypoint"
+publish = false
+
+# A dependency-light presentation crate, deliberately SEPARATE from nxs-foundation (the substrate
+# stays free of terminal/styling deps) and from crates/cli (the umbrella design requires that `nxs`
+# own the visible presentation; the modules are only driven). `nxs init`, `nxf init`'s plugin
+# chooser (hai.3), and `nxm init` all consume this one layer instead of rebuilding it 2–3×.
+
+[dependencies]
+# anstyle + anstyle-query: the styling primitives + terminal-capability detection (NO_COLOR,
+# truecolor/ansi support, Windows console). BOTH are already in the build tree via clap — adding
+# them here pulls in nothing new. We do the truecolor/256/16 downselect ourselves so the emitted
+# SGR matches the terminal's actual depth.
+anstyle = "1"
+anstyle-query = "1"
+# unicode-width: correct display-width measuring for wrapping + box padding (a CJK/emoji cell is
+# two columns). The byte length is wrong for any non-ASCII content.
+unicode-width = "0.1"
+# terminal_size: the terminal's column count for the min/max width logic (box collapse / content
+# cap). Tiny, pure ioctl/GetConsoleScreenBufferInfo wrapper.
+terminal_size = "0.3"
+# inquire: the arrow-key Select the chooser widget wraps — themed to manufakt-Forge. The ticket
+# pins it (shared with hai.3's plugin chooser). It owns its own raw-mode/TTY handling; we only ever
+# invoke the interactive prompt behind an is-terminal gate.
+inquire = "0.7"
+
+[dev-dependencies]
+# Round-trip the emitted SGR back to plain text to prove the byte-stability guard (no escapes on a
+# plain theme). Already in the tree via clap.
+anstream = "1"

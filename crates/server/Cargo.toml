@@ -1,0 +1,103 @@
+[package]
+name = "nxs-server"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow relay: dumb durable op-carrier (OpStore + HTTP), no fold/derive"
+publish = false
+
+[[bin]]
+name = "nxf-relay"
+path = "src/main.rs"
+
+[features]
+default = []
+# Durable Postgres backend behind the OpStore/PrefixRegistry traits (spec §5/§10). Opt-in
+# so the default relay build and `cargo test` stay SQLite-only and need no Postgres driver
+# or running database; CI enables it and points DATABASE_URL at a Postgres service.
+# UNLIKE `dynamodb` below, this feature IS in the released relay binary (nexus-flow-6j6v.7nee):
+# it costs ~1.2 MB and ~14 s of build time, needs no C toolchain, and is what makes "sync to a
+# Postgres, e.g. Supabase" true of the artifact people actually download.
+postgres = [
+  "dep:postgres",
+  "dep:r2d2",
+  "dep:r2d2_postgres",
+  "dep:tokio-postgres-rustls",
+  "dep:rustls",
+  "dep:rustls-pemfile",
+  "dep:webpki-roots",
+]
+# Durable DynamoDB backend behind the OpStore/PrefixRegistry traits (ddb-opstore epic).
+# Opt-in for the same reason as `postgres`: the default relay build and `cargo test` stay
+# free of the AWS SDK and need no endpoint, region, or credentials. It also stays opt-in for
+# a build-environment reason the postgres feature does not have — the AWS SDK pulls
+# `aws-lc-sys`, a native C/assembly crate that needs a working C toolchain AND `cmake` on the
+# build host, so a contributor without those cannot compile `--features dynamodb` at all
+# (`cargo build` and `cargo test` without the feature are unaffected).
+# `tokio/time` is required, not incidental: the registry's bounded retry after a
+# TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry).
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "tokio/time"]
+
+[dependencies]
+# Wire types ONLY — no `engine` feature, so core's fold code never enters this graph.
+nxs-sync = { path = "../sync", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+# Postgres backend (feature-gated). Sync driver — matches the synchronous storage traits;
+# pooled via r2d2 so concurrent appends hit the DB on independent connections (the only
+# way the "atomic monotone seq under concurrent writers" risk is actually exercised).
+postgres = { version = "0.19", optional = true }
+r2d2 = { version = "0.8", optional = true }
+r2d2_postgres = { version = "0.18", optional = true }
+# TLS for the Postgres backend. Without it the driver can only speak plaintext, which every
+# managed provider (Supabase, Neon, RDS) refuses — the backend would be limited to a database
+# on the same private network. `rustls` is pinned to the **ring** provider with
+# `default-features = false`: its default provider is `aws-lc-rs`, which pulls `aws-lc-sys`
+# (native C/asm + cmake) — precisely the build-host burden that keeps `dynamodb` out of the
+# released binary. Selecting it here would drag that cost back in through the side door.
+tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = [
+  "ring",
+] }
+rustls = { version = "0.23", optional = true, default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+  "logging",
+] }
+# Bundled Mozilla roots rather than the OS trust store: the relay is shipped as a static musl
+# binary and is meant to run in distroless/scratch containers, where there is no system
+# certificate store to read. A private or self-signed CA is added on top via
+# NXF_RELAY_PG_CA_FILE (see tls_pg.rs), so this is a floor, not a ceiling.
+webpki-roots = { version = "1", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+# DynamoDB backend (feature-gated). The SDK is async; OpStore/PrefixRegistry are sync
+# traits, so store_ddb bridges the two on a dedicated runtime (see store_ddb::block_on)
+# rather than bending the trait toward async.
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
+
+[[example]]
+name = "managed-pg"
+# The preflight/classify/sweep command CI runs against a managed Postgres. It links the Postgres
+# backend, so it only exists in a build that has one — without this, `cargo build --examples` on a
+# default build would fail on a missing module rather than skipping a target it cannot compile.
+required-features = ["postgres"]
+
+[dev-dependencies]
+ureq = { version = "2", features = ["json"] }
+# Drive the router in process (`ServiceExt::oneshot`) where a socket would race the assertion —
+# the presence body-limit test. The same tower 0.5 axum already links; no new crate.
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+# The E2E proof (6j6v.6hbd) drives the SHIPPED `nxf`/`nxs` binary as a subprocess, and
+# `nxs-test-support::cargo_bin` is this repo's gated way to resolve one: it refuses to hand back a
+# command that would run a STALE `nxs` (the 0yyw trap — `cargo test -p nxs-server` never rebuilds
+# it, so a test could otherwise assert against an arbitrarily old binary and pass).
+nxs-test-support = { path = "../test-support" }
+# Resolve `nxf-relay` — THIS package's own bin target, so `cargo test -p nxs-server --features
+# postgres` builds it with the same features as the test and it can never be stale or SQLite-only.
+# (`nxf`/`nxs` go through the gated `nxs-test-support::cargo_bin` instead; they belong to another
+# package, which is exactly the case that needs the freshness gate.)
+assert_cmd = "2"

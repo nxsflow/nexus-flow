@@ -1,0 +1,19 @@
+name = "probe-fixture"
+
+[description]
+en = "A separately-registered probe plugin (test fixture, r16h.1)."
+de = "Ein separat registriertes Probe-Plugin (Test-Fixture, r16h.1)."
+
+[priority]
+labels = ["P1", "P2"]
+
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+
+[ranking.next]
+order = [{ field = "id", dir = "asc" }]
+
+[presentation.list]
+columns = ["id"]

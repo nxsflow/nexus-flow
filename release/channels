@@ -1,0 +1,17 @@
+# Canonical list of the promotion-ring channels, most-stable first, one per line. This file is
+# the SINGLE SOURCE OF TRUTH for the three rings nexus-flow promotes through (nexus-flow-85y.27).
+# The ring was duplicated across crates/cli/src/selfupdate.rs (the `CHANNELS` array), the clap
+# `--channel` value_parser in crates/cli/src/lib.rs and install.sh's `NXF_CHANNEL` doc comment;
+# `cargo xtask channels check` (a CI gate) now asserts every one of those copies agrees with this
+# file, so adding/renaming a ring is a single edit here followed by a failing check that names
+# every consumer still to update. Lines starting with `#` and blank lines are ignored.
+#
+# ONE CONSUMER IS OUT OF REACH AND IS NOT CHECKED (nexus-flow-6j6v.sgfr). The updater Lambda's
+# download-path regex `download/(stable|beta|alpha)/…` used to be checked here as
+# `infra/lambda/updater/decide.ts`; that tree moved to nxsflow-landing-page with the delivery
+# migration, and the copy this check kept reading was a leftover nobody deployed. See the same
+# paragraph in `release/platforms` — a renamed or added ring must be carried into the landing
+# repo's updater by hand, and the failure mode is a silent "no update available" on that ring.
+stable
+beta
+alpha

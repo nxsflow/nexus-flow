@@ -1,0 +1,16 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH archive 1  "archive " 
+.SH NAME
+archive \- Archive one or more items — "closed and put away". Cascades DOWN: each root and its whole `belongs_to` subtree are archived, but only when the root is closed and every descendant is closed (already\-archived counts as closed). Atomic per root, independent between roots; the result reports each root\*(Aqs outcome plus the full list of ids actually archived (incl. cascaded). Archiving is reversible — see `unarchive`
+.SH SYNOPSIS
+\fBarchive\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIIDS\fR> 
+.SH DESCRIPTION
+Archive one or more items — "closed and put away". Cascades DOWN: each root and its whole `belongs_to` subtree are archived, but only when the root is closed and every descendant is closed (already\-archived counts as closed). Atomic per root, independent between roots; the result reports each root\*(Aqs outcome plus the full list of ids actually archived (incl. cascaded). Archiving is reversible — see `unarchive`
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIIDS\fR>
+Item ids to archive (each a cascade root). At least one is required

@@ -1,0 +1,39 @@
+[package]
+name = "nxs-init"
+version.workspace = true
+edition = "2021"
+description = "nxs shared init/compose library: the compile-time module self-registration registry (inventory) every module submits into, plus the agent-file assembler + shell-out seam the umbrella reads. Modules depend on THIS (never on `nxs`), so `nxs` can link them as the composition root without a dependency cycle."
+publish = false
+
+# WHY this crate exists (nexus-flow-5jz.1): `nxs init`/`prime` must read a roster that each module
+# SELF-REGISTERS at compile time (inventory). For that, the `nxs` binary has to LINK every module
+# crate — but the modules used to depend on `nxs` (for the assembler), which would be a package
+# cycle. The shared platform glue the modules need (the registry descriptor + the assembler + the
+# shell-out) lives HERE instead; modules depend on `nxs-init`, and `nxs` depends on `nxs-init` +
+# the module crates. No cycle. TB-5 reversal applies to the init PATH only (library composition);
+# `prime`/`agent-manifest` stay shell-out, resolving the binary from the same self-registered roster.
+
+[dependencies]
+# The shared substrate: the workspace config (active_modules) the roster resolves against, the
+# manifest contract the assembler consumes, and the structured error envelope.
+nxs-foundation = { path = "../foundation" }
+# The shared presentation layer: `Theme` rides the in-process init request so a module's own
+# sub-config UI (flow's plugin chooser, 5jz.3) renders in the one umbrella look.
+nxs-ui = { path = "../nxs-ui" }
+# Parse `<cli> agent-manifest --json` + read/write `.claude/settings.json` (the assembler), and
+# deserialize the `bd export` JSONL records the beads→nxs migration reads (the `beads` module).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The background-service seam (nxf 6j6v.y12q): every init path — the umbrella's and each module's
+# own front door — puts the workspace it just set up on the list the service attends, so a
+# workspace born under `--json` gets a clock like every other. It sits here rather than in each
+# module because there is ONE rule and two callers, and the crate exists precisely to be linked
+# below everything that has a CLI (see its own manifest).
+nxs-service = { path = "../service" }
+# The compile-time self-registration registry: each module `inventory::submit!`s its `ModuleInit`
+# descriptor; the umbrella collects them with `inventory::iter`. Link-order is unspecified, so the
+# roster is sorted deterministically (by declared `order`, then `key`) for byte-stable output.
+inventory = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,49 @@
+# The `file` consumer plugin (ky26) — the FIRST real user of the plugin custom-fields epic (rvay,
+# T1-T4). It declares a `file` item type with a required custom `uri` field, proving the whole
+# mechanism end-to-end: declare `[fields]` → `create --set uri=…` → read `schema`/`show`/`list`/
+# `next --json` → sync round-trip. Test-only fixture (registered from `plugin-probe`, never linked
+# into the shipped `nxf`); the shape is what a consumer's own `file`-tracking plugin would ship.
+#
+# THE `.nxs/files/` CONVENTION (ky26 model): a `file` item LINKS a created file. Its `uri` is a
+# WORKSPACE-RELATIVE path under `<workspace>/.nxs/files/` (subfolders are free, e.g.
+# `.nxs/files/reports/q3.md`). `title` is the filename, `description` a human summary. The path is
+# relative so the item stays valid across machines once the blob is present.
+#
+# V1 BLOB BOUNDARY (explicit, load-bearing): the op-log syncs the file ITEMS — the metadata (`uri`,
+# title, description) — via the relay, and a peer's replica converges on the SAME `uri` custom
+# value (the "Metadaten syncen" guarantee the ky26 acceptance pins). The BLOBS themselves (the bytes
+# under `.nxs/files/`) are NOT synced in v1 — blob transport is a later engine theme
+# (E4-neighbourhood). A `file` item can therefore point at a blob a given replica does not yet hold.
+
+name = "file-fixture"
+
+[description]
+en = "A file tracker (ky26): links created files as items whose `uri` is a workspace-relative path under .nxs/files/. V1 syncs the file items (metadata), not the blobs."
+de = "Ein Datei-Tracker (ky26): verknüpft erzeugte Dateien als Items, deren `uri` ein workspace-relativer Pfad unter .nxs/files/ ist. V1 synct die Datei-Items (Metadaten), nicht die Blobs."
+
+[priority]
+labels = ["P1", "P2"]
+
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+
+[ranking.next]
+order = [{ field = "id", dir = "asc" }]
+
+[presentation.list]
+columns = ["id"]
+
+# `file` is a global leaf type — no containment rules needed (a linked file stands on its own).
+[types]
+list = ["file"]
+
+# The custom field this whole ticket exists to prove: a required, file-scoped `uri` (plugin-custom-
+# fields §3). `type = "text"` (a uri is free text in v1 — TB-CF-3); `on = ["file"]` scopes it to the
+# `file` type; `required = true` enforces it at create time (TB-CF-7).
+[fields.uri]
+type = "text"
+on = ["file"]
+required = true
+label = "File URI"

@@ -1,0 +1,23 @@
+# Canonical list of the shipped platform keys, one "<os>-<arch>" per line. This file is the
+# SINGLE SOURCE OF TRUTH for the four targets nexus-flow ships (nexus-flow-4sr). The list was
+# duplicated across install.sh, .github/scripts/{publish,promote}-release.sh,
+# .github/workflows/release.yml and npm/mcp/lib/platform.js; `cargo xtask platforms check`
+# (a CI gate) now asserts every one of those copies agrees with this file, so a 5th platform or a
+# rename is a single edit here followed by a failing check that names every consumer still to
+# update. Lines starting with `#` and blank lines are ignored.
+#
+# ONE CONSUMER IS OUT OF REACH AND IS NOT CHECKED (nexus-flow-6j6v.sgfr). The updater Lambda
+# canonicalizes a client-reported (target, arch) into these same keys, and it used to be checked
+# here as `infra/lambda/updater/decide.ts`. That tree moved to nxsflow-landing-page with the
+# delivery migration; the copy this check kept reading was a leftover nobody deployed, so the
+# green tick it produced was about a dead file. Both are gone now.
+#
+# WHAT THAT COSTS, stated rather than left to be discovered: a FIFTH platform must be carried
+# into the landing repo's updater by hand, and the failure mode if it is not is a silent "no
+# update available" for exactly that platform — not an error. Whoever adds one starts here and
+# finishes there. The counter-check lives in the manifest itself: a build for a platform the
+# updater does not canonicalize appears in `platforms` without ever being handed out.
+darwin-aarch64
+darwin-x86_64
+linux-x86_64
+linux-aarch64

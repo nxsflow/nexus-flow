@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH next 1  "next " 
+.SH NAME
+next \- List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+.SH SYNOPSIS
+\fBnext\fR [\fB\-\-now\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+.SH OPTIONS
+.TP
+\fB\-\-now\fR \fI<NOW>\fR
+Reference time (ISO\-8601 / RFC3339); defaults to now
+.TP
+\fB\-\-label\fR \fI<LABEL>\fR
+Filter to ready items carrying this label (user vocabulary, not the display type)
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error
+.TP
+\fB\-\-limit\fR \fI<LIMIT>\fR
+Max items to show (default: no limit). Applied last — after `\-\-sort` and `\-\-label` — and never silently: a truncated list is headed `showing <n> of <total>`, and under `\-\-json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer reads the untruncated total instead of inferring it from the array\*(Aqs length
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

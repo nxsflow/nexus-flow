@@ -1,0 +1,22 @@
+`nxf agent-manifest` emits nxf's declared contribution to the shared agent file (spec §6.2) as
+data — the prime command and the SessionStart hook. Since nexus-flow-0lj.2 it carries no per-module
+section: the `nxs` umbrella writes a single nxs-owned AGENTS.md discovery pointer instead. It needs
+no workspace and is plugin-agnostic. The human form summarizes; `--json` is the machine contract.
+
+```console
+$ nxf agent-manifest
+
+nexus-flow agent manifest
+  prime command:  nxf prime
+  hook:           SessionStart → nxf prime
+
+Run with --json for the machine contract the `nxs` umbrella assembles from.
+
+
+```
+
+```console
+$ nxf agent-manifest --json
+{"prime_command":"nxf prime","hook":{"event":"SessionStart","command":"nxf prime"}}
+
+```

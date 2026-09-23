@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/foundation", "crates/core", "crates/facade", "crates/cli", "crates/memory", "crates/chat", "crates/nxs", "crates/nxs-init", "crates/nxs-ui", "crates/guide", "crates/sync", "crates/service", "crates/server", "crates/plugin-probe", "crates/test-support", "xtask"]
+# The Tauri example links the engine as a real embedding host. It is kept OUT of the workspace so
+# `cargo test`/CI never build Tauri + WebKit; it builds standalone from its own dir. Being out of
+# the workspace is also how it silently rotted for seven weeks (a facade signature moved under
+# it), so `.github/workflows/example-check.yml` runs `cargo check` on it by itself.
+# See examples/tauri-board/README.md.
+exclude = ["examples/tauri-board/src-tauri"]
+
+# Single source of truth for the shipped version. Product crates inherit it via
+# `version.workspace = true`; `nxf --version` reports it through CARGO_PKG_VERSION
+# (clap). The release tag `v<version>` is the truth and CI enforces tag == version
+# fail-closed. See docs/specs/release-management.md §4.1.
+[workspace.package]
+version = "0.200.0"
+
+# Trim the debug build cache (nexus-flow-k1i). `target/debug` had grown to ~24 GB of `.o`/DWARF
+# in `deps/` because the default `debug = true` emits FULL debug info — and on macOS
+# `split-debuginfo = "unpacked"` keeps it in the per-object files. `line-tables-only` keeps the
+# file:line tables, so backtraces (and `cargo test` failures) still point at real source
+# locations; only full variable inspection in a debugger (lldb stepping — not how this project is
+# tested) is dropped. It roughly halves `debug/`. This is the `debug=` (DWARF) knob ONLY: it does
+# NOT touch `cfg(debug_assertions)`, so `debug_assert!` and `cargo test --release` (which gates on
+# `debug_assertions`, not `debug=`) behave exactly as before. The release profile is untouched —
+# zero user/runtime impact. For the OTHER half of the bloat (accumulated stale incremental +
+# dep artifacts that cargo never auto-prunes), prune periodically with cargo-sweep instead of a
+# full `cargo clean` — see the "Build cache" note in CLAUDE.md.
+[profile.dev]
+debug = "line-tables-only"

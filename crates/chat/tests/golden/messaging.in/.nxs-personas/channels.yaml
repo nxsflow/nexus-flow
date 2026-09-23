@@ -1,0 +1,19 @@
+# The order a work order runs through: the coder builds it, then the review quorum judges it.
+# NOTE for the corpus: neither channel declares a `timeout:`. A declared window schedules a real
+# one-shot job through `at`, whose availability and error text differ per machine — which would make
+# this golden's output depend on the host rather than on `nxc`. Timeouts are described in the guides
+# in prose for exactly that reason.
+- name: build-and-ship
+  members: [coder, review]
+  flow: sequential
+  description: the declared order a work order runs through
+
+# The review quorum: both reviewers are asked at once and one folded verdict comes back.
+- name: review
+  members: [general, integrity]
+  description: the review quorum — one round asks both reviewers and hands back one verdict
+  expects: all
+  on_complete: summarize
+  summary_model: opus
+  summary_prompt: |
+    Fold both reviews into one verdict and end with `Ready to merge? yes|no`.

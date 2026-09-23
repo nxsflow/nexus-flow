@@ -1,0 +1,39 @@
+`nxm guide` is memory's own guide verb — one of the three building blocks' (6j6v.9e3r), sharing the
+mechanism `nxf guide` and `nxc guide` use. It needs no workspace: the content is compiled into the
+binary.
+
+Five topics (6j6v.h4k0), in the order they are meant to be read: what memory IS, the model
+underneath it, what you type, and the two seams a reader arrives from.
+
+```console
+$ nxm guide
+Guides (run `nxm guide <topic>`):
+
+  getting-started       What memory is for, what it needs, and your first remembered fact.
+  core-concepts         Keys and auto-keys, the three registers, the retrieval rule, reading order, and the tombstone.
+  commands              Every shipped verb, with its `--json` shape and the errors it can answer with.
+  agents-and-mcp        The `memory_*` MCP tools, what `nxs prime` contributes, and where an agent writes.
+  import-and-migration  Take a Claude-host memory store in, and file what a workspace already accumulated.
+
+```
+
+The `--json` listing shape is identical across the blocks (`[{summary, topic}]`), so a caller that
+learned it from `nxf guide --json` already knows this one. The ORDER is part of the contract.
+
+```console
+$ nxm guide --json
+[{"summary":"What memory is for, what it needs, and your first remembered fact.","topic":"getting-started"},{"summary":"Keys and auto-keys, the three registers, the retrieval rule, reading order, and the tombstone.","topic":"core-concepts"},{"summary":"Every shipped verb, with its `--json` shape and the errors it can answer with.","topic":"commands"},{"summary":"The `memory_*` MCP tools, what `nxs prime` contributes, and where an agent writes.","topic":"agents-and-mcp"},{"summary":"Take a Claude-host memory store in, and file what a workspace already accumulated.","topic":"import-and-migration"}]
+
+```
+
+A topic this block does not carry is a `validation` error naming what IS on offer — never a silent
+empty answer. `mcp` is the interesting case: flow carries a topic by that name (connecting a host is
+the same job for the whole suite), while memory's own seam chapter is `agents-and-mcp`, so the
+refusal points a misdirected reader at the right one.
+
+```console
+$ nxm guide mcp --json
+? 1
+{"error":{"kind":"validation","msg":"unknown guide topic 'mcp'; expected one of getting-started, core-concepts, commands, agents-and-mcp, import-and-migration"}}
+
+```

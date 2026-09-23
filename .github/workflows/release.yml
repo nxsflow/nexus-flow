@@ -1,0 +1,1002 @@
+name: release
+
+# Build → sign → publish the nexus-flow release artifacts (spec §5, nexus-flow-85y.13).
+#
+#   - Tag push `v*`            → PROD  (https://nxsflow.com/nxs): 4-target build, minisign-signed,
+#                                GitHub **Pre-Release** (beta ring), publish to the prod bucket.
+#   - `workflow_dispatch`      → STAGING (https://staging.nxsflow.com/nxs): identical run against
+#                                the staging bucket, **NO GitHub release** — a pipeline rehearsal
+#                                for changes to the release tooling itself. On a FEATURE BRANCH
+#                                this needs TWO dispatches: `gh workflow run ci.yml --ref <branch>`
+#                                first (a branch gets only `pull_request` runs, which the `ci-green`
+#                                gate below does not count), then this one. Runbook: spec §10.1.
+#
+# build-once-promote: every artifact is built ONCE here (beta ring); promote.yml (85y.15)
+# later copies the very same bytes to stable. Validated bytes == shipped bytes — the in-
+# pipeline `nxf verify-signature` gate proves the signature before anything is uploaded.
+#
+# ONE DELIVERY CHAIN (nxsflow.com migration, spec docs/specs/nxsflow-com-migration.md §6 step 9,
+# 6j6v.hy2f): artifacts go to the domain-less `nxs-<env>` origin, fronted by the
+# nxsflow-landing-page distribution under the `/nxs` machine namespace. The old `nxf-<env>` chain
+# (nxf[-staging].nxsflow.com) is GONE — its names no longer resolve and its stacks are deleted —
+# so the dual-publish window (6j6v.cpj4) that fed both is closed and this is a single publish
+# again. Publish happens BEFORE the GitHub Pre-Release is cut: with one chain there is no second
+# copy to fall back on, so a release must never announce bytes that were not delivered.
+#
+# THE ORIGIN IS SAME-ACCOUNT SINCE THE DELIVERY MOVE and this workflow never had to be told:
+# the bucket and the release role are BUILT from `secrets.NXS_<ENV>_ACCOUNT_ID` at run time
+# (below), so re-pointing that one secret at the nxsflowcom accounts moved the whole chain
+# (cyb7.xb8f). Nothing here is cross-account any more, and the CDK that used to define the far
+# side of it left this repo with 6j6v.sgfr — the stack now lives in nxsflow-landing-page. What
+# stays true for a reader: this workflow assumes roles named `nxs-<env>-release` and a bucket
+# named `nxs-<env>-artifacts-<account>`; who creates them is that repo's business, not this
+# one's.
+#
+# Security hygiene (spec §2 last row): tag/dispatch data flows only through `env:`, never
+# `${{ }}`-interpolated into a shell; the artifacts bucket name embeds the (secret) account
+# id so it is masked in logs; sidecar existence is checked with `head-object`, never `s3 ls`.
+#
+# PROD lock (nexus-flow-85y.23): the publish job fails closed on the prod path unless
+# `vars.NXF_PROD_RELEASE_ENABLED == 'true'` — SET since the account split, so real `v*` tag
+# releases publish to the prod chain today.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (staging rehearsal). Empty ⇒ the workspace version."
+        required: false
+        default: ""
+
+# Least privilege at the top; the publish job elevates to what it needs (OIDC + release upload).
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Resolve env (tag ⇒ prod, dispatch ⇒ staging), the version, and the channel — once, so the
+  # build matrix and the publish job agree on names. plain-SemVer guard is fail-closed here.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.m.outputs.env }}
+      is_prod: ${{ steps.m.outputs.is_prod }}
+      version: ${{ steps.m.outputs.version }}
+      channel: beta
+    steps:
+      - uses: actions/checkout@v5
+      - id: m
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            # Tag ref `v<version>` ⇒ prod. version-check.yml separately enforces tag == version.
+            version="${REF_NAME#v}"; target_env="prod"; is_prod="true"
+          else
+            version="$INPUT_VERSION"
+            if [ -z "$version" ]; then
+              # Default to the single workspace version (Cargo.toml [workspace.package]).
+              version="$(sed -n 's/^version = "\([0-9][^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+            fi
+            target_env="staging"; is_prod="false"
+          fi
+          # Plain SemVer only — suffixes are a channel concept, never part of the version (§4.3).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$version' is not plain SemVer X.Y.Z"; exit 1
+          fi
+          {
+            echo "env=$target_env"
+            echo "is_prod=$is_prod"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: env=$target_env, version=$version"
+
+  # Fail-closed release gate (nexus-flow-85y.29, re-cut by 6j6v.31rs). It LOOKS at the quality gate's
+  # verdict for this exact commit; it does not re-run it.
+  #
+  # This job used to BE a second test run: `cargo test --all` + `cargo test --all --release`, byte
+  # for byte the two commands `ci.yml`'s `quality-gates` runs. On v0.51.0 (SHA 49ee217d) the two ran
+  # on the SAME commit fifteen seconds apart — CI's `quality-gates` in 13m47, this job in 21m31 —
+  # and the duplicate accounted for 21m28 of a 31m52 release. It was even SLOWER than the original
+  # because `Swatinem/rust-cache` keys on the job id by default, so `test` != `quality-gates` meant
+  # its own cache silo: measured 1s in the restore step (a miss) against 25s (a hit) in CI. A whole
+  # dependency tree, compiled twice, in both profiles, for one commit.
+  #
+  # WHY IT WAS BUILT THAT WAY, and why that reason no longer forces it: the original note said a
+  # required status check cannot be configured on this plan, and that is still true —
+  # `gh api .../branches/main/protection` answers 403 "Upgrade to GitHub Pro". But "no branch
+  # protection" does not mean "no verdict": the run exists, and this job can read it. Fail-closed is
+  # unchanged and is what the whole job is — no green CI run for this SHA ⇒ the release goes RED. It
+  # never falls back to testing anything itself, and it never waves anything through.
+  #
+  # STRICTLY MORE COVERAGE than the two commands it replaces: the run it demands is the WHOLE CI
+  # workflow — the four `xtask` drift gates, the verb-seam gate, the sidecar suite, the sidecar
+  # BUNDLE build, both lean feature variants, the platform gates, `postgres-parity` and
+  # `dynamodb-local` — not just the two `cargo test` invocations that were mirrored here.
+  #
+  # `push`/`workflow_dispatch` runs ONLY. That is not a formality: `ci.yml`'s three release-profile
+  # steps carry `if: github.event_name != 'pull_request'`, so a `pull_request` run is a DIFFERENT,
+  # smaller gate. The release profile catches a class that has shipped before (a side effect inside
+  # `debug_assert!`, compiled out and silently no-op) and accepting a PR run would quietly drop it.
+  ci-green:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # read `ci.yml`'s run list for this commit
+    # Backstop only. The script below has its own, tighter deadline so the failure message is ours
+    # and says what it saw, instead of a bare "job cancelled".
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      # The commit, resolved from the checkout rather than taken from `github.sha`: on a tag push
+      # that variable is documented only as "the SHA that triggered the workflow", and peeling it
+      # here costs one cheap line and removes the question entirely.
+      - name: Resolve the tagged commit
+        id: commit
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse 'HEAD^{commit}')"
+          echo "release ref resolves to commit $sha (github.sha was $EVENT_SHA)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The gate itself lives in a script, not in this block, so it can be TESTED: every way out of
+      # it — green, red, cancelled, PR-only, missing, never-finishing, and "GitHub could not be
+      # asked" — is asserted by `tests/require-green-ci.test.sh` against a stubbed `gh`. That
+      # harness is mutation-checked, and the five perturbations are RECORDED in its own header
+      # rather than merely claimed here (PR #300 review, Test Quality #2). The job it replaces was a
+      # duplicate test run, which was at least obviously honest; what replaces it has to be provably
+      # fail-closed rather than merely written to be. `install-sh-ci.yml` runs that harness +
+      # shellcheck on every change to either file.
+      #
+      # What the gate does NOT claim — that the commit was reviewed or ever landed on `main` — is
+      # spelled out in the script's own header, not left for a reader to assume.
+      - name: Require a green CI run for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: ./.github/scripts/require-green-ci.sh
+
+  # 4 targets, one job each (spec §5.2). The `platform:` keys below + the `for p in …` loop in
+  # the publish job are checked against release/platforms by `cargo xtask platforms check` (CI),
+  # the single source of truth for the shipped platforms (nexus-flow-4sr). darwin builds
+  # native/cross on macos-14; the two static musl targets cross-compile from ubuntu via
+  # cargo-zigbuild (zig as the C toolchain — bundled rusqlite's sqlite3.c compiles cleanly for
+  # musl). The minisign pubkey
+  # is baked into `nxf` here (NXF_MINISIGN_PUBKEY) so the shipped binary can self-verify
+  # updates; build jobs DO NOT sign — the private key is exposed only to the single publish job.
+  # `needs: ci-green` makes the gate fail-closed — no green CI run for this commit ⇒ no build
+  # (nexus-flow-85y.29, 6j6v.31rs). Deliberately in front of the BUILD, not only the publish: the
+  # darwin legs sign with the Developer ID identity and submit to Apple's notary service, and neither
+  # belongs to a tree whose quality gate has not passed.
+  build:
+    needs: [meta, ci-green]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            platform: darwin-aarch64
+            builder: cargo
+          - target: x86_64-apple-darwin
+            os: macos-14
+            platform: darwin-x86_64
+            builder: cargo
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux-x86_64
+            builder: zigbuild
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux-aarch64
+            builder: zigbuild
+    # The two darwin jobs (codesign + notarytool live on macOS) can run on a SELF-HOSTED Mac
+    # to avoid GitHub-hosted macOS billing — ~10x Linux, and `notarytool --wait` idles the
+    # runner for minutes while Apple notarizes. Set repo var NXF_MACOS_RUNS_ON to a JSON label
+    # array (e.g. ["self-hosted","macOS","X64"]) to route the darwin build+sign+notarize there;
+    # unset ⇒ GitHub-hosted `macos-14`. Host arch is irrelevant — both jobs build with explicit
+    # `--target`, so an Intel runner builds x86_64 native + aarch64 cross (and vice-versa).
+    # Linux jobs always use `matrix.os` (ubuntu). Safe because release.yml triggers only on tag
+    # push / workflow_dispatch (write-access gated) — untrusted PR code never reaches the runner.
+    runs-on: ${{ (matrix.builder == 'cargo' && vars.NXF_MACOS_RUNS_ON != '') && fromJSON(vars.NXF_MACOS_RUNS_ON) || matrix.os }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+      # Compiled into `nxf` so an installed binary verifies update signatures against it
+      # (spec §5.3). A bare base64 line OR a full minisign.pub both parse (signature.rs).
+      NXF_MINISIGN_PUBKEY: ${{ vars.NXF_MINISIGN_PUBKEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Cache only on the ephemeral GitHub-hosted Linux legs (builder: zigbuild). The self-hosted
+      # macOS legs (builder: cargo) persist target/ + ~/.cargo on disk across runs, so the GitHub
+      # Actions cache upload is redundant there — and its Post-save step stalled for hours on the
+      # v0.3.1 run (nexus-flow-47x), blocking the whole job. Skip it on darwin.
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.builder == 'zigbuild'
+        with:
+          key: ${{ matrix.target }}
+          # SAVE NOTHING (nexus-flow-6j6v.gapx). This workflow runs only on `v*` tags, so a run's
+          # cache scope is the tag ref — and a tag exists exactly once, which makes the entry it
+          # writes unreadable by construction. Counted over v0.81.0, v0.82.0 and v0.83.0, two
+          # zigbuild targets each: 6 restores, 0 hits, 6 saves, ~553 MB of upload per release
+          # billed against a 10 GB repository limit that was already full. Restoring stays on —
+          # it costs nothing and a re-run of the same tag could still use it.
+          save-if: false
+
+      # The `nxc` agent sidecar, bundled into ONE self-contained ESM file (nexus-flow-6j6v.81v5) —
+      # and since 6j6v.smsz compiled INTO `nxs` rather than shipped beside it, which is why this
+      # step now runs BEFORE the cargo builds instead of after them. `crates/chat/build.rs` reads
+      # `agent-sidecar/dist/nxc-agent-sidecar.mjs`; a build that ran first would embed nothing.
+      #
+      # The reason for the move, stated once: the sidecar used to be a THIRD tarball member that
+      # `install.sh` and `nxs self-update` placed beside the binary. The code that places it lives
+      # in the version being installed, so the update that INTRODUCES it is always performed by the
+      # PREVIOUS version, which knows nothing about it — every machine coming from <=0.51.0 landed
+      # without one. Embedded, there is no second file for anyone to forget.
+      #
+      # Bundled, not vendored: `agent-sidecar/node_modules` is ~286 MB (245 MB of it the Claude Code
+      # native binary in a platform package) and thousands of files, against 1.4 MB for the bundle.
+      # The SDK's own resolution of that native binary cannot work from a bundle anyway — `nxs`
+      # resolves the machine's installed `claude` and states it in the spec (`claudePath`).
+      #
+      # PLAIN `npm ci`, deliberately: `--omit=optional` would skip esbuild's OWN integrity-pinned
+      # `@esbuild/<platform>` package alongside the SDK's, and esbuild's postinstall then fetches
+      # its binary from the registry with no lockfile `integrity` check. That would put a build tool
+      # of version-only provenance in the middle of a chain whose whole point is that the artifact
+      # is sha256'd and minisign-signed. Install minutes are the cheaper side of that trade.
+      #
+      # Platform-independent output (it is JavaScript), so every matrix leg produces the same file;
+      # building it per leg keeps each leg self-contained with no cross-job artifact plumbing.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Bundle the nxc agent sidecar
+        run: |
+          set -euo pipefail
+          cd agent-sidecar
+          npm ci
+          npm run build
+          ls -l dist/nxc-agent-sidecar.mjs
+
+      # `NXF_EMBED_SIDECAR=require` on BOTH build steps: `crates/chat/build.rs` tolerates a missing
+      # bundle (a contributor's `cargo build` must not need Node), and tolerance is exactly wrong
+      # for an artifact that ships — it would produce an `nxs` that installs cleanly and cannot
+      # start an agent, which is the bug this ticket exists for, one layer down. With the variable
+      # set, the absent case fails the build instead of emitting `None`.
+      #
+      # `--features nxs-server/postgres` on BOTH build steps, and deliberately NOT `dynamodb`
+      # (nexus-flow-6j6v.7nee, spec §5.2). Which backends the shipped `nxf-relay` can actually
+      # select is decided HERE, so the reason belongs here too, measured rather than asserted:
+      #
+      #   backend        crates   cold relay build   binary
+      #   sqlite only        76             57 s     3.8 MB
+      #   + postgres       153             71 s      5.0 MB   ← shipped
+      #   + dynamodb       247          3 m 35 s     22.6 MB
+      #
+      # Postgres is nearly free and is what makes "sync to a Postgres, e.g. Supabase" true of
+      # the artifact people download. DynamoDB pulls `aws-lc-sys` (native C/asm) and would need
+      # `cmake` + a C toolchain on all four runners — including the two musl legs that cross-
+      # compile through zig — to add ~19 MB to every tarball for a capability no consumer takes
+      # from a tarball: the one deployment that uses it (manufakt-io) builds the relay from a
+      # pinned source revision with its own toolchain. It stays a source build, on purpose and
+      # in writing (spec §5.6, guide `running-a-relay`), so nobody "fixes" the omission here.
+      - name: Build (darwin, native/cross)
+        if: matrix.builder == 'cargo'
+        # Multicall (nexus-flow-5jz.7): ONE CLI binary, `nxs` (it serves nxf/nxm by argv[0]); the
+        # personas are symlinks created at install/update, never shipped or built separately.
+        env:
+          NXF_EMBED_SIDECAR: require
+        run: |
+          cargo build --release --target "$TARGET" \
+            --bin nxs --bin nxf-relay --features nxs-server/postgres
+
+      - name: Install zig + cargo-zigbuild (musl)
+        if: matrix.builder == 'zigbuild'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build (linux musl, static, via zigbuild)
+        if: matrix.builder == 'zigbuild'
+        env:
+          NXF_EMBED_SIDECAR: require
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-zigbuild
+          cargo zigbuild --release --target "$TARGET" \
+            --bin nxs --bin nxf-relay --features nxs-server/postgres
+
+      # macOS first-install trust anchor (nexus-flow-85y.30, spec §5.3): codesign the two
+      # darwin binaries with the Developer ID Application identity (hardened runtime +
+      # secure timestamp) and notarize them with Apple via notarytool. A bare CLI Mach-O
+      # cannot be `stapler`-stapled — only a .pkg/.dmg/.app container can — so we sign +
+      # notarize and rely on Gatekeeper's ONLINE check (TB-6 revised); the SAME signed
+      # binaries ship inside the existing tar.gz (build-once-promote unchanged, no .pkg).
+      #
+      # Toggleable + fail-closed (mirrors NXF_MINISIGN_PUBKEY / NXF_PROD_RELEASE_ENABLED):
+      # signing runs only when `vars.NXF_MACOS_SIGNING_ENABLED == 'true'`. When ON, every
+      # required Apple secret MUST be present or the job fails (no silent unsigned release).
+      # When OFF (contributors / pre-bootstrap), darwin builds proceed unsigned with a notice.
+      - name: Sign + notarize darwin binaries (Developer ID)
+        if: matrix.builder == 'cargo' && vars.NXF_MACOS_SIGNING_ENABLED == 'true'
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APP_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APP_CERT_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+
+          # Fail-closed: signing is enabled, so a missing secret is a hard error, never a
+          # silently-unsigned release. `:?` trips under `set -u` on unset OR empty.
+          : "${APPLE_CERT_P12_BASE64:?APPLE_DEVELOPER_ID_APP_CERT_P12_BASE64 secret is required when NXF_MACOS_SIGNING_ENABLED=true}"
+          : "${APPLE_CERT_PASSWORD:?APPLE_DEVELOPER_ID_APP_CERT_PASSWORD secret is required}"
+          : "${APPLE_NOTARY_KEY_P8_BASE64:?APPLE_NOTARY_KEY_P8_BASE64 secret is required}"
+          : "${APPLE_NOTARY_KEY_ID:?APPLE_NOTARY_KEY_ID secret is required}"
+          : "${APPLE_NOTARY_ISSUER_ID:?APPLE_NOTARY_ISSUER_ID secret is required}"
+
+          work="${RUNNER_TEMP:-$(mktemp -d)}"
+          keychain="$work/nxf-signing.keychain-db"
+          keychain_pw="$(openssl rand -base64 24)"
+          # Mask the ad-hoc keychain password so a stray echo / `set -x` cannot leak it.
+          echo "::add-mask::$keychain_pw"
+          cert_p12="$work/devid_app.p12"
+          p8="$work/AuthKey.p8"
+          stage="$work/notarize"            # notarization submission carrier (filled below)
+          zip_path="$work/nxf-notarize.zip"
+          login_kc="$HOME/Library/Keychains/login.keychain-db"
+
+          # ── 6j6v.px3d: this step NEVER sets the session default keychain ──────────────────
+          # It used to (`security default-keychain -s "$keychain"`, nexus-flow-cot), and on the
+          # self-hosted runner — which shares its login session with a human — that leaked out
+          # of CI and broke the desktop: the default is the pointer loginwindow itself
+          # consults. Two windows left it aimed at a keychain that no longer existed: (1) EVERY
+          # run, briefly — the old cleanup trap deleted the temp keychain before restoring the
+          # prior default; (2) after a hard kill (Actions cancel/timeout SIGKILL, a killed
+          # process, a reboot) where the trap never ran at all, the default stayed orphaned
+          # permanently. Both close only if the default is never set in the first place — what
+          # actually keeps codesign non-interactive is an UNLOCKED keychain in the search list
+          # whose key ACL was widened by set-key-partition-list (below); the default only
+          # decides where NEW items land, and this step never creates one outside $keychain.
+          # Dropping the old default-keychain line WITHOUT the search-list + partition-list
+          # handling below would just bring back the original interactive-prompt problem it was
+          # added to avoid.
+          #
+          # Behavior + safeguards ported from app-foundations'
+          # packages/macos-dist/lib/keychain.sh (b06p), which hit this exact failure on a
+          # shared-session runner, fixed it, and test-locked it — not vendored as a dependency
+          # (this repo has no root package.json to hang @nxsflow/macos-dist off of).
+
+          # Does the newline-separated blob $2 contain $1 as a whole line? Line-wise, never a
+          # substring match — a keychain path may contain a space (e.g. "/Users/John Doe/…").
+          kc_blob_has_line() {
+            local needle="$1" line
+            while IFS= read -r line; do
+              [ "$line" = "$needle" ] && return 0
+            done <<< "$2"
+            return 1
+          }
+
+          # The user-domain keychain search list, one bare path per line. Trimming is
+          # EDGE-ONLY (leading whitespace, then the surrounding quotes `security` prints) — a
+          # blanket `tr -d ' "'` would also strip a space INSIDE a path.
+          kc_user_search_list() {
+            local kc
+            while IFS= read -r kc; do
+              kc="${kc#"${kc%%[![:space:]]*}"}"
+              kc="${kc%\"}"; kc="${kc#\"}"
+              [ -n "$kc" ] && printf '%s\n' "$kc"
+            done < <(security list-keychains -d user 2>/dev/null || true)
+            return 0
+          }
+
+          kc_default_user() {
+            local d
+            d="$(security default-keychain -d user 2>/dev/null || true)"
+            d="${d#"${d%%[![:space:]]*}"}"
+            d="${d%\"}"; d="${d#\"}"
+            printf '%s\n' "$d"
+          }
+
+          # Matched by basename: the parent dir is an unpredictable temp path, the name isn't.
+          kc_is_ours() {
+            case "${1##*/}" in
+              nxf-signing.keychain-db | nxf-signing.keychain) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Write the user-domain search list from a newline-separated blob: order preserved,
+          # duplicates dropped. NEVER writes an EMPTY list — `security list-keychains -d user
+          # -s` with no argument CLEARS the search list, which is worse damage than anything
+          # this exists to repair; an empty blob falls back to the stock login+System pair.
+          kc_set_user_search_list() {
+            local blob="$1" kc seen="" list=()
+            while IFS= read -r kc; do
+              [ -n "$kc" ] || continue
+              kc_blob_has_line "$kc" "$seen" && continue
+              seen="$seen$kc"$'\n'
+              list[${#list[@]}]="$kc"
+            done <<< "$blob"
+            if [ ${#list[@]} -eq 0 ]; then
+              echo "::warning::keychain search list came out EMPTY — falling back to the stock login+System pair rather than clearing it"
+              list=("$login_kc" "/Library/Keychains/System.keychain")
+            fi
+            security list-keychains -d user -s "${list[@]}"
+          }
+
+          # Repair keychain state a previous run's trap never got to run (SIGKILL from an
+          # Actions cancel/timeout, a kill, a reboot) — BEFORE this run adds anything of its
+          # own. Idempotent: on a healthy runner it writes nothing. This is the defense against
+          # the wide orphan window from above; the narrow one closes by never setting the
+          # default at all.
+          kc_reconcile() {
+            local kc keep="" repairs=0 dflt
+
+            while IFS= read -r kc; do
+              [ -n "$kc" ] || continue
+              if kc_is_ours "$kc"; then
+                # A signing keychain in the list before THIS run created its own is by
+                # definition orphaned — a live run cleans up its own before adding one.
+                security delete-keychain "$kc" >/dev/null 2>&1 || true
+                echo "::warning::keychain reconciler: pruned an orphaned signing keychain ($kc)"
+                repairs=$((repairs + 1))
+                continue
+              fi
+              if [ ! -f "$kc" ]; then
+                echo "::warning::keychain reconciler: pruned a dead search-list entry ($kc no longer exists)"
+                repairs=$((repairs + 1))
+                continue
+              fi
+              keep="$keep$kc"$'\n'
+            done <<< "$(kc_user_search_list)"
+
+            if [ -f "$login_kc" ] && ! kc_blob_has_line "$login_kc" "$keep"; then
+              keep="$login_kc"$'\n'"$keep"
+              echo "::warning::keychain reconciler: restored the login keychain to the user search list ($login_kc)"
+              repairs=$((repairs + 1))
+            fi
+
+            [ "$repairs" -gt 0 ] && kc_set_user_search_list "$keep"
+
+            dflt="$(kc_default_user)"
+            if [ -n "$dflt" ] && { kc_is_ours "$dflt" || [ ! -f "$dflt" ]; }; then
+              if [ -f "$login_kc" ]; then
+                security default-keychain -s "$login_kc" 2>/dev/null || true
+                echo "::warning::keychain reconciler: the session default pointed at '$dflt' (ours, or missing) — reset to $login_kc"
+                repairs=$((repairs + 1))
+              else
+                echo "::warning::keychain reconciler: the session default points at '$dflt' (ours, or missing) but $login_kc does not exist — leaving it alone"
+              fi
+            fi
+
+            if [ "$repairs" -eq 0 ]; then
+              echo "keychain state clean (no orphaned signing keychain, no dead search-list entry, default resolves)"
+            else
+              echo "::warning::keychain reconciler made $repairs repair(s) — a previous signing run did not clean up (Actions cancel/timeout, kill, or reboot). Expected occasionally; recurring on every run means something is killing the build."
+            fi
+            return 0
+          }
+
+          # Captured after reconcile, before we prepend ours — cleanup restores this verbatim.
+          # Stays empty until then, so a death mid-reconcile leaves cleanup a no-op instead of
+          # collapsing a list the reconciler chose to keep down to the blank-list fallback.
+          orig_search_list=""
+          sign_keychain=""
+
+          # Shred ALL key material + the ephemeral keychain + the submission carrier on ANY exit
+          # INCLUDING signals: a SIGINT/SIGTERM during the multi-minute notarytool wait must never
+          # leave the .p12/.p8/keychain on a (self-hosted) runner's disk, where GitHub does not
+          # wipe $RUNNER_TEMP between jobs. (A dedicated single-tenant runner is required — §5.3.)
+          cleanup() {
+            if [ -n "$sign_keychain" ]; then
+              # Restore the FULL captured list EXPLICITLY, and BEFORE deleting ours, so the
+              # list never references a keychain that is already gone.
+              kc_set_user_search_list "$orig_search_list" \
+                || echo "::warning::could not restore the original keychain search list — the next run's reconciler will"
+              security delete-keychain "$sign_keychain" 2>/dev/null || true
+            fi
+            # The session default is deliberately never touched here — this step never sets it.
+            rm -rf "$cert_p12" "$p8" "$keychain" "$stage" "$zip_path"
+          }
+          trap cleanup EXIT INT TERM
+
+          kc_reconcile
+
+          orig_search_list="$(kc_user_search_list)"
+          sign_keychain="$keychain"
+
+          printf '%s' "$APPLE_CERT_P12_BASE64" | base64 --decode > "$cert_p12"
+          printf '%s' "$APPLE_NOTARY_KEY_P8_BASE64" | base64 --decode > "$p8"
+
+          # Import the Developer ID Application cert into a throwaway keychain and put it first
+          # on the search list so codesign resolves the identity from it. -T authorizes codesign
+          # for the key; set-key-partition-list grants that access non-interactively — that
+          # widened ACL, not the session default, is what keeps codesign from falling back to an
+          # interactive "Always Allow" dialog or a terminal password prompt.
+          security create-keychain -p "$keychain_pw" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_pw" "$keychain"
+          security import "$cert_p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          # Fail LOUD if the ACL grant does not take: a silent failure here is exactly what falls
+          # back to the interactive prompt, so never hide it behind `>/dev/null` without a check.
+          if ! security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_pw" "$keychain" >/dev/null; then
+            echo "::error::set-key-partition-list failed — codesign would fall back to an interactive keychain prompt"
+            exit 1
+          fi
+          # SEARCH LIST ONLY — never the default (6j6v.px3d, see above). This is what lets
+          # codesign resolve the identity; the widened key partition list above is what keeps it
+          # non-interactive.
+          kc_set_user_search_list "$keychain"$'\n'"$orig_search_list"
+
+          # Resolve the identity by SHA-1 hash (robust against the human-readable CN/Team-ID
+          # string varying); there must be exactly the Developer ID Application identity.
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/{print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::no 'Developer ID Application' identity found in the imported keychain"
+            exit 1
+          fi
+          echo "Signing with identity $identity"
+
+          bindir="target/${TARGET}/release"
+          # Multicall (5jz.7): only the TWO real Mach-O binaries exist — `nxs` and `nxf-relay`.
+          # The nxf/nxm personas are symlinks (created at install/update), not signable artifacts.
+          for bin in nxs nxf-relay; do
+            # Hardened runtime (--options runtime) + secure timestamp are notarization
+            # prerequisites; --force re-signs cleanly if a prior ad-hoc sig exists.
+            codesign --force --timestamp --options runtime --sign "$identity" "$bindir/$bin"
+            codesign --verify --deep --strict --verbose=2 "$bindir/$bin"
+          done
+
+          # notarytool needs a zip/pkg/dmg as the upload vehicle (you cannot submit a bare
+          # Mach-O). This zip is ONLY the submission carrier — it is never shipped; the
+          # notarization binds to each binary's cdhash on Apple's servers, not to the zip.
+          mkdir -p "$stage"
+          cp "$bindir/nxs" "$bindir/nxf-relay" "$stage/"
+          ditto -c -k --keepParent "$stage" "$zip_path"
+
+          echo "Submitting to Apple notary service (this waits for the verdict)…"
+          notary_out="$work/notary.json"
+          # `submit --wait` exit semantics vary across notarytool versions, so DO NOT trust the
+          # exit code — parse the verdict and fail-closed on anything but Accepted.
+          set +e
+          xcrun notarytool submit "$zip_path" \
+            --key "$p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json > "$notary_out"
+          set -e
+          cat "$notary_out"
+          # Parse the verdict tolerant of notarytool's JSON formatting: some Xcode versions emit
+          # compact (`"status":"Accepted"`), others pretty-print (`"status" : "Accepted"`). Match
+          # optional whitespace around the colon so the gate is version-independent — and with no
+          # `jq` dependency (not guaranteed on a self-hosted Mac). The 2026-06-15 staging rehearsal
+          # emitted compact JSON and passed; this also covers the pretty-printed variant.
+          sub_id="$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$notary_out" | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
+          status="$(grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$notary_out" | tail -1 | sed -E 's/.*"([^"]*)"$/\1/')"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization verdict: '${status:-unknown}' (expected Accepted)"
+            if [ -n "$sub_id" ]; then
+              echo "--- notarytool log ---"
+              xcrun notarytool log "$sub_id" \
+                --key "$p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" || true
+            fi
+            exit 1
+          fi
+
+          # Acceptance for an un-stapled standalone CLI rests on TWO hard gates already passed
+          # above: (1) `codesign --verify --deep --strict` per binary, and (2) the notarytool
+          # `Accepted` verdict — at which point each binary's cdhash is registered with Apple,
+          # which is exactly what Gatekeeper checks online when a user first opens a quarantined
+          # copy. `spctl --assess -t exec` is INFORMATIONAL only: its exec assessment is
+          # bundle-oriented and returns "rejected" (exit 3) for a correctly signed+notarized
+          # *bare* Mach-O, so we log it but never gate on it. (Stapling would make spctl
+          # deterministic, but a bare CLI binary cannot be stapled — the §5.3 design decision.)
+          echo "--- codesign authority (for the record) ---"
+          codesign --display --verbose=4 "$bindir/nxs" 2>&1 \
+            | grep -iE "Authority|TeamIdentifier|Timestamp=|Runtime|flags" || true
+          echo "--- spctl --assess (informational; un-stapled standalone CLI) ---"
+          spctl --assess --type exec --verbose=2 "$bindir/nxs" 2>&1 \
+            || echo "note: spctl exec assessment is not a reliable signal for an un-stapled standalone CLI; notarization is proven by the Accepted verdict above."
+          echo "darwin binaries signed (Developer ID) + notarized [Accepted] for $PLATFORM"
+
+      - name: Notice — darwin binaries UNSIGNED (signing disabled)
+        if: matrix.builder == 'cargo' && vars.NXF_MACOS_SIGNING_ENABLED != 'true'
+        run: |
+          echo "::warning::darwin ${PLATFORM} built UNSIGNED — set repo var NXF_MACOS_SIGNING_ENABLED=true and provision the Apple Developer ID secrets (nexus-flow-85y.30) to enable codesign + notarization."
+
+      # One tarball per platform. Multicall (nexus-flow-5jz.7): ship the TWO real binaries — `nxs`
+      # (the whole CLI suite; nxf/nxm are symlinks install.sh + self-update create locally) and the
+      # opt-in `nxf-relay` server (+ LICENSE/README when present — added once the repo gets root
+      # docs; absence must not fail the rehearsal).
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          bindir="target/${TARGET}/release"
+          stage="$(mktemp -d)"
+          cp "${bindir}/nxs" "${bindir}/nxf-relay" "$stage/"
+          # TWO members, not three: the `nxc` agent sidecar is compiled into `nxs` itself
+          # (nexus-flow-6j6v.smsz, see the bundle step above), so there is no third file to ship,
+          # to place, or to forget. An update is one file replaced — which is the only shape that
+          # can carry a NEW delivery mechanism, because the update is always performed by the OLD
+          # version. This is also what the acceptance measures: an `nxs self-update` run by a
+          # pre-0.54 binary lands a tarball with no sidecar member, places nothing, and the binary
+          # that lands starts agents anyway.
+          #
+          # Tar an explicit member list so archive entries are bare names (`nxs`, not `./nxs`):
+          # the publish self-verify and install.sh extract members by exact name. A bash array
+          # keeps each member a separate argv entry (no word-splitting fragility).
+          members=(nxs nxf-relay)
+          for doc in LICENSE LICENSE-MIT LICENSE-APACHE README.md; do
+            if [ -f "$doc" ]; then cp "$doc" "$stage/"; members+=("$doc"); fi
+          done
+          tarball="nxf_${VERSION}_${PLATFORM}.tar.gz"
+          tar -czf "$tarball" -C "$stage" "${members[@]}"
+          echo "Built $tarball:"; tar -tzf "$tarball"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tarball-${{ matrix.platform }}
+          path: nxf_${{ needs.meta.outputs.version }}_${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # Single publish job (build-once-promote): collect all tarballs, sign each ONCE with the
+  # private key (the only job that touches it), self-verify with the freshly built nxf, then
+  # publish to S3 via the OIDC release role. Prod additionally cuts the GitHub Pre-Release.
+  publish:
+    # `ci-green` is listed explicitly (fail-closed gate, nexus-flow-85y.29): even though `build`
+    # already transitively depends on it, naming it here makes the no-publish-on-red guarantee
+    # verbatim in this job's needs.
+    needs: [meta, build, ci-green]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GitHub Pre-Release + asset upload (prod/tag path only)
+      id-token: write # OIDC: assume nxs-<env>-release
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      CHANNEL: ${{ needs.meta.outputs.channel }}
+      TARGET_ENV: ${{ needs.meta.outputs.env }}
+      IS_PROD: ${{ needs.meta.outputs.is_prod }}
+    steps:
+      # Fail closed on prod until the account split lands (nexus-flow-85y.23). Staging skips.
+      - name: PROD release lock (account split — nexus-flow-85y.23)
+        if: needs.meta.outputs.is_prod == 'true'
+        env:
+          UNLOCKED: ${{ vars.NXF_PROD_RELEASE_ENABLED }}
+          MACOS_SIGNING: ${{ vars.NXF_MACOS_SIGNING_ENABLED }}
+        run: |
+          if [ "$UNLOCKED" != "true" ]; then
+            echo "::error::PROD release is locked until the account split (nexus-flow-85y.23). Set repo var NXF_PROD_RELEASE_ENABLED=true to unlock after the split."
+            exit 1
+          fi
+          # Fail-CLOSED on signing for prod (nexus-flow-85y.30): the darwin sign+notarize step is
+          # gated on NXF_MACOS_SIGNING_ENABLED in the build job. If that var were unset/typo'd on a
+          # real v* tag, those jobs would build UNSIGNED (only a ::warning::) and this publish job
+          # would still ship them — silently unsigned. Hard-require it here so a misconfigured var
+          # blocks the prod release instead of shipping an unsigned macOS binary.
+          if [ "$MACOS_SIGNING" != "true" ]; then
+            echo "::error::PROD release requires macOS signing: set repo var NXF_MACOS_SIGNING_ENABLED=true (Developer ID + notarization, nexus-flow-85y.30). Refusing to ship unsigned darwin binaries."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Collect built tarballs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: tarball-*
+          path: dist
+          merge-multiple: true
+
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      # Sign every tarball with the private key + sha256 sidecar. `-H` = prehashed: `nxf`
+      # verifies prehashed-only (allow_legacy=false, signature.rs), so unprehashed sigs
+      # would never verify. The key is written to a tmpfile and the password piped on stdin
+      # (minisign reads it from stdin when there is no TTY); neither is ever echoed.
+      - name: Sign + checksum each artifact
+        env:
+          MINISIGN_KEY: ${{ secrets.NXF_MINISIGN_PRIVATE_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.NXF_MINISIGN_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keyfile="$(mktemp)"
+          # Shred the private key on ANY exit — under `set -e` a failing minisign/shasum would
+          # otherwise skip a trailing cleanup and leave the key on disk (the comment above
+          # promises it never is). EXIT fires on success, failure, and signal alike.
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s' "$MINISIGN_KEY" > "$keyfile"
+          for tar in dist/nxf_${VERSION}_*.tar.gz; do
+            shasum -a 256 "$tar" | awk -v f="$(basename "$tar")" '{print $1"  "f}' > "$tar.sha256"
+            printf '%s' "$MINISIGN_PASSWORD" | minisign -S -H -s "$keyfile" -m "$tar" -x "$tar.minisig"
+          done
+          ls -1 dist
+
+      # In-pipeline trust gate: the binary we just built (baked with NXF_MINISIGN_PUBKEY) must
+      # verify the signature we just produced. If the baked pubkey and the signing key ever
+      # disagree, this fails BEFORE anything ships. "Validated bytes == shipped bytes."
+      # Multicall (5jz.7): the tarball ships `nxs`; `verify-signature` is a flow-surface command,
+      # reached via the hidden `nxs flow …` route (byte-identical to the old standalone `nxf`).
+      - name: Verify signature with freshly built nxs
+        run: |
+          set -euo pipefail
+          mkdir -p _verify
+          tar -xzf "dist/nxf_${VERSION}_linux-x86_64.tar.gz" -C _verify nxs
+          ./_verify/nxs flow verify-signature \
+            --file "dist/nxf_${VERSION}_linux-x86_64.tar.gz" \
+            --signature "dist/nxf_${VERSION}_linux-x86_64.tar.gz.minisig"
+
+      # === Delivery chain (nxs-<env>, fronted by the landing distribution under `/nxs`) ===
+      # `DOMAIN` is log context only: the manifest stores RELATIVE `path` keys and the updater
+      # Lambda renders the public URL from its own PUBLIC_BASE_URL.
+      - name: Resolve target (env → nxs release role / bucket / base URL)
+        id: tgt
+        env:
+          STAGING_ACCOUNT: ${{ secrets.NXS_STAGING_ACCOUNT_ID }}
+          PROD_ACCOUNT: ${{ secrets.NXS_PROD_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET_ENV" = "prod" ]; then
+            acct="$PROD_ACCOUNT"; base_url="https://nxsflow.com/nxs"
+          else
+            acct="$STAGING_ACCOUNT"; base_url="https://staging.nxsflow.com/nxs"
+          fi
+          # Fail-closed: a missing account secret would otherwise synthesize a broken role ARN and
+          # fail obscurely in configure-aws-credentials. (`:?` trips under `set -u` on unset OR empty.)
+          : "${acct:?NXS_${TARGET_ENV^^}_ACCOUNT_ID secret is required to publish a release}"
+          # acct is a masked secret ⇒ it stays masked everywhere it appears, incl. the bucket.
+          {
+            echo "role=arn:aws:iam::${acct}:role/nxs-${TARGET_ENV}-release"
+            echo "bucket=nxs-${TARGET_ENV}-artifacts-${acct}"
+            echo "domain=${base_url}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC nxs release role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ steps.tgt.outputs.role }}
+          aws-region: eu-central-1
+
+      - name: Publish to S3
+        env:
+          ARTIFACT_BUCKET: ${{ steps.tgt.outputs.bucket }}
+          DOMAIN: ${{ steps.tgt.outputs.domain }}
+          ARTIFACT_DIR: dist
+          NOTES: "Beta-ring build."
+        run: ./.github/scripts/publish-release.sh
+
+      # Confirm every tarball has BOTH sidecars in S3 (head-object, not `s3 ls`: a 403 must not
+      # masquerade as a 404). This is the promotion precondition (.15 reads the .minisig here),
+      # and — since it runs BEFORE the Pre-Release below — the gate that stops GitHub from
+      # announcing a version the updater cannot serve.
+      - name: Verify sidecars in S3
+        env:
+          ARTIFACT_BUCKET: ${{ steps.tgt.outputs.bucket }}
+        run: |
+          set -euo pipefail
+          for p in darwin-aarch64 darwin-x86_64 linux-x86_64 linux-aarch64; do
+            base="nxf_${VERSION}_${p}.tar.gz"
+            for ext in "" .sha256 .minisig; do
+              key="download/${CHANNEL}/${VERSION}/${base}${ext}"
+              aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$key" >/dev/null \
+                || { echo "::error::missing s3 object $key"; exit 1; }
+            done
+          done
+          echo "All 4 tarballs + .sha256 + .minisig present in s3://.../download/${CHANNEL}/${VERSION}/"
+
+      # PROD only: GitHub Pre-Release (beta ring) with the changelog body + all assets attached.
+      # GitHub is the showcase; AWS is the delivery. Unreachable today (prod lock above).
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.meta.outputs.is_prod == 'true'
+      - name: Create GitHub Pre-Release (beta ring)
+        if: needs.meta.outputs.is_prod == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          body="$(cargo xtask changelog show "$VERSION" beta en 2>/dev/null || echo 'Beta-ring build.')"
+          gh release create "$TAG" \
+            --prerelease \
+            --title "nexus-flow $TAG" \
+            --notes "$body" \
+            dist/nxf_${VERSION}_*.tar.gz \
+            dist/nxf_${VERSION}_*.tar.gz.sha256 \
+            dist/nxf_${VERSION}_*.tar.gz.minisig
+
+  # Publish the `@nexus-flow/mcp` npx runner shim (npm/mcp, nexus-flow-kz8) — the "nxs not installed"
+  # MCP path. Versioned in LOCKSTEP with the release (the shim resolves the actual nxs at runtime via
+  # /latest, so its own version is just the package version). `needs: publish` makes it strictly
+  # post-release: if the binary release did not ship, the shim is never published either. The npm
+  # shim is an OPTIONAL, additive distribution channel — UNLIKE the load-bearing macOS-signing gate,
+  # a release must NOT go red just because it isn't provisioned yet. So the job-level `if` SKIPS it
+  # (grey, not failed) on a prod release when NXF_NPM_PUBLISH_ENABLED is not `true` (still pending
+  # nexus-flow-76u.15), while staging always runs to rehearse the packaging — registry-free, see the
+  # publish step for why that distinction is the whole point (6j6v.xk2t). Auth is OIDC trusted
+  # publishing (no long-lived NXF_NPM_TOKEN — nexus-flow-76u.15): once the var is enabled, a prod
+  # publish only succeeds when the trusted publisher is configured on the @nexus-flow/mcp package
+  # (npmjs.com → package → Trusted Publisher → GitHub Actions → this repo + release.yml). Absent
+  # that config npm rejects the publish — fail-closed by default. Runbook: docs/specs/release-management.md.
+  publish-npm:
+    needs: [meta, publish]
+    # Run for staging (packaging dry-run) always; for a prod release only once npm publishing is
+    # provisioned — otherwise skip so the release stays green (the binaries already shipped).
+    if: ${{ needs.meta.outputs.is_prod != 'true' || vars.NXF_NPM_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC: npm trusted publishing mints a short-lived, workflow-scoped credential
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      IS_PROD: ${{ needs.meta.outputs.is_prod }}
+    defaults:
+      run:
+        working-directory: npm/mcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 for a modern bundled npm; the upgrade step below then pins npm >= 11.5.1, the
+          # floor for OIDC trusted publishing (npm docs). registry-url points publish at npmjs.org.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing (OIDC) requires npm CLI >= 11.5.1; pin the range instead of `@latest` so a
+      # future npm major can't silently change publish behaviour in this credential-minting job.
+      # Zero-dep shim, so this touches nothing the package ships.
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g "npm@>=11.5.1 <12"
+
+      # Stamp the release version into the package (lockstep). The published file list is unaffected.
+      - name: Stamp the package version
+        run: |
+          set -euo pipefail
+          node -e "const fs=require('fs');const p=require('./package.json');p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          echo "package version → $VERSION"
+
+      # Fail-closed before publish: the shim's own verify-path tests (zero deps) must pass — the same
+      # gate npm-mcp-ci.yml runs on every PR, re-asserted here so a red shim never ships.
+      - name: Test the shim (node --test)
+        run: node --test
+
+      - name: Publish to npm (prod) or packaging rehearsal (staging)
+        env:
+          NPM_PUBLISH_ENABLED: ${{ vars.NXF_NPM_PUBLISH_ENABLED }}
+          # Repo visibility from the event payload (no API call / token needed): drives fail-closed
+          # provenance below (yk2c). Renders `true`/`false`; empty if the payload lacks the repo.
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_PROD" != "true" ]; then
+            # REGISTRY-FREE ON PURPOSE (6j6v.xk2t). This used to be `npm publish --dry-run`, which
+            # still asks the registry to validate the version and so dies with "You cannot publish
+            # over the previously published versions: <v>" whenever the workspace version is already
+            # on npm — i.e. between two releases, ALWAYS. Every rehearsal went red for a reason that
+            # had nothing to do with what it was rehearsing, and a red that means nothing is a red
+            # nobody reads. `npm pack` answers the question this step actually exists to ask — does
+            # the package assemble, under the right name, at the stamped version, with the intended
+            # file list — and answers it without a registry round-trip, so a re-rehearsal of an
+            # already-published version is as meaningful as the first.
+            #
+            # Asserted, not just executed: `npm pack` alone exits 0 on almost anything, so a silently
+            # emptied `files:` list or a version stamp that never landed would sail through. The
+            # checks below are the rehearsal's teeth.
+            #
+            # WHY THIS STAYS INLINE (PR #308 review, Test Quality #2). The repo's pattern for
+            # release-adjacent bash is a script under `.github/scripts/` plus a hermetic harness
+            # gated by its own workflow — `promote-release.sh` + `tests/promote-release.test.sh` +
+            # `promote-ci.yml`. That pattern earns its cost on LOAD-BEARING logic: promote carries
+            # the beta→stable contract, where a swallowed 403 could promote an unsigned ring. This
+            # block is staging-only on an optional, additive channel, and the npm-output shape it
+            # reads (`[0].name`, `[0].version`, `[0].files[].path`) is pinned on every PR by
+            # `npm/mcp/test/packaging.test.js`. Extract it the moment it grows past these checks or
+            # starts gating something that ships.
+            echo "staging rehearsal — registry-free packaging check (no publish, no registry lookup)"
+            npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+
+            packed_name="$(jq -r '.[0].name' "$RUNNER_TEMP/pack.json")"
+            packed_version="$(jq -r '.[0].version' "$RUNNER_TEMP/pack.json")"
+            packed_files="$(jq -r '.[0].files[].path' "$RUNNER_TEMP/pack.json" | sort)"
+
+            echo "would pack $(jq -r '.[0].filename' "$RUNNER_TEMP/pack.json") — $(jq -r '.[0].entryCount' "$RUNNER_TEMP/pack.json") entries:"
+            printf '%s\n' "$packed_files" | sed 's/^/  /'
+
+            fail=0
+            [ "$packed_name" = "@nexus-flow/mcp" ] || {
+              echo "::error::packed name is '$packed_name', expected '@nexus-flow/mcp'"; fail=1; }
+            [ "$packed_version" = "$VERSION" ] || {
+              echo "::error::packed version is '$packed_version', expected '$VERSION' — the version stamp did not land"; fail=1; }
+            # npm force-includes package.json, the README and whatever `bin` points at, whatever
+            # `files:` says — so these two catch a RENAME of the `bin` target or a deleted README,
+            # not a narrowed `files:`.
+            for want in bin/cli.js README.md; do
+              printf '%s\n' "$packed_files" | grep -qxF "$want" || {
+                echo "::error::'$want' is missing from the tarball"; fail=1; }
+            done
+            # This one is the real guard on `files:`. bin/cli.js is a thin entry point and everything
+            # it requires lives under lib/, which npm includes only because `files:` lists it — trim
+            # that list and you ship a package that installs, runs, and dies on the first require.
+            printf '%s\n' "$packed_files" | grep -qE '^lib/.+\.js$' || {
+              echo "::error::the tarball carries no lib/*.js — the shim would not run"; fail=1; }
+            [ "$fail" -eq 0 ] || exit 1
+
+            echo "packaging rehearsal OK — @nexus-flow/mcp@$packed_version assembles as intended"
+            exit 0
+          fi
+          # Reaching here on prod means the job-level `if` already confirmed NXF_NPM_PUBLISH_ENABLED
+          # is true. Auth is OIDC trusted publishing: npm mints a short-lived, workflow-scoped
+          # credential from the id-token, so no NODE_AUTH_TOKEN is set. A prod publish therefore only
+          # succeeds once the trusted publisher is configured on the package (else npm rejects it —
+          # fail-closed by default; see the runbook in docs/specs/release-management.md).
+          # Idempotent: a re-run of the same tag must not fail on an already-published version.
+          if npm view "@nexus-flow/mcp@${VERSION}" version >/dev/null 2>&1; then
+            echo "@nexus-flow/mcp@${VERSION} already published — skipping"
+            exit 0
+          fi
+          # Provenance (yk2c): trusted publishing attaches a provenance attestation only when the
+          # source repo is PUBLIC — on a private repo it is a silent no-op (npm limitation), NOT a
+          # failure. Relying on that default means a repo that quietly turns public could keep
+          # shipping UNATTESTED packages if the default ever regressed. So make provenance EXPLICIT +
+          # fail-closed the moment the repo is public: pass `--provenance`, which makes a publish that
+          # cannot attach an attestation FAIL rather than ship without one. Auto-gated on repo
+          # visibility (REPO_PRIVATE from the event payload) so it activates by itself at going-public
+          # — nothing to flip — and stays correctly OFF while private (npm cannot attest a private
+          # repo). An empty/unknown visibility falls back to omitting it (never break the publish).
+          PROVENANCE=()
+          if [ "$REPO_PRIVATE" = "false" ]; then
+            PROVENANCE=(--provenance)
+            echo "repo is public → publishing with fail-closed provenance"
+          else
+            echo "repo not public (private=${REPO_PRIVATE:-unknown}) → provenance omitted (npm cannot attest a non-public repo)"
+          fi
+          npm publish --access public "${PROVENANCE[@]}"
+          echo "published @nexus-flow/mcp@${VERSION}"
+
+  # Refresh the STAGING federated content after a real beta release so the staging landing's
+  # /open-source changelog reflects the new beta (nexus-flow-s8a, re-homed to the content provider
+  # by 6j6v.0a6p). The provider embeds the ring per env: staging previews the BETA ring, prod shows
+  # stable — so re-publishing content to staging picks up the just-released beta from the committed
+  # release-notes.json. The public prod content only flips on stable promotion (promote.yml). Without
+  # this the staging landing stays frozen at the last content push and never reflects a new beta.
+  #
+  # A separate, minimal job (not a step in `publish`) keeps `actions: write` scoped here and off the
+  # signing job. `needs: publish` makes it strictly post-publish AND fail-closed: if the release did
+  # not actually ship (e.g. the prod lock tripped publish), this never runs — no refresh on a non-release.
+  refresh-staging-content:
+    needs: [meta, publish]
+    # ONLY the real prod-tag beta release. The workflow_dispatch rehearsal (is_prod=false) publishes
+    # to the staging *bucket* but must NOT push its (possibly wrong-state) build to the staging landing.
+    if: needs.meta.outputs.is_prod == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # dispatch publish-content.yml (staging refresh)
+    steps:
+      # Explicit dispatch, not an `on: push` trigger: a GITHUB_TOKEN-driven event never fires
+      # publish-content.yml's push trigger (Actions recursion guard) — exactly how promote.yml drives
+      # the prod refresh. `--ref main` assembles from main (its committed release-notes.json is already
+      # current at this point); `-f env=staging` selects the staging bucket + the beta ring. GH_REPO
+      # lets `gh` resolve the workflow without a checkout (this job needs no repo content).
+      - name: Refresh staging content (new beta release notes + docs)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run publish-content.yml --ref main -f env=staging

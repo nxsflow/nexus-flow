@@ -1,0 +1,22 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH close 1  "close " 
+.SH NAME
+close \- Close an item, recording why. Closing is final (no hard delete), so a reason is required
+.SH SYNOPSIS
+\fBclose\fR [\fB\-\-reason\fR] [\fB\-\-reason\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIID\fR> 
+.SH DESCRIPTION
+Close an item, recording why. Closing is final (no hard delete), so a reason is required
+.SH OPTIONS
+.TP
+\fB\-\-reason\fR \fI<REASON>\fR
+Closing comment — required: why this item is being closed. `\-` reads it from STDIN
+.TP
+\fB\-\-reason\-file\fR \fI<REASON_FILE>\fR
+Read the closing comment from this file (UTF\-8, verbatim); `\-` reads STDIN. Mutually exclusive with `\-\-reason`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIID\fR>
+Item id

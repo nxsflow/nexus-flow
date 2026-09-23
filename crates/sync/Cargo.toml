@@ -1,0 +1,42 @@
+[package]
+name = "nxs-sync"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow sync: versioned wire envelope + client anti-entropy engine"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The client engine reads/writes the local core store and speaks HTTP to the relay.
+# Gated behind `engine` so the relay (server) can depend on the wire types ALONE,
+# keeping the "dumb relay" separation visible in the dependency graph (spec §3).
+nexus-flow-core = { path = "../core", optional = true }
+ureq = { version = "2", optional = true, features = ["json"] }
+# A relay URL's userinfo is taken off the URL and sent as a Basic `Authorization` header instead,
+# byte for byte what ureq builds from it (nxf 6j6v.q3kk) — so no URL ureq formats into an error can
+# carry the key. Both are already in the graph through ureq; pure Rust, like it.
+url = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
+# A snapshot (nxf 6j6v.mxt2) is the substrate's image plus a relay watermark, gzipped. flate2 is
+# already in the graph through ureq's gzip support, on its pure-Rust backend (miniz_oxide).
+nxs-foundation = { path = "../foundation", optional = true }
+flate2 = { version = "1", optional = true }
+# Same version as core's so `Store::connection()` hands back a unifiable Connection;
+# the engine reads the stable `ops` substrate table (rowid-scoped) read-only.
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+[features]
+default = []
+engine = [
+    "dep:nexus-flow-core",
+    "dep:ureq",
+    "dep:rusqlite",
+    "dep:url",
+    "dep:base64",
+    "dep:nxs-foundation",
+    "dep:flate2",
+]
+
+[dev-dependencies]
+nexus-flow-core = { path = "../core" }

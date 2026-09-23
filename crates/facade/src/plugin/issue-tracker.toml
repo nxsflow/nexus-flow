@@ -1,0 +1,69 @@
+name = "issue-tracker"
+
+# The predicate `prime` renders after "nexus-flow is …" (agent-facing; not the chooser one-liner).
+# Must stay above the first table header so it is a top-level key, not a `description` field.
+tagline = "a software issue tracker for epics and issues"
+
+[description]
+en = "Software issue tracking: epics and issues, P0–P4 priorities, dependency-aware ranking."
+de = "Software-Issue-Tracking: Epics und Issues, Prioritäten P0–P4, abhängigkeitsbewusstes Ranking."
+
+# Named priority variants, highest first. The ordered list is both the valid set and the
+# ranking order (8qv.2); the agent sets/reads the label itself (e.g. P1).
+[priority]
+labels = ["P0", "P1", "P2", "P3", "P4"]
+
+# The plugin's type system (sp6.4): the valid type set, the allowed parent→child pairs, the parent
+# cardinality per type, and the hierarchy depth limit — all enforced at the write seam, none
+# hardcoded in the core. issue-tracker is deliberately 2 levels and single-parent: only `epic` is a
+# container; every other type may have AT MOST ONE `epic` parent, or be an orphan. An `epic` itself
+# has no rule, so it can never be parented (no epic-under-epic, no third level).
+[types]
+list = ["epic", "bug", "feature", "chore", "decision"]
+max_depth = 2
+
+[types.rules.bug]
+parents = ["epic"]
+max = 1
+
+[types.rules.feature]
+parents = ["epic"]
+max = 1
+
+[types.rules.chore]
+parents = ["epic"]
+max = 1
+
+[types.rules.decision]
+parents = ["epic"]
+max = 1
+
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+
+# Field headings `show` prints (8qv.8). Sparse: only the renamed/long-form fields need an entry;
+# anything omitted falls back to the core default.
+[vocabulary.fields]
+description = "Description"
+completion_criterion = "Definition of Done"
+design = "Design"
+notes = "Notes"
+
+# `next` ranking (sp6.5), entirely declarative — no precedence is hardcoded in the engine. Two key
+# kinds: a FIELD key (priority by its stored ordinal, due chronologically) and an ENUM-INDEX key
+# (`precedence` — the list order IS the sort order). Status precedence ranks claimed work first
+# (`next` always includes it); type precedence orders the kinds within a priority band.
+# Order: status → priority → type → due → id.
+[ranking.next]
+order = [
+    { field = "status", precedence = ["in_progress", "open"] },
+    { field = "priority", dir = "asc" },
+    { field = "type", precedence = ["epic", "bug", "decision", "feature", "chore"] },
+    { field = "due", dir = "asc", nulls = "last" },
+    { field = "id", dir = "asc" },
+]
+
+[presentation.list]
+columns = ["id", "priority", "status", "type", "title"]

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH recap 1  "recap " 
+.SH NAME
+recap \- Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `\-\-limit` caps the count (default 10); `\-\-since` keeps only later closes
+.SH SYNOPSIS
+\fBrecap\fR [\fB\-\-limit\fR] [\fB\-\-since\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `\-\-limit` caps the count (default 10); `\-\-since` keeps only later closes
+.SH OPTIONS
+.TP
+\fB\-\-limit\fR \fI<LIMIT>\fR
+Max items to show (default 10)
+.TP
+\fB\-\-since\fR \fI<SINCE>\fR
+Only closes on/after this ISO\-8601 date (`YYYY\-MM\-DD` or RFC3339); filters `closed_at >= since`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

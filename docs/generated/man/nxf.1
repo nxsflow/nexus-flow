@@ -1,0 +1,109 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH nxf 1  "nxf 0.200.0" 
+.SH NAME
+nxf \- nexus\-flow agent CLI
+.SH SYNOPSIS
+\fBnxf\fR [\fB\-\-json\fR] [\fB\-\-db\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+nexus\-flow agent CLI
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit machine\-readable JSON instead of human output. `priority` and `type` carry canonical keys (stable ordinals / declared type keys), not display labels; the labels are available via `nxf schema` and, on `show`/`list`/`next`, the additive `priority_label`/`type_label` fields. `create`/`update` accept either the key or the label
+.TP
+\fB\-\-db\fR \fI<DB>\fR
+Use this sqlite db file directly instead of discovering `.nxs/`
+.RS
+May also be specified with the \fBNXF_DB\fR environment variable. 
+.RE
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+nxf\-init(1)
+Initialize a `.nxs` workspace in the current directory: set up flow, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler. To set up the whole suite (and pick tools interactively), use `nxs init` instead
+.TP
+nxf\-agent\-manifest(1)
+Emit nxf\*(Aqs declared contribution to the shared agent file (the AGENTS.md section, the prime command, the SessionStart hook) as data. The `nxs` umbrella assembles the shared files from each active module\*(Aqs manifest; `\-\-json` is the machine contract
+.TP
+nxf\-create(1)
+Create a new item — a complete item in one call. Title, description, and priority are required; design, the definition of done, a parent, and dependencies are optional. Run `nxf schema` for the active plugin\*(Aqs field model (labels, constraints, required fields)
+.TP
+nxf\-update(1)
+Update item fields via `\-\-set field=value` (repeatable). The long\-form `description`/`design`/`completion_criterion` are ordinary `\-\-set` fields. Run `nxf schema` for the settable fields and their plugin names. Convention: correct the field model once shortly after creation; once it is stable, record what you learn as append\-only notes (`nxf note add`) rather than further field edits
+.TP
+nxf\-claim(1)
+Claim an item: mark it in progress (and optionally assign it)
+.TP
+nxf\-archive(1)
+Archive one or more items — "closed and put away". Cascades DOWN: each root and its whole `belongs_to` subtree are archived, but only when the root is closed and every descendant is closed (already\-archived counts as closed). Atomic per root, independent between roots; the result reports each root\*(Aqs outcome plus the full list of ids actually archived (incl. cascaded). Archiving is reversible — see `unarchive`
+.TP
+nxf\-unarchive(1)
+Unarchive one or more items, making them visible again. Cascades UP only: each item and its ancestor chain resurface, but its children/siblings stay archived. Partial per root; the result reports each root\*(Aqs outcome plus the full list of ids actually unarchived
+.TP
+nxf\-close(1)
+Close an item, recording why. Closing is final (no hard delete), so a reason is required
+.TP
+nxf\-list(1)
+List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+.TP
+nxf\-blocked(1)
+List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `\-\-sort id`
+.TP
+nxf\-deferred(1)
+List deferred items (open, unblocked, with a future defer date) — the lane that is neither ready nor blocked. Ordered by defer\-date ascending (soonest first); override with `\-\-sort`
+.TP
+nxf\-closed(1)
+List closed items (excluding archived). Ordered by close\-date descending (most recent first); override with `\-\-sort`
+.TP
+nxf\-archived(1)
+List archived items (any status). Ordered by archive\-date descending (most recent first); override with `\-\-sort`
+.TP
+nxf\-recap(1)
+Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `\-\-limit` caps the count (default 10); `\-\-since` keeps only later closes
+.TP
+nxf\-next(1)
+List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+.TP
+nxf\-dep(1)
+Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B blocks A — A cannot be ready until B closes
+.TP
+nxf\-mention(1)
+Add, remove, or list reference edges (free\-text short\-id citations)
+.TP
+nxf\-contributes(1)
+Add, remove, or list contributes\-to edges: `from` contributes to `to` (n:m). Like a mention it never blocks — it records a structural "feeds into" relation, not a dependency
+.TP
+nxf\-thread(1)
+Link a chat thread to a board item, or list what a thread is about. This is how the conversation that did the work and the ticket it was about stop being two artefacts: a later reader of the item sees that there are conversations, without having to go looking
+.TP
+nxf\-label(1)
+Add, remove, or list user labels (free\-text tags) on an item. A label is user vocabulary, distinct from the plugin\*(Aqs display type; filter `list`/`next` with `\-\-label`
+.TP
+nxf\-note(1)
+Add or list notes (the change/worklog stream) on an item
+.TP
+nxf\-search(1)
+Search items by substring over title, description, design, DoD, and notes. Results are grouped by lane priority (next+in\-progress → blocked → deferred → closed), each group in its natural order; archived items are excluded by default
+.TP
+nxf\-show(1)
+Show one item with its dependencies and notes
+.TP
+nxf\-schema(1)
+Describe the active plugin\*(Aqs field model — vocabulary, priorities, and per field whether it is required on create / settable on update and how. `\-\-json` is the machine contract; run it to learn what `create`/`update` accept in this workspace (the static `\-\-help` cannot carry the active plugin\*(Aqs vocabulary)
+.TP
+nxf\-setup(1)
+Wire host\-specific agent integration (idempotent, merge\-only). `nxf init` stays tool\-agnostic; this opts a project into a host\*(Aqs deterministic delivery
+.TP
+nxf\-guide(1)
+Print an embedded, offline guide. Omit the topic to list the available ones
+.TP
+nxf\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v0.200.0

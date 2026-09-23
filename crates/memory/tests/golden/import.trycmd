@@ -1,0 +1,54 @@
+`nxm import` migrates an existing Claude-host memory store into nexus-memory. Each fact is taken
+in under its frontmatter `name:` as a stable key, so the migration is idempotent (a re-run upserts
+in place) and non-destructive (the source files are never touched). `nxm init` surfaces the
+suggestion; `nxm import` does the work.
+
+`nxm init` detects the Claude memory dir for this project and proposes the import:
+
+```console
+$ nxm init
+initialized memory at [CWD]/.nxs
+  prefix:  ab12
+  modules: memory
+  agent files: created AGENTS.md
+  hook:    wired SessionStart → `nxm prime || cat NEXUS_MEMORY.md 2>/dev/null`
+  service: registered with the background service, which keeps this workspace's deadlines
+
+You've set up memory. nxs also ships flow and chat — run `nxs init` to add.
+
+Found 2 existing Claude memories — run `nxm import` to bring them into nexus-memory.
+
+```
+
+`nxm import` brings them in under their stable `name` keys; they are now first-class memories:
+
+```console
+$ nxm import
+imported 2 memories from claude-memory
+
+$ nxm memories
+auth-jwt  auth uses JWT not sessions
+race-flag  always run tests with the -race flag
+
+```
+
+A re-run is idempotent — the same names upsert in place, so nothing duplicates:
+
+```console
+$ nxm import
+imported 2 memories from claude-memory
+
+$ nxm memories
+auth-jwt  auth uses JWT not sessions
+race-flag  always run tests with the -race flag
+
+```
+
+The `--json` receipt names what came in and where from — `imported`, the `keys`, and the resolved
+`source` — so an agent can report the migration without re-reading the store:
+
+```console
+$ nxm import --json
+{"imported":2,"keys":["auth-jwt","race-flag"],"ok":true,"source":"claude-memory"}
+
+```

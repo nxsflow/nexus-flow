@@ -1,0 +1,16 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH unarchive 1  "unarchive " 
+.SH NAME
+unarchive \- Unarchive one or more items, making them visible again. Cascades UP only: each item and its ancestor chain resurface, but its children/siblings stay archived. Partial per root; the result reports each root\*(Aqs outcome plus the full list of ids actually unarchived
+.SH SYNOPSIS
+\fBunarchive\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIIDS\fR> 
+.SH DESCRIPTION
+Unarchive one or more items, making them visible again. Cascades UP only: each item and its ancestor chain resurface, but its children/siblings stay archived. Partial per root; the result reports each root\*(Aqs outcome plus the full list of ids actually unarchived
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIIDS\fR>
+Item ids to unarchive (each surfaces its ancestor chain). At least one is required

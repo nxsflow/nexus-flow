@@ -1,0 +1,162 @@
+name: cache-sweep
+
+# Delete the Actions cache entries no future run can reach (nexus-flow-6j6v.gapx).
+#
+# THE PROBLEM THIS ANSWERS. A repository gets 10 GB of Actions cache; past that GitHub evicts by
+# least-recent use. Measured 2026-09-04 this repo held 10.83 GB in 32 entries — over the limit, so
+# eviction was running all the time — and 5.66 GB of that belonged to refs no workflow can produce
+# again: branches that were deleted, merge refs of merged PRs, superseded release tags. What got
+# evicted to make room was the live half, coldest first, and the coldest live entry is the macOS
+# lane's, which exactly one job reads. That is the original report: a job that could not find its
+# own, fully uploaded, bit-identical cache 47 minutes later.
+#
+# WHY IT IS NOT A `save-if:`. Over the same window 209 of 210 restores in `ci.yml` were full hits.
+# There is no hit-rate problem to fix by saving less; suppressing saves would trade a cache that
+# works for space this sweep recovers at no runtime cost at all. (The single save that WAS worth
+# suppressing — `release.yml`'s per-tag zigbuild cache, 0 hits in 6 restores over three releases —
+# carries its reasoning at that line.)
+#
+# THE RULE ITSELF IS NOT HERE. It lives in `cargo xtask cache sweep`, as a pure function over
+# (entries, reachable refs) with a unit test per row of its decision table — including the shapes
+# nobody would manufacture in CI to watch this file handle them: a deleted branch named like a tag
+# ref, a merge ref with no number, an empty world. This file is the plumbing: three queries in, a
+# delete loop out. Same lesson 6j6v.mw28 records for infra-staging.yml.
+on:
+  # EVERY SIX HOURS, and the interval is arithmetic rather than taste. The live half of the cache
+  # measured 5.17 GB (main's entries plus the newest release tag's) against a 10 GB limit, so
+  # there are ~4.8 GB of headroom; the heaviest measured day of work — PRs #423 to #430 plus one
+  # Cargo.lock change — produced about 5 GB of unreachable entries in 26 hours. A quarter of that
+  # is ~1.3 GB between sweeps, which keeps the total near 6.5 GB and never near the limit.
+  #
+  # The obvious alternative — firing on `pull_request: closed` and `delete`, so the space comes
+  # back the same minute a ref dies — is not taken because the headroom above already covers it,
+  # and for no other reason. It is NOT a cost argument: the first real run took 77 seconds end to
+  # end, 70 of them in the build, so the ~16 daily events would have cost about 20 minutes of
+  # runner time a day. That is affordable. It is simply not needed, and the sweeper would then
+  # write more log than it reclaims space.
+  schedule:
+    - cron: "17 */6 * * *"
+  # `dry_run: true` prints the verdict for every entry and deletes nothing — the preview is the
+  # same code path as the real thing, not a second implementation of the rule.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would be deleted, delete nothing"
+        type: boolean
+        default: true
+
+# `actions: write` is what deleting a cache entry requires, and this is the only workflow in the
+# tree that holds it. `pull-requests: read` lists the open PRs; `contents: read` the branches and
+# the checkout.
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+# One sweep at a time. Two concurrent sweeps would race on the same delete list and the loser
+# would spend its run on 404s.
+concurrency:
+  group: cache-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Deliberately NO Swatinem/rust-cache here: a sweeper that writes its own cache entry — one
+      # more scope competing for the 10 GB it exists to defend — would be part of the problem it
+      # is fixing. Measured on the first live run, the cold build costs 70 s, which is the whole
+      # price of that principle.
+
+      - name: What the repository can still reach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # NDJSON, so more than one page of entries survives the pipe.
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" -q '.actions_caches[]' > caches.ndjson
+          # THE BRANCH LIST COMES FROM THE GIT WIRE PROTOCOL, not from `gh api .../branches`, and
+          # that is robustness rather than taste. `verdict` DELETES a `refs/heads/` entry whose
+          # name is absent from this list, so a list that is merely INCOMPLETE — a lost page, a
+          # namespace the REST endpoint chooses not to surface — silently reads as "those branches
+          # are gone". `git ls-remote --heads` is ONE unpaginated ref advertisement carrying every
+          # `refs/heads/*` the server has: no page to lose, no namespace to hide, including the
+          # ephemeral `gh-readonly-queue/...` refs a merge queue creates. The review of #431 raised
+          # those as a live-deletion hazard; this removes the whole class instead of special-casing
+          # the one prefix. (`actions/checkout` leaves credentials in the local git config, so this
+          # authenticates with no extra token.)
+          git ls-remote --heads origin | cut -f2 | sed 's#^refs/heads/##' > branches.txt
+
+          # `gh pr list` caps at `--limit` and says nothing when it does, and a short list reads as
+          # "those PRs are closed" — which would sweep the merge-ref cache of a PR still running.
+          # Hitting the cap exactly is the only signal there is, so treat it as one and stop.
+          PR_LIMIT=1000
+          gh pr list -R "$REPO" --state open --limit "$PR_LIMIT" --json number -q '.[].number' > open-prs.txt
+          if [ "$(wc -l < open-prs.txt)" -ge "$PR_LIMIT" ]; then
+            echo "::error::the open-PR list hit its limit of $PR_LIMIT and may be truncated — refusing to sweep on a world state that cannot be trusted"
+            exit 1
+          fi
+          # The newest release tag is KEPT: a release re-run happens within minutes of the tag or
+          # never, and this is the one case where "unreachable" is a claim about habit rather than
+          # about refs. An empty answer means no tag scope is swept at all — the safe direction.
+          gh release list -R "$REPO" --limit 1 --json tagName -q '.[].tagName' > keep-tag.txt || true
+          echo "KEEP_TAG=$(head -n1 keep-tag.txt || true)" >> "$GITHUB_ENV"
+          printf 'caches: %s   branches: %s   open PRs: %s   newest tag: %s\n' \
+            "$(wc -l < caches.ndjson)" "$(wc -l < branches.txt)" "$(wc -l < open-prs.txt)" "$(cat keep-tag.txt)"
+
+      # stdout is the id list, stderr the reasoning — so the report below is identical whether or
+      # not the deletions run.
+      - name: Decide
+        run: |
+          set -euo pipefail
+          args=(--caches caches.ndjson --branches branches.txt --open-prs open-prs.txt)
+          # No newest tag found means no tag scope is swept at all — the safe direction, and the
+          # reason this is an explicit `if` and not `[ -n … ] && args+=(…)`: that form returns 1
+          # when the tag is empty, which under `set -e` would end the step instead of the branch.
+          if [ -n "${KEEP_TAG:-}" ]; then
+            args+=(--keep-tag "$KEEP_TAG")
+          fi
+          cargo xtask cache sweep "${args[@]}" > doomed.txt
+
+      - name: Delete
+        if: ${{ github.event_name == 'schedule' || !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # A 404 here is not a failure: a concurrent run may have re-keyed the entry, and the
+          # outcome we want (it is gone) already holds. Anything else fails the job.
+          while read -r id; do
+            [ -n "$id" ] || continue
+            if ! gh api -X DELETE "repos/$REPO/actions/caches/$id" --silent </dev/null 2>err.txt; then
+              grep -q "HTTP 404" err.txt || { cat err.txt; exit 1; }
+              echo "already gone: $id"
+            fi
+          done < doomed.txt
+          echo "deleted $(wc -l < doomed.txt) entries"
+
+      # The number this whole ticket is about, in the job summary, every run.
+      #
+      # Summed from the ENTRY LIST, not from `actions/cache/usage`, and that is a measurement and
+      # not a preference. On the first live sweep (run 33927133384) the usage endpoint still
+      # answered "32 entries, 10.67 GB" four minutes after 17 of those 32 entries were provably
+      # gone, while the entry list already said 15 entries, 5.17 GB; it agreed by the sixth
+      # minute. That aggregate is eventually consistent, and this step runs SECONDS after the
+      # deletions — so it would read the stale value every single time. A summary that reports a
+      # lagging number is worse than no summary, because the number it prints is exactly the one
+      # someone would quote as proof the sweep did nothing.
+      - name: What the repository now holds
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" -q '.actions_caches[].size_in_bytes' \
+            | awk '{n++; s+=$1} END {printf "%d entries, %.2f GB of the 10 GB limit\n", n, s/1e9}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"

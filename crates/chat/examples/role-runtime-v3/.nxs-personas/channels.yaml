@@ -1,0 +1,139 @@
+# The v3 team's two declared channels (nxf ticket 6j6v.3nha, re-cut onto the channel surface by
+# 6j6v.dvyq §3): `build-and-ship`, the ORDER a work order runs through, and `review`, the quorum
+# its second step addresses. Both are declared here; nothing else in this folder describes a flow.
+#
+# `build-and-ship` is what the PM sends a work order to. `flow: sequential` binds the order of its
+# members, and a member may be a persona or another CHANNEL — which is how the review round becomes
+# a step rather than something somebody opens by hand. Its supervisor commissions `coder`, waits
+# for that thread to be answered, then commissions `review`, and hands `review`'s folded verdict
+# back to whoever sent the work order.
+- name: build-and-ship
+  members: [coder, review]
+  flow: sequential
+  description: >-
+    the declared order a work order runs through — the coder builds it, the review quorum judges
+    it, and the verdict comes back to whoever sent it
+  # Long enough that a real implementation pass fits inside it, and it is per MEMBER rather than
+  # for the whole order: each member's clock is restarted by its own transcript, so a coder that is
+  # working is never struck for taking a while. What it protects against is a member that went
+  # silent.
+  timeout: 2h
+
+# The review quorum, whose four members are the review-dimension roles declared alongside it in
+# this same `.nxs-personas/` directory.
+# `expects: all` (the default) is left as it is deliberately — a review round is a one-shot: every
+# member replies exactly once, fresh, per round (never resumed across rounds — a NEW thread is
+# opened each time somebody sends to this channel again). Nothing has to be declared for that: each
+# step mints a fresh session either way, and only a reply into a member's own thread resumes it.
+- name: review
+  members: [general, code-quality, test-quality, integrity]
+  # **ONE REVIEWER IN THE CHECKOUT AT A TIME** (nxf 6j6v.2d00). Three of these four run the
+  # project's own quality gates THEMSELVES — see `working_tree:` below for exactly which — and until
+  # this line they ran at once, so the declaration handed one working copy and one `target/` to
+  # three concurrent `cargo` runs. Two of the same shape merely take cargo's own build lock and wait
+  # (correct, three times as slow); two of DIFFERENT shapes overwrite each other's artifacts, which
+  # is damage this repo has MEASURED (its `no-concurrent-lean-build-during-tests` memory: a lean
+  # build overwrote `target/debug/nxs` and ~19 tests failed with `unrecognized subcommand 'mcp'` — a
+  # shot artifact that reads like a code break). A quorum whose members each choose their own gate
+  # selection is exactly how those shapes diverge. And a reviewer that FIXES something writes into
+  # the checkout the others are building in.
+  #
+  # `flow: sequential` is what removes all three, and it costs neither of the two things the ticket's
+  # other ways cost. Every reviewer still runs the gates ITSELF, in its own session, against the real
+  # working copy — the independence this collection is built on ("judging real output rather than a
+  # gates log handed to you by someone else") is untouched. And no new mechanism was needed: the
+  # engine opens step N+1 only once step N has settled AND its session has ended (nxf 6j6v.10yb), so
+  # the serialization is the flow's own, not a second lock.
+  #
+  # WHAT IT DOES COST, so nobody has to discover it: wall-clock — four reviews in series rather than
+  # four at once, though whenever their gate shapes matched cargo's build lock was already
+  # serializing them. And nxf 6j6v.ma7v's rule for ordered channels: an ESCALATING reply ends the
+  # chain instead of releasing the next step, so a reviewer that CANNOT run stops the round rather
+  # than leaving three verdicts behind. That is the right answer for a quorum whose members all work
+  # in the same checkout — whatever stopped the first will stop the rest — but it is a difference,
+  # and it is the one to weigh before copying this file for a quorum that does NOT share a tree. A
+  # quorum whose members only READ (no build, no writes) wants `working_tree:` and this line gone,
+  # and gets its four opinions at once.
+  flow: sequential
+  # Every reviewer runs the project's own quality gates (build/test/lint) directly against this
+  # same working copy (nxf 6j6v.303b). Said here rather than on each of the four member roles
+  # because none of THEM needs the working copy on its own account — it is the review round that
+  # does. (Since nxf 6j6v.1xw1 it also works the other way round: if a declared member of a channel
+  # says `working_tree: exclusive` for itself, the whole channel counts as needing it and this line
+  # is not repeated. One hop only — a channel does not catch it from another channel through a
+  # member the two share.)
+  #
+  # WHAT THIS PROTECTS AGAINST, AND WHAT IT DOES NOT (nxf 6j6v.egb9). It protects this round from
+  # OTHER chains: while it holds the lease, an unrelated coder or review round waits instead of
+  # running its own `cargo test` against the same `target/`. It does NOT protect the members from
+  # EACH OTHER — they are one claim area, the first acquires and the rest inherit
+  # (orchestration.rs, `acquire_or_queue`), and no `working_tree:` value changes that: the unit of
+  # exclusion is the area, not the session, and the mechanism has no "one member at a time" setting.
+  #
+  # THAT IS WHY THIS QUORUM IS ORDERED (nxf 6j6v.2d00) — see `flow: sequential` above for the whole
+  # argument. Three of these four roles run the project's gates THEMSELVES, in their own session and
+  # on purpose (`general` runs the gates the diff touched, `code-quality` "whatever of the project's
+  # own quality gates your dimension needs", `test-quality` the test suite), so a parallel quorum
+  # here means three concurrent cargo runs in one `target/`. The ORDER is what separates them; this
+  # line is what keeps everything else out while they work. The two do different jobs and this
+  # collection needs both.
+  #
+  # `crates/chat/tests/the_review_quorum_holds_the_checkout_alone.rs` drives THIS FILE and measures
+  # it: over a whole round, the high-water mark of live sessions is one.
+  #
+  # HOW FAR THE CLAIM REACHES (nxf 6j6v.8y6t). It is the OPERATION — the root of the thread tree
+  # this round belongs to, and everything under it — not this channel's own thread. So the claim a
+  # round takes covers the work order above it too, and is given back when the whole operation is
+  # finished rather than when this round is. Two consequences worth knowing before you copy this
+  # file: a second review round of the SAME work order has no gap in front of it that an unrelated
+  # chain could step into, and an exclusive channel opened from INSIDE another one is the same
+  # claim rather than a rival for it, so it runs instead of queuing behind its own parent. (The
+  # paragraph that stood here said the opposite — nesting deadlocked against its own parent. That
+  # was true, it was fixed by nxf 6j6v.43kw, and 6j6v.8y6t makes the shape unreachable rather than
+  # merely handled.)
+  #
+  # WHAT IT STILL DOES NOT BUY: the claim ARISES at the first exclusive step, so nothing is held
+  # while the work order is merely being planned. A channel that wants the copy from its own first
+  # move says `working_tree: exclusive` on itself, exactly as this one does.
+  working_tree: exclusive
+  # What `nxc list` shows for this channel (nxf 6j6v.frek). It carries the four reviewers' own
+  # description because THEY do not appear in that list: each one is `addressable: none`, so the
+  # way to reach any of them is to address `review` — which this channel's own cast is what
+  # establishes (nxf 6j6v.g0yn), not a list repeated at each persona. Without this line the entry
+  # would fall back to naming the members, which says who is in the room but not what it is for.
+  description: >-
+    the four-member review quorum — one round asks General, Code Quality, Test Quality and
+    Integrity & Robustness in turn, each judging the working copy itself, and hands back one
+    synthesized verdict
+  expects: all
+  on_complete: summarize
+  visibility: requester_only
+  timeout: 20m
+  # This channel's CONSOLIDATOR folds, and this is the model it folds with (nxf 6j6v.e9qj). A
+  # channel that names none folds at the documented `junior` band, which is the right default for a
+  # fold that only restates what the members already decided — but this one's fold DECIDES: it
+  # aggregates four verdicts into one merge-or-not answer that the requester acts on. Getting it
+  # wrong sends work the wrong way, so this channel says so instead of taking the default.
+  summary_model: opus
+  summary_prompt: |
+    You are the review synthesizer for the `review` channel. You have been handed this thread's
+    full content, including every one of the four reviewers' replies (General, Code Quality, Test
+    Quality, Integrity & Robustness), each ending in its own `**Ready to merge?** [yes | no |
+    with-fixes]` verdict line.
+
+    Render ONE unified synthesis in this shape:
+    - A one-paragraph overview of the change under review.
+    - One short section per reviewer (General / Code Quality / Test Quality / Integrity &
+      Robustness) naming their grade and their most important findings (skip a reviewer's section
+      if it raised nothing worth restating).
+    - An "Action items" list holding only the Critical/High/Medium findings across all four
+      reviewers that must be addressed before merge (omit Low/Info-only nitpicks).
+
+    Then decide the ONE combined verdict by aggregating the four reviewers' own "Ready to merge?"
+    answers, and state it as the LAST line of your reply:
+    - If every reviewer answered `yes` → `Ready to merge? yes`.
+    - If ANY reviewer answered `no` or `with-fixes` → `Ready to merge? no`, followed by the one
+      sentence that says what has to change first.
+
+    The requester reads that line and decides what happens next. Bury it, hedge it, or leave it off
+    and the round has cost four reviews and answered nothing.

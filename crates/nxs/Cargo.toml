@@ -1,0 +1,135 @@
+[package]
+name = "nxs"
+version.workspace = true
+edition = "2021"
+description = "nxs, the one nexus-flow binary: prime fan-out + agent-file assembler + foundation verbs (migrate/doctor/status) over the one shared .nxs/ substrate"
+publish = false
+
+# lib+bin split (mirrors nexus-flow-cli / nexus-memory): the agent-file assembler + module roster
+# live in the library so the per-module init paths (nxf/nxm, S5) link and call the ONE assembler,
+# and the clap surface stays unit-testable; `nxs` is the binary.
+[lib]
+name = "nxs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nxs"
+path = "src/main.rs"
+
+[features]
+# The MCP seam (E9 #76u): `nxs mcp serve` exposes the active modules' read ops as MCP tools over
+# stdio. Default-on so a release `nxs` can serve out of the box; the lean build
+# (`--no-default-features`) drops rmcp + tokio + the facade entirely (#9ul acceptance). CI builds
+# both variants.
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:nexus-flow-facade"]
+
+[dependencies]
+# The shared substrate: workspace resolution, the schema-version spine, the manifest contract.
+# nxs is foundation-only for migrate/doctor/status and consumes the manifest contract for the
+# assembler — it knows NO product vocabulary, only the platform roster + the contract.
+nxs-foundation = { path = "../foundation" }
+# The shared init/compose library (5jz.1): the self-registration registry (ModuleInit roster) +
+# the moved spawn + assembler. `nxs` reads the roster from here; the module crates also depend on
+# it (NOT on `nxs`), which is what lets `nxs` link them below without a package cycle.
+nxs-init = { path = "../nxs-init" }
+# The composition root (5jz.1, TB-5 reversal for the init PATH): `nxs` LINKS every suite module so
+# their compile-time `inventory::submit!(ModuleInit)` registrations populate the roster `nxs init`/
+# `prime` read. The binary forces the link with `use … as _` (main.rs). prime/agent-manifest still
+# SHELL OUT to these same binaries (TB-5 intact there); only the roster source moved to self-reg.
+nexus-flow-cli = { path = "../cli" }
+nexus-memory = { path = "../memory" }
+# The chat product (nexus-chat-M1 T2): `nxs` routes the `nxc`/`chat` persona to it. The ModuleInit
+# self-registration + the `use nexus_chat as _;` link line are T3 (this dep only enables routing).
+nexus-chat = { path = "../chat" }
+# The ONE embedded-guide mechanism (6j6v.9e3r). `nxs guide` embeds no guides of its own — the
+# umbrella owns no domain — but it renders the markdown it fans back in with the SAME renderer the
+# blocks use, so `nxs guide <topic>` is byte-identical to `<binary> guide <topic>`.
+nxs-guide = { path = "../guide" }
+# The umbrella's OWN guide tree (6j6v.0fvt). `include_dir!` expands against
+# `$CARGO_MANIFEST_DIR`, so it can only be called in the crate that owns the files.
+include_dir = "0.7"
+# Raw connection for the foundation-only verbs: read PRAGMA user_version (from→to for migrate),
+# PRAGMA integrity_check (doctor), and the op count — without registering any product reducer.
+rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+# Parse `<cli> agent-manifest --json` (the assembler) + emit the `--json` contract / error envelope.
+serde_json = "1"
+# The shared `now` for `nxs prime` fan-out (RFC3339), injected into each module via its pin-clock
+# env var; pinned via NXS_NOW for deterministic goldens. Same crate flow/memory already use.
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+# `nxs sync` (aye.2.1): the client anti-entropy engine over the shared op-log + the stream-id mint.
+nxs-sync = { path = "../sync", features = ["engine"] }
+# The background-service seam (6j6v.5zst): the `~/.nexusflow` home, the workspace registry the
+# service sweeps, its single-instance lock and its heartbeat. It sits BELOW every crate with a CLI
+# so an embedding app can register a workspace with the service without linking this one.
+nxs-service = { path = "../service" }
+ulid = "1"
+# Read/write the sync-binding meta (`.nxs/sync.toml`) for `nxs sync` (aye.2.1).
+toml = "0.8"
+# The shared CLI presentation layer (aye.29): the manufakt-Forge theme + the arrow-key chooser/
+# multi-select that `nxs init` uses for its welcome box + module selection. nxs OWNS the visible
+# init presentation; the modules are driven silently.
+nxs-ui = { path = "../nxs-ui" }
+# INTERIM (aye.36): `nxs sync run` drives the engine over flow's store so the prefix-collision
+# remap + on-pull `task` fold keep working as before. Truly foundation-only sync (substrate store +
+# per-product refold) is the aye.36 follow-up; until then the umbrella links core for the sync path.
+nexus-flow-core = { path = "../core" }
+# Cross-platform home/data-dir resolver (8kvr): the workspace registry (`~/.nexusflow/
+# workspaces.toml`) and the sync daemon that iterates it resolve `$HOME` through this in EVERY
+# build, so it is a normal (non-optional) dependency, not gated behind `mcp`. The MCP persona's
+# DEFAULT workspace (#76u.7, feature `mcp`) reuses the SAME resolver for its App-Data-Home rather
+# than hand-rolling a HOME string — one crate, two consumers.
+directories = "6"
+# Deterministic stream_id (sync/slug.rs): stream- + hex(sha256(host/owner/repo))[..24], so every
+# clone of a repo derives the same id from its remote without a manual --join. Same version as
+# memory/cli/chat.
+sha2 = "0.10"
+
+# --- MCP seam (feature `mcp`) ---------------------------------------------------------------------
+# The flow Record-Facade the MCP read tools wrap (E9 #4ti): the same compute→render layer the `nxf`
+# CLI serializes under `--json`, so a tool's `structuredContent` is byte-identical to the CLI seam.
+nexus-flow-facade = { path = "../facade", optional = true }
+# The official Rust MCP SDK: protocol/handshake/stdio framing + the `#[tool_router]`/`#[tool]`
+# macros. `server` pulls schemars (tool input schemas) + async-rw; `transport-io` is server stdio.
+rmcp = { version = "1.8", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
+# The async runtime the rmcp stdio server runs on (the only async surface; the correctness path is
+# the sync facade calls inside each tool). Built per `mcp serve` call, not held process-wide.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"], optional = true }
+
+# SIGPIPE reset (4yt4): `nxs` main restores the default SIGPIPE disposition so a closed downstream
+# pipe (`nxf blocked | head`) kills the process by signal instead of panicking on the EPIPE the
+# Rust runtime's startup SIG_IGN turns closed-pipe writes into. Unix-only; one `signal()` call.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# `PinHome`: the one place a black-box invocation's `$HOME` is pinned, so the variables that
+# out-vote a pinned home go with it (nxf 6j6v.9bjv). A DEV-dependency only — the stale-binary gate
+# resolves the watched closure from `[dependencies]`/`[build-dependencies]` alone, so this crate's
+# own source never trips it.
+nxs-test-support = { path = "../test-support" }
+# The `file-fixture` consumer plugin (a `file` type + a required `uri` custom field), registered from
+# its own crate via `inventory` — linked into the test binary ONLY so the in-process MCP handler tests
+# (mcp/flow.rs) can drive a custom-field-declaring plugin the shipped `nxs` never bundles.
+plugin-probe = { path = "../plugin-probe" }
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+trycmd = "1.2.0"
+# Drive the MCP server from tests: an in-process client over a duplex stream (fast handler tests)
+# and a child-process client that spawns the real `nxs` binary over stdio (the #ygj acceptance e2e).
+rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }
+# "net" (beyond the mcp-feature build's rt-multi-thread/macros/io-util) is for `sync_e2e.rs`'s
+# in-process relay (`tokio::net::TcpListener`), the same harness shape as
+# `crates/server/tests/relay_http.rs::spawn_relay`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net"] }
+# The real relay app (T14, `t4ax`): `sync_e2e.rs` spins it up in-process on an ephemeral port so
+# the convergence + p5sa-regression tests run against actual HTTP routing, not a stand-in. `nxs`
+# sits at the top of the crate graph (no product crate depends on it), so this is not a cycle.
+nxs-server = { path = "../server" }
+axum = "0.7"
+# `sync_snapshot.rs` crafts a snapshot a newer nxs would have written (gzipped JSON) to prove a
+# refused import leaves the workspace unbound; already in the graph through ureq.
+flate2 = "1"

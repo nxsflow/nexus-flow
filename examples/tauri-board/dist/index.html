@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nexus-flow — live next / blocked</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f1115;
+        --fg: #e7e9ee;
+        --muted: #9aa3b2;
+        --card: #171a21;
+        --line: #262b36;
+        --accent: #7c9cff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        padding: 24px;
+      }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      .hint { color: var(--muted); margin: 0 0 20px; max-width: 60ch; }
+      code { background: var(--card); padding: 1px 5px; border-radius: 4px; }
+      section { margin-bottom: 22px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+      }
+      .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); font-size: 12px; }
+      .title { flex: 1; }
+      .meta { color: var(--muted); font-size: 12px; }
+      .blockers { color: var(--muted); font-size: 12px; margin-top: 4px; }
+      .empty { color: var(--muted); font-style: italic; }
+      #status { color: var(--muted); font-size: 12px; margin-top: 8px; }
+      .flash { animation: flash .6s ease; }
+      @keyframes flash { from { background: #20304a; } to { background: var(--card); } }
+    </style>
+  </head>
+  <body>
+    <h1>nexus-flow — next / blocked, live</h1>
+    <p class="hint">
+      This window embeds <code>nexus_flow_facade::Engine</code> in-process — no
+      <code>nxf</code> subprocess. In another terminal, run <code>nxf create</code>,
+      <code>nxf dep add</code>, or <code>nxf close</code> in this workspace and watch the lists
+      below move on their own, with no reload.
+    </p>
+
+    <section>
+      <h2>Next</h2>
+      <ul id="next"></ul>
+    </section>
+
+    <section>
+      <h2>Blocked</h2>
+      <ul id="blocked"></ul>
+    </section>
+
+    <div id="status">starting…</div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+
+      const esc = (s) =>
+        String(s ?? "").replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+        );
+
+      function renderNext(items) {
+        const ul = document.getElementById("next");
+        if (!items.length) {
+          ul.innerHTML = '<li class="empty">nothing to do next</li>';
+          return;
+        }
+        ul.innerHTML = items
+          .map(
+            (i) =>
+              `<li><span class="id">${esc(i.id)}</span><span class="title">${esc(
+                i.title
+              )}</span><span class="meta">${esc(i.item_type)} · ${esc(
+                i.priority
+              )} · ${esc(i.status)}</span></li>`
+          )
+          .join("");
+      }
+
+      function renderBlocked(items) {
+        const ul = document.getElementById("blocked");
+        if (!items.length) {
+          ul.innerHTML = '<li class="empty">nothing blocked</li>';
+          return;
+        }
+        ul.innerHTML = items
+          .map(
+            (i) =>
+              `<li><div style="flex:1"><div><span class="id">${esc(
+                i.id
+              )}</span> <span class="title">${esc(
+                i.title
+              )}</span></div><div class="blockers">blocked by: ${
+                i.blockers.map(esc).join(", ") || "—"
+              }</div></div></li>`
+          )
+          .join("");
+      }
+
+      function setStatus(msg) {
+        const el = document.getElementById("status");
+        el.textContent = msg;
+        el.classList.remove("flash");
+        void el.offsetWidth; // restart the flash animation
+        el.classList.add("flash");
+      }
+
+      async function refresh() {
+        try {
+          const [next, blocked] = await Promise.all([
+            invoke("next"),
+            invoke("blocked"),
+          ]);
+          renderNext(next);
+          renderBlocked(blocked);
+          setStatus(
+            `${next.length} next · ${blocked.length} blocked · updated ${new Date().toLocaleTimeString()}`
+          );
+        } catch (e) {
+          setStatus("error: " + e);
+        }
+      }
+
+      // Re-read whenever an external writer commits (the watcher's coalesced "go re-read" cue).
+      listen("nxf-change", refresh);
+      // And one read up front — a write committed before we subscribed is folded into the
+      // watcher's baseline and won't produce an event (see the facade watch contract).
+      refresh();
+    </script>
+  </body>
+</html>

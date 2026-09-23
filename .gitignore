@@ -1,0 +1,30 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Rust build artifacts
+target/
+
+# minisign signing material — NEVER commit keys (spec §5.3). The private key lives only in
+# GitHub Secrets + the operator's offline backup; the public key is injected into the build
+# via NXF_MINISIGN_PUBKEY, not a committed file. Belt-and-suspenders against an accidental add.
+*.key
+*.pub
+*.minisig
+
+# macOS
+.DS_Store
+.nxs
+
+# Node (agent-sidecar and any future Node-based tooling)
+node_modules/
+
+# The shipped sidecar bundle (`npm run build` in agent-sidecar) — a build artifact of the release
+# job, never a source. It is packaged into the release tarball as `nxc-agent-sidecar.mjs`.
+agent-sidecar/dist/
+
+# Browser-automation scratch output (Playwright MCP page dumps, ad-hoc screenshots). Tool
+# artifacts, never sources — they were swept into a commit once by a `git add -A`.
+.playwright-mcp/

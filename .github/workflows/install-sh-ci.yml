@@ -1,0 +1,95 @@
+name: install-sh-ci
+
+# The shell gate. `install.sh` is the primary install path (`curl -fsSL …/install.sh | sh`, spec
+# §7.1, nexus-flow-85y.16) and carries a security-critical contract: sha256 verification is
+# mandatory, minisign is fail-closed when present. Every other language surface here has its own
+# gate — ci.yml the Rust crates (and the sidecar's JavaScript), content-ci.yml and npm-mcp-ci.yml
+# the rest of the JavaScript; without this job the SHELL would ship ungated, and a regression in
+# the verify path is exactly the kind of bug that must never reach a user.
+#
+# (Until 6j6v.sgfr this line named `infra-ci.yml` and "the TypeScript", accurate while `infra/`
+# was a TypeScript CDK app. Gate and language went together — the repo now ships no TypeScript at
+# all — so naming a successor gate for it would be a second false map, created by the removal
+# rather than left by it.)
+# Runs shellcheck + the hermetic harness (tests/install.sh.test.sh, local server, no
+# network/AWS) on every PR that touches the script. Fail-closed. Spec §9.
+#
+# WIDENED by 6j6v.31rs to a second script with the same property: `.github/scripts/require-green-ci.sh`
+# is the release's fail-closed quality gate, the one thing standing between a red tree and a signed,
+# notarized, published artifact now that `release.yml` reads CI's verdict instead of re-running the
+# suite. Same treatment — shellcheck plus a hermetic harness (`tests/require-green-ci.test.sh`,
+# a stubbed `gh`, no network), because a gate nobody tests is a gate nobody can trust.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "tests/install.sh.test.sh"
+      - "tests/smoke-install-update.sh"
+      - "tests/require-green-ci.test.sh"
+      - ".github/scripts/require-green-ci.sh"
+      - ".github/workflows/install-sh-ci.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "tests/install.sh.test.sh"
+      - "tests/smoke-install-update.sh"
+      - "tests/require-green-ci.test.sh"
+      - ".github/scripts/require-green-ci.sh"
+      - ".github/workflows/install-sh-ci.yml"
+
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. Cancels PR runs only — the push run on `main` is that ref's standing record of green
+# and must always finish.
+concurrency:
+  group: install-sh-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  install-sh-quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # minisign so the harness can exercise the real (prehashed, -H) signature path that
+      # release.yml produces — matching the in-pipeline trust gate. python3 (the local static
+      # server) is preinstalled on ubuntu-latest.
+      - name: Install shellcheck + minisign
+        run: sudo apt-get update && sudo apt-get install -y shellcheck minisign
+
+      - name: Lint (shellcheck)
+        run: |
+          shellcheck install.sh tests/install.sh.test.sh tests/smoke-install-update.sh
+          shellcheck .github/scripts/require-green-ci.sh tests/require-green-ci.test.sh
+
+      # The embedded minisign pubkey IS the authenticity anchor — a typo or a missed rotation
+      # would ship an installer whose signature gate can never pass (silent downgrade to
+      # sha256-only). Assert the literal equals the repo variable release.yml bakes into `nxf`.
+      # (vars is empty on fork PRs, which can't read it — warn+skip there; enforced on main.)
+      - name: Embedded minisign pubkey matches the repo variable
+        env:
+          EXPECTED: ${{ vars.NXF_MINISIGN_PUBKEY }}
+        run: |
+          set -euo pipefail
+          embedded="$(sed -n 's/^EMBEDDED_MINISIGN_PUBKEY="\(.*\)"$/\1/p' install.sh)"
+          [ -n "$embedded" ] || { echo "::error::could not read EMBEDDED_MINISIGN_PUBKEY from install.sh"; exit 1; }
+          if [ -z "${EXPECTED:-}" ]; then
+            echo "::warning::vars.NXF_MINISIGN_PUBKEY unavailable in this context — skipping cross-check"
+            exit 0
+          fi
+          if [ "$embedded" != "$EXPECTED" ]; then
+            echo "::error::install.sh EMBEDDED_MINISIGN_PUBKEY != vars.NXF_MINISIGN_PUBKEY (rotation/typo?)"
+            exit 1
+          fi
+          echo "embedded pubkey matches the repo variable (${#embedded} chars)"
+
+      - name: Test (hermetic harness)
+        run: tests/install.sh.test.sh
+
+      # The release quality gate, against a stubbed `gh` (6j6v.31rs). Seconds, no network.
+      - name: Test the release CI gate (hermetic harness)
+        run: tests/require-green-ci.test.sh

@@ -1,0 +1,19 @@
+{
+  "name": "@nexus-flow/content-provider",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Assembles the federated content.json + docs.json (+ per-URL docs pages) the nxsflow landing renders at /open-source (nxsflow.com migration, 6j6v.0a6p).",
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "scripts": {
+    "assemble": "node assemble.mjs",
+    "validate": "node validate.mjs",
+    "test": "node --test",
+    "build": "node --test && node assemble.mjs && node validate.mjs --schema schema/content-contract-v1.json"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  }
+}

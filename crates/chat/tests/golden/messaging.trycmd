@@ -1,0 +1,185 @@
+**A worked `nxc` session, executed** (nxf 6j6v.t6vd). Every ` ```console ` block the chat guides
+(`docs/guide/{en,de}/*.md`) print must appear VERBATIM in this corpus — `tests/guide_examples.rs`
+holds that loop closed, exactly as flow's does for its own guides. A guide can therefore never show
+a command or an output that is not a real, tested one.
+
+The workspace comes from `messaging.in/`: four files under `.nxs-personas/` — a `coder` persona, two
+reviewer personas reachable only through a channel, and a `channels.yaml` declaring the ordered
+`build-and-ship` channel and the `review` quorum. Nothing below creates a channel or registers an
+agent: there is no verb for either, and that is the point.
+
+`NXC_ACTOR` is spelled on each command line because this session has TWO speakers — see `golden.rs`
+for why it cannot be pinned on the harness instead.
+
+```console
+$ nxc init --quiet
+
+```
+
+## Who is here
+
+`nxc list` is the read over the declaration folder. `general` and `integrity` do not appear: each
+declares `addressable: none`, so the way to reach either is to address the channel that casts it.
+
+```console
+$ NXC_ACTOR=alice nxc list
+## Who you can address
+
+Address any of them the same way: `nxc send --to <handle> -` — the `-` reads the message from STDIN, and a one-line message may be an argument instead.
+
+**Coder** (handle: `coder`) — Implements a work order on a branch and merges it.
+
+**Build-And-Ship** (handle: `build-and-ship`, members: coder, review) — the declared order a work order runs through
+
+**Review** (handle: `review`, members: general, integrity) — the review quorum — one round asks both reviewers and hands back one verdict
+
+```
+
+## Opening a conversation
+
+`send --to <persona>` posts the message, stamps a thread on it, and starts the persona on a fresh
+session. `--ref` says what the conversation is about; the thread id is the one value to keep.
+
+```console
+$ NXC_ACTOR=alice nxc send --to coder --ref nxf_ids=ab12.0007 "Add a --since flag to the export command."
+-> coder · thread m-00000000000000000000000001
+
+  The answer lands in this thread.
+    nxc threads show    m-00000000000000000000000001    — the conversation
+    nxc status --thread m-00000000000000000000000001    — where it stands
+
+  To watch instead of coming back: add --stream next time.
+
+```
+
+The thread's board: who owes a reply, who has answered, and whether it is finished.
+
+```console
+$ NXC_ACTOR=alice nxc threads show m-00000000000000000000000001
+thread m-00000000000000000000000001 in dm:9445dbc93dfdad401585c42b
+  expects:     ab12/coder
+  replied:     
+  outstanding: ab12/coder
+  complete:    false
+  working tree: holding
+  · ab12/alice Add a --since flag to the export command.
+
+```
+
+## The other side
+
+The persona does not ask for its message: `send` started its session with that message in the
+prompt, and a later `reply` resumes it with the reply's body (nxf 6j6v.1gm9 removed `nxc inbox` and
+`nxc read` for exactly that reason). What it can read is the CONVERSATION, the same board its
+requester sees.
+
+```console
+$ NXC_ACTOR=coder nxc threads show m-00000000000000000000000001
+thread m-00000000000000000000000001 in dm:9445dbc93dfdad401585c42b
+  expects:     ab12/coder
+  replied:     
+  outstanding: ab12/coder
+  complete:    false
+  working tree: holding
+  · ab12/alice Add a --since flag to the export command.
+
+```
+
+Answering the thread is how a persona finishes. It discharges the turn and hands it back.
+
+```console
+$ NXC_ACTOR=coder nxc reply --thread m-00000000000000000000000001 "Added the flag and a test; branch feat/export-since." --json
+{"posted":true,"message_id":"m-00000000000000000000000002","thread_id":"m-00000000000000000000000001","resumed":false,"warnings":[],"await":{"how":"poll","poll":["nxc","threads","show","m-00000000000000000000000001","--json"],"done_when":{"complete":true,"outstanding":[]},"stopped_when":{"stale":true,"escalated":true},"answer_at":"messages[-1]","deadline":null}}
+
+```
+
+## Where an operation stands
+
+```console
+$ NXC_ACTOR=alice nxc status
+nothing open (`nxc status --all` also shows finished operations)
+
+```
+
+```console
+$ NXC_ACTOR=alice nxc status --all
+operation m-00000000000000000000000001  dm:9445dbc93dfdad401585c42b  1 thread(s), 0 open  · finished
+  m-00000000000000000000000001  dm:9445dbc93dfdad401585c42b  awaiting you (answered by ab12/coder)
+
+```
+
+```console
+$ NXC_ACTOR=alice nxc status --all --json
+{"operations":[{"root":"m-00000000000000000000000001","channel_id":"dm:9445dbc93dfdad401585c42b","live":false,"open":0,"needs_decision":false,"holds_working_tree":false,"interrupted":false,"threads":[{"thread_id":"m-00000000000000000000000001","channel_id":"dm:9445dbc93dfdad401585c42b","depth":0,"state":"answered","awaiting_human":true,"escalated":false,"substituted":false,"opener":"ab12/alice","expects":["ab12/coder"],"stale":false}]}],"worker_answers_liveness":false,"worker_names_a_working_copy":false}
+
+```
+
+```console
+$ NXC_ACTOR=alice nxc search "since flag" --json
+[{"message_id":"m-00000000000000000000000001","channel_id":"dm:9445dbc93dfdad401585c42b","sender":"ab12/alice","body":"Add a --since flag to the export command."}]
+
+```
+
+A session's own step-by-step record is the transcript. This one is empty: the corpus records
+triggers instead of running real sessions, so nothing was ever written to it.
+
+```console
+$ NXC_ACTOR=alice nxc transcript show m-00000000000000000000000001
+transcript m-00000000000000000000000001  role=coder  (0 entries)
+
+```
+
+## Naming a subject, or saying there is none
+
+Saying nothing still sends — the message is worth more posted than lost — but it is flagged, on
+stderr for a reader and as `refs_warning` in `--json` for an app.
+
+```console
+$ NXC_ACTOR=alice nxc send --to coder "One more thing." --json
+{"thread_id":"m-00000000000000000000000002","message_id":"m-00000000000000000000000003","to":"coder","target":"persona","channel":"dm:9445dbc93dfdad401585c42b","session":"m-00000000000000000000000002","expects":["ab12/coder"],"spawned":true,"warnings":[],"refs_warning":"nothing was named as the subject of this conversation. Say what it is about — `--ref nxf_ids=<id>`, repeatable — or `--no-ref` if there really is nothing.","await":{"how":"poll","poll":["nxc","threads","show","m-00000000000000000000000002","--json"],"done_when":{"complete":true,"outstanding":[]},"stopped_when":{"stale":true,"escalated":true},"answer_at":"messages[-1]","deadline":null}}
+warning: nothing was named as the subject of this conversation. Say what it is about — `--ref nxf_ids=<id>`, repeatable — or `--no-ref` if there really is nothing.
+
+```
+
+## A channel is a declaration
+
+`build-and-ship` is `flow: sequential`, so one `send --to` opens the whole order: the first member
+is commissioned, and each later one starts when the one before it has settled.
+
+```console
+$ NXC_ACTOR=alice nxc send --to build-and-ship --ref nxf_ids=ab12.0008 "Ship the export change." --json
+{"thread_id":"m-00000000000000000000000003","message_id":"m-00000000000000000000000004","to":"build-and-ship","target":"channel","channel":"decl:build-and-ship","expects":["ab12/__channel__"],"spawned":true,"warnings":[],"refs_warning":null,"await":{"how":"poll","poll":["nxc","threads","show","m-00000000000000000000000003","--json"],"done_when":{"complete":true,"outstanding":[]},"stopped_when":{"stale":true,"escalated":true},"answer_at":"messages[-1]","deadline":null}}
+
+```
+
+The coder declares `working_tree: exclusive`, so the round above is parked behind the conversation
+that is already holding the repository's working copy. `threads list` is where that is visible.
+
+```console
+$ NXC_ACTOR=alice nxc threads list
+m-00000000000000000000000003  decl:build-and-ship  0/1 in  [waiting]  · waiting for working tree (#1)
+m-00000000000000000000000004  decl:build-and-ship  0/1 in  [waiting]  · waiting for working tree (#1)
+m-00000000000000000000000001  dm:9445dbc93dfdad401585c42b  1/1 in  [complete]
+m-00000000000000000000000002  dm:9445dbc93dfdad401585c42b  0/1 in  [waiting]  · holding working tree
+
+```
+
+## What is refused
+
+A persona that is addressable only through a channel refuses a direct message from everyone alike:
+
+```console
+$ NXC_ACTOR=alice nxc send --to general --ref nxf_ids=ab12.0008 "Have a look?" --json
+? 1
+{"error":{"kind":"validation","msg":"general is addressable only through review — send --to review instead"}}
+
+```
+
+A name no declaration carries is not a target — there is no verb that would make it one:
+
+```console
+$ NXC_ACTOR=alice nxc send --to nobody --ref nxf_ids=ab12.0008 "Anyone there?" --json
+? 1
+{"error":{"kind":"not_found","msg":"no such target: nobody (not a declared channel, not a declared persona, not a channel in this workspace) — `nxc list` shows what can be addressed"}}
+
+```

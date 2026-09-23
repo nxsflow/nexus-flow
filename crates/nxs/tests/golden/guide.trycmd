@@ -1,0 +1,213 @@
+`nxs guide` is the suite-wide reading of the guides (6j6v.9e3r). It fans out to `<binary> guide`
+exactly as `nxs prime` fans out to `<binary> prime` — but needs no workspace (guides are compiled
+into the binary, and `getting-started` is written for the reader who has not initialized anything
+yet), so with no `.nxs/` it lists every installed block.
+
+Since 6j6v.0fvt the umbrella carries guides of its OWN and heads the listing: first setup, the map
+of the blocks, and the workspace on disk are what a reader needs BEFORE they know that `nxf`, `nxm`
+and `nxc` exist. Everything below it is the fan-out, unchanged — flow's eight, memory's five since
+6j6v.h4k0, chat's seven (six since 6j6v.t6vd, `writing-declarations` since 6j6v.9w08). A block with
+no topics YET would still appear — it is part of the suite whether or not its guides are written —
+and would say `(no guides yet)` plainly instead of vanishing; that path is held by the unit tests in
+`src/guide.rs`, since no shipped block is in that state any more.
+
+```console
+$ nxs guide
+nxs — run `nxs guide <topic>`:
+
+  getting-started              Install the suite, set up a workspace, and see what restores an agent's context.
+  modules                      What flow, memory and chat are each for, and which one to reach for.
+  the-workspace                What `nxs init` leaves on disk, what is committed, and how to check it is healthy.
+
+flow — run `nxf guide <topic>`:
+
+  getting-started              Install, init a workspace, and create your first task.
+  mcp                          Connect an MCP host (Claude Desktop, Cursor, …) — register the server and bootstrap.
+  core-concepts                Items, dependencies, and how `next` and `blocked` are derived rather than stored.
+  commands                     A tour of the most-used nxf commands.
+  plugins                      How vocabulary, ranking, and presentation are configured.
+  migration                    Bring an existing tracker in and bind a sync stream.
+  deferring-and-waiting        Defer only for real calendar dates; model waiting on a delivery as a WAIT chore.
+  running-a-relay              Run your own sync server for backup or collaboration — SQLite, or a Postgres such as Supabase.
+
+chat — run `nxc guide <topic>`:
+
+  getting-started              Activate chat, declare a persona, and get your first answer back.
+  core-concepts                The shared op-log, qualified handles, threads and their derived quorum, and how a message is delivered.
+  commands                     Every shipped verb, with its `--json` shape — and what was removed, with what to do instead.
+  personas                     Declaring one agent: identity, prompt layers, model band, tools, and who may address it.
+  channels                     Declaring a group — and the ordered channel (`flow: sequential`) that IS the workflow.
+  writing-declarations         From an intention to a declaration that answers usefully: seven measured error classes, and a checklist.
+  limits-and-safety            The hop cap, the human gate, the working-copy lease, and what an agent does NOT decide.
+
+memory — run `nxm guide <topic>`:
+
+  getting-started              What memory is for, what it needs, and your first remembered fact.
+  core-concepts                Keys and auto-keys, the three registers, the retrieval rule, reading order, and the tombstone.
+  commands                     Every shipped verb, with its `--json` shape and the errors it can answer with.
+  agents-and-mcp               The `memory_*` MCP tools, what `nxs prime` contributes, and where an agent writes.
+  import-and-migration         Take a Claude-host memory store in, and file what a workspace already accumulated.
+
+develop — run `nxs guide <topic>`:
+
+  architecture                 The map: five layers, which way the arrows point, and which seams are contracts.
+  the-journey-of-one-op        One `nxf close`, followed from the verb to a derived answer nobody wrote.
+  a-reply-across-two-machines  The same trip over two replicas: what an arriving op carries, and what stays behind.
+
+```
+
+The `--json` contract wraps each block's own `guide --json` records — the same `{topic, summary}`
+pairs `nxf guide --json` has always emitted — under `{module, binary, topics}`, mirroring how
+`nxs prime --json` wraps each module's prime record. An empty block carries `"topics":[]`.
+
+```console
+$ nxs guide --json
+{"modules":[{"binary":"nxs","module":"nxs","topics":[{"summary":"Install the suite, set up a workspace, and see what restores an agent's context.","topic":"getting-started"},{"summary":"What flow, memory and chat are each for, and which one to reach for.","topic":"modules"},{"summary":"What `nxs init` leaves on disk, what is committed, and how to check it is healthy.","topic":"the-workspace"}]},{"binary":"nxf","module":"flow","topics":[{"summary":"Install, init a workspace, and create your first task.","topic":"getting-started"},{"summary":"Connect an MCP host (Claude Desktop, Cursor, …) — register the server and bootstrap.","topic":"mcp"},{"summary":"Items, dependencies, and how `next` and `blocked` are derived rather than stored.","topic":"core-concepts"},{"summary":"A tour of the most-used nxf commands.","topic":"commands"},{"summary":"How vocabulary, ranking, and presentation are configured.","topic":"plugins"},{"summary":"Bring an existing tracker in and bind a sync stream.","topic":"migration"},{"summary":"Defer only for real calendar dates; model waiting on a delivery as a WAIT chore.","topic":"deferring-and-waiting"},{"summary":"Run your own sync server for backup or collaboration — SQLite, or a Postgres such as Supabase.","topic":"running-a-relay"}]},{"binary":"nxc","module":"chat","topics":[{"summary":"Activate chat, declare a persona, and get your first answer back.","topic":"getting-started"},{"summary":"The shared op-log, qualified handles, threads and their derived quorum, and how a message is delivered.","topic":"core-concepts"},{"summary":"Every shipped verb, with its `--json` shape — and what was removed, with what to do instead.","topic":"commands"},{"summary":"Declaring one agent: identity, prompt layers, model band, tools, and who may address it.","topic":"personas"},{"summary":"Declaring a group — and the ordered channel (`flow: sequential`) that IS the workflow.","topic":"channels"},{"summary":"From an intention to a declaration that answers usefully: seven measured error classes, and a checklist.","topic":"writing-declarations"},{"summary":"The hop cap, the human gate, the working-copy lease, and what an agent does NOT decide.","topic":"limits-and-safety"}]},{"binary":"nxm","module":"memory","topics":[{"summary":"What memory is for, what it needs, and your first remembered fact.","topic":"getting-started"},{"summary":"Keys and auto-keys, the three registers, the retrieval rule, reading order, and the tombstone.","topic":"core-concepts"},{"summary":"Every shipped verb, with its `--json` shape and the errors it can answer with.","topic":"commands"},{"summary":"The `memory_*` MCP tools, what `nxs prime` contributes, and where an agent writes.","topic":"agents-and-mcp"},{"summary":"Take a Claude-host memory store in, and file what a workspace already accumulated.","topic":"import-and-migration"}]},{"binary":"nxs","module":"develop","topics":[{"summary":"The map: five layers, which way the arrows point, and which seams are contracts.","topic":"architecture"},{"summary":"One `nxf close`, followed from the verb to a derived answer nobody wrote.","topic":"the-journey-of-one-op"},{"summary":"The same trip over two replicas: what an arriving op carries, and what stays behind.","topic":"a-reply-across-two-machines"}]}]}
+
+```
+
+A topic no block carries is a `validation` error that lists what IS on offer, per tool — never a
+silent empty answer:
+
+```console
+$ nxs guide does-not-exist --json
+? 1
+{"error":{"kind":"validation","msg":"unknown guide topic 'does-not-exist'; expected one of: nxs getting-started, nxs modules, nxs the-workspace, nxf getting-started, nxf mcp, nxf core-concepts, nxf commands, nxf plugins, nxf migration, nxf deferring-and-waiting, nxf running-a-relay, nxc getting-started, nxc core-concepts, nxc commands, nxc personas, nxc channels, nxc writing-declarations, nxc limits-and-safety, nxm getting-started, nxm core-concepts, nxm commands, nxm agents-and-mcp, nxm import-and-migration, nxs architecture, nxs the-journey-of-one-op, nxs a-reply-across-two-machines"}}
+
+```
+
+**A topic SEVERAL blocks carry is not picked for you.** This is the case the `<binary>-<topic>` slug
+scheme exists for, seen from the command line: `getting-started`, `core-concepts` and `commands` are
+each carried by all THREE blocks now, and silently preferring the first would make
+`nxs guide commands` mean "flow's commands" forever — precisely the flow-is-the-suite framing
+6j6v.9e3r exists to undo. So the refusal names the exact per-tool commands instead.
+
+```console
+$ nxs guide commands --json
+? 1
+{"error":{"kind":"validation","msg":"guide topic 'commands' exists in 3 building blocks — ask one of them: `nxf guide commands`, `nxc guide commands`, `nxm guide commands`"}}
+
+```
+
+```console
+$ nxs guide getting-started
+GETTING STARTED
+
+nxs is the umbrella of the nexus-flow suite. It is one binary carrying three building
+blocks — flow (nxf: projects, tasks, dependencies), memory (nxm: durable project
+knowledge) and chat (nxc: the channel between you and your agents) — over one shared
+store. You install it once and then decide, per workspace, which of the three to activate.
+
+This guide takes you from nothing installed to a workspace whose agent restores its own context at
+the start of every session. It is the one place that first setup is written down; the building
+blocks' own guides start from here.
+
+Install
+
+    curl -fsSL https://nxsflow.com/nxs/install.sh | sh
+
+The script detects your platform, verifies the download — a sha256 and a signature — and
+installs one program: nxs. The other names are symlinks to it: nxf, nxm and nxc are the
+same binary, which decides which persona it is from the name you typed. That is why the four can
+never drift apart in version — there is only one program to update.
+
+Signature verification needs either minisign or an OpenSSL that can do Ed25519. A stock macOS has
+neither (its openssl is LibreSSL), so either install minisign — brew install minisign — or
+bootstrap with NXF_INSECURE=1, which checks the sha256 alone and proves integrity but not origin.
+nxs self-update verifies signatures unconditionally from then on.
+
+    nxs --version
+
+Set up a workspace
+
+A workspace is a .nxs/ directory in your project: one store that every activated building
+block writes into. Create it with:
+
+    nxs init
+
+On a real terminal this asks which building blocks you want, with the arrow keys. A block's own
+sub-configuration runs inside that frame — flow asks which plugin to use, because that choice
+decides the vocabulary you will read and write for the life of the workspace.
+
+On an agent, or in a script, name the blocks instead of being asked:
+
+    nxs init --module flow --module memory --json
+
+Either way you land on the same workspace. To activate another block later, run nxs init again
+and tick it — the command is idempotent and adds rather than replaces.
+
+What nxs init leaves behind
+
+Four things, and it is worth knowing all four:
+
+  - .nxs/ — the workspace itself: one SQLite store that every active block folds its own views
+  over. It is git-ignored and local to this machine.
+  - The shared agent file — the AGENTS.md section each active block contributes, assembled
+  into one document rather than three competing ones. Not CLAUDE.md: that belongs to the host
+  running the hook below, which has already delivered the same thing.
+  - One SessionStart hook per active block — nxf prime, nxm prime, nxc prime.
+  - An entry with the background service — the workspace is added to the list that service
+  attends, so a deferral or a window declared here has something that will actually look at it. It
+  is a local index entry and nothing more: it does not sync anything anywhere, and nothing is sent
+  off this machine. nxs sync unregister takes it back off the list.
+
+The workspace goes through each of them in detail.
+
+The background service, and the question init asks about it
+
+One process per machine keeps the deadlines of every workspace it attends, and syncs the ones that
+are bound to a stream. Without it, a deferral that comes due in this project simply never fires —
+which is why nxs init offers, on a real terminal, to set it up:
+
+    Set up the nexus-flow background service on this machine?
+
+Say no and the answer is recorded in this workspace, so no later nxs init asks again; the frame
+still tells you where the service stands, and nxs sync daemon install sets it up whenever you
+change your mind. In a script or under --json the question is never asked and nothing is
+installed: name it explicitly with nxs init --service, or settle it with nxs init --no-service.
+
+The installer is macOS-only (it is a launchd agent). Everywhere else, run nxs sync daemon in the
+foreground under your own supervisor — systemd, runit, whatever you already have — and it keeps
+exactly the same deadlines.
+
+What restores context at the start of a session
+
+The hooks are one per active block, not one for the umbrella — and that is a deliberate
+reversal of the earlier shape. The host truncates each hook's output on its own, at 10,240 bytes,
+so three hooks carry three budgets instead of one. That was measured, not assumed: three blocks'
+hooks of roughly 8 KB each arrived whole, 24 KB between them, where one combined hook would have
+been cut off at 10 KB.
+
+nxs prime still exists, and it is still the fan-out:
+
+    nxs prime
+
+It runs the prime verb of every active block and hands back one answer — flow's board,
+memory's index, chat's channel — in a fixed order, with a single shared now, so a deferred date
+means the same thing to every block in the same run. That is what you type when you want the whole
+picture in one place. The session hooks simply no longer go through it.
+
+Either way the effect is the one that matters: an agent starts a session already knowing what this
+project is doing, what it has learned, and who else is working on it. A flow-only workspace yields
+exactly flow's prime; memory appears the day you activate memory. Nothing is configured for that —
+the hook set is derived from the active blocks.
+
+Which block do I reach for?
+
+Short version: flow for what needs doing, memory for what the project knows, chat for
+the messages between you and your agents. Modules is the longer answer, and it is
+worth reading before the three detail guides.
+
+Where to go next
+
+  - modules — what each building block is for
+  - the workspace — what is on disk, and how to keep it healthy
+  - Then the block you actually need: flow, memory,
+  chat
+
+```
+
+A topic only ONE block carries resolves straight through, with no disambiguation to do — the
+per-block goldens (`crates/chat/tests/golden/guide.trycmd`, flow's alongside it) show that shape.
+It is not repeated here, because the answer is a whole guide on one line and this file would become
+a second, unreadable copy of the documentation.

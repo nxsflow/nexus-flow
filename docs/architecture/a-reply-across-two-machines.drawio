@@ -1,0 +1,52 @@
+<mxfile host="nexus-flow">
+  <diagram id="reply-two-machines" name="nexus-flow &#8212; A reply across two machines">
+    <mxGraphModel dx="1123" dy="460" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="980" pageHeight="1052" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="A reply across two machines" style="text;html=1;align=left;verticalAlign=middle;fontSize=31;fontStyle=1;fontColor=#1C1C1C;fontFamily=Merriweather;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%3A700%2C900;" parent="1" vertex="1">
+          <mxGeometry x="42" y="46" width="760" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="scene" value="&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;&lt;b&gt;The scene.&lt;/b&gt; An agent ran on the &lt;b&gt;laptop&lt;/b&gt; and is owed an answer. You are at the &lt;b&gt;desktop&lt;/b&gt;, so you answer there. Nothing joins the two machines but a relay and an append-only log.&lt;/font&gt;" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=top;spacingRight=20;fontColor=#6B6B6B;fontSize=14;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="100" width="760" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;&lt;b&gt;You reply where you happen to be&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;&lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;nxc reply --thread m-7f2&lt;/span&gt; appends message ops to &lt;b&gt;this&lt;/b&gt; machine&amp;#39;s log, and the receipt comes back the moment they are durable. Nothing has left the desktop yet.&lt;/font&gt;" style="rounded=1;absoluteArcSize=1;arcSize=12;whiteSpace=wrap;html=1;align=left;spacingLeft=20;spacingRight=20;verticalAlign=middle;fontColor=#1C1C1C;fontSize=14;fillColor=#FFFFFF;strokeColor=#E5E5E0;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="202" width="760" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1band" value="desktop" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="814" y="202" width="140" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;&lt;b&gt;The wake stays behind&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;The receipt says &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;woke: null&lt;/span&gt; — not an attempt that failed, but no wake ever owed. A return address names a &lt;i&gt;session&lt;/i&gt;, and &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;session_map&lt;/span&gt; is a plain table the reducer never touches and sync never carries: it names a live process on ONE machine.&lt;/font&gt;" style="rounded=1;absoluteArcSize=1;arcSize=12;whiteSpace=wrap;html=1;align=left;spacingLeft=20;spacingRight=20;verticalAlign=middle;fontColor=#1C1C1C;fontSize=14;fillColor=#FFFFFF;strokeColor=#E5E5E0;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="358" width="760" height="124" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2band" value="desktop" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="814" y="358" width="140" height="124" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;&lt;b&gt;Anti-entropy, not delivery&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;Each side asks what the other holds that it lacks, and takes the ops themselves. No op is addressed to a machine, and no server keeps a queue per recipient — nobody ever told the relay that a laptop cares about this thread.&lt;/font&gt;" style="rounded=1;absoluteArcSize=1;arcSize=12;whiteSpace=wrap;html=1;align=left;spacingLeft=20;spacingRight=20;verticalAlign=middle;fontColor=#1C1C1C;fontSize=14;fillColor=#FFFFFF;strokeColor=#E5E5E0;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="538" width="760" height="124" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3band" value="relay" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="814" y="538" width="140" height="124" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;&lt;b&gt;The laptop refolds&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;The ops land in its &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;ops&lt;/span&gt; table. A pass moves the log for every domain but folds only flow&amp;#39;s views, so opening a chat store runs the refold and &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;messages&lt;/span&gt; catches up. That commit bumps &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;PRAGMA data_version&lt;/span&gt;, and &lt;span style=&quot;font-family: JetBrains Mono, monospace; background-color: #FFFFFF; border: 1px solid #DCEFC0; color: #1C1C1C; border-radius: 3px; padding: 0px 3px&quot;&gt;subscribe()&lt;/span&gt; hands out a tick: &lt;i&gt;someone wrote — re-read&lt;/i&gt;.&lt;/font&gt;" style="rounded=1;absoluteArcSize=1;arcSize=12;whiteSpace=wrap;html=1;align=left;spacingLeft=20;spacingRight=20;verticalAlign=middle;fontColor=#1C1C1C;fontSize=14;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="718" width="760" height="144" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4band" value="laptop" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="814" y="718" width="140" height="144" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#84CC16;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;fontColor=#6B6B6B;labelBackgroundColor=#FFFFFF;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" source="b1" target="b2" edge="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" value="push" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#84CC16;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;fontColor=#6B6B6B;labelBackgroundColor=#FFFFFF;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" source="b2" target="b3" edge="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="pull" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#84CC16;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;fontColor=#6B6B6B;labelBackgroundColor=#FFFFFF;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" source="b3" target="b4" edge="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="callout" value="&lt;b&gt;Sync delivers your data, not your control flow.&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 14px;&quot;&gt;An app that is already alive re-reads on the tick and carries on. A session that ended its turn is resumed by nothing here — that the laptop was waiting is not in the log, and cannot be.&lt;/font&gt;" style="rounded=1;absoluteArcSize=1;arcSize=12;whiteSpace=wrap;html=1;align=left;spacingLeft=20;spacingRight=20;verticalAlign=middle;fontColor=#1C1C1C;fontSize=14;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;dashed=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" parent="1" vertex="1">
+          <mxGeometry x="42" y="918" width="760" height="92" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,33 @@
+[package]
+name = "nxs-test-support"
+version.workspace = true
+edition = "2021"
+description = "Test-only harness support: the stale-multicall-binary gate (nexus-flow-0yyw)"
+publish = false
+
+# TEST-ONLY, never a dependency of a shipped crate: this is a dev-dependency of the persona test
+# suites (cli/memory/chat) and of `nxs` itself, so nothing here rides the `nxs` binary. It is
+# deliberately NOT in the nxs dependency CLOSURE — `path_deps` follows `[dependencies]` and
+# `[build-dependencies]` only, so the gate does not trip on edits to its own source even where it
+# is a dev-dependency of the very package it watches.
+[dependencies]
+# Parse the workspace manifests to resolve the `nxs` path-dep closure. Already a workspace dep.
+toml = "0.8"
+# Re-exported: `cargo_bin` hands back an `assert_cmd::Command`, so the persona suites keep the exact
+# type they already assert on — the gate is a drop-in for `Command::cargo_bin`.
+assert_cmd = "2"
+# The verb-seam gate (6j6v.vtvs) walks the persona's REAL `clap` tree — the same one that renders
+# `--help` and the generated command reference — so the CLI half of the comparison is derived rather
+# than maintained. Same major as every persona crate; cargo unifies it to one build.
+clap = "4"
+# …and parses the module's engine/facade sources for the other half. Rust has no reflection over an
+# `impl` block, so the seam list has to come from the source text; `syn` is how it is read without a
+# regex that would trip over an attribute, a doc comment or a nested module. Already in the graph
+# via clap/serde derive.
+# `visit` is the actor-contract detector's completeness gate (6j6v.d4dw): it walks CALL expressions
+# to find the write entry points that validate an actor, rather than text-matching a name that also
+# appears in half a dozen doc comments.
+syn = { version = "2", features = ["full", "visit"] }
+
+[dev-dependencies]
+tempfile = "3"

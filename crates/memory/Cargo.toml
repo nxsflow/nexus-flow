@@ -1,0 +1,71 @@
+[package]
+name = "nexus-memory"
+version.workspace = true
+edition = "2021"
+description = "nexus-memory: the fact-reducer + nxm CLI — agent-native persistent project memory over the shared nxs-foundation substrate (domain=fact → memories view)"
+publish = false
+
+# Library-only since the multicall collapse (nexus-flow-5jz.7): `nxm` is no longer its own bin —
+# it is an `argv[0]` symlink to the single `nxs` binary, which links this crate and routes to it.
+# The reducer/store/CLI tree live here so the umbrella can call `run_from` and the verbs stay
+# unit-testable.
+[lib]
+name = "nexus_memory"
+path = "src/lib.rs"
+
+[dependencies]
+# The shared op-log CRDT substrate. memory's store wraps it and registers the fact reducer; it
+# depends ONLY on the foundation — no flow vocabulary leaks into the memory product (spec §4.4).
+nxs-foundation = { path = "../foundation" }
+# The shared init/compose library (5jz.1): the agent-file assembler `nxm init` delegates to, plus
+# the `ModuleInit` registry memory SELF-REGISTERS into (inventory). memory depends on `nxs-init`,
+# NOT on `nxs` — the seam that lets `nxs` link memory as the composition root without a cycle.
+nxs-init = { path = "../nxs-init" }
+# Self-registration: memory `inventory::submit!`s its `ModuleInit` into the registry `nxs-init`
+# collects. Same crate/version as `nxs-init`.
+inventory = "0.3"
+# The shared presentation layer: the manufakt-Forge Theme (TTY-gated so non-terminal/golden output
+# stays byte-stable plain).
+nxs-ui = { path = "../nxs-ui" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+ulid = "1"
+# Deterministic content-hash auto-keys (`f-`+sha256(body)): byte-identical bodies dedup to one
+# key, reworded bodies get a new key (bd parity). Pure-Rust, already in the workspace tree.
+sha2 = "0.10"
+# Embed the EN guide docs into the binary at compile time, so `nxm guide` works fully offline with
+# no filesystem dependency — the same mechanism `nxf guide` has (6j6v.9e3r). The macro must be
+# expanded in THIS crate (it resolves `$CARGO_MANIFEST_DIR`); `build.rs` supplies the
+# rerun-if-changed the macro itself does not emit.
+include_dir = "0.7"
+# The ONE embedded-guide mechanism shared by the three building blocks (6j6v.9e3r): listing,
+# lookup, the frozen `--json` contract, the terminal renderer and the TOPICS<->directory parity
+# rule. Shared so `nxf guide`, `nxm guide` and `nxc guide` cannot drift apart.
+nxs-guide = { path = "../guide" }
+# The `nxm` CLI surface: parser tree, `--json` records, the agent-file manifest as JSON.
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The `updated` display timestamp (RFC3339); pinned via NXM_NOW for deterministic goldens.
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+# Block SIGPIPE in the ONE thread that writes to the judge subprocess (migration.rs). The `nxs`
+# binary deliberately restores SIG_DFL at start so `nxf list | head` dies quietly like any Unix
+# filter — which means a judge that answers without draining its stdin would kill the whole process
+# from that thread instead of surfacing the EPIPE this code handles. `pthread_sigmask` scopes the
+# exception to the thread that needs it, rather than flipping a process-global disposition under an
+# embedding app. Unix-only, and no other code here touches libc.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+trycmd = "1.2.0"
+# The aye.23 multi-module integration test proves fact + task coexist in ONE op-log and that a
+# fact-op survives the SHARED sync wire (domain preserved) and folds at the peer. Those are DEV-
+# only deps — the memory LIBRARY stays flow-free; only the cross-product proof references both.
+nexus-flow-core = { path = "../core" }
+nxs-sync = { path = "../sync", features = ["engine"] }
+# The stale-multicall-binary gate (0yyw): `nxm` is an argv[0] symlink to `nxs`, which `-p
+# nexus-memory` never rebuilds — without this the suite silently asserts against an old binary.
+nxs-test-support = { path = "../test-support" }

@@ -1,0 +1,46 @@
+name: version-check
+
+# Version-file consistency on every PR and main push, plus tag == version on release tags —
+# fail-closed, before any build runs. Spec §4.3, §9.
+on:
+  push:
+    # `release/<major>.<minor>` maintenance lines (nexus-flow-aye.18): version-file consistency must
+    # hold on every active backport line too (a backport bumps the line's workspace version), not
+    # just main.
+    #
+    # NARROWED from `release/**` (6j6v.31rs), for the reason `ci.yml` spells out in full: that glob
+    # also caught the `release/v<X.Y.Z>` RELEASE-PREPARATION branches, so a version-bump PR ran this
+    # gate twice on one tree. The `pull_request` trigger below still covers those branches — which is
+    # where a version-file inconsistency has to be caught anyway, before the merge.
+    branches: [main, "release/[0-9]+.[0-9]+"]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: the consistency check only reads the repo.
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. Cancels PR runs only — a push run on `main` (or a `release/**` line / a tag)
+# is that ref's standing record of green and must always finish.
+concurrency:
+  group: version-check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `version check` reads $GITHUB_REF_TYPE / $GITHUB_REF_NAME itself, so on a `v*` tag it
+      # additionally enforces tag == v<version> (malformed tag => error, never skip). Tag data
+      # stays in env and is never interpolated into shell text.
+      - name: Check version consistency (+ tag == version on tags)
+        run: cargo xtask version check

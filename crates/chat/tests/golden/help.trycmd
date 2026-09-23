@@ -1,0 +1,575 @@
+**Every `--help` page `nxc` can render, captured** (nxf 6j6v.spjj, closed for the `nxc` tree by
+6j6v.dvyq).
+
+No gate watched this text before, and it had already bitten: removing `nxc threads expect` left clap
+advertising the subcommand in `nxc threads --help`, user-visible, and nothing went red. The reason is
+structural rather than an oversight — `xtask::docs::render_all` renders `nexus_flow_cli::command()`
+and nothing else, so `docs/generated/` has no `nxc` subtree at all and `cargo xtask docs check` /
+`docs coverage` cannot see this surface however carefully they run.
+
+So the pages are goldens. Every leaf verb and every group node is here, which is what makes this a
+MAP rather than a spot-check: a group page names its children (so a removed or added subcommand
+shows up), and a leaf page names its flags (so a removed or added option does too). A verb that is
+taken away and leaves its help behind now turns this file red.
+
+Agent ergonomics is this project's stated measuring stick, and a help page naming a verb that no
+longer exists is a false map, not a cosmetic defect: an agent reads it and then types something the
+binary refuses.
+
+A page that is REMOVED has to leave this file with its verb: regenerating would otherwise capture
+clap's "unrecognized subcommand" as the page's expected output, and the map would quietly become a
+map of doors that are shut. Delete the block; `tests/consolidated_entrances.rs` is where a removed
+entrance's refusal is pinned.
+
+Regenerate after an INTENDED surface change, and only then — read the diff before committing it:
+`cargo build -p nxs && TRYCMD=overwrite cargo test -p nexus-chat --test golden`. The `nxs` build
+first is load-bearing: `nxc` is a multicall alias of that binary, so a stale one would burn the
+previous surface into these pages (the freshness gate in `golden.rs` refuses that outright).
+
+```console
+$ nxc --help
+nexus-chat agent CLI
+
+Usage: nxc [OPTIONS] <COMMAND>
+
+Commands:
+  init            Initialize chat in the current directory: ensure a `.nxs` workspace, register the `chat` module, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler (re-assembling every active module) — parity with `nxm init`
+  agent-manifest  Emit nxc's declared contribution to the shared agent file (the prime command + the SessionStart hook) as data. `--json` is the machine contract the `nxs` umbrella assembles from
+  list            Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own address book, recognised from its session. With `--persona` it is that persona's view, whoever is asking
+  send            Open a conversation with a declared persona or channel: posts the first message, stamps a thread, and starts (or wakes) whoever is on the other side. Returns the thread id
+  reply           Answer in a thread: posts into the thread's own channel and hands the turn back to whoever is on the other side of it
+  threads         Thread quorum boards: `list` the caller's boards, or `show` one in full
+  status          Where an operation stands: the whole thread TREE from its root down, across channel borders. `--thread` shows the one operation that thread belongs to; `--channel` the live operations that started in a channel; `--all` adds the finished ones; with none of them, everything still going on here
+  search          Case-insensitive substring over message bodies in the caller's channels (bound LIKE), deterministically ordered
+  session         The role-runtime internal↔real SDK session map
+  transcript      The role session's Claude Agent SDK transcript: the normalized stream — assistant text, thinking, tool calls and their results, and any subagent activity they spawned
+  machine         Which machine a chat runs on — a new one with `--to <persona>`, or `--thread <id>` — and whether sending now would ask instead: the machine, where that came from, whether it is online, and the machines that are. Writes nothing
+  withdraw        Take back a commission — one still waiting for the working copy, or a round that is running
+  resume          Take up an operation that stopped because the model was not available to it — an exhausted quota, a provider that was unreachable, a broken connection
+  guide           Print an embedded, offline guide. Omit the topic to list the available ones
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+  -V, --version  Print version
+
+```
+
+```console
+$ nxc init --help
+Initialize chat in the current directory: ensure a `.nxs` workspace, register the `chat` module, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler (re-assembling every active module) — parity with `nxm init`
+
+Usage: nxc init [OPTIONS]
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --quiet    Driven/quiet mode: set up chat and delegate the agent files + hook, but render no banner. The seam the `nxs` umbrella uses to drive `nxc init` without output bleeding through; also the non-interactive agent entry
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc agent-manifest --help
+Emit nxc's declared contribution to the shared agent file (the prime command + the SessionStart hook) as data. `--json` is the machine contract the `nxs` umbrella assembles from
+
+Usage: nxc agent-manifest [OPTIONS]
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc prime --help
+Session bootstrap: pin the chat rule, name the core verbs, say who can be addressed here, and name the commissions of this caller's own that finished while it was away. Hidden from `--help`: the umbrella `nxs prime` is the single user-facing entry and fans out to this verb as a subprocess
+
+Usage: nxc prime [OPTIONS]
+
+Options:
+      --consumer <CONSUMER>  Read the record as this handle (default: the caller's own qualified handle)
+      --json                 Emit machine-readable JSON instead of human output
+      --db <DB>              Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+      --persona <PERSONA>    Prime as this declared persona: adds its identity block and its address book. OPTIONAL — a session started by `nxc` is recognised from the session it runs under, so this is for hosts that start sessions THEMSELVES (an app). Without either, the caller is a human
+  -h, --help                 Print help
+
+```
+
+```console
+$ nxc list --help
+Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own address book, recognised from its session. With `--persona` it is that persona's view, whoever is asking
+
+Usage: nxc list [OPTIONS]
+
+Options:
+      --json               Emit machine-readable JSON instead of human output
+      --persona <PERSONA>  Project the directory for this declared persona
+      --db <DB>            Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help               Print help
+
+```
+
+```console
+$ nxc send --help
+Open a conversation with a declared persona or channel: posts the first message, stamps a thread, and starts (or wakes) whoever is on the other side. Returns the thread id
+
+Usage: nxc send [OPTIONS] --to <TO> [BODY]
+
+Arguments:
+  [BODY]  The message body. The TARGET is `--to`: a declared persona or a declared channel. Pass `-` to read the body from STDIN instead (escaping-free, multi-line — the safe form for anything longer than a sentence), or supply it via `--body-file`
+
+Options:
+      --body-file <BODY_FILE>  Read the body from this file (UTF-8, verbatim); `-` reads STDIN. Mutually exclusive with the positional body — the same notation `nxf` uses for `--description-file`
+      --json                   Emit machine-readable JSON instead of human output
+      --db <DB>                Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+      --ref <REFS>             What this conversation is about — a ref pointer `k=v`, repeatable: `nxf_ids` (a ticket, repeatable), `branch`, `pr`, `session_id`. REQUIRED unless you say `--no-ref`
+      --no-ref                 This conversation really is about nothing — the explicit answer that turns off the `--ref` reminder. Says "I looked", where saying nothing says nothing
+      --to <TO>                Open a conversation with a declared persona or channel and get a thread id back. The TARGET's declaration decides what happens — a persona is started on a fresh session, a channel fans out under its own policy. A channel no declaration names is not a target (6j6v.dvyq §3)
+      --machine <MACHINE>      Run this chat on that machine — an id or a name from `nxs sync machines`. Without it the chat runs where the persona's `machine:` says, else on this machine. A machine that is not online is ASKED about, and nothing is sent: the refusal lists the machines that are online, and naming one here is the answer. A machine named here is honoured even when it is not online — the chat then waits in the log until it is back. Persona chats only
+      --stream                 Watch it happen instead of returning immediately: the thread AND the personas' transcripts, until somebody answers. For a human at the keyboard — refused once a persona is registered
+  -h, --help                   Print help
+
+```
+
+```console
+$ nxc reply --help
+Answer in a thread: posts into the thread's own channel and hands the turn back to whoever is on the other side of it
+
+Usage: nxc reply [OPTIONS] [BODY]
+
+Arguments:
+  [BODY]
+          The message body. The thread is `--thread`. Pass `-` to read the body from STDIN instead — the form to use for a verdict, a report or anything quoting a command, since nothing on that path is evaluated by the shell — or supply it via `--body-file`
+
+Options:
+      --body-file <BODY_FILE>
+          Read the body from this file (UTF-8, verbatim); `-` reads STDIN. Mutually exclusive with the positional body — the same notation `nxf` uses for `--description-file`
+
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+      --escalate
+          "I cannot reach the result on my own — I need help, or a decision." One of the three things an agent may say with `reply`; the others are "I am finished" (a bare reply) and `--needs-rework`, which is about somebody ELSE's work. Everything else it produces belongs in the transcript.
+          
+          **A DECISION counts, and saying so is half of what this flag is for** (nxf 6j6v.aqqa). The short reading — "I cannot carry out this task" — describes only the blocked half, and a session that CAN carry its task out reads it as not applying to it. Measured: a PM with two open product questions ended its turn with a plain reply, and the chain handed the questions DOWNWARD to a review round that had no standing to answer them. A decision that is not yours goes UP, to whoever commissioned you, and this is the flag that takes it there.
+          
+          It is not a wastebasket for anything that is not a result. A real follow-up question ("what do you mean by X?") used to be `--kind question` and is a different thing still; with `--kind` gone (6j6v.ckeq) there is no way to spell it on a reply, so ask it by opening a conversation of its own — or say it here, since for the WORKING COPY the two are the same fact anyway (nobody is working, the task is mid-flight).
+          
+          The turn is discharged either way — the session ends, and the debt with it. What is different is the OUTCOME, and the channel's supervisor decides what becomes of it.
+          
+          On a `flow: sequential` channel that decision is: the chain ENDS here. The step after this one is not started, the round is handed up as it stands, and whoever commissioned it decides what happens next (nxf 6j6v.ma7v). A round that is merely SLOW has no spelling on this verb — do not reach for this flag to buy time, because a caller reads it as work that will not arrive.
+          
+          It is DECLARED rather than free, which is what makes it a signal at all: the supervisor branches on a bit whose meaning is written in the channel, not on a token you invent and no reader can enumerate.
+
+      --needs-rework
+          "What you handed me does not meet the standard." The THIRD and last thing an agent may say with `reply` — and the one about SOMEBODY ELSE's work rather than your own.
+          
+          Use it when you were asked to assess something and what you were given cannot go forward as it stands. Name what must be put right IN THE BODY: those words are handed to the party that produced the work, and they are its next task.
+          
+          **It is not `--escalate` and the two may not be combined.** `--escalate` says you cannot reach the result of YOUR task without help or a decision, and ends the chain upward; this says the round goes BACK and continues. Setting both is refused.
+          
+          **What it does is written in the channel** (`steps:` → `on_needs_rework:`), which is what makes it a signal rather than a token you invent. A step whose channel declares no back edge will not have offered it to you at all; set on such a step it is dropped, and the reply's receipt says so.
+
+      --accept
+          "I know what the review said. This goes on anyway." **Not for the party whose work was reviewed** — for the party that ASKED for the round (nxf 6j6v.am8j).
+          
+          Answer the round's own thread with it and the step whose verdict sent the work back counts as satisfied: the chain continues over that step's `next:` instead of going round the cycle again, and the next step is handed your words together with the verdict you set aside, so it knows the judgement was overruled rather than met.
+          
+          **Without it there is no way out of a cycle whose reviewer never becomes satisfied.** `max_passes` bounds ONE run, and answering the round in any other way commissions a new one — which arms the same ceiling again. Measured in `watch-bundestag` on 2026-09-12: six draft/review passes, six verdicts, not one ticket handed on.
+          
+          **You may not accept your own reviewer.** It is honoured only on the thread of a round YOU commissioned; on the slot you are serving it is refused, because the separation between producing and checking is the whole reason the round has two parties. What an agent does instead is `--escalate`, which asks the party above it to decide — and this is the verb that party then has.
+          
+          It is recorded as its own kind (`accepted`), so an override stays findable afterwards as something other than "the review passed" — because it is not that.
+
+      --thread <THREAD>
+          Answer in this thread. A thread id identifies a conversation on its own — no channel context — and hands the turn back to whoever is on the other side of it.
+          
+          **Optional since 6j6v.dq59, while exactly ONE conversation is open for you**: then a bare `nxc reply "…"` answers it, because there is nothing else it could mean. With several open — you owe your commissioner an answer AND the role you consulted has come back to you — this is required again, and the message that woke you named each one with the command it takes. Passing it is always allowed, including when only one is open.
+
+      --if-unanswered
+          FOR THE AGENT SIDECAR'S TEARDOWN, not for you: post ONLY if the caller still owes a reply on this thread — it is named in the thread's `expects_reply_from` (nxf 6j6v.jepk/6j6v.enrs) and has not posted there yet. Otherwise a deliberate no-op — exit 0, `posted: false` in `--json`, nothing written — never an error.
+          
+          That is what lets a caller which cannot tell whether it already answered ask unconditionally and safely every time (nxf 6j6v.ww0a), and there is exactly one such caller: `agent-sidecar/src/main.mjs` runs `nxc reply --thread <id> --if-unanswered <text>` when an SDK session ends without ever answering the thread it owed, so the thread does not go quiet forever. When owed, this behaves exactly like a plain reply, return address and all; when not owed, the skip wakes nobody either.
+          
+          It is deliberately NOT on the library seam (nxf 6j6v.ckeq): an app holds its own sessions and knows whether they answered.
+
+      --machine <MACHINE>
+          Hand this chat to another machine — an id or a name from `nxs sync machines`. The persona is started there with the conversation so far; this machine starts nothing. Persona chats only, and a person's decision: a session inside the chat cannot move it
+
+      --stream
+          Watch the answer arrive (see `send --stream`)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc threads --help
+Thread quorum boards: `list` the caller's boards, or `show` one in full
+
+Usage: nxc threads [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the caller's threads (membership-scoped), each with its bulk quorum state
+  show  Show one board in full: the quorum state plus the reply messages in order
+  name  Give a conversation its NAME — once (nxf 6j6v.e76c). Without `<name>` the name is DERIVED from the thread's opening message, which is what the run `send` commissions does; a thread that already has one keeps it
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc threads list --help
+List the caller's threads (membership-scoped), each with its bulk quorum state
+
+Usage: nxc threads list [OPTIONS]
+
+Options:
+      --consumer <CONSUMER>  List as this handle's threads (default: the caller's own qualified handle)
+      --json                 Emit machine-readable JSON instead of human output
+      --channel <CHANNEL>    Restrict to one channel
+      --db <DB>              Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help                 Print help
+
+```
+
+```console
+$ nxc threads show --help
+Show one board in full: the quorum state plus the reply messages in order
+
+Usage: nxc threads show [OPTIONS] <THREAD_ID>
+
+Arguments:
+  <THREAD_ID>  The thread id to show
+
+Options:
+      --consumer <CONSUMER>  Read as this handle (default: the caller's own qualified handle)
+      --json                 Emit machine-readable JSON instead of human output
+      --db <DB>              Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help                 Print help
+
+```
+
+```console
+$ nxc status --help
+Where an operation stands: the whole thread TREE from its root down, across channel borders. `--thread` shows the one operation that thread belongs to; `--channel` the live operations that started in a channel; `--all` adds the finished ones; with none of them, everything still going on here
+
+Usage: nxc status [OPTIONS]
+
+Options:
+      --json               Emit machine-readable JSON instead of human output
+      --thread <THREAD>    Any thread of the operation — the tree is shown from ITS root, whether it is still running or already finished
+      --channel <CHANNEL>  A declared channel name (or a raw channel id): the live operations whose ROOT sits there. An entry point, not an anchor — an operation crosses channels
+      --db <DB>            Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+      --all                Finished operations too, not just what is still going on — with `--channel`, the finished ones of that channel
+  -h, --help               Print help
+
+```
+
+```console
+$ nxc search --help
+Case-insensitive substring over message bodies in the caller's channels (bound LIKE), deterministically ordered
+
+Usage: nxc search [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>  The substring to search for
+
+Options:
+      --consumer <CONSUMER>  Search as this handle's channels (default: the caller's own qualified handle)
+      --json                 Emit machine-readable JSON instead of human output
+      --db <DB>              Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help                 Print help
+
+```
+
+```console
+$ nxc session --help
+The role-runtime internal↔real SDK session map
+
+Usage: nxc session [OPTIONS] <COMMAND>
+
+Commands:
+  bind   Bind a previously-minted internal session id to the real Claude Agent SDK session id the SDK handed back. Called by the sidecar once a session starts; an unknown `internal` id is reported as `not_found`
+  ended  Report that a session's own process is over. Called by the sidecar's teardown as its last act; an unknown `internal` id is reported as `not_found`
+  state  Say what became of a session: running, ended (and when), or neither
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc session bind --help
+Bind a previously-minted internal session id to the real Claude Agent SDK session id the SDK handed back. Called by the sidecar once a session starts; an unknown `internal` id is reported as `not_found`
+
+Usage: nxc session bind [OPTIONS] <INTERNAL> <REAL>
+
+Arguments:
+  <INTERNAL>  The internal (nxc-minted) session id
+  <REAL>      The real Claude Agent SDK session id
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc session interrupted --help
+Report that a session stopped because the model was not available to it. Called by the sidecar's teardown; an unknown `internal` id is reported as `not_found`.
+
+**Not a failure and not an ending** — the session is ON HOLD. Its thread keeps owing an answer, because the session that owes it is coming back, and the operation is marked interrupted rather than escalated.
+
+Idempotent: the first announcement wins, and a repeat is a clean no-op.
+
+Usage: nxc session interrupted [OPTIONS] --limit <LIMIT> <INTERNAL>
+
+Arguments:
+  <INTERNAL>
+          The internal (nxc-minted) session id that stopped
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --limit <LIMIT>
+          The runtime's own name for the boundary — which window, or the error class where it named no window
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+      --until <UNTIL>
+          When the boundary falls (RFC3339). Omit when the runtime stated no instant: the hold is still recorded and the way back is then `nxc resume --thread <id>`, run by hand
+
+      --detail <DETAIL>
+          The runtime's own sentence about it, for a human reading a line
+          
+          [default: ""]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc transcript --help
+The role session's Claude Agent SDK transcript: the normalized stream — assistant text, thinking, tool calls and their results, and any subagent activity they spawned
+
+Usage: nxc transcript [OPTIONS] <COMMAND>
+
+Commands:
+  append  Append normalized transcript entries, read as JSON-lines from STDIN, to a session's transcript (`seq` is assigned by the store, so repeated calls for the same session — the `resume` case — continue it rather than colliding)
+  show    Render a session's stored transcript as a timeline: the main conversation in `seq` order, with each Task-spawned subagent's own entries nested under the `tool_use` that spawned them. `--json` is the same transcript record an embedding app receives
+  prune   Retire the transcripts of sessions nobody has written to for a while, and say what went (nxf 6j6v.t7pa). WHOLE sessions, aged on their LAST recorded entry — a session still being written to is never a candidate, however long it has been running, and a long-running one is never cut in half
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json     Emit machine-readable JSON instead of human output
+      --db <DB>  Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+  -h, --help     Print help
+
+```
+
+```console
+$ nxc transcript append --help
+Append normalized transcript entries, read as JSON-lines from STDIN, to a session's transcript (`seq` is assigned by the store, so repeated calls for the same session — the `resume` case — continue it rather than colliding).
+
+THE SIDECAR'S CALLBACK CONTRACT, like `session bind`'s: `agent-sidecar/src/main.mjs` already shells out to exactly `nxc transcript append --session <internal>` and writes one `JSON.stringify(entry)` per line to this process's stdin. The flag NAME, the stdin framing, and the `--json` record are therefore all load-bearing — an already-committed producer depends on them. Blank lines are framing (the sidecar ends its batch with a newline) and are skipped; a line that does not parse, or an entry with an empty `kind`, is a `validation` error naming the line — the sidecar propagates everything except clap's "unrecognized subcommand", so a silent skip here would lose transcript with no trace anywhere.
+
+Usage: nxc transcript append [OPTIONS] --session <SESSION>
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --session <SESSION>
+          The INTERNAL (nxc-minted) session id whose transcript this is — the same id `session bind` maps to the real SDK session, not the real SDK id itself
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc transcript show --help
+Render a session's stored transcript as a timeline: the main conversation in `seq` order, with each Task-spawned subagent's own entries nested under the `tool_use` that spawned them. `--json` is the same transcript record an embedding app receives.
+
+An OPERATOR surface, with no membership gate: a transcript has no channel to gate on, and `agent_transcript` is device-local and never synced, so a gate here would buy nothing anyone with the workspace file cannot already do with `sqlite3`. Note what that means for the OUTPUT though: it contains raw tool inputs and results — whatever the agent read, wrote, or ran — so treat a dumped transcript like the workspace db itself, not like a message log, when pasting it into a bug report.
+
+An unknown session renders an EMPTY transcript rather than failing: a session whose sidecar never flushed is indistinguishable from one that had nothing to say.
+
+Usage: nxc transcript show [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>
+          The INTERNAL (nxc-minted) session id — the id `send --to <persona>` returns as `session` and `refs.session_id` carries, not the real SDK id
+
+Options:
+      --from-seq <SEQ>
+          Start AFTER this `seq` instead of at the beginning — the paging cursor (nxf 6j6v.t7pa). Pair it with `--limit` to walk a long session in chunks: pass the largest `seq` the last chunk showed, and a chunk shorter than `--limit` is the end.
+          
+          A subagent entry whose spawning `tool_use` fell outside the window is shown at top level with its `subagent_type` — nothing is hidden, but the nesting of a WINDOW is the nesting of the rows in it. Read without these flags for the exact tree. `allow_negative_numbers` because `-1` is the "from the start" sentinel the read itself uses (`seq` starts at 0), so a script walking the cursor can pass it back verbatim instead of special-casing the first call into "omit the flag".
+
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+      --limit <N>
+          Show at most this many entries. Counts stored entries, nested subagent ones included — that is what bounds the memory this read holds, and a single `Task` can carry hundreds of nested entries. Zero or negative reads as "no limit", the same way the library seam treats it (and the same way SQLite spells it).
+          
+          `allow_negative_numbers` to match `--from-seq` beside it: without it clap rejects `--limit -1` before the value is ever seen, which left the store's own "negative means no limit" contract unreachable from the command line (PR review, Test Quality #3).
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc transcript prune --help
+Retire the transcripts of sessions nobody has written to for a while, and say what went (nxf 6j6v.t7pa). WHOLE sessions, aged on their LAST recorded entry — a session still being written to is never a candidate, however long it has been running, and a long-running one is never cut in half.
+
+**You do not have to run this to keep the table bounded**: the same retention rides the first flush of every new role session. Reach for it to clear out a workspace that has gone quiet — where no new session is coming to trigger that — or to apply a tighter window once.
+
+Sessions carrying no readable timestamp are of unknown age and are KEPT, and reported separately so they are a visible gap rather than a silent one.
+
+This stops `.nxs/db.sqlite` growing; it does not make it smaller. The freed pages are reused by later writes, but shrinking the file itself takes a `VACUUM`, which is not run here — it rewrites the whole shared workspace database under an exclusive lock.
+
+Usage: nxc transcript prune [OPTIONS]
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --keep-days <DAYS>
+          Keep sessions whose last entry is within this many days. Defaults to the configured window (`NXC_TRANSCRIPT_KEEP_DAYS`, itself defaulting to 30 days)
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+      --dry-run
+          Report what would be removed and remove nothing. Takes no write lock either, so it is safe to point at a busy workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc resume --help
+Take up an operation that stopped because the model was not available to it — an exhausted quota, a provider that was unreachable, a broken connection.
+
+Nothing was broken and nobody did anything wrong, so the round was never handed back: the thread still owes its answer and the session is waiting to give it. `nxc status` marks such an operation and says when the boundary falls.
+
+**The session continues with its own transcript** — everything it did before the interruption, including every command and what that command returned — rather than starting over. That is what stops the work being done a second time.
+
+**It checks before it starts anything**: a round that was answered before the interruption is not run again, a session that is already working is left alone, and a working copy that has moved since sends a question back to the thread that started the operation instead of continuing blind.
+
+The background service does this by itself once the boundary falls. Run it by hand to go earlier — with another account, say — with `--force`.
+
+Usage: nxc resume [OPTIONS]
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --thread <THREAD>
+          A thread of the interrupted operation — the id `nxc status` shows
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+      --session <SESSION>
+          The interrupted session itself, by its internal id. What the background service's own job carries; a person normally names a thread
+
+      --force
+          Start it even though the runtime says its window has not lifted yet
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc tick --help
+Re-check a thread's completion/staleness and, if due, route it through its declared channel's `on_complete` policy — what a channel's scheduled one-shot timer runs when it fires. IDEMPOTENT: a thread whose completion was already handled — by a real completing `reply`, or an earlier `tick` — is a clean no-op, never a second wake or synthesizer spawn.
+
+Hidden from `--help` for `prime`'s reason, one step further: nobody types this. The one-shot job a channel's declared `timeout` schedules is what runs it, and that job re-schedules itself on every decline, because a member's clock is restarted by that member's own transcript.
+
+Usage: nxc tick [OPTIONS] --thread <THREAD>
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --thread <THREAD>
+          The thread to re-check. Keyed on the THREAD: a declared channel's `timeout` hangs on the board it opened, and the board's own return address is what the routing resolves back through
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```console
+$ nxc guide --help
+Print an embedded, offline guide. Omit the topic to list the available ones.
+
+One of the three building blocks' guide verbs (6j6v.9e3r): `nxc guide` serves CHAT's topics, `nxf guide` flow's, `nxm guide` memory's, and `nxs guide` fans out over the active modules. Needs no workspace — the content is compiled into the binary.
+
+Usage: nxc guide [OPTIONS] [TOPIC]
+
+Arguments:
+  [TOPIC]
+          Guide topic; omit to list topics
+
+Options:
+      --json
+          Emit machine-readable JSON instead of human output
+
+      --db <DB>
+          Use this sqlite db file directly instead of discovering `.nxs/`
+          
+          [env: NXC_DB=]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```

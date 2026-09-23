@@ -1,0 +1,33 @@
+The `nxs` umbrella verbs over the ONE shared workspace. Set up the suite, then inspect it.
+
+Set up flow + memory non-interactively (the agent entry point):
+
+```console
+$ nxs init --module flow --module memory --json
+{"already_active":[],"hook":{"commands":["nxf prime","nxm prime || cat NEXUS_MEMORY.md 2>/dev/null"],"wired":true},"modules":["flow","memory"],"ok":true,"service":{"answer":null,"registered":true},"workspace":"[CWD]/.nxs"}
+
+```
+
+Re-running init in this workspace is an informative no-op — `already_active` reports what was already set up (5jz.4):
+
+```console
+$ nxs init --module flow --json
+{"already_active":["flow","memory"],"hook":{"commands":["nxf prime","nxm prime || cat NEXUS_MEMORY.md 2>/dev/null"],"wired":true},"modules":["flow","memory"],"ok":true,"service":{"answer":null,"registered":true},"workspace":"[CWD]/.nxs"}
+
+```
+
+Cross-module diagnosis of the shared workspace (foundation-only):
+
+```console
+$ nxs doctor --json
+{"workspace":"[CWD]/.nxs","site_id":1,"prefix":"ab12","active_modules":["flow","memory"],"schema_version":7,"schema_supported":7,"schema_status":"current","sync_bound":false,"op_count":0,"duplicate_coordinates":0,"integrity_ok":true,"beads_residue":false}
+
+```
+
+Raise the workspace to the current schema (a clean no-op when already current):
+
+```console
+$ nxs migrate --json
+{"from":7,"to":7,"changed":false,"hook_rewritten":false,"hook_commands":[],"modules_registered":[]}
+
+```

@@ -1,0 +1,128 @@
+[package]
+name = "nexus-chat"
+version.workspace = true
+edition = "2021"
+description = "nexus-chat: the message-reducer + nxc CLI over the shared nxs-foundation substrate (domain=message → chat views); the nxc messaging verbs (send/reply/inbox/read/search/status)"
+publish = false
+
+[lib]
+name = "nexus_chat"
+path = "src/lib.rs"
+
+[features]
+# The `nxc` CLI/onboarding surface (a6ah). Default-on, so the `nxs` multicall binary and `nxc`
+# behave exactly as before. An EMBEDDING consumer that links only `nexus_chat::engine::Engine`
+# (app-foundations engine-bridge/engine-server, be9y) sets `default-features = false` and the whole
+# CLI/TUI dependency closure — clap, nxs-ui (→ inquire, crossterm), nxs-init, inventory —
+# drops out of its graph, leaving just engine/facade/store/model/watch/orchestration over the
+# foundation. The `cli`/`onboarding` modules (the only code that touches those deps) are
+# `#[cfg(feature = "cli")]`.
+#
+# `sha2` used to sit in this list and no longer can (nxf 6j6v.qvfp): the deterministic DM channel id
+# moved into `orchestration`, which the ENGINE seam uses — a lean embedder calling `coordinator_commission`
+# auto-opens a DM, so it needs the hash. Gating it behind `cli` made
+# `--no-default-features` fail to compile, which only CI's lean-build step caught.
+default = ["cli"]
+cli = ["dep:clap", "dep:nxs-ui", "dep:nxs-init", "dep:inventory", "dep:include_dir", "dep:nxs-guide"]
+
+[dependencies]
+# The shared op-log CRDT substrate. chat's store wraps it and registers the message reducer; it
+# depends ONLY on the foundation — no flow/memory vocabulary leaks in (spec §4.4).
+nxs-foundation = { path = "../foundation" }
+# The background-service seam (nxf 6j6v.8see): a declared `timeout:` is armed by writing into the
+# workspace's deadline book, which the ONE nexus-flow service honours. NOT optional — `timer.rs` is
+# on the shared path both seams take, so an embedder linking only the engine
+# (`default-features = false`) arms windows through exactly the same book the CLI does. The crate
+# itself is deliberately tiny (serde/toml/serde_json/directories/time over the shared error type)
+# and pulls in no CLI closure, which is the whole reason it exists below every crate that has one.
+nxs-service = { path = "../service" }
+# The shared init/compose library (5jz.1): the agent-file assembler `nxc init` delegates to, plus
+# the `ModuleInit` registry chat SELF-REGISTERS into (inventory). chat depends on `nxs-init`, NOT on
+# `nxs` — the seam that lets `nxs` link chat as the composition root without a cycle (spec §5.2 T3).
+# CLI-surface only (`cli` feature): the embedding engine handle never assembles agent files.
+nxs-init = { path = "../nxs-init", optional = true }
+# Self-registration: chat `inventory::submit!`s its `ModuleInit` into the registry `nxs-init`
+# collects. Same crate/version as `nxs-init`. CLI-surface only (`cli` feature).
+inventory = { version = "0.3", optional = true }
+# The shared presentation layer: the manufakt-Forge Theme for `nxc init`'s suite cross-sell CTA
+# (TTY-gated so non-terminal/golden output stays byte-stable plain). Mirrors `nxm init`.
+# CLI/TUI-surface only (`cli` feature): pulls inquire + crossterm transitively.
+nxs-ui = { path = "../nxs-ui", optional = true }
+# Embed the EN guide docs into the binary at compile time, so `nxc guide` works fully offline with
+# no filesystem dependency — the same mechanism `nxf guide` has (6j6v.9e3r). The macro must be
+# expanded in THIS crate (it resolves `$CARGO_MANIFEST_DIR`); `build.rs` supplies the
+# rerun-if-changed the macro itself does not emit. CLI-surface only (`cli` feature).
+include_dir = { version = "0.7", optional = true }
+# The ONE embedded-guide mechanism shared by the three building blocks (6j6v.9e3r): listing,
+# lookup, the frozen `--json` contract, the terminal renderer and the TOPICS<->directory parity
+# rule. Shared so `nxf guide`, `nxm guide` and `nxc guide` cannot drift apart. CLI-surface only.
+nxs-guide = { path = "../guide", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Global, time-sortable message/thread ids (`m-`+ULID). Collision-free across workspaces (spec §2.2).
+ulid = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# YAML persona declarations under `<workspace-root>/.nxs-personas/*.yaml` (role.rs):
+# handle/base_prompt/claude_md/session/tools/etc, one file per persona. Also used directly by
+# tests/role.rs (integration tests get every entry in `[dependencies]`, not just
+# `[dev-dependencies]`).
+serde_yaml = "0.9"
+# The `nxc` CLI surface: parser tree, `--json` records, env-backed flags. CLI-surface only
+# (`cli` feature) — the embedding engine handle parses no argv.
+clap = { version = "4", features = ["derive", "env"], optional = true }
+# Deterministic DM channel id: dm: + hex(sha256(sorted handles joined by \x00))[..24] (spec §3.2).
+# NOT optional: `orchestration::dm_channel_id`/`ensure_dm_channel` are on the shared path both seams
+# take — a persona summon auto-opens the DM when the caller names no channel, which is what
+# `Engine::send_to` does on every call — so an embedder linking only the engine
+# (`default-features = false`) needs it just as much as `nxc` does.
+sha2 = "0.10"
+# The `created` display timestamp (RFC3339 formatting); pinned via NXC_NOW for deterministic goldens.
+# `parsing` powers a declared channel `timeout:`'s duration→absolute resolution (parse `now` + the
+# RFC3339 form). It reached that grammar through a FLAG until 6j6v.ckeq removed the last of them
+# (`ask --deadline` -> `send --deadline` -> nothing): the window is declared now, not passed.
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[target.'cfg(unix)'.dependencies]
+# `kill(pid, 0)` — the POSIX "is this process alive?" question, and the whole of the single-process
+# guard for one internal session (nxf 6j6v.7qtf, `worker.rs`'s `SessionLock`). `std` has no
+# process-liveness API and there is no way to answer it without the syscall; shelling out to `kill`
+# would put a subprocess on the spawn path of every resume. Already in this workspace's lock file
+# through several transitive users, so it costs no new download and no new build. Unix-only: the
+# sidecar runtime is (nxf 6j6v.mwn4), and the `cfg(not(unix))` fallback says what it costs there.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+# The BULK-READ gate (nxf 6j6v.yr59, `tests/bulk_quorum.rs`) counts the SQL statements one read
+# prepares, through `Connection::authorizer` — SQLite calls it once per statement being PREPARED,
+# so a read that grows a statement per thread is visible as a count that grows with N. `hooks` is
+# the feature that exposes it, and it is DEV-ONLY: the library itself installs no callback and the
+# non-test build of `rusqlite` is unchanged.
+#
+# A second gate of the same kind since nxf 6j6v.zmb5, and it is why this line is worth keeping in
+# mind rather than treating as one test's private dependency: `working_tree.rs`'s
+# `the_hand_over_is_one_transaction_so_a_naive_split_shows_up_as_a_second_commit` counts COMMITS
+# (`commit_hook`) and row writes (`update_hook`) across the working-tree hand-off, so splitting that
+# one transaction in two is a deterministic failure instead of a race nobody can reproduce. Note
+# that this one lives in a `#[cfg(test)]` module inside `src/`, not under `tests/` — dev-dependency
+# features unify into the lib's own test build, which is what makes that work.
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+# Black-box `nxc` verb tests over the built binary (the multicall symlink the nxs build produces).
+# `sha2` (a normal dep) is reused by the byte-stable golden test to mirror the DM-id derivation.
+assert_cmd = "2"
+# The T3 contract goldens: every `nxc init`/`agent-manifest`/`prime` doc example runs against the
+# built binary and the shown output IS the assertion (mirrors memory's golden harness, spec §5.2).
+trycmd = "1.2.0"
+# The coexistence + sync-gate proofs reference flow AND memory — DEV-only, so the chat LIBRARY
+# stays flow/memory-free (mirrors crates/memory/Cargo.toml).
+nexus-flow-core = { path = "../core" }
+# T4 (6j6v.j25s) drives the REAL client anti-entropy engine so a `message` op crosses a relay and
+# folds on a peer — the `export()/apply()` shortcut in coexistence.rs is upgraded to the engine the
+# `nxs sync` CLI actually runs. `engine` pulls in nexus-flow-core + the ops-table reader.
+nxs-sync = { path = "../sync", features = ["engine"] }
+# The three-way coexistence + M1-gate proof exercises the memory (`fact`) domain alongside
+# task/message in one shared `.nxs` db — DEV-only, no library dependency on memory.
+nexus-memory = { path = "../memory" }
+# The stale-multicall-binary gate (0yyw): `nxc` is an argv[0] symlink to `nxs`, which `-p
+# nexus-chat` never rebuilds — without this the suite silently asserts against an old binary.
+nxs-test-support = { path = "../test-support" }

@@ -1,0 +1,22 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH init 1  "init " 
+.SH NAME
+init \- Initialize a `.nxs` workspace in the current directory: set up flow, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler. To set up the whole suite (and pick tools interactively), use `nxs init` instead
+.SH SYNOPSIS
+\fBinit\fR [\fB\-\-plugin\fR] [\fB\-\-quiet\fR] [\fB\-\-from\-beads\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Initialize a `.nxs` workspace in the current directory: set up flow, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler. To set up the whole suite (and pick tools interactively), use `nxs init` instead
+.SH OPTIONS
+.TP
+\fB\-\-plugin\fR \fI<PLUGIN>\fR
+Plugin to activate (vocabulary + ranking): `issue\-tracker` | `personal\-todo`. Required when non\-interactive (`\-\-json`/piped/`\-\-quiet`); on a TTY, omitting it prompts
+.TP
+\fB\-\-quiet\fR
+Driven/quiet mode: set up the workspace and delegate the agent files + the SessionStart hooks, but render no banner or prompt. The seam the `nxs` umbrella uses to drive `nxf init` without its output bleeding through; implies a non\-interactive plugin choice (`\-\-plugin`)
+.TP
+\fB\-\-from\-beads\fR
+Consent to the beads → nxs migration: in a project that still uses beads, import its tickets + memories and roll back beads\*(Aq config. Routed through the `nxs` umbrella, which owns the migration
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

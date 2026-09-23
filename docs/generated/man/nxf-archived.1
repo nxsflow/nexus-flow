@@ -1,0 +1,16 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH archived 1  "archived " 
+.SH NAME
+archived \- List archived items (any status). Ordered by archive\-date descending (most recent first); override with `\-\-sort`
+.SH SYNOPSIS
+\fBarchived\fR [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List archived items (any status). Ordered by archive\-date descending (most recent first); override with `\-\-sort`
+.SH OPTIONS
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `archived` | `id` | `rank` (default `archived`). An unknown key is a loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

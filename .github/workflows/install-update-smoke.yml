@@ -1,0 +1,147 @@
+name: install-update-smoke
+
+# Real install + self-update smoke on FRESH runners (nexus-flow-h1h).
+#
+# The hermetic harness (tests/install.sh.test.sh, run by install-sh-ci.yml) exercises install.sh
+# against a local static server with a throwaway key — it can never reach the real origin. This
+# job closes that gap: on a clean macOS/Linux runner it installs `nxf` from the PUBLISHED channel
+# via `curl …/install.sh | sh`, proves the signature verification fires, runs the binary
+# (`nxf --version` == the channel head), and drives the canonical `nxs self-update`. It automates the
+# previously-manual release verification step (lhg) and is usable as a v0.1.0 verification run.
+#
+# Target: the new staging /nxs chain (https://staging.nxsflow.com/nxs) by default — staging previews
+# the beta ring (spec §4), so every scheduled run exercises the migrated same-origin delivery and
+# landing-staging is a declared CI dependency (nxsflow.com migration, spec §5, 6j6v.xvv3). Dispatch
+# inputs point it at prod (https://nxsflow.com/nxs, channel stable) or turn on a REAL older->newer
+# self-update — the henne-ei is solved because it tests whatever origin it is given, no public
+# release required.
+#
+# Fail-closed: a failed verification, a version mismatch, or the wrong verifier path fails the job
+# (`fail-fast: false` so every cell still reports). Not a `pull_request` trigger, so it never
+# gates PRs — it is an on-demand / scheduled verification, exactly as the ticket frames it.
+#
+# The 85y.28 "no verifier at all → refusal with the `brew install minisign` hint" case is NOT
+# reproducible here: every GitHub runner ships a capable openssl (and `capable_openssl` probes
+# absolute Homebrew paths, so PATH tricks can't hide it), which means install.sh correctly
+# VERIFIES via openssl instead of refusing. That refusal-with-brew-hint path is covered
+# deterministically by the hermetic harness (tests/install.sh.test.sh, case C1).
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Origin to install from (staging /nxs default; set https://nxsflow.com/nxs for a prod check)
+        required: false
+        default: https://staging.nxsflow.com/nxs
+      channel:
+        description: Promotion ring (stable | beta | alpha) — staging serves beta, prod serves stable
+        required: false
+        default: beta
+      update_from:
+        description: Older version to install then self-update FROM (staging rehearsal; empty = assert up-to-date)
+        required: false
+        default: ""
+  schedule:
+    # Weekly drift check against the staging /nxs chain: the install path is security-critical and
+    # depends on external state (CDN, TLS cert, published manifest) that no PR can catch.
+    #
+    # PROD IS WATCHED FROM THE OTHER SIDE NOW (6j6v.sgfr). It used to be the infra e2e in
+    # `infra-prod.yml`, which went with the infra teardown. What replaced it is not in this repo:
+    # nxsflow-landing-page owns the bucket, the distribution and the updater, and runs a scheduled
+    # endpoint prober over /nxs/{updater,latest,install.sh} with one alarm per check (cyb7.fv48).
+    # It asserts more than a status code — notably that a manifest's `url` and a `/latest`
+    # `Location` stay on `https://nxsflow.com/nxs/`, which is the failure a 200 hides.
+    #
+    # So this job is the last automated black-box check of the install path living HERE, and the
+    # only one either side runs against the *installer* rather than the endpoints. That is why it
+    # stays, and why it is worth its weekly minute.
+    - cron: "37 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # WRITTEN DECISION (6j6v.31rs): both macOS cells STAY on GitHub-hosted runners, even though the
+  # standing rule from that ticket is "no GitHub-hosted macOS in the regular path" and `ci.yml`'s
+  # platform gate and `release.yml`'s darwin legs have both moved to the org's own Mac.
+  #
+  # Two reasons, and the first one alone decides it:
+  #
+  #   1. THIS JOB'S PREMISE IS A FRESH MACHINE. Its header says so — "on a clean macOS/Linux runner"
+  #      — and its steps act on it: `brew uninstall minisign` to force the openssl verifier path,
+  #      `brew install minisign` for the other, then a real `curl … | sh` install into `$HOME` and a
+  #      `nxs self-update` over it. On the shared, non-ephemeral self-hosted Mac that is not a test,
+  #      it is damage: it would uninstall a human's minisign and overwrite their own `nxs`. The
+  #      ticket's own caveat covers exactly this — a self-hosted runner is no substitute for
+  #      ephemerality, and where cleanliness is what makes the check meaningful it has to be real.
+  #      It is the same shared-login-session hazard 6j6v.px3d documented for the signing keychain.
+  #
+  #   2. THE INTEL CELL HAS NO HOME THERE ANYWAY. It is x86_64, the org runner is ARM64. The choices
+  #      would be Rosetta — which proves an emulated environment, not the one an Intel user runs —
+  #      or dropping the cell. We ship a `darwin-x86_64` tarball, so silently retiring the only
+  #      check that installs it is not on the table.
+  #
+  # The cost this accepts is bounded and known: three cells, one scheduled run a WEEK, a few minutes
+  # each. It is not a per-release line item, which is what the ticket set out to remove — that was
+  # `ci.yml`'s macOS gate on every push, and the release job that tested `main` twice.
+  #
+  # Revisit if either premise moves: a dedicated, wiped-per-run Mac runner would satisfy (1), and an
+  # Intel runner (or dropping the `darwin-x86_64` platform) would settle (2).
+  #
+  # …AND THE INTEL CELL WAS ALREADY DEAD when that decision was written (6j6v.31rs). GitHub retired
+  # the `macos-13` label; the cell therefore never got a runner, sat QUEUED for the full 24-hour job
+  # limit, and was then cancelled — taking the whole run's conclusion to `cancelled` with it. Four
+  # consecutive weekly runs checked (30805507182, 30258152512, 29732518199, 29240925959): the
+  # `darwin-x86_64` job has `runner_name` empty and a 1440-minute duration in every one, while the
+  # other two cells passed in seconds. So x86_64 install+self-update coverage had been gone for over
+  # a month, and nobody was told, because "cancelled" does not read like "broken". Fixed here by
+  # moving to the current Intel label — which is the opposite of quietly dropping an architecture,
+  # and the reason the ticket says not to. (Verified live before merging: a dispatch of this
+  # workflow scheduled the `macos-15-intel` cell on a real runner instead of queueing forever.)
+  smoke:
+    name: smoke (${{ matrix.label }})
+    # Bounds a cell that HANGS once a runner has picked it up. This suite installs over the network
+    # and drives `self-update`, so a wedged download would otherwise sit until GitHub's own default
+    # (6h on a GitHub-hosted runner).
+    #
+    # It is deliberately NOT claimed as the fix for the retired-label case above. What killed that
+    # cell was the documented queue limit — "a job can be in the queue for 24 hours before it is
+    # automatically cancelled" — and GitHub does not document whether `timeout-minutes` covers time
+    # spent WAITING for a runner as opposed to running on one. So this bounds execution; the label
+    # change is what restores the coverage. What actually hid the loss for a month is that the
+    # outcome renders as `cancelled` rather than `failure`, which does not read like "broken" to
+    # anyone glancing at a weekly scheduled run.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64, verifier: openssl }
+          - { os: macos-14, label: darwin-arm64, verifier: minisign }
+          # `macos-15-intel`, not `macos-13` (retired — see above). The `-intel` suffix is how
+          # GitHub still offers x86_64 macOS now that the default `macos-*` labels are Apple silicon.
+          - { os: macos-15-intel, label: darwin-x86_64, verifier: openssl }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # minisign-path cell (macOS): install the binary so install.sh uses the minisign verifier.
+      - name: Install minisign (minisign verifier path)
+        if: matrix.verifier == 'minisign'
+        run: brew install minisign
+
+      # openssl-path cell (85y.28): make sure a capable openssl IS present and the minisign binary
+      # is NOT, so install.sh exercises the openssl verification fallback. Linux ships a capable
+      # system openssl and no minisign already; macOS needs openssl@3 and minisign removed.
+      - name: Force the openssl verifier path (no minisign, capable openssl present)
+        if: matrix.verifier == 'openssl' && runner.os == 'macOS'
+        run: |
+          brew list minisign >/dev/null 2>&1 && brew uninstall --ignore-dependencies minisign || true
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+
+      - name: Install from the channel, verify, self-update
+        env:
+          NXF_SMOKE_BASE_URL: ${{ github.event.inputs.base_url || 'https://staging.nxsflow.com/nxs' }}
+          NXF_SMOKE_CHANNEL: ${{ github.event.inputs.channel || 'beta' }}
+          NXF_SMOKE_UPDATE_FROM: ${{ github.event.inputs.update_from || '' }}
+          NXF_SMOKE_EXPECT_VERIFIER: ${{ matrix.verifier }}
+        run: bash tests/smoke-install-update.sh

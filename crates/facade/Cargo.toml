@@ -1,0 +1,36 @@
+[package]
+name = "nexus-flow-facade"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow engine facade: shared compute→render read paths + a long-lived in-process engine handle"
+publish = false
+
+# The facade is the seam an embedding app (Tauri), the CLI, and (later) the MCP server all
+# share. It is deliberately CLI-free: NO clap, NO tokio, NO rmcp — just the engine core, the
+# plugin config, workspace resolution, the canonical record, and the read compute layer. The
+# app consumes this crate directly instead of depending on `crates/cli` (E5 #9t7.1 / E9 #49g).
+[dependencies]
+# The shared substrate + the product-agnostic embedding handle (generic Engine, Watch,
+# Workspace, the structured error). flow's facade layers its plugin + read/write over it.
+nxs-foundation = { path = "../foundation" }
+nexus-flow-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Compile-time plugin self-registration (r16h.1): the same registry crate the module roster uses.
+# A consumer's proprietary plugin `inventory::submit!`s its `PluginRegistration` from its own crate,
+# so the plugin set is registry-driven, not a hardcoded list in this OSS repo.
+inventory = "0.3"
+ulid = "1"
+# Calendar-aware date validation for the write paths (`due`/`defer` accept YYYY-MM-DD or
+# RFC3339). Pure Rust, no C deps — keeps the facade musl-clean for an embedding host.
+time = { version = "0.3", features = ["parsing", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+# r16h.1: the external-registration proof test submits a `PluginRegistration` from THIS test crate
+# (a stand-in for a consumer crate), so the integration binary needs `inventory` in scope.
+inventory = "0.3"
+# The actor-contract detector (6j6v.d4dw): the boundary table + runner + completeness gate live
+# once, in the crate that already hosts the repo's cross-cutting test gates. TEST-only.
+nxs-test-support = { path = "../test-support" }

@@ -1,0 +1,68 @@
+name: facade-semver
+
+# Machine-enforce the facade SemVer contract (spec §4.3/§4.4, nexus-flow-aye.14): diff the
+# public Rust API of the CONSUMED LIBRARY SURFACES against the baseline release tag and
+# fail-closed on a PATCH bump that breaks it. The baseline + fail-closed-vs-report-only decision
+# live in `cargo xtask facade semver-check` (unit-tested); cargo-semver-checks owns the API diff.
+#
+# WHICH surfaces: nexus-flow-facade, nexus-chat and nexus-memory — all three are pinned by git tag
+# in lockstep by app-foundations and manufakt-io, so all three are shipped library API. Guarding
+# only crates/facade was the gap 6j6v.a7ce closed: on 2026-08-03 a downstream COMPILER, not the
+# release notes, found that nexus-chat's WorkflowStartRequest had gained fields in v0.41.0.
+# The set lives in one place, `facade::CONSUMED_SURFACES`, which the changelog gate reads too.
+#
+# On an ordinary feature PR the workspace version equals the last tag (axis "none") → report-only;
+# the fail-closed gate fires on the version-bump (release-prep) PR and on the v* tag, where the
+# bump axis is known. The changelog-side mirror is `cargo xtask version set`'s
+# enforce_facade_breaking_axis (nexus-flow-aye.15).
+on:
+  push:
+    # `release/<major>.<minor>` maintenance lines (nexus-flow-aye.18): the facade contract holds PER
+    # LINE — a backport patch on release/x.Y is gated against its own line predecessor
+    # (select_baseline picks the highest tag ≤ the line version), so the gate must run on these
+    # branches too.
+    #
+    # NARROWED from `release/**` (6j6v.31rs), for the reason `ci.yml` spells out in full: that glob
+    # also caught the `release/v<X.Y.Z>` RELEASE-PREPARATION branches, so a version-bump PR ran this
+    # gate twice on one tree. Nothing is lost: the version-bump PR is exactly the case this gate's
+    # own header calls out as fail-closed, and it still runs there on the `pull_request` event — and
+    # again on the `v*` tag.
+    branches: [main, "release/[0-9]+.[0-9]+"]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: the gate only reads the repo (checkout + git tags + cargo-semver-checks).
+permissions:
+  contents: read
+
+# One run per ref (6j6v.6e0e): a rapid second push to a PR branch supersedes the first, so the
+# in-flight run is answering a question nobody is asking any more. Mirrors the group content-ci.yml
+# already had. Cancels PR runs only — a push run on `main` (or a `release/**` line / a tag)
+# is that ref's standing record of green and must always finish.
+concurrency:
+  group: facade-semver-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  facade-semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history + tags so `--baseline-rev <tag>` can resolve the baseline release
+          # locally (no crates.io — the facade is `publish = false`, §14 TB-8; no network at
+          # check time).
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binary (no compile) — cargo-semver-checks generates the rustdoc JSON it needs
+      # itself, so the stable toolchain above suffices.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Consumed-surface public-API SemVer gate (patch never breaks)
+        run: cargo xtask facade semver-check

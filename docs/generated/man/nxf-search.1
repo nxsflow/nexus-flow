@@ -1,0 +1,34 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH search 1  "search " 
+.SH NAME
+search \- Search items by substring over title, description, design, DoD, and notes. Results are grouped by lane priority (next+in\-progress → blocked → deferred → closed), each group in its natural order; archived items are excluded by default
+.SH SYNOPSIS
+\fBsearch\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-now\fR] [\fB\-\-include\-archived\fR] [\fB\-\-archived\-only\fR] [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIQUERY\fR> 
+.SH DESCRIPTION
+Search items by substring over title, description, design, DoD, and notes. Results are grouped by lane priority (next+in\-progress → blocked → deferred → closed), each group in its natural order; archived items are excluded by default
+.SH OPTIONS
+.TP
+\fB\-\-status\fR \fI<STATUS>\fR
+Filter by status
+.TP
+\fB\-\-type\fR \fI<TY>\fR
+Filter by type, using the active plugin\*(Aqs vocabulary (see `nxf schema`)
+.TP
+\fB\-\-now\fR \fI<NOW>\fR
+Reference time (ISO\-8601 / RFC3339); defaults to now. Sets the defer boundary used to group deferred matches
+.TP
+\fB\-\-include\-archived\fR
+Append the archived group (lowest priority) instead of excluding it
+.TP
+\fB\-\-archived\-only\fR
+Search ONLY the archive; the live lanes are skipped
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Flatten the lane grouping into one order by this key (`rank` | `id` | …). Unknown = loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIQUERY\fR>
+Query string

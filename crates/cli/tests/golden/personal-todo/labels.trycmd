@@ -1,0 +1,59 @@
+User labels (h89s): free-text tags on a todo, distinct from the plugin's display **type**. They
+ride their own observed-remove OR-set, so re-adding the same label still leaves one, and a remove
+only detaches what it observed. Filter the list with `--label`.
+
+Set up a workspace and create a todo to label:
+
+```console
+$ nxf init --plugin personal-todo --json
+[..]
+
+```
+
+```console
+$ nxf create --type todo --title "Book venue" --description "Reserve the event space" --priority soon --json
+[..]
+
+```
+
+Attach two labels (idempotent), then list them — sorted and de-duplicated:
+
+```console
+$ nxf label add ab12.0001 errands --json
+{"msg":"ab12.0001 labelled errands","ok":true}
+
+```
+
+```console
+$ nxf label add ab12.0001 home --json
+{"msg":"ab12.0001 labelled home","ok":true}
+
+```
+
+```console
+$ nxf label list ab12.0001 --json
+["errands","home"]
+
+```
+
+Filter the list to a label (only the labelled todo is returned):
+
+```console
+$ nxf list --label errands --json
+[..]
+
+```
+
+Detach one label (observed-remove); the other remains:
+
+```console
+$ nxf label remove ab12.0001 errands --json
+{"msg":"ab12.0001 unlabelled errands","ok":true}
+
+```
+
+```console
+$ nxf label list ab12.0001 --json
+["home"]
+
+```

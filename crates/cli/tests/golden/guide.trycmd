@@ -1,0 +1,25 @@
+`nxf guide` is the embedded, offline guide — no workspace needed, identical whether piped or
+interactive, and plugin-agnostic. List the topics, then the same listing as machine JSON.
+
+```console
+$ nxf guide
+
+Guides (run `nxf guide <topic>`):
+
+  getting-started        Install, init a workspace, and create your first task.
+  mcp                    Connect an MCP host (Claude Desktop, Cursor, …) — register the server and bootstrap.
+  core-concepts          Items, dependencies, and how `next` and `blocked` are derived rather than stored.
+  commands               A tour of the most-used nxf commands.
+  plugins                How vocabulary, ranking, and presentation are configured.
+  migration              Bring an existing tracker in and bind a sync stream.
+  deferring-and-waiting  Defer only for real calendar dates; model waiting on a delivery as a WAIT chore.
+  running-a-relay        Run your own sync server for backup or collaboration — SQLite, or a Postgres such as Supabase.
+
+
+```
+
+```console
+$ nxf guide --json
+[{"summary":"Install, init a workspace, and create your first task.","topic":"getting-started"},{"summary":"Connect an MCP host (Claude Desktop, Cursor, …) — register the server and bootstrap.","topic":"mcp"},{"summary":"Items, dependencies, and how `next` and `blocked` are derived rather than stored.","topic":"core-concepts"},{"summary":"A tour of the most-used nxf commands.","topic":"commands"},{"summary":"How vocabulary, ranking, and presentation are configured.","topic":"plugins"},{"summary":"Bring an existing tracker in and bind a sync stream.","topic":"migration"},{"summary":"Defer only for real calendar dates; model waiting on a delivery as a WAIT chore.","topic":"deferring-and-waiting"},{"summary":"Run your own sync server for backup or collaboration — SQLite, or a Postgres such as Supabase.","topic":"running-a-relay"}]
+
+```

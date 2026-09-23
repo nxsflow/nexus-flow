@@ -1,0 +1,21 @@
+# Test-only probe crate (r16h.1 review, Test Quality #4). It registers ONE plugin from its OWN
+# crate — the realistic consumer-plugin shape — so its integration test can prove the registration
+# survives linking into a SEPARATE binary (debug + release), which the facade's own in-binary test
+# cannot. Not published; not a dependency of any shipped binary, so it never adds a plugin to nxf/nxs.
+[package]
+name = "plugin-probe"
+version.workspace = true
+edition = "2021"
+publish = false
+description = "Test-only: proves an externally-registered plugin survives realistic linking (r16h.1)."
+
+[dependencies]
+nexus-flow-facade = { path = "../facade" }
+inventory = "0.3"
+
+[dev-dependencies]
+# The ky26 acceptance test (`tests/ky26_file_consumer.rs`) drives the real facade read+write layer
+# over an in-memory `Store` and asserts JSON shapes — the core store type and serde_json are only
+# needed by that integration test, so they ride as dev-dependencies.
+nexus-flow-core = { path = "../core" }
+serde_json = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "nexus-flow-core"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow engine core: flow's task vocabulary, reducer + derivation over the nxs-foundation substrate"
+publish = false
+
+[dependencies]
+# The shared op-log CRDT substrate. flow's Store wraps it and registers the task reducer; the
+# substrate types (Op, Reducer, schema-version spine) are re-exported under `nexus_flow_core::*`.
+nxs-foundation = { path = "../foundation" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+ulid = "1"
+
+[dev-dependencies]
+automerge = "0.5"

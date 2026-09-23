@@ -1,0 +1,891 @@
+name: CI
+
+on:
+  push:
+    # `release/<major>.<minor>` maintenance lines run the full gate too (nexus-flow-aye.18):
+    # quality-gates + postgres-parity ARE the derivation-parity gate we keep green on EVERY active
+    # backport line (current + 2 previous, spec §4.5), not just main.
+    #
+    # NARROWED from `release/**` (6j6v.31rs). That glob also caught the RELEASE-PREPARATION branches,
+    # which are named `release/v<X.Y.Z>` — so every version-bump PR ran this whole workflow TWICE on
+    # the same tree: once on the `pull_request` event and once on the branch push, in different
+    # `concurrency` groups so neither cancelled the other, and the push half additionally ran the
+    # release profile (~22m vs ~8m). Measured on SHA 61b33407 (release/v0.52.0): ~20m37 of runner
+    # time for the PR run, ~44m57 for the push run, on one identical tree.
+    #
+    # The pattern is the branch-filter spelling of `promote.yml`'s own `^release/[0-9]+\.[0-9]+$`
+    # validation, so both places agree on what a maintenance line IS. `+` means "one or more of the
+    # preceding character" in a GitHub filter pattern and `.` is literal, so this matches
+    # `release/0.52` and NOT `release/v0.52.0`. There is no coverage loss: a release is cut by
+    # tagging a commit on `main` or on a maintenance line, and the push run on THAT branch is the
+    # full both-profile gate (see `Tests (release)` below) — the preparation branch's own push run
+    # only ever re-answered the question its PR run had already answered.
+    branches: [main, "release/[0-9]+.[0-9]+"]
+  pull_request:
+  # The escape hatch for the profile staggering below (6j6v.6e0e): dispatching this workflow on a
+  # branch runs the FULL both-profile gate there, because the skip keys on `pull_request`. Reach for
+  # it when a PR is exactly the kind of change the release profile exists to catch — a `debug_assert!`
+  # with a side effect, arithmetic that can overflow — instead of waiting for the push-to-main run.
+  # A dispatch input would add nothing: `workflow_dispatch` already carries the branch to run on.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# One run per ref (6j6v.6e0e). Three pushes to a PR branch used to mean three FULL concurrent runs,
+# two of them already answered by the third — with no `concurrency` group nothing cancelled them.
+# Cancels on `pull_request` ONLY: a push run on `main` or on a `release/<major>.<minor>` maintenance
+# line is that ref's standing record of green (and the release-profile gate, below), so it must
+# always finish, even when the next push is already in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege: the quality gates only read the repo (checkout + build/test).
+permissions:
+  contents: read
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ---- room for both profiles AND the cache save (nxf 6j6v.z5ae) ------------------------
+      #
+      # After `cargo test --all --release` the debug and release target dirs coexist, and
+      # rust-cache's post-save then ran the runner out of disk: every gate step green, the job
+      # red on 'No space left on device' — five runs in a row on 2026-09-21/22, the v0.102.0
+      # release commit's among them, where the fail-closed `require-green-ci.sh` refuses the tag.
+      # A re-run does not help once the suite has outgrown the margin. The runner image ships
+      # toolchains no step here uses (.NET, the Android SDK, GHC, CodeQL — well over 10 GB), so
+      # they go before the first build. The cache's own behaviour (`save-if` and friends) is
+      # deliberately untouched — see the memory `ci-cache-and-runtime-noise`.
+      - name: Free the runner's disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # ---- the nxc agent sidecar, BEFORE any cargo step (nexus-flow-6j6v.smsz) --------------
+      #
+      # The bundle is compiled INTO `nxs` now (`crates/chat/build.rs` reads
+      # `agent-sidecar/dist/nxc-agent-sidecar.mjs`), so it has to exist before the first cargo
+      # invocation or every Rust gate below would run against a binary carrying no sidecar — and
+      # the one test that would notice (`the_bundle_is_embedded_exactly_when_the_build_had_one`)
+      # would pass trivially, both halves absent. Building it first is what makes the embedded path
+      # the one CI actually exercises. It is the same work as before, moved, not added.
+      #
+      # The nxc agent sidecar is Node, so its pure helpers (`spec-helpers.mjs`, and the transcript
+      # normalizer that carries the whole T1↔T2 wire contract — 0dbp) are unit-tested with
+      # `node --test`. That suite had NO gate at all until 6j6v.81v5: it could rot silently while
+      # every Rust gate stayed green. Node is pinned (not the runner's default) so a silent major
+      # bump cannot change behavior under us, matching content-ci. No `npm ci` for THAT
+      # step on purpose — the pure modules are dependency-free by design, and
+      # `main-teardown.test.mjs` (which DOES run main.mjs, the one file that imports the SDK)
+      # redirects that bare specifier to a generated stub through an `--import`ed resolve hook, so
+      # the real package is never resolved. `node --test` skips node_modules, so the suite runs from
+      # a bare checkout with no SDK installed — verified by running it with
+      # `agent-sidecar/node_modules` removed entirely.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Sidecar tests (node --test)
+        working-directory: agent-sidecar
+        run: node --test
+
+      # The sidecar that SHIPS is the bundle, not the source tree (nexus-flow-6j6v.81v5) — and the
+      # release job is the only other place that builds it. Without this step a bundling break (a
+      # new import esbuild cannot resolve, a bumped SDK that no longer bundles) would first show up
+      # mid-release, on a tag, with the version already cut.
+      #
+      # PLAIN `npm ci`, no `--omit=optional`. The flag was aimed at the SDK's ~245 MB platform
+      # packages, but esbuild declares ITS platform binary optional too — so omitting them skipped
+      # the integrity-pinned `@esbuild/<platform>` and esbuild's postinstall fell back to fetching
+      # the binary from the registry with no lockfile `integrity` check at all. A build tool of
+      # version-only provenance produced JavaScript that then got legitimately minisign-signed and
+      # run on every user's machine; CI minutes are the cheaper side of that trade.
+      #
+      # And the bundle is RUN, not just listed: `node --test` exercises `src/main.mjs` with the SDK
+      # redirected to a stub, so the bundled file's own module graph is never loaded by anything
+      # else. A break that survives esbuild but fails at load (an unresolved dynamic require, a
+      # `__dirname` shim, an SDK bump that bundles but does not run) would otherwise ship green.
+      # `claudePath` points at nothing on purpose: reaching the SDK's own "cannot launch" is proof
+      # the whole graph loaded, and it needs no API call and no `claude` on the runner.
+      #
+      # Finally `NXF_EMBED_SIDECAR=require` goes into the job environment, so every cargo step below
+      # FAILS rather than quietly embedding `None` if this step ever stops producing a bundle. The
+      # tolerant default exists for a contributor without Node; it has no business in a gate.
+      - name: Sidecar bundle builds and runs
+        working-directory: agent-sidecar
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          ls -l dist/nxc-agent-sidecar.mjs
+          printf '%s' '{"role":"ci","message":"x","cwd":".","env":{},"tools":[],"claudePath":"/nonexistent/claude"}' > /tmp/ci-spec.json
+          if node dist/nxc-agent-sidecar.mjs --spec /tmp/ci-spec.json > /tmp/ci-out 2>&1; then
+            echo "::error::the bundled sidecar exited 0 against a nonexistent claude — it cannot have reached the SDK"
+            cat /tmp/ci-out; exit 1
+          fi
+          grep -q "Claude Code" /tmp/ci-out || {
+            echo "::error::the bundled sidecar did not reach the SDK's own executable check — the bundle is broken, not the spec"
+            cat /tmp/ci-out; exit 1
+          }
+          echo "the bundle loads its whole module graph and reaches query()"
+          echo "NXF_EMBED_SIDECAR=require" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The self-hosted-runner boundary (nexus-flow-6j6v.2sb1). `platform-gates-macos` below and
+      # `release.yml`'s darwin legs bill the ORG'S OWN Mac — not ephemeral, sharing a login session
+      # with a human, holding the Developer ID signing material. What keeps untrusted pull-request
+      # code off it is one `if:` line, and nothing checked that line until this gate: a later change
+      # that adds a macOS step without it, or picks a trigger that includes `pull_request`, would
+      # merge green and open the surface from that commit on.
+      #
+      # Reads every workflow's triggers, each job's `if:` and each job's `runs-on` and asserts no
+      # job a `pull_request`/`pull_request_target` run can REACH — directly, or round by
+      # `workflow_run`/`workflow_call` — routes anywhere it cannot prove is a GitHub-hosted image.
+      # Named here, and early, for the same reason as the drift gates below: `cargo test --all`
+      # runs it either way, but this one should fail by name before the long test step.
+      #
+      # It is the half of the guard that lives in the repo. Runner-group scoping and fork-PR
+      # approval are the server-side half (6j6v.w07d); neither replaces the other.
+      - name: Runner routing check (self-hosted stays off pull requests)
+        run: cargo xtask runners check
+
+      # The other half of the macOS lane below (nexus-flow-6j6v.fb1d). The lane is complete on the
+      # day it is written and incomplete from the next new test on, unless something counts: this
+      # reads every `cfg(target_os = "macos")` in the test tree and fails if one sits in a package
+      # the lane does not run. Reading source text only, so it belongs on ubuntu and costs nothing.
+      # Fail-closed and by name, same shape as the three single-source gates below.
+      - name: macOS test-coverage check (every cfg(macos) test is in the lane)
+        run: cargo xtask macos-tests check
+
+      # Single source of truth for the 4 shipped platform keys (nexus-flow-4sr): fail fast and
+      # by name if install.sh / the publish+promote scripts / the release matrix+loops / the npx
+      # shim drift from release/platforms. (cargo test --all also covers this; this is the named
+      # gate.) The updater Lambda's decide.ts was checked here too until 6j6v.sgfr moved it out
+      # of the repo; release/platforms' header says what that costs.
+      - name: Platforms single-source check
+        run: cargo xtask platforms check
+
+      # Single source of truth for the promotion-ring channels (nexus-flow-85y.27): fail fast and
+      # by name if selfupdate.rs's CHANNELS / the clap --channel value_parser / install.sh's
+      # NXF_CHANNEL doc token drift from release/channels — and if the npx shim's DEFAULT_CHANNEL
+      # stops being the canonical most-stable ring. decide.ts's download-path regex was a consumer
+      # here too until 6j6v.sgfr; see release/channels' header.
+      - name: Channels single-source check
+        run: cargo xtask channels check
+
+      # Living documentation (nexus-flow-4oa.1): the nxf clap command tree is the single source
+      # of truth for the command reference. Fail fast and by name if docs/generated/ (Markdown +
+      # man-pages + commands.json) drifts from the tree — i.e. a command changed without running
+      # `cargo xtask docs gen`. Fail-closed. (cargo test --all also covers this; this is the gate.)
+      - name: Docs drift check
+        run: cargo xtask docs check
+
+      # Living-documentation coverage (nexus-flow-4oa.2): every non-hidden subcommand must have a
+      # reference entry AND a golden trycmd example under BOTH shipped plugins. Fail-closed and by
+      # name if a command was added/renamed without a golden example. The example-execution gate
+      # itself (the trycmd cases run against the built nxf binary) is part of `cargo test --all`.
+      - name: Docs coverage check
+        run: cargo xtask docs coverage
+
+      # The OMISSION gate (nexus-flow-6j6v.vtvs): every CLI verb must have a counterpart on the
+      # library seam an embedding app links. The three parity differentials next to it compare what
+      # exists on BOTH seams byte for byte and are, by construction, blind to a verb that exists on
+      # only one — which is how `nxm prime`/`nxc prime` stayed CLI-only for a year with all three
+      # green, until app-foundations had to rebuild the same assembly in TypeScript. This compares
+      # the two verb LISTS, both derived (the clap tree, the engine/facade sources).
+      #
+      # Named here for the same reason as the drift gates above — `cargo test --all` runs it either
+      # way, but a "quickly add a verb to the CLI" regression should fail by name, before the long
+      # test step, not somewhere inside it.
+      #
+      # ONE invocation with `--no-fail-fast`, not three sequential ones (PR #277 review, Code
+      # Quality #4): the first run of this gate is an inventory, and a reader who has just moved
+      # code between modules wants every module's verdict from one CI log, not the first one that
+      # goes red and nothing about the other two.
+      - name: Verb seam check (CLI ↔ Engine, all three modules)
+        run: >
+          cargo test --no-fail-fast --test verb_seam
+          -p nexus-flow-cli -p nexus-memory -p nexus-chat
+
+      # ---- THE LEAN BUILDS RUN BEFORE THE LONG TEST STEP (nexus-flow-6j6v.1xkg) -------------
+      #
+      # They used to sit at the very end of this job, BEHIND `Tests (debug)`. Measured on run
+      # 33717260226 (a green PR run) that step is 281s — 63% of the job — so a lean-build break
+      # cost 4.7 minutes of waiting before it could even be reported. The two builds are 23s and
+      # 9s together, and nothing downstream depends on their result, so moving them forward makes
+      # exactly that class go red about five minutes earlier at no cost to any other gate.
+      #
+      # It is the class most worth failing early on: [[build-test]] calls these "the ones that
+      # actually bite", because `crates/nxs` takes chat's default features — so the
+      # `default-features = false` variant, the one app-foundations embeds, has NO in-repo consumer
+      # and NO local gate. It once stayed broken for a day behind six green checks (6j6v.qvfp).
+      #
+      # fmt, clippy and the drift gates stay AHEAD of them: together they are under a minute and
+      # they fail on even cheaper mistakes.
+      #
+      # The MCP seam (E9 #76u) is feature-gated and default-on, so the gates below build+test the
+      # `mcp`-on variant. This is the OTHER variant: the lean `nxs` must still compile + lint clean
+      # without rmcp/tokio (#9ul acceptance — "CI builds both feature variants").
+      - name: Lean build (nxs without the mcp feature)
+        run: |
+          cargo build -p nxs --no-default-features
+          cargo clippy -p nxs --no-default-features --all-targets -- -D warnings
+
+      # The `nxc` CLI/onboarding surface is feature-gated and default-on (a6ah), so the gates below
+      # build+test the `cli`-on variant. This is the OTHER variant: an embedding consumer links only
+      # `nexus_chat::engine::Engine` with `default-features = false`, so the LIBRARY must still
+      # compile + lint clean without clap/nxs-ui/nxs-init/inventory. (`sha2` was in that list until
+      # nxf 6j6v.qvfp moved the DM channel id onto the shared orchestration path, which the engine
+      # seam takes too — it is an unconditional dependency now.) `--lib` scope on purpose —
+      # the black-box tests spawn the built binary (cli on); the embed surface is the library.
+      - name: Lean build (nexus-chat without the cli feature)
+        run: |
+          cargo build -p nexus-chat --no-default-features
+          cargo clippy -p nexus-chat --no-default-features --lib -- -D warnings
+
+      # NOT `cargo nextest run` (nexus-flow-6j6v.1xkg, measured 2026-09-03 on run 33774500959).
+      # nextest is a one-line change everyone believes is faster, so the ticket set itself a rule:
+      # measure, and below ~60s of gain do not switch. Measured on ONE tree, ONE job, one warm
+      # cache — compile the test binaries (155s), then run them three ways:
+      #
+      #   `cargo test --all` with the binaries already built   160s   (runs doctests too)
+      #   `cargo nextest run --all`                            141s   (no doctests)
+      #   `cargo test --all --doc` alone                         2s
+      #
+      # 160 - (141 + 2) = 17s. The PR run on the same commit said 15s. Both are a twentieth of the
+      # bar, and nextest's number is if anything flattered — it ran third, on a page cache the
+      # other two had just warmed. So the switch is declined WITH a number, and the trap it would
+      # have carried (nextest silently runs no doctests) never gets bought.
+      - name: Tests (debug)
+        run: cargo test --all
+
+      # Release profile is a REQUIRED gate, not a nicety: a side effect placed inside
+      # `debug_assert!` is compiled out of release builds and silently no-ops there,
+      # while passing the entire debug test suite. That bug class shipped once
+      # (apply_op inside debug_assert!); this gate is what catches its return.
+      #
+      # STAGGERED, NOT DROPPED (6j6v.6e0e). This one step is the most expensive thing in CI — a
+      # second full optimizing compile of the workspace, measured at 288–393s, ~54% of the machine
+      # time of an entire run (release steps across all three jobs: 427s of 793s, mean of 6 PR runs).
+      # It now runs on every `push` to `main` and to every `release/<major>.<minor>` line, and on
+      # demand via `workflow_dispatch` — but not on the `pull_request` event.
+      #
+      # Coverage of anything that SHIPS is unchanged: a release is cut by tagging a commit on `main`
+      # (or on a maintenance line), and every push to both branch classes runs this step. There is
+      # no path from a PR to a published artifact that skips it — the skipped run is the one on a
+      # tree whose release profile is re-checked minutes later, before it can go anywhere.
+      - name: Tests (release)
+        if: github.event_name != 'pull_request'
+        run: cargo test --all --release
+
+  # The PLATFORM-GATED halves of the sync daemon (6j6v.4t9p). Every job above runs on
+  # ubuntu-latest, which means `#[cfg(target_os = "macos")]` and `#[cfg(not(unix))]` code was
+  # never compiled — not by a build, not by clippy, not by a test. `launchd.rs`'s user-facing
+  # verbs (`plist_path`, `log_dir`, `install`, `uninstall`, `install_quiet`) are macOS-only in
+  # their entirety, and macOS is the platform the daemon actually runs on; `daemon.rs`'s
+  # `DaemonLock` fallback is the mirror case on the other side. Both could break in a refactor
+  # and stay green here until a Mac user ran them.
+  #
+  # `clippy` and not a test run, on purpose (the ticket's own design note): the gated code is a
+  # thin layer of wrappers over pure logic that IS tested on every platform
+  # (`render_plist`/`install_with`/`uninstall_with`), so what is missing is compilation and lint
+  # coverage, not a second execution of the same assertions. A macOS runner bills at 10x on a
+  # private repo — this keeps it to one analysis pass over one package.
+  #
+  # VERIFIED ONCE, as the ticket's DoD requires: a deliberate `deliberate_break()` call planted in
+  # launchd.rs's macOS-only `log_dir()` failed this job (run 30890372479, `error[E0425]`) while
+  # every ubuntu job on the same commit stayed green — which is both halves of the proof.
+  # The Windows job passed on that same run, so the `cfg(not(unix))` fallback compiles today and
+  # is kept rather than deleted.
+  # SPLIT INTO TWO JOBS, not one matrix (PR #300 review, Integrity & Robustness #1). They used to
+  # share a matrix, which forced one `runs-on` expression to serve both halves — and the macOS half
+  # needs an event condition the Windows half must not have. A job-level `if:` cannot read the
+  # `matrix` context, so the split is what lets each say its own rule plainly.
+  platform-gates-windows:
+    name: Platform gates (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Scope is the library and binary, not `--all-targets`: Windows is not a unix, and several
+      # `#[cfg(test)]` modules in this package use `std::os::unix` directly — while the
+      # `cfg(not(unix))` PRODUCTION code this exists to compile lives exactly here.
+      # `-p nxs-service` alongside `-p nxs` (6j6v.5zst): the `cfg(not(unix))` half of the
+      # single-instance lock moved into that crate, and it is the only production code in this repo
+      # that no unix build ever compiles. `-p nxs` pulls the crate in as a LIBRARY dependency, which
+      # compiles that half — but not its `#[cfg(test)]` module, so naming the crate itself is what
+      # keeps its tests under the same lint gate they had before the move.
+      - name: Clippy (nxs, warnings are errors)
+        run: cargo clippy -p nxs -p nxs-service -- -D warnings
+
+  # The macOS half runs on the ORG'S OWN Mac (6j6v.31rs, owner directive: "auf GitHub sollte niemals
+  # der macOS-Runner laufen") — same repo variable and JSON label array `release.yml` already routes
+  # its darwin build/sign/notarize legs with (`NXF_MACOS_RUNS_ON`, set since 2026-07-25). Unset ⇒
+  # GitHub-hosted `macos-latest`, so a fork or a fresh clone still gets the gate.
+  #
+  # ── NEVER ON `pull_request`. THIS IS A SECURITY BOUNDARY, NOT A COST DECISION. ────────────────
+  #
+  # The first cut of this routed same-repo PRs to the runner too, guarded by
+  # `github.event.pull_request.head.repo.full_name == github.repository`. That guard cannot hold,
+  # and the PR #300 review caught it: a `pull_request` run executes the workflow file from the PR's
+  # OWN head ref, so the check lives inside the very file an attacker edits. GitHub's own guidance
+  # is unambiguous — "self-hosted runners should almost never be used for public repositories …
+  # any user can open pull requests against the repository and compromise the environment"
+  # (docs.github.com/actions/reference/security/secure-use). This machine shares a login session
+  # with a human and holds the Developer ID signing material (6j6v.px3d).
+  #
+  # So the event condition, not a field of the event payload, is what decides: `push` and
+  # `workflow_dispatch` both require write access to reach, and both run the file as it exists on
+  # the pushed/dispatched ref. That is the same argument `release.yml` makes for its darwin legs,
+  # and it is the only version of it that survives the repo going public.
+  #
+  # The workflow file cannot enforce this on its own either way: a fork could write
+  # `runs-on: [self-hosted, …]` into its own copy. The real controls are repository/organization
+  # settings — fork-PR approval and runner-group scoping — which is why they are tracked as a
+  # going-public prerequisite (6j6v.w07d) rather than implied by a line of YAML here.
+  #
+  # What the repo CAN enforce is that no job in ITS OWN tree ever routes here from a pull request,
+  # and since 6j6v.2sb1 it does: `cargo xtask runners check` (the "Runner routing check" step in
+  # quality-gates) reads the `if:` below and fails the build the moment it stops excluding the
+  # event — or the moment a new job routes to an unproven runner from a PR-reachable path. That
+  # covers the drift case, which is the one nobody would notice; the fork case still needs the
+  # settings.
+  #
+  # WHAT THIS COSTS: a macOS-only break now surfaces on the push to `main`, not on the PR. Exactly
+  # the staggering `Tests (release)` above already makes (6j6v.6e0e) and for a weaker reason there:
+  # this gate is `cargo clippy` over `#[cfg(target_os = "macos")]` code, and everyone working on
+  # this repo is ON macOS, so `cargo clippy -p nxs --all-targets` locally is the same check. When a
+  # change is exactly that shape, dispatch this workflow on the branch for the full gate.
+  #
+  # Host arch is irrelevant to what it proves: `#[cfg]`-gated macOS code compiles the same on Apple
+  # silicon as on Intel.
+  platform-gates-macos:
+    name: Platform gates (macos)
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ vars.NXF_MACOS_RUNS_ON != '' && fromJSON(vars.NXF_MACOS_RUNS_ON) || 'macos-latest' }}
+    # A self-hosted job inherits a FIVE DAY default execution limit where a GitHub-hosted one gets
+    # 6 hours. This is a single `cargo clippy` pass of ~90-110s; five days of a wedged compile
+    # holding the org's only Mac is not a default to inherit silently.
+    #
+    # It bounds EXECUTION, not the wait for a runner — GitHub documents a separate 24-hour queue
+    # limit and does not say `timeout-minutes` covers queue time, so this is no guard against the
+    # runner being offline. That case showed up for real while PR #300 was open: the Mac went down
+    # mid-job, steps 1-3 passed, `clippy` never reported a conclusion, no log was uploaded, and the
+    # job ended by itself after ~10 minutes. Re-run on the restored runner: green in 91s.
+    timeout-minutes: 30
+    steps:
+      # `clean: true` (the default) is what replaces ephemerality here: the action resets and
+      # `git clean -ffdx`es the work tree before checkout, so a previous run's stray files cannot
+      # influence this one. What legitimately persists is `target/` + `~/.cargo` — a build cache,
+      # which is the point.
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Skipped when this really is the self-hosted runner, for the reason `release.yml` gives for
+      # its darwin builds (nexus-flow-47x): that machine keeps `target/` on disk across runs, so
+      # uploading the same cache to GitHub is redundant — and its Post-save step once stalled for
+      # hours and blocked the whole job. On the GitHub-hosted fallback the cache is worth having.
+      - uses: Swatinem/rust-cache@v2
+        if: vars.NXF_MACOS_RUNS_ON == ''
+
+      # `--all-targets` here, unlike the Windows half: macOS IS a unix, so the test modules compile
+      # too.
+      - name: Clippy (nxs, warnings are errors)
+        run: cargo clippy -p nxs -p nxs-service --all-targets -- -D warnings
+
+  # ── THE macOS TEST LANE (nexus-flow-6j6v.fb1d) ────────────────────────────────────────────────
+  #
+  # Everything above runs its tests on ubuntu. A test the compiler removes off macOS is therefore
+  # a test NO gate ever executes — and it goes on looking like coverage in the source tree.
+  # Counted on 2026-09-03: ~18 such tests across five files, two of them switched off at MODULE
+  # level (`crates/nxs/tests/service_program.rs`, `crates/nxs/tests/service_stays_awake.rs`,
+  # `crates/service/tests/wake_release.rs`, plus single tests in `e2e.rs`,
+  # `init_offers_the_background_service.rs` and `crates/chat/src/timer.rs`). They cover launchd
+  # installation, the IOPM wake assertion and the service's program resolution — the machinery
+  # three consecutive work orders hung on.
+  #
+  # It was tolerable while the house rule was "run the full gate locally before pushing"; everyone
+  # here is on macOS. That rule is gone (6j6v.2x72, [[gates-run-in-ci-not-locally]]): a full local
+  # cycle on the dev machine is 88-122 min against 7.5 min in CI, so local runs are targeted now
+  # and CI is the gate. The evidence that discipline was never the answer is in the same measurement
+  # — the session behind PR #421 ran `cargo test --all` FOUR times, all green, and CI still found a
+  # real break it could not have seen.
+  #
+  # ── HOSTED, NOT THE ORG'S MAC. THIS IS THE SECURITY BOUNDARY, NOT A PREFERENCE. ───────────────
+  #
+  # `runs-on: macos-latest` is written out, deliberately NOT `vars.NXF_MACOS_RUNS_ON` like the job
+  # above: that variable points at the org's own Mac, which is not ephemeral, shares a login
+  # session with a human and holds the Developer ID signing material (6j6v.px3d). A clippy pass is
+  # one thing; running an entire test suite — which spawns binaries, installs launchd jobs and
+  # takes IOPM assertions — is a far larger surface, and it has no business there. `cargo xtask
+  # macos-tests check` reads this very line and fails if it ever stops being a GitHub-hosted image.
+  #
+  # ── WHEN IT RUNS, AND WHY NOT ON EVERY PULL REQUEST ──────────────────────────────────────────
+  #
+  # `if: github.event_name != 'pull_request'` — the same staggering as `Tests (release)` and the
+  # job above, for the reason the ticket's own measurement gives. This repo is PRIVATE and GitHub
+  # bills macOS runner minutes at 10x (linux 1x, windows 2x), so a lane that compiles this
+  # workspace is the most expensive thing in the file by an order of magnitude. The process rule
+  # this pairs with is what makes that safe: after mitigating the review findings and BEFORE the
+  # merge, `ci.yml` is dispatched once on the branch, and a `workflow_dispatch` run is not a
+  # `pull_request` — so this lane, and the release-profile steps, run there. Once per WORK ORDER
+  # instead of once per PUSH, and still ahead of the merge.
+  #
+  # When 6j6v.zc9q flips the repository to public the calculus changes on both sides: hosted
+  # runners are free for public repositories (`macos-latest` included), and a fork cannot dispatch
+  # a workflow at all — so `pull_request` gets added to the condition then, and a `paths:` filter
+  # becomes worth its complexity for the wall clock. Neither is worth paying for today.
+  #
+  # ── SCOPE ────────────────────────────────────────────────────────────────────────────────────
+  #
+  # Three packages, not `--all`: those are the ones that hold macOS-gated tests, and the drift gate
+  # in `quality-gates` is what keeps that list honest — adding such a test to a fourth package
+  # fails there by name, on ubuntu, for free. Everything else about those crates is already proved
+  # on ubuntu minutes earlier.
+  #
+  # No sidecar bundle is built here, unlike `quality-gates`: `crates/chat/build.rs` falls back to
+  # the source-tree sidecar when the bundle is absent, and the one test that could notice passes
+  # either way. `npm ci` on a 10x runner is minutes bought for nothing.
+  #
+  # ── WHAT IT ACTUALLY COSTS, measured rather than estimated ───────────────────────────────────
+  #
+  # 292s end to end with a COLD cache (run 33774500959: 69s to build the binaries, 172s of tests),
+  # so ~50 BILLED minutes at the 10x factor. The ticket's estimate was 15-25 min and 150-250 billed
+  # minutes — an order of magnitude high, because the lane compiles three packages and not the
+  # workspace. That number is also why there is no `paths:` filter here: the ticket kept one as a
+  # cost control, and at 5 minutes a run, once per work order, it would buy back less than it costs
+  # in a moving part that can only ever fail OPEN — a filter that wrongly says "nothing relevant
+  # changed" leaves the gate ABSENT, not red. Measured alongside it: 9 of the last 25 pushes to
+  # `main` touched the paths a filter would have keyed on, so it would skip about two thirds of the
+  # push half — worth revisiting when `pull_request` is added with 6j6v.zc9q, not before.
+  macos-tests:
+    name: macOS tests (hosted)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    # Generous next to the 30 of the jobs above, because this one COMPILES the workspace rather
+    # than linting one package, and a cold cache on a 3-core hosted Mac is the worst case it has.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `nxf`/`nxm`/`nxc` are argv[0] symlinks to the single `nxs` binary, and `nxs` is its own
+      # package that DEPENDS on the persona crates rather than the other way round — so the black
+      # box tests below resolve `target/debug/nxs` and the freshness gate (0yyw) refuses a stale
+      # one. Building it first is what the postgres job does for the same reason.
+      - name: Build the shipped nxs/nxf binaries the suites drive
+        run: cargo build -p nxs
+
+      # `--no-fail-fast`, for the same reason the verb-seam gate gives: this lane runs once per
+      # work order on a runner that bills at 10x, so a reader who has just gone red wants every
+      # failing binary's verdict from THAT log, not the first one and a second 10x run to find the
+      # rest.
+      - name: Tests (debug, macOS)
+        run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service
+
+  # The durable Postgres backend (spec §5/§10) is verified by differential parity against
+  # a REAL Postgres. The parity tests skip themselves unless DATABASE_URL is set, so this
+  # is the gate that actually exercises them: a Postgres service provides the database, and
+  # the `postgres` feature compiles the backend + the parity suite in.
+  postgres-parity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nxf_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (postgres backend, warnings are errors)
+        run: cargo clippy -p nxs-server --all-targets --features postgres -- -D warnings
+
+      # The E2E proof (6j6v.6hbd) that runs inside this job: `tests/relay_e2e.rs` drives the
+      # SHIPPED `nxf`/`nxs` binary in two real workspaces against the SHIPPED `nxf-relay`, so an
+      # item has to travel A -> relay -> B for real. `nxf-relay` is THIS package's own bin target
+      # and `cargo test -p nxs-server` builds it; `nxs` belongs to another package, so without this
+      # step it would be missing — or, far worse, an arbitrarily old copy left in `target/` (the
+      # 0yyw stale-binary trap, which is why the test resolves it through the freshness gate and
+      # would fail loudly rather than assert against foreign code).
+      #
+      # This is the half of that ticket's DoD that must hold on EVERY change with no foreign
+      # dependency: the service container above is the endpoint, so the proof is deterministic.
+      # The `managed-postgres` job below runs the very same test against a real Supabase project.
+      - name: Build the shipped nxs/nxf binaries the relay E2E drives
+        run: cargo build -p nxs
+
+      - name: Postgres parity tests (debug)
+        run: cargo test -p nxs-server --features postgres
+
+      # Staggered with the same rule as `Tests (release)` above (6j6v.6e0e): the release profile is a
+      # push-to-`main`/maintenance-line gate, not a per-PR one. Kept uniform on purpose — a rule that
+      # holds for every job is one a reader can trust; exempting the two cheap parity steps would
+      # forgo 72s of the 427s and leave "which profile runs where" to be looked up per job.
+      # Debug and release use separate profile dirs, so the release run needs its OWN `nxs`: the
+      # E2E resolves `target/release/nxf` and would otherwise abort on a binary that is not there.
+      # Guarded by the same condition as the step it feeds, so a pull request pays nothing for it.
+      - name: Build the shipped nxs/nxf binaries (release)
+        if: github.event_name != 'pull_request'
+        run: cargo build -p nxs --release
+
+      - name: Postgres parity tests (release)
+        if: github.event_name != 'pull_request'
+        run: cargo test -p nxs-server --features postgres --release
+
+  # The `postgres-parity` job above runs against a stock `postgres:16`, which has SSL **off** —
+  # so `sslmode=prefer` negotiates plaintext there and the entire `tokio-postgres-rustls`/`ring`
+  # handshake goes unexercised. Reaching a MANAGED Postgres (Supabase, Neon, RDS) is the headline
+  # capability of the shipped relay, so leaving it to one manual verification is exactly the shape
+  # of gap this backend was fixed for (PR #305 review, Test Quality #1).
+  #
+  # Not a service container: the certificates have to exist before Postgres starts, and service
+  # containers boot before any step can create them. So the server is started by a step, with a
+  # throwaway CA minted in the job — no secret, nothing to rotate, and the CA-rejection path
+  # becomes testable precisely because the CA is private.
+  postgres-tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Mint a throwaway CA and a server certificate for localhost
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pgtls"
+          cd "$RUNNER_TEMP/pgtls"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt \
+            -days 1 -subj "/CN=nxf-relay CI test CA"
+          openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
+            -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' > ext.cnf
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+            -out server.crt -days 1 -extfile ext.cnf
+          # The postgres image runs as uid 999 and REFUSES to start if the key is group/world
+          # readable, so ownership and mode are part of the setup, not hygiene.
+          sudo chown 999:999 server.key server.crt
+          sudo chmod 600 server.key
+
+      - name: Start Postgres with TLS enabled
+        run: |
+          set -euo pipefail
+          docker run -d --name pgtls \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=nxf_test \
+            -p 5432:5432 \
+            -v "$RUNNER_TEMP/pgtls":/certs \
+            postgres:16 \
+            -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+          for i in $(seq 1 30); do
+            if docker exec pgtls pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          # Fail loudly here rather than let every test report a connection error: if the server
+          # came up WITHOUT ssl, this job would otherwise "pass" while proving nothing.
+          docker exec pgtls psql -U postgres -tAc "show ssl;" | grep -qx on
+
+      # Two invocations, because the trust anchor is process-global env (see the suite's header).
+      - name: TLS handshake succeeds and the session is really encrypted
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
+          NXF_RELAY_PG_TLS_MODE: ca
+        run: |
+          export NXF_RELAY_PG_CA_FILE="$RUNNER_TEMP/pgtls/ca.crt"
+          cargo test -p nxs-server --features postgres --test postgres_tls -- --nocapture
+
+      - name: An untrusted server certificate is refused
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
+          NXF_RELAY_PG_TLS_MODE: no-ca
+        run: cargo test -p nxs-server --features postgres --test postgres_tls -- --nocapture
+
+      # The rest of the Postgres surface, driven over a REAL TLS connection rather than the
+      # plaintext one `postgres-parity` uses — same suites, different transport.
+      - name: Parity + runtime-context suites over TLS
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
+        run: |
+          export NXF_RELAY_PG_CA_FILE="$RUNNER_TEMP/pgtls/ca.crt"
+          cargo test -p nxs-server --features postgres \
+            --test postgres_parity --test postgres_in_runtime
+
+      - name: Stop Postgres
+        if: always()
+        run: docker rm -f pgtls || true
+
+  # The proof against a REAL managed Postgres — a Supabase project that outlives the run
+  # (6j6v.da42 + 6j6v.6hbd). Everything above it uses a container this workflow starts and throws
+  # away: same code, but never a foreign network, a provider's pooler, a TLS-only endpoint, or a
+  # database that remembers yesterday. "Sync to a Postgres, e.g. Supabase" is a claim the shipped
+  # relay makes; this job is where it is answered instead of assumed.
+  #
+  # IT BLOCKS. Owner decision, 2026-08-10, reversing the earlier "must not be fail-closed" note in
+  # 6j6v.da42: a non-blocking job is a job nobody looks at, and the price of that was a silent
+  # break — the class this repo walked past twice in one day on 2026-08-09. Red because Supabase
+  # was unreachable is an acceptable price; red because the integration broke, unnoticed because
+  # the job was advisory, is not.
+  #
+  # THAT DECISION IS ONLY USABLE IF A HUMAN CAN TELL THE TWO APART IN SECONDS, so the real work is
+  # not the blocking, it is the verdict:
+  #
+  #   * The preflight step runs BEFORE any suite. If the endpoint is not there, THAT step is the
+  #     one that goes red and its name already says so — no log-reading required. It also proves
+  #     the endpoint is usable the way the suites need (CREATE SCHEMA, and startup `options`
+  #     surviving the provider's pooler), so a transaction-mode pooler is reported as such rather
+  #     than as a pile of inexplicable parity failures.
+  #   * If the preflight passed and a suite then fails, the failure can only be the integration —
+  #     and the `classify` step says exactly that, in those words, as a run annotation and in the
+  #     job summary.
+  #
+  # The classification lives in `crates/server/src/managed_pg.rs` and is unit-tested there, not
+  # spelled out in shell here: a verdict that decides whether we ship is not something to leave in
+  # a workflow file where nothing can test it.
+  #
+  # A missing secret is a HARD failure, never a skip (`managed-pg` reports "NO MANAGED POSTGRES
+  # CONFIGURED"). A skipped required check reports green to GitHub, which is the precise trap the
+  # owner's decision exists to close.
+  #
+  # ---- CONTRIBUTIONS FROM A FORK (6j6v.waeb) -------------------------------------------------
+  #
+  # GitHub withholds repository secrets from a pull request opened from a fork. That is the
+  # event's design and not a setting: the org-wide "require approval for outside contributors"
+  # gate, which this repository already has, decides whether the run STARTS — never whether it
+  # gets credentials. So the moment this repository is public, this blocking job would be
+  # unpassable for every outside contributor: an open-source project no stranger can contribute
+  # to, which is the opposite of the reason for opening it.
+  #
+  # The two shortcuts were both refused:
+  #
+  #   * A job-level `if:` that skips the job on forks. GitHub reports a skipped required check as
+  #     GREEN — the silent pass the blocking decision exists to close, arriving exactly where
+  #     unfamiliar code does.
+  #   * `pull_request_target`, or a `workflow_run` that checks out the pull request's head. Both
+  #     run contributor-authored code with the CI database URL in its environment; one `println!`
+  #     in a test exfiltrates it.
+  #
+  # What happens instead: the job ALWAYS runs, under its own name, and its first step decides
+  # which proof this run can give (`managed-pg mode`, the rule and the words in
+  # `crates/server/src/managed_pg.rs`, unit-tested there). A fork's pull request is DECLARED —
+  # green, because the contributor cannot fix GitHub's secret policy and has to be able to merge,
+  # but carrying a `::warning::` at the top of the run page and a verdict block in the job summary
+  # that name what went unproven and where it will be. The managed proof itself is not weakened:
+  # it still blocks on every push to `main` and to every maintenance line, which is where a
+  # release is cut from, and a maintainer who wants it before merging pushes the branch into this
+  # repository. The residual risk — a fork's change breaking the managed integration is caught on
+  # `main` rather than on the pull request — is the same trade this workflow already makes
+  # deliberately for the release-profile steps above (6j6v.6e0e).
+  #
+  # The rule is impossible to ship through: `not-configured` (endpoint missing where it was meant
+  # to be there) stays a hard failure, and the fork branch is reachable ONLY from a `pull_request`
+  # event whose head repository is a fork — never from the push a release is tagged on.
+  managed-postgres:
+    runs-on: ubuntu-latest
+    # **The endpoint is a SINGLETON, so this job is one too** (nxf 6j6v.4dtx). The workflow-level
+    # group above is `ci-${{ github.ref }}` and cancels only on `pull_request`, so two runs on
+    # DIFFERENT refs never wait for each other — and our own release procedure guarantees exactly
+    # that pair: merging a feature PR starts a push run on `main`, and cutting the version opens a
+    # release PR moments later. Both contain this job, both talk to the one free-tier project, and
+    # on 2026-08-31 both went red — the second with `remaining connection slots are reserved for
+    # roles with the SUPERUSER attribute` before its preflight could even connect.
+    #
+    # A ref-INDEPENDENT group makes the second one wait instead. Named limitation, so nobody
+    # discovers it during a release: GitHub keeps only ONE pending entry per group, so with three
+    # overlapping runs the middle one is CANCELLED rather than queued — and a cancelled required
+    # check is not a pass either. That is rarer than today's guaranteed collision, not impossible.
+    concurrency:
+      group: managed-postgres
+      cancel-in-progress: false
+    # Same budget as `quality-gates` and the platform gates, and it matters more here than on any
+    # of them: this job is meant to become a REQUIRED check, and every step in it talks to a
+    # third-party endpoint over the internet. A stall with no ceiling would hold the merge gate
+    # open instead of failing fast — the opposite of what a blocking check is for. The probe's own
+    # `connect_timeout` bounds each connection; this bounds the job.
+    timeout-minutes: 30
+    env:
+      # The same variable the suites already key on, so the preflight and the suites can never
+      # disagree about which database they are talking about. Empty when the secret is unset —
+      # which `managed-pg` and `tests/common` both treat as "not configured", loudly.
+      DATABASE_URL: ${{ secrets.NXF_SUPABASE_DATABASE_URL }}
+      # Gentler than the 16-connection default: a free-tier managed project has a modest client
+      # limit, and several parity tests each build their own pool and race 8 writers through it.
+      # 8 still exercises the contended path the tests exist for (they spawn 8 threads), it just
+      # does not let four parallel test binaries ask for 64 connections at once.
+      NXF_RELAY_PG_POOL_MAX_SIZE: 8
+      # Supabase signs its Postgres AND pooler certificates with its own root (Supabase Root 2021
+      # CA), which the relay's bundled Mozilla roots do not chain to — so without this the
+      # handshake fails with `UnknownIssuer`. Found by this job's very first real run, which is
+      # what it is for. Job-level so the `nxf-relay` child the E2E spawns inherits it too: the
+      # relay is the process that actually has to trust the endpoint.
+      NXF_RELAY_PG_CA_FILE: ${{ github.workspace }}/.github/certs/supabase-root-2021-ca.pem
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Built as its own step so a COMPILE failure cannot be mistaken for the endpoint being down.
+      # Only the verdict tool: the shipped binaries below are built after the mode is known, so a
+      # fork's pull request does not pay for an end-to-end run it is not going to make.
+      - name: Build the managed-Postgres tooling
+        run: cargo build -p nxs-server --features postgres --example managed-pg
+
+      # Before anything talks to the network: can this run reach a managed endpoint at all, and if
+      # not, is that forgivable? Writes `mode` for the guards below, and — in the one forgivable
+      # case, a pull request from a fork — the warning and the summary block that keep a deliberate
+      # skip from reading like a pass. Exits non-zero when the endpoint is missing with no excuse.
+      - name: Which proof can this run give?
+        id: proof
+        env:
+          # The SAME fact the step reads out of the event payload, read a second time from the
+          # runner's own context — the tamper detector for the one gap the fork rule cannot close
+          # on its own (PR #321 review, Integrity #2). Contributor code has already compiled in
+          # this job by now, and a build script could rewrite `$GITHUB_EVENT_PATH` or export a
+          # `GITHUB_EVENT_NAME` through `$GITHUB_ENV`. It cannot touch this: the expression is
+          # evaluated by the runner, and a step-level `env:` wins over anything `$GITHUB_ENV` set.
+          # The two must agree or the job fails — see `cross_check_fork_signal`.
+          NXF_CI_HEAD_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: cargo run -p nxs-server --features postgres --example managed-pg -- mode
+
+      - name: Build the shipped binaries the relay E2E drives
+        if: steps.proof.outputs.mode == 'managed'
+        run: cargo build -p nxs
+
+      # The name of this step is the verdict when it goes red. That is the whole design.
+      - name: Preflight — is the managed Postgres reachable and usable?
+        if: steps.proof.outputs.mode == 'managed'
+        run: cargo run -p nxs-server --features postgres --example managed-pg -- preflight
+
+      # BEFORE the suites, not after. The suites isolate every test in its own schema, and against
+      # a project that persists that is a leak — one schema per test, forever. Sweeping first lets
+      # the cutoff stay generous (2 h), which is what makes it safe to run while another CI run is
+      # mid-flight: it decides by AGE, never by guessing whose schema it is looking at. The cost is
+      # that the most recent run's schemas outlive it and are cleaned by the next run.
+      - name: Sweep scratch schemas left behind by earlier runs
+        if: steps.proof.outputs.mode == 'managed'
+        run: cargo run -p nxs-server --features postgres --example managed-pg -- sweep
+
+      # The storage layer, over TLS, against the managed endpoint. `postgres_tls` is deliberately
+      # NOT in this list: it mints its own throwaway CA and asserts a rejection path that only
+      # makes sense against a server this workflow controls.
+      # **`--test-threads=1`, and the cap belongs HERE rather than on the pool** (nxf 6j6v.4dtx).
+      # Every `connect` builds its OWN lazy r2d2 pool of `NXF_RELAY_PG_POOL_MAX_SIZE`
+      # (`store_pg.rs`), so the demand on the endpoint is (tests running at once) x (pools per test)
+      # x 8 — and `NXF_RELAY_PG_POOL_MAX_SIZE` only bounds the LAST factor. The first one is what
+      # actually multiplies: a runner has 4 cores, so libtest ran 4 of these at once, while
+      # `opstore_concurrent_appends_get_unique_contiguous_sequences_postgres` deliberately holds 8
+      # connections for minutes (that concurrency IS the property it proves). The neighbour that
+      # wanted to OPEN one during that window died on the acquire timeout — measured repeatedly, and
+      # again on the release PR for v0.75.0 with the endpoint entirely to itself, which is what
+      # ruled out cross-run contention as the cause of the recurring one.
+      #
+      # Serial, not merely narrower: a free-tier project's ceiling is not published and not stable,
+      # so the only budget this job can reason about is "one test's worth". The suite is dominated
+      # by that one long test either way, and certainty is worth more here than the minutes — this
+      # job is meant to become a required check, and a required check that flakes is worse than a
+      # slow one.
+      - name: Storage parity against the managed endpoint
+        if: steps.proof.outputs.mode == 'managed'
+        run: |
+          cargo test -p nxs-server --features postgres \
+            --test postgres_parity --test postgres_in_runtime -- --test-threads=1
+
+      # …and the whole path: two workspaces, the shipped relay binary, an item travelling A -> B,
+      # and a relay restart in the middle. Same test the service-container job runs.
+      - name: Two workspaces, the shipped relay, an item travelling A → B
+        if: steps.proof.outputs.mode == 'managed'
+        run: |
+          cargo test -p nxs-server --features postgres --test relay_e2e \
+            -- --nocapture --test-threads=1
+
+      # The other half of the owner's rule: when something above failed, say WHICH KIND of failure
+      # it was, in plain words, at the top of the run page. Exits 0 on purpose — the job is already
+      # red from the step that actually failed, and a second red step would only add noise.
+      - name: Availability or integration?
+        if: failure() && steps.proof.outputs.mode == 'managed'
+        run: cargo run -p nxs-server --features postgres --example managed-pg -- classify
+
+  # The durable DynamoDB backend (ddb-opstore epic) is verified against a REAL DynamoDB
+  # Local instance — same rationale as postgres-parity above: the suite skips itself unless
+  # NXF_RELAY_DDB_ENDPOINT is set, so this job is what actually exercises it (and turns the
+  # harness's CI-hard-fail-on-missing-endpoint into a real, live check rather than dead
+  # code). The `dynamodb` feature pulls the full AWS SDK tree including aws-lc-sys (a native
+  # C build, ~4 minutes cold) — Swatinem/rust-cache keeps that off the common path the same
+  # way it already does for the postgres job above.
+  dynamodb-local:
+    runs-on: ubuntu-latest
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+        # DynamoDB Local has no dedicated readiness binary (unlike postgres's pg_isready),
+        # but the image does carry `curl`: a bare, unauthenticated GET always completes
+        # with SOME HTTP response (400 "missing auth token" once the JVM is actually
+        # serving), so `-o /dev/null` without `-f` is what proves liveness — `-f` would
+        # treat that same 400 as a health-check failure forever. GitHub Actions blocks the
+        # job's own steps until this reports healthy, exactly as it does for postgres's
+        # health-cmd above.
+        options: >-
+          --health-cmd "curl -s -o /dev/null http://localhost:8000"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      NXF_RELAY_DDB_ENDPOINT: http://localhost:8000
+      # DynamoDB Local accepts any credentials, but the SDK's credential chain still needs
+      # *something* present or client construction fails looking for a real provider.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (dynamodb backend, warnings are errors)
+        run: cargo clippy -p nxs-server --all-targets --features dynamodb -- -D warnings
+
+      - name: DynamoDB Local tests (debug)
+        run: cargo test -p nxs-server --features dynamodb
+
+      # Same staggering as the other two release steps (6j6v.6e0e).
+      - name: DynamoDB Local tests (release)
+        if: github.event_name != 'pull_request'
+        run: cargo test -p nxs-server --features dynamodb --release

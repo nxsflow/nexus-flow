@@ -1,0 +1,59 @@
+User labels (h89s): free-text tags on an item, distinct from the plugin's display **type**. They
+ride their own observed-remove OR-set, so re-adding the same label still leaves one, and a remove
+only detaches what it observed. Filter the board to a label with `--label`.
+
+Set up a workspace and create an item to label:
+
+```console
+$ nxf init --plugin issue-tracker --json
+[..]
+
+```
+
+```console
+$ nxf create --type bug --title "Fix login" --description "Users cannot log in" --priority P1 --json
+[..]
+
+```
+
+Attach two labels (idempotent), then list them — sorted and de-duplicated:
+
+```console
+$ nxf label add ab12.0001 urgent --json
+{"msg":"ab12.0001 labelled urgent","ok":true}
+
+```
+
+```console
+$ nxf label add ab12.0001 backend --json
+{"msg":"ab12.0001 labelled backend","ok":true}
+
+```
+
+```console
+$ nxf label list ab12.0001 --json
+["backend","urgent"]
+
+```
+
+Filter the board to a label (only the labelled item is returned):
+
+```console
+$ nxf list --label urgent --json
+[..]
+
+```
+
+Detach one label (observed-remove); the other remains:
+
+```console
+$ nxf label remove ab12.0001 urgent --json
+{"msg":"ab12.0001 unlabelled urgent","ok":true}
+
+```
+
+```console
+$ nxf label list ab12.0001 --json
+["backend"]
+
+```

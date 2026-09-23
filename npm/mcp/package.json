@@ -1,0 +1,29 @@
+{
+  "name": "@nexus-flow/mcp",
+  "version": "0.0.0-dev",
+  "description": "Runner shim: fetch, verify (sha256 + minisign), cache, and exec the signed nxs binary as an MCP server for hosts where nxs is not installed.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "nexus-flow",
+    "nxs"
+  ],
+  "homepage": "https://nxsflow.com/",
+  "bugs": "https://github.com/nxsflow/nexus-flow/issues",
+  "license": "Apache-2.0 OR MIT",
+  "type": "commonjs",
+  "bin": {
+    "nexus-flow-mcp": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

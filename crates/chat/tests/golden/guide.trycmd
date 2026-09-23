@@ -1,0 +1,40 @@
+`nxc guide` is chat's own guide verb — one of the three building blocks' (6j6v.9e3r), sharing the
+mechanism `nxf guide` and `nxm guide` use. It needs no workspace: the content is compiled into the
+binary.
+
+Seven topics (6j6v.t6vd, and `writing-declarations` from 6j6v.9w08), in the order they are meant
+to be read.
+
+```console
+$ nxc guide
+Guides (run `nxc guide <topic>`):
+
+  getting-started       Activate chat, declare a persona, and get your first answer back.
+  core-concepts         The shared op-log, qualified handles, threads and their derived quorum, and how a message is delivered.
+  commands              Every shipped verb, with its `--json` shape — and what was removed, with what to do instead.
+  personas              Declaring one agent: identity, prompt layers, model band, tools, and who may address it.
+  channels              Declaring a group — and the ordered channel (`flow: sequential`) that IS the workflow.
+  writing-declarations  From an intention to a declaration that answers usefully: seven measured error classes, and a checklist.
+  limits-and-safety     The hop cap, the human gate, the working-copy lease, and what an agent does NOT decide.
+
+```
+
+The `--json` listing shape is identical across the blocks (`[{summary, topic}]`), so a caller that
+learned it from `nxf guide --json` already knows this one. The ORDER is part of the contract.
+
+```console
+$ nxc guide --json
+[{"summary":"Activate chat, declare a persona, and get your first answer back.","topic":"getting-started"},{"summary":"The shared op-log, qualified handles, threads and their derived quorum, and how a message is delivered.","topic":"core-concepts"},{"summary":"Every shipped verb, with its `--json` shape — and what was removed, with what to do instead.","topic":"commands"},{"summary":"Declaring one agent: identity, prompt layers, model band, tools, and who may address it.","topic":"personas"},{"summary":"Declaring a group — and the ordered channel (`flow: sequential`) that IS the workflow.","topic":"channels"},{"summary":"From an intention to a declaration that answers usefully: seven measured error classes, and a checklist.","topic":"writing-declarations"},{"summary":"The hop cap, the human gate, the working-copy lease, and what an agent does NOT decide.","topic":"limits-and-safety"}]
+
+```
+
+A topic this block does not carry is a `validation` error naming what IS on offer — never a silent
+empty answer. `workflow` is the interesting case: it was a verb group until 6j6v.dvyq §3, and what
+replaced it is a channel that declares its order, so the honest answer points at `channels`.
+
+```console
+$ nxc guide workflow --json
+? 1
+{"error":{"kind":"validation","msg":"unknown guide topic 'workflow'; expected one of getting-started, core-concepts, commands, personas, channels, writing-declarations, limits-and-safety"}}
+
+```

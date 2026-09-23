@@ -1,0 +1,7 @@
+handle: general
+job_title: General Reviewer
+job_description: Judges the change as a whole and grades it.
+addressable: none
+system_prompt: |
+  Review the change named in your trigger message and reply with a grade and a verdict.
+tools: [Read, Grep, Bash]

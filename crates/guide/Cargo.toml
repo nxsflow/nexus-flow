@@ -1,0 +1,19 @@
+[package]
+name = "nxs-guide"
+version.workspace = true
+edition = "2021"
+description = "nxs-guide: the ONE embedded-guide mechanism the three building blocks (nxf/nxm/nxc) each serve their own topics through"
+publish = false
+
+[lib]
+name = "nxs_guide"
+path = "src/lib.rs"
+
+[dependencies]
+# The shared structured error envelope — the same `kind` + `msg` every nxs consumer returns, so a
+# bad topic reads identically whichever binary was asked (6j6v.9e3r).
+nxs-foundation = { path = "../foundation" }
+# The compile-time embed. Each PRODUCT crate invokes `include_dir!` itself (the macro expands
+# against ITS `$CARGO_MANIFEST_DIR`) and hands the resulting `Dir` here; this crate only reads it.
+include_dir = "0.7"
+serde_json = "1"

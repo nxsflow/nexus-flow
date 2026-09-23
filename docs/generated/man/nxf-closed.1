@@ -1,0 +1,16 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH closed 1  "closed " 
+.SH NAME
+closed \- List closed items (excluding archived). Ordered by close\-date descending (most recent first); override with `\-\-sort`
+.SH SYNOPSIS
+\fBclosed\fR [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List closed items (excluding archived). Ordered by close\-date descending (most recent first); override with `\-\-sort`
+.SH OPTIONS
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `closed` | `id` | `rank` (default `closed`). An unknown key is a loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

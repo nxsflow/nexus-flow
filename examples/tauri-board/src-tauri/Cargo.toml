@@ -1,0 +1,28 @@
+# Standalone example crate — deliberately NOT a member of the root workspace (the root
+# `[workspace] exclude` keeps it out), so `cargo test`/CI never builds Tauri + WebKit. It links
+# the engine the way a real host does: a path dependency on `nexus-flow-facade`. Its own gate is
+# `.github/workflows/example-check.yml`.
+[package]
+name = "tauri-board"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal Tauri desktop app embedding the nexus-flow engine in-process"
+publish = false
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The engine, linked directly — exactly how a Tauri backend (the first embedding consumer)
+# consumes nexus-flow. No `nxf` subprocess; same store, same ops, same derivation.
+nexus-flow-facade = { path = "../../../crates/facade" }
+nexus-flow-core = { path = "../../../crates/core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Format the host's system clock as the RFC3339 `now` the engine derives ready/defer from.
+time = { version = "0.3", features = ["formatting"] }

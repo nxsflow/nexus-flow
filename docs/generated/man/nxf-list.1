@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH list 1  "list " 
+.SH NAME
+list \- List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+.SH SYNOPSIS
+\fBlist\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+.SH OPTIONS
+.TP
+\fB\-\-status\fR \fI<STATUS>\fR
+Filter by status
+.TP
+\fB\-\-type\fR \fI<TY>\fR
+Filter by type, using the active plugin\*(Aqs vocabulary (see `nxf schema`)
+.TP
+\fB\-\-label\fR \fI<LABEL>\fR
+Filter to items carrying this label (user vocabulary, not the display type)
+.TP
+\fB\-\-sort\fR \fI<SORT>\fR
+Sort order: `rank` | `id` (default `id`). An unknown key is a loud error
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

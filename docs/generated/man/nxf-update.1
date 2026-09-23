@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH update 1  "update " 
+.SH NAME
+update \- Update item fields via `\-\-set field=value` (repeatable). The long\-form `description`/`design`/`completion_criterion` are ordinary `\-\-set` fields. Run `nxf schema` for the settable fields and their plugin names. Convention: correct the field model once shortly after creation; once it is stable, record what you learn as append\-only notes (`nxf note add`) rather than further field edits
+.SH SYNOPSIS
+\fBupdate\fR [\fB\-\-set\fR] [\fB\-\-set\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIID\fR> [\fI\-\fR] 
+.SH DESCRIPTION
+Update item fields via `\-\-set field=value` (repeatable). The long\-form `description`/`design`/`completion_criterion` are ordinary `\-\-set` fields. Run `nxf schema` for the settable fields and their plugin names. Convention: correct the field model once shortly after creation; once it is stable, record what you learn as append\-only notes (`nxf note add`) rather than further field edits
+.SH OPTIONS
+.TP
+\fB\-\-set\fR \fI<SET>\fR
+A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `\-` reads that field from STDIN (escaping\-free, multi\-line); at most one field per call may read STDIN
+.TP
+\fB\-\-set\-file\fR \fI<SET_FILE>\fR
+A `field=path` assignment that reads the field\*(Aqs value from a file (UTF\-8, verbatim); `path` of `\-` reads STDIN. Repeatable; lets several long\-text fields each come from their own file in one call. A field may be set by `\-\-set` or `\-\-set\-file`, not both
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIID\fR>
+Item id
+.TP
+[\fI\-\fR]
+`\-` reads the fields to set as one JSON object from STDIN (`{"description":"…", "design":"…"}`) — every field in one piped payload, no escaping. The only accepted value is `\-` (canonical form `nxf update <id> \-\-json \-`), mutually exclusive with `\-\-set`/`\-\-set\-file`

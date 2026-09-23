@@ -1,0 +1,64 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH create 1  "create " 
+.SH NAME
+create \- Create a new item — a complete item in one call. Title, description, and priority are required; design, the definition of done, a parent, and dependencies are optional. Run `nxf schema` for the active plugin\*(Aqs field model (labels, constraints, required fields)
+.SH SYNOPSIS
+\fBcreate\fR [\fB\-\-type\fR] [\fB\-\-title\fR] [\fB\-\-description\fR] [\fB\-\-description\-file\fR] [\fB\-\-priority\fR] [\fB\-\-design\fR] [\fB\-\-design\-file\fR] [\fB\-\-dod\fR] [\fB\-\-dod\-file\fR] [\fB\-\-due\fR] [\fB\-\-defer\fR] [\fB\-\-parent\fR] [\fB\-\-depends\-on\fR] [\fB\-\-set\fR] [\fB\-\-set\-file\fR] [\fB\-q\fR|\fB\-\-id\-only\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fI\-\fR] 
+.SH DESCRIPTION
+Create a new item — a complete item in one call. Title, description, and priority are required; design, the definition of done, a parent, and dependencies are optional. Run `nxf schema` for the active plugin\*(Aqs field model (labels, constraints, required fields)
+.SH OPTIONS
+.TP
+\fB\-\-type\fR \fI<TY>\fR
+Item type, from the active plugin\*(Aqs own vocabulary (under `issue\-tracker`: `epic`, `feature`, `bug`, `chore`, `decision`). The set is plugin\-declared, so run `nxf schema` for the one this workspace actually accepts
+.TP
+\fB\-\-title\fR \fI<TITLE>\fR
+Item title (required)
+.TP
+\fB\-\-description\fR \fI<DESCRIPTION>\fR
+Description — why this item exists and its goal (required). Pass `\-` to read it from STDIN (escaping\-free, multi\-line; e.g. `cat desc.md | nxf create … \-\-description \-`), or supply it via `\-\-description\-file` instead
+.TP
+\fB\-\-description\-file\fR \fI<DESCRIPTION_FILE>\fR
+Read the description from this file (UTF\-8, verbatim); `\-` reads STDIN. Mutually exclusive with `\-\-description`
+.TP
+\fB\-\-priority\fR \fI<PRIORITY>\fR
+Priority — the plugin\*(Aqs named variant (e.g. P0..P4) OR its canonical ordinal key (0..4, the form `\-\-json` emits), required; run `nxs prime`/`nxf schema` to see the set. Validated against it; ranks `next` by the variant order
+.TP
+\fB\-\-design\fR \fI<DESIGN>\fR
+Design — the path to the goal; can be filled in later (optional). `\-` reads it from STDIN
+.TP
+\fB\-\-design\-file\fR \fI<DESIGN_FILE>\fR
+Read the design from this file (UTF\-8, verbatim); `\-` reads STDIN
+.TP
+\fB\-\-dod\fR \fI<DOD>\fR
+Definition of done — what "done" means for this item (optional). `\-` reads it from STDIN
+.TP
+\fB\-\-dod\-file\fR \fI<DOD_FILE>\fR
+Read the definition of done from this file (UTF\-8, verbatim); `\-` reads STDIN
+.TP
+\fB\-\-due\fR \fI<DUE>\fR
+Due date (ISO\-8601 / RFC3339)
+.TP
+\fB\-\-defer\fR \fI<DEFER>\fR
+Defer\-until date (ISO\-8601 / RFC3339)
+.TP
+\fB\-\-parent\fR \fI<PARENT>\fR
+Parent item id (sets belongs\-to); must exist
+.TP
+\fB\-\-depends\-on\fR \fI<DEPENDS_ON>\fR
+This item depends on <id> (repeatable): <id> must exist and blocks this item until it closes. Same direction as `dep add <this> <id>`
+.TP
+\fB\-\-set\fR \fI<SET>\fR
+Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `\-\-set` carries the active plugin\*(Aqs declared custom fields (run `nxf schema` for the set). Validated against the field\*(Aqs type; a value of `\-` reads STDIN
+.TP
+\fB\-\-set\-file\fR \fI<SET_FILE>\fR
+Set a custom field from a file: `name=path` (UTF\-8, verbatim); `path` of `\-` reads STDIN. Repeatable. A field may be set by `\-\-set` or `\-\-set\-file`, not both
+.TP
+\fB\-q\fR, \fB\-\-id\-only\fR
+Print ONLY the new item\*(Aqs id — one line, no JSON, no output framing — so it can be captured straight into the next command (`id=$(nxf create … \-q)`) without parsing JSON. Takes precedence over `\-\-json` (the id wins; `\-\-json` is ignored, not an error)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+[\fI\-\fR]
+`\-` reads the whole item as one JSON object from STDIN (every field in one piped payload — no escaping, no flag combinatorics; pair with `\-\-json` for JSON output too, the canonical form `nxf create \-\-json \-`). The only accepted value is `\-`, and it is mutually exclusive with the field flags

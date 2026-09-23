@@ -1,0 +1,15 @@
+{
+  "name": "nxc-agent-sidecar",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "build": "esbuild src/main.mjs --bundle --platform=node --format=esm --outfile=dist/nxc-agent-sidecar.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.215"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.4"
+  }
+}
