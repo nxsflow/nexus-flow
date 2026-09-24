@@ -833,9 +833,16 @@ jobs:
   # nexus-flow-76u.15), while staging always runs to rehearse the packaging — registry-free, see the
   # publish step for why that distinction is the whole point (6j6v.xk2t). Auth is OIDC trusted
   # publishing (no long-lived NXF_NPM_TOKEN — nexus-flow-76u.15): once the var is enabled, a prod
-  # publish only succeeds when the trusted publisher is configured on the @nexus-flow/mcp package
+  # release only reaches npm when the trusted publisher is configured on the @nexus-flow/mcp package
   # (npmjs.com → package → Trusted Publisher → GitHub Actions → this repo + release.yml). Absent
-  # that config npm rejects the publish — fail-closed by default. Runbook: docs/specs/release-management.md.
+  # that config npm rejects it — fail-closed by default. Runbook: docs/specs/release-management.md.
+  #
+  # STAGED, NOT PUBLISHED (6j6v.c7dd). The job runs `npm stage publish`: the version lands on npm
+  # UNAVAILABLE to the public, and only a maintainer's approval WITH 2FA (npmjs.com, or
+  # `npm stage approve <id>`) makes it live. This is npm's default for trusted publishers since
+  # 2026-09-03 (a new one is created stage-only) and the owner's choice for this repo: no CI run —
+  # not even a compromised one — can put a package in front of `npx` users on its own. The job goes
+  # green when the version is STAGED; the release is not complete on npm until it is approved.
   publish-npm:
     needs: [meta, publish]
     # Run for staging (packaging dry-run) always; for a prod release only once npm publishing is
@@ -855,16 +862,17 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
-          # Node 24 for a modern bundled npm; the upgrade step below then pins npm >= 11.5.1, the
-          # floor for OIDC trusted publishing (npm docs). registry-url points publish at npmjs.org.
+          # Node 24 for a modern bundled npm; the upgrade step below then pins npm >= 11.15.0, the
+          # floor for staged publishing (npm docs). registry-url points publish at npmjs.org.
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing (OIDC) requires npm CLI >= 11.5.1; pin the range instead of `@latest` so a
-      # future npm major can't silently change publish behaviour in this credential-minting job.
-      # Zero-dep shim, so this touches nothing the package ships.
-      - name: Ensure npm supports trusted publishing
-        run: npm install -g "npm@>=11.5.1 <12"
+      # Staged publishing (`npm stage publish`) requires npm CLI >= 11.15.0 (trusted publishing alone
+      # needed 11.5.1); pin the range instead of `@latest` so a future npm major can't silently change
+      # publish behaviour in this credential-minting job. Zero-dep shim, so this touches nothing the
+      # package ships.
+      - name: Ensure npm supports staged trusted publishing
+        run: npm install -g "npm@>=11.15.0 <12"
 
       # Stamp the release version into the package (lockstep). The published file list is unaffected.
       - name: Stamp the package version
@@ -948,6 +956,11 @@ jobs:
           # succeeds once the trusted publisher is configured on the package (else npm rejects it —
           # fail-closed by default; see the runbook in docs/specs/release-management.md).
           # Idempotent: a re-run of the same tag must not fail on an already-published version.
+          # A version that is STAGED but not yet approved is invisible to `npm view`, and a re-run
+          # then fails on npm's own uniqueness check. That is deliberate: the short-lived OIDC token
+          # may only stage or publish, not list the queue, so this job cannot tell "already staged"
+          # from any other refusal, and guessing from error text would turn a real refusal green.
+          # Approve (or reject) the staged version instead of re-running.
           if npm view "@nexus-flow/mcp@${VERSION}" version >/dev/null 2>&1; then
             echo "@nexus-flow/mcp@${VERSION} already published — skipping"
             exit 0
@@ -968,8 +981,24 @@ jobs:
           else
             echo "repo not public (private=${REPO_PRIVATE:-unknown}) → provenance omitted (npm cannot attest a non-public repo)"
           fi
-          npm publish --access public "${PROVENANCE[@]}"
-          echo "published @nexus-flow/mcp@${VERSION}"
+          npm stage publish --access public "${PROVENANCE[@]}" 2>&1 | tee "$RUNNER_TEMP/stage.log"
+          echo "staged @nexus-flow/mcp@${VERSION} — NOT live until a maintainer approves it"
+          {
+            echo "## npm: @nexus-flow/mcp@${VERSION} is STAGED, not live"
+            echo
+            echo "A maintainer approves it with 2FA — on npmjs.com (package → Staged versions), or:"
+            echo
+            echo '```'
+            echo "npm stage list @nexus-flow/mcp"
+            echo "npm stage approve <stage-id>"
+            echo '```'
+            echo
+            echo "npm's own output:"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/stage.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Refresh the STAGING federated content after a real beta release so the staging landing's
   # /open-source changelog reflects the new beta (nexus-flow-s8a, re-homed to the content provider
