@@ -39,9 +39,9 @@ jobs:
     # Defensive guard (the trigger already implies it): only a real, published release.
     if: github.event.release.prerelease == false && github.event.release.draft == false
     permissions:
-      contents: write # commit the regenerated feed back to main (best-effort)
+      contents: write # push the regenerated feed to its own branch (never to the line itself)
+      pull-requests: write # open the feed PR and label it (6j6v.exga)
       id-token: write # OIDC: assume nxs-prod-release (copy + manifest write)
-      actions: write # dispatch publish-content.yml after the feed commit (85y.19; re-homed by 6j6v.0a6p)
     env:
       # Tag/release data flows ONLY through env, never `${{ }}`-interpolated into a shell
       # (security hygiene, spec §2). version-check.yml enforces tag == v<workspace-version>.
@@ -195,50 +195,63 @@ jobs:
           done
           echo "All 4 tarballs + .sha256 + .minisig present in s3://.../download/stable/${VERSION}/"
 
-      # Best-effort: commit the regenerated feed back to main. `continue-on-error` is scoped to
-      # THIS step only — a branch-protection reject of the feed push must NOT fail an already-
-      # done promotion. The push outcome drives `dispatch`: only a landed feed commit should
-      # trigger the site refresh.
-      - name: Commit + push regenerated feed (best-effort)
-        id: feed
-        continue-on-error: true
+      # The regenerated feed reaches its line through a PULL REQUEST, never a push (6j6v.exga). main
+      # carries ruleset 23939298 ("every change through a pull request", no bypass — owner rule), so
+      # the old direct push was rejected, and it degraded to a ::warning:: while the promotion
+      # itself stayed green: main's feed silently lacked the stable entry and the public changelog
+      # never refreshed. Now the feed commit goes to its own branch and a PR carries it.
+      #
+      # WHY THE OWNER RE-OPENS THE PR. A PR opened with GITHUB_TOKEN starts no workflows (GitHub's
+      # loop prevention), so its six required checks would never report and it could never merge.
+      # Closing and re-opening it as a human fires `pull_request: reopened`, and every required
+      # check runs. The owner chose that over a GitHub App token (6j6v.exga): a stable promotion is
+      # already a deliberate human gesture, and it costs no new secret. The job summary spells it
+      # out.
+      #
+      # NOT best-effort any more: a feed that cannot reach a PR fails the job. The promotion above
+      # has already landed by then, so red here means "stable is live, main's feed is not", which
+      # is exactly what somebody must see.
+      #
+      # publish-content is NOT dispatched from here any more. It must run on the MERGED feed, and
+      # the owner's merge is a human push to the line that touches release-notes.json, which fires
+      # publish-content.yml's own push trigger (main only; a backport's entry reaches main through
+      # its forward-port PR, as before).
+      - name: Open the feed PR
         env:
           VERSION: ${{ steps.v.outputs.version }}
           LINE_REF: ${{ steps.line.outputs.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if git diff --quiet -- release-notes.json; then
-            echo "feed unchanged — nothing to commit"
-            echo "dispatch=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "feed unchanged — nothing to commit"; exit 0
           fi
+          branch="release-notes/promote-v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
           git add release-notes.json
           git commit -m "chore(release-notes): promote ${VERSION} to stable"
-          # Push back to the LINE it came from (main for a normal release; release/x.Y for a
-          # backport). A backport's stable entry reaches main + the public site via the
-          # forward-port step in the backport runbook (docs/specs/maintenance-and-backports.md).
-          if git push origin "HEAD:${LINE_REF}"; then
-            echo "dispatch=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::feed commit rejected (branch protection?) — promotion already succeeded, skipping content refresh"
-            echo "dispatch=false" >> "$GITHUB_OUTPUT"
-          fi
+          # The branch is this job's own: a re-run regenerates the same feed and may overwrite it.
+          git push --force origin "HEAD:refs/heads/${branch}"
 
-      # Refresh the public changelog from the just-pushed feed (spec §8, 85y.19; re-homed to the
-      # content provider by 6j6v.0a6p). The dispatch is EXPLICIT because a GITHUB_TOKEN push never
-      # triggers `on: push` workflows (Actions loop prevention) — publish-content.yml's push trigger
-      # only catches human commits. NOT best-effort: unlike the feed push, a failed dispatch means
-      # the public changelog silently never refreshes, so let it fail the job and surface (the
-      # promotion itself already landed).
-      #
-      # ONLY for the main line. The public landing builds from main's feed; a backport commits its
-      # feed entry to release/x.Y, which is NOT yet on main, so dispatching here would refresh the
-      # content to the SAME (backport-less) state — a misleading, wasted run. A backport's entry
-      # reaches main + the landing via the forward-port PR (backport runbook §4.6), whose merge fires
-      # publish-content.yml on main naturally.
-      - name: Publish content (refresh public changelog)
-        if: steps.feed.outputs.dispatch == 'true' && steps.line.outputs.ref == 'main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run publish-content.yml --ref main -f env=prod
+          pr="$(gh pr list --head "$branch" --base "$LINE_REF" --state open --json url --jq '.[0].url')"
+          if [ -z "$pr" ]; then
+            pr="$(gh pr create --base "$LINE_REF" --head "$branch" --label skip-changelog \
+              --title "chore(release-notes): promote ${VERSION} to stable" \
+              --body "The stable entry for ${VERSION}, regenerated by promote.yml after the promotion itself succeeded. The checks do not start on their own for a PR opened by a workflow: close and re-open this PR, wait for the required checks, then merge. The merge refreshes the public changelog through publish-content.yml.")"
+          fi
+          number="${pr##*/}"
+          echo "feed PR: $pr"
+          {
+            echo "## Stable ${VERSION} is live. Its feed entry waits in a PR"
+            echo
+            echo "Merge $pr to put the stable entry into \`${LINE_REF}\` and refresh the public changelog."
+            echo "Its checks do not start by themselves (the PR was opened by a workflow). Start them by closing and re-opening it:"
+            echo
+            echo '```'
+            echo "gh pr close ${number} -R ${GITHUB_REPOSITORY} && gh pr reopen ${number} -R ${GITHUB_REPOSITORY}"
+            echo "gh pr checks ${number} -R ${GITHUB_REPOSITORY} --watch"
+            echo "gh pr merge ${number} -R ${GITHUB_REPOSITORY} --squash --delete-branch"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

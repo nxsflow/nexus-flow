@@ -85,8 +85,9 @@ For each active line `x.Y` (current first, then the previous ones):
    aggregates within the line (`prev-stable` returns the line predecessor `vx.Y.z`, not a
    higher-line stable — proven by the `backport_promotion_is_line_scoped_across_parallel_lines`
    test), and copies the same bytes beta→stable (build-once-promote, per line).
-6. **Forward-port the line's feed entry to `main`.** `promote.yml` commits the regenerated feed
-   back to the **line** branch. To surface the backport in the canonical feed + the public
+6. **Forward-port the line's feed entry to `main`.** `promote.yml` opens a PR carrying the
+   regenerated feed against the **line** branch (release-management.md §5.5 step 5: close and
+   re-open it so its checks run, then merge). To surface the backport in the canonical feed + the public
    changelog (which build from `main`'s `release-notes.json`), open a small PR cherry-picking that
    `release-notes.json` change onto `main`. Merging it triggers `site.yml` and refreshes the
    public site. (The canonical feed on `main` is the **union** of all lines' entries; backport
