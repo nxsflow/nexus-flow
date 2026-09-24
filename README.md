@@ -358,6 +358,8 @@ cargo clippy --all-targets -- -D warnings   # lint, warnings are errors
 cargo fmt --check                           # formatting gate
 ```
 
+Be careful with the use of `clippy` as it can take up a lot of compute resources. 
+
 ## Repository layout
 
 ```
