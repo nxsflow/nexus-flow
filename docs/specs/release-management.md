@@ -526,9 +526,16 @@ Flow (identical to the reference, only n platforms instead of 2-into-1):
    condenses multiple beta refinements of one feature into a single stable line, and phrases for a
    stable audience before publishing.
 4. Rewrite `manifests/stable.json`, promote the feed + publish to S3.
-5. Commit the regenerated feed **best-effort** back to `main` (no `[skip ci]` — the
-   push triggers exactly the site deploy that updates the changelog; loop-free, because the
-   release runs only on tags). A branch-protection reject must not fail the promotion.
+5. Carry the regenerated feed to its line **through a pull request** (6j6v.exga): the commit goes
+   to its own branch `release-notes/promote-v<v>`, and `promote.yml` opens a PR against the line
+   (`main`, or `release/x.Y` for a backport), labelled `skip-changelog`. `main` carries a ruleset
+   with no bypass ("every change through a pull request"), so the old direct push was rejected and,
+   being best-effort, left main's feed silently without the stable entry. Failing to open the PR now
+   fails the job; the promotion itself has landed by then. **Owner step:** a PR opened by a workflow
+   starts no workflows, so its required checks run only after the owner closes and re-opens it; then
+   the owner merges. That merge is a human push touching `release-notes.json`, and it fires
+   `publish-content.yml`, which refreshes the public changelog. The job summary prints the three
+   commands.
 
 ### 5.6 Container image for `nxf-relay` — **specified, deliberately not built yet**
 
@@ -720,7 +727,7 @@ prerendered, EN + `/de`, no router — the reasons documented there hold unchang
 | `changelog-check.yml` | PR (+`labeled`/`unlabeled`) | fragment requirement, waived by itself when nothing the PR touches ships, opt-out `skip-changelog`; plus the explicit `facade:` verdict when the diff touches a consumed surface (§4.2, `6j6v.gmjd`) |
 | `facade-semver.yml` | PR, main, `release/<major>.<minor>`, tags `v*` | `cargo xtask facade semver-check` — public-API SemVer gate over all three consumed surfaces, `nexus-flow-facade`/`nexus-chat`/`nexus-memory` (patch never breaks); fail-closed on a patch bump, report-only on a feature PR / minor; runs per line (§4.3) |
 | `release.yml` | tag `v*` (prod) / dispatch (staging) | **`ci-green` gate** → matrix build, sign, GitHub pre-release, S3 publish, beta manifest, GHCR image. The gate DEMANDS a green `ci.yml` run for the tagged commit (`push`/`workflow_dispatch` only — a `pull_request` run skips the release profile) and never tests the tree itself; no green run ⇒ red release. It replaced a `test` job that re-ran `cargo test --all` and `cargo test --all --release` on a commit CI had just tested — 21m28 of a 31m52 release on v0.51.0 (6j6v.31rs). Script: `.github/scripts/require-green-ci.sh`, hermetically tested by `tests/require-green-ci.test.sh`. |
-| `promote.yml` | `release: released` | beta→stable: S3 copy, stable manifest, notes aggregate, feed commit, image retag; **line-aware** — promotes from `main` or, for a backport, the release's `release/x.Y` line |
+| `promote.yml` | `release: released` | beta→stable: S3 copy, stable manifest, notes aggregate, feed PR (owner re-opens + merges), image retag; **line-aware** — promotes from `main` or, for a backport, the release's `release/x.Y` line |
 
 **SIX ROWS USED TO STAND HERE AND THE FILES ARE GONE.** `staging-gate.yml`, `infra-staging.yml`,
 `infra-staging-release.yml`, `infra-prod.yml` and `infra-ci.yml` were deleted with the infra
@@ -762,7 +769,8 @@ This table was never exhaustive and is less so now; `.github/workflows/` is the 
 3. **Dogfood on beta**: `nxs self-update --channel beta` (we use nexus-flow ourselves —
    the engine eats its own tail, vision §Phases).
 4. **Promote**: open the GitHub release, deselect "Set as pre-release", set "Set as latest"
-   → `promote.yml` copies the same bytes to stable.
+   → `promote.yml` copies the same bytes to stable and opens the feed PR. **Then** close and re-open
+   that PR (its checks do not start otherwise), wait for them, and merge it (§5.5 step 5).
 5. **Broken?** `enabled:false` into the affected channel manifest (kill switch, immediate), fix
    forward as `<v+1>`; stable simply skips the broken version.
 

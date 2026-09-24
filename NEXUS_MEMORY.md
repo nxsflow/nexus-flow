@@ -1972,7 +1972,10 @@ for the commit, red release, never a fallback test run. Merging to main produces
 
 PROMOTION TO STABLE IS A MANUAL OWNER STEP: open the GitHub release, deselect "Set as pre-release",
 set "Set as latest". That fires `promote.yml` (`release: types: [released]`), which SERVER-SIDE
-COPIES the same bytes and signatures to stable — nothing is rebuilt or re-signed.
+COPIES the same bytes and signatures to stable — nothing is rebuilt or re-signed. Since 6j6v.exga
+it then opens a FEED PR (branch release-notes/promote-v<v>): main's ruleset allows no direct push.
+A workflow-opened PR starts no checks, so CLOSE AND RE-OPEN it, wait for the checks, MERGE it. Only
+that merge puts the stable entry on main and refreshes the public changelog (publish-content.yml).
 
 AND IF PROMOTE EVER COMPLAINS "no beta entry for <v> to promote": do NOT flip the GitHub release
 first. Add the entry, re-run `version set`, then fire the promotion. That failure is now structurally
