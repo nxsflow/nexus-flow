@@ -853,10 +853,14 @@ new installs/checks; already-affected users are healed by a higher fix release.
 8. Rehearsal: `release.yml` via dispatch against staging (with `NXF_MACOS_SIGNING_ENABLED=true`
    the run verifies codesign + notarization + `spctl --assess`); then the first real
    tag release.
-9. **npm publishing of `@nexus-flow/mcp` via trusted publishing.** The `publish-npm`
+9. **npm publishing of `@nexus-flow/mcp` via trusted, STAGED publishing.** The `publish-npm`
    job authenticates by **OIDC trusted publishing — no long-lived npm token** (validated against the
-   current npm docs; this supersedes the earlier `NXF_NPM_TOKEN` plan). It is fail-closed: a prod publish
-   only succeeds once the trusted publisher is configured on the package, so nothing ships prematurely.
+   current npm docs; this supersedes the earlier `NXF_NPM_TOKEN` plan). It is fail-closed: a prod release
+   only reaches npm once the trusted publisher is configured on the package, so nothing ships prematurely.
+   **Since 6j6v.c7dd it STAGES rather than publishes** (`npm stage publish`): the version sits on npm
+   unavailable to the public until a maintainer approves it with 2FA. That is npm's default for trusted
+   publishers created since 2026-09-03, and the owner's choice: no CI run can put a package in front of
+   `npx` users on its own. **Every release therefore ends with one human step** — see g.
    One-time owner steps (require the npm account that will own the org):
    a. **Own the scope.** Create the **`@nexus-flow`** org on npmjs.com (this reserves the `@nexus-flow/*`
       scope) and confirm the **`@nexus-flow/mcp`** name is free.
@@ -868,9 +872,13 @@ new installs/checks; already-affected users are healed by a higher fix release.
       use that and skip the manual publish.)
    c. **Configure the trusted publisher.** npmjs.com → `@nexus-flow/mcp` → *Settings* → *Trusted Publisher*
       → **GitHub Actions**, with: organization/owner **`nxsflow`**, repository **`nexus-flow`**, workflow
-      filename **`release.yml`** (filename only). Leave *Environment* blank (the job uses none); if the
-      form offers an allowed-actions choice, select **npm publish**. These must match the `publish-npm`
-      job exactly (`id-token: write`, `release.yml`).
+      filename **`release.yml`** (filename only). Leave *Environment* blank (the job uses none). Under
+      *Allowed actions* keep **stage publish only** (npm's default); do NOT tick direct publish — the job
+      never uses it, and leaving it off is what makes the approval step binding. A trusted publisher that
+      allows only staging answers a direct `npm publish` with `403 … OIDC permission denied for this
+      action`. These must match the `publish-npm` job exactly (`id-token: write`, `release.yml`). The entry
+      is bound to the repository, not only its name: after the 2026-09 cutover to the history-free repo
+      the old entry answered `404` on the PUT until it was removed and re-added.
    d. **Lock it down.** Once a trusted publish works, set the package to *Require two-factor authentication
       and disallow tokens* (npm recommendation) — OIDC still works, and stray tokens can no longer publish.
       *Optional defense-in-depth (yk2c / review #160.4).* The trust today is "any `release.yml` run with
@@ -896,8 +904,16 @@ new installs/checks; already-affected users are healed by a higher fix release.
       a machine **without** `nxs`: `npx -y @nexus-flow/mcp -- --workspace <path>` fetches the signed `nxs`
       from the live CDN, passes **sha256 + minisign**, caches, and serves. Confirm a **tampered/wrong-key**
       artifact still **aborts** against the live pubkey (the fail-closed guarantee — already unit-proven by
-      the shim's `node --test` suite, re-asserted against the real CDN here). npm CLI ≥ 11.5.1 + Node ≥ 22.14
-      are required for OIDC; the job pins them (Node 24 + `npm install -g npm@latest`).
+      the shim's `node --test` suite, re-asserted against the real CDN here). npm CLI ≥ 11.15.0 (staged
+      publishing; OIDC alone needed 11.5.1) + Node ≥ 22.14 are required; the job pins them (Node 24 +
+      `npm install -g "npm@>=11.15.0 <12"`).
+   g. **Approve every release (the human step).** The `publish-npm` job goes green when the version is
+      STAGED, and writes the approval instructions into its job summary. Approve on npmjs.com
+      (`@nexus-flow/mcp` → staged versions) or with `npm stage list @nexus-flow/mcp` then
+      `npm stage approve <stage-id>`; both ask for 2FA. `npm stage reject <stage-id>` discards a bad one.
+      Until then `npx -y @nexus-flow/mcp` keeps resolving the previous version. Do not re-run the job for
+      a version that is staged but unapproved: npm refuses a second copy of the same version, and the
+      job cannot see the queue (its OIDC token may only stage or publish), so it fails rather than guess.
 
 ## 13. Implementation phases
 
