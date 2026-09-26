@@ -1976,6 +1976,10 @@ COPIES the same bytes and signatures to stable — nothing is rebuilt or re-sign
 it then opens a FEED PR (branch release-notes/promote-v<v>): main's ruleset allows no direct push.
 A workflow-opened PR starts no checks, so CLOSE AND RE-OPEN it, wait for the checks, MERGE it. Only
 that merge puts the stable entry on main and refreshes the public changelog (publish-content.yml).
+NPM IS STAGED, NOT PUBLISHED (6j6v.c7dd): release.yml's publish-npm runs `npm stage publish`, so each
+tag release leaves @nexus-flow/mcp@<v> WAITING on npm. The owner approves it with 2FA (npmjs.com, or
+`npm stage list @nexus-flow/mcp` + `npm stage approve <id>`); the job summary says so. Do NOT re-run
+publish-npm for a staged-but-unapproved version: it fails, because npm refuses a second copy.
 
 AND IF PROMOTE EVER COMPLAINS "no beta entry for <v> to promote": do NOT flip the GitHub release
 first. Add the entry, re-run `version set`, then fire the promotion. That failure is now structurally
