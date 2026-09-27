@@ -18,6 +18,22 @@
         }
       }
     ],
-    "stable": []
+    "stable": [
+      {
+        "version": "0.200.0",
+        "date": "2026-09-23",
+        "items": [
+          {
+            "type": "changed",
+            "en": "**nexus-flow's source now lives in a public repository, starting from a single commit.** The code is\nthe same as in 0.103.0; what changed is where it is published. The history before this release stays\nin a private archive, so the release list on GitHub begins here. Installing and updating are\nunaffected: `install.sh` and `nxs self-update` keep fetching from `nxsflow.com/nxs`.",
+            "de": "**Der Quellcode von nexus-flow liegt jetzt in einem öffentlichen Repository, beginnend mit einem\neinzigen Commit.** Der Code ist derselbe wie in 0.103.0; geändert hat sich, wo er veröffentlicht wird.\nDie Historie vor diesem Release bleibt in einem privaten Archiv, deshalb beginnt die Release-Liste auf\nGitHub hier. Installation und Aktualisierung sind nicht betroffen: `install.sh` und\n`nxs self-update` holen weiterhin von `nxsflow.com/nxs`."
+          }
+        ],
+        "notes": {
+          "en": "### Changed\n- **nexus-flow's source now lives in a public repository, starting from a single commit.** The code is\nthe same as in 0.103.0; what changed is where it is published. The history before this release stays\nin a private archive, so the release list on GitHub begins here. Installing and updating are\nunaffected: `install.sh` and `nxs self-update` keep fetching from `nxsflow.com/nxs`.",
+          "de": "### Geändert\n- **Der Quellcode von nexus-flow liegt jetzt in einem öffentlichen Repository, beginnend mit einem\neinzigen Commit.** Der Code ist derselbe wie in 0.103.0; geändert hat sich, wo er veröffentlicht wird.\nDie Historie vor diesem Release bleibt in einem privaten Archiv, deshalb beginnt die Release-Liste auf\nGitHub hier. Installation und Aktualisierung sind nicht betroffen: `install.sh` und\n`nxs self-update` holen weiterhin von `nxsflow.com/nxs`."
+        }
+      }
+    ]
   }
 }
