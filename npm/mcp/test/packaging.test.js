@@ -48,3 +48,17 @@ test('npm pack reports name and version where release.yml reads them', () => {
   assert.equal(name, '@nexus-flow/mcp');
   assert.equal(version, require('../package.json').version);
 });
+
+// `npm stage publish --provenance` (release.yml, once the repo is public) has the registry check
+// that package.json's `repository.url` names the repository the provenance statement was built
+// from — an empty one is refused with E422, after the release itself is already out. v0.200.1 hit
+// exactly that: the first npm publish from the public repository. Pinned here, on every PR.
+test('package.json names the repository the provenance statement is built from', () => {
+  const { repository } = require('../package.json');
+  assert.ok(repository && typeof repository === 'object', 'repository must be an object');
+  const normalized = String(repository.url)
+    .replace(/^git\+/, '')
+    .replace(/\.git$/, '');
+  assert.equal(normalized, 'https://github.com/nxsflow/nexus-flow');
+  assert.equal(repository.directory, 'npm/mcp');
+});
