@@ -13,7 +13,7 @@ exclude = ["examples/tauri-board/src-tauri"]
 # (clap). The release tag `v<version>` is the truth and CI enforces tag == version
 # fail-closed. See docs/specs/release-management.md §4.1.
 [workspace.package]
-version = "0.200.1"
+version = "0.200.2"
 
 # Trim the debug build cache (nexus-flow-k1i). `target/debug` had grown to ~24 GB of `.o`/DWARF
 # in `deps/` because the default `debug = true` emits FULL debug info — and on macOS
