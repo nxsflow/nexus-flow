@@ -41,7 +41,7 @@ NOTES
 
 - 2026-06-23 started on the command layer
 
-This item has the following parents: ab12.0001. URGENT RECOMMENDATION: ALSO READ THESE ITEMS TO GET THE COMPLETE PICTURE!!!
+Parents: ab12.0001 (read for full context)
 ```
 
 `list` dumps every item; with `--json` it is the canonical, byte-stable snapshot (id-ordered,

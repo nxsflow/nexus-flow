@@ -207,8 +207,8 @@ fn section_headings_use_the_plugins_field_labels() {
 
 #[test]
 fn appends_parent_notice_at_the_very_end_when_parents_exist() {
-    // 6j6v.zvd0: an item with a parent gets a loud, verbatim notice appended at the very END of
-    // `nxf show`'s human output — after NOTES — pointing the reader at the parent(s).
+    // 6j6v.zvd0: an item with a parent gets a notice appended at the very END of `nxf show`'s
+    // human output — after NOTES — pointing the reader at the parent(s). Neutral since 6j6v.jfgy.
     let tmp = TempDir::new().unwrap();
     init(tmp.path(), "issue-tracker");
     let parent = create(tmp.path(), "epic", "Epic", &[]);
@@ -220,10 +220,7 @@ fn appends_parent_notice_at_the_very_end_when_parents_exist() {
         .success();
 
     let out = show(tmp.path(), &task);
-    let expected = format!(
-        "This item has the following parents: {parent}. URGENT RECOMMENDATION: ALSO READ THESE \
-         ITEMS TO GET THE COMPLETE PICTURE!!!"
-    );
+    let expected = format!("Parents: {parent} (read for full context)");
     assert!(
         out.trim_end().ends_with(expected.trim_end()),
         "notice must be the very last thing in the output:\n{out}"
@@ -237,7 +234,7 @@ fn omits_parent_notice_when_no_parent() {
     let task = create(tmp.path(), "bug", "Standalone", &[]);
     let out = show(tmp.path(), &task);
     assert!(
-        !out.contains("URGENT RECOMMENDATION"),
+        !out.contains("(read for full context)"),
         "no parent notice when there is no parent:\n{out}"
     );
 }
@@ -258,7 +255,7 @@ fn omits_parent_notice_for_a_contributes_to_only_edge() {
 
     let out = show(tmp.path(), &cream);
     assert!(
-        !out.contains("URGENT RECOMMENDATION"),
+        !out.contains("(read for full context)"),
         "a contributes_to edge is not a parent, so no notice:\n{out}"
     );
 }

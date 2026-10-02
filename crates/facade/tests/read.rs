@@ -453,18 +453,37 @@ fn show_of_an_item_with_one_parent_carries_parents_and_notice() {
     assert_eq!(rec.parents, vec!["ab12.0001".to_string()]);
     assert_eq!(
         rec.parents_notice.as_deref(),
-        Some(
-            "This item has the following parents: ab12.0001. URGENT RECOMMENDATION: ALSO READ \
-             THESE ITEMS TO GET THE COMPLETE PICTURE!!!"
-        )
+        Some("Parents: ab12.0001 (read for full context)")
     );
 
     let v = rec.to_value();
     assert_eq!(v["parents"], serde_json::json!(["ab12.0001"]));
     assert_eq!(
         v["parents_notice"],
-        "This item has the following parents: ab12.0001. URGENT RECOMMENDATION: ALSO READ \
-         THESE ITEMS TO GET THE COMPLETE PICTURE!!!"
+        "Parents: ab12.0001 (read for full context)"
+    );
+}
+
+#[test]
+fn the_parents_notice_reads_as_data_not_as_an_instruction() {
+    // 6j6v.jfgy: the old notice shouted ("URGENT RECOMMENDATION: … !!!"), and agents downstream
+    // flagged it as a prompt injection in the ticket data — or learned to skim the urgent line at
+    // the end of board output, which blunts them against real injections. Tool output in an agent
+    // chain must not sound like an order: no exclamation mark, no word in capitals.
+    let mut s = Store::open_in_memory(1);
+    open_task(&mut s, "ab12.0001", "Epic", "0");
+    open_task(&mut s, "ab12.0002", "Child", "0");
+    s.add_parent("ab12.0002", "ab12.0001", "t");
+
+    let notice = read::show(&s, "ab12.0002").unwrap().parents_notice.unwrap();
+    assert!(!notice.contains('!'), "no exclamation mark: {notice}");
+    let shouted: Vec<&str> = notice
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|w| w.len() > 1 && w.chars().all(|c| c.is_ascii_uppercase()))
+        .collect();
+    assert!(
+        shouted.is_empty(),
+        "no word in capitals, found {shouted:?}: {notice}"
     );
 }
 
@@ -484,10 +503,7 @@ fn show_of_an_item_with_multiple_parents_lists_all_ids_comma_separated() {
     );
     assert_eq!(
         rec.parents_notice.as_deref(),
-        Some(
-            "This item has the following parents: ab12.0001, ab12.0002. URGENT \
-             RECOMMENDATION: ALSO READ THESE ITEMS TO GET THE COMPLETE PICTURE!!!"
-        )
+        Some("Parents: ab12.0001, ab12.0002 (read for full context)")
     );
 }
 
@@ -537,10 +553,7 @@ fn show_omits_a_deleted_parent_from_parents_and_notice() {
     );
     assert_eq!(
         rec.parents_notice.as_deref(),
-        Some(
-            "This item has the following parents: ab12.0002. URGENT RECOMMENDATION: ALSO READ \
-             THESE ITEMS TO GET THE COMPLETE PICTURE!!!"
-        )
+        Some("Parents: ab12.0002 (read for full context)")
     );
 }
 
