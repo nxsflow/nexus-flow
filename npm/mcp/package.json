@@ -10,6 +10,11 @@
   ],
   "homepage": "https://nxsflow.com/",
   "bugs": "https://github.com/nxsflow/nexus-flow/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nxsflow/nexus-flow.git",
+    "directory": "npm/mcp"
+  },
   "license": "Apache-2.0 OR MIT",
   "type": "commonjs",
   "bin": {
