@@ -3,6 +3,22 @@
     "alpha": [],
     "beta": [
       {
+        "version": "0.201.0",
+        "date": "2026-10-03",
+        "items": [
+          {
+            "type": "changed",
+            "en": "`nxf show` now points at an item's parents in a neutral line — `Parents: <ids> (read for full context)` —\ninstead of \"URGENT RECOMMENDATION: … !!!\". Agents reading the board had flagged the old line as a\npossible prompt injection. The `parents_notice` field in `--json` and on the facade carries the same\nnew text; its name and when it appears are unchanged.",
+            "de": "`nxf show` verweist auf die Eltern eines Eintrags jetzt in einer neutralen Zeile —\n`Parents: <ids> (read for full context)` — statt mit „URGENT RECOMMENDATION: … !!!“. Agenten, die das\nBoard lesen, hatten die alte Zeile als möglichen Prompt-Injection-Versuch gemeldet. Das Feld\n`parents_notice` in `--json` und in der Fassade trägt denselben neuen Text; Name und Bedingung, wann es\nerscheint, bleiben gleich.",
+            "facade": "changed"
+          }
+        ],
+        "notes": {
+          "en": "### Changed\n- `nxf show` now points at an item's parents in a neutral line — `Parents: <ids> (read for full context)` —\ninstead of \"URGENT RECOMMENDATION: … !!!\". Agents reading the board had flagged the old line as a\npossible prompt injection. The `parents_notice` field in `--json` and on the facade carries the same\nnew text; its name and when it appears are unchanged.\n\n### Facade Contract\n- `changed` · `nxf show` now points at an item's parents in a neutral line — `Parents: <ids> (read for full context)` —\ninstead of \"URGENT RECOMMENDATION: … !!!\". Agents reading the board had flagged the old line as a\npossible prompt injection. The `parents_notice` field in `--json` and on the facade carries the same\nnew text; its name and when it appears are unchanged.",
+          "de": "### Geändert\n- `nxf show` verweist auf die Eltern eines Eintrags jetzt in einer neutralen Zeile —\n`Parents: <ids> (read for full context)` — statt mit „URGENT RECOMMENDATION: … !!!“. Agenten, die das\nBoard lesen, hatten die alte Zeile als möglichen Prompt-Injection-Versuch gemeldet. Das Feld\n`parents_notice` in `--json` und in der Fassade trägt denselben neuen Text; Name und Bedingung, wann es\nerscheint, bleiben gleich.\n\n### Facade-Kontrakt\n- `changed` · `nxf show` verweist auf die Eltern eines Eintrags jetzt in einer neutralen Zeile —\n`Parents: <ids> (read for full context)` — statt mit „URGENT RECOMMENDATION: … !!!“. Agenten, die das\nBoard lesen, hatten die alte Zeile als möglichen Prompt-Injection-Versuch gemeldet. Das Feld\n`parents_notice` in `--json` und in der Fassade trägt denselben neuen Text; Name und Bedingung, wann es\nerscheint, bleiben gleich."
+        }
+      },
+      {
         "version": "0.200.2",
         "date": "2026-10-02",
         "items": [],
