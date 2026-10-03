@@ -566,6 +566,53 @@ impl Store {
         .collect()
     }
 
+    /// The ops with these ids, in log order — what a caller that already knows WHICH ops it wants
+    /// (a border thread's, nxf 6j6v.4gp2) copies to another log, instead of exporting all of them.
+    pub fn ops_with_ids(&self, ids: &[String]) -> Vec<Op> {
+        let mut out = Vec::with_capacity(ids.len());
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT op_id, lamport, site, domain, target_kind, target_id, field, op_type,
+                        value, author, wall_clock, key_id, sig FROM ops WHERE op_id = ?1",
+            )
+            .unwrap();
+        for id in ids {
+            let op = stmt
+                .query_row([id], |r| {
+                    Ok(Op {
+                        op_id: r.get(0)?,
+                        lamport: r.get(1)?,
+                        site: r.get(2)?,
+                        domain: r.get(3)?,
+                        target_kind: r.get(4)?,
+                        target_id: r.get(5)?,
+                        field: r.get(6)?,
+                        op_type: r.get(7)?,
+                        value: r.get(8)?,
+                        author: r.get(9)?,
+                        wall_clock: r.get(10)?,
+                        key_id: r.get(11)?,
+                        sig: r.get(12)?,
+                    })
+                })
+                .optional()
+                .unwrap();
+            out.extend(op);
+        }
+        out.sort_by_key(|o| (o.lamport, o.site));
+        out
+    }
+
+    /// Whether this log holds the op `op_id`.
+    pub fn holds_op(&self, op_id: &str) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM ops WHERE op_id = ?1", [op_id], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_some()
+    }
+
     /// Merge foreign ops: advance the Lamport clock past each, fold it in via its domain's reducer.
     /// Ops with an unknown / malformed shape (or unknown domain) are **stored but not folded**
     /// (forward-compat, §7) and returned so the caller can see what was deferred; a deferred op

@@ -752,6 +752,28 @@ impl PersonaBrief {
                     via("; everyone else reaches you through")
                 ))
             }
+            // The whitelist with callers from outside (nxf 6j6v.t5xb): who inside, then who from
+            // other workspaces — a persona told it can be commissioned from outside should know.
+            Addressable::OnlyWithExternal {
+                personas,
+                humans,
+                external,
+            } => {
+                let inside = match (personas.as_slice(), humans) {
+                    ([], false) => "nobody in this workspace".to_string(),
+                    ([], true) => "only the person at the terminal".to_string(),
+                    (named, false) => format!("only {}", named.join(", ")),
+                    (named, true) => {
+                        format!("only {} and the person at the terminal", named.join(", "))
+                    }
+                };
+                Some(format!(
+                    "{inside} may message you directly, and from other workspaces on this machine \
+                     {}{}",
+                    external.join(", "),
+                    via("; everyone else reaches you through")
+                ))
+            }
         };
         if let Some(reachable) = reachable {
             lines.push(format!("- **Reachable:** {reachable}"));

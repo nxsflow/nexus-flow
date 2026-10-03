@@ -515,6 +515,52 @@ pub fn pick_up_owed(
     report
 }
 
+// ---- the border (6j6v.4gp2) -------------------------------------------------------------------
+
+/// How often the service runs `nxs chat handover` for a workspace that has an open border thread.
+/// `send` and `reply` hand a border thread over at once; this pass is what carries the rest — an
+/// answer for a caller whose turn had not ended yet, a write whose own handover failed — so it can
+/// be unhurried.
+pub const BORDER_PASS: Duration = Duration::from_secs(5);
+
+/// When each workspace's last border handover was started.
+#[derive(Debug, Default)]
+pub struct BorderPasses {
+    last: std::collections::HashMap<std::path::PathBuf, Instant>,
+}
+
+/// **Run the handover where a border thread is open** (nxf 6j6v.4gp2) — every [`BORDER_PASS`], for
+/// every attended workspace whose `.nxs/` carries the marker `nexus_chat::border` keeps while it has
+/// a border thread that is not finished. The marker, not the database, because this runs every tick
+/// for every workspace and must cost one `stat`. Returns the workspaces whose spawn failed.
+pub fn hand_over_borders(
+    resolved: &[Workspace],
+    spawn: &dyn Spawn,
+    passes: &mut BorderPasses,
+    now: Instant,
+) -> Vec<(String, String)> {
+    let mut failed = Vec::new();
+    for ws in resolved {
+        if !ws.dir.join(nexus_chat::border::OPEN_MARKER).exists() {
+            continue;
+        }
+        let due = passes
+            .last
+            .get(&ws.dir)
+            .is_none_or(|at| now.duration_since(*at) >= BORDER_PASS);
+        if !due || spawn.capacity() == 0 {
+            continue;
+        }
+        passes.last.insert(ws.dir.clone(), now);
+        let root = ws.dir.parent().unwrap_or(&ws.dir);
+        let argv = vec!["chat".to_string(), "handover".to_string()];
+        if let Err(e) = spawn.spawn(root, &argv) {
+            failed.push((ws.dir.display().to_string(), e.msg));
+        }
+    }
+    failed
+}
+
 // ---- the clock (6j6v.8see) --------------------------------------------------------------------
 
 /// Starts one due job. A trait for [`Pass`]'s reason: the whole firing path is provable without
@@ -1745,6 +1791,7 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
         write_failures.record(to_rfc3339(SystemTime::now()), e.msg.clone());
     }
 
+    let mut border_passes: BorderPasses = BorderPasses::default();
     loop {
         let now = Instant::now();
         let wall = SystemTime::now();
@@ -1790,6 +1837,12 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
         // `reap` first, so a finished job's handle is released before another is started.
         clock.reap();
         let clock_report = fire_deadlines(&resolved, &to_rfc3339(wall), &clock);
+        for (label, msg) in hand_over_borders(&resolved, &clock, &mut border_passes, now) {
+            log_line(
+                json,
+                &format!("workspace {label}: the border handover did not start: {msg}"),
+            );
+        }
         for (label, key) in &clock_report.fired {
             log_line(
                 json,

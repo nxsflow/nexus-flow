@@ -121,6 +121,11 @@ pub struct Ctx<'a> {
     /// designated, and a chat starts where it is written, exactly as before the executing machine
     /// existed.
     pub machines: Option<&'a dyn crate::machine::Machines>,
+    /// **How this host reaches the other workspaces on this machine** (nxf 6j6v.4gp2) — see
+    /// [`crate::border::Peers`]. `None` — the default for a host that supplies none, and for every
+    /// test that does not care — reaches none: an address from another workspace is refused, and
+    /// everything else runs exactly as before the border existed.
+    pub peers: Option<&'a dyn crate::border::Peers>,
 }
 
 /// **Who is calling, and nothing that can be derived from that** (nxf 6j6v.07me): [`Ctx`]'s caller
@@ -284,6 +289,8 @@ pub struct Adapter<'a> {
     pub project_claude_md: Option<&'a str>,
     pub module_primes: Option<&'a dyn crate::facade::ModulePrimes>,
     pub machines: Option<&'a dyn crate::machine::Machines>,
+    /// See [`Ctx::peers`].
+    pub peers: Option<&'a dyn crate::border::Peers>,
 }
 
 impl<'a> Caller<'a> {
@@ -350,6 +357,7 @@ impl<'a> Caller<'a> {
             project_claude_md: adapter.project_claude_md,
             module_primes: adapter.module_primes,
             machines: adapter.machines,
+            peers: adapter.peers,
         }
     }
 }
@@ -797,6 +805,28 @@ pub fn trigger_role(
         priority,
         queued_since,
     } = req;
+    // **A session woken on the way back still owes what it owed** (nxf 6j6v.4gp2). An answer
+    // travelling UP a chain (`Unwind`: a resumed return address, a completed quorum handed to its
+    // opener) declares no obligation of its own, so `reply_thread` arrives `None` — but the woken
+    // session usually still owes the thread it was commissioned on, and the wake message names it
+    // with the command it takes. Without the obligation here the trigger granted nothing, and a
+    // persona that declares no `tools:` was woken with the answer and then refused its own
+    // `nxc reply` ("This command requires approval"); found when a border answer woke a PM that
+    // could not pass it on. Read back from the record — the thread where this persona is still
+    // outstanding — exactly as `fire_queued_trigger` reproduces a parked obligation.
+    let owed_on_the_way_back = match (reply_thread, chain) {
+        (None, ChainMove::Unwind) => {
+            crate::addressees::open_for(store, &ctx.qualify(&decl.handle), thread, ctx.now)
+                .ok()
+                .and_then(|open| {
+                    open.into_iter()
+                        .find(|a| a.relation == crate::addressees::Relation::Owed)
+                        .map(|a| a.thread_id)
+                })
+        }
+        _ => None,
+    };
+    let reply_thread = reply_thread.or(owed_on_the_way_back.as_deref());
     // ONE number, derived once, for both consumers: what is recorded against the session and what
     // the session is told in `NXC_HOP`. `resolve_hop` takes the larger of the two later, so letting
     // them be computed apart is letting the higher of two independent expressions silently win.
@@ -4616,6 +4646,12 @@ impl CheckedHop {
 /// The bare cap check over an already-resolved depth, and deliberately still `u32 -> u32`: see
 /// [`CheckedHop`] for why this one may not mint one. Verbs call [`resolve_hop`], which is where the
 /// depth comes FROM; this stays separate so the cap and its wording live in exactly one place.
+/// A depth carried in from outside this workspace — a border commission's (nxf 6j6v.4gp2) — put
+/// through the same guard, so it reaches [`trigger_role`] only as a [`CheckedHop`].
+pub(crate) fn checked_hop(hop: u32) -> Result<CheckedHop> {
+    check_depth_guard(hop).map(CheckedHop)
+}
+
 pub fn check_depth_guard(hop: u32) -> Result<u32> {
     if hop > MAX_HOP {
         return Err(NxfError::validation(format!(
@@ -4748,7 +4784,7 @@ fn ensure_declared_channel(
 /// address a triggered role's eventual reply routes back through. Only when a REAL session exists:
 /// a bare-terminal kickoff leaves it unset rather than reusing a placeholder that could later be
 /// mistaken for a genuine identity.
-fn with_return_address(ctx: &Ctx, mut refs: Refs) -> Refs {
+pub(crate) fn with_return_address(ctx: &Ctx, mut refs: Refs) -> Refs {
     if refs.session_id.is_none() {
         if let Some(s) = ctx.session {
             refs.session_id = Some(s.to_string());
@@ -5613,6 +5649,13 @@ pub(crate) fn persona_chat(
     let [persona] = q.expects.as_slice() else {
         return Ok(None);
     };
+    // **A border thread this workspace commissioned is not a chat with one of its own personas**
+    // (nxf 6j6v.q32p). It expects a reply from the receiver's participant, `<their prefix>/pm`, and
+    // the reduction one line down would read that as this workspace's own `pm` — which would then
+    // be started here to answer its own commission.
+    if crate::border::is_outbound(store, thread) {
+        return Ok(None);
+    }
     let handle = persona.rsplit('/').next().unwrap_or(persona).to_string();
     if ctx.defs.role(&handle).is_err() {
         return Ok(None);
@@ -6736,6 +6779,7 @@ fn as_supervisor<'a>(ctx: &Ctx<'a>, hop: CheckedHop) -> Ctx<'a> {
         project_claude_md: ctx.project_claude_md,
         module_primes: ctx.module_primes,
         machines: ctx.machines,
+        peers: ctx.peers,
     }
 }
 
@@ -9841,6 +9885,11 @@ pub struct ReplyReceipt {
     /// receipt of a chat that runs where it was written is byte-identical to before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handed_to: Option<crate::machine::ExecutingMachine>,
+    /// **The reply landed on a border thread** (nxf 6j6v.4gp2): nothing is woken here — the party it
+    /// is for lives in the other workspace — and it was carried across at once; this is where the
+    /// border thread stands afterwards. Skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<crate::border::BorderReceipt>,
     #[serde(rename = "await")]
     pub await_: Option<crate::awaiting::Await>,
 }
@@ -10711,6 +10760,7 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
             warnings: Vec::new(),
             held: None,
             // Filled by the surface, which is the layer that knows who is asking — see the field.
+            border: None,
             await_: None,
         });
     };
@@ -10729,6 +10779,35 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
         None => None,
     };
     let ctx = &with_declarations(ctx, frozen.as_ref());
+
+    // **A reply on a border thread is for the other workspace** (nxf 6j6v.4gp2). Whoever it answers
+    // — or asks — lives there, so nothing is resumed, routed or completed HERE: the thread is copied
+    // across at once and the other side's coordinator acts on it. Every wake below would look for a
+    // session of this workspace, and the return address on the thread names one of the other's.
+    if let Some(tid) = receipt.thread_id.as_deref() {
+        if crate::border::is_border(store, tid)? {
+            crate::border::after_local_write(ctx, store, tid);
+            let border = crate::border::row(store, tid)?.map(|r| crate::border::BorderReceipt {
+                peer: r.peer,
+                state: r.state,
+                reason: r.reason,
+            });
+            return Ok(ReplyReceipt {
+                handed_to: None,
+                posted: true,
+                message_id: Some(receipt.message_id),
+                thread_id: receipt.thread_id,
+                resumed: false,
+                woke: None,
+                wake_skipped: None,
+                completed: None,
+                warnings: Vec::new(),
+                held: None,
+                border,
+                await_: None,
+            });
+        }
+    }
 
     // **A persona chat runs on ONE machine** (nxf 6j6v.1c6k). On any other machine this reply is
     // posted and nothing else happens here: the chat's machine picks it up after its next pull. On
@@ -10762,6 +10841,7 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
                         completed: None,
                         warnings: Vec::new(),
                         held: None,
+                        border: None,
                         await_: None,
                     });
                 }
@@ -10794,6 +10874,7 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
                         completed: None,
                         warnings,
                         held,
+                        border: None,
                         await_: None,
                     });
                 }
@@ -11142,6 +11223,7 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
         warnings,
         held,
         // Filled by the surface, which is the layer that knows who is asking — see the field.
+        border: None,
         await_: None,
     })
 }
@@ -16482,6 +16564,7 @@ mod tests {
             project_claude_md: None,
             module_primes: None,
             machines: None,
+            peers: None,
         };
 
         // One pass outside the timing loop: it is the one that pays for SQLite's page cache and for
@@ -16576,6 +16659,7 @@ mod tests {
             project_claude_md: None,
             module_primes: None,
             machines: None,
+            peers: None,
         };
 
         // The warm-up, outside the loop for the reason the measurement beside it gives — and it is
@@ -17087,6 +17171,7 @@ mod tests {
             project_claude_md: None,
             module_primes: None,
             machines: None,
+            peers: None,
         }
     }
 

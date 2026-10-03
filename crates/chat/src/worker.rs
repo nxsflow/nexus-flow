@@ -126,6 +126,11 @@ pub enum Coordinator {
     /// release path is the named place that lets it through, and re-derives the declaration and the
     /// obligation rather than replaying a frozen decision.
     Released,
+    /// The receiver's coordinator admitting a commission from ANOTHER workspace on this machine
+    /// (nxf 6j6v.4gp2, [`crate::border`]): the caller's access was checked here — its workspace
+    /// trusted, its role listed in `addressable.external` — and nothing about the caller's own
+    /// working copy is inherited.
+    Border,
 }
 
 impl Coordinator {
@@ -138,6 +143,7 @@ impl Coordinator {
             Coordinator::Channel => "channel",
             Coordinator::Return => "return",
             Coordinator::Released => "released",
+            Coordinator::Border => "border",
         }
     }
 }
@@ -1965,11 +1971,25 @@ impl Worker for SidecarWorker {
 /// Takes an explicit ambient-lookup closure (dependency injection) so the decision is pure and
 /// independently unit-testable without mutating process-global env. The closure receives an env
 /// var key and returns `Some(value)` if present, `None` if unset.
+///
+/// **`NXS_SERVICE_INSTANCE` travels too** (nxf 6j6v.4gp2). It says which background-service home a
+/// development build belongs to (`~/.nexusflow-<qualifier>`), and a session spawned without it
+/// resolved the PRODUCTION home from inside a dev build: its `nxc` read another registry than the
+/// one that spawned it — found when a border commission from a spawned persona could not see the
+/// workspace its own coordinator had just found. An installed binary ignores the variable, so
+/// forwarding it changes nothing outside a build.
 fn forwarded_real_env(ambient: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
-    ["PATH", "HOME", "USER", "NXC_SIDECAR", "NXC_WORKER"]
-        .iter()
-        .filter_map(|k| ambient(k).map(|v| (k.to_string(), v)))
-        .collect()
+    [
+        "PATH",
+        "HOME",
+        "USER",
+        "NXC_SIDECAR",
+        "NXC_WORKER",
+        nxs_service::instance::INSTANCE_ENV,
+    ]
+    .iter()
+    .filter_map(|k| ambient(k).map(|v| (k.to_string(), v)))
+    .collect()
 }
 
 /// **What a declared HURDLE's shell may see** (nxf 6j6v.n92p; PR #391 review, Integrity #1) — the
@@ -3214,13 +3234,18 @@ mod tests {
                 "USER" => "ckoch".to_string(),
                 "NXC_SIDECAR" => "/path/to/main.mjs".to_string(),
                 "NXC_WORKER" => "sidecar".to_string(),
+                "NXS_SERVICE_INSTANCE" => "nexus-flow-dev".to_string(),
                 _ => return None,
             })
         };
 
         let result = forwarded_real_env(ambient);
 
-        assert_eq!(result.len(), 5);
+        assert_eq!(result.len(), 6);
+        assert!(
+            result.iter().any(|(k, _)| k == "NXS_SERVICE_INSTANCE"),
+            "a session spawned by a dev build must resolve the same service home as its spawner"
+        );
         assert!(result.iter().any(|(k, _)| k == "PATH"));
         assert!(result.iter().any(|(k, _)| k == "HOME"));
         assert!(result.iter().any(|(k, _)| k == "NXC_SIDECAR"));

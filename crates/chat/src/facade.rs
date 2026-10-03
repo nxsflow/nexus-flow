@@ -3634,6 +3634,11 @@ pub fn status(
     // table that holds at most one row per claim, plus a worker call per session of the ONE claim
     // that wins attribution.
     let withdrawn = withdrawn_holders_for(store, worker, &id_list, &forest.root_of)?;
+    // Answers held for a commissioner still mid-turn (nxf 6j6v.4gp2) — the twelfth read, one
+    // statement over `pending_wakes`, which is empty unless an answer is on its way to a busy
+    // session. It keeps such a sub-round "in flight" on its parent's row; see
+    // [`crate::awaiting::own_sub_round_in_flight`].
+    let held_answers = store.threads_holding_wakes()?;
     // **One bundle, because these seven ARE one thing**: the bulk reads this report is assembled
     // from, taken once for the whole selection and then read per thread. Passing them
     // individually made the per-thread derivation an eight-argument call, and the argument list
@@ -3648,6 +3653,7 @@ pub fn status(
         working_tree: &working_tree,
         anchors: &anchors,
         interruptions: &interruptions,
+        held_answers: &held_answers,
     };
 
     let mut operations = Vec::new();
@@ -3758,6 +3764,8 @@ struct DerivedFacts<'a> {
     /// thread for [`DerivedFacts::session_states`]'s reason: it is a fact about the session named on
     /// the row, so the two cannot come to disagree about one id.
     interruptions: &'a BTreeMap<String, crate::interruption::Interruption>,
+    /// The threads whose answer is held for a commissioner still mid-turn (nxf 6j6v.4gp2).
+    held_answers: &'a std::collections::HashSet<String>,
 }
 
 /// **How many process questions ONE status read will ask** (review of PR #444, Integrity #1).
@@ -4296,6 +4304,7 @@ impl<'a> Forest<'a> {
             working_tree,
             anchors,
             interruptions,
+            held_answers,
         } = facts;
         let q = by_id.get(id)?;
         let parent = self.declared.get(id).copied().flatten();
@@ -4355,9 +4364,10 @@ impl<'a> Forest<'a> {
             // the forest's own edges and their quorums are in the same bulk read as this thread's,
             // so the field costs no statement at all — the property `tests/bulk_quorum.rs`
             // measures. A child of another operation cannot appear here: `kids` are this forest's.
-            waiting_on_sub_round: crate::awaiting::own_open_sub_round(
+            waiting_on_sub_round: crate::awaiting::own_sub_round_in_flight(
                 q,
                 kids.iter().filter_map(|kid| by_id.get(kid).copied()),
+                held_answers,
             ),
             working_copy: anchors.get(id).cloned(),
             // Keyed by SESSION for `session_state`'s reason, and beside it: the hold reported is a

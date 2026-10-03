@@ -111,6 +111,7 @@ fn ctx<'a>(
         project_claude_md,
         module_primes: None,
         machines: None,
+        peers: None,
     }
 }
 

@@ -723,6 +723,9 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
         "DROP TABLE IF EXISTS read_cursors;
          DROP INDEX IF EXISTS messages_channel;",
     )?;
+    // The border record (nxf 6j6v.4gp2): device-local, like `session_map` — it names where the
+    // other half of a conversation lives on THIS machine. See `crate::border`.
+    conn.execute_batch(crate::border::BORDER_DDL)?;
     Ok(upgraded)
 }
 

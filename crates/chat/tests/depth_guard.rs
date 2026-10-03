@@ -155,6 +155,7 @@ fn ctx_as<'a>(
         project_claude_md: None,
         module_primes: None,
         machines: None,
+        peers: None,
     }
 }
 

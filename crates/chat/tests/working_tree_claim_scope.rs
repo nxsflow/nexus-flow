@@ -138,6 +138,7 @@ fn reply_with_a_question(tmp: &TempDir, actor: &str, session: &str, thread: &str
         project_claude_md: None,
         module_primes: None,
         machines: None,
+        peers: None,
     };
     nexus_chat::orchestration::reply(
         &ctx,

@@ -258,6 +258,45 @@ pub enum Addressable {
     /// exists at all (nxf 6j6v.st83's second finding — until now a persona handle written here was
     /// silently read as a channel name and nothing complained until somebody tried to send).
     ViaChannels(Vec<String>),
+    /// [`Only`](Addressable::Only) with the third class beside it (nxf 6j6v.t5xb): callers from
+    /// OTHER workspaces on this machine, by workspace and role — `external: ["*/pm",
+    /// "nxsflow/manufakt-io/pm"]`. `*` stands for every workspace this one trusts; the role is
+    /// always named.
+    ///
+    /// A variant of its own rather than a third field on `Only`, because `Only` is matched on by
+    /// field in code that embeds this crate, and a field added to it would break every such match;
+    /// a variant is additive under `#[non_exhaustive]`. The YAML is one shape: a mapping without
+    /// `external` reads as `Only`, one with it as this.
+    ///
+    /// No `external` means closed to the outside — under every other form too, `General` included:
+    /// "everybody" means everybody in this workspace.
+    OnlyWithExternal {
+        personas: Vec<String>,
+        humans: bool,
+        external: Vec<String>,
+    },
+}
+
+/// **Whether `rule` is an `external` entry** (nxf 6j6v.t5xb): `<workspace>/<role>`, the workspace a
+/// name (`nxs_foundation::workspace_name`) or `*`, the role a handle. An `Err` says what is wrong.
+pub fn check_external_rule(rule: &str) -> std::result::Result<(), String> {
+    let Some((workspace, role)) = rule.rsplit_once('/') else {
+        return Err(format!(
+            "`{rule}` is not an `external` entry — write `<owner>/<repo>/<role>`, or `*/<role>` for \
+             every trusted workspace"
+        ));
+    };
+    if role.is_empty() || role == "*" {
+        return Err(format!(
+            "`{rule}` names no role — `external` admits a role, never everyone"
+        ));
+    }
+    if workspace != "*" && !nxs_foundation::workspace_name::is_valid_name(workspace) {
+        return Err(format!(
+            "`{workspace}` in `{rule}` is not a workspace name — it is `<owner>/<repo>` or `*`"
+        ));
+    }
+    Ok(())
 }
 
 impl Addressable {
@@ -270,11 +309,35 @@ impl Addressable {
         match self {
             Addressable::General => true,
             Addressable::Nobody | Addressable::ViaChannels(_) => false,
-            Addressable::Only { personas, humans } => match caller.persona() {
+            Addressable::Only { personas, humans }
+            | Addressable::OnlyWithExternal {
+                personas, humans, ..
+            } => match caller.persona() {
                 None => *humans,
                 Some(handle) => personas.iter().any(|p| p == handle),
             },
         }
+    }
+
+    /// The `external` entries, empty for every form that has none — which is every form but one.
+    pub fn external(&self) -> &[String] {
+        match self {
+            Addressable::OnlyWithExternal { external, .. } => external,
+            _ => &[],
+        }
+    }
+
+    /// **Whether a persona of ANOTHER workspace may commission this one** (nxf 6j6v.t5xb): the
+    /// caller's workspace `from` and its `role` match an `external` entry. Only the role half of the
+    /// two checks — whether `from` is trusted at all is the trust list's question, asked first.
+    ///
+    /// A bare handle in `personas:` never admits anybody from outside: it means this workspace's
+    /// own persona of that name, and nothing here reads it.
+    pub fn admits_external(&self, from: &str, role: &str) -> bool {
+        self.external().iter().any(|rule| {
+            rule.rsplit_once('/')
+                .is_some_and(|(workspace, r)| r == role && (workspace == "*" || workspace == from))
+        })
     }
 
     /// Whether ANY caller may open a direct conversation — what a reader needs when there is no
@@ -283,7 +346,10 @@ impl Addressable {
         match self {
             Addressable::General => true,
             Addressable::Nobody | Addressable::ViaChannels(_) => false,
-            Addressable::Only { personas, humans } => *humans || !personas.is_empty(),
+            Addressable::Only { personas, humans }
+            | Addressable::OnlyWithExternal {
+                personas, humans, ..
+            } => *humans || !personas.is_empty(),
         }
     }
 
@@ -302,7 +368,9 @@ impl Addressable {
     /// check walks.
     pub fn named_personas(&self) -> &[String] {
         match self {
-            Addressable::Only { personas, .. } => personas,
+            Addressable::Only { personas, .. } | Addressable::OnlyWithExternal { personas, .. } => {
+                personas
+            }
             _ => &[],
         }
     }
@@ -322,6 +390,13 @@ impl Addressable {
 /// would parse as an empty whitelist and silently mean "nobody", which is the exact class of quiet
 /// misconfiguration nxf 6j6v.st83 exists to end. With it the untagged enum finds no variant and the
 /// role file fails to load, naming itself.
+///
+/// **And it stays strict with `external` added (nxf 6j6v.t5xb), at a known price.** An engine older
+/// than `external` refuses a declaration that carries it — the whole persona file fails to load
+/// there. Relaxing the check now would not help those engines, which are already built, and it
+/// would give up the typo protection for every key to come. So a declaration with `external:` goes
+/// only into a repository whose every reader — the apps that pin an engine included — has an engine
+/// that knows the key; the personas guide and the changelog say so.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OnlyRaw {
@@ -329,6 +404,8 @@ struct OnlyRaw {
     personas: Vec<String>,
     #[serde(default)]
     humans: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    external: Vec<String>,
 }
 
 impl Serialize for Addressable {
@@ -342,6 +419,17 @@ impl Serialize for Addressable {
             Addressable::Only { personas, humans } => OnlyRaw {
                 personas: personas.clone(),
                 humans: *humans,
+                external: Vec::new(),
+            }
+            .serialize(serializer),
+            Addressable::OnlyWithExternal {
+                personas,
+                humans,
+                external,
+            } => OnlyRaw {
+                personas: personas.clone(),
+                humans: *humans,
+                external: external.clone(),
             }
             .serialize(serializer),
             Addressable::ViaChannels(channels) => channels.serialize(serializer),
@@ -372,10 +460,20 @@ impl<'de> Deserialize<'de> for Addressable {
                  `personas:`/`humans:`, or a list of channel names"
             ))),
             Raw::List(channels) => Ok(Addressable::ViaChannels(channels)),
-            Raw::Only(only) => Ok(Addressable::Only {
+            Raw::Only(only) if only.external.is_empty() => Ok(Addressable::Only {
                 personas: only.personas,
                 humans: only.humans,
             }),
+            Raw::Only(only) => {
+                for rule in &only.external {
+                    check_external_rule(rule).map_err(serde::de::Error::custom)?;
+                }
+                Ok(Addressable::OnlyWithExternal {
+                    personas: only.personas,
+                    humans: only.humans,
+                    external: only.external,
+                })
+            }
         }
     }
 }

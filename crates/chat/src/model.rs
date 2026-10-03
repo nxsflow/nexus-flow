@@ -415,6 +415,12 @@ pub struct Refs {
     /// [`substituted`]: Refs::substituted
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_copy: Option<crate::anchor::Anchor>,
+    /// **A commission across the border of a workspace, and who sent it** (nxf 6j6v.4gp2) — the
+    /// caller's workspace, the address, the role its coordinator stamped and the depth of its chain;
+    /// on the receiver's refusal, the reason. Part of what the author's key signs, so the receiver
+    /// reads it as the caller's coordinator wrote it. See [`crate::border`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<crate::border::BorderRef>,
 }
 
 /// The immutable message payload carried in one op's `value` (spec §2.1). `message_id`/`created`

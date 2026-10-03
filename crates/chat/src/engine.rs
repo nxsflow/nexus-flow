@@ -158,6 +158,14 @@ pub struct EngineConfig {
     /// existed. A host that executes passes its machine and its claims; a host that only shows and
     /// writes (a web board) passes presence and no machine, and is then asked to name one.
     pub machines: Option<Arc<dyn crate::machine::Machines>>,
+    /// **How this handle's host reaches the other workspaces on its machine** (nxf 6j6v.4gp2) — see
+    /// [`crate::border::Peers`].
+    ///
+    /// `None` (the default) reaches none: an address from another workspace
+    /// (`<owner>/<repo>/<persona>`) is refused and every other call behaves exactly as before the
+    /// border existed. A host that passes one can commission across the border and runs
+    /// [`Engine::hand_over`] for this workspace.
+    pub peers: Option<Arc<dyn crate::border::Peers>>,
 }
 
 /// **Hand-written since nxf 6j6v.k8zq**, because [`EngineConfig::module_primes`] is a trait object
@@ -181,6 +189,11 @@ impl PartialEq for EngineConfig {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 _ => false,
             }
+            && match (&self.peers, &other.peers) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
     }
 }
 
@@ -193,6 +206,7 @@ impl Default for EngineConfig {
             poll_interval: nxs_foundation::watch::POLL_INTERVAL,
             module_primes: None,
             machines: None,
+            peers: None,
         }
     }
 }
@@ -218,6 +232,8 @@ pub struct Engine {
     module_primes: Option<Arc<dyn crate::facade::ModulePrimes>>,
     /// ([`EngineConfig::machines`]) — held for the handle's lifetime, like the prime source.
     machines: Option<Arc<dyn crate::machine::Machines>>,
+    /// ([`EngineConfig::peers`]) — held for the handle's lifetime, like the machines.
+    peers: Option<Arc<dyn crate::border::Peers>>,
 }
 
 /// chat's store factory for the foundation handle: open the chat store (message reducer + the six
@@ -352,6 +368,7 @@ impl Engine {
             namer,
             module_primes: cfg.module_primes,
             machines: cfg.machines,
+            peers: cfg.peers,
         })
     }
 
@@ -934,6 +951,10 @@ impl Engine {
                         .machines
                         .as_deref()
                         .map(|m| m as &dyn crate::machine::Machines),
+                    peers: self
+                        .peers
+                        .as_deref()
+                        .map(|p| p as &dyn crate::border::Peers),
                 },
             );
             f(&ctx, &mut s.store)
@@ -960,6 +981,15 @@ impl Engine {
     /// doc explains for the sibling verb.
     pub fn send_to(&self, caller: Caller<'_>, req: SendToRequest) -> Result<SendToReceipt> {
         self.with_orchestration(caller, |ctx, store| surface::send_to(ctx, store, req))
+    }
+
+    /// **Carry this workspace's border threads across** (`nxc handover`, nxf 6j6v.4gp2) — copy each
+    /// border thread to and from the other workspace on this machine, admit or refuse a commission
+    /// that came in (starting the persona it is for), and wake whoever an answer from the other side
+    /// is for. What the background service runs on its pass, and what a host that executes calls
+    /// when it learns the other side wrote. Reaches nothing without [`EngineConfig::peers`].
+    pub fn handover(&self, caller: Caller<'_>) -> Result<crate::border::HandoverReport> {
+        self.with_orchestration(caller, crate::border::hand_over)
     }
 
     /// **Where a chat runs, before anything is sent** (`nxc machine`, nxf 6j6v.1c6k) — the machine
@@ -1002,6 +1032,10 @@ impl Engine {
                         .machines
                         .as_deref()
                         .map(|m| m as &dyn crate::machine::Machines),
+                    peers: self
+                        .peers
+                        .as_deref()
+                        .map(|p| p as &dyn crate::border::Peers),
                 },
             );
             surface::machine(&ctx, &s.store, query)

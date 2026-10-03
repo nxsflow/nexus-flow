@@ -119,6 +119,57 @@ pub fn own_open_sub_round<'a>(
     opened_by(&thread.outstanding, children)
 }
 
+/// [`own_open_sub_round`], with one more child counted as still running: one whose answer is IN
+/// but HELD for its commissioner, because the commissioner was still mid-turn when it arrived
+/// (nxf 6j6v.4gp2). `held` names the threads that hold such an answer.
+///
+/// Without it the status row said "nothing to wait for" in exactly the window where the answer was
+/// on its way: the commissioner's sidecar, ending its turn, read the row, saw a thread it still
+/// owed and no open sub-round, and REMINDED it — and a session that rightly declined to answer
+/// before it had the answer was then answered for by the runtime. A consultee that answers within
+/// seconds (another workspace's PM reading one line of its board) is all it takes. The held answer
+/// is delivered when the commissioner's turn ends; until then it is waiting, which is what this
+/// says.
+pub fn own_sub_round_in_flight<'a>(
+    thread: &ThreadQuorum,
+    children: impl IntoIterator<Item = &'a ThreadQuorum> + Clone,
+    held: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    if thread.outstanding.is_empty() {
+        return Vec::new();
+    }
+    let mut waiting = opened_by(&thread.outstanding, children.clone());
+    let answered_but_held: Vec<&ThreadQuorum> = children
+        .into_iter()
+        .filter(|child| child.outstanding.is_empty() && held.contains(&child.thread_id))
+        .collect();
+    for id in opened_by_regardless(&thread.outstanding, answered_but_held) {
+        if !waiting.contains(&id) {
+            waiting.push(id);
+        }
+    }
+    waiting.sort();
+    waiting
+}
+
+/// [`opened_by`]'s opener rule without its "still open" filter — for children already known to be
+/// answered whose answer has not reached the commissioner yet.
+fn opened_by_regardless<'a>(
+    waiting_for: &[String],
+    children: impl IntoIterator<Item = &'a ThreadQuorum>,
+) -> Vec<String> {
+    children
+        .into_iter()
+        .filter(|child| {
+            child.opener.as_deref().is_some_and(|opener| {
+                !crate::orchestration::is_engine_identity(opener)
+                    && waiting_for.iter().any(|owed| owed == opener)
+            })
+        })
+        .map(|child| child.thread_id.clone())
+        .collect()
+}
+
 /// **The same question asked of ONE party: is `handle` waiting on a round IT commissioned?** (nxf
 /// 6j6v.hw2t, review of PR #460 · Code Quality #2, corroborated independently as Integrity #2).
 ///

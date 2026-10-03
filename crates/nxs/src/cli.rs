@@ -110,6 +110,14 @@ enum Command {
     Doctor,
     /// Alias for `doctor`: the same cross-module diagnosis.
     Status,
+    /// This workspace's name, `<owner>/<repo>` — what a persona in ANOTHER workspace writes before a
+    /// persona's handle to address it (`nxsflow/nexus-flow/pm`). Without an argument it prints the
+    /// name, storing the one the git origin implies on first use; with one it stores that name, for
+    /// a workspace without a git origin or one whose origin says something else.
+    Name {
+        /// The name to store, `<owner>/<repo>`.
+        name: Option<String>,
+    },
     /// Wire host-specific agent integration for this workspace (idempotent, merge-only). Host setup
     /// is an umbrella responsibility — the umbrella owns the whole SessionStart set, one hook per
     /// active module — so this is the canonical home of the verb; `nxf setup claude` delegates here.
@@ -227,12 +235,21 @@ enum TrustAction {
     /// Trust a key: the ops it signed and signs, past ones included, may carry agent actions here.
     /// Takes the FULL key id another machine prints with `nxs sync key`; compare it with that
     /// machine's owner over a channel you trust before adding it.
+    ///
+    /// Or `--workspace <owner>/<repo>`: trust another workspace ON THIS MACHINE by its name — its
+    /// key is read from its own directory, found through the background service's registry, and
+    /// recorded under that name. That is what lets a persona of that workspace commission one of
+    /// this workspace's personas, and what lets its answers wake one here.
     Add {
         /// The key id, `ed25519:…`.
-        key_id: String,
+        #[arg(required_unless_present = "workspace", conflicts_with = "workspace")]
+        key_id: Option<String>,
         /// What to call it — usually the other machine's name (one line, up to 64 characters).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "workspace")]
         name: Option<String>,
+        /// A neighbouring workspace of this machine, by name (`nxs name` prints a workspace's).
+        #[arg(long)]
+        workspace: Option<String>,
     },
     /// Stop trusting a key — revocation, effective at once: its ops stay on the board and none of
     /// them carries an agent action from now on. This replica's own key cannot be removed.
@@ -453,6 +470,7 @@ pub fn run() -> ExitCode {
         // project's memories.
         Some("nxc") => {
             return route(PERSONA_CHAT, || {
+                nexus_chat::cli::provide_peers(&crate::peers::SERVICE_PEERS);
                 nexus_chat::run_from_with(
                     args,
                     Some(&prime::SIBLING_PRIMES),
@@ -495,6 +513,7 @@ pub fn run() -> ExitCode {
         Some("chat") => route(PERSONA_CHAT, || {
             // Same wiring as the `nxc` symlink above — `nxs chat …` IS `nxc …`, so a persona
             // summoned through it must be told the same things (nxf 6j6v.k8zq).
+            nexus_chat::cli::provide_peers(&crate::peers::SERVICE_PEERS);
             nexus_chat::run_from_with(
                 synth_argv(PERSONA_CHAT, &args[2..]),
                 Some(&prime::SIBLING_PRIMES),
@@ -699,6 +718,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Command::Guide { topic } => guide_cmd(cli.json, db, topic.as_deref()),
         Command::Migrate => migrate_cmd(cli.json, db),
         Command::Doctor | Command::Status => doctor_cmd(cli.json, db),
+        Command::Name { name } => name_cmd(cli.json, db, name.as_deref()),
         // `setup claude` is cwd-scoped (it writes `.claude/` + agent files at the project root next
         // to `.nxs/`, resolving the workspace by walk-up), so an explicit `--db`/`NXS_DB` cannot be
         // honored. Like `init`, REJECT it loudly rather than accept-and-ignore (the no-silent-
@@ -770,13 +790,26 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 let ws = resolve(db)?;
                 match action {
                     TrustAction::List => sync::trust::list_verb(cli.json, &ws),
-                    TrustAction::Add { key_id, name } => sync::trust::add_verb(
-                        cli.json,
-                        &ws,
+                    TrustAction::Add {
                         key_id,
-                        name.as_deref(),
-                        &crate::prime::resolve_now()?,
-                    ),
+                        name,
+                        workspace,
+                    } => match (key_id, workspace) {
+                        (_, Some(workspace)) => sync::trust::add_workspace_verb(
+                            cli.json,
+                            &ws,
+                            workspace,
+                            &crate::prime::resolve_now()?,
+                        ),
+                        (Some(key_id), None) => sync::trust::add_verb(
+                            cli.json,
+                            &ws,
+                            key_id,
+                            name.as_deref(),
+                            &crate::prime::resolve_now()?,
+                        ),
+                        (None, None) => unreachable!("clap requires a key id or --workspace"),
+                    },
                     TrustAction::Remove { key_id } => {
                         sync::trust::remove_verb(cli.json, &ws, key_id)
                     }
@@ -1052,6 +1085,40 @@ fn migrate_cmd(json: bool, db: Option<&str>) -> Result<()> {
             "  outdated SessionStart wiring rewritten — {}",
             nxs_init::assembler::describe_hooks(true, &report.hook_commands)
         );
+    }
+    Ok(())
+}
+
+/// `nxs name [<owner>/<repo>]` (nxf 6j6v.q32p) — print or store the workspace's name.
+fn name_cmd(json: bool, db: Option<&str>, name: Option<&str>) -> Result<()> {
+    use nxs_foundation::workspace_name;
+    let ws = resolve(db)?;
+    let (name, changed) = match name {
+        Some(name) => (
+            Some(name.to_string()),
+            workspace_name::set_name(&ws.dir, name)?,
+        ),
+        None => {
+            let stored = workspace_name::stored_name(&ws).is_some();
+            let name = workspace_name::ensure_name(&ws)?;
+            (name.clone(), !stored && name.is_some())
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            to_json(&serde_json::json!({ "name": name, "stored_now": changed }))?
+        );
+        return Ok(());
+    }
+    match name {
+        Some(name) => println!("{name}"),
+        None => {
+            return Err(NxfError::not_found(
+                "this workspace has no name: nothing is stored and there is no git origin to \
+                 derive one from — set it with `nxs name <owner>/<repo>`",
+            ))
+        }
     }
     Ok(())
 }
