@@ -761,6 +761,7 @@ pub struct StatusThread {
 
 /// **A border thread as a status row shows it** (nxf 6j6v.szc5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct BorderStatus {
     /// The other workspace, by name (`<owner>/<repo>`).
     pub peer: String,
@@ -770,6 +771,23 @@ pub struct BorderStatus {
     /// Why it was rejected or canceled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl BorderStatus {
+    /// This workspace was commissioned.
+    pub fn is_inbound(&self) -> bool {
+        self.direction == crate::border::Direction::Inbound
+    }
+
+    /// The other side still has it, or it is waiting on this one: neither finished nor refused.
+    pub fn is_in_progress(&self) -> bool {
+        matches!(
+            self.state,
+            crate::border::BorderState::Submitted
+                | crate::border::BorderState::Working
+                | crate::border::BorderState::InputRequired
+        )
+    }
 }
 
 /// One operation: a root thread and everything that was opened out of it, across channel borders.
@@ -3695,7 +3713,17 @@ pub fn status(
         // Both derived from the SAME `threads` this operation already carries, so a reader can
         // always find the thread behind either flag and the two can never disagree with the rows
         // beneath them.
-        let needs_decision = threads.iter().any(|t| t.escalated);
+        // **A question asked across the border is not a decision for THIS workspace** (nxf
+        // 6j6v.4gp2): when the persona working on an inbound border thread hands it back, the one
+        // who has to answer is its commissioner in the other workspace — never the owner here, who
+        // would otherwise be told NEEDS DECISION about somebody else's conversation. The thread
+        // still keeps the operation live while the other side has it (`border_live` below).
+        let needs_decision = threads
+            .iter()
+            .any(|t| t.escalated && !t.border.as_ref().is_some_and(BorderStatus::is_inbound));
+        let border_live = threads
+            .iter()
+            .any(|t| t.border.as_ref().is_some_and(BorderStatus::is_in_progress));
         let holds_working_tree = threads
             .iter()
             .any(|t| t.working_tree == Some(WorkingTreeStatus::Holding));
@@ -3729,6 +3757,7 @@ pub fn status(
         let withdrawn_here = withdrawn.get(root).cloned();
         let live = open > 0
             || needs_decision
+            || border_live
             || holds_working_tree
             || dead_end
             || interrupted
@@ -4371,7 +4400,13 @@ impl<'a> Forest<'a> {
             parent: parent.map(str::to_string),
             depth: self.depth_of(id),
             state,
-            awaiting_human: is_root && q.complete,
+            // The root of an INBOUND border thread is answered to the commissioner in the other
+            // workspace, not to anybody here (nxf 6j6v.4gp2).
+            awaiting_human: is_root
+                && q.complete
+                && !borders
+                    .get(id)
+                    .is_some_and(|r| r.direction == crate::border::Direction::Inbound),
             escalated: last_replies.escalated.contains(id),
             substituted: last_replies.substituted.contains(id),
             opener: q.opener.clone(),

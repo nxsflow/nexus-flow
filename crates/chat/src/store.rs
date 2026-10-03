@@ -2786,6 +2786,10 @@ pub(crate) mod tests {
             "withdrawn_holders",
             "withdrawn_sessions",
             "session_interruption",
+            // The border record (nxf 6j6v.4gp2): where the other half of a conversation lives on
+            // THIS machine, and what of it was handed to this side's party.
+            "border_threads",
+            "border_served",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store

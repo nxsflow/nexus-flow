@@ -1115,7 +1115,8 @@ fn act_outbound(
             "{}/{} gave no sign of life for {DEADLINE_HOURS} hours",
             row.peer, row.persona
         );
-        return cancel(ctx, store, row, &why);
+        cancel(ctx, store, row, &why)?;
+        return wake_with_cancellation(ctx, store, row, &why);
     }
     let refusal = acting
         .iter()
@@ -1211,54 +1212,49 @@ fn epoch_secs(instant: &str) -> Option<i64> {
 /// **Take an outbound commission back** — the caller's owner withdrew the operation it belongs
 /// to, or the receiver gave no sign of life past the deadline. The caller's coordinator says so on
 /// the thread (marked, so the receiver stops its persona), clears the expectation so the caller is
-/// no longer waiting on it, wakes the caller with the reason, and carries it across.
+/// no longer waiting on it, and carries it across. It wakes NOBODY: a withdrawal took the
+/// commissioner back too, and the deadline's wake is [`wake_with_cancellation`], a call of its own so
+/// that what a withdrawal can set going is visible in the code and not only in a branch.
 fn cancel(ctx: &Ctx, store: &mut ChatStore, row: &BorderRow, why: &str) -> Result<()> {
     let caller_role = row
         .session
         .as_deref()
         .and_then(|s| store.session_role(s).ok().flatten());
-    let Some(role) = caller_role else {
-        set_state(
-            store,
-            &row.thread_id,
-            BorderState::Canceled,
-            Some(why),
-            ctx.now,
-        )?;
-        return Ok(());
-    };
-    let caller = ctx.qualify(&role);
-    let body = format!("Withdrawn: {why}.");
-    let refs = Refs {
-        border: Some(BorderRef {
-            from: String::new(),
-            to: format!("{}/{}", row.peer, row.persona),
-            role: Some(role.clone()),
-            hop: 0,
-            refusal: None,
-            canceled: true,
-        }),
-        ..Refs::default()
-    };
-    crate::facade::send(
-        store,
-        crate::facade::SendRequest {
-            now: ctx.now,
-            origin: ctx.origin,
-            actor: &role,
-            channel: &store
-                .thread_channel(&row.thread_id)
-                .or_else(|| store.thread_channel_via_message(&row.thread_id))
-                .unwrap_or_default(),
-            body: &body,
+    if let Some(role) = caller_role {
+        let caller = ctx.qualify(&role);
+        let body = format!("Withdrawn: {why}.");
+        let refs = Refs {
+            border: Some(BorderRef {
+                from: String::new(),
+                to: format!("{}/{}", row.peer, row.persona),
+                role: Some(role.clone()),
+                hop: 0,
+                refusal: None,
+                canceled: true,
+            }),
+            ..Refs::default()
+        };
+        let channel = store
+            .thread_channel(&row.thread_id)
+            .or_else(|| store.thread_channel_via_message(&row.thread_id))
+            .unwrap_or_default();
+        // Posted through the store and not `facade::send`: the write-surface gate joins calls by
+        // bare name (nxf 6j6v.cbhe), and a `send` here reads to it as the CLI's `send`, which
+        // starts sessions — a cancellation starts none.
+        store.set_wall_clock(ctx.now);
+        store.post_message(&crate::model::MessageEnvelope {
+            origin: ctx.origin.to_string(),
+            channel_id: channel,
+            sender: caller.clone(),
             kind: MessageKind::Info,
             priority: Priority::Normal,
             disposition: Disposition::InTurn,
-            thread: Some(&row.thread_id),
+            thread_id: Some(row.thread_id.clone()),
             refs,
-        },
-    )?;
-    store.set_expects_reply_from(&row.thread_id, "[]", &caller);
+            body,
+        });
+        store.set_expects_reply_from(&row.thread_id, "[]", &caller);
+    }
     set_state(
         store,
         &row.thread_id,
@@ -1266,35 +1262,45 @@ fn cancel(ctx: &Ctx, store: &mut ChatStore, row: &BorderRow, why: &str) -> Resul
         Some(why),
         ctx.now,
     )?;
-    if let Some(session) = row.session.as_deref() {
-        let hop = orch::resolve_hop(ctx, store)?;
-        let guidance = orch::reply_guidance(store, ctx.now, &caller, Some(&row.thread_id));
-        let wake = orch::wake_message(
-            &format!("{body} Thread {} is closed.", row.thread_id),
-            true,
-            &guidance,
-        );
-        let hold = crate::collecting::Held {
-            thread_id: row.thread_id.clone(),
-            message_id: String::new(),
-            sender: caller.clone(),
-            body: body.clone(),
-            escalated: true,
-        };
-        let _ = orch::resume_return_address(
-            ctx,
-            store,
-            orch::Resume {
-                addr: session,
-                body: &wake,
-                model: None,
-                hop,
-                thread: Some(&row.thread_id),
-                on_busy: orch::OnBusy::Hold(&hold),
-            },
-        );
-    }
     after_local_write_quiet(ctx, store, &row.thread_id);
+    Ok(())
+}
+
+/// Wake the commissioner of a border thread the deadline canceled, with the reason — resumed, or
+/// held while it is mid-turn.
+fn wake_with_cancellation(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &BorderRow,
+    why: &str,
+) -> Result<()> {
+    let Some(session) = row.session.as_deref() else {
+        return Ok(());
+    };
+    let caller = ctx.qualify(&store.session_role(session)?.unwrap_or_default());
+    let body = format!("Withdrawn: {why}. Thread {} is closed.", row.thread_id);
+    let hop = orch::resolve_hop(ctx, store)?;
+    let guidance = orch::reply_guidance(store, ctx.now, &caller, Some(&row.thread_id));
+    let wake = orch::wake_message(&body, true, &guidance);
+    let hold = crate::collecting::Held {
+        thread_id: row.thread_id.clone(),
+        message_id: String::new(),
+        sender: caller,
+        body,
+        escalated: true,
+    };
+    let _ = orch::resume_return_address(
+        ctx,
+        store,
+        orch::Resume {
+            addr: session,
+            body: &wake,
+            model: None,
+            hop,
+            thread: Some(&row.thread_id),
+            on_busy: orch::OnBusy::Hold(&hold),
+        },
+    );
     Ok(())
 }
 
@@ -1393,6 +1399,80 @@ fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A border thread this workspace commissioned, in an in-memory store: the direct conversation
+    /// between `local/pm` and the receiver's `xx12/pm`, and a thread in it expecting `xx12/pm`.
+    fn commissioned_thread(store: &mut ChatStore) -> &'static str {
+        let channel =
+            crate::orchestration::ensure_dm_channel(store, "local", "pm", "local/pm", "xx12/pm")
+                .unwrap();
+        store.open_thread(
+            "t-border",
+            &crate::model::ThreadRoot {
+                origin: "local".into(),
+                channel_id: channel,
+                opener: "local/pm".into(),
+                created: "2026-10-03T10:00:00Z".into(),
+                parent: None,
+            },
+            "local/pm",
+        );
+        store.set_expects_reply_from("t-border", "[\"xx12/pm\"]", "local/pm");
+        "t-border"
+    }
+
+    #[test]
+    fn a_thread_this_workspace_commissioned_across_the_border_is_not_a_chat_with_its_own_persona() {
+        // The trap of nxf 6j6v.q32p in `persona_chat`: it reduces the expected participant to its
+        // last segment, so `xx12/pm` — the OTHER workspace's pm — read as this workspace's `pm`, which
+        // a pickup or a reply would then start to answer its own commission.
+        let defs = crate::definitions::Definitions::new(
+            vec![serde_yaml::from_str("handle: pm\nsystem_prompt: PM.\n").unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let worker = crate::worker::DryWorker { log: None };
+        let ctx = Ctx {
+            now: "2026-10-03T10:00:00Z",
+            origin: "local",
+            actor: "test",
+            session: None,
+            hop: 0,
+            defs: &defs,
+            worker: &worker,
+            timer: &crate::timer::DryTimer,
+            namer: &crate::naming::DryNamer,
+            db_path: "",
+            project_claude_md: None,
+            module_primes: None,
+            machines: None,
+            peers: None,
+        };
+        let mut store = ChatStore::open_in_memory(1);
+        let thread = commissioned_thread(&mut store);
+        assert!(
+            crate::orchestration::persona_chat(&ctx, &store, thread)
+                .unwrap()
+                .is_some(),
+            "the premise: without its border record the thread reads as a chat with our pm"
+        );
+        insert_row(
+            &store,
+            thread,
+            Direction::Outbound,
+            "test/beta",
+            "pm",
+            None,
+            ctx.now,
+        )
+        .unwrap();
+        assert!(
+            crate::orchestration::persona_chat(&ctx, &store, thread)
+                .unwrap()
+                .is_none(),
+            "a border thread this workspace commissioned is nobody's chat here"
+        );
+    }
 
     #[test]
     fn an_address_is_a_workspace_name_and_a_persona() {

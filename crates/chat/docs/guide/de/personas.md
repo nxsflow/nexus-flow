@@ -246,6 +246,62 @@ anzusprechen, in der sie sitzen, lädt eine Einzelauflistung genau zu dem Aufruf
 wollen. Die Darstellung folgt dem *Leser*, dieselbe Deklaration kann eine Persona Ihnen also zeigen
 und einem Agenten verbergen.
 
+### Aus einem anderen Arbeitsbereich
+
+Eine Persona eines ANDEREN Arbeitsbereichs auf derselben Maschine kann diese beauftragen, wenn die
+Deklaration es erlaubt. Ihre Adresse von außen ist der Name des Arbeitsbereichs und das Handle der
+Persona: `nxc send --to nxsflow/nexus-flow/pm`. Der Name eines Arbeitsbereichs ist
+`<besitzer>/<repo>`; `nxs name` zeigt ihn (aus der Git-Herkunft abgeleitet und beim ersten Gebrauch
+gespeichert), `nxs name <besitzer>/<repo>` setzt ihn, wo es keine Herkunft gibt. Innerhalb eines
+Arbeitsbereichs ändert sich nichts: `pm` bleibt `pm`.
+
+```yaml
+addressable:
+  humans: true
+  external:
+    - "*/pm"                     # der PM jedes Arbeitsbereichs, dem dieser vertraut
+    - nxsflow/manufakt-io/pm     # oder genau dieser
+```
+
+- **Kein `external`, kein Weg von außen herein** — in jeder Form, auch unter `general`: „jeder“
+  heißt jeder in diesem Arbeitsbereich. Ein bloßes Handle in `personas:` meint die gleichnamige
+  Persona dieses Arbeitsbereichs und lässt nie eine fremde herein: `personas: [pm]` lässt den `pm`
+  eines anderen Arbeitsbereichs nicht durch.
+- **Zwei Prüfungen, beide nötig.** Der Arbeitsbereich des Aufrufers steht auf der Vertrauensliste
+  dieses Arbeitsbereichs, UND seine Rolle steht in `external`. Einen Nachbarn nehmen Sie beim Namen
+  auf mit `nxs sync trust add --workspace <besitzer>/<repo>` — **in beiden Arbeitsbereichen**: Die
+  Antwort kommt mit dem Schlüssel des Empfängers signiert zurück, und eine Antwort aus einem
+  Arbeitsbereich, dem der Aufrufer nicht vertraut, weckt niemanden. `send` lehnt deshalb vorab ab,
+  bis er vertraut ist.
+- **Die Rolle stempelt der Koordinator des Aufrufers**, aus der Sitzung, die er selbst gestartet
+  hat — nie der Agent. Ein Mensch kommt von außen nicht herein: Er geht in jenen Arbeitsbereich und
+  schreibt dort.
+- **Eine Ablehnung nennt ihren Grund**, in der Antwort an den Aufrufer: *workspace unknown*, *not
+  on this machine*, *not trusted*, *role not admitted*, *no such persona* oder *depth limit
+  reached*.
+
+Was dann geschieht, ist eine Konsultation mit einer Übergabe in der Mitte. Der Auftrag des
+Aufrufers ist ein Faden in dessen eigenem Log, und nur dieser Faden geht hinüber: Der Empfänger
+startet seine Persona in SEINER Arbeitskopie, mit SEINEM Board und Gedächtnis, und was diese Persona
+beauftragt, um zu antworten, bleibt in ihrem Arbeitsbereich. Eine Rückfrage (`--escalate`) geht an
+den Auftraggeber zurück — nie an ihm vorbei zum Besitzer des anderen Arbeitsbereichs —, und die
+Antwort des Auftraggebers auf demselben Faden setzt die Persona fort. Die Tiefengrenze gilt für die
+ganze Kette über beide Arbeitsbereiche. `nxc status` zeigt den Faden in beiden Arbeitsbereichen mit
+der Gegenseite und einem von vier Zuständen: `submitted`, `working`, `input-required`, `completed`
+(oder `rejected` / `canceled`). Zwei Stunden ohne Lebenszeichen — keine Nachricht auf dem Faden,
+nichts im Transkript der empfangenden Persona — brechen ihn ab und wecken den Auftraggeber mit dem
+Grund; `nxc withdraw` auf der Operation zieht ihn auch im anderen Arbeitsbereich zurück.
+
+`send` und `reply` tragen einen Grenzfaden sofort hinüber, die Zustellung braucht also keinen
+Hintergrunddienst; den Rest trägt der Dienst in seinem Takt. Ein Fall braucht ihn doch, wie
+innerhalb eines Arbeitsbereichs: Eine Antwort, die eintrifft, während ihr Auftraggeber seinen Zug
+noch beendet, wird zurückgehalten und vom Dienst übergeben, sobald der Zug endet.
+
+**Ausrollen.** Die Mapping-Form von `addressable` lehnt Schlüssel ab, die sie nicht kennt — das fängt
+einen Tippfehler wie `persona:` —, darum kann eine Engine, die älter ist als `external`, eine
+Persona-Datei mit dem Feld nicht laden. Setzen Sie `external:` nur in ein Repository, dessen Leser
+alle — auch Apps, die eine Engine fest einbinden — einen Stand haben, der es kennt.
+
 ## Wen sie ansprechen darf
 
 ```yaml

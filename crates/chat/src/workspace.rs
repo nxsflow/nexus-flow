@@ -18,9 +18,14 @@ pub const CHAT_MODULE: &str = "chat";
 /// **the workspace's own replica prefix**.
 ///
 /// **A per-workspace value, and M1 says so in as many words**: "in M1 it is the local workspace
-/// identity"; the org/repo-qualified form is finalized with the federation bridge (nxf 6j6v.kz8p).
-/// One string per workspace, the same for every caller in it — and when 6j6v.kz8p gives a workspace
-/// a real federated identity, this function is the one place it lands.
+/// identity"; the org/repo-qualified form was left to the federation bridge (nxf 6j6v.kz8p).
+/// One string per workspace, the same for every caller in it.
+///
+/// **The workspace's NAME is not this** (nxf 6j6v.q32p). The `<owner>/<repo>` an address from
+/// another workspace starts with is stored beside the replica (`nxs_foundation::workspace_name`),
+/// and the origin stays the prefix: a message copied across the border keeps the origin its author
+/// signed, and a status row maps the other side to its name through the border record
+/// (`crate::border`), never by rewriting a handle.
 ///
 /// **Written once because BOTH seams read it** (nxf 6j6v.07me). `cli.rs`'s `origin()` falls back to
 /// it when `NXC_ORIGIN` is unset, and [`crate::engine::Engine::origin`] answers with it for every

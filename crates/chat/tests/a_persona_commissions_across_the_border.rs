@@ -529,8 +529,21 @@ fn a_question_from_the_foreign_pm_wakes_the_commissioner_and_its_answer_goes_bac
     assert!(wake.message.contains("Which release"), "{}", wake.message);
     assert_eq!(a.border_rows()[0].state, BorderState::InputRequired);
     assert_eq!(b.border_rows()[0].state, BorderState::InputRequired);
-    // Nothing in beta was woken for it: the question is not beta's owner's to answer.
+    // Nothing in beta was woken for it: the question is not beta's owner's to answer — and beta's
+    // view does not tell its owner it is waiting on them either.
     assert_eq!(w.worker.of(&b, "pm").len(), 1);
+    let in_beta = status_row(&b, &receipt.thread_id);
+    assert!(in_beta.escalated && !in_beta.awaiting_human, "{in_beta:?}");
+    let beta_ops = b
+        .engine
+        .status(NOW, nexus_chat::facade::StatusScope::Workspace)
+        .unwrap()
+        .operations;
+    let op = beta_ops
+        .iter()
+        .find(|op| op.root == receipt.thread_id)
+        .expect("the operation is live while the commissioner has the question");
+    assert!(!op.needs_decision, "{op:?}");
 
     // The commissioner answers on the border thread, and the foreign pm is resumed with it.
     a.reply(&alpha_pm, &receipt.thread_id, "The next one, 0.300.", false);

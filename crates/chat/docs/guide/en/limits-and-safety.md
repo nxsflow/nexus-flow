@@ -94,6 +94,10 @@ state: it runs on the runtime's full default toolset with an approved shell, and
 any of this. A persona that declares `permissions: bypassPermissions` approves everything itself,
 whatever its `tools:` says.
 
+A persona that admits callers from other workspaces (`addressable.external`, `nxc guide personas`)
+is handed text another workspace wrote. Its declaration is what bounds what that text can make it
+do — which is exactly why `tools: []` has to mean what it says.
+
 ## Escalation: the declared "I need help, or a decision"
 
 An agent has exactly two things it may say with `reply`: *I am finished*, and *I cannot reach the

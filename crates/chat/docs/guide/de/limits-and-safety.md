@@ -99,6 +99,10 @@ Persona ohne `tools:` ist ein anderer Zustand: Sie läuft mit dem vollen Standar
 Laufzeit und einer freigegebenen Shell, und nichts davon schränkt sie ein. Eine Persona mit
 `permissions: bypassPermissions` gibt alles selbst frei, gleich, was in `tools:` steht.
 
+Eine Persona, die Aufrufer aus anderen Arbeitsbereichen zulässt (`addressable.external`, `nxc guide
+personas`), bekommt Text, den ein anderer Arbeitsbereich geschrieben hat. Was dieser Text sie tun
+lassen kann, begrenzt ihre Deklaration — genau deshalb muss `tools: []` bedeuten, was es sagt.
+
 ## Eskalation: das deklarierte „ich brauche Hilfe oder eine Entscheidung"
 
 Ein Agent darf mit `reply` genau zwei Dinge sagen: *ich bin fertig* und *allein komme ich nicht ans

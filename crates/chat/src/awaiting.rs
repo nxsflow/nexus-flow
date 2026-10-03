@@ -571,6 +571,34 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_round_whose_answer_is_held_for_its_commissioner_is_still_in_flight() {
+        // nxf 6j6v.4gp2: the answer came back while the commissioner was still ending its turn, so
+        // it is HELD for it. Until it is delivered the commissioner is waiting — not owing an answer
+        // it could give, which is what the status row used to say, and what made its sidecar remind
+        // it into a substituted reply.
+        let root = quorum(&["47jy/pm"]);
+        let kids = [
+            child("m-answered-held", "47jy/pm", &[]),
+            child("m-answered-delivered", "47jy/pm", &[]),
+            child("m-somebody-elses", "47jy/coder", &[]),
+        ];
+        let held: std::collections::HashSet<String> = [
+            "m-answered-held".to_string(),
+            "m-somebody-elses".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(own_open_sub_round(&root, kids.iter()), Vec::<String>::new());
+        assert_eq!(
+            own_sub_round_in_flight(&root, kids.iter(), &held),
+            vec!["m-answered-held".to_string()],
+            "only the commissioner's own round, and only while its answer is held"
+        );
+        // A thread that owes nothing waits for nothing, held answers or not.
+        assert!(own_sub_round_in_flight(&quorum(&[]), kids.iter(), &held).is_empty());
+    }
+
+    #[test]
     fn a_window_is_reported_only_while_somebody_still_owes_an_answer_against_it() {
         // nxf 6j6v.0vd9's second half, at the one function that decides it. The condition is
         // `outstanding != []` and not `complete`, deliberately: a thread that expects NOBODY is

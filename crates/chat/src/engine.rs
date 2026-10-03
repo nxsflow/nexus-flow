@@ -989,7 +989,7 @@ impl Engine {
     /// is for. What the background service runs on its pass, and what a host that executes calls
     /// when it learns the other side wrote. Reaches nothing without [`EngineConfig::peers`].
     pub fn handover(&self, caller: Caller<'_>) -> Result<crate::border::HandoverReport> {
-        self.with_orchestration(caller, crate::border::hand_over)
+        self.with_orchestration(caller, |ctx, store| crate::border::hand_over(ctx, store))
     }
 
     /// **Where a chat runs, before anything is sent** (`nxc machine`, nxf 6j6v.1c6k) — the machine

@@ -129,12 +129,17 @@ E5c closes all three:
 3. **Plumb per-role/step/call model selection** (`fable`|`opus`|`sonnet`), which exists nowhere in
    the spawn path today — a definition naming a model is inert until it does.
 
-**Hard scope guardrail (owner, 2026-07-30, recorded as a note on `qvfp`).** This seam delivers
-**exclusively** the single-repo role runtime — roles, channels, workflows, quorum and app-supplied
-definitions **within one** workspace, plus transcript read. **No** cross-repo routing, **no**
-cross-workspace bridge, **no** repo-spanning WAIT resolution. Cross-repo communication is the
-manufakt.io USP and stays there (`dqem.c5em`). This boundary is not negotiable and not "just for
-now": what becomes surface here goes irreversibly public with the open-source launch.
+**Scope guardrail (owner, 2026-07-30, recorded as a note on `qvfp`) — and its cross-repo clause
+LIFTED by the owner on 2026-10-03 (epic `6j6v.70dy`).** This seam was cut as the single-repo role
+runtime — roles, channels, workflows, quorum and app-supplied definitions within one workspace, plus
+transcript read. The 2026-07-30 note excluded cross-repo routing and any cross-workspace bridge as
+the manufakt.io USP (`dqem.c5em`). That ruling is superseded: conversation across repository and
+application borders belongs in the open nexus-flow (owner direction of 2026-10-03, decisions E1–E9
+in the coordinator workspace's `2026-10-03-standards-und-foederation-richtung.md`). The first slice
+is on this seam now — a persona commissions a persona of another workspace on the same machine
+(`crate::border`, `Engine::handover`, `addressable.external`, `EngineConfig::peers`), and only the
+border thread crosses. Still NOT here: repo-spanning WAIT resolution, anything over a network, and
+a person addressing a foreign persona directly.
 
 ## 2. Why the verbs cannot be lifted as they stand
 
@@ -1122,7 +1127,9 @@ Beyond parity, the acceptance is behavioural and has to be run for real, not ass
 
 ## 6. Explicitly not in scope
 
-- **Cross-repo routing, cross-workspace bridging, repo-spanning WAIT resolution** — §1, non-negotiable.
+- **Repo-spanning WAIT resolution, and any cross-workspace path over a network** — §1. Cross-repo
+  routing between two workspaces on one machine is no longer excluded: the owner lifted that clause
+  on 2026-10-03 (epic `6j6v.70dy`), and its first slice is `crate::border`.
 - **Transcript authorization** (`yxsa`). The transcript read — `Engine::transcript_page` since nxf
   6j6v.yr59 — remains ungated and keeps its existing "an app serving more than one user must
   authorize the caller itself" warning. Adjacent, watched, not fixed here.
