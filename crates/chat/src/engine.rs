@@ -989,6 +989,10 @@ impl Engine {
     /// is for. What the background service runs on its pass, and what a host that executes calls
     /// when it learns the other side wrote. Reaches nothing without [`EngineConfig::peers`].
     pub fn handover(&self, caller: Caller<'_>) -> Result<crate::border::HandoverReport> {
+        // A closure on purpose, not the function path clippy suggests: the write-surface gate
+        // (`tests/read_surface.rs`) finds what a method starts by its CALLS, and a function passed
+        // as a value is no call — this method would read as starting nothing.
+        #[allow(clippy::redundant_closure)]
         self.with_orchestration(caller, |ctx, store| crate::border::hand_over(ctx, store))
     }
 

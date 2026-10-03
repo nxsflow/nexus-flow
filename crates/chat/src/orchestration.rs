@@ -14508,7 +14508,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     let border_open = crate::border::rows(store)?.iter().any(|r| {
         r.direction == crate::border::Direction::Outbound
             && !r.state.is_final()
-            && area.iter().any(|t| *t == r.thread_id)
+            && area.contains(&r.thread_id)
     });
     if parked.is_empty() && running.is_empty() && !border_open {
         // **A worker that cannot LOOK does not get to say nothing is running** (fix round 3 of this
