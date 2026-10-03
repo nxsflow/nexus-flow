@@ -2268,8 +2268,8 @@ pub fn show(json: bool, db: Option<&str>, id: &str) -> Result<()> {
 /// they apply), then the DESCRIPTION / DEFINITION OF DONE / DESIGN / NOTES sections whose
 /// headings are the plugin's field labels. `--json` carries everything for machines; this is
 /// the human surface, so due/defer/assignee live in the record but not in this layout.
-/// `parents_notice` (6j6v.zvd0) — the engine-computed parent-pointer notice — is rendered
-/// verbatim as the very last thing when the item has parent(s); omitted entirely otherwise.
+/// `parents_notice` (6j6v.zvd0) — the engine-computed parent-pointer notice — is printed
+/// unchanged as the very last thing when the item has parent(s); omitted entirely otherwise.
 #[allow(clippy::too_many_arguments)]
 fn render_show(
     cfg: &PluginConfig,
@@ -2417,12 +2417,11 @@ fn render_show(
         }
     }
 
-    // Parent-pointer notice (6j6v.zvd0): the engine's verbatim, loud reminder to also read the
-    // parent(s) — appended last, only when the item actually has parent(s). Deliberately restates
-    // the quiet `PARENT:` line above for a single parent (Code Quality #2, PR #255 review): the
-    // `PARENT:` field is easy to skim past, and for MULTIPLE parents it shows only the LWW
-    // `belongs_to` winner — this notice is the one place that is both unmissable and lists every
-    // live parent.
+    // Parent-pointer notice (6j6v.zvd0, worded neutrally since 6j6v.jfgy): the engine's pointer to
+    // the parent(s) — appended last, only when the item actually has parent(s). Deliberately
+    // restates the `PARENT:` line above for a single parent (Code Quality #2, PR #255 review): for
+    // MULTIPLE parents that field shows only the LWW `belongs_to` winner — this notice is the one
+    // place that lists every live parent.
     if let Some(notice) = parents_notice {
         out.push('\n');
         out.push_str(notice);

@@ -1040,17 +1040,21 @@ fn live_parents_of(store: &Store, item_id: &str) -> Result<Vec<String>> {
     Ok(live)
 }
 
-/// The loud, verbatim notice urging the reader to also read `parents` (6j6v.zvd0): `None` when
-/// `parents` is empty, so a parentless item carries no notice at all. Lives here — not in the CLI
-/// printer — so `nxf show` (human), `--json`, and every other consumer (MCP, embedders) render the
-/// identical text off the identical engine computation.
+/// The notice pointing the reader at `parents` (6j6v.zvd0): `None` when `parents` is empty, so a
+/// parentless item carries no notice at all. Lives here — not in the CLI printer — so `nxf show`
+/// (human), `--json`, and every other consumer (MCP, embedders) render the identical text off the
+/// identical engine computation.
+///
+/// Neutral on purpose (6j6v.jfgy, superseding zvd0's "URGENT RECOMMENDATION … !!!"): agents read
+/// this output, and a line that sounds like an order got flagged as a prompt injection in the
+/// ticket data — or taught agents to skim the urgent line at the end, which blunts them against a
+/// real one. It states where the context is; it does not command.
 fn parents_notice(parents: &[String]) -> Option<String> {
     if parents.is_empty() {
         return None;
     }
     Some(format!(
-        "This item has the following parents: {}. URGENT RECOMMENDATION: ALSO READ THESE \
-         ITEMS TO GET THE COMPLETE PICTURE!!!",
+        "Parents: {} (read for full context)",
         parents.join(", ")
     ))
 }
@@ -1894,8 +1898,8 @@ pub struct ShowRecord {
     /// The item's belongs-to/containment parent ids, sorted (6j6v.zvd0); empty when it has none.
     /// `contributes_to` edges are NOT parents here — see [`parents_notice`] for the derived notice.
     pub parents: Vec<String>,
-    /// The verbatim parent-pointer notice (6j6v.zvd0) when [`parents`](Self::parents) is
-    /// non-empty; `None` for a parentless item.
+    /// The engine's parent-pointer notice (6j6v.zvd0, neutral since 6j6v.jfgy) when
+    /// [`parents`](Self::parents) is non-empty; `None` for a parentless item.
     pub parents_notice: Option<String>,
 }
 
