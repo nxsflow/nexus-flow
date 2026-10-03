@@ -94,6 +94,10 @@ pub struct BorderRef {
     /// On the receiver's answer only: the reason the commission was refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<Refusal>,
+    /// On the caller's last word only: the commission is taken back — withdrawn by its owner, or
+    /// given up after [`DEADLINE_HOURS`] without a sign of life. The receiver stops its persona.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub canceled: bool,
 }
 
 /// **Why a border commission was refused** — named, so a caller learns which of its two checks
@@ -597,6 +601,7 @@ pub fn commission(
         role: Some(role),
         hop: hop.get(),
         refusal: None,
+        canceled: false,
     });
     let sent = crate::facade::send(
         store,
@@ -838,29 +843,71 @@ fn act_inbound(
     let Some(session) = row.session.clone() else {
         return Ok(());
     };
-    let fresh: Vec<MessageRow> = store
-        .acting_messages_in_thread(&row.thread_id)?
-        .into_iter()
+    let acting = store.acting_messages_in_thread(&row.thread_id)?;
+    let fresh: Vec<MessageRow> = acting
+        .iter()
         .filter(|m| m.sender != participant)
         .filter(|m| !is_served(store, &row.thread_id, &m.message_id).unwrap_or(true))
+        .cloned()
         .collect();
-    if fresh.is_empty() {
+    // The caller took the commission back: stop the persona working on it, and hand it nothing.
+    if let Some(cancel) = fresh
+        .iter()
+        .find(|m| border_of(m).is_some_and(|b| b.canceled))
+    {
+        if let Err(e) = ctx.worker.stop_session(&session) {
+            eprintln!(
+                "warning: border thread {} was withdrawn, and its persona session {session} could \
+                 not be stopped: {e}",
+                row.thread_id
+            );
+        }
+        for m in &fresh {
+            mark_served(store, &row.thread_id, &m.message_id)?;
+        }
+        set_state(
+            store,
+            &row.thread_id,
+            BorderState::Canceled,
+            Some(&cancel.body),
+            ctx.now,
+        )?;
         return Ok(());
     }
-    let hop = orch::checked_hop(stamp.hop.saturating_add(1))?;
-    if deliver(
-        ctx,
-        store,
-        &session,
-        &row.thread_id,
-        &fresh,
-        &participant,
-        hop,
-    ) {
-        report.woke.push(session);
+    if !fresh.is_empty() {
+        let hop = orch::checked_hop(stamp.hop.saturating_add(1))?;
+        if deliver(
+            ctx,
+            store,
+            &session,
+            &row.thread_id,
+            &fresh,
+            &participant,
+            hop,
+        ) {
+            report.woke.push(session);
+        }
     }
-    set_state(store, &row.thread_id, BorderState::Working, None, ctx.now)?;
+    let state = state_after(acting.last(), &participant, row.state);
+    if state != row.state {
+        set_state(store, &row.thread_id, state, None, ctx.now)?;
+    }
     Ok(())
+}
+
+/// Where a border thread stands, read off its newest acting message (`last`): the side that does
+/// the work (`worker`, the addressed persona's participant) answered — `completed`, or
+/// `input-required` when it handed the task back — or the other side wrote since, and the work is
+/// on again. `current` when the thread has no message to read.
+fn state_after(last: Option<&MessageRow>, worker: &str, current: BorderState) -> BorderState {
+    match last {
+        None => current,
+        Some(m) if m.sender == worker && m.kind == crate::model::KIND_ESCALATION => {
+            BorderState::InputRequired
+        }
+        Some(m) if m.sender == worker => BorderState::Completed,
+        Some(_) => BorderState::Working,
+    }
 }
 
 /// **The two checks, both required** (6j6v.t5xb), plus whether the address leads anywhere: the
@@ -998,6 +1045,7 @@ fn refuse(
             role: None,
             hop: stamp.hop,
             refusal: Some(refusal),
+            canceled: false,
         }),
         ..Refs::default()
     };
@@ -1053,61 +1101,224 @@ fn act_outbound(
     row: &BorderRow,
     report: &mut HandoverReport,
 ) -> Result<()> {
-    let caller = ctx.qualify(
-        &row.session
-            .as_deref()
-            .and_then(|s| store.session_role(s).ok().flatten())
-            .unwrap_or_default(),
-    );
-    let msgs = store.acting_messages_in_thread(&row.thread_id)?;
-    let fresh: Vec<MessageRow> = msgs
-        .iter()
-        .filter(|m| m.sender != caller && border_of(m).is_none_or(|b| b.refusal.is_some()))
-        .filter(|m| !is_served(store, &row.thread_id, &m.message_id).unwrap_or(true))
-        .cloned()
-        .collect();
-    if row.state == BorderState::Submitted && fresh.is_empty() {
-        // Handed over, nothing back yet: the receiver is working on it once it holds the thread.
-        if store
-            .messages_in_thread(&row.thread_id)?
-            .iter()
-            .any(|m| m.sender != caller)
-            || peer_holds(ctx, row)
-        {
-            set_state(store, &row.thread_id, BorderState::Working, None, ctx.now)?;
-        }
-        return Ok(());
-    }
-    let Some(last) = fresh.last() else {
+    // The receiver's participant — the one party this thread was opened to expect a reply from. Its
+    // messages are what the caller is woken with; the caller's own are what it already knows.
+    let Some(worker) = store
+        .thread_quorum(&row.thread_id, ctx.now)?
+        .and_then(|q| q.expects.first().cloned())
+    else {
         return Ok(());
     };
-    let refusal = fresh
+    let acting = store.acting_messages_in_thread(&row.thread_id)?;
+    if row.state == BorderState::Working && overdue(ctx, row, &acting) {
+        let why = format!(
+            "{}/{} gave no sign of life for {DEADLINE_HOURS} hours",
+            row.peer, row.persona
+        );
+        return cancel(ctx, store, row, &why);
+    }
+    let refusal = acting
         .iter()
+        .rev()
+        .filter(|m| m.sender == worker)
         .find_map(|m| border_of(m).and_then(|b| b.refusal));
     let state = match refusal {
         Some(_) => BorderState::Rejected,
-        None if last.kind == crate::model::KIND_ESCALATION => BorderState::InputRequired,
-        None => BorderState::Completed,
-    };
-    set_state(
-        store,
-        &row.thread_id,
-        state,
-        refusal.map(Refusal::text),
-        ctx.now,
-    )?;
-    if let Some(session) = row.session.clone() {
-        let hop = orch::resolve_hop(ctx, store)?;
-        let sender = last.sender.clone();
-        if deliver(ctx, store, &session, &row.thread_id, &fresh, &sender, hop) {
-            report.woke.push(session);
+        None if acting.iter().any(|m| m.sender == worker) => {
+            state_after(acting.last(), &worker, row.state)
         }
-    } else {
-        for m in &fresh {
-            mark_served(store, &row.thread_id, &m.message_id)?;
+        // Nothing back yet: working once the other side holds the thread, submitted until then.
+        None if row.state == BorderState::Submitted && peer_holds(ctx, row) => BorderState::Working,
+        None => row.state,
+    };
+    if state != row.state {
+        set_state(
+            store,
+            &row.thread_id,
+            state,
+            refusal.map(Refusal::text),
+            ctx.now,
+        )?;
+    }
+    let fresh: Vec<MessageRow> = acting
+        .iter()
+        .filter(|m| m.sender == worker)
+        .filter(|m| !is_served(store, &row.thread_id, &m.message_id).unwrap_or(true))
+        .cloned()
+        .collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    match row.session.clone() {
+        Some(session) => {
+            let hop = orch::resolve_hop(ctx, store)?;
+            if deliver(ctx, store, &session, &row.thread_id, &fresh, &worker, hop) {
+                report.woke.push(session);
+            }
+        }
+        None => {
+            for m in &fresh {
+                mark_served(store, &row.thread_id, &m.message_id)?;
+            }
         }
     }
     Ok(())
+}
+
+/// **Whether a working border thread has been quiet past its deadline** — [`DEADLINE_HOURS`] since
+/// the last sign of life (6j6v.nj20, owner 2026-09-17: two hours of INACTIVITY, not two hours from
+/// the start). A sign of life is a message on the thread, either side's, or an entry in the
+/// transcript of the receiver's persona session — a persona that is reading and thinking is
+/// working even while it has said nothing yet.
+fn overdue(ctx: &Ctx, row: &BorderRow, acting: &[MessageRow]) -> bool {
+    let mut signs: Vec<String> = acting.iter().filter_map(|m| m.created.clone()).collect();
+    signs.push(row.updated.clone());
+    if let Some(peers) = ctx.peers {
+        if let Ok(Ok(peer)) = find_one(peers, &row.peer) {
+            if let Ok(far) = open_far(&peer) {
+                let seen: Option<String> = far
+                    .store
+                    .connection()
+                    .query_row(
+                        "SELECT MAX(t.at) FROM agent_transcript t
+                           JOIN border_threads b ON b.session = t.internal_session
+                          WHERE b.thread_id = ?1",
+                        [&row.thread_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten();
+                signs.extend(seen);
+            }
+        }
+    }
+    let last = signs.iter().filter_map(|s| epoch_secs(s)).max();
+    match (last, epoch_secs(ctx.now)) {
+        (Some(last), Some(now)) => now - last > DEADLINE_HOURS * 3600,
+        _ => false,
+    }
+}
+
+/// Seconds since the epoch of an RFC 3339 instant, or `None` for one that does not parse.
+fn epoch_secs(instant: &str) -> Option<i64> {
+    time::OffsetDateTime::parse(instant, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|t| t.unix_timestamp())
+}
+
+/// **Take an outbound commission back** — the caller's owner withdrew the operation it belongs
+/// to, or the receiver gave no sign of life past the deadline. The caller's coordinator says so on
+/// the thread (marked, so the receiver stops its persona), clears the expectation so the caller is
+/// no longer waiting on it, wakes the caller with the reason, and carries it across.
+fn cancel(ctx: &Ctx, store: &mut ChatStore, row: &BorderRow, why: &str) -> Result<()> {
+    let caller_role = row
+        .session
+        .as_deref()
+        .and_then(|s| store.session_role(s).ok().flatten());
+    let Some(role) = caller_role else {
+        set_state(
+            store,
+            &row.thread_id,
+            BorderState::Canceled,
+            Some(why),
+            ctx.now,
+        )?;
+        return Ok(());
+    };
+    let caller = ctx.qualify(&role);
+    let body = format!("Withdrawn: {why}.");
+    let refs = Refs {
+        border: Some(BorderRef {
+            from: String::new(),
+            to: format!("{}/{}", row.peer, row.persona),
+            role: Some(role.clone()),
+            hop: 0,
+            refusal: None,
+            canceled: true,
+        }),
+        ..Refs::default()
+    };
+    crate::facade::send(
+        store,
+        crate::facade::SendRequest {
+            now: ctx.now,
+            origin: ctx.origin,
+            actor: &role,
+            channel: &store
+                .thread_channel(&row.thread_id)
+                .or_else(|| store.thread_channel_via_message(&row.thread_id))
+                .unwrap_or_default(),
+            body: &body,
+            kind: MessageKind::Info,
+            priority: Priority::Normal,
+            disposition: Disposition::InTurn,
+            thread: Some(&row.thread_id),
+            refs,
+        },
+    )?;
+    store.set_expects_reply_from(&row.thread_id, "[]", &caller);
+    set_state(
+        store,
+        &row.thread_id,
+        BorderState::Canceled,
+        Some(why),
+        ctx.now,
+    )?;
+    if let Some(session) = row.session.as_deref() {
+        let hop = orch::resolve_hop(ctx, store)?;
+        let guidance = orch::reply_guidance(store, ctx.now, &caller, Some(&row.thread_id));
+        let wake = orch::wake_message(
+            &format!("{body} Thread {} is closed.", row.thread_id),
+            true,
+            &guidance,
+        );
+        let hold = crate::collecting::Held {
+            thread_id: row.thread_id.clone(),
+            message_id: String::new(),
+            sender: caller.clone(),
+            body: body.clone(),
+            escalated: true,
+        };
+        let _ = orch::resume_return_address(
+            ctx,
+            store,
+            orch::Resume {
+                addr: session,
+                body: &wake,
+                model: None,
+                hop,
+                thread: Some(&row.thread_id),
+                on_busy: orch::OnBusy::Hold(&hold),
+            },
+        );
+    }
+    after_local_write_quiet(ctx, store, &row.thread_id);
+    Ok(())
+}
+
+/// **Withdraw every outbound border thread of the operation rooted at `root`** — what taking back an
+/// operation does at the border: the threads it sent into other workspaces are canceled there too,
+/// and their personas stopped. Called by [`crate::orchestration::withdraw`]; best effort, since the
+/// withdrawal itself has already happened.
+pub fn withdraw_under(ctx: &Ctx, store: &mut ChatStore, root: &str) {
+    let Ok(open) = rows(store) else { return };
+    for row in open
+        .into_iter()
+        .filter(|r| r.direction == Direction::Outbound && !r.state.is_final())
+    {
+        if store.thread_root(&row.thread_id).ok().as_deref() != Some(root) {
+            continue;
+        }
+        if let Err(e) = cancel(ctx, store, &row, "withdrawn by the owner of the operation") {
+            eprintln!(
+                "warning: border thread {} could not be withdrawn across the border: {}",
+                row.thread_id, e.msg
+            );
+        }
+    }
+    refresh_marker(store, ctx.db_path);
 }
 
 /// Whether the other side already records this thread — the receiver holds it, so it is working.

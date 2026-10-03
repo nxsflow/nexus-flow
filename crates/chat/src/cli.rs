@@ -3641,11 +3641,34 @@ fn status_line(t: &crate::facade::StatusThread) -> String {
         None => t.channel_id.clone().unwrap_or_default(),
     };
     format!(
-        "{indent}{}  {what}  {state}{by_whom}{own_round}{}{}{}",
+        "{indent}{}  {what}  {state}{by_whom}{own_round}{}{}{}{}",
         t.thread_id,
+        border_suffix(t.border.as_ref()),
         session_suffix(t),
         interruption_suffix(t.interrupted.as_ref()),
         anchor_suffix(t.working_copy.as_ref())
+    )
+}
+
+/// **The thread crosses into another workspace** (nxf 6j6v.szc5) — which one, which way, and where
+/// it stands, in the four words A2A uses. Empty for every thread that stays here.
+fn border_suffix(border: Option<&crate::facade::BorderStatus>) -> String {
+    let Some(b) = border else {
+        return String::new();
+    };
+    let way = match b.direction {
+        crate::border::Direction::Outbound => "to",
+        crate::border::Direction::Inbound => "from",
+    };
+    let reason = b
+        .reason
+        .as_deref()
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+    format!(
+        " — across the border {way} {}: {}{reason}",
+        b.peer,
+        b.state.as_str()
     )
 }
 

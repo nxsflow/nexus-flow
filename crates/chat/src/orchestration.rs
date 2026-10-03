@@ -14502,7 +14502,15 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     // **The running half** (nxf 6j6v.b9nf): every unended session in the area that the worker says
     // has a live process — the same two reads, in the same order, as `sessions_still_running`.
     let running = sessions_running_under(ctx, store, &area)?;
-    if parked.is_empty() && running.is_empty() {
+    // **Work running in ANOTHER workspace is running too** (nxf 6j6v.4gp2): a border thread under
+    // this operation that is not finished has a persona working on it over there, and taking the
+    // operation back is what stops it — see `crate::border::withdraw_under` at the end.
+    let border_open = crate::border::rows(store)?.iter().any(|r| {
+        r.direction == crate::border::Direction::Outbound
+            && !r.state.is_final()
+            && area.iter().any(|t| *t == r.thread_id)
+    });
+    if parked.is_empty() && running.is_empty() && !border_open {
         // **A worker that cannot LOOK does not get to say nothing is running** (fix round 3 of this
         // item's review, Code Quality #7 (a)). `running` is empty for two different reasons: the
         // worker looked and found nothing, or the worker cannot look at all — a custom worker
@@ -14842,6 +14850,10 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     if holds_the_copy {
         warnings.extend(service_finding(ctx, thread_id));
     }
+
+    // **The border is part of the operation** (nxf 6j6v.4gp2): what it sent into other workspaces
+    // is taken back too — said on each border thread, so the receiving workspace stops its persona.
+    crate::border::withdraw_under(ctx, store, &store.thread_root(thread_id)?);
 
     Ok(WithdrawReceipt {
         thread_id: thread_id.to_string(),

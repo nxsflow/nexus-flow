@@ -751,6 +751,25 @@ pub struct StatusThread {
     /// statement for the whole report, never one per thread.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interrupted: Option<crate::interruption::Interruption>,
+    /// **This thread crosses the border of the workspace** (nxf 6j6v.szc5): which workspace is on
+    /// the other side, which way it was commissioned, and where it stands — the four states A2A
+    /// knows. The same thread carries it in BOTH workspaces, each from its own side. `None` for every
+    /// thread that stays in this workspace, which is skipped in `--json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<BorderStatus>,
+}
+
+/// **A border thread as a status row shows it** (nxf 6j6v.szc5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BorderStatus {
+    /// The other workspace, by name (`<owner>/<repo>`).
+    pub peer: String,
+    /// `outbound` when this workspace commissioned, `inbound` when it was commissioned.
+    pub direction: crate::border::Direction,
+    pub state: crate::border::BorderState,
+    /// Why it was rejected or canceled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// One operation: a root thread and everything that was opened out of it, across channel borders.
@@ -3639,6 +3658,12 @@ pub fn status(
     // session. It keeps such a sub-round "in flight" on its parent's row; see
     // [`crate::awaiting::own_sub_round_in_flight`].
     let held_answers = store.threads_holding_wakes()?;
+    // The border record (nxf 6j6v.szc5) — the thirteenth read, one statement over a device-local
+    // table that holds a row per border thread this workspace ever had.
+    let borders: BTreeMap<String, crate::border::BorderRow> = crate::border::rows(store)?
+        .into_iter()
+        .map(|r| (r.thread_id.clone(), r))
+        .collect();
     // **One bundle, because these seven ARE one thing**: the bulk reads this report is assembled
     // from, taken once for the whole selection and then read per thread. Passing them
     // individually made the per-thread derivation an eight-argument call, and the argument list
@@ -3654,6 +3679,7 @@ pub fn status(
         anchors: &anchors,
         interruptions: &interruptions,
         held_answers: &held_answers,
+        borders: &borders,
     };
 
     let mut operations = Vec::new();
@@ -3766,6 +3792,8 @@ struct DerivedFacts<'a> {
     interruptions: &'a BTreeMap<String, crate::interruption::Interruption>,
     /// The threads whose answer is held for a commissioner still mid-turn (nxf 6j6v.4gp2).
     held_answers: &'a std::collections::HashSet<String>,
+    /// The border record, per thread (nxf 6j6v.szc5).
+    borders: &'a BTreeMap<String, crate::border::BorderRow>,
 }
 
 /// **How many process questions ONE status read will ask** (review of PR #444, Integrity #1).
@@ -4305,6 +4333,7 @@ impl<'a> Forest<'a> {
             anchors,
             interruptions,
             held_answers,
+            borders,
         } = facts;
         let q = by_id.get(id)?;
         let parent = self.declared.get(id).copied().flatten();
@@ -4377,6 +4406,12 @@ impl<'a> Forest<'a> {
                 .get(id)
                 .and_then(|sid| interruptions.get(sid))
                 .cloned(),
+            border: borders.get(id).map(|r| BorderStatus {
+                peer: r.peer.clone(),
+                direction: r.direction,
+                state: r.state,
+                reason: r.reason.clone(),
+            }),
         })
     }
 }
