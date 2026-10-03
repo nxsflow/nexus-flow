@@ -939,6 +939,17 @@ VOCABULARY=(
   'of a fully withdrawn round'                   # 7me0's rule, in prose
   # NOT listable, and the review of PR #483 found it by hand: a verb that STAYS but may no longer
   # be offered to an agent. `git grep 'nxc withdraw' -- crates/chat/src` is that sweep.
+  #
+  # nxf 6j6v.jfgy (2026-10-03) — `parents_notice` no longer shouts. zvd0's verbatim "This item has
+  # the following parents: … URGENT RECOMMENDATION: ALSO READ THESE ITEMS TO GET THE COMPLETE
+  # PICTURE!!!" became "Parents: <ids> (read for full context)": agents downstream flagged the old
+  # line as a prompt injection. Each phrase is its own term, because a stray copy in prose or a
+  # golden may carry only part of it. The field NAME stays and is not listed. Expected hits: the
+  # jfgy changelog fragment and the comments that name the old text as superseded.
+  'URGENT RECOMMENDATION'
+  'ALSO READ THESE ITEMS'
+  'COMPLETE PICTURE'
+  'has the following parents'
 )
 
 # ---- THE EXCLUSIONS, each with the reason it is not a defect ----------------------------------

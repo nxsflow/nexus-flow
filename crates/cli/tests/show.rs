@@ -7,6 +7,12 @@ use assert_cmd::Command;
 use std::path::Path;
 use tempfile::TempDir;
 
+/// How the parent notice opens its line (6j6v.jfgy). The positive test below asserts it is PRESENT,
+/// and the two negative tests assert it is ABSENT — one constant for both, so a rewording that
+/// moves the lead turns the positive test red instead of leaving the negative ones checking for a
+/// string nobody prints any more.
+const PARENTS_NOTICE_LEAD: &str = "\nParents: ";
+
 fn nxf() -> Command {
     nxs_test_support::cargo_bin("nxf")
 }
@@ -220,6 +226,10 @@ fn appends_parent_notice_at_the_very_end_when_parents_exist() {
         .success();
 
     let out = show(tmp.path(), &task);
+    assert!(
+        out.contains(PARENTS_NOTICE_LEAD),
+        "the notice opens its own line with the shared lead:\n{out}"
+    );
     let expected = format!("Parents: {parent} (read for full context)");
     assert!(
         out.trim_end().ends_with(expected.trim_end()),
@@ -234,7 +244,7 @@ fn omits_parent_notice_when_no_parent() {
     let task = create(tmp.path(), "bug", "Standalone", &[]);
     let out = show(tmp.path(), &task);
     assert!(
-        !out.contains("(read for full context)"),
+        !out.contains(PARENTS_NOTICE_LEAD),
         "no parent notice when there is no parent:\n{out}"
     );
 }
@@ -255,7 +265,7 @@ fn omits_parent_notice_for_a_contributes_to_only_edge() {
 
     let out = show(tmp.path(), &cream);
     assert!(
-        !out.contains("(read for full context)"),
+        !out.contains(PARENTS_NOTICE_LEAD),
         "a contributes_to edge is not a parent, so no notice:\n{out}"
     );
 }

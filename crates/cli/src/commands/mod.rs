@@ -2268,8 +2268,8 @@ pub fn show(json: bool, db: Option<&str>, id: &str) -> Result<()> {
 /// they apply), then the DESCRIPTION / DEFINITION OF DONE / DESIGN / NOTES sections whose
 /// headings are the plugin's field labels. `--json` carries everything for machines; this is
 /// the human surface, so due/defer/assignee live in the record but not in this layout.
-/// `parents_notice` (6j6v.zvd0) — the engine-computed parent-pointer notice — is rendered
-/// verbatim as the very last thing when the item has parent(s); omitted entirely otherwise.
+/// `parents_notice` (6j6v.zvd0) — the engine-computed parent-pointer notice — is printed
+/// unchanged as the very last thing when the item has parent(s); omitted entirely otherwise.
 #[allow(clippy::too_many_arguments)]
 fn render_show(
     cfg: &PluginConfig,

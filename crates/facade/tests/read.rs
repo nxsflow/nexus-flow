@@ -469,7 +469,10 @@ fn the_parents_notice_reads_as_data_not_as_an_instruction() {
     // 6j6v.jfgy: the old notice shouted ("URGENT RECOMMENDATION: … !!!"), and agents downstream
     // flagged it as a prompt injection in the ticket data — or learned to skim the urgent line at
     // the end of board output, which blunts them against real injections. Tool output in an agent
-    // chain must not sound like an order: no exclamation mark, no word in capitals.
+    // chain must not sound like an order. Pinned as two properties, so a future rewording keeps
+    // them without re-deriving them: it does not shout (no exclamation mark, no word in capitals),
+    // and it is one statement that LEADS with the data — `Parents: <ids>` — with no second sentence
+    // after the ids where an imperative could sit ("Read these first: …", "Parents: x. Read them.").
     let mut s = Store::open_in_memory(1);
     open_task(&mut s, "ab12.0001", "Epic", "0");
     open_task(&mut s, "ab12.0002", "Child", "0");
@@ -484,6 +487,13 @@ fn the_parents_notice_reads_as_data_not_as_an_instruction() {
     assert!(
         shouted.is_empty(),
         "no word in capitals, found {shouted:?}: {notice}"
+    );
+    let after_ids = notice
+        .strip_prefix("Parents: ab12.0001")
+        .unwrap_or_else(|| panic!("the notice leads with the data, `Parents: <ids>`: {notice}"));
+    assert!(
+        !after_ids.contains(['.', ':', '!', '?']),
+        "one statement: no second sentence after the ids, found {after_ids:?}"
     );
 }
 

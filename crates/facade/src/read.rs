@@ -1898,8 +1898,8 @@ pub struct ShowRecord {
     /// The item's belongs-to/containment parent ids, sorted (6j6v.zvd0); empty when it has none.
     /// `contributes_to` edges are NOT parents here — see [`parents_notice`] for the derived notice.
     pub parents: Vec<String>,
-    /// The verbatim parent-pointer notice (6j6v.zvd0) when [`parents`](Self::parents) is
-    /// non-empty; `None` for a parentless item.
+    /// The engine's parent-pointer notice (6j6v.zvd0, neutral since 6j6v.jfgy) when
+    /// [`parents`](Self::parents) is non-empty; `None` for a parentless item.
     pub parents_notice: Option<String>,
 }
 
