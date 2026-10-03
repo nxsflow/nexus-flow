@@ -183,10 +183,13 @@ weggelassener Schlüssel und eine leere Liste sind *nicht* dasselbe.
 Eine Persona, die überhaupt `nxc` ausführen soll, braucht `Bash`, denn so antwortet sie — und wo die
 Engine eine Antwort *verlangt*, gibt sie das selbst dazu. Jede Beauftragung sagt der Persona in ihrem
 eigenen Systemprompt, sie solle ihren Zug mit `nxc reply --thread <id>` beenden; wer so verpflichtet,
-muss also sicherstellen, dass es ausführbar ist. Der Trigger nimmt `Bash` zusätzlich zu dem auf, was
-Sie deklariert haben — ohne den Werkzeugsatz zu verengen, den ein weggelassenes `tools:` gewährt. Für
-eine Persona, die die Shell für ihre *Arbeit* braucht, deklarieren Sie `Bash` weiterhin selbst; was
-Sie nicht mehr mitdenken müssen, ist, dass Antworten auch Arbeit ist.
+muss also sicherstellen, dass es ausführbar ist. Was der Trigger dazugibt, hängt von Ihrer
+Deklaration ab und verengt sie nie: Eine Persona ohne `tools:` bekommt `Bash`, wie bisher; eine
+Persona mit einer Liste ohne `Bash` — auch `tools: []` — bekommt `Bash(nxc reply:*)`, das ihre
+Antwort ausführt und keinen anderen Befehl; eine Persona, die `Bash` aufführt, bekommt nichts dazu.
+Für eine Persona, die die Shell für ihre *Arbeit* braucht, deklarieren Sie `Bash` weiterhin selbst;
+was Sie nicht mehr mitdenken müssen, ist, dass Antworten auch Arbeit ist. `limits-and-safety` sagt
+genau, was die enge Gewährung durchlässt.
 
 ## Wer sie ansprechen darf
 

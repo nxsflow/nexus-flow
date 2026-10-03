@@ -82,6 +82,18 @@ The other human gate is the one you write yourself. A persona that must not act 
 a persona whose `system_prompt` says so and whose declaration gives it no tools to act with —
 `tools: []` is a real, distinct state, not the same as leaving the key out.
 
+What `tools: []` does and does not prevent, exactly. A persona declared that way still owes its
+answer, so when it is commissioned the engine grants it the one command that answer is:
+`Bash(nxc reply:*)`. It can run `nxc reply` — the heredoc form and the one-line form — and nothing
+else without approval: not `nxc send`, not `git push`, not `gh`, not a file write, not a chain,
+pipe, redirection or `$(…)` around its reply. Because no person is there to approve anything, a
+command that needs approval is refused. What the agent runtime itself counts as read-only inside
+the persona's working directory (`ls`, `cat` of a file there, `git status`) still runs; that
+allowance is the runtime's, not the declaration's. A persona that omits `tools:` is a different
+state: it runs on the runtime's full default toolset with an approved shell, and is not limited by
+any of this. A persona that declares `permissions: bypassPermissions` approves everything itself,
+whatever its `tools:` says.
+
 ## Escalation: the declared "I need help, or a decision"
 
 An agent has exactly two things it may say with `reply`: *I am finished*, and *I cannot reach the

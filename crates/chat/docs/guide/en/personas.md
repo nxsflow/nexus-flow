@@ -172,10 +172,12 @@ non-agentic role. Write a list and it gets exactly that list. An omitted key and
 A persona that will run `nxc` at all needs `Bash`, since that is how it answers — and where the
 engine *orders* an answer, it grants that itself. Every commission tells the persona, in its own
 system prompt, to end its turn with `nxc reply --thread <id>`, so whoever imposes that obligation has
-to make sure it can be carried out: the trigger adds `Bash` to what the session may run, on top of
-whatever you declared, without narrowing the toolset an omitted `tools:` gives it. You still declare
-`Bash` for a persona that needs the shell for its *work*; what you no longer have to remember is that
-answering is itself work.
+to make sure it can be carried out. What the trigger adds depends on what you declared, and never
+narrows it: a persona that omits `tools:` gets `Bash`, as it always did; a persona that declares a
+list without `Bash` — `tools: []` included — gets `Bash(nxc reply:*)`, which runs its reply and no
+other command; a persona that lists `Bash` gets nothing more. You still declare `Bash` for a persona
+that needs the shell for its *work*; what you no longer have to remember is that answering is itself
+work. `limits-and-safety` says exactly what the narrow grant lets through.
 
 ## Who may address it
 

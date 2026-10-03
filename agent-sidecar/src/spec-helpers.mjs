@@ -23,21 +23,39 @@ function grantedOf(grantedTools) {
 }
 
 /**
+ * The tool a permission RULE names — `"Bash"` for `"Bash(nxc reply:*)"`, the string itself for a
+ * plain tool name (nxf 6j6v.ewbj).
+ *
+ * The SDK has two lists that look alike and take different things: `tools` (the base toolset) takes
+ * tool NAMES, `allowedTools` (the auto-approval list) takes RULES, and a rule may scope a tool to
+ * some of its uses. A scoped rule put into `tools` names no tool at all, so the base set would lack
+ * the very tool the rule approves.
+ *
+ * @param {string} rule - a tool name or a permission rule.
+ * @returns {string} the tool it names.
+ */
+export function toolOfRule(rule) {
+  const open = rule.indexOf("(");
+  return open > 0 && rule.endsWith(")") ? rule.slice(0, open) : rule;
+}
+
+/**
  * Decide what main.mjs should assign to the SDK's `options.tools` (the base toolset), given
  * `spec.tools` and `spec.grantedTools` as parsed from the role spec JSON.
  *
- * Mirrors the exact guard main.mjs used inline: `if (Array.isArray(spec.tools)) options.tools =
- * spec.tools;`. Only an actual array — including `[]` — is a genuine declaration of intent:
+ * Only an actual array — including `[]` — is a genuine declaration of intent:
  *   - `tools` absent (`undefined`) or `null` -> returns `undefined`, meaning "leave
  *     `options.tools` unset", so the SDK's default full toolset applies. The grant is NOT folded
  *     in here, and that is the point: the default set already contains everything the grant names,
  *     and turning "unset" into a list would SHRINK an undeclared role's toolset to exactly the
  *     grant — which is the regression this whole split exists to avoid.
- *   - `tools: []` -> the grant, and nothing else. An explicit zero-tools role that is put under an
- *     obligation gets exactly the means for that obligation and no more — the same narrow scoping
- *     nxf 6j6v.04es gave the `summarize` synthesizer by hand, now derived.
- *   - `tools: [...]` -> that array plus anything granted that is not already in it, order
- *     preserved (declaration first).
+ *   - `tools: []` -> the TOOL the grant names, and nothing else. Since nxf 6j6v.ewbj the engine
+ *     grants such a role the rule `Bash(nxc reply:*)`, so this is `["Bash"]`, and what may run
+ *     inside it without approval is decided by {@link resolveAllowedTools} — the rule, not the
+ *     whole shell.
+ *   - `tools: [...]` -> the tools that array names plus any granted tool not already in it, order
+ *     preserved (declaration first). A declared rule (`Bash(nxc reply:*)`) contributes its tool, so
+ *     a narrowly declared role has a base set the rule can act in.
  *
  * @param {unknown} tools - `spec.tools` as parsed from the role spec (may be undefined, null,
  *   an array, or any other JSON value).
@@ -46,8 +64,10 @@ function grantedOf(grantedTools) {
  */
 export function resolveToolsOption(tools, grantedTools) {
   if (!Array.isArray(tools)) return undefined;
-  const granted = grantedOf(grantedTools);
-  return [...tools, ...granted.filter((t) => !tools.includes(t))];
+  const named = [...tools, ...grantedOf(grantedTools)].map((t) =>
+    typeof t === "string" ? toolOfRule(t) : t,
+  );
+  return named.filter((t, i) => named.indexOf(t) === i);
 }
 
 /**
@@ -59,6 +79,9 @@ export function resolveToolsOption(tools, grantedTools) {
  * list: every tool call it made, its own obligatory `nxc reply` included, came back "This command
  * requires approval". Union of the declaration and the grant, so the obligation is runnable
  * whatever the declaration says, and a role that was granted nothing reads exactly as before.
+ *
+ * Rules pass through as RULES (nxf 6j6v.ewbj): a granted `Bash(nxc reply:*)` approves that command
+ * and no other, which is what keeps a `tools: []` role from holding an auto-approved shell.
  *
  * @param {unknown} tools - `spec.tools` as parsed from the role spec.
  * @param {unknown} [grantedTools] - `spec.grantedTools` as parsed from the role spec.

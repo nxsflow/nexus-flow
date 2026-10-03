@@ -4463,11 +4463,19 @@ fn fire_queued_trigger(
 /// declaration says — see that field for why the two lists are separate, and for what the sidecar
 /// does with each. A trigger that demands nothing grants nothing, so a role that owes nobody an
 /// answer reads exactly as it did before this existed.
+///
+/// **What it grants is the command, not the shell** (nxf 6j6v.ewbj). It granted the bare `Bash`
+/// until then, which the sidecar auto-approves — so a role declared `tools: []` that owed a reply
+/// could run any command at all. [`crate::role::obligation_grant`] now decides from the
+/// declaration: a declared list gets `Bash(nxc reply:*)` and nothing wider; only a role that
+/// declared no `tools:` keeps the bare tool it always had.
 fn grant_the_means_for_the_obligation(req: &mut TriggerRequest) {
     if req.reply_thread.is_none() {
         return;
     }
-    let tool = crate::role::REPLY_OBLIGATION_TOOL;
+    let Some(tool) = crate::role::obligation_grant(req.role.tools.as_deref()) else {
+        return;
+    };
     if !req.role.granted_tools.iter().any(|t| t == tool) {
         req.role.granted_tools.push(tool.to_string());
     }

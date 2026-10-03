@@ -917,19 +917,58 @@ fn push_paragraph(block: &mut String, paragraph: &str) {
     block.push_str(paragraph);
 }
 
-/// **The tool a session needs to do what [`reply_obligation`] tells it to do** (nxf 6j6v.kffm).
+/// **The tool a session needs to do what [`reply_obligation`] tells it to do** (nxf 6j6v.kffm),
+/// scoped to that one command (nxf 6j6v.ewbj).
 ///
-/// Every form the obligation offers is a SHELL COMMAND — `nxc reply …` — so the means is the tool
-/// that runs a shell command. Named here rather than at the seam that grants it, beside the text
-/// that imposes the duty, because the two are one decision: change the obligation into something
-/// that is not a command line and this constant is wrong in the same edit.
+/// Every form the obligation offers is a SHELL COMMAND — `nxc reply …` — so the means is the shell
+/// tool, and only for that command. Named here rather than at the seam that grants it, beside the
+/// text that imposes the duty, because the two are one decision: change the obligation into
+/// something that is not a command line and this constant is wrong in the same edit.
 /// `role::tests::the_obligation_asks_for_a_shell_command_and_the_granted_tool_runs_one` is what
 /// holds them together.
 ///
-/// Consumed by `crate::orchestration`'s trigger funnel, which unions it into
-/// [`RoleSpec::granted_tools`](crate::worker::RoleSpec::granted_tools) whenever a trigger carries a
-/// `reply_thread`.
-pub const REPLY_OBLIGATION_TOOL: &str = "Bash";
+/// **Why scoped, and what the scope lets through.** Until 6j6v.ewbj this was the bare `"Bash"`, and
+/// the sidecar put it on the auto-approval list — so a persona declared with `tools: []`, the state
+/// the guide sells as "it cannot act", got an unscoped, auto-approved shell the moment it owed a
+/// reply: `gh pr merge`, `git push --force`, a release. Measured against the pinned agent SDK
+/// (0.3.215, 2026-10-03), this rule lets the obligation's own forms through — the heredoc form and
+/// the one-line `--escalate` argument — and refuses `nxc send`, `touch`, `rm`, `curl`, `gh`, `env`,
+/// a chain (`&&`, `;`), a pipe, a redirection and a `$(…)` inside the argument. What the SDK itself
+/// treats as read-only inside the session's working directory (`ls`, `echo`, `git status`, `cat`
+/// of a file there) still runs without approval: that allowance is the SDK's, not this rule's.
+///
+/// Consumed by `crate::orchestration`'s trigger funnel through [`obligation_grant`], which decides
+/// per declaration whether this, the bare tool, or nothing is granted.
+pub const REPLY_OBLIGATION_TOOL: &str = "Bash(nxc reply:*)";
+
+/// **The tool [`REPLY_OBLIGATION_TOOL`] scopes** — what the sidecar's base toolset must contain for
+/// the scoped rule to mean anything (the SDK's `tools` list takes tool names, its `allowedTools`
+/// list takes rules).
+pub const SHELL_TOOL: &str = "Bash";
+
+/// **What an obligated session is granted, given what its author declared** (nxf 6j6v.kffm,
+/// 6j6v.ewbj) — `None` when the declaration already covers the obligation.
+///
+/// - `tools` absent: the bare [`SHELL_TOOL`], exactly as before 6j6v.ewbj. An undeclared role runs
+///   on the SDK's full default toolset, and the roles written that way (a PM reading its board
+///   through `nxf`) rely on the approved shell; scoping it here would break them without closing
+///   anything the declaration promised to close.
+/// - a list naming the bare shell: nothing — the author already approved every command.
+/// - any other list, `[]` included: [`REPLY_OBLIGATION_TOOL`], the obligation's command and nothing
+///   else. A list that already carries that rule gets nothing added.
+pub fn obligation_grant(declared: Option<&[String]>) -> Option<&'static str> {
+    match declared {
+        None => Some(SHELL_TOOL),
+        Some(list)
+            if list
+                .iter()
+                .any(|t| t == SHELL_TOOL || t == REPLY_OBLIGATION_TOOL) =>
+        {
+            None
+        }
+        Some(_) => Some(REPLY_OBLIGATION_TOOL),
+    }
+}
 
 /// **What one trigger's forced ending is** (nxf 6j6v.553s (a)) — the thread that is waiting, and
 /// whether this particular step may answer with a VERDICT.
@@ -1445,8 +1484,8 @@ mod tests {
             "the obligation is discharged by running a shell command: {obligation}"
         );
         assert_eq!(
-            REPLY_OBLIGATION_TOOL, "Bash",
-            "…and the tool the engine grants for it is the one that runs a shell command"
+            REPLY_OBLIGATION_TOOL, "Bash(nxc reply:*)",
+            "…and the tool the engine grants for it runs that shell command and no other"
         );
     }
 

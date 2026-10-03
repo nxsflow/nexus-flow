@@ -36,7 +36,7 @@ use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
 use nexus_chat::orchestration::Caller;
-use nexus_chat::role::{RoleDecl, REPLY_OBLIGATION_TOOL};
+use nexus_chat::role::{RoleDecl, REPLY_OBLIGATION_TOOL, SHELL_TOOL};
 use nexus_chat::surface::{SendToRefs, SendToRequest};
 use nexus_chat::timer::TimerConfig;
 use nexus_chat::worker::{
@@ -162,13 +162,11 @@ fn a_persona_ordered_to_reply_is_granted_what_running_that_reply_takes() {
         req.reply_thread.is_some(),
         "the premise: this trigger DEMANDS a reply — {req:?}"
     );
-    assert!(
-        req.role
-            .granted_tools
-            .iter()
-            .any(|t| t == REPLY_OBLIGATION_TOOL),
-        "…so it must also grant the means: {:?}",
-        req.role.granted_tools
+    assert_eq!(
+        req.role.granted_tools,
+        vec![SHELL_TOOL.to_string()],
+        "…so it must also grant the means — for a role that declared no `tools:`, the bare shell \
+         it always had (nxf 6j6v.ewbj scopes only a DECLARED list)"
     );
     assert_eq!(
         req.role.tools, None,
@@ -192,14 +190,7 @@ fn a_channel_member_ordered_to_reply_is_granted_it_too() {
 
     let req = worker.for_role("checker");
     assert!(req.reply_thread.is_some(), "{req:?}");
-    assert!(
-        req.role
-            .granted_tools
-            .iter()
-            .any(|t| t == REPLY_OBLIGATION_TOOL),
-        "{:?}",
-        req.role.granted_tools
-    );
+    assert_eq!(req.role.granted_tools, vec![SHELL_TOOL.to_string()]);
 }
 
 #[test]
@@ -217,6 +208,57 @@ fn a_role_that_declared_its_own_tools_keeps_them_and_the_grant_stays_beside_them
         req.role.granted_tools,
         vec![REPLY_OBLIGATION_TOOL.to_string()]
     );
+}
+
+#[test]
+fn a_persona_declared_with_no_tools_is_granted_the_reply_and_not_the_shell() {
+    // nxf 6j6v.ewbj, THE hole: `tools: []` is what the guide sells as "this persona cannot act",
+    // and until then the grant for its obligation was the bare `Bash`, which the sidecar
+    // auto-approves — any command at all, from a persona declared to have no tools.
+    let tmp = TempDir::new().unwrap();
+    let (engine, worker) = team(&tmp, vec![declared_tools("silent", "[]")], vec![]);
+    send_to(&engine, "silent");
+
+    let req = worker.for_role("silent");
+    assert!(
+        req.reply_thread.is_some(),
+        "the premise: it owes a reply — {req:?}"
+    );
+    assert_eq!(req.role.tools, Some(vec![]), "the declaration stays empty");
+    assert_eq!(
+        req.role.granted_tools,
+        vec![REPLY_OBLIGATION_TOOL.to_string()],
+        "the grant is the reply command, scoped — never the bare shell"
+    );
+    assert!(
+        !req.role.granted_tools.iter().any(|t| t == SHELL_TOOL),
+        "{:?}",
+        req.role.granted_tools
+    );
+}
+
+#[test]
+fn a_persona_that_declared_the_shell_or_the_reply_rule_is_granted_nothing_more() {
+    // DoD 2 of nxf 6j6v.ewbj: a role that lists `Bash` behaves as before — it already approved
+    // every command, so nothing is added. And a role that declared the narrow rule itself (the
+    // coordinator workspace's marketing personas asked for exactly that) keeps it narrow: before
+    // 6j6v.ewbj the bare grant silently undid that declaration.
+    for (handle, tools) in [
+        ("wide", "[Bash, Read]"),
+        ("narrow", "[Read, \"Bash(nxc reply:*)\"]"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (engine, worker) = team(&tmp, vec![declared_tools(handle, tools)], vec![]);
+        send_to(&engine, handle);
+
+        let req = worker.for_role(handle);
+        assert!(req.reply_thread.is_some(), "{req:?}");
+        assert!(
+            req.role.granted_tools.is_empty(),
+            "{handle} ({tools}) already covers the obligation: {:?}",
+            req.role.granted_tools
+        );
+    }
 }
 
 #[test]
@@ -348,9 +390,9 @@ fn the_spec_the_sidecar_reads_carries_the_grant_as_its_own_key() {
 /// $ cargo build -p nxs
 /// $ cargo test -p nexus-chat --test an_obligation_comes_with_its_means -- --ignored --nocapture
 /// ```
-#[test]
-#[ignore = "live: spawns a real Claude Agent SDK session through the real sidecar"]
-fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
+/// One real round: `yaml` is written as the persona `answerer`, `ask` is sent to it, and what comes
+/// back is the workspace, the persona's answer, its status row and the spec its session ran on.
+fn live_round(yaml: &str, ask: &str) -> (TempDir, String, serde_json::Value, serde_json::Value) {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -387,15 +429,6 @@ fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
     let roles = tmp.path().join(".nxs-personas");
     std::fs::create_dir_all(&roles).unwrap();
-    // NO `tools:` key. That is the whole premise, and it is asserted rather than trusted: an
-    // accidental `tools: [Bash]` here would make this test pass for the wrong reason, which is the
-    // one way a live smoke can go quietly hollow.
-    let yaml = "handle: answerer\njob_title: Live acceptance persona\nsystem_prompt: |\n  \
-                You are a persona in a live acceptance run. Read, write or change NO files.\n  \
-                Run exactly one command: the `nxc reply --thread <id>` you were asked for, with\n  \
-                the single word `ready` as its body. Then stop.\n";
-    let decl: RoleDecl = serde_yaml::from_str(yaml).expect("the live role parses");
-    assert_eq!(decl.tools, None, "the premise: this role declares no tools");
     std::fs::write(roles.join("answerer.yaml"), yaml).unwrap();
 
     let live = |args: &[&str]| {
@@ -430,14 +463,7 @@ fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
         })
     };
 
-    let receipt = live(&[
-        "--json",
-        "send",
-        "--to",
-        "answerer",
-        "--no-ref",
-        "Acceptance run. Reply with the single word: ready.",
-    ]);
+    let receipt = live(&["--json", "send", "--to", "answerer", "--no-ref", ask]);
     let thread = receipt["thread_id"]
         .as_str()
         .unwrap_or_else(|| panic!("the send opened a thread: {receipt:#}"))
@@ -465,6 +491,41 @@ fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
         std::thread::sleep(std::time::Duration::from_secs(3));
     };
 
+    let status = live(&["--json", "status", "--thread", &thread]);
+    let row = status["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .flat_map(|op| op["threads"].as_array().expect("threads").iter())
+        .find(|t| t["thread_id"] == thread.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("the thread is in the report: {status:#}"));
+    let spec: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join(".nxs/agent-logs").join(format!(
+            "{}.spec.json",
+            receipt["session"].as_str().unwrap()
+        )))
+        .expect("the spec the live session ran on"),
+    )
+    .expect("valid json");
+    (tmp, body, row, spec)
+}
+
+#[test]
+#[ignore = "live: spawns a real Claude Agent SDK session through the real sidecar"]
+fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
+    // NO `tools:` key. That is the whole premise, and it is asserted rather than trusted: an
+    // accidental `tools: [Bash]` here would make this test pass for the wrong reason, which is the
+    // one way a live smoke can go quietly hollow.
+    let yaml = "handle: answerer\njob_title: Live acceptance persona\nsystem_prompt: |\n  \
+                You are a persona in a live acceptance run. Read, write or change NO files.\n  \
+                Run exactly one command: the `nxc reply --thread <id>` you were asked for, with\n  \
+                the single word `ready` as its body. Then stop.\n";
+    let decl: RoleDecl = serde_yaml::from_str(yaml).expect("the live role parses");
+    assert_eq!(decl.tools, None, "the premise: this role declares no tools");
+    let (_tmp, body, row, spec) =
+        live_round(yaml, "Acceptance run. Reply with the single word: ready.");
+
     assert!(
         !body.starts_with("sidecar:"),
         "THE DEFECT, verbatim: the answer on this thread is the runtime's fallback for a session \
@@ -476,16 +537,6 @@ fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
         body.to_lowercase().contains("ready"),
         "…and it is the answer that was asked for: {body}"
     );
-
-    let status = live(&["--json", "status", "--thread", &thread]);
-    let row = status["operations"]
-        .as_array()
-        .expect("operations")
-        .iter()
-        .flat_map(|op| op["threads"].as_array().expect("threads").iter())
-        .find(|t| t["thread_id"] == thread.as_str())
-        .cloned()
-        .unwrap_or_else(|| panic!("the thread is in the report: {status:#}"));
     assert_eq!(
         row["substituted"], false,
         "the AGENT answered, not the runtime standing in for it: {row:#}"
@@ -494,15 +545,45 @@ fn live_a_persona_that_declares_no_tools_answers_its_own_thread() {
 
     // And the spec the sidecar was actually handed says why it could: the declaration is absent and
     // the grant is present, which is the two-key split this item exists for.
-    let spec: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tmp.path().join(".nxs/agent-logs").join(format!(
-            "{}.spec.json",
-            receipt["session"].as_str().unwrap()
-        )))
-        .expect("the spec the live session ran on"),
-    )
-    .expect("valid json");
     assert_eq!(spec["tools"], serde_json::Value::Null, "{spec}");
+    assert_eq!(
+        spec["grantedTools"],
+        serde_json::json!([SHELL_TOOL]),
+        "{spec}"
+    );
+}
+
+/// **`tools: []` stops a persona acting, and it can still answer** (nxf 6j6v.ewbj, DoD 1).
+///
+/// The persona is told to run a forbidden command FIRST and then report what happened. Before
+/// 6j6v.ewbj its grant was the bare, auto-approved `Bash`, and the file would exist afterwards.
+#[test]
+#[ignore = "live: spawns a real Claude Agent SDK session through the real sidecar"]
+fn live_a_persona_declared_with_no_tools_answers_and_cannot_run_anything_else() {
+    let yaml =
+        "handle: answerer\njob_title: Live acceptance persona\ntools: []\nsystem_prompt: |\n  \
+                You are a persona in a live acceptance run. First run exactly this command with\n  \
+                the Bash tool: touch forbidden.txt\n  \
+                Then answer with the `nxc reply --thread <id>` you were asked for: the word\n  \
+                `ran` if the touch succeeded, `refused` if it did not. Then stop.\n";
+    let decl: RoleDecl = serde_yaml::from_str(yaml).expect("the live role parses");
+    assert_eq!(
+        decl.tools,
+        Some(vec![]),
+        "the premise: this role declares NO tools"
+    );
+    let (tmp, body, row, spec) = live_round(yaml, "Acceptance run. Do as your instructions say.");
+
+    assert!(
+        !tmp.path().join("forbidden.txt").exists(),
+        "a persona declared `tools: []` ran a command that is not its reply: {body}"
+    );
+    assert!(
+        !body.starts_with("sidecar:"),
+        "the persona answered itself: {body}"
+    );
+    assert_eq!(row["substituted"], false, "{row:#}");
+    assert_eq!(spec["tools"], serde_json::json!([]), "{spec}");
     assert_eq!(
         spec["grantedTools"],
         serde_json::json!([REPLY_OBLIGATION_TOOL]),
