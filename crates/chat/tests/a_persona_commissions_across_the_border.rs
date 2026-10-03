@@ -42,6 +42,9 @@ const NOW: &str = "2026-10-03T10:00:00Z";
 struct Recorder {
     seen: Mutex<Vec<TriggerRequest>>,
     stopped: Mutex<Vec<String>>,
+    /// Sessions that are mid-turn: a resume of one is refused as already running, which is what
+    /// makes an answer for it HELD.
+    busy: Mutex<Vec<String>>,
 }
 
 impl Recorder {
@@ -59,6 +62,12 @@ impl Recorder {
 
 impl Worker for Recorder {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        if self.busy.lock().unwrap().contains(&req.internal_session) {
+            return Err(nexus_chat::worker::TriggerError::AlreadyRunning {
+                session: req.internal_session,
+                pid: 4242,
+            });
+        }
         self.seen.lock().unwrap().push(req);
         Ok(TriggerOutcome::Accepted)
     }
@@ -824,4 +833,34 @@ fn withdrawing_the_operation_takes_the_border_thread_back_in_both_workspaces() {
     assert_eq!(a.border_rows()[0].state, BorderState::Canceled);
     assert_eq!(b.border_rows()[0].state, BorderState::Canceled);
     assert!(w.worker.stopped.lock().unwrap().contains(&beta_pm));
+}
+
+// ---- an answer for a commissioner still in its turn ------------------------------------------
+
+#[test]
+fn an_answer_held_for_a_commissioner_still_in_its_turn_keeps_it_waiting_rather_than_owing() {
+    // The race the live run met: the other workspace's pm answers within seconds, while the
+    // commissioner is still ending its turn. The answer is HELD for it — and until it is handed
+    // over, the commissioner's own row says it is waiting on its round, so its sidecar does not
+    // remind it into a substituted reply.
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, owners_thread) = alpha_session(&a, &w, "pm");
+    let receipt = a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
+
+    w.worker.busy.lock().unwrap().push(alpha_pm.clone());
+    b.reply(&beta_pm, &receipt.thread_id, "0.300", false);
+
+    let owners = status_row(&a, &owners_thread);
+    assert_eq!(
+        owners.waiting_on_sub_round,
+        vec![receipt.thread_id.clone()],
+        "the commissioner is waiting for the answer held for it: {owners:?}"
+    );
+    assert_eq!(
+        w.worker.of(&a, "pm").len(),
+        1,
+        "nothing was resumed while it was busy"
+    );
 }
