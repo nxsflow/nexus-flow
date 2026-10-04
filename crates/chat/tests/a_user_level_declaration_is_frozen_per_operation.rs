@@ -72,11 +72,12 @@ fn open(engine: &Engine) -> String {
 
 #[test]
 fn an_edit_to_the_user_level_folder_reaches_the_next_operation_and_not_the_running_one() {
-    let home = TempDir::new().unwrap();
-    // SAFETY of the mutation: this binary has exactly one test, and nothing else runs in it.
-    std::env::set_var("HOME", home.path());
-    std::env::remove_var("XDG_CONFIG_HOME");
-    std::env::remove_var("XDG_DATA_HOME");
+    // The pinning `nxs_test_support::PinHome` gives a subprocess, applied to THIS process: the
+    // home, the XDG directories and the instance together (nxf 6j6v.9bjv). Process-wide, which is
+    // safe because this binary has exactly one test.
+    for (key, value) in nxs_test_support::pinned_home_env() {
+        std::env::set_var(key, value);
+    }
     let user = nexus_chat::definitions::user_declarations_dir().unwrap();
     std::fs::create_dir_all(&user).unwrap();
     declare_version(&user, "VERSION-ONE");

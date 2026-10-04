@@ -12,15 +12,17 @@ const NOW: &str = "2026-10-04T10:00:00Z";
 
 #[test]
 fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entry_came_from() {
-    let home = TempDir::new().unwrap();
-    // SAFETY of the mutation: this binary has exactly one test, and nothing else runs in it.
-    std::env::set_var("HOME", home.path());
-    std::env::remove_var("XDG_CONFIG_HOME");
-    std::env::remove_var("XDG_DATA_HOME");
+    // The pinning `nxs_test_support::PinHome` gives a subprocess, applied to THIS process: the
+    // home, the XDG directories and the instance together (nxf 6j6v.9bjv). Process-wide, which is
+    // safe because this binary has exactly one test.
+    for (key, value) in nxs_test_support::pinned_home_env() {
+        std::env::set_var(key, value);
+    }
+    let home = nxs_test_support::pinned_home();
     // Whichever instance the ambient environment names, the folder is that instance's — resolved
     // the way production resolves it, not spelled out here.
     let user = nexus_chat::definitions::user_declarations_dir().unwrap();
-    assert!(user.starts_with(home.path()), "{}", user.display());
+    assert!(user.starts_with(home), "{}", user.display());
     std::fs::create_dir_all(&user).unwrap();
     std::fs::write(
         user.join("pm.yaml"),

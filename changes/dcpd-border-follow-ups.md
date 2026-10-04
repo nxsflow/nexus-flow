@@ -1,5 +1,6 @@
 ---
 type: fixed
+facade: changed
 ---
 [en]
 Across a workspace border: when the caller's workspace stops trusting the receiver while a
