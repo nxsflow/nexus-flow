@@ -712,7 +712,12 @@ pub struct ChatStore {
 /// the receiver does not hold and never will — only the border thread crosses — so a walk would end
 /// at a root that does not exist, and the receiver's whole operation would hang under a phantom.
 /// For the receiver the border thread IS the root of what it does about the commission; this is
-/// where that is said, once, for every walk that reads the edge.
+/// where that is said, once, for the two reads every walk to a root goes through —
+/// [`thread_parent`](ChatStore::thread_parent) and [`thread_edges`](ChatStore::thread_edges).
+/// Three reads still see the raw column, and none of them walks up: the "parent moved on" check
+/// (it asks about messages in a parent this workspace does not hold, and finds none), the children
+/// of a given thread (nobody asks for the children of a thread that is not here), and the reducer
+/// that stores the edge as the signed op carries it.
 const PARENT_WITHIN_THE_BORDER: &str = "CASE WHEN EXISTS(SELECT 1 FROM border_threads b \
      WHERE b.thread_id = threads.thread_id AND b.direction = 'in') THEN NULL ELSE parent END";
 

@@ -124,3 +124,22 @@ impl Peers for ServicePeers {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_handover_that_cannot_start_in_the_other_workspace_is_an_error_not_a_silence() {
+        // Review of PR #14, Test Quality #2: the failure path of the peer's handover. A root that
+        // does not exist (a moved or deleted clone still in the registry) cannot be started in.
+        let peer = PeerWorkspace {
+            name: "test/gone".into(),
+            root: std::env::temp_dir().join("nxs-peers-test-no-such-workspace-6j6v"),
+        };
+        let err = SERVICE_PEERS
+            .hand_over_in(&peer)
+            .expect_err("nothing to start in");
+        assert!(err.contains("test/gone"), "{err}");
+    }
+}

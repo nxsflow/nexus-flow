@@ -526,12 +526,6 @@ enum Command {
     // The rest of the reasoning — why the verb survives the group it stood in, and the owner's
     // direction of 2026-08-20 ("an der Aussenflaeche muss es weg") — is in
     // `tests/seam_disposition.rs`'s row for it, beside every other decision of this cut.
-    /// Carry this workspace's border threads across: copy each one's messages to and from the
-    /// other workspace on this machine, start a persona for a commission that came in and passes
-    /// its access check, and wake whoever an answer from the other side is for. Run by the
-    /// background service on its pass; `send` and `reply` on a border thread run it themselves.
-    #[command(hide = true)]
-    Handover,
     #[command(hide = true)]
     Tick {
         /// The thread to re-check. Keyed on the THREAD: a declared channel's `timeout` hangs on
@@ -540,6 +534,12 @@ enum Command {
         #[arg(long)]
         thread: String,
     },
+    /// Carry this workspace's border threads across: copy each one's messages to and from the
+    /// other workspace on this machine, start a persona for a commission that came in and passes
+    /// its access check, and wake whoever an answer from the other side is for. Run by the
+    /// background service on its pass; `send` and `reply` on a border thread run it themselves.
+    #[command(hide = true)]
+    Handover,
     /// Print an embedded, offline guide. Omit the topic to list the available ones.
     ///
     /// One of the three building blocks' guide verbs (6j6v.9e3r): `nxc guide` serves CHAT's
@@ -970,6 +970,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             stream,
             machine,
         } => {
+            refuse_another_db_for_a_session(db)?;
             let body = resolve_body(body.as_deref(), body_file.as_deref())?;
             reply_thread(
                 cli.json,
@@ -1168,6 +1169,22 @@ fn cwd() -> Result<PathBuf> {
 }
 
 /// Resolve the workspace and open chat's store over it.
+/// **A spawned session answers in its own workspace** (nxf 6j6v.ewbj, review of PR #14). Its
+/// coordinator stamps `NXC_DB` with that workspace's database; a `--db` naming another one would
+/// let a persona whose only granted command is `nxc reply` write into a different workspace —
+/// which the narrow grant exists to rule out. Refused before anything is read. A caller without a
+/// session (a person, a test) keeps `--db` as it always was.
+fn refuse_another_db_for_a_session(db: Option<&str>) -> Result<()> {
+    let session = std::env::var("NXC_SESSION").ok().filter(|s| !s.is_empty());
+    let own = std::env::var("NXC_DB").ok().filter(|s| !s.is_empty());
+    match (session, own) {
+        (Some(_), Some(own)) if db != Some(own.as_str()) => Err(NxfError::validation(format!(
+            "this session answers in its own workspace ({own}); `--db` may not name another one"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn open(db: Option<&str>) -> Result<ChatStore> {
     let ws = Workspace::resolve(db, &cwd()?)?;
     ws.open_chat_store()

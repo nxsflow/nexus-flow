@@ -127,13 +127,16 @@ pub fn is_valid_name(name: &str) -> bool {
         })
 }
 
-/// The name stored in this workspace's `config.toml`, if any.
+/// The name stored in this workspace's `config.toml`, if any. A stored value that is not a valid
+/// name (the file is hand-editable) reads as none, so it is derived again rather than handed to
+/// another workspace as an address.
 pub fn stored_name(ws: &Workspace) -> Option<String> {
     ws.config
         .products
         .get(SECTION)
         .and_then(|s| s.get(KEY))
         .and_then(|v| v.as_str())
+        .filter(|name| is_valid_name(name))
         .map(str::to_string)
 }
 

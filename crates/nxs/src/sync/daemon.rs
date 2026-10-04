@@ -3182,6 +3182,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_border_pass_runs_the_handover_where_a_border_thread_is_open_and_no_more_often() {
+        // nxf 6j6v.4gp2 (review of PR #14, Test Quality #2): the service's half of the handover.
+        let (_tmp, ws) = workspace();
+        let all = std::slice::from_ref(&ws);
+        let spy = SpySpawn::default();
+        let mut passes = BorderPasses::default();
+        let t0 = Instant::now();
+
+        assert!(hand_over_borders(all, &spy, &mut passes, t0).is_empty());
+        assert!(
+            spy.started.borrow().is_empty(),
+            "no open border thread, no handover"
+        );
+
+        std::fs::write(ws.dir.join(nexus_chat::border::OPEN_MARKER), b"").unwrap();
+        hand_over_borders(all, &spy, &mut passes, t0);
+        hand_over_borders(all, &spy, &mut passes, t0 + Duration::from_secs(1));
+        assert_eq!(
+            spy.started.borrow().len(),
+            1,
+            "once per pass, not once per tick"
+        );
+        hand_over_borders(all, &spy, &mut passes, t0 + BORDER_PASS);
+        assert_eq!(spy.started.borrow().len(), 2);
+        let (dir, argv) = spy.started.borrow()[0].clone();
+        assert_eq!(dir, ws.dir.parent().unwrap(), "run in the workspace root");
+        assert_eq!(argv, ["chat", "handover"]);
+
+        let failing = SpySpawn {
+            fail: true,
+            ..SpySpawn::default()
+        };
+        let failed = hand_over_borders(all, &failing, &mut BorderPasses::default(), t0);
+        assert_eq!(
+            failed.len(),
+            1,
+            "a handover that would not start is reported: {failed:?}"
+        );
+        let full = SpySpawn {
+            room: 0,
+            ..SpySpawn::default()
+        };
+        hand_over_borders(all, &full, &mut BorderPasses::default(), t0);
+        assert!(full.started.borrow().is_empty(), "no room, no spawn");
+    }
+
     fn arm(ws: &Workspace, due: &str, thread: &str) {
         nxs_service::timers::arm(
             &nxs_service::timers::path_in(&ws.dir),

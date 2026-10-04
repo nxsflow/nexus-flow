@@ -91,6 +91,7 @@ impl Worker for Recorder {
 /// What the two workspaces share: the worker every spawn of either reaches.
 struct TwoWorkspaces {
     worker: Arc<Recorder>,
+    failing_kicks: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The test's [`Peers`]: both workspaces by name, and the other side's handover run in-process
@@ -99,6 +100,9 @@ struct TwoWorkspaces {
 struct InProcessPeers {
     by_name: Vec<(String, PathBuf)>,
     worker: Arc<Recorder>,
+    /// How many of the next peer handovers fail before running — a peer database that was busy,
+    /// a binary that was gone.
+    failing_kicks: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -135,6 +139,14 @@ impl Peers for InProcessPeers {
     }
 
     fn hand_over_in(&self, peer: &PeerWorkspace) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        if self
+            .failing_kicks
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(format!("{} is busy", peer.name));
+        }
         let engine = open_engine(&peer.root, self.worker.clone(), Arc::new(self.clone()));
         engine
             .handover(machine_caller())
@@ -310,12 +322,14 @@ fn two(
         trust(&beta, &alpha, "test/alpha");
     }
     let worker = Arc::new(Recorder::default());
+    let failing_kicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let peers = Arc::new(InProcessPeers {
         by_name: vec![
             ("test/alpha".to_string(), alpha.clone()),
             ("test/beta".to_string(), beta.clone()),
         ],
         worker: worker.clone(),
+        failing_kicks: failing_kicks.clone(),
     });
     let a = Side {
         root: alpha.clone(),
@@ -325,7 +339,14 @@ fn two(
         root: beta.clone(),
         engine: open_engine(&beta, worker.clone(), peers),
     };
-    (a, b, TwoWorkspaces { worker })
+    (
+        a,
+        b,
+        TwoWorkspaces {
+            worker,
+            failing_kicks,
+        },
+    )
 }
 
 /// The person commissions alpha's `handle`, and the session started for it is returned.
@@ -863,4 +884,128 @@ fn an_answer_held_for_a_commissioner_still_in_its_turn_keeps_it_waiting_rather_t
         1,
         "nothing was resumed while it was busy"
     );
+}
+
+// ---- review of PR #14: the paths a live run met and the gaps it left -------------------------
+
+#[test]
+fn the_held_answer_reaches_the_commissioner_once_its_turn_has_ended() {
+    // The end of the race `an_answer_held_…` starts: the commissioner's turn ends, the held answer
+    // is handed over — once, with the answer in it.
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    let receipt = a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
+    w.worker.busy.lock().unwrap().push(alpha_pm.clone());
+    b.reply(&beta_pm, &receipt.thread_id, "0.300", false);
+    assert_eq!(w.worker.of(&a, "pm").len(), 1, "held, not woken");
+
+    w.worker.busy.lock().unwrap().clear();
+    a.engine
+        .deliver_held(machine_caller(), &alpha_pm)
+        .expect("the delivery runs");
+    a.engine.handover(machine_caller()).unwrap();
+    let woken = w.worker.of(&a, "pm");
+    assert_eq!(woken.len(), 2, "woken exactly once: {woken:?}");
+    assert_eq!(woken[1].internal_session, alpha_pm);
+    assert!(woken[1].message.contains("0.300"), "{}", woken[1].message);
+}
+
+#[test]
+fn a_sign_of_life_in_the_receivers_transcript_restarts_the_deadline() {
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
+    // The persona is reading its board at 11:30 — working, though it has said nothing yet.
+    b.engine
+        .transcript_append(
+            &beta_pm,
+            &[nexus_chat::transcript::TranscriptEntry {
+                kind: "tool_use".into(),
+                at: Some("2026-10-03T11:30:00Z".into()),
+                tool_use_id: None,
+                parent_tool_use_id: None,
+                subagent_type: None,
+                data: serde_json::json!({"name": "Bash"}),
+            }],
+        )
+        .unwrap();
+    let at = |now: &'static str| Caller {
+        session: None,
+        actor: Some("handover"),
+        now: Some(now),
+    };
+    a.engine.handover(at("2026-10-03T12:00:01Z")).unwrap();
+    assert_eq!(
+        a.border_rows()[0].state,
+        BorderState::Working,
+        "two hours from the start, but half an hour from the last sign of life"
+    );
+    a.engine.handover(at("2026-10-03T13:30:01Z")).unwrap();
+    assert_eq!(a.border_rows()[0].state, BorderState::Canceled);
+}
+
+#[test]
+fn a_commission_whose_first_kick_failed_is_handed_over_by_the_next_handover() {
+    // The other side's handover did not run (its database was busy). Nothing new is pushed the next
+    // time — the ops are already there — so the kick has to come from the other side not holding
+    // the thread yet, or the commission would be stranded.
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    // Two: the send's own kick, and the one its handover tries right after it.
+    w.failing_kicks
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let receipt = a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    assert_eq!(receipt.border.unwrap().state, BorderState::Submitted);
+    assert!(w.worker.of(&b, "pm").is_empty(), "the kick failed");
+
+    a.engine.handover(machine_caller()).unwrap();
+    assert_eq!(
+        w.worker.of(&b, "pm").len(),
+        1,
+        "the next handover kicked again"
+    );
+    assert_eq!(a.border_rows()[0].state, BorderState::Working);
+}
+
+#[test]
+fn a_border_stamp_on_a_thread_of_this_workspace_makes_no_border_thread() {
+    // A message in a local thread that merely CARRIES a stamp — written here, by anybody who can
+    // set refs — is not a commission from outside: no record, no persona, no refusal posted.
+    let tmp = TempDir::new().unwrap();
+    let (_a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let forged = nexus_chat::model::Refs {
+        border: Some(nexus_chat::border::BorderRef {
+            from: "test/alpha".into(),
+            to: "test/beta/pm".into(),
+            role: Some("pm".into()),
+            hop: 0,
+            refusal: None,
+            canceled: false,
+        }),
+        ..Default::default()
+    };
+    b.engine
+        .send_to(
+            Caller {
+                session: None,
+                actor: Some("carsten"),
+                now: Some(NOW),
+            },
+            SendToRequest {
+                to: "pm",
+                body: "pretend I came from alpha",
+                refs: SendToRefs::Declared(forged),
+                machine: None,
+            },
+        )
+        .unwrap();
+    let before = w.worker.all().len();
+    b.engine.handover(machine_caller()).unwrap();
+    assert!(b.border_rows().is_empty(), "{:?}", b.border_rows());
+    assert_eq!(w.worker.all().len(), before);
 }

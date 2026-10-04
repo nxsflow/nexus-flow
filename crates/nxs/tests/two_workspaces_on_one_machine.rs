@@ -229,7 +229,179 @@ fn a_commission_crosses_to_the_other_workspace_and_its_coordinator_starts_the_pe
         assert_eq!(row["border"]["direction"], direction, "{row}");
         assert_eq!(row["border"]["state"], "working", "{row}");
     }
+    // A session answers in its own workspace: `--db` naming another one is refused, so a persona
+    // granted only `nxc reply` cannot write into a neighbour's log (nxf 6j6v.ewbj).
+    let beta_db = m.beta.join(".nxs/db.sqlite");
+    let out = m
+        .nxs(&m.alpha)
+        .env("NXC_SESSION", &session)
+        .env("NXC_DB", m.alpha.join(".nxs/db.sqlite"))
+        .args(["chat", "reply", "--thread", thread, "--db"])
+        .arg(&beta_db)
+        .arg("written elsewhere")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("may not name another one"),
+        "{stderr}"
+    );
+
     // And the service has something to carry while it is open.
     assert!(m.alpha.join(".nxs/border-open").exists());
     assert!(m.beta.join(".nxs/border-open").exists());
+}
+
+/// **The scenario with real sessions** (nxf 6j6v.70dy, section 1 of the slice's specification) —
+/// the PM of one repository asks the PM of another and passes the answer on, through the real
+/// binary, the real sidecar and a real model. What the routing tests above cannot show: that a
+/// persona actually commissions across the border, the other persona actually answers, and the
+/// answer actually wakes the commissioner.
+///
+/// `#[ignore]`d for the reasons every live smoke here is: real subscription auth, real seconds,
+/// real cost. It does NOT pin `HOME` — the SDK's credentials live there — so the registry it
+/// writes is a development instance of its own, `nexus-flow-border-live`, removed at the end.
+/// Run it by hand where `claude` is authenticated:
+///
+/// ```console
+/// $ (cd agent-sidecar && npm ci)
+/// $ cargo build -p nxs
+/// $ cargo test -p nxs --test two_workspaces_on_one_machine -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "live: real Claude Agent SDK sessions in two workspaces"]
+fn live_the_pm_of_one_repository_asks_the_pm_of_another_and_tells_its_owner() {
+    const INSTANCE: &str = "nexus-flow-border-live";
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("this crate sits at <root>/crates/nxs")
+        .to_path_buf();
+    let sidecar = repo.join("agent-sidecar/src/main.mjs");
+    assert!(sidecar.is_file(), "no sidecar at {sidecar:?}");
+    nxs_test_support::assert_multicall_binary_fresh();
+    let bin = assert_cmd::cargo::cargo_bin("nxs");
+    let bin_dir = bin.parent().unwrap().to_path_buf();
+    // The instance's home, `~/.nexusflow-border-live` — named by the instance, so resolved by it.
+    let service_home = nxs_service::ServiceHome::for_instance(
+        nxs_service::Instance::named(INSTANCE).expect("a valid instance name"),
+    )
+    .expect("a home directory")
+    .root()
+    .to_path_buf();
+    assert!(
+        service_home.ends_with(".nexusflow-border-live"),
+        "{}",
+        service_home.display()
+    );
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(service_home);
+
+    let dirs = TempDir::new().unwrap();
+    let alpha = dirs.path().join("alpha");
+    let beta = dirs.path().join("beta");
+    git_repo(&alpha, "git@github.com:test/alpha.git");
+    git_repo(&beta, "git@github.com:test/beta.git");
+    let nxs = |dir: &Path| {
+        let mut c = Command::new(&bin);
+        c.current_dir(dir)
+            .env("NXS_SERVICE_INSTANCE", INSTANCE)
+            .env(
+                "PATH",
+                format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("NXC_WORKER", "sidecar")
+            .env("NXC_SIDECAR", &sidecar)
+            .env("NXC_ACTOR", "owner")
+            .env_remove("NXC_SESSION")
+            .env_remove("NXC_DB")
+            .env_remove("NXC_ORIGIN")
+            .env_remove("NXC_HOP")
+            .env_remove("NXC_NOW")
+            .env_remove("NXC_TIMER")
+            .env_remove("ANTHROPIC_API_KEY");
+        c
+    };
+    for dir in [&alpha, &beta] {
+        let ok = nxs(dir)
+            .args(["init", "--json", "--module", "chat", "--no-service"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        std::fs::create_dir_all(dir.join(".nxs-personas")).unwrap();
+    }
+    std::fs::write(
+        alpha.join(".nxs-personas/pm.yaml"),
+        "handle: pm\nsystem_prompt: |\n  You are the PM of test/alpha. Keep every message short.\n  \
+         When the person asks you to find something out from the PM of another repository, run\n  \
+         exactly `nxc send --to <owner>/<repo>/pm --no-ref \"<question>\"` and end your turn without\n  \
+         replying. When you are woken with the answer, pass it on to the person with `nxc reply`.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        beta.join(".nxs-personas/pm.yaml"),
+        "handle: pm\naddressable:\n  humans: true\n  external:\n    - \"*/pm\"\nsystem_prompt: |\n  \
+         You are the PM of test/beta. Keep every message short. Before answering, look at your\n  \
+         team with `nxc list`. Your board says: the access rule on channels ships with version\n  \
+         0.300. Answer what you are asked with `nxc reply`, in one sentence.\n",
+    )
+    .unwrap();
+    for (dir, other) in [(&alpha, "test/beta"), (&beta, "test/alpha")] {
+        let ok = nxs(dir)
+            .args(["sync", "trust", "add", "--workspace", other])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+
+    let out = nxs(&alpha)
+        .args([
+            "chat",
+            "--json",
+            "send",
+            "--to",
+            "pm",
+            "--no-ref",
+            "Ask the PM of test/beta when the access rule on channels ships, then tell me.",
+        ])
+        .output()
+        .unwrap();
+    let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let thread = receipt["thread_id"].as_str().unwrap().to_string();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(400);
+    let answer = loop {
+        let out = nxs(&alpha)
+            .args(["chat", "--json", "threads", "show", &thread])
+            .output()
+            .unwrap();
+        let board: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        if let Some(body) = board["messages"].as_array().and_then(|ms| {
+            ms.iter()
+                .find(|m| m["sender"].as_str().is_some_and(|s| s.ends_with("/pm")))
+                .and_then(|m| m["body"].as_str())
+        }) {
+            break body.to_string();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "alpha's pm never answered its owner: {board:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    };
+    assert!(
+        !answer.starts_with("sidecar:"),
+        "the persona answered itself: {answer}"
+    );
+    assert!(
+        answer.contains("0.300"),
+        "the answer came from beta's board: {answer}"
+    );
 }

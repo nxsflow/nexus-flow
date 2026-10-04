@@ -71,7 +71,14 @@ pub fn parse_address(to: &str) -> Option<Address<'_>> {
     if persona.is_empty() || !workspace.contains('/') {
         return None;
     }
-    nxs_foundation::workspace_name::is_valid_name(workspace)
+    let handle_ok = persona.len() <= 64
+        && !persona.starts_with("__")
+        && persona
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && persona != "."
+        && persona != "..";
+    (handle_ok && nxs_foundation::workspace_name::is_valid_name(workspace))
         .then_some(Address { workspace, persona })
 }
 
@@ -183,6 +190,14 @@ impl BorderState {
     pub fn is_final(self) -> bool {
         matches!(self, BorderState::Rejected | BorderState::Canceled)
     }
+
+    /// Whether one side still has work to do on it: not answered, not refused, not withdrawn.
+    pub fn is_in_progress(self) -> bool {
+        matches!(
+            self,
+            BorderState::Submitted | BorderState::Working | BorderState::InputRequired
+        )
+    }
 }
 
 /// Which side of the border this workspace is on for one thread.
@@ -261,8 +276,10 @@ fn refresh_marker(store: &ChatStore, db_path: &str) {
         return;
     };
     let marker = dir.join(OPEN_MARKER);
+    // In progress only: a completed thread stays open to a further exchange, but that one starts
+    // with a write, and the write carries itself across — the service has nothing to poll for it.
     let open = rows(store)
-        .map(|rows| rows.iter().any(|r| !r.state.is_final()))
+        .map(|rows| rows.iter().any(|r| r.state.is_in_progress()))
         .unwrap_or(false);
     let _ = if open {
         std::fs::write(&marker, b"")
@@ -405,6 +422,27 @@ fn mark_served(store: &ChatStore, thread: &str, message: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// Give `message` back after a delivery that put nothing in motion, so the next handover tries again.
+fn unmark_served(store: &ChatStore, thread: &str, message: &str) {
+    let _ = store.connection().execute(
+        "DELETE FROM border_served WHERE thread_id = ?1 AND message_id = ?2",
+        params![thread, message],
+    );
+}
+
+/// **Claim the admission of an inbound commission** — `true` for exactly one of however many
+/// handovers look at it at once (the service's pass, a `send`, the peer's child process). The claim
+/// is the state change itself, compare-and-swap in one statement, so two runs cannot both start a
+/// persona for one commission.
+fn claim_admission(store: &ChatStore, thread: &str, now: &str) -> Result<bool> {
+    let n = store.connection().execute(
+        "UPDATE border_threads SET state = 'working', updated = ?2
+          WHERE thread_id = ?1 AND state = 'submitted'",
+        params![thread, now],
+    )?;
+    Ok(n == 1)
+}
+
 fn is_served(store: &ChatStore, thread: &str, message: &str) -> Result<bool> {
     Ok(store
         .connection()
@@ -467,17 +505,40 @@ fn find_one(peers: &dyn Peers, name: &str) -> Result<std::result::Result<PeerWor
 
 /// The ids of every op that makes up `thread` in `store`: its register ops, its messages, and the
 /// direct conversation it lives in. Nothing else — this is the whole of what crosses the border.
+///
+/// **The channel is checked, not taken on trust.** A border thread lives in the direct conversation
+/// between the two parties it was opened for — its opener and the one participant it expects — and
+/// that conversation's id is derived from exactly those two handles. A thread whose log names any
+/// other channel (a local channel, `decl:planning`) is refused whole: copying its channel and
+/// membership ops would let one workspace write into a conversation of the other's. Messages are
+/// taken only from that direct conversation, for the same reason.
 fn thread_op_ids(store: &ChatStore, thread: &str) -> Result<Vec<String>> {
     let channel = store
         .thread_channel(thread)
         .or_else(|| store.thread_channel_via_message(thread))
         .unwrap_or_default();
+    // The two members of a direct conversation are its whole identity: its id is derived from
+    // them. Read from the membership rather than from the thread's expectation, which a withdrawal
+    // clears and which must not decide whether the withdrawal itself can cross.
+    let opener = store.thread_opener(thread)?.unwrap_or_default();
+    let members = store.resolve_membership(&channel)?;
+    let direct = match members.as_slice() {
+        [a, b] => channel == orch::dm_channel_id(a, b) && (opener == *a || opener == *b),
+        _ => false,
+    };
+    if !direct {
+        return Err(NxfError::validation(format!(
+            "border thread {thread} does not live in the direct conversation between its two \
+             parties ({channel}), so nothing of it is copied"
+        )));
+    }
     let conn = store.connection();
     let mut st = conn.prepare(
         "SELECT op_id FROM ops
           WHERE (target_kind = 'thread' AND target_id = ?1)
              OR (target_kind = 'message'
-                 AND target_id IN (SELECT message_id FROM messages WHERE thread_id = ?1))
+                 AND target_id IN (SELECT message_id FROM messages
+                                    WHERE thread_id = ?1 AND channel_id = ?2))
              OR (target_kind = 'channel' AND target_id = ?2)
              OR (target_kind = 'membership' AND substr(target_id, 1, length(?2) + 1) = ?2 || char(31))
           ORDER BY lamport, site",
@@ -660,8 +721,11 @@ pub fn after_local_write(ctx: &Ctx, store: &mut ChatStore, thread: &str) {
         Ok(Ok(p)) => p,
         Ok(Err(_)) | Err(_) => return,
     };
-    let pushed = match open_far(&peer) {
-        Ok(mut far) => copy_thread(store, &mut far.store, thread).unwrap_or(0),
+    let (pushed, peer_lacks_it) = match open_far(&peer) {
+        Ok(mut far) => (
+            copy_thread(store, &mut far.store, thread).unwrap_or(0),
+            !holds_record(&far.store, thread),
+        ),
         Err(e) => {
             eprintln!(
                 "warning: border thread {thread} could not be handed over: {}",
@@ -670,7 +734,7 @@ pub fn after_local_write(ctx: &Ctx, store: &mut ChatStore, thread: &str) {
             return;
         }
     };
-    if pushed > 0 {
+    if pushed > 0 || peer_lacks_it {
         if let Err(e) = peers.hand_over_in(&peer) {
             eprintln!(
                 "warning: the handover in {} did not run ({e}); the background service hands \
@@ -749,8 +813,13 @@ fn exchange(store: &mut ChatStore, peers: &dyn Peers, row: &BorderRow) -> Result
     let mut far = open_far(&peer)?;
     let pushed = copy_thread(store, &mut far.store, &row.thread_id)?;
     let pulled = copy_thread(&far.store, store, &row.thread_id)?;
+    // **Kicked again while the other side has not taken it in** (review of PR #14): a first kick
+    // that failed — the peer's database busy, its binary gone — would otherwise strand the
+    // commission, because nothing new is pushed the next time and the peer has no marker to make
+    // its own service look.
+    let peer_lacks_it = !holds_record(&far.store, &row.thread_id);
     drop(far);
-    if pushed > 0 {
+    if pushed > 0 || peer_lacks_it {
         if let Err(e) = peers.hand_over_in(&peer) {
             eprintln!(
                 "warning: the handover in {} did not run ({e}); its service picks thread {} up",
@@ -782,6 +851,9 @@ fn discover_inbound(ctx: &Ctx, store: &mut ChatStore, peers: &dyn Peers) -> Resu
         rows
     };
     for (thread, refs) in candidates {
+        if !is_foreign_opening(ctx, store, &thread)? {
+            continue;
+        }
         let Ok(refs) = serde_json::from_str::<Refs>(&refs) else {
             continue;
         };
@@ -805,6 +877,31 @@ fn discover_inbound(ctx: &Ctx, store: &mut ChatStore, peers: &dyn Peers) -> Resu
     Ok(())
 }
 
+/// **Whether `thread` was opened in another workspace, by a signed first message** — what a
+/// commission has to be before this workspace records it (review of PR #14). The stamped message
+/// must be the thread's first, written by the thread's opener, the opener must not be one of this
+/// workspace's own participants (a stamp forged into a local thread would otherwise make it a
+/// border thread here, and cut its parent edge), and the op behind it must carry a signature that
+/// verified. Trust is not asked yet: a known neighbour that is not trusted is answered "not
+/// trusted"; what this keeps out is a message nobody can be held to.
+fn is_foreign_opening(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<bool> {
+    let Some(first) = store.messages_in_thread(thread)?.into_iter().next() else {
+        return Ok(false);
+    };
+    if border_of(&first).is_none() || border_of(&first).is_some_and(|b| b.refusal.is_some()) {
+        return Ok(false);
+    }
+    let opener = store.thread_opener(thread)?;
+    if opener.as_deref() != Some(first.sender.as_str())
+        || first.sender.starts_with(&format!("{}/", ctx.origin))
+    {
+        return Ok(false);
+    }
+    Ok(store
+        .message_provenance(&first.message_id)?
+        .is_some_and(|p| p.provenance == nxs_foundation::signing::Provenance::Verified))
+}
+
 /// The commission that opened `thread` — its first message, with the border stamp on it.
 fn opening(store: &ChatStore, thread: &str) -> Result<Option<(MessageRow, BorderRef)>> {
     let first = store.messages_in_thread(thread)?.into_iter().next();
@@ -826,13 +923,40 @@ fn act_inbound(
     if row.state == BorderState::Submitted {
         match admission(ctx, store, &first, &stamp, &row.persona)? {
             Ok(()) => {
-                let session = start_persona(ctx, store, row, &first, &stamp)?;
+                if !claim_admission(store, &row.thread_id, ctx.now)? {
+                    return Ok(()); // another handover is admitting it right now
+                }
+                let session = match start_persona(ctx, store, row, &first, &stamp) {
+                    Ok(session) => session,
+                    Err(e) => {
+                        // Given back, so the next handover tries again.
+                        set_state(store, &row.thread_id, BorderState::Submitted, None, ctx.now)?;
+                        return Err(e);
+                    }
+                };
                 set_session(store, &row.thread_id, &session)?;
-                set_state(store, &row.thread_id, BorderState::Working, None, ctx.now)?;
                 mark_served(store, &row.thread_id, &first.message_id)?;
                 report.admitted.push(row.thread_id.clone());
             }
+            // A workspace nobody on this machine is, under the key that signed: recorded and left
+            // unanswered. Answering it would have this workspace sign and store a reply for every
+            // message anyone writes in, which is a log anyone could grow.
+            Err(Refusal::WorkspaceUnknown) => {
+                set_state(
+                    store,
+                    &row.thread_id,
+                    BorderState::Rejected,
+                    Some(Refusal::WorkspaceUnknown.text()),
+                    ctx.now,
+                )?;
+                report
+                    .refused
+                    .push((row.thread_id.clone(), Refusal::WorkspaceUnknown));
+            }
             Err(refusal) => {
+                if !claim_admission(store, &row.thread_id, ctx.now)? {
+                    return Ok(());
+                }
                 refuse(ctx, store, row, &stamp, refusal)?;
                 report.refused.push((row.thread_id.clone(), refusal));
             }
@@ -923,16 +1047,18 @@ fn admission(
     let signer = store
         .message_provenance(&first.message_id)?
         .and_then(|p| p.key_id);
-    if let Some(peers) = ctx.peers {
-        match find_one(peers, &stamp.from) {
-            Ok(Ok(peer)) => {
-                let known_key = open_far(&peer).ok().map(|f| f.store.key_id().to_string());
-                if known_key.is_none() || known_key != signer {
-                    return Ok(Err(Refusal::WorkspaceUnknown));
-                }
+    // Fail closed: without a way to look the caller's workspace up, it is unknown.
+    let Some(peers) = ctx.peers else {
+        return Ok(Err(Refusal::WorkspaceUnknown));
+    };
+    match find_one(peers, &stamp.from) {
+        Ok(Ok(peer)) => {
+            let known_key = open_far(&peer).ok().map(|f| f.store.key_id().to_string());
+            if known_key.is_none() || known_key != signer {
+                return Ok(Err(Refusal::WorkspaceUnknown));
             }
-            Ok(Err(_)) | Err(_) => return Ok(Err(Refusal::WorkspaceUnknown)),
         }
+        Ok(Err(_)) | Err(_) => return Ok(Err(Refusal::WorkspaceUnknown)),
     }
     if !first.acts {
         return Ok(Err(Refusal::NotTrusted));
@@ -1018,7 +1144,7 @@ fn refuse(
                 "No workspace on this machine is named {} under the key that signed the commission.",
                 stamp.from
             ),
-            Refusal::NotOnThisMachine => String::new(),
+            Refusal::NotOnThisMachine => format!("{} is not on this machine.", stamp.from),
             Refusal::NotTrusted => format!(
                 "{} is not on this workspace's trust list; its owner adds it with `nxs sync trust \
                  add --workspace {}`.",
@@ -1041,7 +1167,10 @@ fn refuse(
                 .rsplit_once('/')
                 .map(|(w, _)| w.to_string())
                 .unwrap_or_default(),
-            to: format!("{}/{}", stamp.from, stamp.role.as_deref().unwrap_or("")),
+            to: match stamp.role.as_deref() {
+                Some(role) => format!("{}/{role}", stamp.from),
+                None => stamp.from.clone(),
+            },
             role: None,
             hop: stamp.hop,
             refusal: Some(refusal),
@@ -1110,7 +1239,9 @@ fn act_outbound(
         return Ok(());
     };
     let acting = store.acting_messages_in_thread(&row.thread_id)?;
-    if row.state == BorderState::Working && overdue(ctx, row, &acting) {
+    if matches!(row.state, BorderState::Working | BorderState::Submitted)
+        && overdue(ctx, row, &acting)
+    {
         let why = format!(
             "{}/{} gave no sign of life for {DEADLINE_HOURS} hours",
             row.peer, row.persona
@@ -1195,11 +1326,17 @@ fn overdue(ctx: &Ctx, row: &BorderRow, acting: &[MessageRow]) -> bool {
             }
         }
     }
-    let last = signs.iter().filter_map(|s| epoch_secs(s)).max();
-    match (last, epoch_secs(ctx.now)) {
-        (Some(last), Some(now)) => now - last > DEADLINE_HOURS * 3600,
-        _ => false,
-    }
+    let Some(now) = epoch_secs(ctx.now) else {
+        return false;
+    };
+    // A time from the future counts as now: the other side writes these, and an instant it dated
+    // ahead must not postpone the deadline.
+    let last = signs
+        .iter()
+        .filter_map(|s| epoch_secs(s))
+        .map(|t| t.min(now))
+        .max();
+    last.is_some_and(|last| now - last > DEADLINE_HOURS * 3600)
 }
 
 /// Seconds since the epoch of an RFC 3339 instant, or `None` for one that does not parse.
@@ -1216,45 +1353,47 @@ fn epoch_secs(instant: &str) -> Option<i64> {
 /// commissioner back too, and the deadline's wake is [`wake_with_cancellation`], a call of its own so
 /// that what a withdrawal can set going is visible in the code and not only in a branch.
 fn cancel(ctx: &Ctx, store: &mut ChatStore, row: &BorderRow, why: &str) -> Result<()> {
-    let caller_role = row
+    // Said in the commissioner's name when its session still resolves; otherwise in the name of the
+    // coordinator running this — the receiver needs the marker either way, or its persona keeps
+    // working on a commission nobody here is waiting for any more (review of PR #14).
+    let role = row
         .session
         .as_deref()
         .and_then(|s| store.session_role(s).ok().flatten());
-    if let Some(role) = caller_role {
-        let caller = ctx.qualify(&role);
-        let body = format!("Withdrawn: {why}.");
-        let refs = Refs {
-            border: Some(BorderRef {
-                from: String::new(),
-                to: format!("{}/{}", row.peer, row.persona),
-                role: Some(role.clone()),
-                hop: 0,
-                refusal: None,
-                canceled: true,
-            }),
-            ..Refs::default()
-        };
-        let channel = store
-            .thread_channel(&row.thread_id)
-            .or_else(|| store.thread_channel_via_message(&row.thread_id))
-            .unwrap_or_default();
-        // Posted through the store and not `facade::send`: the write-surface gate joins calls by
-        // bare name (nxf 6j6v.cbhe), and a `send` here reads to it as the CLI's `send`, which
-        // starts sessions — a cancellation starts none.
-        store.set_wall_clock(ctx.now);
-        store.post_message(&crate::model::MessageEnvelope {
-            origin: ctx.origin.to_string(),
-            channel_id: channel,
-            sender: caller.clone(),
-            kind: MessageKind::Info,
-            priority: Priority::Normal,
-            disposition: Disposition::InTurn,
-            thread_id: Some(row.thread_id.clone()),
-            refs,
-            body,
-        });
-        store.set_expects_reply_from(&row.thread_id, "[]", &caller);
-    }
+    let author = role.clone().unwrap_or_else(|| ctx.actor.to_string());
+    let caller = ctx.qualify(&author);
+    let body = format!("Withdrawn: {why}.");
+    let refs = Refs {
+        border: Some(BorderRef {
+            from: String::new(),
+            to: format!("{}/{}", row.peer, row.persona),
+            role,
+            hop: 0,
+            refusal: None,
+            canceled: true,
+        }),
+        ..Refs::default()
+    };
+    let channel = store
+        .thread_channel(&row.thread_id)
+        .or_else(|| store.thread_channel_via_message(&row.thread_id))
+        .unwrap_or_default();
+    // Posted through the store and not `facade::send`: the write-surface gate joins calls by
+    // bare name (nxf 6j6v.cbhe), and a `send` here reads to it as the CLI's `send`, which
+    // starts sessions — a cancellation starts none.
+    store.set_wall_clock(ctx.now);
+    store.post_message(&crate::model::MessageEnvelope {
+        origin: ctx.origin.to_string(),
+        channel_id: channel,
+        sender: caller.clone(),
+        kind: MessageKind::Info,
+        priority: Priority::Normal,
+        disposition: Disposition::InTurn,
+        thread_id: Some(row.thread_id.clone()),
+        refs,
+        body,
+    });
+    store.set_expects_reply_from(&row.thread_id, "[]", &caller);
     set_state(
         store,
         &row.thread_id,
@@ -1327,6 +1466,11 @@ pub fn withdraw_under(ctx: &Ctx, store: &mut ChatStore, root: &str) {
     refresh_marker(store, ctx.db_path);
 }
 
+/// Whether `store`'s border record names `thread`.
+fn holds_record(store: &ChatStore, thread: &str) -> bool {
+    matches!(row(store, thread), Ok(Some(_)))
+}
+
 /// Whether the other side already records this thread — the receiver holds it, so it is working.
 fn peer_holds(ctx: &Ctx, row: &BorderRow) -> bool {
     let Some(peers) = ctx.peers else { return false };
@@ -1350,6 +1494,14 @@ fn deliver(
     from: &str,
     hop: orch::CheckedHop,
 ) -> bool {
+    // **Claimed before they are handed over** (review of PR #14): the claim is an insert that only
+    // one of several concurrent handovers can win, so a message is delivered once however many
+    // runs see it. A delivery that puts nothing in motion gives its claims back below.
+    let claimed: Vec<&MessageRow> = messages
+        .iter()
+        .filter(|m| mark_served(store, thread, &m.message_id).unwrap_or(false))
+        .collect();
+    let messages: Vec<MessageRow> = claimed.into_iter().cloned().collect();
     let Some(last) = messages.last() else {
         return false;
     };
@@ -1388,9 +1540,12 @@ fn deliver(
             on_busy: orch::OnBusy::Hold(&hold),
         },
     );
-    if attempt.woke.is_some() || attempt.held.is_some() {
-        for m in messages {
-            let _ = mark_served(store, thread, &m.message_id);
+    // HELD — the session is mid-turn — counts as delivered: the held answer goes out when its turn
+    // ends. On the command line that takes the background service; without one it waits
+    // (nxf 6j6v.v0pj), exactly as an in-house consultation's held answer does.
+    if attempt.woke.is_none() && attempt.held.is_none() {
+        for m in &messages {
+            unmark_served(store, thread, &m.message_id);
         }
     }
     attempt.woke.is_some()
@@ -1475,6 +1630,64 @@ mod tests {
     }
 
     #[test]
+    fn only_a_thread_in_the_direct_conversation_of_its_two_parties_is_copied() {
+        // Review of PR #14, Integrity #1: a thread whose log names another channel would carry that
+        // channel's ops and members across — one workspace writing into another's conversation.
+        let mut store = ChatStore::open_in_memory(1);
+        let thread = commissioned_thread(&mut store);
+        assert!(
+            thread_op_ids(&store, thread).is_ok(),
+            "the direct conversation is copied"
+        );
+
+        store.set_channel_field(
+            "c-team",
+            "kind",
+            crate::model::CHANNEL_KIND_GROUP,
+            "local/pm",
+        );
+        store.add_member("c-team", "local/pm", "local/pm");
+        store.add_member("c-team", "xx12/pm", "local/pm");
+        store.open_thread(
+            "t-in-a-group",
+            &crate::model::ThreadRoot {
+                origin: "local".into(),
+                channel_id: "c-team".into(),
+                opener: "local/pm".into(),
+                created: "2026-10-03T10:00:00Z".into(),
+                parent: None,
+            },
+            "local/pm",
+        );
+        store.set_expects_reply_from("t-in-a-group", "[\"xx12/pm\"]", "local/pm");
+        let err = thread_op_ids(&store, "t-in-a-group").expect_err("refused whole");
+        assert!(err.msg.contains("direct conversation"), "{}", err.msg);
+    }
+
+    #[test]
+    fn exactly_one_handover_wins_the_admission_of_a_commission() {
+        // Review of PR #14, Integrity #4: the service's pass, a `send` and the peer's child process
+        // can look at one commission at once; only the one that claims it starts a persona.
+        let store = ChatStore::open_in_memory(1);
+        insert_row(
+            &store,
+            "t-1",
+            Direction::Inbound,
+            "test/alpha",
+            "pm",
+            None,
+            "2026-10-03T10:00:00Z",
+        )
+        .unwrap();
+        assert!(claim_admission(&store, "t-1", "2026-10-03T10:00:01Z").unwrap());
+        assert!(!claim_admission(&store, "t-1", "2026-10-03T10:00:01Z").unwrap());
+        assert_eq!(
+            row(&store, "t-1").unwrap().unwrap().state,
+            BorderState::Working
+        );
+    }
+
+    #[test]
     fn an_address_is_a_workspace_name_and_a_persona() {
         assert_eq!(
             parse_address("nxsflow/nexus-flow/pm"),
@@ -1494,6 +1707,8 @@ mod tests {
         for to in [
             "pm",
             "ab12/pm",
+            "nxsflow/nexus-flow/__engine",
+            "nxsflow/nexus-flow/p m",
             "nxsflow/nexus-flow/",
             "NxsFlow/nexus-flow/pm",
             "/x/pm",
