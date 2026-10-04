@@ -87,6 +87,22 @@ ist eine Persona, deren `system_prompt` das sagt und deren Deklaration ihr keine
 Handeln gibt — `tools: []` ist ein echter, eigener Zustand und nicht dasselbe wie den Schlüssel
 wegzulassen.
 
+Was `tools: []` genau verhindert und was nicht. Eine so deklarierte Persona schuldet ihre Antwort
+trotzdem; wird sie beauftragt, gewährt ihr die Engine deshalb den einen Befehl, der diese Antwort
+ist: `Bash(nxc reply:*)`. Sie kann `nxc reply` ausführen — die Heredoc-Form und die einzeilige Form
+— und ohne Freigabe nichts anderes: kein `nxc send`, kein `git push`, kein `gh`, kein Schreiben einer
+Datei, keine Kette, Pipe, Umleitung und kein `$(…)` um ihre Antwort herum. Weil niemand da ist, der
+etwas freigibt, wird ein Befehl, der eine Freigabe braucht, abgewiesen. Was die Agenten-Laufzeit
+selbst im Arbeitsverzeichnis der Persona als nur lesend zählt (`ls`, `cat` einer Datei dort,
+`git status`), läuft weiterhin; diese Erlaubnis gehört der Laufzeit, nicht der Deklaration. Eine
+Persona ohne `tools:` ist ein anderer Zustand: Sie läuft mit dem vollen Standardwerkzeugsatz der
+Laufzeit und einer freigegebenen Shell, und nichts davon schränkt sie ein. Eine Persona mit
+`permissions: bypassPermissions` gibt alles selbst frei, gleich, was in `tools:` steht.
+
+Eine Persona, die Aufrufer aus anderen Arbeitsbereichen zulässt (`addressable.external`, `nxc guide
+personas`), bekommt Text, den ein anderer Arbeitsbereich geschrieben hat. Was dieser Text sie tun
+lassen kann, begrenzt ihre Deklaration — genau deshalb muss `tools: []` bedeuten, was es sagt.
+
 ## Eskalation: das deklarierte „ich brauche Hilfe oder eine Entscheidung"
 
 Ein Agent darf mit `reply` genau zwei Dinge sagen: *ich bin fertig* und *allein komme ich nicht ans

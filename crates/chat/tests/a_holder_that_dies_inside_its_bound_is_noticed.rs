@@ -383,6 +383,7 @@ impl Bench {
             project_claude_md: None,
             module_primes: None,
             machines: None,
+            peers: None,
         };
         orchestration::tick(&ctx, &mut store, TickRequest { thread_id: thread }).expect("tick")
     }

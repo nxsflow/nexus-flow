@@ -22,62 +22,7 @@ pub fn is_valid_stream_id(id: &str) -> bool {
         })
 }
 
-/// Reduce any git remote spelling to `host/owner/repo` (lowercased, no scheme, no
-/// credentials, no port, no `.git`). `None` when the input carries no usable path.
-pub fn normalize_remote(url: &str) -> Option<String> {
-    let s = url.trim();
-    // Whether a scheme was actually present is load-bearing below: git's scp-like syntax
-    // `[user@]host:path` has NO port syntax at all, so a colon there is always the path
-    // separator. A port is only grammatically possible once a scheme introduced `host:port`.
-    // Do not fold this back into a bare "is the segment all-digits?" guess — that collides
-    // scp remotes whose owner segment happens to be numeric (`host:1234/repo` and
-    // `host:5678/repo` would both normalize to `host/repo`), which is exactly the property
-    // this derivation exists to avoid.
-    let had_scheme = s.contains("://");
-    // Scheme, if any: https:// | ssh:// | git://
-    let s = match s.find("://") {
-        Some(i) => &s[i + 3..],
-        None => s,
-    };
-    // Credentials: `git@host…`, `user:token@host…` — but ONLY an `@` occurring BEFORE the first
-    // `/` is a credential separator (finding 6, final review). The old code stripped up to the
-    // FIRST `@` anywhere in the string, including inside the path: `https://host/a@b/repo` was
-    // treated as if `host/a` were credentials and normalized to `b/repo`, silently dropping the
-    // host — the same defect class as the port heuristic just below (a bare positional guess
-    // that ignores where in the URL's grammar the character actually sits), and it defeats the
-    // whole point of host-scoping the derived `stream_id` (§4.1): two unrelated repos whose
-    // paths happen to share an `x@y/…` segment would collide onto one stream.
-    let s = {
-        let path_start = s.find('/').unwrap_or(s.len());
-        match s[..path_start].find('@') {
-            Some(i) => &s[i + 1..],
-            None => s,
-        }
-    };
-    // A `:` before the first `/` is a port ONLY when a scheme was present (`ssh://host:22/…`);
-    // in scp syntax (`host:owner/repo`) it is always the path separator, regardless of digits.
-    let s = match s.find(':') {
-        Some(colon) => {
-            let rest = &s[colon + 1..];
-            let end = rest.find('/').unwrap_or(rest.len());
-            let seg = &rest[..end];
-            let is_port = had_scheme && !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit());
-            if is_port {
-                format!("{}{}", &s[..colon], &rest[end..])
-            } else {
-                format!("{}/{}", &s[..colon], rest)
-            }
-        }
-        None => s.to_string(),
-    };
-    let s = s.trim_end_matches('/');
-    let s = s.strip_suffix(".git").unwrap_or(s);
-    let s = s.trim_end_matches('/').to_ascii_lowercase();
-    if !s.contains('/') || s.split('/').any(str::is_empty) {
-        return None;
-    }
-    Some(s)
-}
+pub use nxs_foundation::workspace_name::normalize_remote;
 
 /// `stream-` + the first 24 hex chars of `sha256(host/owner/repo)`.
 ///
@@ -90,22 +35,7 @@ pub fn stream_id_from_remote(url: &str) -> Option<String> {
     Some(format!("stream-{}", &format!("{:x}", h.finalize())[..24]))
 }
 
-/// `git remote get-url origin` in `dir`. `None` when git is absent, the directory is not a
-/// repo, or there is no `origin` — the caller turns that into the error that names
-/// `--create`/`--join`.
-pub fn origin_remote(dir: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let url = String::from_utf8(out.stdout).ok()?;
-    let url = url.trim().to_string();
-    (!url.is_empty()).then_some(url)
-}
+pub use nxs_foundation::workspace_name::origin_remote;
 
 #[cfg(test)]
 mod tests {

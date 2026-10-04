@@ -207,6 +207,7 @@ fn ctx_in_session<'a>(
         project_claude_md: None,
         module_primes: None,
         machines: None,
+        peers: None,
     }
 }
 

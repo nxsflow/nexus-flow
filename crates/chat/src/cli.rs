@@ -534,6 +534,12 @@ enum Command {
         #[arg(long)]
         thread: String,
     },
+    /// Carry this workspace's border threads across: copy each one's messages to and from the
+    /// other workspace on this machine, start a persona for a commission that came in and passes
+    /// its access check, and wake whoever an answer from the other side is for. Run by the
+    /// background service on its pass; `send` and `reply` on a border thread run it themselves.
+    #[command(hide = true)]
+    Handover,
     /// Print an embedded, offline guide. Omit the topic to list the available ones.
     ///
     /// One of the three building blocks' guide verbs (6j6v.9e3r): `nxc guide` serves CHAT's
@@ -815,6 +821,18 @@ static MODULE_PRIMES: std::sync::OnceLock<&'static dyn crate::facade::ModulePrim
 static MACHINES: std::sync::OnceLock<&'static dyn crate::machine::Machines> =
     std::sync::OnceLock::new();
 
+/// **How this CLI reaches the other workspaces on the machine** (nxf 6j6v.4gp2) — set once by
+/// [`provide_peers`] for [`MACHINES`]'s reason: the composition root knows the service registry
+/// and the binary that runs a peer's handover. `None` for anyone linking this CLI on its own, which
+/// refuses an address from another workspace.
+static PEERS: std::sync::OnceLock<&'static dyn crate::border::Peers> = std::sync::OnceLock::new();
+
+/// Hand this CLI the host's [`crate::border::Peers`] — what the `nxs` binary calls before
+/// [`run_from_with`]. Keeps the FIRST one, like the other providers.
+pub fn provide_peers(peers: &'static dyn crate::border::Peers) {
+    let _ = PEERS.set(peers);
+}
+
 /// [`run_from`] with the sibling modules' prime source injected — what the `nxs` multicall binary
 /// calls, because the composition root is the one place that knows the module registry.
 ///
@@ -952,6 +970,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             stream,
             machine,
         } => {
+            refuse_another_db_for_a_session(db)?;
             let body = resolve_body(body.as_deref(), body_file.as_deref())?;
             reply_thread(
                 cli.json,
@@ -996,6 +1015,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             force,
         } => resume(cli.json, db, thread.as_deref(), session.as_deref(), *force),
         Command::Tick { thread } => tick(cli.json, db, thread),
+        Command::Handover => handover_verb(cli.json, db),
         Command::Guide { topic } => crate::guide::guide(cli.json, topic.as_deref()),
     }
 }
@@ -1149,6 +1169,22 @@ fn cwd() -> Result<PathBuf> {
 }
 
 /// Resolve the workspace and open chat's store over it.
+/// **A spawned session answers in its own workspace** (nxf 6j6v.ewbj, review of PR #14). Its
+/// coordinator stamps `NXC_DB` with that workspace's database; a `--db` naming another one would
+/// let a persona whose only granted command is `nxc reply` write into a different workspace —
+/// which the narrow grant exists to rule out. Refused before anything is read. A caller without a
+/// session (a person, a test) keeps `--db` as it always was.
+fn refuse_another_db_for_a_session(db: Option<&str>) -> Result<()> {
+    let session = std::env::var("NXC_SESSION").ok().filter(|s| !s.is_empty());
+    let own = std::env::var("NXC_DB").ok().filter(|s| !s.is_empty());
+    match (session, own) {
+        (Some(_), Some(own)) if db != Some(own.as_str()) => Err(NxfError::validation(format!(
+            "this session answers in its own workspace ({own}); `--db` may not name another one"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn open(db: Option<&str>) -> Result<ChatStore> {
     let ws = Workspace::resolve(db, &cwd()?)?;
     ws.open_chat_store()
@@ -1226,7 +1262,7 @@ impl CliCtx {
             // destructive direction at every site that asks, the channel-advance gate of nxf
             // 6j6v.10yb included.
             worker: LazyWorker { cwd: root.clone() },
-            timer: LazyTimer,
+            timer: LazyTimer::FROM_ENV,
             namer: LazyNamer,
             now: resolve_now()?,
             origin: origin_in(&ws),
@@ -1255,6 +1291,7 @@ impl CliCtx {
             project_claude_md: self.project_claude_md.as_deref(),
             module_primes: self.module_primes,
             machines: MACHINES.get().copied(),
+            peers: PEERS.get().copied(),
         }
     }
 }
@@ -1263,7 +1300,18 @@ impl CliCtx {
 /// same reason (PR #269 review, Code Quality #3): most CLI verbs never schedule anything, and an
 /// unknown `NXC_TIMER` value should be a loud error only for the ones that do, exactly as it was
 /// when `select_timer()` was called from inside the verb itself.
-struct LazyTimer;
+///
+/// `resolve` is [`crate::timer::select_timer`] everywhere but in the tests that hold this wrapper
+/// to forwarding every method it has.
+struct LazyTimer {
+    resolve: fn() -> Result<std::sync::Arc<dyn crate::timer::Timer>>,
+}
+
+impl LazyTimer {
+    const FROM_ENV: LazyTimer = LazyTimer {
+        resolve: crate::timer::select_timer,
+    };
+}
 
 /// Resolves the real namer from `NXC_NAMER` on FIRST USE — [`LazyTimer`]'s twin, lazy for its
 /// reason: most CLI verbs open no thread at all, and an unknown `NXC_NAMER` should be a loud error
@@ -1286,10 +1334,28 @@ impl crate::timer::Timer for LazyTimer {
         deadline: &str,
         command: &str,
     ) -> Result<crate::timer::TimerHandle> {
-        crate::timer::select_timer()?.schedule(thread_id, deadline, command)
+        (self.resolve)()?.schedule(thread_id, deadline, command)
+    }
+    /// **Forwarded, not inherited** (nxf 6j6v.4gp2) — [`service_fault`](Self::service_fault)'s
+    /// lesson, learned a second time. The trait's default arms a delivery as an ordinary
+    /// `schedule` keyed on the SESSION, which the service backend books as a channel tick: the
+    /// service then ran `nxc tick --thread <session id>`, which answers "no such thread", and an
+    /// answer held for a busy caller was never handed over on the command line. Found when a
+    /// border answer arrived while its caller was still ending its turn.
+    fn schedule_delivery(
+        &self,
+        session: &str,
+        deadline: &str,
+    ) -> Result<crate::timer::TimerHandle> {
+        (self.resolve)()?.schedule_delivery(session, deadline)
+    }
+    /// Forwarded for [`schedule_delivery`](Self::schedule_delivery)'s reason: the default books the
+    /// way back from an availability boundary as a tick on a session id.
+    fn schedule_resume(&self, session: &str, deadline: &str) -> Result<crate::timer::TimerHandle> {
+        (self.resolve)()?.schedule_resume(session, deadline)
     }
     fn cancel(&self, handle: &crate::timer::TimerHandle) -> Result<()> {
-        crate::timer::select_timer()?.cancel(handle)
+        (self.resolve)()?.cancel(handle)
     }
     /// **Forwarded, not inherited** (nxf 6j6v.0j12). The trait defaults this to `None`, which is the
     /// right answer for a backend that does not depend on the service — and the wrong one here,
@@ -1300,7 +1366,7 @@ impl crate::timer::Timer for LazyTimer {
     /// An unresolvable `NXC_TIMER` is `None` rather than an error: this rides along on calls that
     /// have already succeeded, and the verb that genuinely needs the timer says so loudly on its own.
     fn service_fault(&self) -> Option<nxs_service::ServiceFault> {
-        crate::timer::select_timer().ok()?.service_fault()
+        (self.resolve)().ok()?.service_fault()
     }
 }
 
@@ -2574,6 +2640,33 @@ fn withdraw(json: bool, db: Option<&str>, thread: &str) -> Result<()> {
 /// looks at the thread at all, it reclaims this workspace's working-tree lease if that lease is
 /// past its bound and somebody is parked behind it. See `orchestration::sweep_expired_working_tree`
 /// for why the drain rides this verb rather than one of its own.
+/// `nxc handover` (nxf 6j6v.4gp2) — see [`crate::border::hand_over`].
+fn handover_verb(json: bool, db: Option<&str>) -> Result<()> {
+    let cli_ctx = CliCtx::resolve(db, hop())?;
+    let mut store = open(db)?;
+    let r = crate::border::hand_over(&cli_ctx.ctx(), &mut store)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&r).map_err(|e| NxfError::io(e.to_string()))?
+        );
+        return Ok(());
+    }
+    for t in &r.admitted {
+        println!("admitted {t}");
+    }
+    for (t, why) in &r.refused {
+        println!("refused {t}: {}", why.text());
+    }
+    for s in &r.woke {
+        println!("woke {s}");
+    }
+    for (t, e) in &r.failed {
+        println!("failed {t}: {e}");
+    }
+    Ok(())
+}
+
 fn tick(json: bool, db: Option<&str>, thread_id: &str) -> Result<()> {
     let cli_ctx = CliCtx::resolve(db, hop())?;
     let mut store = open(db)?;
@@ -3565,11 +3658,34 @@ fn status_line(t: &crate::facade::StatusThread) -> String {
         None => t.channel_id.clone().unwrap_or_default(),
     };
     format!(
-        "{indent}{}  {what}  {state}{by_whom}{own_round}{}{}{}",
+        "{indent}{}  {what}  {state}{by_whom}{own_round}{}{}{}{}",
         t.thread_id,
+        border_suffix(t.border.as_ref()),
         session_suffix(t),
         interruption_suffix(t.interrupted.as_ref()),
         anchor_suffix(t.working_copy.as_ref())
+    )
+}
+
+/// **The thread crosses into another workspace** (nxf 6j6v.szc5) — which one, which way, and where
+/// it stands, in the four words A2A uses. Empty for every thread that stays here.
+fn border_suffix(border: Option<&crate::facade::BorderStatus>) -> String {
+    let Some(b) = border else {
+        return String::new();
+    };
+    let way = match b.direction {
+        crate::border::Direction::Outbound => "to",
+        crate::border::Direction::Inbound => "from",
+    };
+    let reason = b
+        .reason
+        .as_deref()
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+    format!(
+        " — across the border {way} {}: {}{reason}",
+        b.peer,
+        b.state.as_str()
     )
 }
 
@@ -4316,6 +4432,49 @@ fn print_transcript_entry(e: &crate::facade::TranscriptEntryView, depth: usize) 
 
 #[cfg(test)]
 mod tests {
+    // ---- the CLI's timer forwards every method (nxf 6j6v.4gp2) -----------------------------
+
+    /// Records which trait method a call arrived through.
+    struct Recording;
+
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+    impl crate::timer::Timer for Recording {
+        fn schedule(&self, _: &str, _: &str, _: &str) -> Result<crate::timer::TimerHandle> {
+            SEEN.lock().unwrap().push("schedule");
+            Ok(crate::timer::TimerHandle("h".into()))
+        }
+        fn schedule_delivery(&self, _: &str, _: &str) -> Result<crate::timer::TimerHandle> {
+            SEEN.lock().unwrap().push("delivery");
+            Ok(crate::timer::TimerHandle("h".into()))
+        }
+        fn schedule_resume(&self, _: &str, _: &str) -> Result<crate::timer::TimerHandle> {
+            SEEN.lock().unwrap().push("resume");
+            Ok(crate::timer::TimerHandle("h".into()))
+        }
+        fn cancel(&self, _: &crate::timer::TimerHandle) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_cli_timer_hands_a_delivery_and_a_resume_to_the_backend_as_what_they_are() {
+        // The trait's defaults turn both into a plain `schedule` keyed on a session id, which the
+        // service backend books as a tick on a thread that does not exist. The wrapper the CLI runs
+        // every verb with must reach the backend's OWN method, or no held answer is ever delivered.
+        use crate::timer::Timer as _;
+        let timer = super::LazyTimer {
+            resolve: || Ok(std::sync::Arc::new(Recording)),
+        };
+        timer
+            .schedule_delivery("m-session", "2026-10-03T00:00:00Z")
+            .unwrap();
+        timer
+            .schedule_resume("m-session", "2026-10-03T00:00:00Z")
+            .unwrap();
+        assert_eq!(*SEEN.lock().unwrap(), vec!["delivery", "resume"]);
+    }
+
     use super::*;
 
     /// An anchor as the engine records one — full sha, a real branch, and a fingerprint.

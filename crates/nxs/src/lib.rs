@@ -39,6 +39,7 @@ pub mod machines;
 pub mod mcp;
 pub mod migrate;
 pub mod migrate_beads;
+pub mod peers;
 pub mod prime;
 pub mod selfheal;
 pub mod setup;

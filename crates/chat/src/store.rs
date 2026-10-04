@@ -704,6 +704,23 @@ pub struct ChatStore {
     inner: Substrate,
 }
 
+/// **A thread's parent, unless the thread came in across the border** (nxf 6j6v.4gp2) — the
+/// `threads.parent` column as the tree walks read it.
+///
+/// A border commission is opened in the CALLER's workspace under the thread the caller stands in,
+/// and its root op carries that parent. Copied into the receiver's log, the parent names a thread
+/// the receiver does not hold and never will — only the border thread crosses — so a walk would end
+/// at a root that does not exist, and the receiver's whole operation would hang under a phantom.
+/// For the receiver the border thread IS the root of what it does about the commission; this is
+/// where that is said, once, for the two reads every walk to a root goes through —
+/// [`thread_parent`](ChatStore::thread_parent) and [`thread_edges`](ChatStore::thread_edges).
+/// Three reads still see the raw column, and none of them walks up: the "parent moved on" check
+/// (it asks about messages in a parent this workspace does not hold, and finds none), the children
+/// of a given thread (nobody asks for the children of a thread that is not here), and the reducer
+/// that stores the edge as the signed op carries it.
+const PARENT_WITHIN_THE_BORDER: &str = "CASE WHEN EXISTS(SELECT 1 FROM border_threads b \
+     WHERE b.thread_id = threads.thread_id AND b.direction = 'in') THEN NULL ELSE parent END";
+
 impl ChatStore {
     pub fn open_in_memory(site: i64) -> ChatStore {
         let mut inner = Substrate::open_in_memory(site);
@@ -749,6 +766,18 @@ impl ChatStore {
     }
     pub fn apply(&mut self, ops: &[Op]) -> Vec<Op> {
         self.inner.apply(ops)
+    }
+    /// The ops with these ids, in log order (nxf 6j6v.4gp2 — what a border thread copies).
+    pub fn ops_with_ids(&self, ids: &[String]) -> Vec<Op> {
+        self.inner.ops_with_ids(ids)
+    }
+    /// Whether this log holds the op `op_id`.
+    pub fn holds_op(&self, op_id: &str) -> bool {
+        self.inner.holds_op(op_id)
+    }
+    /// Whether `key_id` is on this replica's trust list (its own key always is).
+    pub fn is_trusted(&self, key_id: &str) -> bool {
+        self.inner.trusted_keys().iter().any(|k| k.key_id == key_id)
     }
     pub fn refold(&mut self) {
         self.inner.refold();
@@ -1391,8 +1420,10 @@ impl ChatStore {
         &self,
     ) -> crate::error::Result<Vec<(String, Option<String>, Option<String>)>> {
         let conn = self.inner.connection();
-        let mut st =
-            conn.prepare("SELECT thread_id, parent, channel_id FROM threads ORDER BY thread_id")?;
+        let mut st = conn.prepare(&format!(
+            "SELECT thread_id, {}, channel_id FROM threads ORDER BY thread_id",
+            PARENT_WITHIN_THE_BORDER
+        ))?;
         let rows = st
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1503,7 +1534,9 @@ impl ChatStore {
     /// `threads_tree` covering index. A db error → `io`.
     pub fn thread_parent(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
         let conn = self.inner.connection();
-        let mut st = conn.prepare("SELECT parent FROM threads WHERE thread_id = ?1")?;
+        let mut st = conn.prepare(&format!(
+            "SELECT {PARENT_WITHIN_THE_BORDER} FROM threads WHERE thread_id = ?1"
+        ))?;
         let mut rows = st.query([thread_id])?;
         match rows.next()? {
             Some(row) => Ok(row.get(0)?),
@@ -2758,6 +2791,10 @@ pub(crate) mod tests {
             "withdrawn_holders",
             "withdrawn_sessions",
             "session_interruption",
+            // The border record (nxf 6j6v.4gp2): where the other half of a conversation lives on
+            // THIS machine, and what of it was handed to this side's party.
+            "border_threads",
+            "border_served",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store

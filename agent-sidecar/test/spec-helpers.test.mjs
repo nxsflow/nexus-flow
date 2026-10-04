@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   resolveToolsOption,
   resolveAllowedTools,
+  toolOfRule,
   resolveModelOption,
   isSubcommandNotImplementedYet,
   isFlagNotImplementedYet,
@@ -96,6 +97,39 @@ test("resolveToolsOption", async (t) => {
   await t.test("an older engine sends no grant at all", () => {
     assert.deepEqual(resolveToolsOption(["Read"], undefined), ["Read"]);
   });
+
+  // ---- a scoped grant (nxf 6j6v.ewbj) ----------------------------------------------------------
+
+  await t.test("a zero-tools role granted the reply rule gets the shell TOOL in its base set", () => {
+    // The base set takes tool names; the rule goes to the approval list (below). Without the tool
+    // in the base set the rule approves a tool the session does not have.
+    assert.deepEqual(resolveToolsOption([], ["Bash(nxc reply:*)"]), ["Bash"]);
+  });
+
+  await t.test("a declared rule contributes its tool, once", () => {
+    assert.deepEqual(resolveToolsOption(["Bash(nxc reply:*)"], undefined), ["Bash"]);
+    assert.deepEqual(resolveToolsOption(["Read", "Bash(nxc reply:*)"], ["Bash(nxc reply:*)"]), [
+      "Read",
+      "Bash",
+    ]);
+    assert.deepEqual(resolveToolsOption(["Bash", "Read"], ["Bash(nxc reply:*)"]), ["Bash", "Read"]);
+  });
+});
+
+test("toolOfRule", async (t) => {
+  await t.test("a plain tool name is itself", () => {
+    assert.equal(toolOfRule("Bash"), "Bash");
+    assert.equal(toolOfRule("Read"), "Read");
+  });
+
+  await t.test("a scoped rule names the tool before the parenthesis", () => {
+    assert.equal(toolOfRule("Bash(nxc reply:*)"), "Bash");
+  });
+
+  await t.test("something that only looks scoped is left alone", () => {
+    assert.equal(toolOfRule("(nxc)"), "(nxc)");
+    assert.equal(toolOfRule("Bash(unclosed"), "Bash(unclosed");
+  });
 });
 
 test("resolveAllowedTools", async (t) => {
@@ -122,6 +156,13 @@ test("resolveAllowedTools", async (t) => {
   await t.test("declaration and grant are unioned, declaration first, no duplicates", () => {
     assert.deepEqual(resolveAllowedTools(["Read"], ["Bash"]), ["Read", "Bash"]);
     assert.deepEqual(resolveAllowedTools(["Bash"], ["Bash"]), ["Bash"]);
+  });
+
+  await t.test("a scoped grant is approved as the RULE, never widened to the tool", () => {
+    // THE hole nxf 6j6v.ewbj closes: the grant used to be the bare `Bash`, and a `tools: []` role
+    // that owed a reply held an auto-approved shell.
+    assert.deepEqual(resolveAllowedTools([], ["Bash(nxc reply:*)"]), ["Bash(nxc reply:*)"]);
+    assert.ok(!resolveAllowedTools([], ["Bash(nxc reply:*)"]).includes("Bash"));
   });
 
   await t.test("a malformed grant cannot inject a non-string into the list", () => {

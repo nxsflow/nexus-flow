@@ -267,6 +267,11 @@ pub struct SendToReceipt {
     /// receipt of a chat that runs where it was written is byte-identical to before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handed_to: Option<crate::machine::ExecutingMachine>,
+    /// **The commission went to a persona of ANOTHER workspace** (nxf 6j6v.4gp2) — which one, and
+    /// where the border thread stands now: `working` once that workspace took it in, `rejected`
+    /// with the reason when it refused. Absent for every send inside this workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<crate::border::BorderReceipt>,
     /// Best-effort steps that did NOT happen even though the thread and message above ARE durably
     /// posted (nxf 6j6v.hpv8). Relayed verbatim from [`orchestration::TriggerReceipt::warnings`] on
     /// the persona path — see that field's own doc for the failure this closes (a summon that fails
@@ -332,7 +337,7 @@ pub struct SendToReceipt {
 /// the coordinator can resume, and a second answer here could disagree with the refusal a line
 /// away. A process that simply never registers is "a human" to this check, exactly as it is there —
 /// and lands on the advice that works for anybody, which is the benign direction.
-fn caller_identity(ctx: &Ctx, store: &ChatStore) -> Result<crate::persona::Identity> {
+pub(crate) fn caller_identity(ctx: &Ctx, store: &ChatStore) -> Result<crate::persona::Identity> {
     crate::persona::resolve_identity(store, ctx.defs.roles(), None, ctx.session)
 }
 
@@ -373,7 +378,10 @@ fn refusal(decl: &crate::role::RoleDecl, caller: &crate::persona::Identity, ctx:
         // A whitelist refused THIS caller. Naming the caller's own class is what makes the refusal
         // actionable rather than merely true: "a persona may not" is the thing to change a
         // declaration over, and it is invisible from the outside.
-        Addressable::Only { personas, humans } => {
+        Addressable::Only { personas, humans }
+        | Addressable::OnlyWithExternal {
+            personas, humans, ..
+        } => {
             let who = match (personas.as_slice(), humans) {
                 ([], true) => "only the human at the terminal may".to_string(),
                 // An empty whitelist admits nobody — the same answer as `none`, reached through
@@ -459,6 +467,54 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     let identity = caller_identity(ctx, store)?;
     let persona = identity.persona().is_some();
 
+    // (0) An address in ANOTHER workspace on this machine (nxf 6j6v.4gp2): `<owner>/<repo>/<persona>`.
+    // Its own workspace's name is just a longer way to write the bare handle, and falls through.
+    if let Some(address) = crate::border::parse_address(req.to) {
+        let own_name = ctx.peers.and_then(|p| p.here(ctx.db_path).ok().flatten());
+        if own_name.as_deref() == Some(address.workspace) {
+            return send_to(
+                ctx,
+                store,
+                SendToRequest {
+                    to: address.persona,
+                    body: req.body,
+                    refs: SendToRefs::Declared(refs),
+                    machine: req.machine,
+                },
+            )
+            .map(|mut r| {
+                r.refs_warning = refs_warning.or(r.refs_warning);
+                r
+            });
+        }
+        if req.machine.is_some() {
+            return Err(NxfError::validation(format!(
+                "{} is a persona of another workspace, which runs where that workspace is — \
+                 --machine names the machine of a chat in this one",
+                req.to
+            )));
+        }
+        let c = crate::border::commission(ctx, store, address, req.body, refs)?;
+        return Ok(SendToReceipt {
+            thread_id: c.thread_id.clone(),
+            message_id: c.message_id,
+            to: req.to.to_string(),
+            target: TargetKind::Persona,
+            channel: c.channel,
+            session: None,
+            queued_behind: None,
+            queue_position: None,
+            expects: vec![c.expects],
+            deadline: None,
+            spawned: false,
+            handed_to: None,
+            border: Some(c.border),
+            warnings: Vec::new(),
+            refs_warning,
+            await_: Await::for_caller(persona, &c.thread_id, None),
+        });
+    }
+
     // (1) A declared channel: hand the whole thing to the existing verb.
     if ctx.defs.declared_channel(req.to)?.is_some() {
         // A channel runs where it is started (nxf 6j6v.1c6k, spec §2.1): its supervisor's state is
@@ -493,6 +549,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
         let thread_id = receipt.board.thread_id;
         return Ok(SendToReceipt {
             handed_to: None,
+            border: None,
             thread_id: thread_id.clone(),
             message_id: receipt.board.message_id,
             to: req.to.to_string(),
@@ -631,6 +688,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
         let expects = quorum.map(|q| q.expects).unwrap_or_default();
         return Ok(SendToReceipt {
             handed_to: receipt.handed_to,
+            border: None,
             thread_id: thread_id.clone(),
             message_id: receipt.message_id,
             to: req.to.to_string(),
@@ -1505,6 +1563,7 @@ fn reply_in_thread_inner(
     // and all. This fallback would be a second route around both: it resumed the persona's session
     // on THIS machine after a hand-over, and could deliver a message a pickup had already delivered.
     let routed_by_its_machine = receipt.handed_to.is_some()
+        || receipt.border.is_some()
         || orchestration::persona_chat(ctx, store, req.thread)?
             .is_some_and(|chat| chat.machine.is_some_and(|m| m.acts) && chat.persona != caller);
     if receipt.posted

@@ -132,6 +132,67 @@ pub fn add_verb(
     Ok(())
 }
 
+/// `nxs sync trust add --workspace <owner>/<repo>` (nxf 6j6v.t5xb) — trust a neighbouring workspace
+/// of this machine by name: its key is read out of its own store, found through the service
+/// registry, and put on this workspace's trust list under that name. The comparison out of band
+/// that `add <key-id>` asks for is unnecessary here: both stores are on this machine, and the
+/// registry is the owner's own.
+pub fn add_workspace_verb(json: bool, ws: &Workspace, name: &str, now: &str) -> Result<()> {
+    use nexus_chat::border::Peers as _;
+    let found = crate::peers::SERVICE_PEERS
+        .find(name)
+        .map_err(NxfError::io)?;
+    let peer = match found.as_slice() {
+        [] => {
+            return Err(NxfError::not_found(format!(
+                "no workspace named {name} is registered with the background service on this \
+                 machine — `nxs name` in its directory prints its name, and `nxs init` there \
+                 registers it"
+            )))
+        }
+        [one] => one.clone(),
+        many => {
+            return Err(NxfError::validation(format!(
+                "{} workspaces on this machine are named {name}: {} — rename one with \
+                 `nxs name <owner>/<repo>` in its directory",
+                many.len(),
+                many.iter()
+                    .map(|p| p.root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
+    };
+    let peer_ws = nxs_foundation::workspace::discover(&peer.root)?;
+    if peer_ws.dir == ws.dir {
+        return Err(NxfError::validation(format!(
+            "{name} is this workspace — its own key is trusted already"
+        )));
+    }
+    let key_id = open(&peer_ws)?.key_id().to_string();
+    let mut store = open(ws)?;
+    let added = store.trust_key(&key_id, name, now)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "workspace": name,
+                "key_id": key_id,
+                "added": added,
+            })
+        );
+    } else if added {
+        println!(
+            "trusted {name} ({key_id}) — a persona there may now commission the personas here that \
+             admit it, and its answers may wake one here"
+        );
+    } else {
+        println!("{name} ({key_id}) was already trusted");
+    }
+    Ok(())
+}
+
 /// `nxs sync trust remove <key-id>` — revocation, effective at once.
 pub fn remove_verb(json: bool, ws: &Workspace, key_id: &str) -> Result<()> {
     let mut store = open(ws)?;

@@ -172,10 +172,12 @@ non-agentic role. Write a list and it gets exactly that list. An omitted key and
 A persona that will run `nxc` at all needs `Bash`, since that is how it answers — and where the
 engine *orders* an answer, it grants that itself. Every commission tells the persona, in its own
 system prompt, to end its turn with `nxc reply --thread <id>`, so whoever imposes that obligation has
-to make sure it can be carried out: the trigger adds `Bash` to what the session may run, on top of
-whatever you declared, without narrowing the toolset an omitted `tools:` gives it. You still declare
-`Bash` for a persona that needs the shell for its *work*; what you no longer have to remember is that
-answering is itself work.
+to make sure it can be carried out. What the trigger adds depends on what you declared, and never
+narrows it: a persona that omits `tools:` gets `Bash`, as it always did; a persona that declares a
+list without `Bash` — `tools: []` included — gets `Bash(nxc reply:*)`, which runs its reply and no
+other command; a persona that lists `Bash` gets nothing more. You still declare `Bash` for a persona
+that needs the shell for its *work*; what you no longer have to remember is that answering is itself
+work. `limits-and-safety` says exactly what the narrow grant lets through.
 
 ## Who may address it
 
@@ -228,6 +230,56 @@ A persona the reader may not address directly is not an entry of its own — the
 it is. That is usually what you want: if the way to reach four reviewers is to address the round
 they are in, listing them individually invites exactly the call you do not want. The rendering
 follows the *reader*, so the same declaration can show a persona to you and hide it from an agent.
+
+### From another workspace
+
+A persona of ANOTHER workspace on the same machine can commission this one, if the declaration says
+so. Its address from outside is the workspace's name and the persona's handle:
+`nxc send --to nxsflow/nexus-flow/pm`. A workspace's name is `<owner>/<repo>`; `nxs name` prints it
+(derived from the git origin and stored on first use) and `nxs name <owner>/<repo>` sets it where
+there is no origin. Inside a workspace nothing changes: `pm` stays `pm`.
+
+```yaml
+addressable:
+  humans: true
+  external:
+    - "*/pm"                     # the PM of every workspace this one trusts
+    - nxsflow/manufakt-io/pm     # or exactly this one
+```
+
+- **No `external`, no way in from outside** — under every form, `general` included: "anyone" means
+  anyone in this workspace. A bare handle in `personas:` means this workspace's persona of that name
+  and never admits a foreign one: `personas: [pm]` does not let another workspace's `pm` in.
+- **Two checks, both required.** The caller's workspace is on this workspace's trust list, AND its
+  role is listed in `external`. Trust a neighbour by name with
+  `nxs sync trust add --workspace <owner>/<repo>` — **in both workspaces**: the answer comes back
+  signed by the receiver's key, and an answer from a workspace the caller does not trust wakes
+  nobody, so `send` refuses up front until it is trusted.
+- **The role is stamped by the caller's coordinator**, from the session it started — never by the
+  agent. A person does not come in from outside: they go to that workspace and write there.
+- **A refusal says why**, in the caller's answer: *workspace unknown*, *not on this machine*, *not
+  trusted*, *role not admitted*, *no such persona*, or *depth limit reached*.
+
+What happens then is a consultation with one handover in the middle. The caller's commission is a
+thread in its own log, and only that thread crosses: the receiver starts its persona in ITS working
+copy, with ITS board and memory, and whatever that persona commissions to answer stays in its own
+workspace. A question (`--escalate`) goes back to the commissioner — never past it to the other
+workspace's owner — and the commissioner's answer on the same thread resumes the persona. The depth
+cap holds for the whole chain across both workspaces. `nxc status` shows the thread in both
+workspaces with the other side and one of four states: `submitted`, `working`, `input-required`,
+`completed` (or `rejected` / `canceled`). Two hours without a sign of life — no message on the
+thread, nothing in the receiving persona's transcript — cancel it and wake the commissioner with
+the reason; `nxc withdraw` on the operation takes it back in the other workspace too.
+
+`send` and `reply` carry a border thread across at once, so delivery does not need the background
+service; the service's pass carries the rest. One case does need it, as it does inside a workspace:
+an answer that arrives while its commissioner is still finishing its turn is held, and handed over
+by the service when that turn ends.
+
+**Rolling it out.** `addressable`'s mapping refuses keys it does not know — that is what catches a
+typo like `persona:` — so an engine older than `external` cannot load a persona file that carries
+it. Add `external:` only to a repository whose every reader, apps that pin an engine included, runs
+a version that knows it.
 
 ## Who it may address
 

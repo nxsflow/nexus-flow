@@ -919,6 +919,28 @@ const SURFACE: &[Member] = &[
               sessions itself and syncs on its own has no such pass to ride on.",
     },
     Member {
+        name: "handover",
+        kind: Handle,
+        records: Recorded::ReadBy {
+            fact: "that a border thread was carried across — the other workspace's messages on it \
+                   taken in, a commission from there admitted or refused, the persona started for \
+                   it, the caller woken with an answer",
+            by: &["status", "thread"],
+        },
+        causes: Causes::OnlyWhatWasCommissioned {
+            starts: "the persona a commission from another workspace on this machine addressed, \
+                     once it passes this workspace's access check, or the session that commissioned \
+                     across the border, with the answer — never anything of its own",
+            commissioned_by: "send_to",
+        },
+        why: "THE BORDER'S HAND (nxf 6j6v.4gp2). A conversation between two workspaces on one \
+              machine is one thread in two logs, and this is what carries it: it copies the thread \
+              both ways and acts on what arrived, in this workspace only. `pick_up`'s line again: \
+              on the command line the background service runs `nxc handover` on its pass and \
+              `send`/`reply` on a border thread run it at once; a host that executes its own \
+              sessions has no such pass to ride on.",
+    },
+    Member {
         name: "machine",
         kind: Handle,
         records: Recorded::Nothing,

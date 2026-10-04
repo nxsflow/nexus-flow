@@ -22,3 +22,4 @@ pub mod text_input;
 pub mod trust;
 pub mod watch;
 pub mod workspace;
+pub mod workspace_name;

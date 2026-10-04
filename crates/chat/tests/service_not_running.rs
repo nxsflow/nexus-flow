@@ -339,6 +339,7 @@ impl Seam {
             project_claude_md: None,
             module_primes: None,
             machines: None,
+            peers: None,
         }
     }
 }

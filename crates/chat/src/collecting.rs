@@ -134,6 +134,18 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// Every thread an answer is held from — what keeps a sub-round "in flight" on the status
+    /// row of the thread that commissioned it until the answer reaches its commissioner
+    /// (nxf 6j6v.4gp2).
+    pub fn threads_holding_wakes(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.connection();
+        let mut st = conn.prepare("SELECT DISTINCT thread_id FROM pending_wakes")?;
+        let rows = st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<String>>>()?;
+        Ok(rows)
+    }
+
     /// Every session with something waiting for it, in a deterministic order — what the periodic
     /// sweep walks when a caller died without announcing its end.
     pub fn sessions_holding_wakes(&self) -> Result<Vec<String>> {

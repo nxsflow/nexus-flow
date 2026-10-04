@@ -35,6 +35,7 @@ pub mod anchor;
 /// hand back, and the human lines that say the same thing. Not CLI-gated: the block is a receipt
 /// field an embedding app reads exactly as `nxc --json` does.
 pub mod awaiting;
+pub mod border;
 pub mod channel;
 /// **The persona coordinator's pending queue** (nxf 6j6v.gn8b): the durable hold that turns "your
 /// caller is busy, so nobody was woken" into "your caller is resumed with this, and with everything
