@@ -65,13 +65,12 @@ wird, statt einer Umgebungsvariablen — das ist ein Zugriffsentwurf, nicht dies
 
 **Über die Grenze eines Arbeitsbereichs gilt das Wort des Aufrufers.** Ein Auftrag aus einem anderen
 Arbeitsbereich auf dieser Maschine trägt seine Tiefe im signierten Stempel, den dessen Koordinator
-geschrieben hat, und der Empfänger rechnet von dieser Zahl weiter: Er kann sie nicht gegen eine Kette
-prüfen, die im Log des anderen Arbeitsbereichs liegt. Ein vertrauter Arbeitsbereich, der jeden Auftrag
-mit Tiefe 0 stempelt, hebelt die Grenze zwischen beiden aus. Das liegt innerhalb dessen, was Vertrauen
-in einen Arbeitsbereich heißt — seinem Koordinator wird geglaubt, wer fragt, in welcher Rolle und wie
-tief —, also ist `nxs sync trust add --workspace` für Arbeitsbereiche, deren Koordinator Sie selbst
-laufen ließen.
-
+geschrieben hat, und der Empfänger rechnet von dieser Zahl weiter: Er kann sie nicht gegen eine
+Kette prüfen, die im Log des anderen Arbeitsbereichs liegt. Ein vertrauter Arbeitsbereich, der jeden
+Auftrag mit Tiefe 0 stempelt, hebelt die Grenze zwischen beiden aus. Das liegt innerhalb dessen, was
+Vertrauen in einen Arbeitsbereich heißt — seinem Koordinator wird geglaubt, wer fragt, in welcher
+Rolle und wie tief —, also ist `nxs sync trust add --workspace` für Arbeitsbereiche, deren
+Koordinator Sie selbst laufen ließen.
 ## Das menschliche Tor
 
 **Kein Mensch steht mitten im Ablauf.** Ein Mensch eröffnet einen Vorgang und ein Mensch liest sein

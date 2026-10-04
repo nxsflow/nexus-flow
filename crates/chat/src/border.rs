@@ -1310,9 +1310,14 @@ fn act_outbound(
 }
 
 /// Whether the receiver's NEWEST message on a border thread is one this workspace cannot vouch for
-/// — present in the log, absent from what may act. On a border thread the signature was verified
-/// when the message was copied in, so the only way to fall out of `acting` is a signer this
-/// workspace does not trust (any more).
+/// and has not handed on — present in the log, absent from what may act, and not served to the
+/// commissioner. On a border thread the signature was verified when the message was copied in, so
+/// the only way to fall out of `acting` is a signer this workspace does not trust (any more).
+///
+/// **Not served, and that is the point** (review of PR #17, Integrity #7): revoking trust also
+/// takes a message that was vouched for and already DELIVERED out of `acting` — a question the
+/// commissioner has been woken with and is answering. That is not an answer that arrived from an
+/// untrusted workspace; cancelling on it would be irreversible and say the wrong thing.
 fn answered_unvouched(
     store: &ChatStore,
     thread: &str,
@@ -1324,7 +1329,13 @@ fn answered_unvouched(
         .into_iter()
         .rev()
         .find(|m| m.sender == worker);
-    Ok(newest.is_some_and(|m| !acting.iter().any(|a| a.message_id == m.message_id)))
+    let Some(newest) = newest else {
+        return Ok(false);
+    };
+    if acting.iter().any(|a| a.message_id == newest.message_id) {
+        return Ok(false);
+    }
+    Ok(!is_served(store, thread, &newest.message_id)?)
 }
 
 /// **Whether a working border thread has been quiet past its deadline** — [`DEADLINE_HOURS`] since

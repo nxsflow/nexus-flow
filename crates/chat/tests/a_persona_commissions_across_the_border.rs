@@ -870,11 +870,7 @@ fn an_answer_from_a_workspace_no_longer_trusted_cancels_it_with_that_reason() {
     let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
 
     // The owner of alpha stops trusting beta while the thread is open.
-    {
-        let ws = nxs_foundation::workspace::discover(&a.root).unwrap();
-        let mut store = ws.open_chat_store().unwrap();
-        assert!(store.distrust_key(&key_of(&b.root)).unwrap());
-    }
+    distrust(&a.root, &b.root);
     b.reply(&beta_pm, &receipt.thread_id, "With version 0.300.", false);
 
     let out = a.border_rows();
@@ -902,6 +898,61 @@ fn an_answer_from_a_workspace_no_longer_trusted_cancels_it_with_that_reason() {
     // The commissioner is no longer waiting on it.
     let row = status_row(&a, &receipt.thread_id);
     assert!(row.outstanding.is_empty(), "{row:?}");
+}
+
+fn distrust(root: &Path, other: &Path) {
+    let ws = nxs_foundation::workspace::discover(root).unwrap();
+    let mut store = ws.open_chat_store().unwrap();
+    assert!(store.distrust_key(&key_of(other)).unwrap());
+}
+
+/// The negative control of the one above: revoking trust is not itself a reason to cancel. With
+/// nothing back from the receiver yet, the thread keeps waiting (its deadline still applies).
+#[test]
+fn revoking_trust_before_any_answer_leaves_the_commission_working() {
+    let tmp = TempDir::new().unwrap();
+    let (a, _b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    distrust(&a.root, &tmp.path().join("beta"));
+    a.engine
+        .handover(Caller {
+            session: None,
+            actor: Some("handover"),
+            now: Some(NOW),
+        })
+        .unwrap();
+    assert_eq!(a.border_rows()[0].state, BorderState::Working);
+}
+
+/// The second control (review of PR #17, Integrity #7): a question that was vouched for and
+/// DELIVERED before trust was revoked is not "an answer from an untrusted workspace" — the
+/// commissioner has it and is working on it. Revoking afterwards must not cancel on it.
+#[test]
+fn a_question_delivered_before_trust_was_revoked_does_not_cancel_the_commission() {
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    let receipt = a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
+    b.reply(&beta_pm, &receipt.thread_id, "Which version line?", true);
+    let woken = w.worker.of(&a, "pm").last().unwrap().clone();
+    assert!(
+        woken.message.contains("Which version line?"),
+        "{}",
+        woken.message
+    );
+
+    distrust(&a.root, &b.root);
+    a.engine
+        .handover(Caller {
+            session: None,
+            actor: Some("handover"),
+            now: Some(NOW),
+        })
+        .unwrap();
+    let out = a.border_rows();
+    assert_ne!(out[0].state, BorderState::Canceled, "{out:?}");
 }
 
 // ---- an answer for a commissioner still in its turn ------------------------------------------

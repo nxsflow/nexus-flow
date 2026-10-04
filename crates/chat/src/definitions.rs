@@ -153,15 +153,84 @@ impl DeclarationOrigin {
 /// The USER-LEVEL declaration folder this process reads beside every workspace's own (nxf
 /// 6j6v.7k58): `<service home>/personas` — `~/.nexusflow/personas` for the installed suite and for
 /// an embedding app, `~/.nexusflow-<qualifier>/personas` for a development build named so by
-/// `NXS_SERVICE_INSTANCE` ([`nxs_service::ServiceHome::personas`]).
+/// `NXS_SERVICE_INSTANCE` ([`nxs_service::ServiceHome::personas`]). `None` when there is none to
+/// read — never an error.
 ///
 /// **One rule, the service's, and no knob.** An embedding app does not choose this location, and
 /// must not be able to: the personas it starts run the `nxc` CLI, which resolves the folder by this
 /// same rule, and an app reading a folder of its own would disagree with the very sessions it
-/// spawned about who exists. Following the service home is also what keeps a build under test off
-/// the personas the machine's installed suite runs with.
-pub fn user_declarations_dir() -> Result<PathBuf> {
-    Ok(nxs_service::ServiceHome::resolve()?.personas())
+/// spawned about who exists.
+///
+/// **A build never reads the production folder** (review of PR #17, Code Quality #2 / Integrity
+/// #3). The service rule sends a build that names no instance to the production home, which is
+/// right for a registry nobody fills by hand and wrong here: a test binary is such a build, and
+/// `cargo test` run outside `direnv` — CI, another shell — would read the owner's real personas
+/// into every suite that resolves a catalogue. So a binary inside a build directory reads a
+/// user-level folder only under a NAMED development instance (`~/.nexusflow-<qualifier>/personas`),
+/// and the installed suite — the one thing that has a production folder to read — is untouched. A
+/// suite that tests this folder pins the home and then names a development instance.
+///
+/// **The environment cannot fail a catalogue** (review of PR #17, Code Quality #3 / Integrity #4).
+/// No home directory, or an instance name that does not validate, means no user-level folder — the
+/// state of every machine before this folder existed — rather than an error on every read.
+pub fn user_declarations_dir() -> Option<PathBuf> {
+    let instance = nxs_service::Instance::ambient().ok()?;
+    if instance.is_production() && nxs_service::Origin::ambient() == nxs_service::Origin::Build {
+        return None;
+    }
+    nxs_service::ServiceHome::for_instance(instance)
+        .ok()
+        .map(|home| home.personas())
+}
+
+/// The declared CHANNELS of a workspace, merged with the user-level ones — the read for a verb that
+/// needs only the channel policy (`threads show`, `search`, `Engine::thread`, `Engine::search`), so
+/// that it depends on the two `channels.yaml` files and not on every persona file besides (review
+/// of PR #17, Code Quality #1: a malformed persona file anywhere must not make a thread unreadable).
+/// Same rule as [`Definitions::resolve`]: a workspace channel hides the user-level one of its name.
+pub fn merged_channels(root: &Path) -> Result<Vec<ChannelDecl>> {
+    merged_channels_with_user_dir(root, user_declarations_dir().as_deref())
+}
+
+/// [`merged_channels`] against a NAMED user-level folder, or none — the test form, as
+/// [`Definitions::resolve_with_user_dir`] is for the whole catalogue.
+pub fn merged_channels_with_user_dir(
+    root: &Path,
+    user_dir: Option<&Path>,
+) -> Result<Vec<ChannelDecl>> {
+    let source = DeclarationSource::locate(root);
+    let mut channels = crate::channel::load_all_channels(&source.read_dir)?;
+    reject_duplicates_in(&source.read_dir, &[], &channels)?;
+    if let Some(user_dir) = user_folder_carrying_declarations(user_dir)? {
+        let user_channels = crate::channel::load_all_channels(&user_dir)?;
+        reject_duplicates_in(&user_dir, &[], &user_channels)?;
+        for channel in user_channels {
+            if !channels.iter().any(|c| c.name == channel.name) {
+                channels.push(channel);
+            }
+        }
+    }
+    Ok(channels)
+}
+
+/// `dir` when it carries a declaration, `None` when it does not exist or carries none — and an
+/// ERROR when it exists but cannot be read (review of PR #17, Integrity #5): an unreadable
+/// user-level folder would otherwise make its personas vanish from every workspace without a word,
+/// which is the fail-open the rest of this module refuses.
+fn user_folder_carrying_declarations(dir: Option<&Path>) -> Result<Option<PathBuf>> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        return Ok(None);
+    }
+    std::fs::read_dir(dir).map_err(|e| {
+        NxfError::io(format!(
+            "reading the user-level declaration folder {}: {e}",
+            dir.display()
+        ))
+    })?;
+    Ok(carries_declarations(dir).then(|| dir.to_path_buf()))
 }
 
 /// The three answers to "where did this catalogue come from".
@@ -552,7 +621,7 @@ impl Definitions {
     /// 2026-08-14; pinned on the app side by `engine-bridge/src/chat.rs` and
     /// `engine-server/tests/chat_wire.rs`).
     pub fn resolve(root: &Path) -> Result<Definitions> {
-        Definitions::resolve_with_user_dir(root, Some(&user_declarations_dir()?))
+        Definitions::resolve_with_user_dir(root, user_declarations_dir().as_deref())
     }
 
     /// [`resolve`](Definitions::resolve) against a NAMED user-level folder, or none — the form for
@@ -561,9 +630,7 @@ impl Definitions {
     /// no seam lets an app pick another.
     pub fn resolve_with_user_dir(root: &Path, user_dir: Option<&Path>) -> Result<Definitions> {
         let mut source = DeclarationSource::locate(root);
-        source.user_path = user_dir
-            .filter(|dir| carries_declarations(dir))
-            .map(Path::to_path_buf);
+        source.user_path = user_folder_carrying_declarations(user_dir)?;
         Definitions::load(source)
     }
 

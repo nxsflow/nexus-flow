@@ -14,6 +14,9 @@ use nxs_test_support::PinHome;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The development instance these tests run under — named so a build reads a user-level folder.
+const INSTANCE: &str = "nexus-flow-two-workspaces";
+
 struct Machine {
     home: TempDir,
     _dirs: TempDir,
@@ -22,9 +25,9 @@ struct Machine {
 }
 
 impl Machine {
-    /// The user-level declaration folder of the pinned home's (production) service instance.
+    /// The user-level declaration folder of the test's service instance under the pinned home.
     fn user_personas(&self) -> PathBuf {
-        self.home.path().join(".nexusflow/personas")
+        self.home.path().join(".nexusflow-two-workspaces/personas")
     }
 
     fn dry_log(&self) -> PathBuf {
@@ -40,6 +43,9 @@ impl Machine {
         let mut c = Command::new(assert_cmd::cargo::cargo_bin("nxs"));
         c.current_dir(dir)
             .pin_home(self.home.path())
+            // After the home, as the pinning rule asks: a build reads a user-level declaration
+            // folder only under a NAMED development instance (nxf 6j6v.7k58), so the test names one.
+            .env("NXS_SERVICE_INSTANCE", INSTANCE)
             .env("NXC_WORKER", "dry")
             .env("NXC_DRY_LOG", self.dry_log())
             .env("NXC_TIMER", "dry")
@@ -104,8 +110,7 @@ fn machine() -> Machine {
         assert!(ok, "init: {err}");
     }
     // ONE pm for both repositories, from the user-level folder (nxf 6j6v.7k58): neither repository
-    // declares it. The pinned home is the production instance's, so the folder is
-    // `<home>/.nexusflow/personas`.
+    // declares it. The folder is the test instance's, `<home>/.nexusflow-two-workspaces/personas`.
     std::fs::create_dir_all(m.user_personas()).unwrap();
     std::fs::write(
         m.user_personas().join("pm.yaml"),
@@ -323,6 +328,57 @@ fn both_repositories_run_the_user_level_pm_and_a_repository_file_hides_it_out_lo
     // Alpha is untouched by beta's copy.
     let list = m.json(&m.alpha, &["chat", "--json", "list"]);
     assert!(list["declarations"].get("shadowed").is_none(), "{list}");
+}
+
+/// A user-level `external` does not open every repository on the machine (review of PR #17,
+/// Integrity #2): admission also needs the RECEIVING repository to trust the caller's workspace by
+/// name, and that trust is per repository. Here beta runs the user-level pm, which admits `*/pm`
+/// from outside, but beta trusts nobody — so alpha's pm is refused, "not trusted", and nothing
+/// starts in beta.
+#[test]
+fn a_user_level_external_admits_nobody_into_a_repository_that_trusts_nobody() {
+    let m = machine();
+    let (ok, _, err) = m.run(
+        &m.alpha,
+        &["sync", "trust", "add", "--workspace", "test/beta"],
+    );
+    assert!(ok, "{err}");
+    let first = m.json(
+        &m.alpha,
+        &[
+            "chat",
+            "--json",
+            "send",
+            "--to",
+            "pm",
+            "--no-ref",
+            "Ask test/beta.",
+        ],
+    );
+    let session = first["session"].as_str().expect("a session").to_string();
+    let out = m
+        .nxs(&m.alpha)
+        .env("NXC_SESSION", &session)
+        .args([
+            "chat",
+            "--json",
+            "send",
+            "--to",
+            "test/beta/pm",
+            "--no-ref",
+            "When does it ship?",
+        ])
+        .output()
+        .unwrap();
+    let receipt: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(receipt["border"]["state"], "rejected", "{receipt}");
+    assert_eq!(receipt["border"]["reason"], "not trusted", "{receipt}");
+    assert!(
+        !m.starts().contains("coordinator=border"),
+        "nothing started in beta: {}",
+        m.starts()
+    );
 }
 
 /// **The scenario with real sessions** (nxf 6j6v.70dy, section 1 of the slice's specification) —

@@ -59,13 +59,13 @@ anything to be attributed to. Closing that last gap needs an unforgeable credent
 spawned process rather than an environment variable, which is an access-control design, not this
 guard.
 
-**Across a workspace border it is the caller\'s word.** A commission from another workspace on this
+**Across a workspace border it is the caller's word.** A commission from another workspace on this
 machine carries its depth in the signed stamp its coordinator wrote, and the receiver continues from
-that number: it cannot check it against a chain that lives in the other workspace\'s log. A trusted
+that number: it cannot check it against a chain that lives in the other workspace's log. A trusted
 workspace that stamps depth 0 on every commission defeats the cap between the two. That is inside
 what trusting a workspace means — its coordinator is trusted to say who asks, in which role, and how
-deep — so `nxs sync trust add --workspace` is for workspaces whose coordinator you would run yourself.
-
+deep — so `nxs sync trust add --workspace` is for workspaces whose coordinator you would run
+yourself.
 ## The human gate
 
 **No human stands inside the flow.** A person opens an operation and a person reads its result;

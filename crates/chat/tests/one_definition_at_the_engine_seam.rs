@@ -19,10 +19,38 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
         std::env::set_var(key, value);
     }
     let home = nxs_test_support::pinned_home();
-    // Whichever instance the ambient environment names, the folder is that instance's — resolved
-    // the way production resolves it, not spelled out here.
-    let user = nexus_chat::definitions::user_declarations_dir().unwrap();
+
+    // **The guard** (review of PR #17, Code Quality #2 / Integrity #3): this test binary is a
+    // BUILD, and under the production instance — what `cargo test` outside `direnv` resolves —
+    // a build reads no user-level folder at all, even with personas lying in the production one.
+    let production = home.join(".nexusflow/personas");
+    std::fs::create_dir_all(&production).unwrap();
+    std::fs::write(
+        production.join("intruder.yaml"),
+        "handle: intruder\nsystem_prompt: The owner's real persona.\n",
+    )
+    .unwrap();
+    assert_eq!(nexus_chat::definitions::user_declarations_dir(), None);
+    let repo = TempDir::new().unwrap();
+    nexus_chat::workspace::setup(repo.path(), &nexus_chat::workspace::chat_config()).unwrap();
+    let engine = nexus_chat::engine::Engine::open(None, repo.path()).unwrap();
+    let defs = engine.definitions().unwrap();
+    assert!(
+        defs.role("intruder").is_err(),
+        "a build read the production folder"
+    );
+    assert_eq!(defs.source().unwrap().user_path, None);
+
+    // A NAMED development instance reads its own folder — resolved the way production resolves
+    // it, not spelled out here.
+    std::env::set_var("NXS_SERVICE_INSTANCE", "nexus-flow-test");
+    let user = nexus_chat::definitions::user_declarations_dir().expect("a named instance's folder");
     assert!(user.starts_with(home), "{}", user.display());
+    assert!(
+        user.ends_with(".nexusflow-test/personas"),
+        "{}",
+        user.display()
+    );
     std::fs::create_dir_all(&user).unwrap();
     std::fs::write(
         user.join("pm.yaml"),
@@ -34,10 +62,6 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
         "- name: planning\n  members: [pm]\n",
     )
     .unwrap();
-
-    let repo = TempDir::new().unwrap();
-    nexus_chat::workspace::setup(repo.path(), &nexus_chat::workspace::chat_config()).unwrap();
-    let engine = nexus_chat::engine::Engine::open(None, repo.path()).unwrap();
 
     // `definitions`: the merged catalogue, with its account.
     let defs = engine.definitions().unwrap();

@@ -2282,6 +2282,11 @@ pub struct PrimeRoster {
 ///
 /// It carried a third partition, the DECLARED WORKFLOWS, until 6j6v.dvyq §3 removed the run engine.
 /// A `workflow.yaml` left in the folder is now simply not read by anything.
+///
+/// **ONE folder, and no longer what `prime` partitions** (nxf 6j6v.7k58): since the catalogue is
+/// the workspace's folder merged with the user-level one, `prime` partitions the merged team
+/// through [`validate_declared`]. This stays for a caller that asks about one folder on purpose,
+/// and is kept rather than removed because it is public — `tests/prime_validation.rs` pins it.
 pub fn validate_declared_team(dir: &Path) -> Result<PrimeRoster> {
     let roles = crate::role::load_all_roles(dir)?;
     let channels = crate::channel::load_all_channels(dir)?;
@@ -3066,7 +3071,7 @@ fn render_finding(file: &str, what: &str) -> String {
 /// fan-out. (It replayed the consumer's entire unread set as well — both dispositions, because a new
 /// session was the catch-up moment — until nxf 6j6v.4d2z removed the unread set.)
 ///
-/// Every read goes through this layer's own seams ([`opener_wake`], [`validate_declared_team`]),
+/// Every read goes through this layer's own seams ([`opener_wake`], [`validate_declared`]),
 /// never the store directly: the CLI used to reach past the facade for exactly these, which is why
 /// none of it was reachable from the library. `now` drives only
 /// the wake's clock-dependent `stale` flag; `declarations` is the resolved declaration source (the
@@ -3102,13 +3107,33 @@ pub fn prime_for(
     // is the reducer, which refuses to fold an envelope whose disposition it does not know
     // (`an_unknown_disposition_op_is_stored_but_never_folded`).
     //
-    // The declarations are read a second time here (`validate_declared_team` loads its own copy to
-    // partition them): a handful of small YAML files, once per prime, in exchange for leaving that
-    // function's roster contract — and every caller of it — untouched.
     //
     // Both folders, merged by the one rule (nxf 6j6v.7k58): `from_source` re-reads the workspace's
-    // folder and the user-level one the resolution names.
-    let defs = crate::definitions::Definitions::from_source(declarations)?;
+    // folder and the user-level one the resolution names. A caller that already holds the merged
+    // catalogue hands it to [`prime_with`] instead, so the report and its source come from ONE read.
+    prime_with(
+        store,
+        consumer,
+        persona,
+        now,
+        &crate::definitions::Definitions::from_source(declarations)?,
+    )
+}
+
+/// [`prime_for`] over a catalogue already resolved — `nxc prime` and
+/// [`crate::engine::Engine::prime_as`] resolve once and pass it, so the directory, the roster, the brief and the source the report
+/// carries cannot come from two different reads of a folder that changed in between (review of PR
+/// #17, Code Quality #5).
+pub(crate) fn prime_with(
+    store: &ChatStore,
+    consumer: &str,
+    persona: Option<&str>,
+    now: &str,
+    defs: &crate::definitions::Definitions,
+) -> Result<PrimeReport> {
+    let declarations = defs
+        .source()
+        .expect("a resolved catalogue records its source");
     let (roles, channels) = (defs.roles(), defs.channels());
     let brief = persona
         .and_then(|handle| roles.iter().find(|r| r.handle == handle))

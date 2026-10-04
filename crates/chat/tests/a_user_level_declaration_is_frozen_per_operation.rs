@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use nexus_chat::engine::{Engine, EngineConfig};
 use nexus_chat::orchestration::Caller;
+use nexus_chat::precondition::PreconditionOutcome;
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::TimerConfig;
 use nexus_chat::worker::{TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig};
@@ -19,13 +20,23 @@ use tempfile::TempDir;
 
 const NOW: &str = "2026-10-04T10:00:00Z";
 
+/// Records every start and every hurdle it is asked to run; every hurdle passes.
 #[derive(Default)]
-struct RecordingWorker(Mutex<Vec<TriggerRequest>>);
+struct RecordingWorker(Mutex<Vec<TriggerRequest>>, Mutex<Vec<String>>);
 
 impl Worker for RecordingWorker {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
         self.0.lock().unwrap().push(req);
         Ok(TriggerOutcome::Accepted)
+    }
+
+    fn run_precondition(&self, command: &str) -> PreconditionOutcome {
+        self.1.lock().unwrap().push(command.to_string());
+        PreconditionOutcome::Ran {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
     }
 }
 
@@ -41,6 +52,8 @@ impl RecordingWorker {
     }
 }
 
+/// Both personas AND the channel's hurdle carry the version, so an edit changes a prompt and a
+/// piece of executable text from the user-level folder at once (review of PR #17, Code Quality #6).
 fn declare_version(user: &std::path::Path, version: &str) {
     for handle in ["coder", "finisher"] {
         std::fs::write(
@@ -49,6 +62,14 @@ fn declare_version(user: &std::path::Path, version: &str) {
         )
         .unwrap();
     }
+    std::fs::write(
+        user.join("channels.yaml"),
+        format!(
+            "- name: coding\n  members: [coder, finisher]\n  flow: sequential\n  preconditions:\n    \
+             - name: gate\n      run: hurdle-{version}\n"
+        ),
+    )
+    .unwrap();
 }
 
 fn open(engine: &Engine) -> String {
@@ -78,14 +99,11 @@ fn an_edit_to_the_user_level_folder_reaches_the_next_operation_and_not_the_runni
     for (key, value) in nxs_test_support::pinned_home_env() {
         std::env::set_var(key, value);
     }
-    let user = nexus_chat::definitions::user_declarations_dir().unwrap();
+    // A build reads a user-level folder only under a named development instance.
+    std::env::set_var("NXS_SERVICE_INSTANCE", "nexus-flow-test");
+    let user = nexus_chat::definitions::user_declarations_dir().expect("a named instance's folder");
     std::fs::create_dir_all(&user).unwrap();
     declare_version(&user, "VERSION-ONE");
-    std::fs::write(
-        user.join("channels.yaml"),
-        "- name: coding\n  members: [coder, finisher]\n  flow: sequential\n",
-    )
-    .unwrap();
 
     // A repository that declares nothing of its own.
     let repo = TempDir::new().unwrap();
@@ -138,10 +156,27 @@ fn an_edit_to_the_user_level_folder_reaches_the_next_operation_and_not_the_runni
         finisher[0].contains("VERSION-ONE"),
         "the running operation keeps the version it opened with: {finisher:?}"
     );
+    // …and so does the HURDLE before that step: executable text from the user-level folder is
+    // frozen with the rest.
+    let asked = worker.1.lock().unwrap().clone();
+    assert!(
+        !asked.iter().any(|c| c == "hurdle-VERSION-TWO"),
+        "the edited hurdle reached the running operation: {asked:?}"
+    );
+    assert!(
+        asked.len() >= 2,
+        "the hurdle was asked before each step: {asked:?}"
+    );
+    assert!(asked.iter().all(|c| c == "hurdle-VERSION-ONE"), "{asked:?}");
 
     // The next operation takes the edit.
     open(&engine);
     let coders = worker.prompts_of("coder");
     assert_eq!(coders.len(), 2);
     assert!(coders[1].contains("VERSION-TWO"), "{coders:?}");
+    assert_eq!(
+        worker.1.lock().unwrap().last().map(String::as_str),
+        Some("hurdle-VERSION-TWO"),
+        "the next operation asks the edited hurdle"
+    );
 }

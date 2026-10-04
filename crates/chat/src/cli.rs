@@ -1198,15 +1198,12 @@ fn workspace_root(db: Option<&str>) -> Result<PathBuf> {
         .to_path_buf())
 }
 
-/// The declared channels this invocation resolves through — the MERGED catalogue's (nxf 6j6v.7k58),
-/// so a channel that arrives from the user-level folder gates `threads show` and `search` exactly
-/// like one the workspace declares.
+/// The declared channels this invocation resolves through — the workspace's merged with the
+/// user-level ones (nxf 6j6v.7k58), so a channel from the user-level folder gates `threads show` and
+/// `search` exactly like one the workspace declares. Channels ONLY: a malformed persona file must
+/// not make a thread unreadable ([`crate::definitions::merged_channels`]).
 fn declared_channels(db: Option<&str>) -> Result<Vec<crate::channel::ChannelDecl>> {
-    Ok(
-        crate::definitions::Definitions::resolve(&workspace_root(db)?)?
-            .channels()
-            .to_vec(),
-    )
+    crate::definitions::merged_channels(&workspace_root(db)?)
 }
 
 /// Everything [`crate::orchestration::Ctx`] borrows, owned — the CLI adapter's job in one place.
@@ -1886,18 +1883,14 @@ fn prime(
     // human. See `crate::persona` for why it is deliberately not the process id, and for what the
     // answer may and may not be used for.
     let defs = crate::definitions::Definitions::resolve(&workspace_root(db)?)?;
-    let declarations = defs
-        .source()
-        .cloned()
-        .expect("Definitions::resolve always records its source");
     let identity =
         crate::persona::resolve_identity(&store, defs.roles(), persona, session().as_deref())?;
-    let report = facade::prime_for(
+    let report = facade::prime_with(
         &store,
         &consumer,
         identity.persona(),
         &resolve_now()?,
-        &declarations,
+        &defs,
     )?;
     let interactive = !is_spawned_context();
     if json {

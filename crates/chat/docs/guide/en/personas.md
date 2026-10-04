@@ -265,14 +265,14 @@ thread in its own log, and only that thread crosses: the receiver starts its per
 copy, with ITS board and memory, and whatever that persona commissions to answer stays in its own
 workspace. A question (`--escalate`) goes back to the commissioner — never past it to the other
 workspace's owner — and the commissioner's answer on the same thread resumes the persona. The depth
-cap holds for the whole chain across both workspaces — on the caller's word: the depth
-travels in the commission's signed stamp, and the receiver cannot check it against a chain it never
-sees. Trusting a workspace means trusting its coordinator, and a hostile one could stamp depth 0;
-trust only workspaces whose coordinator you would run yourself. `nxc status` shows the thread in both
+cap holds for the whole chain across both workspaces — on the caller's word: the depth travels in
+the commission's signed stamp, and the receiver cannot check it against a chain it never sees.
+Trusting a workspace means trusting its coordinator, and a hostile one could stamp depth 0; trust
+only workspaces whose coordinator you would run yourself. `nxc status` shows the thread in both
 workspaces with the other side and one of four states: `submitted`, `working`, `input-required`,
 `completed` (or `rejected` / `canceled`). Two hours without a sign of life — no message on the
-thread, nothing in the receiving persona's transcript — cancel it and wake the commissioner with
-the reason; `nxc withdraw` on the operation takes it back in the other workspace too.
+thread, nothing in the receiving persona's transcript — cancel it and wake the commissioner with the
+reason; `nxc withdraw` on the operation takes it back in the other workspace too.
 
 `send` and `reply` carry a border thread across at once, so delivery does not need the background
 service; the service's pass carries the rest. One case does need it, as it does inside a workspace:
@@ -485,8 +485,9 @@ each one. Beside a workspace's own `.nxs-personas/` there is a **user-level fold
 - **Where it came from is shown.** `nxc list` marks each entry from the user-level folder and says
   which entries the repository hides; `nxc list --json` carries `"origin": "user"` on such an entry
   and `user_path`, `from_user` and `shadowed` under `declarations`. `nxs prime` says the same under
-  "Declarations". A hiding is never silent: a repository that still keeps an old copy runs the old
-  copy, and you should know.
+  "Declarations". A hiding is reported there and nowhere else — not when an operation opens, not in
+  the session it starts. A repository that keeps its own copy runs that copy, with its own hurdles,
+  members and access rules; the user-level folder cannot forbid it.
 - **How the folder is filled is yours to decide** — a git clone, a symbolic link. The folder is the
   contract, not its history.
 
@@ -501,17 +502,23 @@ Three things hold exactly as they do for the repository's own folder:
   edit there reaches the next operation, never a running one.
 - **A relative path means the repository the persona runs in.** Nothing resolves a path written in a
   declaration: a system prompt that says "read `knowledge/x.md`, relative to the root of this
-  workspace" is read by a session whose working directory is the repository, and a hurdle runs
-  there too. Files kept *beside* a user-level declaration are therefore not found that way. A
-  persona from the user-level folder is told at session start where its declaration lives
-  ("Declared in"), so its instructions can point there instead.
+  workspace" is read by a session whose working directory is the repository, and a hurdle runs there
+  too. Files kept *beside* a user-level declaration are therefore not found that way. A persona from
+  the user-level folder is told at session start where its declaration lives ("Declared in"), so its
+  instructions can point there instead.
 - **An embedding app reads the same folder.** It does not choose another one, and cannot: the
   personas it starts run `nxc`, which reads this folder, and two answers to "who exists" would split
   an app from its own sessions.
 
-A development build reads the user-level folder of its own service instance —
-`~/.nexusflow-<name>/personas/` when `NXS_SERVICE_INSTANCE` names it — so a build under test never
-picks up the personas your installed suite runs with.
+**An `external` from the user-level folder opens no repository by itself.** A user-level persona
+that admits callers from outside is admissible in every repository that runs it, but only from the
+workspaces that repository trusts by name in its own trust list (`nxs sync trust add --workspace`).
+A repository that trusts nobody admits nobody from outside.
+
+A development build reads a user-level folder only under a named service instance —
+`~/.nexusflow-<name>/personas/` when `NXS_SERVICE_INSTANCE` names one. A build without one (CI, a
+shell without `direnv`) reads none, so a build under test never picks up the personas your installed
+suite runs with.
 
 ## When a declaration is wrong
 

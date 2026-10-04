@@ -235,3 +235,99 @@ fn from_source_reads_the_same_merged_catalogue_again() {
     let again = Definitions::from_source(defs.source().unwrap()).unwrap();
     assert_eq!(defs, again);
 }
+
+// ---- the user-level loader's failing cases (review of PR #17, Test Quality #2) ----------------
+
+#[test]
+fn a_malformed_user_level_channels_file_fails_the_catalogue_with_its_path() {
+    let m = Machine::new();
+    declare(
+        m.user.path(),
+        "channels.yaml",
+        "- name: planning\n  members: pm\n",
+    );
+    let err = m.resolve().unwrap_err();
+    assert!(
+        err.msg
+            .contains(&m.user.path().join("channels.yaml").display().to_string()),
+        "{}",
+        err.msg
+    );
+}
+
+#[test]
+fn two_user_level_channels_of_one_name_are_refused_naming_that_folder() {
+    let m = Machine::new();
+    declare(
+        m.user.path(),
+        "channels.yaml",
+        "- name: planning\n  members: [pm]\n- name: planning\n  members: [pm]\n",
+    );
+    declare(m.user.path(), "pm.yaml", CENTRAL_PM);
+    let err = m.resolve().unwrap_err();
+    assert!(
+        err.msg.contains(&m.user.path().display().to_string())
+            && err.msg.contains("duplicate channel name"),
+        "{}",
+        err.msg
+    );
+}
+
+/// Referential integrity stays advisory for the merged team exactly as for one folder: a user-level
+/// channel naming a persona nobody declares still loads (`prime` reports it; a send to it refuses).
+#[test]
+fn a_user_level_channel_naming_a_persona_nobody_declares_still_loads() {
+    let m = Machine::new();
+    declare(m.user.path(), "channels.yaml", PLANNING);
+    let defs = m.resolve().expect("advisory, not a construction error");
+    assert!(defs.declared_channel("planning").unwrap().is_some());
+    assert!(defs.role("coder").is_err());
+}
+
+#[test]
+fn a_user_level_folder_that_does_not_exist_is_no_user_level_folder() {
+    let m = Machine::new();
+    declare(&m.repo_personas(), "pm.yaml", REPO_PM);
+    let missing = m.user.path().join("not-there");
+    let with_missing = Definitions::resolve_with_user_dir(m.repo.path(), Some(&missing)).unwrap();
+    let without = Definitions::resolve_with_user_dir(m.repo.path(), None).unwrap();
+    assert_eq!(with_missing, without);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_user_level_folder_is_an_error_not_a_silence() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let m = Machine::new();
+    declare(m.user.path(), "pm.yaml", CENTRAL_PM);
+    std::fs::set_permissions(m.user.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = m.resolve();
+    std::fs::set_permissions(m.user.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A process that may read anything (root in a container) reads it fine; only a refused read
+    // is the case under test.
+    if std::fs::metadata("/root").is_ok_and(|_| std::fs::read_dir("/root").is_ok()) {
+        return;
+    }
+    let err = result.unwrap_err();
+    assert!(
+        err.msg.contains("user-level declaration folder"),
+        "{}",
+        err.msg
+    );
+}
+
+/// The read `threads show` and `search` resolve their channel policy through depends on the two
+/// `channels.yaml` files only (review of PR #17, Code Quality #1): a malformed PERSONA file in the
+/// user-level folder fails the catalogue, and must not make a thread unreadable.
+#[test]
+fn the_channel_policy_read_does_not_fail_on_a_malformed_persona_file() {
+    let m = Machine::new();
+    declare(m.user.path(), "channels.yaml", PLANNING);
+    declare(m.user.path(), "pm.yaml", "handle: [not, a, handle]\n");
+    assert!(m.resolve().is_err());
+    let channels =
+        nexus_chat::definitions::merged_channels_with_user_dir(m.repo.path(), Some(m.user.path()))
+            .expect("channels only");
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].name, "planning");
+}
