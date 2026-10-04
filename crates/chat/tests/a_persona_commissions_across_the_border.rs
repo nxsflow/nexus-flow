@@ -140,10 +140,12 @@ impl Peers for InProcessPeers {
 
     fn hand_over_in(&self, peer: &PeerWorkspace) -> Result<(), String> {
         use std::sync::atomic::Ordering;
-        if self
-            .failing_kicks
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
+        let left = self.failing_kicks.load(Ordering::SeqCst);
+        if left > 0
+            && self
+                .failing_kicks
+                .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         {
             return Err(format!("{} is busy", peer.name));
         }
