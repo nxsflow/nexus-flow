@@ -40,6 +40,9 @@ const HEARTBEAT_FILE: &str = "sync-daemon.json";
 const LOG_DIR: &str = "logs";
 /// Where the alias lives — see [`ServiceHome::program`].
 const BIN_DIR: &str = "bin";
+/// The user-level declarations every workspace on this machine reads beside its own (nxf
+/// 6j6v.7k58) — see [`ServiceHome::personas`].
+const PERSONAS_DIR: &str = "personas";
 
 /// The directory a nexus-flow background service keeps its state in, and the files within it.
 ///
@@ -126,6 +129,18 @@ impl ServiceHome {
     /// `<home>/logs` — where an unattended service's output lands.
     pub fn logs(&self) -> PathBuf {
         self.root.join(LOG_DIR)
+    }
+
+    /// `<home>/personas` — the USER-LEVEL declaration folder (nxf 6j6v.7k58): personas and a
+    /// `channels.yaml` that every workspace on this machine reads beside its own `.nxs-personas/`,
+    /// merged per name, the workspace's own winning.
+    ///
+    /// It lives in the service home on purpose rather than at a fixed `~/.nexusflow/personas`: a
+    /// development build reads `~/.nexusflow-<qualifier>/personas`, so a build under test can never
+    /// pick up the personas the machine's installed suite runs with — the same rule, and the same
+    /// reason, as the registry beside it.
+    pub fn personas(&self) -> PathBuf {
+        self.root.join(PERSONAS_DIR)
     }
 
     /// `<home>/bin` — the directory holding the alias.

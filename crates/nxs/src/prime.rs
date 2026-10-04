@@ -363,8 +363,12 @@ where
 /// ([`nexus_chat::role::compose_system_prompt`]), so it survives that regardless.
 pub fn persona_block(ws: &Workspace, handle: &str) -> Result<String> {
     let root = ws.workspace_root()?.to_path_buf();
-    let source = nexus_chat::definitions::DeclarationSource::resolve(&root)?;
+    // ONE read: the source handed on below describes exactly the catalogue `decl` came from.
     let defs = nexus_chat::definitions::Definitions::resolve(&root)?;
+    let source = defs
+        .source()
+        .cloned()
+        .expect("Definitions::resolve always records its source");
     let decl = defs.role(handle)?;
     if !decl.prime.is_primed() {
         return Ok(String::new());

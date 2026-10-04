@@ -1239,6 +1239,18 @@ fn act_outbound(
         return Ok(());
     };
     let acting = store.acting_messages_in_thread(&row.thread_id)?;
+    // **An answer from a workspace this one no longer trusts** (nxf 6j6v.dcpd, item 1): trust was
+    // revoked after the commission, so the receiver's newest message is in the log but steers
+    // nothing. Left alone the thread would end two hours later as "no sign of life" — bounded, but
+    // the wrong reason, told to the first person who uses the route. Say the right one, now.
+    if row.state.is_in_progress() && answered_unvouched(store, &row.thread_id, &worker, &acting)? {
+        let why = format!(
+            "the answer arrived from {}, a workspace no longer trusted here",
+            row.peer
+        );
+        cancel(ctx, store, row, &why)?;
+        return wake_with_cancellation(ctx, store, row, &why);
+    }
     if matches!(row.state, BorderState::Working | BorderState::Submitted)
         && overdue(ctx, row, &acting)
     {
@@ -1295,6 +1307,35 @@ fn act_outbound(
         }
     }
     Ok(())
+}
+
+/// Whether the receiver's NEWEST message on a border thread is one this workspace cannot vouch for
+/// and has not handed on — present in the log, absent from what may act, and not served to the
+/// commissioner. On a border thread the signature was verified when the message was copied in, so
+/// the only way to fall out of `acting` is a signer this workspace does not trust (any more).
+///
+/// **Not served, and that is the point** (review of PR #17, Integrity #7): revoking trust also
+/// takes a message that was vouched for and already DELIVERED out of `acting` — a question the
+/// commissioner has been woken with and is answering. That is not an answer that arrived from an
+/// untrusted workspace; cancelling on it would be irreversible and say the wrong thing.
+fn answered_unvouched(
+    store: &ChatStore,
+    thread: &str,
+    worker: &str,
+    acting: &[MessageRow],
+) -> Result<bool> {
+    let newest = store
+        .messages_in_thread(thread)?
+        .into_iter()
+        .rev()
+        .find(|m| m.sender == worker);
+    let Some(newest) = newest else {
+        return Ok(false);
+    };
+    if acting.iter().any(|a| a.message_id == newest.message_id) {
+        return Ok(false);
+    }
+    Ok(!is_served(store, thread, &newest.message_id)?)
 }
 
 /// **Whether a working border thread has been quiet past its deadline** — [`DEADLINE_HOURS`] since

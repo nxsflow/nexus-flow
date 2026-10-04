@@ -85,7 +85,10 @@ pub trait ChatWorkspaceExt {
     /// declarations lived at before 6j6v.dvyq. Resolved, not necessarily existing.
     fn legacy_roles_dir(&self) -> Result<PathBuf>;
 
-    /// The folder declarations are actually READ from, resolved over both locations — see
+    /// The workspace's OWN folder declarations are read from — only the workspace's half since nxf
+    /// 6j6v.7k58: the catalogue also merges the user-level folder, so a reader that wants the team
+    /// resolves [`crate::definitions::Definitions::resolve`] rather than loading this folder alone.
+    /// Resolved over both workspace locations — see
     /// [`crate::definitions::DeclarationSource::locate`], which owns the rule. Shared by every
     /// declared-persona/channel/flow loader, so the CLI and [`crate::engine::Engine`] cannot
     /// resolve it differently (independent review, Integrity #3/Code Quality #1, High).

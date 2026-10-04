@@ -2282,10 +2282,26 @@ pub struct PrimeRoster {
 ///
 /// It carried a third partition, the DECLARED WORKFLOWS, until 6j6v.dvyq §3 removed the run engine.
 /// A `workflow.yaml` left in the folder is now simply not read by anything.
+///
+/// **ONE folder, and no longer what `prime` partitions** (nxf 6j6v.7k58): since the catalogue is
+/// the workspace's folder merged with the user-level one, `prime` partitions the merged team
+/// through [`validate_declared`]. This stays for a caller that asks about one folder on purpose,
+/// and is kept rather than removed because it is public — `tests/prime_validation.rs` pins it.
 pub fn validate_declared_team(dir: &Path) -> Result<PrimeRoster> {
     let roles = crate::role::load_all_roles(dir)?;
     let channels = crate::channel::load_all_channels(dir)?;
-    let channel_errors = crate::channel::validate_channels(&roles, &channels);
+    Ok(validate_declared(&roles, &channels))
+}
+
+/// [`validate_declared_team`] over a catalogue already in hand — what `prime` partitions since the
+/// catalogue is two folders merged (nxf 6j6v.7k58). "Whole-file" below then means the merged
+/// channels as one: a channel error from either `channels.yaml` excludes every channel, which is
+/// coarser than per folder and is the reading under which the partition still says one thing.
+pub(crate) fn validate_declared(
+    roles: &[crate::role::RoleDecl],
+    channels: &[ChannelDecl],
+) -> PrimeRoster {
+    let channel_errors = crate::channel::validate_channels(roles, channels);
     // Whole-file scoping: any CHANNEL error excludes every channel this file declared — and only a
     // channel error does. The persona pass below is appended after this is decided, deliberately:
     // a persona's dangling reference says nothing about whether `channels.yaml` can be trusted, and
@@ -2300,19 +2316,19 @@ pub fn validate_declared_team(dir: &Path) -> Result<PrimeRoster> {
     // stay in the roster whatever it finds — see [`PrimeRoster`], which has always said a role file
     // fails at LOAD time or not at all.
     let mut errors = channel_errors;
-    errors.extend(crate::role::validate_roles(&roles, &channels));
+    errors.extend(crate::role::validate_roles(roles, channels));
 
     // Over the SAME two slices, and deliberately not bounded by the partition above: a quality
     // warning is about how a declaration is written, so a referential error elsewhere in
     // `channels.yaml` neither suppresses it nor is suppressed by it.
-    let warnings = crate::declaration_quality::warn_declarations(&roles, &channels);
+    let warnings = crate::declaration_quality::warn_declarations(roles, channels);
 
-    Ok(PrimeRoster {
-        roles: roles.into_iter().map(|r| r.handle).collect(),
+    PrimeRoster {
+        roles: roles.iter().map(|r| r.handle.clone()).collect(),
         channels: clean_channels,
         errors,
         warnings,
-    })
+    }
 }
 
 // ---- prime: the session bootstrap (nxf 6j6v.r5a2) --------------------------
@@ -2955,7 +2971,11 @@ pub fn render_declared_team(roster: &PrimeRoster) -> String {
 /// pointing at a section that no longer exists.
 pub fn render_declaration_source(source: &DeclarationSource) -> String {
     match (source.kind, &source.legacy_path) {
-        (crate::definitions::DeclarationSourceKind::Personas, None) => String::new(),
+        // Silent no longer when the user-level folder takes part (nxf 6j6v.7k58): what came from
+        // it is not versioned with this repository, and a hiding is news to whoever reads this.
+        (crate::definitions::DeclarationSourceKind::Personas, None) if !source.worth_saying() => {
+            String::new()
+        }
         _ => format!("## Declarations\n\n{}", source.explain()),
     }
 }
@@ -3051,7 +3071,7 @@ fn render_finding(file: &str, what: &str) -> String {
 /// fan-out. (It replayed the consumer's entire unread set as well — both dispositions, because a new
 /// session was the catch-up moment — until nxf 6j6v.4d2z removed the unread set.)
 ///
-/// Every read goes through this layer's own seams ([`opener_wake`], [`validate_declared_team`]),
+/// Every read goes through this layer's own seams ([`opener_wake`], [`validate_declared`]),
 /// never the store directly: the CLI used to reach past the facade for exactly these, which is why
 /// none of it was reachable from the library. `now` drives only
 /// the wake's clock-dependent `stale` flag; `declarations` is the resolved declaration source (the
@@ -3087,18 +3107,49 @@ pub fn prime_for(
     // is the reducer, which refuses to fold an envelope whose disposition it does not know
     // (`an_unknown_disposition_op_is_stored_but_never_folded`).
     //
-    // The declarations are read a second time here (`validate_declared_team` loads its own copy to
-    // partition them): a handful of small YAML files, once per prime, in exchange for leaving that
-    // function's roster contract — and every caller of it — untouched.
-    let decl_dir = declarations.read_dir.as_path();
-    let roles = crate::role::load_all_roles(decl_dir)?;
-    let channels = crate::channel::load_all_channels(decl_dir)?;
+    //
+    // Both folders, merged by the one rule (nxf 6j6v.7k58): `from_source` re-reads the workspace's
+    // folder and the user-level one the resolution names. A caller that already holds the merged
+    // catalogue hands it to [`prime_with`] instead, so the report and its source come from ONE read.
+    prime_with(
+        store,
+        consumer,
+        persona,
+        now,
+        &crate::definitions::Definitions::from_source(declarations)?,
+    )
+}
+
+/// [`prime_for`] over a catalogue already resolved — `nxc prime` and
+/// [`crate::engine::Engine::prime_as`] resolve once and pass it, so the directory, the roster, the brief and the source the report
+/// carries cannot come from two different reads of a folder that changed in between (review of PR
+/// #17, Code Quality #5).
+pub(crate) fn prime_with(
+    store: &ChatStore,
+    consumer: &str,
+    persona: Option<&str>,
+    now: &str,
+    defs: &crate::definitions::Definitions,
+) -> Result<PrimeReport> {
+    let declarations = defs
+        .source()
+        .expect("a resolved catalogue records its source");
+    let (roles, channels) = (defs.roles(), defs.channels());
     let brief = persona
         .and_then(|handle| roles.iter().find(|r| r.handle == handle))
-        .map(|decl| PersonaBrief::from_decl(decl, &channels));
+        .map(|decl| {
+            PersonaBrief::from_decl(decl, channels).declared_in(
+                match declarations
+                    .origin_of(crate::definitions::DeclarationKind::Persona, &decl.handle)
+                {
+                    crate::definitions::DeclarationOrigin::User => declarations.user_path.clone(),
+                    crate::definitions::DeclarationOrigin::Workspace => None,
+                },
+            )
+        });
     let directory = match persona {
-        Some(handle) => Directory::for_persona(&roles, &channels, handle),
-        None => Directory::full(&roles, &channels),
+        Some(handle) => Directory::for_persona(roles, channels, handle),
+        None => Directory::full(roles, channels),
     };
     // **The caller's own previous session end** (nxf 6j6v.2hx9) — the watermark the notice below is
     // a window over.
@@ -3149,7 +3200,7 @@ pub fn prime_for(
         // rather than a gap: a human at a terminal has no session whose end could be a watermark,
         // and `nxc status` answers the same question on demand.
         wake: opener_wake(store, consumer, now, watermark.as_deref())?,
-        roster: validate_declared_team(decl_dir)?,
+        roster: validate_declared(roles, channels),
         persona: brief,
         directory,
         declarations: declarations.clone(),

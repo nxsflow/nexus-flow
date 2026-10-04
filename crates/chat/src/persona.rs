@@ -41,6 +41,7 @@
 use serde::Serialize;
 
 use crate::channel::ChannelDecl;
+use crate::definitions::{DeclarationKind, DeclarationOrigin};
 use crate::error::Result;
 use crate::role::{Addressable, RoleDecl, Stage};
 use crate::store::ChatStore;
@@ -131,6 +132,11 @@ pub struct PersonaEntry {
     /// line comes from the caller's own declaration rather than from the target's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// Where this persona's declaration came from (nxf 6j6v.7k58) — stamped by
+    /// [`Directory::with_declarations`], and absent from the wire form for the workspace's own
+    /// folder, so a workspace without a user-level folder reads exactly as it did.
+    #[serde(skip_serializing_if = "DeclarationOrigin::is_workspace")]
+    pub origin: DeclarationOrigin,
 }
 
 impl PersonaEntry {
@@ -154,6 +160,7 @@ impl PersonaEntry {
                 false => route_in(decl, channels),
             },
             why,
+            origin: DeclarationOrigin::Workspace,
         }
     }
 }
@@ -184,6 +191,9 @@ pub struct ChannelEntry {
     /// Why THIS caller would address it — address-book projection only, as on [`PersonaEntry`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// Where this channel's declaration came from — as on [`PersonaEntry::origin`].
+    #[serde(skip_serializing_if = "DeclarationOrigin::is_workspace")]
+    pub origin: DeclarationOrigin,
 }
 
 impl ChannelEntry {
@@ -197,6 +207,7 @@ impl ChannelEntry {
             members: crate::channel::cast(decl),
             description: decl.description.clone(),
             why,
+            origin: DeclarationOrigin::Workspace,
         }
     }
 }
@@ -308,11 +319,20 @@ impl Directory {
     }
 
     /// Attach the resolution the catalogue behind this directory came from — see the
-    /// [`declarations`](Directory::declarations) field.
+    /// [`declarations`](Directory::declarations) field — and stamp each entry with where it came
+    /// from (nxf 6j6v.7k58), which only the resolution knows.
     pub fn with_declarations(
         mut self,
         source: Option<&crate::definitions::DeclarationSource>,
     ) -> Directory {
+        if let Some(source) = source {
+            for p in &mut self.personas {
+                p.origin = source.origin_of(DeclarationKind::Persona, &p.handle);
+            }
+            for c in &mut self.channels {
+                c.origin = source.origin_of(DeclarationKind::Channel, &c.name);
+            }
+        }
         self.declarations = source.cloned();
         self
     }
@@ -493,6 +513,11 @@ impl Directory {
     }
 }
 
+/// What an entry from the user-level folder carries in its parenthesis (nxf 6j6v.7k58). Only `nxc
+/// list` stamps origins ([`Directory::with_declarations`]), so a persona's own address book in
+/// `prime` never shows it — where a peer's definition is kept is not what a persona addresses it by.
+const USER_LEVEL_QUALIFIER: &str = "from the user-level folder";
+
 /// One persona's entry: who they are, how to name them, and what they are for.
 ///
 /// The bold name is the human one (`job_title`), because that is what a reader recognises; the
@@ -504,6 +529,9 @@ fn render_persona_entry(p: &PersonaEntry) -> String {
     let mut qualifiers = vec![format!("handle: `{}`", p.handle)];
     if let Some(stage) = p.stage {
         qualifiers.push(format!("level: {}", stage_label(stage)));
+    }
+    if !p.origin.is_workspace() {
+        qualifiers.push(USER_LEVEL_QUALIFIER.to_string());
     }
     let mut line = format!(
         "**{}** ({})",
@@ -533,6 +561,9 @@ fn render_channel_entry(c: &ChannelEntry) -> String {
     let mut qualifiers = vec![format!("handle: `{}`", c.name)];
     if !c.members.is_empty() {
         qualifiers.push(format!("members: {}", c.members.join(", ")));
+    }
+    if !c.origin.is_workspace() {
+        qualifiers.push(USER_LEVEL_QUALIFIER.to_string());
     }
     let mut line = format!(
         "**{}** ({})",
@@ -610,6 +641,17 @@ pub struct PersonaBrief {
     pub channels: Vec<String>,
     /// How this persona uses `nxc` — one line per rule, in display order.
     pub instructions: &'static [&'static str],
+    /// The user-level folder this persona's declaration came from, when it did (nxf 6j6v.7k58) —
+    /// absent for a declaration in the workspace's own folder.
+    ///
+    /// **It answers a question the session cannot answer for itself:** where the files a
+    /// declaration keeps BESIDE itself are. A system prompt that says "read `knowledge/x.md`,
+    /// relative to the root of this workspace" means the repository the session runs in — its
+    /// working directory, and the working directory a hurdle runs in — never the folder the
+    /// declaration was read from; nothing in the engine resolves a path inside a declaration. A
+    /// user-level persona whose knowledge lives beside its definition is told where that is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_in: Option<std::path::PathBuf>,
 }
 
 /// The `nxc` rules every persona is handed. Rendered in order; the answering rule comes first
@@ -688,7 +730,14 @@ impl PersonaBrief {
             addressable: decl.addressable.clone(),
             channels: route_in(decl, channels),
             instructions: PERSONA_INSTRUCTIONS,
+            declared_in: None,
         }
+    }
+
+    /// Say where the declaration came from — see [`declared_in`](PersonaBrief::declared_in).
+    pub fn declared_in(mut self, folder: Option<std::path::PathBuf>) -> PersonaBrief {
+        self.declared_in = folder;
+        self
     }
 
     /// The "you are …" block as Markdown — identity first, then the `nxc` rules.
@@ -777,6 +826,15 @@ impl PersonaBrief {
         };
         if let Some(reachable) = reachable {
             lines.push(format!("- **Reachable:** {reachable}"));
+        }
+        if let Some(folder) = &self.declared_in {
+            lines.push(format!(
+                "- **Declared in:** the user-level folder `{}`, not in this repository. A path your \
+                 instructions give relative to this repository means THIS repository; files kept \
+                 beside your declaration are under `{}`.",
+                folder.display(),
+                folder.display()
+            ));
         }
         lines.push(String::new());
         lines.push("### How you use `nxc`".to_string());
