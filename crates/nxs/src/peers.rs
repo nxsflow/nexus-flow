@@ -99,28 +99,40 @@ impl Peers for ServicePeers {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("could not start the handover in {}: {e}", peer.name))?;
-        let deadline = Instant::now() + HANDOVER_WAIT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => {
-                    return Err(format!(
-                        "the handover in {} exited with {status}",
-                        peer.name
-                    ))
-                }
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50))
-                }
-                Ok(None) => {
-                    return Err(format!(
-                        "the handover in {} is still running after {}s; it goes on by itself",
-                        peer.name,
-                        HANDOVER_WAIT.as_secs()
-                    ))
-                }
-                Err(e) => return Err(format!("waiting for the handover in {}: {e}", peer.name)),
+        wait_or_stop(&mut child, HANDOVER_WAIT, &peer.name)
+    }
+}
+
+/// Wait for a peer's handover, and STOP it when it outlives `limit` (nxf 6j6v.dcpd, item 3).
+///
+/// It used to be left running with "it goes on by itself", and its child was then reaped by nobody
+/// until the calling process exited. Harmless for a short-lived CLI; the background service is
+/// long-lived, and it runs a border pass every few seconds, so one wedged handover per pass would
+/// pile up processes for as long as the service runs. A handover only copies a thread and starts a
+/// persona session it does not wait for, so one past the limit is stuck rather than busy: killing it
+/// rolls back at most one SQLite transaction, and the next pass hands over whatever it had not.
+/// Killed AND waited for, so no zombie is left behind either.
+fn wait_or_stop(
+    child: &mut std::process::Child,
+    limit: Duration,
+    name: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("the handover in {name} exited with {status}")),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "the handover in {name} was still running after {}s and was stopped; the \
+                     service's next pass hands over what it had not",
+                    limit.as_secs()
+                ));
             }
+            Err(e) => return Err(format!("waiting for the handover in {name}: {e}")),
         }
     }
 }
@@ -141,5 +153,44 @@ mod tests {
             .hand_over_in(&peer)
             .expect_err("nothing to start in");
         assert!(err.contains("test/gone"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handover_past_its_limit_is_stopped_and_reaped_not_left_running() {
+        // nxf 6j6v.dcpd, item 3: the long-lived service must not collect wedged children.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let started = Instant::now();
+        let err = wait_or_stop(&mut child, Duration::from_millis(200), "test/stuck")
+            .expect_err("past the limit");
+        assert!(
+            err.contains("test/stuck") && err.contains("stopped"),
+            "{err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it did not wait for sleep"
+        );
+        // Reaped: the pid is gone, not a zombie still answering `kill -0`.
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the child {pid} was left behind");
+    }
+
+    #[test]
+    fn a_handover_that_finishes_in_time_is_ok() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        assert_eq!(
+            wait_or_stop(&mut child, Duration::from_secs(10), "test/quick"),
+            Ok(())
+        );
     }
 }

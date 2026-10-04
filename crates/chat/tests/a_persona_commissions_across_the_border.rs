@@ -858,6 +858,52 @@ fn withdrawing_the_operation_takes_the_border_thread_back_in_both_workspaces() {
     assert!(w.worker.stopped.lock().unwrap().contains(&beta_pm));
 }
 
+/// Trust revoked AFTER the commission (nxf 6j6v.dcpd, item 1): the answer arrives signed by a key
+/// this workspace no longer vouches for, so it steers nothing — and the commissioner must hear that
+/// reason, now, rather than "no sign of life" two hours later.
+#[test]
+fn an_answer_from_a_workspace_no_longer_trusted_cancels_it_with_that_reason() {
+    let tmp = TempDir::new().unwrap();
+    let (a, b, w) = two(&tmp, &[ALPHA_PM], &[BETA_PM], true, true);
+    let (alpha_pm, _) = alpha_session(&a, &w, "pm");
+    let receipt = a.as_session(&alpha_pm, "test/beta/pm", "When?").unwrap();
+    let beta_pm = w.worker.of(&b, "pm")[0].internal_session.clone();
+
+    // The owner of alpha stops trusting beta while the thread is open.
+    {
+        let ws = nxs_foundation::workspace::discover(&a.root).unwrap();
+        let mut store = ws.open_chat_store().unwrap();
+        assert!(store.distrust_key(&key_of(&b.root)).unwrap());
+    }
+    b.reply(&beta_pm, &receipt.thread_id, "With version 0.300.", false);
+
+    let out = a.border_rows();
+    assert_eq!(out[0].state, BorderState::Canceled, "{out:?}");
+    assert!(
+        out[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("test/beta, a workspace no longer trusted here"),
+        "{out:?}"
+    );
+    let wake = w.worker.of(&a, "pm").last().unwrap().clone();
+    assert_eq!(wake.internal_session, alpha_pm);
+    assert!(
+        wake.message.contains("no longer trusted"),
+        "{}",
+        wake.message
+    );
+    assert!(
+        !wake.message.contains("0.300"),
+        "the unvouched answer itself is not handed on: {}",
+        wake.message
+    );
+    // The commissioner is no longer waiting on it.
+    let row = status_row(&a, &receipt.thread_id);
+    assert!(row.outstanding.is_empty(), "{row:?}");
+}
+
 // ---- an answer for a commissioner still in its turn ------------------------------------------
 
 #[test]
