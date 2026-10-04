@@ -85,8 +85,9 @@ use std::time::Duration;
 /// untouched and orchestration is a deliberate opt-in through [`Engine::open_with`].
 ///
 /// **Declarations are NOT on this config, and that is the point** (nxf 6j6v.dvyq step 6). They come
-/// from the workspace's own `.nxs-personas/` folder, always, and are re-read on every verb that
-/// needs them — exactly as a fresh `nxc` process re-reads the folder per invocation. There is no
+/// from the workspace's own `.nxs-personas/` folder, merged per name with the user-level folder
+/// (nxf 6j6v.7k58, [`crate::definitions::user_declarations_dir`] — not configurable here either,
+/// for the reason given there), and are re-read on every verb that needs them — exactly as a fresh `nxc` process re-reads the folder per invocation. There is no
 /// injection path any more: `DefinitionSource::Supplied` and `Engine::set_definitions` are gone,
 /// because personas and channels live in the folder even for an app, and a later in-app role editor
 /// writes into that same folder rather than into an app-owned database (owner decision, 2026-08-14,
@@ -300,15 +301,14 @@ impl Worker for DisabledWorker {
 /// in.
 fn declared_policy_of(
     store: &ChatStore,
-    decl_dir: &Path,
+    channels: &[crate::channel::ChannelDecl],
     thread_id: &str,
 ) -> Result<ChannelPolicy> {
     let channel_id = store
         .thread_channel(thread_id)
         .or_else(|| store.thread_channel_via_message(thread_id));
-    let channels = crate::channel::load_all_channels(decl_dir)?;
     Ok(crate::channel::declared_policy(
-        &channels,
+        channels,
         channel_id.as_deref(),
     ))
 }
@@ -425,9 +425,10 @@ impl Engine {
     /// the filter is the one that went. `AllMembers` remains the honest fallback for a thread whose
     /// channel no declaration names.
     pub fn thread(&self, thread_id: &str, as_handle: &str) -> Result<ThreadView> {
-        let decl_dir = self.workspace().declaration_dir()?;
+        // The MERGED catalogue's channels (nxf 6j6v.7k58), read before the store lock is taken.
+        let defs = self.definitions()?;
         self.handle.try_with_state(|s| {
-            let policy = declared_policy_of(&s.store, &decl_dir, thread_id)?;
+            let policy = declared_policy_of(&s.store, defs.channels(), thread_id)?;
             facade::thread(&s.store, thread_id, as_handle, policy)
         })
     }
@@ -475,9 +476,9 @@ impl Engine {
     /// rule and what it costs; `AllMembers` remains the honest fallback for a channel no
     /// declaration names, so an undeclared workspace reads exactly as it always did.
     pub fn search(&self, handle: &str, query: &str) -> Result<Vec<MessageHitView>> {
-        let channels = crate::channel::load_all_channels(&self.workspace().declaration_dir()?)?;
+        let defs = self.definitions()?;
         self.handle
-            .try_with_state(|s| facade::search(&s.store, handle, query, &channels))
+            .try_with_state(|s| facade::search(&s.store, handle, query, defs.channels()))
     }
 
     /// **Where does this operation stand** (nxf 6j6v.a71h) — the thread TREE an operation is, across
@@ -786,7 +787,8 @@ impl Engine {
     // ---- declarations ------------------------------------------------------
 
     /// The declarations this handle resolves through, read fresh from the workspace's
-    /// `.nxs-personas/` folder (see [`crate::definitions::DeclarationSource`] for the resolution
+    /// `.nxs-personas/` folder merged with the user-level one (nxf 6j6v.7k58), each entry's origin
+    /// on the source (see [`crate::definitions::DeclarationSource`] for the resolution
     /// and for the legacy `roles/` compatibility). Carries its own source resolution, so an app can
     /// render "nothing is declared, and here is where it goes" without re-deriving the path.
     ///

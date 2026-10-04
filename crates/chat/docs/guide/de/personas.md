@@ -286,7 +286,10 @@ startet seine Persona in SEINER Arbeitskopie, mit SEINEM Board und Gedächtnis, 
 beauftragt, um zu antworten, bleibt in ihrem Arbeitsbereich. Eine Rückfrage (`--escalate`) geht an
 den Auftraggeber zurück — nie an ihm vorbei zum Besitzer des anderen Arbeitsbereichs —, und die
 Antwort des Auftraggebers auf demselben Faden setzt die Persona fort. Die Tiefengrenze gilt für die
-ganze Kette über beide Arbeitsbereiche. `nxc status` zeigt den Faden in beiden Arbeitsbereichen mit
+ganze Kette über beide Arbeitsbereiche — auf das Wort des Aufrufers: Die Tiefe reist im signierten
+Stempel des Auftrags, und der Empfänger kann sie nicht gegen eine Kette prüfen, die er nie sieht. Einem
+Arbeitsbereich zu vertrauen heißt, seinem Koordinator zu vertrauen, und ein feindseliger könnte
+Tiefe 0 stempeln; vertrauen Sie nur Arbeitsbereichen, deren Koordinator Sie selbst laufen ließen. `nxc status` zeigt den Faden in beiden Arbeitsbereichen mit
 der Gegenseite und einem von vier Zuständen: `submitted`, `working`, `input-required`, `completed`
 (oder `rejected` / `canceled`). Zwei Stunden ohne Lebenszeichen — keine Nachricht auf dem Faden,
 nichts im Transkript der empfangenden Persona — brechen ihn ab und wecken den Auftraggeber mit dem
@@ -498,6 +501,52 @@ Beides beobachtet **die Datei der Persona selbst** und sonst nichts in diesem Or
 gemeldet. Der Rat oben heißt deshalb nicht „das Werkzeug passt schon auf": es ist die
 Versionsverwaltung, die aufpasst, und dies ist ein zweites Paar Augen auf der Hälfte des Ordners, die
 es sehen kann.
+
+## Eine Definition für jedes Repo
+
+Eine Persona, die Sie in jedem Repo haben wollen — denselben `pm` überall —, müssen Sie nicht in jedes
+kopieren. Neben dem eigenen `.nxs-personas/` eines Workspace gibt es einen **Ordner auf
+Benutzerebene**, `~/.nexusflow/personas/`, genauso aufgebaut: eine `<handle>.yaml` je Persona und eine
+`channels.yaml`. Jeder Workspace auf der Maschine liest ihn.
+
+- **Zusammengeführt je Name.** Eine Persona oder ein Kanal, den das Repo selbst deklariert,
+  **verdeckt** den gleichnamigen Eintrag auf Benutzerebene; alles andere kommt hinzu. Ein Kanal kommt
+  mit den Personas, die er voraussetzt, und seine Mitglieder lösen gegen das zusammengeführte Team
+  auf — ein Kanal `planning` auf Benutzerebene, der `coder` nennt, erreicht den eigenen `coder` jedes
+  Repos.
+- **Die Identität bleibt je Repo.** Aus einer Definition `pm` wird in jedem Repo, in dem sie läuft,
+  ein eigener Teilnehmer, mit Board, Gedächtnis und Arbeitskopie dieses Repos.
+- **Woher etwas kommt, wird gezeigt.** `nxc list` markiert jeden Eintrag aus dem Ordner auf
+  Benutzerebene und sagt, welche Einträge das Repo verdeckt; `nxc list --json` trägt an einem solchen
+  Eintrag `"origin": "user"` und unter `declarations` die Felder `user_path`, `from_user` und
+  `shadowed`. `nxs prime` sagt dasselbe unter „Declarations". Eine Verdeckung ist nie still: ein Repo,
+  das noch eine alte Kopie hält, führt die alte Kopie aus, und das sollten Sie wissen.
+- **Wie der Ordner gefüllt wird, entscheiden Sie** — ein Git-Klon, eine symbolische Verknüpfung. Der
+  Ordner ist der Vertrag, nicht seine Herkunft.
+
+**Der Preis, ausgesprochen:** Eine Deklaration außerhalb des Repos ist nicht mit ihm versioniert, und
+ein Klon auf einer Maschine ohne den Ordner hat keinen `pm`. Alles, was oben über Versionsverwaltung
+steht, gilt für diesen Ordner genauso — halten Sie ihn in einem eigenen Repo.
+
+Drei Dinge gelten genau wie für den eigenen Ordner des Repos:
+
+- **Er wird je Vorgang eingefroren.** Ein Vorgang läuft unter dem zusammengeführten Katalog, wie er
+  beim Öffnen des Vorgangs stand — Hürden (`preconditions:`) aus dem Ordner auf Benutzerebene
+  eingeschlossen. Eine Änderung dort erreicht den nächsten Vorgang, nie einen laufenden.
+- **Ein relativer Pfad meint das Repo, in dem die Persona läuft.** Nichts löst einen Pfad auf, der in
+  einer Deklaration steht: Ein System-Prompt, der sagt „lies `knowledge/x.md`, relativ zur Wurzel
+  dieses Arbeitsbereichs", wird von einer Sitzung gelesen, deren Arbeitsverzeichnis das Repo ist, und
+  eine Hürde läuft ebenfalls dort. Dateien, die *neben* einer Deklaration auf Benutzerebene liegen,
+  werden so also nicht gefunden. Eine Persona aus dem Ordner auf Benutzerebene erfährt beim
+  Sitzungsstart, wo ihre Deklaration liegt („Declared in"), damit ihre Anweisungen dorthin zeigen
+  können.
+- **Eine einbettende App liest denselben Ordner.** Sie wählt keinen anderen und kann es nicht: Die
+  Personas, die sie startet, laufen mit `nxc`, das diesen Ordner liest, und zwei Antworten auf „wer
+  existiert" würden eine App von ihren eigenen Sitzungen trennen.
+
+Ein Entwicklungs-Build liest den Ordner auf Benutzerebene seiner eigenen Dienst-Instanz —
+`~/.nexusflow-<name>/personas/`, wenn `NXS_SERVICE_INSTANCE` sie benennt —, sodass ein Build im Test nie
+die Personas aufgreift, mit denen Ihre installierte Suite läuft.
 
 ## Wenn eine Deklaration falsch ist
 

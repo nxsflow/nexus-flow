@@ -265,7 +265,10 @@ thread in its own log, and only that thread crosses: the receiver starts its per
 copy, with ITS board and memory, and whatever that persona commissions to answer stays in its own
 workspace. A question (`--escalate`) goes back to the commissioner — never past it to the other
 workspace's owner — and the commissioner's answer on the same thread resumes the persona. The depth
-cap holds for the whole chain across both workspaces. `nxc status` shows the thread in both
+cap holds for the whole chain across both workspaces — on the caller's word: the depth
+travels in the commission's signed stamp, and the receiver cannot check it against a chain it never
+sees. Trusting a workspace means trusting its coordinator, and a hostile one could stamp depth 0;
+trust only workspaces whose coordinator you would run yourself. `nxc status` shows the thread in both
 workspaces with the other side and one of four states: `submitted`, `working`, `input-required`,
 `completed` (or `rejected` / `canceled`). Two hours without a sign of life — no message on the
 thread, nothing in the receiving persona's transcript — cancel it and wake the commissioner with
@@ -465,6 +468,50 @@ that was rolled back the same way — different members, a different `working_tr
 `timeout:` — steers your agents just as much and is **not** reported by either. So the advice above
 is not "the tooling has your back": it is version control that has your back, and this is a second
 pair of eyes on the half of the folder it can see.
+
+## One definition for every repository
+
+A persona you want in every repository — the same `pm` in each — does not have to be copied into
+each one. Beside a workspace's own `.nxs-personas/` there is a **user-level folder**,
+`~/.nexusflow/personas/`, laid out the same way: one `<handle>.yaml` per persona, and a
+`channels.yaml`. Every workspace on the machine reads it.
+
+- **Merged per name.** A persona or channel the repository declares itself **hides** the user-level
+  one of the same name; everything else is added. A channel comes along with the personas it
+  presupposes, and its members resolve against the merged team — a user-level `planning` channel
+  naming `coder` reaches each repository's own `coder`.
+- **Identity stays per repository.** One definition `pm` is a participant of its own in every
+  repository it runs in, with that repository's board, memory and working copy.
+- **Where it came from is shown.** `nxc list` marks each entry from the user-level folder and says
+  which entries the repository hides; `nxc list --json` carries `"origin": "user"` on such an entry
+  and `user_path`, `from_user` and `shadowed` under `declarations`. `nxs prime` says the same under
+  "Declarations". A hiding is never silent: a repository that still keeps an old copy runs the old
+  copy, and you should know.
+- **How the folder is filled is yours to decide** — a git clone, a symbolic link. The folder is the
+  contract, not its history.
+
+**The price, said out loud:** a declaration outside the repository is not versioned with it, and a
+clone on a machine without the folder has no `pm`. Everything said above about version control holds
+for this folder too — keep it in a repository of its own.
+
+Three things hold exactly as they do for the repository's own folder:
+
+- **It is frozen per operation.** What an operation runs under is the merged catalogue as it stood
+  when the operation opened — hurdles (`preconditions:`) from the user-level folder included. An
+  edit there reaches the next operation, never a running one.
+- **A relative path means the repository the persona runs in.** Nothing resolves a path written in a
+  declaration: a system prompt that says "read `knowledge/x.md`, relative to the root of this
+  workspace" is read by a session whose working directory is the repository, and a hurdle runs
+  there too. Files kept *beside* a user-level declaration are therefore not found that way. A
+  persona from the user-level folder is told at session start where its declaration lives
+  ("Declared in"), so its instructions can point there instead.
+- **An embedding app reads the same folder.** It does not choose another one, and cannot: the
+  personas it starts run `nxc`, which reads this folder, and two answers to "who exists" would split
+  an app from its own sessions.
+
+A development build reads the user-level folder of its own service instance —
+`~/.nexusflow-<name>/personas/` when `NXS_SERVICE_INSTANCE` names it — so a build under test never
+picks up the personas your installed suite runs with.
 
 ## When a declaration is wrong
 

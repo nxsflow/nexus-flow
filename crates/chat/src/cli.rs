@@ -1061,7 +1061,7 @@ fn origin_in(ws: &Workspace) -> String {
 }
 
 /// [`origin_in`] for a call site that has not resolved its workspace yet — it resolves one from
-/// `--db`/cwd exactly as [`open`], [`workspace_root`] and [`declaration_dir`] next door do.
+/// `--db`/cwd exactly as [`open`], [`workspace_root`] and [`declared_channels`] next door do.
 ///
 /// **Why this takes `db` at all** (nxf 6j6v.07me): the origin stopped being a value the process
 /// environment alone can answer, so the function that answers it needs a workspace, and every
@@ -1198,11 +1198,15 @@ fn workspace_root(db: Option<&str>) -> Result<PathBuf> {
         .to_path_buf())
 }
 
-/// The declaration directory this invocation READS — `.nxs-personas/`, or a legacy `roles/` folder
-/// when that is the one carrying declarations (nxf 6j6v.dvyq step 4). One resolution, owned by
-/// [`crate::definitions::DeclarationSource::locate`], so the CLI and `Engine` cannot disagree.
-fn declaration_dir(db: Option<&str>) -> Result<PathBuf> {
-    Workspace::resolve(db, &cwd()?)?.declaration_dir()
+/// The declared channels this invocation resolves through — the MERGED catalogue's (nxf 6j6v.7k58),
+/// so a channel that arrives from the user-level folder gates `threads show` and `search` exactly
+/// like one the workspace declares.
+fn declared_channels(db: Option<&str>) -> Result<Vec<crate::channel::ChannelDecl>> {
+    Ok(
+        crate::definitions::Definitions::resolve(&workspace_root(db)?)?
+            .channels()
+            .to_vec(),
+    )
 }
 
 /// Everything [`crate::orchestration::Ctx`] borrows, owned — the CLI adapter's job in one place.
@@ -1881,13 +1885,13 @@ fn prime(
     // host that started the session itself, else the session this invocation runs under, else a
     // human. See `crate::persona` for why it is deliberately not the process id, and for what the
     // answer may and may not be used for.
-    let declarations = crate::definitions::DeclarationSource::resolve(&workspace_root(db)?)?;
-    let identity = crate::persona::resolve_identity(
-        &store,
-        &crate::role::load_all_roles(&declarations.read_dir)?,
-        persona,
-        session().as_deref(),
-    )?;
+    let defs = crate::definitions::Definitions::resolve(&workspace_root(db)?)?;
+    let declarations = defs
+        .source()
+        .cloned()
+        .expect("Definitions::resolve always records its source");
+    let identity =
+        crate::persona::resolve_identity(&store, defs.roles(), persona, session().as_deref())?;
     let report = facade::prime_for(
         &store,
         &consumer,
@@ -1915,13 +1919,18 @@ fn prime(
 /// human sees the complete declared team, which is the directory an app renders whole.
 fn list(json: bool, db: Option<&str>, persona: Option<&str>) -> Result<()> {
     let store = open(db)?;
-    let declarations = crate::definitions::DeclarationSource::resolve(&workspace_root(db)?)?;
-    let roles = crate::role::load_all_roles(&declarations.read_dir)?;
-    let channels = crate::channel::load_all_channels(&declarations.read_dir)?;
-    let identity = crate::persona::resolve_identity(&store, &roles, persona, session().as_deref())?;
+    // The MERGED catalogue (nxf 6j6v.7k58): the workspace's own declarations and the user-level
+    // ones it does not hide, with the account of which is which on its source.
+    let defs = crate::definitions::Definitions::resolve(&workspace_root(db)?)?;
+    let declarations = defs
+        .source()
+        .cloned()
+        .expect("Definitions::resolve always records its source");
+    let (roles, channels) = (defs.roles(), defs.channels());
+    let identity = crate::persona::resolve_identity(&store, roles, persona, session().as_deref())?;
     let directory = match identity.persona() {
-        Some(handle) => crate::persona::Directory::for_persona(&roles, &channels, handle),
-        None => crate::persona::Directory::full(&roles, &channels),
+        Some(handle) => crate::persona::Directory::for_persona(roles, channels, handle),
+        None => crate::persona::Directory::full(roles, channels),
     };
     // The directory AND where it came from, in one value: an app renders its empty list with the
     // explanation and the path beside it rather than re-deriving either (nxf 6j6v.dvyq). Attached
@@ -1949,8 +1958,10 @@ fn list(json: bool, db: Option<&str>, persona: Option<&str>) -> Result<()> {
     } else {
         println!("{}", directory.render_markdown());
         // A LEGACY folder is worth saying out loud every time it is the one being read — otherwise
-        // the move to `.nxs-personas/` is invisible to the person who has to make it.
-        if declarations.kind == crate::definitions::DeclarationSourceKind::LegacyRoles {
+        // the move to `.nxs-personas/` is invisible to the person who has to make it. So is the
+        // user-level folder (nxf 6j6v.7k58): what came from it is not versioned with this
+        // repository, and a repository file hiding one of its entries runs the repository's copy.
+        if declarations.worth_saying() {
             println!("\n{}", declarations.explain());
         }
     }
@@ -3911,7 +3922,7 @@ fn threads_show(
     let channel_id = store
         .thread_channel(thread_id)
         .or_else(|| store.thread_channel_via_message(thread_id));
-    let channels = crate::channel::load_all_channels(&declaration_dir(db)?)?;
+    let channels = declared_channels(db)?;
     let policy = crate::channel::declared_policy(&channels, channel_id.as_deref());
     let board = crate::facade::thread_board(&store, thread_id, &resolve_now()?, &consumer, policy)?;
     if json {
@@ -4002,7 +4013,7 @@ fn search(json: bool, db: Option<&str>, query: &str, consumer: Option<&str>) -> 
     // Since nxf 6j6v.cs03 the catalogue decides the caller's MEMBERSHIP there as well — which is why
     // the qualified handle `resolve_consumer` falls back to now finds a declared channel's boards at
     // all, where it used to match no materialised member row and answer "no matches".
-    let channels = crate::channel::load_all_channels(&declaration_dir(db)?)?;
+    let channels = declared_channels(db)?;
     let hits = crate::facade::search(&store, &consumer, query, &channels)?;
     if json {
         println!("{}", serde_json::to_string(&hits).expect("hits serialize"));

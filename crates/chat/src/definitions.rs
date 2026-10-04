@@ -23,6 +23,25 @@
 //!
 //! Since 6j6v.dvyq the folder is `<workspace-root>/.nxs-personas/`, and WHICH folder a catalogue
 //! came from is itself part of the answer — see [`DeclarationSource`].
+//!
+//! **Since 6j6v.7k58 there is a second folder, and the two are MERGED PER NAME.** Beside the
+//! workspace's own folder every workspace reads the USER-LEVEL folder
+//! ([`user_declarations_dir`], `~/.nexusflow/personas/` for the installed suite): a persona or a
+//! channel the workspace declares itself hides the user-level one of the same name, everything else
+//! is added. One definition `pm` therefore runs in every repository as that repository's own
+//! participant — its board, its memory, its working copy — while it is written down once. The price
+//! is said where it is paid: a declaration outside the repository is not versioned with it, and a
+//! clone on a machine without the folder has no `pm`. That is why the catalogue says, per entry,
+//! where it came from ([`DeclarationSource::from_user`]) and which user-level entries the workspace
+//! hides ([`DeclarationSource::shadowed`]).
+//!
+//! The merge happens HERE, inside [`Definitions::resolve`], and nowhere else — so every seam that
+//! resolves a catalogue (the CLI per invocation, every `Engine` verb, `nxs prime`, a spawned
+//! persona's own `nxc`) sees the same team, and everything built on the catalogue inherits the
+//! user-level entries without knowing they exist: the per-operation freeze
+//! ([`crate::declaration_freeze`]) projects the MERGED catalogue, so a hurdle (`preconditions:`) that
+//! arrives from the user-level folder is frozen at an operation's start exactly like one from the
+//! workspace, and an edit to the user-level folder reaches the next operation, not a running one.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -67,8 +86,82 @@ pub struct DeclarationSource {
     /// is declared at all — every loader reads a missing folder as an empty catalogue, so the
     /// resolution stays total.
     pub read_dir: PathBuf,
-    /// How many declarations the catalogue carries: personas + channels + flows.
+    /// How many declarations the catalogue carries: personas + channels — the workspace's own and
+    /// the user-level ones it does not hide, together.
     pub count: usize,
+    /// The USER-LEVEL folder (nxf 6j6v.7k58, see [`user_declarations_dir`]) — present only when it
+    /// carries at least one declaration, so a workspace on a machine without one keeps exactly the
+    /// shape (and the wording) it had before the folder existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_path: Option<PathBuf>,
+    /// The entries of the catalogue that came from [`user_path`](DeclarationSource::user_path)
+    /// rather than from the workspace's own folder — the per-entry origin `nxc list` and
+    /// [`crate::engine::Engine::directory`] stamp onto the directory.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub from_user: Vec<DeclaredName>,
+    /// User-level entries the workspace HIDES with its own declaration of the same name. Reported
+    /// rather than resolved silently: a repository that keeps an old copy of a persona the owner
+    /// now maintains centrally runs the old copy, and nobody would know.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shadowed: Vec<DeclaredName>,
+}
+
+/// One declaration by kind and name — how [`DeclarationSource`] names an entry's origin and a
+/// shadowing (nxf 6j6v.7k58).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeclaredName {
+    pub kind: DeclarationKind,
+    pub name: String,
+}
+
+/// The two kinds of declaration that merge per name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclarationKind {
+    Persona,
+    Channel,
+}
+
+impl DeclarationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeclarationKind::Persona => "persona",
+            DeclarationKind::Channel => "channel",
+        }
+    }
+}
+
+/// Where ONE entry of a catalogue came from (nxf 6j6v.7k58) — carried on the directory's entries,
+/// and absent from their wire form for the common case, so a workspace without a user-level folder
+/// renders exactly as before.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclarationOrigin {
+    /// The workspace's own folder.
+    #[default]
+    Workspace,
+    /// The user-level folder.
+    User,
+}
+
+impl DeclarationOrigin {
+    pub fn is_workspace(&self) -> bool {
+        *self == DeclarationOrigin::Workspace
+    }
+}
+
+/// The USER-LEVEL declaration folder this process reads beside every workspace's own (nxf
+/// 6j6v.7k58): `<service home>/personas` — `~/.nexusflow/personas` for the installed suite and for
+/// an embedding app, `~/.nexusflow-<qualifier>/personas` for a development build named so by
+/// `NXS_SERVICE_INSTANCE` ([`nxs_service::ServiceHome::personas`]).
+///
+/// **One rule, the service's, and no knob.** An embedding app does not choose this location, and
+/// must not be able to: the personas it starts run the `nxc` CLI, which resolves the folder by this
+/// same rule, and an app reading a folder of its own would disagree with the very sessions it
+/// spawned about who exists. Following the service home is also what keeps a build under test off
+/// the personas the machine's installed suite runs with.
+pub fn user_declarations_dir() -> Result<PathBuf> {
+    Ok(nxs_service::ServiceHome::resolve()?.personas())
 }
 
 /// The three answers to "where did this catalogue come from".
@@ -147,6 +240,9 @@ impl DeclarationSource {
             legacy_path,
             read_dir,
             count: 0,
+            user_path: None,
+            from_user: Vec::new(),
+            shadowed: Vec::new(),
         }
     }
 
@@ -166,12 +262,29 @@ impl DeclarationSource {
     /// own is a lie by omission; a failure would be wrong too, since having declared nothing yet is
     /// a legitimate state.
     pub fn explain(&self) -> String {
+        let repo = self.explain_workspace_half();
+        match &self.user_path {
+            None => repo,
+            Some(user) => format!("{repo} {}", self.explain_user_half(user)),
+        }
+    }
+
+    /// The workspace's own folder, said as it was before the user-level folder existed — so a
+    /// machine without one reads exactly as it did (acceptance point 8 of 6j6v.70dy).
+    fn explain_workspace_half(&self) -> String {
         let where_it_belongs = format!(
             "declare one as `{}/<handle>.yaml` (a persona) or `{}/channels.yaml` (a channel)",
             self.path.display(),
             self.path.display()
         );
+        // The workspace's OWN count: `count` is the merged catalogue's.
+        let count = self.count.saturating_sub(self.from_user.len());
         match (self.kind, &self.legacy_path) {
+            // With user-level entries in the catalogue, "nobody is declared here" would be false:
+            // somebody is, just not by this repository.
+            (DeclarationSourceKind::None, _) if self.user_path.is_some() => {
+                format!("this repository declares nobody of its own — {where_it_belongs}.")
+            }
             (DeclarationSourceKind::None, Some(legacy)) => format!(
                 "nobody is declared here yet — {where_it_belongs}. A legacy folder exists at {} \
                  but declares nothing.",
@@ -184,24 +297,69 @@ impl DeclarationSource {
                 "read from the LEGACY folder {} ({} declared). Declarations belong in {} now; move \
                  the folder when it suits you — nothing here rewrites your project.",
                 self.read_dir.display(),
-                self.count,
+                count,
                 self.path.display()
             ),
             (DeclarationSourceKind::Personas, Some(legacy)) => format!(
                 "read from {} ({} declared). A legacy folder is still present at {} and is NOT \
                  read while {} carries declarations.",
                 self.path.display(),
-                self.count,
+                count,
                 legacy.display(),
                 PERSONAS_DIR
             ),
             (DeclarationSourceKind::Personas, None) => {
-                format!(
-                    "read from {} ({} declared).",
-                    self.path.display(),
-                    self.count
-                )
+                format!("read from {} ({} declared).", self.path.display(), count)
             }
+        }
+    }
+
+    /// The user-level folder: what came from it, and what this workspace hides of it.
+    fn explain_user_half(&self, user: &Path) -> String {
+        let names = |list: &[DeclaredName]| {
+            list.iter()
+                .map(|d| format!("{} `{}`", d.kind.as_str(), d.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut out = match self.from_user.is_empty() {
+            true => format!(
+                "The user-level folder {} adds nothing here.",
+                user.display()
+            ),
+            false => format!(
+                "From the user-level folder {}: {} — not versioned with this repository.",
+                user.display(),
+                names(&self.from_user)
+            ),
+        };
+        if !self.shadowed.is_empty() {
+            out.push_str(&format!(
+                " This repository's own declaration HIDES the user-level {}.",
+                names(&self.shadowed)
+            ));
+        }
+        out
+    }
+
+    /// Whether a surface that shows a non-empty directory should print [`explain`] beside it: a
+    /// LEGACY folder is being read, or the user-level folder contributes or is hidden. The plain
+    /// case — the workspace's own `.nxs-personas/` and nothing else — has nothing to say.
+    ///
+    /// [`explain`]: DeclarationSource::explain
+    pub fn worth_saying(&self) -> bool {
+        self.kind == DeclarationSourceKind::LegacyRoles || self.user_path.is_some()
+    }
+
+    /// Where the entry `name` of `kind` in this catalogue came from.
+    pub fn origin_of(&self, kind: DeclarationKind, name: &str) -> DeclarationOrigin {
+        match self
+            .from_user
+            .iter()
+            .any(|d| d.kind == kind && d.name == name)
+        {
+            true => DeclarationOrigin::User,
+            false => DeclarationOrigin::Workspace,
         }
     }
 
@@ -394,8 +552,85 @@ impl Definitions {
     /// 2026-08-14; pinned on the app side by `engine-bridge/src/chat.rs` and
     /// `engine-server/tests/chat_wire.rs`).
     pub fn resolve(root: &Path) -> Result<Definitions> {
+        Definitions::resolve_with_user_dir(root, Some(&user_declarations_dir()?))
+    }
+
+    /// [`resolve`](Definitions::resolve) against a NAMED user-level folder, or none — the form for
+    /// a test that must not read the machine's real one, and for a caller that has resolved the
+    /// folder already. Production reads the one [`user_declarations_dir`] names; see there for why
+    /// no seam lets an app pick another.
+    pub fn resolve_with_user_dir(root: &Path, user_dir: Option<&Path>) -> Result<Definitions> {
         let mut source = DeclarationSource::locate(root);
-        let mut defs = Definitions::from_dir(&source.read_dir)?;
+        source.user_path = user_dir
+            .filter(|dir| carries_declarations(dir))
+            .map(Path::to_path_buf);
+        Definitions::load(source)
+    }
+
+    /// Re-read the catalogue a [`DeclarationSource`] describes — both folders, merged by the same
+    /// rule. For a caller that was handed the resolution rather than the root (`prime`).
+    pub fn from_source(source: &DeclarationSource) -> Result<Definitions> {
+        let mut source = source.clone();
+        source.from_user.clear();
+        source.shadowed.clear();
+        Definitions::load(source)
+    }
+
+    /// Load the workspace's folder and, when there is one, the user-level folder, and MERGE them
+    /// per name (nxf 6j6v.7k58): a workspace entry hides the user-level entry of the same name and
+    /// kind, everything else is added. Recorded on `source` as it happens, so the catalogue and the
+    /// account of where it came from cannot disagree.
+    ///
+    /// **A duplicate is judged per folder, then the merged whole is validated once.** Two files in
+    /// one folder declaring the same name are still the ambiguity [`Definitions::new`] refuses, and
+    /// the error names the folder. Across the two folders the same name is not a duplicate — it is
+    /// the shadowing the merge exists for. Everything else (handle form, reserved prefix, a flow
+    /// reaching itself) is checked on the MERGED catalogue, because that is the team that runs: a
+    /// user-level flow can only form a cycle through the workspace's channels, or be relieved of one
+    /// by a workspace channel that hides a step.
+    ///
+    /// A malformed user-level file fails every workspace's catalogue, with that file's path in the
+    /// error — the same fail-closed rule a malformed workspace file has, and for the same reason: a
+    /// team half-read is worse than a team refused with the name of the file to fix.
+    fn load(mut source: DeclarationSource) -> Result<Definitions> {
+        let mut roles = crate::role::load_all_roles(&source.read_dir)?;
+        let mut channels = crate::channel::load_all_channels(&source.read_dir)?;
+        reject_duplicates_in(&source.read_dir, &roles, &channels)?;
+        if let Some(user_dir) = source.user_path.clone() {
+            let user_roles = crate::role::load_all_roles(&user_dir)?;
+            let user_channels = crate::channel::load_all_channels(&user_dir)?;
+            reject_duplicates_in(&user_dir, &user_roles, &user_channels)?;
+            for role in user_roles {
+                let name = DeclaredName {
+                    kind: DeclarationKind::Persona,
+                    name: role.handle.clone(),
+                };
+                match roles.iter().any(|r| r.handle == role.handle) {
+                    true => source.shadowed.push(name),
+                    false => {
+                        source.from_user.push(name);
+                        roles.push(role);
+                    }
+                }
+            }
+            for channel in user_channels {
+                let name = DeclaredName {
+                    kind: DeclarationKind::Channel,
+                    name: channel.name.clone(),
+                };
+                match channels.iter().any(|c| c.name == channel.name) {
+                    true => source.shadowed.push(name),
+                    false => {
+                        source.from_user.push(name);
+                        channels.push(channel);
+                    }
+                }
+            }
+            // The loader's own contract: roles handle-sorted. Channels keep declaration order,
+            // the workspace's first.
+            roles.sort_by(|a, b| a.handle.cmp(&b.handle));
+        }
+        let mut defs = Definitions::new(roles, channels)?;
         source.count = defs.len();
         defs.source = Some(source);
         Ok(defs)
@@ -562,6 +797,14 @@ fn validate_role_handle(handle: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// [`reject_duplicates`] for one folder's personas and channels, naming the folder — so a duplicate
+/// in the user-level folder is not mistaken for one in the workspace (nxf 6j6v.7k58).
+fn reject_duplicates_in(dir: &Path, roles: &[RoleDecl], channels: &[ChannelDecl]) -> Result<()> {
+    reject_duplicates("role handle", roles.iter().map(|r| r.handle.as_str()))
+        .and_then(|()| reject_duplicates("channel name", channels.iter().map(|c| c.name.as_str())))
+        .map_err(|e| NxfError::validation(format!("{}: {}", dir.display(), e.msg)))
 }
 
 /// Reject a repeated name, saying which kind and which value — the ambiguity a caller-supplied

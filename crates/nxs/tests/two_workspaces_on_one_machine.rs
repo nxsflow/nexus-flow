@@ -22,6 +22,11 @@ struct Machine {
 }
 
 impl Machine {
+    /// The user-level declaration folder of the pinned home's (production) service instance.
+    fn user_personas(&self) -> PathBuf {
+        self.home.path().join(".nexusflow/personas")
+    }
+
     fn dry_log(&self) -> PathBuf {
         self.home.path().join("starts.log")
     }
@@ -98,16 +103,13 @@ fn machine() -> Machine {
         let (ok, _, err) = m.run(dir, &["init", "--json", "--module", "chat", "--no-service"]);
         assert!(ok, "init: {err}");
     }
-    std::fs::create_dir_all(m.alpha.join(".nxs-personas")).unwrap();
+    // ONE pm for both repositories, from the user-level folder (nxf 6j6v.7k58): neither repository
+    // declares it. The pinned home is the production instance's, so the folder is
+    // `<home>/.nexusflow/personas`.
+    std::fs::create_dir_all(m.user_personas()).unwrap();
     std::fs::write(
-        m.alpha.join(".nxs-personas/pm.yaml"),
-        "handle: pm\nsystem_prompt: You are the PM of test/alpha.\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(m.beta.join(".nxs-personas")).unwrap();
-    std::fs::write(
-        m.beta.join(".nxs-personas/pm.yaml"),
-        "handle: pm\nsystem_prompt: You are the PM of test/beta.\naddressable:\n  humans: true\n  external:\n    - \"*/pm\"\n",
+        m.user_personas().join("pm.yaml"),
+        "handle: pm\nsystem_prompt: You are the PM of this repository.\naddressable:\n  humans: true\n  external:\n    - \"*/pm\"\n",
     )
     .unwrap();
     m
@@ -252,11 +254,83 @@ fn a_commission_crosses_to_the_other_workspace_and_its_coordinator_starts_the_pe
     assert!(m.beta.join(".nxs/border-open").exists());
 }
 
+/// **One definition, every repository** (nxf 6j6v.7k58, acceptance point 7 of the slice): both
+/// repositories run the pm out of the user-level folder without a file of their own, `nxc list`
+/// says where it came from, and a repository file of the same name hides it — reported, not
+/// silent. The scenario test above runs on exactly this pm.
+#[test]
+fn both_repositories_run_the_user_level_pm_and_a_repository_file_hides_it_out_loud() {
+    let m = machine();
+    for dir in [&m.alpha, &m.beta] {
+        assert!(!dir.join(".nxs-personas/pm.yaml").exists());
+        let list = m.json(dir, &["chat", "--json", "list"]);
+        let pm = list["personas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["handle"] == "pm")
+            .unwrap_or_else(|| panic!("pm in {}: {list}", dir.display()));
+        assert_eq!(pm["origin"], "user", "{list}");
+        let declarations = &list["declarations"];
+        assert_eq!(
+            declarations["user_path"],
+            m.user_personas().display().to_string(),
+            "{list}"
+        );
+        assert_eq!(
+            declarations["from_user"],
+            serde_json::json!([{"kind": "persona", "name": "pm"}]),
+            "{list}"
+        );
+        let (ok, human, err) = m.run(dir, &["chat", "list"]);
+        assert!(ok, "{err}");
+        assert!(
+            human.contains("from the user-level folder") && human.contains("persona `pm`"),
+            "the human list names the source: {human}"
+        );
+    }
+
+    // Beta keeps a copy of its own: it wins, and the hiding is said.
+    std::fs::write(
+        m.beta.join(".nxs-personas/pm.yaml"),
+        "handle: pm\nsystem_prompt: The repository's own pm.\n",
+    )
+    .unwrap();
+    let list = m.json(&m.beta, &["chat", "--json", "list"]);
+    let pm = list["personas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["handle"] == "pm")
+        .unwrap();
+    assert!(pm.get("origin").is_none(), "the repository's own: {list}");
+    assert_eq!(
+        list["declarations"]["shadowed"],
+        serde_json::json!([{"kind": "persona", "name": "pm"}]),
+        "{list}"
+    );
+    let (_, human, _) = m.run(&m.beta, &["chat", "list"]);
+    assert!(
+        human.contains("HIDES the user-level persona `pm`"),
+        "the hiding is reported: {human}"
+    );
+    let (ok, prime, err) = m.run(&m.beta, &["prime"]);
+    assert!(ok, "{err}");
+    assert!(
+        prime.contains("HIDES the user-level persona `pm`"),
+        "prime reports it too: {prime}"
+    );
+    // Alpha is untouched by beta's copy.
+    let list = m.json(&m.alpha, &["chat", "--json", "list"]);
+    assert!(list["declarations"].get("shadowed").is_none(), "{list}");
+}
+
 /// **The scenario with real sessions** (nxf 6j6v.70dy, section 1 of the slice's specification) —
 /// the PM of one repository asks the PM of another and passes the answer on, through the real
 /// binary, the real sidecar and a real model. What the routing tests above cannot show: that a
 /// persona actually commissions across the border, the other persona actually answers, and the
-/// answer actually wakes the commissioner.
+/// answer actually wakes the commissioner — and, since nxf 6j6v.7k58, that both PMs are ONE
+/// definition from the user-level folder, each knowing only its own repository.
 ///
 /// `#[ignore]`d for the reasons every live smoke here is: real subscription auth, real seconds,
 /// real cost. It does NOT pin `HOME` — the SDK's credentials live there — so the registry it
@@ -300,6 +374,7 @@ fn live_the_pm_of_one_repository_asks_the_pm_of_another_and_tells_its_owner() {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    let service_home_root = service_home.clone();
     let _cleanup = Cleanup(service_home);
 
     let dirs = TempDir::new().unwrap();
@@ -334,24 +409,31 @@ fn live_the_pm_of_one_repository_asks_the_pm_of_another_and_tells_its_owner() {
             .unwrap()
             .success();
         assert!(ok);
-        std::fs::create_dir_all(dir.join(".nxs-personas")).unwrap();
     }
+    // ONE pm for both repositories, from the instance's user-level folder (nxf 6j6v.7k58) —
+    // neither repository declares it. What each one knows is in ITS repository: the prompt names
+    // `BOARD.md` relative to the repository, which is the repository the session runs in.
+    let user_personas = service_home_root.join("personas");
+    std::fs::create_dir_all(&user_personas).unwrap();
     std::fs::write(
-        alpha.join(".nxs-personas/pm.yaml"),
-        "handle: pm\nsystem_prompt: |\n  You are the PM of test/alpha. Keep every message short.\n  \
+        user_personas.join("pm.yaml"),
+        "handle: pm\naddressable:\n  humans: true\n  external:\n    - \"*/pm\"\nsystem_prompt: |\n  \
+         You are the PM of the repository you run in. Keep every message short.\n  \
          When the person asks you to find something out from the PM of another repository, run\n  \
          exactly `nxc send --to <owner>/<repo>/pm --no-ref \"<question>\"` and end your turn without\n  \
-         replying. When you are woken with the answer, pass it on to the person with `nxc reply`.\n",
+         replying. When you are woken with the answer, pass it on to the person with `nxc reply`.\n  \
+         When the PM of another repository asks YOU something, read `BOARD.md` at the root of this\n  \
+         repository and answer with `nxc reply`, in one sentence.\n",
     )
     .unwrap();
     std::fs::write(
-        beta.join(".nxs-personas/pm.yaml"),
-        "handle: pm\naddressable:\n  humans: true\n  external:\n    - \"*/pm\"\nsystem_prompt: |\n  \
-         You are the PM of test/beta. Keep every message short. Before answering, look at your\n  \
-         team with `nxc list`. Your board says: the access rule on channels ships with version\n  \
-         0.300. Answer what you are asked with `nxc reply`, in one sentence.\n",
+        beta.join("BOARD.md"),
+        "The access rule on channels ships with version 0.300.\n",
     )
     .unwrap();
+    for dir in [&alpha, &beta] {
+        assert!(!dir.join(".nxs-personas/pm.yaml").exists());
+    }
     for (dir, other) in [(&alpha, "test/beta"), (&beta, "test/alpha")] {
         let ok = nxs(dir)
             .args(["sync", "trust", "add", "--workspace", other])
