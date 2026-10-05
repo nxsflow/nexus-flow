@@ -29,7 +29,10 @@
 //! errors and under the same rule — a spawned persona is not shown its author's mistakes, a human
 //! at a keyboard is ([`crate::facade::PrimeReport::render_markdown`]).
 
+use std::path::Path;
+
 use crate::channel::ChannelDecl;
+use crate::definitions::{DeclarationFile, DeclarationForm, DeclarationKind, Ignored};
 use crate::role::RoleDecl;
 
 /// One quality finding about a declaration, in [`ValidationError`](crate::channel::ValidationError)'s
@@ -128,20 +131,121 @@ const ROUTING_SURFACE_MIN_CHARS: usize = 24;
 /// order. Pure — no I/O, no notion of interactive-vs-spawned, exactly like
 /// [`crate::channel::validate_channels`] beside it.
 pub fn warn_declarations(roles: &[RoleDecl], channels: &[ChannelDecl]) -> Vec<DeclarationWarning> {
+    warn_declarations_in(roles, channels, &[], None)
+}
+
+/// [`warn_declarations`] with the FILES behind the declarations (nxf 6j6v.dw16 / 6j6v.2x7t), which
+/// adds what only a file can show and names each finding by the file it is in rather than by a
+/// name derived from the handle:
+///
+/// - `address_book` — retired and ignored (nxf 6j6v.xjh3);
+/// - a name that breaks the Agent Skills name rule, or a skill whose folder is named otherwise;
+/// - the inert keys `session`, `sub_agents`, `reports_to`;
+/// - a nexus-flow key at the top of a `SKILL.md`, or a key under `nxs:` that names no field;
+/// - `nxs.requires` naming anything — ONE note for the whole team, that nothing binds it yet.
+///
+/// `folder` is the workspace's declaration folder: a file under it is named relative to it
+/// (`pm/SKILL.md`), any other — the user-level folder's — by its full path.
+pub fn warn_declarations_in(
+    roles: &[RoleDecl],
+    channels: &[ChannelDecl],
+    files: &[DeclarationFile],
+    folder: Option<&Path>,
+) -> Vec<DeclarationWarning> {
+    let label = |file: &DeclarationFile| match folder.and_then(|f| file.file.strip_prefix(f).ok()) {
+        Some(relative) => relative.display().to_string(),
+        None => file.file.display().to_string(),
+    };
+    let file_of =
+        |kind: DeclarationKind, name: &str| files.iter().find(|f| f.kind == kind && f.name == name);
     let mut warnings = Vec::new();
     for role in roles {
-        warn_role(role, &mut warnings);
+        let file = file_of(DeclarationKind::Persona, &role.handle)
+            .map(label)
+            .unwrap_or_else(|| format!("{}.yaml", role.handle));
+        warn_role(role, &file, &mut warnings);
     }
     for channel in channels {
-        warn_channel(channel, &mut warnings);
+        let file = file_of(DeclarationKind::Channel, &channel.name)
+            .map(label)
+            .unwrap_or_else(|| CHANNELS_FILE.to_string());
+        warn_channel(channel, &file, &mut warnings);
+    }
+    for file in files {
+        warn_file(file, &label(file), &mut warnings);
+    }
+    let requiring: Vec<String> = files
+        .iter()
+        .filter(|f| !f.requires.is_empty())
+        .map(|f| format!("`{}` ({})", f.name, f.requires.join(", ")))
+        .collect();
+    if let Some(first) = files.iter().find(|f| !f.requires.is_empty()) {
+        warnings.push(DeclarationWarning {
+            file: label(first),
+            what: format!(
+                "`nxs.requires` names capabilities for {} — nothing binds a capability yet: the \
+                 names are shown, not checked, and a persona runs without what it names until a \
+                 later release binds capabilities per environment",
+                requiring.join(", ")
+            ),
+        });
     }
     warnings
 }
 
+/// What only a declaration's FILE shows: the keys it carries that are ignored, and its name.
+fn warn_file(file: &DeclarationFile, label: &str, out: &mut Vec<DeclarationWarning>) {
+    let mut say = |what: String| {
+        out.push(DeclarationWarning {
+            file: label.to_string(),
+            what,
+        })
+    };
+    if file.kind == DeclarationKind::Persona {
+        let folder = match file.form {
+            DeclarationForm::Skill => file.folder.file_name().and_then(|n| n.to_str()),
+            _ => None,
+        };
+        if let Some(problem) = crate::skill::name_rule_violation(&file.name, folder) {
+            say(format!(
+                "the name `{}` breaks the Agent Skills name rule: it {problem}. It still works \
+                 here; a skill tool that checks the rule will refuse it",
+                file.name
+            ));
+        }
+    }
+    for ignored in &file.ignored {
+        say(match ignored {
+            Ignored::AddressBook { entries: 0 } => "`address_book` is retired and ignored: who \
+                this persona can reach is derived from what every other persona and channel \
+                admits. Remove the key"
+                .to_string(),
+            Ignored::AddressBook { entries } => format!(
+                "`address_book` is retired and ignored, its {entries} entr{} included: who this \
+                 persona can reach is derived from what every other persona and channel admits, \
+                 described in their own words. To be reached, a target says so in its own \
+                 `addressable`. Remove the key",
+                if *entries == 1 { "y" } else { "ies" }
+            ),
+            Ignored::Inert(key) => {
+                format!("`{key}` has never had an effect and is ignored. Remove it")
+            }
+            Ignored::Misplaced(key) => format!(
+                "`{key}` at the top of SKILL.md is not read: nexus-flow's fields live under \
+                 `nxs:` — move it there"
+            ),
+            Ignored::Unknown(key) => format!(
+                "`{key}` names no field and is ignored — `nxc guide personas` lists what `nxs:` \
+                 takes"
+            ),
+        });
+    }
+}
+
 /// One persona's findings: engine text copied into it (guide class 1), then a routing surface that
 /// cannot route (guide class 3).
-fn warn_role(role: &RoleDecl, out: &mut Vec<DeclarationWarning>) {
-    let file = format!("{}.yaml", role.handle);
+fn warn_role(role: &RoleDecl, file: &str, out: &mut Vec<DeclarationWarning>) {
+    let file = file.to_string();
     let text = [
         Some(role.system_prompt.as_str()),
         role.job_description.as_deref(),
@@ -202,7 +306,7 @@ fn warn_role(role: &RoleDecl, out: &mut Vec<DeclarationWarning>) {
 /// One channel's findings: engine text copied into anything it declares that reaches a model (guide
 /// class 1), a step target repeated under `members:` (nxf 6j6v.g0yn), then a routing surface that
 /// cannot route (guide class 3).
-fn warn_channel(channel: &ChannelDecl, out: &mut Vec<DeclarationWarning>) {
+fn warn_channel(channel: &ChannelDecl, file: &str, out: &mut Vec<DeclarationWarning>) {
     // **The redundancy the derived cast leaves behind** (nxf 6j6v.g0yn). A step target IS in the
     // channel now ([`crate::channel::cast`]), so repeating it under `members:` says nothing — and
     // the two lists are then two places one fact is written, which is what the ticket set out to
@@ -216,7 +320,7 @@ fn warn_channel(channel: &ChannelDecl, out: &mut Vec<DeclarationWarning>) {
         .collect();
     if !repeated.is_empty() {
         out.push(DeclarationWarning {
-            file: CHANNELS_FILE.to_string(),
+            file: file.to_string(),
             what: format!(
                 "channel {:?} lists {} under `members:` as well as in its steps — a step \
                  target already takes part, so the member entry adds nothing. `members:` is for a \
@@ -250,7 +354,7 @@ fn warn_channel(channel: &ChannelDecl, out: &mut Vec<DeclarationWarning>) {
     let found = spelled(&text, &admitted);
     if !found.is_empty() {
         out.push(DeclarationWarning {
-            file: CHANNELS_FILE.to_string(),
+            file: file.to_string(),
             what: format!(
                 "channel {:?} spells {} — the engine supplies that already, to the synthesizer and \
                  to every member it commissions. A copy drifts, and the copy is the half nobody \
@@ -272,7 +376,7 @@ fn warn_channel(channel: &ChannelDecl, out: &mut Vec<DeclarationWarning>) {
         ),
         Some(_) => return,
     };
-    out.push(routing_surface(CHANNELS_FILE, &what));
+    out.push(routing_surface(file, &what));
 }
 
 /// The shared second half of warnings (b) and (c): WHY this field is worth a sentence of thought.

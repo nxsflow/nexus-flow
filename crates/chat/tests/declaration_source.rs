@@ -454,8 +454,8 @@ fn init_creates_the_personas_folder_with_an_explanation_and_no_shipped_personas(
     );
     let readme = std::fs::read_to_string(personas.join(PERSONAS_README))
         .expect("with a short explanation of the format inside");
-    assert!(readme.contains("<handle>.yaml"), "{readme}");
-    assert!(readme.contains("channels.yaml"), "{readme}");
+    assert!(readme.contains("<name>/SKILL.md"), "{readme}");
+    assert!(readme.contains("channels/<name>.yaml"), "{readme}");
 
     // NO shipped personas: those are explicitly outside this epic (owner note on 6j6v.m4xe), and a
     // workspace that arrived with a team would make the whole declaration story a lie.

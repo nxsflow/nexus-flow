@@ -1,16 +1,26 @@
 # Channels
 
 A **channel** is a declared group and, since the order of its members can be made binding, it is
-also the only workflow this system has. Both live in one file, `.nxs-personas/channels.yaml`, as a
-YAML list:
+also the only workflow this system has. Each channel is one file,
+`.nxs-personas/channels/<name>.yaml`, holding that channel as a map:
 
 ```yaml
-- name: review
-  members: [general, integrity]
-  description: the review quorum — one round asks both reviewers and hands back one verdict
+# .nxs-personas/channels/review.yaml
+name: review
+members: [general, integrity]
+description: the review quorum — one round asks both reviewers and hands back one verdict
 ```
 
-`name` and `members` are the only required keys. Address it exactly as you address a persona:
+`name` and `members` are the only required keys. `name:` is the truth; the file's name is
+convention. A channel is not a skill and has no frontmatter — its fields are the ones on this page.
+
+**The older form is still read:** all channels as one YAML list in `.nxs-personas/channels.yaml`,
+each entry the same map with a `- ` in front. The examples on this page show one channel, which is
+the same text in either file. A channel declared in both — in `channels.yaml` and in `channels/` —
+is refused when the folder is read, naming both files; `nxs personas migrate` moves the list into
+`channels/`, one file per channel, keeping your comments (`nxc guide personas`). Read from
+`channels/`, the channels are listed in the order of their file names. Address it exactly as you
+address a persona:
 
 ```bash
 nxc send --to review --ref nxf_ids=ab12.0008 "Judge the export change."
@@ -121,8 +131,8 @@ channel's messages, `nxc search` included — one list, one answer, whichever ve
 **Nothing on the CHANNEL declares when a member is resumed**, and nothing needs to: a fan-out
 always starts a member's turn on a fresh session, and a `nxc reply --thread` into that member's own
 thread resumes the session it already has. A `member_session: fresh | resume` key stood here until
-it was removed — it steered nothing and refused its own second value — and a `channels.yaml` that
-still sets it loads unchanged, the key ignored.
+it was removed — it steered nothing and refused its own second value — and a channel declaration
+that still sets it loads unchanged, the key ignored.
 
 The one place a declaration *does* decide is a **step**, which has a `resume:` of its own — see
 [Continuing a session, or starting a fresh one](#continuing-a-session-or-starting-a-fresh-one). Per

@@ -48,7 +48,7 @@ may not settle it either, and the work runs on around it.
 
 ## Declarations
 
-nobody is declared here yet — declare one as `[CWD]/.nxs-personas/<handle>.yaml` (a persona) or `[CWD]/.nxs-personas/channels.yaml` (a channel).
+nobody is declared here yet — declare one as `[CWD]/.nxs-personas/<name>/SKILL.md` (a persona) or `[CWD]/.nxs-personas/channels/<name>.yaml` (a channel).
 
 ```
 

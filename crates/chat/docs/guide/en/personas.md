@@ -1,50 +1,69 @@
 # Personas
 
-A **persona** is one agent, declared in one file: `.nxs-personas/<handle>.yaml`. `nxc` reads that
-folder; nothing but you writes it. There is no `register` verb, no built-in personas, and no way to
-conjure one at runtime — which is the point. A declared agent is one you can read, diff, review and
-commit, and once committed it is still there tomorrow. **Commit it** — see
+A **persona** is one agent, declared in one folder: `.nxs-personas/<name>/SKILL.md`. `nxc` reads
+that folder; nothing but you writes it. There is no `register` verb, no built-in personas, and no
+way to conjure one at runtime — which is the point. A declared agent is one you can read, diff,
+review and commit, and once committed it is still there tomorrow. **Commit it** — see
 [the folder belongs in version control](#the-folder-belongs-in-version-control), which is not
 housekeeping advice.
 
-The minimum is two lines:
+The file is a **skill**, in the form of the [Agent Skills specification](https://agentskills.io):
+a YAML frontmatter between two `---` lines, then the instructions. The minimum is three lines and a
+sentence:
 
-```yaml
-handle: coder
-system_prompt: |
-  You are the coder. Do what the trigger message asks; an answer from you means it is done.
+```markdown
+---
+name: coder
+---
+You are the coder. Do what the trigger message asks; an answer from you means it is done.
 ```
 
 Everything else has a default that means what it meant before the field existed, so a declaration
-never breaks by standing still.
+never breaks by standing still. The specification's own fields sit at the top of the frontmatter;
+everything nexus-flow needs beyond them sits under ONE key, `nxs:`. A skill that has no `nxs:` at
+all is a persona with every default — see
+[a published skill is a persona](#a-published-skill-is-a-persona).
+
+The older form, one `<handle>.yaml` per persona, is still read — see
+[the older YAML form](#the-older-yaml-form) for how its fields map, and `nxs personas migrate` for
+the command that rewrites it.
 
 ## Who it is
 
-```yaml
-handle: coder
-job_title: Coder
-job_description: Implements a work order on a branch and merges it.
-expected_output: A short report of what changed, and the branch it is on.
+```markdown
+---
+name: coder
+description: Implements a work order on a branch and merges it.
+nxs:
+  title: Coder
+  expected_output: A short report of what changed, and the branch it is on.
+---
 ```
 
-`handle` is the address — what you type after `send --to`. By convention it is also the filename
-stem, though the YAML field is the source of truth.
+`name` is the handle, the address — what you type after `send --to`. By convention it is also the
+folder's name, though the field is the source of truth. The Agent Skills specification has a rule
+for it: 1 to 64 characters, lowercase letters, digits and hyphens, no hyphen at either end and no
+two in a row, and the same as the folder's name. `nxs prime` warns when a name breaks it; nothing
+refuses one, but a skill tool that checks the rule will.
 
-`job_title` and `job_description` are not decoration. They are what `nxc list` shows a human
+`description` and `nxs.title` are not decoration. They are what `nxc list` shows a human
 deciding whom to address, and what the persona itself is told at session start. A handle with no
 description is a name in a directory that nobody can choose from — the one-liner does the work a
 skill's frontmatter does, and it is worth a sentence of thought.
 
-`expected_output` is the shape of the answer you want back. It reaches the persona's own identity
-block, so it is the cheapest way to make several agents' replies comparable.
+`nxs.expected_output` is the shape of the answer you want back. It reaches the persona's own
+identity block, so it is the cheapest way to make several agents' replies comparable.
 
 A handle may not start with `__`. That prefix is reserved for the engine's own identities (a
-channel's supervisor is `__channel__`), which is what makes those unforgeable by a declaration.
+channel's supervisor is `__channel__`), which is what makes those unforgeable by a declaration. And
+no persona may be called `channels`: that is the folder holding one file per channel (`nxc guide
+channels`).
 
 ## What it is for
 
-`system_prompt` is the persona's job, in your own words, and it is the last thing the model reads
-before the conversation itself. The composed prompt is layered, in this order:
+The **body** of `SKILL.md` — everything after the frontmatter — is the persona's job, in your own
+words, and it is the last thing the model reads before the conversation itself. The composed prompt
+is layered, in this order:
 
 1. **The prime block** — what `nxs prime --persona <handle>` composes, and you can print it and
    read it yourself. It is the suite's session start, assembled in module order: the board
@@ -53,7 +72,7 @@ before the conversation itself. The composed prompt is layered, in this order:
    what for, the `nxc` command reference, and its answering rules. It goes first so that "who am I
    and how do I answer" anchors everything after it.
 2. **The project's `CLAUDE.md`**, when the persona's `claude_md:` policy asks for it.
-3. **The persona's own `system_prompt`** — the role, in your words.
+3. **The body of the persona's `SKILL.md`** — the role, in your words, unchanged.
 4. **The task the step declared**, when this persona was summoned by a step of a channel's flow that
    carries a `task:` (`nxc guide channels`). It sits under the role because it is the narrower of
    the two, and it is what the role could not know: which of the several jobs it serves this station
@@ -73,21 +92,35 @@ closed — a reply into one of its threads is refused, and says so — so the ne
 `send --to`, which is also how you start something new with somebody else. `nxc list` shows who is
 there.
 
-Three switches shape those layers:
+**A relative path in the body means the persona's own folder.** That is the Agent Skills rule: a
+skill keeps `references/`, `scripts/` or `examples/` beside its `SKILL.md` and says
+"load `references/guide.md`". It holds wherever the persona runs — in this repository, or from the
+user-level folder in somebody else's — because the session is told at its start where its
+declaration lives (the "Declared in" line) and that a relative path means that folder, unless the
+instructions say a path is relative to the repository. The session's working directory is still the
+repository it works in. (The older YAML form keeps the opposite rule: a relative path there means
+the repository.)
+
+A skill body is often written as instructions — "when X, do Y" — rather than as a role. That
+carries, because the engine supplies the identity and the answering rules in layer 1 itself.
+
+Three switches shape those layers, all under `nxs:`:
 
 ```yaml
-prime: true            # default. false opts out of layer 1 for a narrow role whose prompt covers it
-claude_md: inherit     # default | ignore (do not show project conventions) | override (reserved)
-base_prompt: claude_code   # default. `none` runs without the Claude Code preset underneath
+nxs:
+  prime: true            # default. false opts out of layer 1 for a narrow role whose body covers it
+  claude_md: inherit     # default | ignore (do not show project conventions) | override (reserved)
+  base_prompt: claude_code   # default. `none` runs without the Claude Code preset underneath
 ```
 
 `prime:` also takes a map, when a persona should be given some of the suite and not the rest:
 
 ```yaml
-prime:
-  flow: false          # no board for THIS persona — a pure reviewer does not need one
-  memory: true         # the project's memories (the default)
-  chat: true           # its identity, address book and answering rules (the default)
+nxs:
+  prime:
+    flow: false          # no board for THIS persona — a pure reviewer does not need one
+    memory: true         # the project's memories (the default)
+    chat: true           # its identity, its directory and answering rules (the default)
 ```
 
 Anything you leave out stays on, so the map above says one thing and changes one thing. The filter
@@ -145,11 +178,15 @@ prevent.
 
 ## What it runs as
 
-```yaml
-stage: senior          # junior | senior | principal
-model: opus            # fable | opus | sonnet — beats `stage` when both are given
-tools: [Bash, Read, Write]
-permissions: acceptEdits
+```markdown
+---
+name: coder
+allowed-tools: Bash Read Write
+nxs:
+  stage: senior          # junior | senior | principal
+  model: opus            # fable | opus | sonnet — beats `stage` when both are given
+  permissions: acceptEdits
+---
 ```
 
 **`stage` is a vocabulary that is not a model name.** You decide how much thinking a job is worth
@@ -164,30 +201,41 @@ channels`) — the same reviewer judging a diff at one station and a design at a
 second is dearer thinking. It moves the band and nothing else: a step may not name a model, and a
 persona that declared its own `model:` runs on it whatever a step asks for.
 
-`tools` has three states, and the difference matters. Omit it entirely and the agent runtime's own
-full default toolset applies. Write `tools: []` and the persona explicitly has none — a narrow,
-non-agentic role. Write a list and it gets exactly that list. An omitted key and an empty list are
-*not* the same thing.
+`allowed-tools` has three states, and the difference matters. Omit it entirely and the agent
+runtime's own full default toolset applies. Write it with an empty value (`allowed-tools:`, or
+`""`) and the persona explicitly has none — a narrow, non-agentic role. Write a list and it gets
+exactly that list. An omitted key and an empty one are *not* the same thing.
+
+The list is the specification's space-separated text (`Bash Read Write`); a comma-separated text
+and a YAML list are taken too. An entry may be a rule rather than a bare tool — `Bash(git add *)` —
+and is split only outside its parentheses. In Claude Code `allowed-tools` PRE-APPROVES tools
+without restricting the rest; here it is both, because a persona runs with nobody at the keyboard to
+approve a prompt: the rules are approved as written, and the tools they name are the persona's
+toolset.
 
 A persona that will run `nxc` at all needs `Bash`, since that is how it answers — and where the
 engine *orders* an answer, it grants that itself. Every commission tells the persona, in its own
-system prompt, to end its turn with `nxc reply --thread <id>`, so whoever imposes that obligation has
-to make sure it can be carried out. What the trigger adds depends on what you declared, and never
-narrows it: a persona that omits `tools:` gets `Bash`, as it always did; a persona that declares a
-list without `Bash` — `tools: []` included — gets `Bash(nxc reply:*)`, which runs its reply and no
-other command; a persona that lists `Bash` gets nothing more. You still declare `Bash` for a persona
-that needs the shell for its *work*; what you no longer have to remember is that answering is itself
-work. `limits-and-safety` says exactly what the narrow grant lets through.
+system prompt, to end its turn with `nxc reply --thread <id>`, so whoever imposes that obligation
+has to make sure it can be carried out. What the trigger adds depends on what you declared, and
+never narrows it: a persona that omits `tools:` gets `Bash`, as it always did; a persona that
+declares a list without `Bash` — `tools: []` included — gets `Bash(nxc reply:*)`, which runs its
+reply and no other command; a persona that lists `Bash` gets nothing more. You still declare `Bash`
+for a persona that needs the shell for its *work*; what you no longer have to remember is that
+answering is itself work. (What this paragraph says of `tools` holds for `allowed-tools`: it is the
+same field.) `limits-and-safety` says exactly what the narrow grant lets through.
 
 ## Who may address it
 
 ```yaml
-addressable: general        # the default: anyone may open a conversation directly
-addressable: none           # nobody may — come through a channel that casts me
-addressable:                # exactly these callers, and nobody else
-  personas: [pm]
-  humans: true
+nxs:
+  addressable: general        # the default: anyone may open a conversation directly
+  addressable: none           # nobody may — come through a channel that casts me
+  addressable:                # exactly these callers, and nobody else
+    personas: [pm]
+    humans: true
 ```
+
+(Three alternatives, not one block — a frontmatter takes one of them.)
 
 **The mapping is a whitelist, and an omitted half names nobody of that class.** That is what makes
 the two cases people actually hit one form rather than two:
@@ -207,7 +255,7 @@ places. Write `none`; `nxs prime` will tell you as well.
 ### Why a caller-derived limit is admissible here
 
 The rule this surface is built on is that dropping your identity must never let you do *more* —
-that is why the address book below is guidance and never enforcement. The distinction an earlier
+that is why the directory below is guidance and never enforcement. The distinction an earlier
 version of this page drew too widely:
 
 - `general` and `none` read the same for every caller, exactly as they always did.
@@ -240,11 +288,12 @@ so. Its address from outside is the workspace's name and the persona's handle:
 there is no origin. Inside a workspace nothing changes: `pm` stays `pm`.
 
 ```yaml
-addressable:
-  humans: true
-  external:
-    - "*/pm"                     # the PM of every workspace this one trusts
-    - nxsflow/manufakt-io/pm     # or exactly this one
+nxs:
+  addressable:
+    humans: true
+    external:
+      - "*/pm"                     # the PM of every workspace this one trusts
+      - nxsflow/manufakt-io/pm     # or exactly this one
 ```
 
 - **No `external`, no way in from outside** — under every form, `general` included: "anyone" means
@@ -286,42 +335,37 @@ a version that knows it.
 
 ## Who it may address
 
+Nobody declares whom a persona may address. Its session start lists the team **derived** from what
+everybody else declares: every persona and channel of the workspace that admits it, each described
+in its own words (`description`, a channel's `description`), with the channel route in for a
+persona that admits nobody directly. A target appears in a persona's directory because the target
+says so in its own `addressable` — one place, written by the one who is addressed.
+
+One thing the list leaves out: **the channels the persona is a member of.** Offering a reviewer the
+`review` round it sits in is help in no reading.
+
+The list is guidance a persona reads, not a limit: deriving a limit from a droppable identity would
+be worse than useless (see above).
+
+**`address_book` is retired.** The older form let a persona carry a list of whom it addresses and
+why. It was a second place the route was written down, it could disagree with the target's own
+`addressable`, and its `why` lines went stale when a target's job changed. A declaration that still
+carries it loads; the key is ignored, `nxs prime` says so, and `nxs personas migrate` leaves it out.
+`address_book: []` — "this persona commissions nobody" — has no successor either: a persona sees
+the targets that admit it.
+
+## What it says it needs
+
 ```yaml
-address_book:
-  - to: review
-    why: to get a change judged before merging
-  - to: pm
-    why: to report that a work order is done
+nxs:
+  requires: [board, memory, mail]
 ```
 
-The **`why` is the load-bearing half** — it works like a skill's one-line description, a sentence a
-model chooses from, which is why it is rendered everywhere the target is.
-
-**It has three states, exactly like `tools:`, and the difference matters.**
-
-```yaml
-# key omitted            -> "nobody wrote this down": the persona is shown the whole declared team
-address_book: []         # -> "commissions nothing": the persona is shown nobody at all
-address_book: [{to: pm}] # -> that book, in the author's order
-```
-
-`address_book: []` is the declaration for a role at a **leaf** of the tree: a pure reviewer, a
-summarizer, anything whose only outbound call is the reply on its own thread. Saying it in the file
-is the point — before this, the alternative was a sentence in the `system_prompt` ("you commission
-nothing; ignore the list"), which is a prompt argued against a declaration.
-
-An **omitted** key stays "not written down" and shows the whole team, so every persona declared
-before this existed means exactly what it always meant.
-
-One thing the derived list leaves out: **the channels the persona is a member of.** Offering a
-reviewer the `review` round it sits in is help in no reading, and commissioning your own channel is
-not declaration cyclicity — that is refused when the catalogue loads — so nothing else would catch
-it. A book you write yourself is honoured entry for entry, that channel included: the file is the
-authority.
-
-Note what the address book deliberately does *not* do in this milestone: it does not restrict. It is
-guidance a persona reads, for the same reason as above — deriving a limit from a droppable identity
-would be worse than useless.
+`nxs.requires` names the capabilities a persona needs, in free words. **In this release it is read
+and shown, and nothing more:** no vocabulary checks the names, and nothing binds one to a tool, a
+subscription or an account. `nxs prime` says so once when any persona names one, and
+`nxc list --json` carries the list. Binding a capability per environment — "mail" meaning Outlook on
+one machine and Gmail on another — is a later release; do not build on it yet.
 
 ## How it learns the answers it commissioned
 
@@ -347,7 +391,8 @@ does not have to be acknowledged. `nxc status` answers the same question at any 
 ## What it needs to work
 
 ```yaml
-working_tree: exclusive        # shared (default) | exclusive
+nxs:
+  working_tree: exclusive        # shared (default) | exclusive
 ```
 
 `exclusive` says this persona's sessions need sole use of the repository's working copy and build
@@ -359,12 +404,13 @@ not protect you from — are in [limits-and-safety](nxc-limits-and-safety).
 ## Where it runs
 
 ```yaml
-machine: studio                # a machine id or name from `nxs sync machines`; default: where the chat starts
+nxs:
+  machine: studio   # a machine id or name from `nxs sync machines`; default: where the chat starts
 ```
 
 A chat with this persona runs on exactly **one** machine. Every other machine that syncs the
 workspace sees the chat and starts nothing. The machine is decided when the chat starts, in this
-order: `nxc send --to <persona> --machine <m>` for that one chat, then this `machine:`, then the
+order: `nxc send --to <persona> --machine <m>` for that one chat, then this `nxs.machine`, then the
 machine that starts the chat. The answer is written into the chat itself, so every machine reads the
 same one, and a later `nxc reply --thread <id> --machine <m>` hands the chat to another machine.
 
@@ -377,29 +423,31 @@ visible in the thread and starts nothing.
 All of this applies to a workspace that syncs with other machines (`nxs sync bind`). One that syncs
 nowhere has a single machine, so nothing is designated there and a chat starts where it is written.
 
-`machine:` is read only when a person starts a chat. A chat that a running persona starts runs on
+`nxs.machine` is read only when a person starts a chat. A chat that a running persona starts runs on
 that persona's machine, because the answer has to come back to the session that asked. A persona
 commissioned as a channel's member runs wherever the channel was started.
 
 ## A worked example
 
-```yaml
-handle: coder
-job_title: Coder
-job_description: Implements a work order on a branch and merges it.
-working_tree: exclusive
-system_prompt: |
-  You are the coder. Implement the work order in the message you were handed: on a branch of
-  its own, with the project's own gates green before you merge it.
+```markdown
+---
+name: coder
+description: Implements a work order on a branch and merges it.
+allowed-tools: Bash Read Write
+nxs:
+  title: Coder
+  working_tree: exclusive
+  permissions: acceptEdits
+---
+You are the coder. Implement the work order in the message you were handed: on a branch of
+its own, with the project's own gates green before you merge it.
 
-  An answer from you means the branch is merged and those gates were green on the tree that was
-  merged. If you cannot get there — something is missing, or a decision came up that is not
-  yours to make — say what you are missing in your thread rather than answering.
-tools: [Bash, Read, Write]
-permissions: acceptEdits
+An answer from you means the branch is merged and those gates were green on the tree that was
+merged. If you cannot get there — something is missing, or a decision came up that is not
+yours to make — say what you are missing in your thread rather than answering.
 ```
 
-**Three things in that prompt are worth copying into your own, and one absence carries all three.**
+**Three things in that body are worth copying into your own, and one absence carries all three.**
 It names a ROLE and never a position — nothing in it claims to be the first step of anything, so
 the same file is still true the day the channel gains a step, and a persona that asserts its
 position gets it wrong (measured: one claimed three steps where there were four). It says what
@@ -415,21 +463,18 @@ the engine had moved on. `nxs prime` reports one as a **declaration warning** wh
 
 ## Declared but not yet read
 
-Trustworthy documentation says which fields are inert. These parse, round-trip and validate, and
-nothing in the engine acts on them today:
+Trustworthy documentation says which fields are inert. Three keys of the older form never had an
+effect, and are ignored with a warning from `nxs prime`; `nxs personas migrate` leaves them out:
 
 - **`session: fresh | continue`** — inert because **the persona is not what decides**. `nxc
   send --to <persona>` mints a fresh session; a `nxc reply --thread` into that persona's own thread
   resumes the session it already has, with everything it already knows; and inside a channel that
   declares `steps:`, the step being entered decides for itself with its own `resume:` (`nxc guide
-  channels`). A policy on the persona has nothing left to decide that the verb or the step has not
-  decided already.
+  channels`).
 - **`sub_agents: true | false`**.
 - **`reports_to: <handle>`**.
 
-Declaring them costs nothing and documents intent; do not build a process on them behaving.
-
-**`claude_md: override` is the one to be careful with**, because it is only HALF unread. The
+**`nxs.claude_md: override` is the one to be careful with**, because it is only HALF unread. The
 per-persona replacement document it names is not specified yet, so nothing composes one — but the
 tag is not idle while it waits: it is simply not `inherit`, so a persona that declares it is
 composed WITHOUT the project's `CLAUDE.md`, exactly as `ignore` would be. Declare `ignore` when that
@@ -463,18 +508,38 @@ to be stable is a running **operation**, not the directory:
   ordinary way to work, and the exit code stays `0`. A change is usually intended. An unnoticed one
   never is.
 
-Both of those watch **the persona's own file**, and nothing else in the folder. A `channels.yaml`
+Both of those watch **the persona's own file**, and nothing else in the folder. A channel file
 that was rolled back the same way — different members, a different `working_tree:`, a different
 `timeout:` — steers your agents just as much and is **not** reported by either. So the advice above
 is not "the tooling has your back": it is version control that has your back, and this is a second
 pair of eyes on the half of the folder it can see.
 
+## A published skill is a persona
+
+A skill you found — a folder with a `SKILL.md`, perhaps `references/` and `scripts/` beside it —
+is a persona the moment it lies in `.nxs-personas/`: copy the folder in, unchanged, and the next
+`nxc list` shows it. Nothing has to be rewritten and no command has to run. Putting it there is the
+decision; `nxc` reads no other skill location (`.claude/skills/` included) by itself.
+
+- **Without `nxs:` it runs with every default:** addressable by anybody inside this workspace and
+  by nobody outside it, at the default stage, with the tools its `allowed-tools` names, or the full
+  default set when it names none.
+- **Fields nexus-flow does not read are left alone.** Claude Code and other runtimes add fields of
+  their own to the frontmatter (`when_to_use`, `hooks`, …); they are not an error. `license`,
+  `compatibility` and `metadata`, the specification's own, are passed through: not read, kept by
+  `nxs personas migrate`, and shown in `nxc list --json` under `declaration`, beside the file, its
+  form and its folder. To a human a persona is a persona — `nxc list` does not show the form.
+- **A nexus-flow key at the top level is not read.** `addressable: none` belongs under `nxs:`;
+  written at the top it would be ignored, so `nxs prime` warns about it. A key under `nxs:` that
+  names no field is warned about too.
+
 ## One definition for every repository
 
 A persona you want in every repository — the same `pm` in each — does not have to be copied into
 each one. Beside a workspace's own `.nxs-personas/` there is a **user-level folder**,
-`~/.nexusflow/personas/`, laid out the same way: one `<handle>.yaml` per persona, and a
-`channels.yaml`. Every workspace on the machine reads it.
+`~/.nexusflow/personas/`, laid out the same way: one `<name>/SKILL.md` per persona and one
+`channels/<name>.yaml` per channel (or the older `<handle>.yaml` and `channels.yaml`). Every
+workspace on the machine reads it.
 
 - **Merged per name.** A persona or channel the repository declares itself **hides** the user-level
   one of the same name; everything else is added. A channel comes along with the personas it
@@ -500,12 +565,13 @@ Three things hold exactly as they do for the repository's own folder:
 - **It is frozen per operation.** What an operation runs under is the merged catalogue as it stood
   when the operation opened — hurdles (`preconditions:`) from the user-level folder included. An
   edit there reaches the next operation, never a running one.
-- **A relative path means the repository the persona runs in.** Nothing resolves a path written in a
-  declaration: a system prompt that says "read `knowledge/x.md`, relative to the root of this
-  workspace" is read by a session whose working directory is the repository, and a hurdle runs there
-  too. Files kept *beside* a user-level declaration are therefore not found that way. A persona from
-  the user-level folder is told at session start where its declaration lives ("Declared in"), so its
-  instructions can point there instead.
+- **A relative path follows the form.** In a `SKILL.md` it means the persona's own folder, so a
+  user-level skill finds its `references/` in every repository it runs in — that is the Agent
+  Skills rule, and the session is told where the folder is ("Declared in"). In the older YAML form
+  it means the repository the persona runs in: a prompt that says "read `knowledge/x.md`, relative
+  to the root of this workspace" is read by a session whose working directory is the repository, and
+  a hurdle runs there too. A YAML persona from the user-level folder is told where its declaration
+  lives as well, so its instructions can point there.
 - **An embedding app reads the same folder.** It does not choose another one, and cannot: the
   personas it starts run `nxc`, which reads this folder, and two answers to "who exists" would split
   an app from its own sessions.
@@ -520,9 +586,41 @@ A development build reads a user-level folder only under a named service instanc
 shell without `direnv`) reads none, so a build under test never picks up the personas your installed
 suite runs with.
 
+## The older YAML form
+
+Before the skill form, a persona was one `<handle>.yaml`. It is still read, in the repository's
+folder and in the user-level folder alike, and it maps field for field:
+
+| YAML form | Skill form |
+| --- | --- |
+| `handle` | `name` |
+| `job_description` | `description` |
+| `system_prompt` | the body of `SKILL.md` |
+| `tools` | `allowed-tools`, with the same three states |
+| `job_title` | `nxs.title` |
+| `expected_output`, `stage`, `model`, `addressable`, `prime`, `claude_md`, `base_prompt`, `permissions`, `working_tree`, `machine` | `nxs.<the same name>` |
+| `address_book`, `session`, `sub_agents`, `reports_to` | left out — ignored, with a warning |
+
+**One name, one declaration.** A `pm.yaml` beside a `pm/SKILL.md` is refused when the folder is
+read, and the error names both files: two declarations of one name must not let one win silently.
+
+**`nxs personas migrate`** rewrites a folder from the older form into the new one: every
+`<handle>.yaml` into `<handle>/SKILL.md`, the list in `channels.yaml` into one
+`channels/<name>.yaml` per channel, and it removes the old files. It keeps your comments with the
+keys they stand above, moves the notes heading `channels.yaml` into `channels/README.md`, and
+reports per file what it left out. Every rewritten file is read back before anything is written and
+must give the same declaration; a key it does not know stops the run, naming the file, before a
+single file changes. `--dry-run` shows the plan and writes nothing, `--user` migrates the user-level
+folder, and a second run finds nothing to do.
+
+An app that embeds an engine older than this one does not see a skill folder at all — migrate a
+repository an app reads only once the app runs this version.
+
 ## When a declaration is wrong
 
-A malformed file is a loud `validation` error naming the path — never a silently skipped persona. A
+A malformed file is a loud `validation` error naming the path — never a silently skipped persona.
+A `SKILL.md` without a frontmatter, or without a `name`, is one; a sub-folder without a `SKILL.md`
+is not a declaration at all and is left alone, so a team can keep its `knowledge/` there. A
 missing folder is *not* an error: a workspace with no declarations resolves cleanly and simply has
 nobody to address, and `nxc list` and `nxs prime` say so in as many words.
 
@@ -531,10 +629,12 @@ reachable through a channel it is not a member of — are surfaced in `nxs prime
 interactive context. A spawned persona is not shown its author's mistakes; a human at a keyboard is.
 
 **Quality warnings arrive in the same place, under the same rule.** A declaration that copies text
-the engine supplies anyway, or whose `job_description` cannot tell a caller when to call it, is not
-broken — so it is a *warning*: it is listed for the human, it excludes nothing, and the declaration
-loads and runs exactly as it would otherwise. What is checked, what deliberately is not, and the
-four error classes no check can decide are in [writing-declarations](nxc-writing-declarations).
+the engine supplies anyway, whose `description` cannot tell a caller when to call it, that still
+carries `address_book` or an inert key, whose name breaks the Agent Skills rule, or that names
+capabilities under `nxs.requires` that nothing binds yet, is not broken — so it is a *warning*: it
+is listed for the human, it excludes nothing, and the declaration loads and runs exactly as it would
+otherwise. What is checked, what deliberately is not, and the four error classes no check can decide
+are in [writing-declarations](nxc-writing-declarations).
 
 ## Next
 

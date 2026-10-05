@@ -52,23 +52,28 @@ Dateien, die Sie lesen, prüfen und einchecken können — nicht zur Laufzeit in
 einzelnen Maschine registriert. Der erste Schritt ist also, eine Persona aufzuschreiben:
 
 ```bash
-cat > .nxs-personas/coder.yaml <<'YAML'
-handle: coder
-job_title: Coder
-job_description: Implements a work order on a branch and merges it.
-system_prompt: |
-  You are the coder. Do what the trigger message asks. An answer from you means it is done; if
-  you cannot get there, say what you are missing rather than answering.
-tools: [Bash, Read, Write]
-YAML
+mkdir -p .nxs-personas/coder
+cat > .nxs-personas/coder/SKILL.md <<'MD'
+---
+name: coder
+description: Implements a work order on a branch and merges it.
+allowed-tools: Bash Read Write
+nxs:
+  title: Coder
+---
+You are the coder. Do what the trigger message asks. An answer from you means it is done; if
+you cannot get there, say what you are missing rather than answering.
+MD
 ```
 
-`handle` und `system_prompt` sind die einzigen Pflichtfelder; alles andere hat einen Vorgabewert.
-Der vollständige Feldsatz steht unter [Personas](nxc-personas).
+Eine Persona ist ein Skill in der Form der Agent-Skills-Spezifikation: `name` und der Rumpf sind
+alles, was sie braucht, und alles, was nexus-flow hinzufügt, steht unter `nxs:`. Ein Skill-Ordner,
+den Sie anderswo gefunden haben, funktioniert genauso — kopieren Sie ihn hinein. Der vollständige
+Feldsatz und die ältere YAML-Form in einer Datei stehen unter [Personas](nxc-personas).
 
 **Das durchgehende Beispiel.** Jedes ausgeführte Beispiel in diesen Anleitungen stammt aus einem
 kleinen Workspace: dem `coder` von oben, zwei Reviewer-Personas (`general` und `integrity`), die nur
-über einen Kanal erreichbar sind, und einer `channels.yaml`, die einen geordneten Kanal
+über einen Kanal erreichbar sind, und einem Ordner `channels/`, der einen geordneten Kanal
 `build-and-ship` und ein Quorum `review` deklariert. `nxc list` ist die Lesung über diesen Ordner —
 das, was ein Mensch prüft, und das, was eine App als Verzeichnis darstellt:
 
@@ -222,7 +227,7 @@ gerenderten Block entfernt, um ins Sitzungsstart-Budget zu passen).
 ## Weiter
 
 - [Kernkonzepte](nxc-core-concepts) — das Substrat, Identität, Fäden und Zustellung.
-- [Personas](nxc-personas) — alles, was eine `.nxs-personas/<handle>.yaml` deklarieren kann.
+- [Personas](nxc-personas) — alles, was eine `.nxs-personas/<name>/SKILL.md` deklarieren kann.
 - [Kanäle](nxc-channels) — einen Kanal deklarieren, und der geordnete Kanal, der *der* Ablauf ist.
 - [Befehle](nxc-commands) — die vollständige Referenz, mit `--json`.
 - [Grenzen und Sicherheit](nxc-limits-and-safety) — was ein Agent nicht selbst entscheidet.

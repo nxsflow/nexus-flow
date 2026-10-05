@@ -27,7 +27,7 @@ use nexus_chat::model::{
     FIELD_ENVELOPE, FIELD_ROOT, KIND_MESSAGE, KIND_THREAD, OP_OPEN, OP_POST,
 };
 use nexus_chat::orchestration::Caller;
-use nexus_chat::role::{AddressBookEntry, RoleDecl, Stage};
+use nexus_chat::role::{RoleDecl, Stage};
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest, TargetKind};
 use nexus_chat::timer::TimerConfig;
 use nexus_chat::worker::{TriggerError, TriggerRequest, TriggerResult, Worker, WorkerConfig};
@@ -1003,13 +1003,9 @@ fn an_app_replying_into_a_round_that_is_over_meets_the_same_refusal_the_cli_does
 // ---- list / prime -----------------------------------------------------------------------------
 
 #[test]
-fn the_directory_is_the_whole_team_or_one_personas_address_book() {
+fn the_directory_is_the_whole_team_or_one_personas_derived_view() {
     let tmp = workspace();
-    let mut coder = simple_role("coder");
-    coder.address_book = Some(vec![AddressBookEntry {
-        to: "pm".into(),
-        why: Some("hand back the finished work order".into()),
-    }]);
+    let coder = simple_role("coder");
     let mut pm = simple_role("pm");
     pm.job_title = Some("Product manager".into());
     pm.stage = Some(Stage::Senior);
@@ -1029,11 +1025,11 @@ fn the_directory_is_the_whole_team_or_one_personas_address_book() {
         .directory(Some("coder"))
         .expect("one persona's own view");
     assert_eq!(mine.persona.as_deref(), Some("coder"));
-    assert_eq!(mine.personas.len(), 1, "the address book, not the team");
+    assert_eq!(mine.personas.len(), 1, "the team minus the persona itself");
     assert_eq!(mine.personas[0].handle, "pm");
-    assert_eq!(
-        mine.personas[0].why.as_deref(),
-        Some("hand back the finished work order")
+    assert!(
+        mine.channels.is_empty(),
+        "minus the channel the persona sits in"
     );
 }
 

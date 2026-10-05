@@ -2288,9 +2288,15 @@ pub struct PrimeRoster {
 /// through [`validate_declared`]. This stays for a caller that asks about one folder on purpose,
 /// and is kept rather than removed because it is public — `tests/prime_validation.rs` pins it.
 pub fn validate_declared_team(dir: &Path) -> Result<PrimeRoster> {
-    let roles = crate::role::load_all_roles(dir)?;
-    let channels = crate::channel::load_all_channels(dir)?;
-    Ok(validate_declared(&roles, &channels))
+    let (roles, mut files): (Vec<_>, Vec<_>) = crate::role::load_declared_personas(dir)?
+        .into_iter()
+        .map(|p| (p.decl, p.file))
+        .unzip();
+    let (channels, channel_files): (Vec<_>, Vec<_>) = crate::channel::load_declared_channels(dir)?
+        .into_iter()
+        .unzip();
+    files.extend(channel_files);
+    Ok(validate_declared(&roles, &channels, &files, Some(dir)))
 }
 
 /// [`validate_declared_team`] over a catalogue already in hand — what `prime` partitions since the
@@ -2300,6 +2306,8 @@ pub fn validate_declared_team(dir: &Path) -> Result<PrimeRoster> {
 pub(crate) fn validate_declared(
     roles: &[crate::role::RoleDecl],
     channels: &[ChannelDecl],
+    files: &[crate::definitions::DeclarationFile],
+    folder: Option<&Path>,
 ) -> PrimeRoster {
     let channel_errors = crate::channel::validate_channels(roles, channels);
     // Whole-file scoping: any CHANNEL error excludes every channel this file declared — and only a
@@ -2321,7 +2329,7 @@ pub(crate) fn validate_declared(
     // Over the SAME two slices, and deliberately not bounded by the partition above: a quality
     // warning is about how a declaration is written, so a referential error elsewhere in
     // `channels.yaml` neither suppresses it nor is suppressed by it.
-    let warnings = crate::declaration_quality::warn_declarations(roles, channels);
+    let warnings = crate::declaration_quality::warn_declarations_in(roles, channels, files, folder);
 
     PrimeRoster {
         roles: roles.iter().map(|r| r.handle.clone()).collect(),
@@ -3138,14 +3146,26 @@ pub(crate) fn prime_with(
     let brief = persona
         .and_then(|handle| roles.iter().find(|r| r.handle == handle))
         .map(|decl| {
-            PersonaBrief::from_decl(decl, channels).declared_in(
-                match declarations
-                    .origin_of(crate::definitions::DeclarationKind::Persona, &decl.handle)
-                {
-                    crate::definitions::DeclarationOrigin::User => declarations.user_path.clone(),
-                    crate::definitions::DeclarationOrigin::Workspace => None,
-                },
-            )
+            let file =
+                declarations.file_of(crate::definitions::DeclarationKind::Persona, &decl.handle);
+            let (folder, form) = match file.map(|f| f.form) {
+                Some(crate::definitions::DeclarationForm::Skill) => (
+                    file.map(|f| f.folder.clone()),
+                    crate::definitions::DeclarationForm::Skill,
+                ),
+                _ => (
+                    match declarations
+                        .origin_of(crate::definitions::DeclarationKind::Persona, &decl.handle)
+                    {
+                        crate::definitions::DeclarationOrigin::User => {
+                            declarations.user_path.clone()
+                        }
+                        crate::definitions::DeclarationOrigin::Workspace => None,
+                    },
+                    crate::definitions::DeclarationForm::Yaml,
+                ),
+            };
+            PersonaBrief::from_decl(decl, channels).declared_in(folder, form)
         });
     let directory = match persona {
         Some(handle) => Directory::for_persona(roles, channels, handle),
@@ -3200,7 +3220,12 @@ pub(crate) fn prime_with(
         // rather than a gap: a human at a terminal has no session whose end could be a watermark,
         // and `nxc status` answers the same question on demand.
         wake: opener_wake(store, consumer, now, watermark.as_deref())?,
-        roster: validate_declared(roles, channels),
+        roster: validate_declared(
+            roles,
+            channels,
+            &declarations.files,
+            Some(&declarations.read_dir),
+        ),
         persona: brief,
         directory,
         declarations: declarations.clone(),

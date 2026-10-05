@@ -203,7 +203,7 @@ fn nothing_declared(tmp: &TempDir) -> String {
         .join(".nxs-personas");
     format!(
         "\n\n## Declarations\n\nnobody is declared here yet — declare one as \
-         `{d}/<handle>.yaml` (a persona) or `{d}/channels.yaml` (a channel).",
+         `{d}/<name>/SKILL.md` (a persona) or `{d}/channels/<name>.yaml` (a channel).",
         d = dir.display()
     )
 }

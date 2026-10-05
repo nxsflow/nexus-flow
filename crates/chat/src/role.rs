@@ -478,23 +478,6 @@ impl<'de> Deserialize<'de> for Addressable {
     }
 }
 
-/// One line of a persona's address book (nxf 6j6v.p6m1, surface draft §3.1): a persona or channel
-/// it may open a conversation with, and what for.
-///
-/// **The description is the load-bearing half.** It works like a skill's frontmatter — a short
-/// sentence a model chooses from — which is why `why` is rendered everywhere `to` is. What the
-/// address book deliberately does NOT do in this slice is restrict: see
-/// [`crate::persona`]'s module docs for why deriving a limit from a droppable identity would be
-/// worse than useless.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AddressBookEntry {
-    /// A declared persona handle or channel name.
-    pub to: String,
-    /// What this persona would address it about — one short line, in the author's own words.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub why: Option<String>,
-}
-
 /// **Which of the suite's session-start blocks this persona is handed** (nxf 6j6v.k8zq).
 ///
 /// Owner, 2026-08-23: *"Jede Rolle sollte den Inhalt von `nxs prime --persona` erhalten. Wir
@@ -699,26 +682,6 @@ pub struct RoleDecl {
     /// resolves to — so no existing declaration changes meaning.
     #[serde(default, skip_serializing_if = "Addressable::is_general")]
     pub addressable: Addressable,
-    /// Who this persona may address, and what for (nxf 6j6v.p6m1).
-    ///
-    /// **Three states, exactly like [`tools`](RoleDecl::tools), and for the same reason** (nxf
-    /// 6j6v.vce2). It was a plain `Vec` until then, which could express only two of them:
-    ///
-    /// * **omitted** (`None`) — "nobody wrote this down". The surface shows the persona the whole
-    ///   declared team, because an absent book is not a prohibition, and reading it as one would
-    ///   silently mute every persona declared before this field existed.
-    /// * **`address_book: []`** (`Some(vec![])`) — "commissions nothing". A pure reviewer, a
-    ///   summarizer, any role at a leaf of the tree: it answers on its own thread and calls nobody.
-    ///   A common, well-founded role that could not be DECLARED before — writing `[]` produced the
-    ///   whole team, identically to omitting the key, so the only way to say it was a sentence in
-    ///   the `system_prompt`, which is the inversion of what the declaration file is for.
-    /// * **a non-empty list** — that book, in the author's order.
-    ///
-    /// The `Option` is load-bearing all the way down to the spec JSON, exactly as `tools`' is: a
-    /// plain `Vec` always serializes, so an omitted key and an explicit empty list would be
-    /// indistinguishable on the round trip too.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address_book: Option<Vec<AddressBookEntry>>,
     /// Whether this role's sessions need exclusive use of the repo's working copy and build
     /// directory (nxf epic 6j6v.bqe0, the working-tree lease). Defaults to [`WorkingTree::Shared`],
     /// which is what every role file written before this field existed means, unchanged.
@@ -1303,21 +1266,59 @@ pub fn load_role(path: &Path) -> Result<RoleDecl> {
 /// failing to parse as a persona.
 const SIBLING_DECLARATION_FILES: &[&str] = &["channels.yaml", "workflow.yaml"];
 
-/// Load every `*.yaml` role file directly under `dir`, sorted by `handle` — skipping the known
-/// sibling declaration files (`channels.yaml`/`workflow.yaml`, see [`SIBLING_DECLARATION_FILES`]),
-/// which live in the same directory but are not roles. A missing directory is not an error — it
-/// just means no roles are declared yet (`Ok(vec![])`), so a fresh workspace without a
-/// directory still resolves cleanly.
+/// Load every persona declared directly under `dir`, sorted by `handle` — the declarations alone;
+/// [`load_declared_personas`] is the same read with the file behind each.
+///
+/// A missing directory is not an error — it just means no roles are declared yet (`Ok(vec![])`),
+/// so a fresh workspace without a directory still resolves cleanly.
 pub fn load_all_roles(dir: &Path) -> Result<Vec<RoleDecl>> {
+    Ok(load_declared_personas(dir)?
+        .into_iter()
+        .map(|p| p.decl)
+        .collect())
+}
+
+/// Every persona declared directly under `dir`, in either form, sorted by `handle`:
+///
+/// - `<handle>.yaml` — skipping the known sibling declaration files (`channels.yaml` /
+///   `workflow.yaml`, see [`SIBLING_DECLARATION_FILES`]), which live in the same directory but are
+///   not roles;
+/// - `<name>/SKILL.md` (nxf 6j6v.dw16, [`crate::skill`]) — any sub-folder that carries one, except
+///   `channels/`, which holds one file per channel (nxf 6j6v.k3qy). A sub-folder without a
+///   `SKILL.md` is not a declaration and is left alone: a team keeps its `knowledge/` there.
+///
+/// **One name, one declaration** (owner decision of 2026-10-05): a name declared by two files — a
+/// `pm.yaml` beside a `pm/SKILL.md` above all, the state a half-finished migration leaves — is
+/// REFUSED, naming both files. Silently picking one would run whichever the directory listing
+/// happened to return first.
+pub fn load_declared_personas(dir: &Path) -> Result<Vec<crate::skill::LoadedPersona>> {
     if !dir.is_dir() {
         return Ok(vec![]);
     }
-    let mut roles = Vec::new();
+    let mut personas = Vec::new();
     for entry in std::fs::read_dir(dir)
         .map_err(|e| NxfError::io(format!("reading role directory {}: {e}", dir.display())))?
     {
         let entry = entry.map_err(|e| NxfError::io(format!("reading directory entry: {e}")))?;
         let path = entry.path();
+        if path.is_dir() {
+            let skill = path.join(crate::skill::SKILL_FILE);
+            if path.file_name().and_then(|n| n.to_str()) == Some(crate::channel::CHANNELS_DIR) {
+                if skill.is_file() {
+                    return Err(NxfError::validation(format!(
+                        "{}: a persona may not be called {:?} — the folder is reserved for one \
+                         file per channel",
+                        skill.display(),
+                        crate::channel::CHANNELS_DIR
+                    )));
+                }
+                continue;
+            }
+            if skill.is_file() {
+                personas.push(crate::skill::load_skill(&skill)?);
+            }
+            continue;
+        }
         if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
             continue;
         }
@@ -1328,10 +1329,38 @@ pub fn load_all_roles(dir: &Path) -> Result<Vec<RoleDecl>> {
         {
             continue;
         }
-        roles.push(load_role(&path)?);
+        let decl = load_role(&path)?;
+        let file = crate::skill::yaml_file_record(&path, &decl)?;
+        personas.push(crate::skill::LoadedPersona { decl, file });
     }
-    roles.sort_by(|a, b| a.handle.cmp(&b.handle));
-    Ok(roles)
+    personas.sort_by(|a, b| {
+        a.decl
+            .handle
+            .cmp(&b.decl.handle)
+            .then_with(|| a.file.file.cmp(&b.file.file))
+    });
+    for pair in personas.windows(2) {
+        if pair[0].decl.handle == pair[1].decl.handle {
+            let (a, b) = (&pair[0].file, &pair[1].file);
+            let forms = [a.form, b.form];
+            let hint = match forms.contains(&crate::definitions::DeclarationForm::Yaml)
+                && forms.contains(&crate::definitions::DeclarationForm::Skill)
+            {
+                true => {
+                    " Keep one: `nxs personas migrate` rewrites the YAML form and removes it, or \
+                     delete the one you no longer mean."
+                }
+                false => " Keep one.",
+            };
+            return Err(NxfError::validation(format!(
+                "persona {:?} is declared twice: in {} and in {} — one name, one declaration.{hint}",
+                pair[0].decl.handle,
+                a.file.display(),
+                b.file.display()
+            )));
+        }
+    }
+    Ok(personas)
 }
 
 /// **Pure referential validation of declared PERSONAS against the declared channels** (nxf
@@ -1860,15 +1889,14 @@ it, got:\n{}",
 
     #[test]
     fn a_role_that_declares_none_of_the_persona_fields_is_byte_identical_on_round_trip() {
-        // The whole additive claim in one test: `stage`/`addressable`/`address_book` may not appear
+        // The whole additive claim in one test: `stage`/`addressable` may not appear
         // in the serialized form of a declaration that does not mention them, or every existing
         // role file changes meaning the moment it passes through this type.
         let role: RoleDecl = serde_yaml::from_str("handle: a\nsystem_prompt: A\n").unwrap();
         assert_eq!(role.stage, None);
         assert_eq!(role.addressable, Addressable::General);
-        assert_eq!(role.address_book, None);
         let yaml = serde_yaml::to_string(&role).unwrap();
-        for key in ["stage", "addressable", "address_book"] {
+        for key in ["stage", "addressable"] {
             assert!(
                 !yaml.contains(key),
                 "undeclared {key} must not serialize:\n{yaml}"
@@ -2195,55 +2223,18 @@ it, got:\n{}",
     }
 
     #[test]
-    fn address_book_entries_round_trip_with_and_without_a_reason() {
-        let role: RoleDecl = serde_yaml::from_str(
-            "handle: a\nsystem_prompt: A\naddress_book:\n  - to: pm\n    why: hand back the result\n  - to: code-review\n",
+    fn a_retired_address_book_still_loads_and_is_not_carried() {
+        // nxf 6j6v.xjh3: the key is retired, not refused — a declaration that still carries it
+        // loads exactly like one without it, and `nxs prime` warns (crate::declaration_quality).
+        let with: RoleDecl = serde_yaml::from_str(
+            "handle: a\nsystem_prompt: A\naddress_book:\n  - to: pm\n    why: hand back\n",
         )
         .unwrap();
-        assert_eq!(
-            role.address_book,
-            Some(vec![
-                AddressBookEntry {
-                    to: "pm".into(),
-                    why: Some("hand back the result".into())
-                },
-                AddressBookEntry {
-                    to: "code-review".into(),
-                    why: None
-                },
-            ])
-        );
-        let back: RoleDecl = serde_yaml::from_str(&serde_yaml::to_string(&role).unwrap()).unwrap();
-        assert_eq!(back, role);
-    }
-
-    #[test]
-    fn an_explicitly_empty_address_book_is_not_an_omitted_one() {
-        // nxf 6j6v.vce2 — `tools:`' three states, applied to the field beside it. Before this, both
-        // of these parsed to the same value and the surface showed both personas the whole team, so
-        // "commissions nothing" was not a thing a declaration could say.
-        let omitted: RoleDecl = serde_yaml::from_str("handle: a\nsystem_prompt: A\n").unwrap();
         let empty: RoleDecl =
             serde_yaml::from_str("handle: a\nsystem_prompt: A\naddress_book: []\n").unwrap();
-
-        assert_eq!(omitted.address_book, None, "not written down");
-        assert_eq!(
-            empty.address_book,
-            Some(Vec::new()),
-            "written down, and it says nobody"
-        );
-        assert_ne!(omitted, empty);
-
-        // And the distinction survives the round trip, which is the half a plain `Vec` could never
-        // carry: an omitted key must not come back as `[]`, or every existing declaration would
-        // change meaning by passing through this type once.
-        let back: RoleDecl = serde_yaml::from_str(&serde_yaml::to_string(&empty).unwrap()).unwrap();
-        assert_eq!(back.address_book, Some(Vec::new()));
-        let yaml = serde_yaml::to_string(&omitted).unwrap();
-        assert!(
-            !yaml.contains("address_book"),
-            "an undeclared book must not serialize:\n{yaml}"
-        );
+        let without: RoleDecl = serde_yaml::from_str("handle: a\nsystem_prompt: A\n").unwrap();
+        assert_eq!(with, without);
+        assert_eq!(empty, without);
     }
 
     #[test]

@@ -118,6 +118,12 @@ enum Command {
         /// The name to store, `<owner>/<repo>`.
         name: Option<String>,
     },
+    /// The declarations of personas and channels: `migrate` rewrites the older form (`<handle>.yaml`,
+    /// `channels.yaml`) into the new one (`<name>/SKILL.md`, `channels/<name>.yaml`).
+    Personas {
+        #[command(subcommand)]
+        action: PersonasAction,
+    },
     /// Wire host-specific agent integration for this workspace (idempotent, merge-only). Host setup
     /// is an umbrella responsibility — the umbrella owns the whole SessionStart set, one hook per
     /// active module — so this is the canonical home of the verb; `nxf setup claude` delegates here.
@@ -152,6 +158,25 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         action: McpAction,
+    },
+}
+
+/// `nxs personas` actions (nxf 6j6v.h9ee).
+#[derive(Subcommand, Debug)]
+enum PersonasAction {
+    /// Rewrite this workspace's `.nxs-personas/` into the new form: every `<handle>.yaml` into
+    /// `<handle>/SKILL.md`, the list in `channels.yaml` into one `channels/<name>.yaml` per channel,
+    /// and remove the old files. Comments are kept with the keys they precede; `address_book` and the
+    /// inert `session`, `sub_agents` and `reports_to` are dropped and reported per file. A key it
+    /// cannot place stops the run before anything is written. Run it twice and the second run finds
+    /// nothing to do.
+    Migrate {
+        /// Migrate the user-level folder (`~/.nexusflow/personas/`) instead of this workspace's.
+        #[arg(long)]
+        user: bool,
+        /// Check everything and report what would change; write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 }
 
@@ -719,6 +744,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Command::Migrate => migrate_cmd(cli.json, db),
         Command::Doctor | Command::Status => doctor_cmd(cli.json, db),
         Command::Name { name } => name_cmd(cli.json, db, name.as_deref()),
+        Command::Personas {
+            action: PersonasAction::Migrate { user, dry_run },
+        } => personas_migrate_cmd(cli.json, db, *user, *dry_run),
         // `setup claude` is cwd-scoped (it writes `.claude/` + agent files at the project root next
         // to `.nxs/`, resolving the workspace by walk-up), so an explicit `--db`/`NXS_DB` cannot be
         // honored. Like `init`, REJECT it loudly rather than accept-and-ignore (the no-silent-
@@ -1119,6 +1147,75 @@ fn name_cmd(json: bool, db: Option<&str>, name: Option<&str>) -> Result<()> {
                  derive one from — set it with `nxs name <owner>/<repo>`",
             ))
         }
+    }
+    Ok(())
+}
+
+/// `nxs personas migrate` (nxf 6j6v.h9ee) — the verb over
+/// [`nexus_chat::persona_migration::migrate_declarations`].
+fn personas_migrate_cmd(json: bool, db: Option<&str>, user: bool, dry_run: bool) -> Result<()> {
+    let dir = match user {
+        true => nexus_chat::definitions::user_declarations_dir().ok_or_else(|| {
+            NxfError::validation(
+                "this binary reads no user-level declaration folder — a development build reads \
+                 one only under a named NXS_SERVICE_INSTANCE",
+            )
+        })?,
+        false => {
+            let ws = resolve(db)?;
+            ws.dir
+                .parent()
+                .unwrap_or(&ws.dir)
+                .join(nexus_chat::workspace::PERSONAS_DIR)
+        }
+    };
+    let report = nexus_chat::persona_migration::migrate_declarations(&dir, !dry_run)?;
+    if json {
+        println!("{}", to_json(&report)?);
+        return Ok(());
+    }
+    if report.nothing_to_do() {
+        println!(
+            "Nothing to migrate in {} — every declaration there is in the new form.",
+            dir.display()
+        );
+        return Ok(());
+    }
+    let relative = |p: &std::path::Path| {
+        p.strip_prefix(&dir)
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+    println!(
+        "{} {}:",
+        if report.applied {
+            "Migrated"
+        } else {
+            "Would migrate (dry run, nothing written)"
+        },
+        dir.display()
+    );
+    for p in &report.personas {
+        let dropped = match p.dropped.is_empty() {
+            true => String::new(),
+            false => format!("  — dropped: {}", p.dropped.join(", ")),
+        };
+        println!("  {} -> {}{dropped}", relative(&p.from), relative(&p.to));
+    }
+    if let Some(first) = report.channels.first() {
+        let to: Vec<String> = report.channels.iter().map(|c| relative(&c.to)).collect();
+        println!("  {} -> {}", relative(&first.from), to.join(", "));
+    }
+    if let Some(readme) = &report.header_moved_to {
+        println!("  the notes heading channels.yaml -> {}", relative(readme));
+    }
+    let books = report.dropped_address_books();
+    if books > 0 {
+        println!(
+            "\n{books} address book{} dropped: who a persona may reach is derived from each \
+             persona's `addressable` now.",
+            if books == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }

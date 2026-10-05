@@ -64,10 +64,12 @@ that shows itself.
 **The rule, in one sentence: what the engine supplies does not belong in the declaration.** A copy
 drifts, and a drifting copy that contradicts the engine produces misbehaviour.
 
-The composed prompt is layered ([personas](nxc-personas), "What it is for"), and your
-`system_prompt` is one layer of several. These four pieces are written by the engine, into every
-session that qualifies for them, and naming them here is the point of this section — so you can go
-and read what you do not have to write:
+The composed prompt is layered ([personas](nxc-personas), "What it is for"), and your persona's body
+— the text of its `SKILL.md` after the frontmatter, `system_prompt` in the older YAML form — is one
+layer of several. The examples on this page show the fields in the older YAML form, where each is
+one key; in a `SKILL.md` the same text is the body, `description`, or a field under `nxs:`. These
+four pieces are written by the engine, into every session that qualifies for them, and naming them
+here is the point of this section — so you can go and read what you do not have to write:
 
 | What | Where it lives | When it arrives |
 |---|---|---|
@@ -174,11 +176,10 @@ was skipped is a structural question first, and a wording question only after th
 
 **The rule: it answers "when do you call me?", not "what am I made of".**
 
-For a persona it is `job_description`; for a channel it is `description`. It is the one thing a
-calling agent is shown when it decides whom to address — `nxc list` renders it, and so does the
-"Who you can address" section of every prime block built from it. (One thing beats it: if the caller
-has an `address_book:` entry for you with a `why`, that caller sees its own line instead. That is
-the caller's sentence about this pairing, and it is more specific. Everyone else sees yours.)
+For a persona it is `description` (`job_description` in the older YAML form); for a channel it is
+`description`. It is the one thing a calling agent is shown when it decides whom to address —
+`nxc list` renders it, and so does the "Who you can address" section of every prime block built
+from it. Every caller sees yours: a caller no longer writes its own line about you.
 
 What was declared in the measured set was mechanism and a topic list: *each member assesses
 independently, then the assessments are composed* — true, and useless to somebody deciding whom to
@@ -421,7 +422,7 @@ One pass, seven questions — the seven classes, in their own order:
 2. **Does anything in here contradict the engine?** Read the forced ending as it is today rather
    than as you remember it. Above all: does your text tell the role to keep working while it waits,
    to escalate instead of waiting, or to end its turn in a form its position is not offered?
-3. **Does `job_description` — or a channel's `description` — answer "when do you call me?"** Anchor
+3. **Does `description` — a persona's or a channel's — answer "when do you call me?"** Anchor
    situation, boundary, what the caller must bring, rather than a description of the machinery.
 4. **Would this declaration survive being copied into another project?** Fixed paths, product names,
    a board prefix — or a procedure for finding out where things stand?
