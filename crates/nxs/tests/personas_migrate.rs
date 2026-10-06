@@ -64,7 +64,9 @@ impl Repo {
     }
 
     fn user_personas(&self) -> PathBuf {
-        self.home.path().join(".nexusflow-personas-migrate/personas")
+        self.home
+            .path()
+            .join(".nexusflow-personas-migrate/personas")
     }
 
     fn run(&self, args: &[&str]) -> (bool, String, String) {
@@ -121,7 +123,11 @@ fn the_plan_writes_nothing_the_run_rewrites_and_a_second_run_has_nothing_to_do()
     let plan = repo.json(&["personas", "--json", "migrate", "--dry-run"]);
     assert_eq!(plan["applied"], false);
     assert_eq!(plan["personas"].as_array().unwrap().len(), 2);
-    assert_eq!(listing(&repo.personas()), before, "the plan wrote something");
+    assert_eq!(
+        listing(&repo.personas()),
+        before,
+        "the plan wrote something"
+    );
 
     let (ok, out, err) = repo.run(&["personas", "migrate"]);
     assert!(ok, "{out}{err}");
@@ -133,13 +139,26 @@ fn the_plan_writes_nothing_the_run_rewrites_and_a_second_run_has_nothing_to_do()
         out.contains("coder.yaml -> coder/SKILL.md  — dropped: address_book ([]), session"),
         "{out}"
     );
-    assert!(out.contains("channels.yaml -> channels/planning.yaml"), "{out}");
+    assert!(
+        out.contains("channels.yaml -> channels/planning.yaml"),
+        "{out}"
+    );
     assert!(out.contains("2 address books dropped"), "{out}");
     let after = listing(&repo.personas());
-    for expected in ["pm/SKILL.md", "coder/SKILL.md", "channels/planning.yaml", "channels/README.md"] {
-        assert!(after.iter().any(|p| p == expected), "{expected} in {after:?}");
+    for expected in [
+        "pm/SKILL.md",
+        "coder/SKILL.md",
+        "channels/planning.yaml",
+        "channels/README.md",
+    ] {
+        assert!(
+            after.iter().any(|p| p == expected),
+            "{expected} in {after:?}"
+        );
     }
-    assert!(!after.iter().any(|p| p.ends_with(".yaml") && !p.starts_with("channels/")));
+    assert!(!after
+        .iter()
+        .any(|p| p.ends_with(".yaml") && !p.starts_with("channels/")));
 
     // The same team, as a human and an app see it — the source aside.
     let team_after = repo.json(&["chat", "--json", "list"]);
@@ -190,6 +209,9 @@ fn a_key_it_cannot_place_stops_the_run_naming_the_file() {
     let before = listing(&repo.personas());
     let (ok, out, err) = repo.run(&["personas", "migrate"]);
     assert!(!ok, "{out}");
-    assert!(err.contains("odd.yaml") && err.contains("`favourite_colour`"), "{err}");
+    assert!(
+        err.contains("odd.yaml") && err.contains("`favourite_colour`"),
+        "{err}"
+    );
     assert_eq!(listing(&repo.personas()), before);
 }

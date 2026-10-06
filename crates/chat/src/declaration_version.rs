@@ -51,7 +51,7 @@
 //!    database; hashing "the file on disk" there would hash something the prompt was not built
 //!    from.
 //! 3. Nothing that steers a session can fall out of it. `handle`, `system_prompt`, `tools`,
-//!    `model`, `prime`, `address_book`, `working_tree`, `permissions` — every one is a field of the
+//!    `model`, `prime`, `addressable`, `working_tree`, `permissions` — every one is a field of the
 //!    struct, so every one is in the hash, with no second list of "the fields that matter" for
 //!    somebody to forget to extend.
 //!

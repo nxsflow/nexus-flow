@@ -1,0 +1,62 @@
+name: planning
+members: []   # every participant is a step target below; this seats nobody extra
+steps:
+  # The conversation lives HERE: the PM's question rounds run inside this one step. It asks by
+  # escalating — the chain holds, you answer in the channel, and the same session continues with
+  # everything it already knows.
+  - id: design
+    target: pm
+    next: judge
+    resume: true
+  # The same three reviewers the coding chain uses, pointed at a DESIGN and lifted to senior:
+  # judging a diff reads a text that says what IS, judging a design has to imagine what WOULD
+  # happen, and that is the dearer thinking.
+  - id: judge
+    target: review
+    stage: senior
+    next: cut
+    on_needs_rework: design
+    max_passes: 3
+    task: |
+      You are judging a SPECIFICATION, not a change — the "at a DESIGN" list in your role is the
+      one that applies this round. Nothing has been built yet; what you have is a document and
+      the code it proposes to touch.
+
+      Read, in this order: the design itself; the board item it came from and the epic above it,
+      which is where its INTENT is written down; and THE CODE THE DESIGN WANTS TO TOUCH. Without
+      the last one nobody can say "this is not buildable as described" — a design's worst errors
+      hide in the gap between what it assumes the code is and what the code is.
+
+      PRUEFE BEIDES, and the second half is why you exist rather than a second self-check:
+
+      FIRST the craftsmanship — contradictions, ambiguity, open questions, gaps. Do NOT assume
+      the author's own review already cleared these. It was written by the person who made the
+      mistake, and it shares their blind spot.
+
+      SECOND, and this is the class a self-check structurally cannot find: sentences that are
+      clear, consistent, unambiguous — and WRONG. The most expensive error in a specification is
+      the one that reads well. Measured: a design once said "generous at the corners, and
+      generous is the right direction for a walkway" — nothing about that is contradictory,
+      ambiguous or incomplete. It was simply untrue, and it survived three rounds of questions
+      and an approval before a throwaway prototype showed it in minutes.
+
+      A FOURTH KIND OF FINDING is open to you here, beside the three severities you already use:
+      **"this is not decidable by reading."** Not "I do not know" — a named finding with the
+      quote it applies to, saying that this particular claim can only be judged by building it
+      and looking. Use it where you genuinely cannot tell from the text. It is how this round
+      says that reading has reached its limit, and it is worth more than a guess dressed as a
+      grade.
+  # No `next:` — this ends the round. The PM that wrote the design cuts the epic, in the same
+  # session, now carrying what the review said.
+  - id: cut
+    target: pm
+    resume: true
+description: >-
+  Turn a product idea into board items — a brainstorm that ends in an epic, and a plan that ends
+  as that epic's design plus one ticket per task underneath. The design is JUDGED before it
+  becomes work: the same three reviewers the coding chain uses read it as a design, at senior,
+  and any one of them can send it back. Address it with the idea, or with your answer to the
+  PM's last question, on the same thread. For small work, or for a question rather than a plan,
+  write to `pm` directly instead — this channel always runs the review.
+timeout: 2h
+visibility: requester_only

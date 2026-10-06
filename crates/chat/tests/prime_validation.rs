@@ -273,14 +273,14 @@ fn a_missing_channels_yaml_yields_a_clean_roles_only_roster_with_no_spurious_err
 }
 
 #[test]
-fn human_output_renders_the_address_book_and_gates_declaration_errors_section() {
+fn human_output_renders_the_directory_and_gates_declaration_errors_section() {
     let tmp = workspace();
     write_role(&tmp, "pm");
     write_channels(&tmp, "- name: standup\n  members: [pm, ghost]\n");
 
     let out = nxc_interactive(&tmp).arg("prime").assert().success();
     let text = String::from_utf8_lossy(&out.get_output().stdout);
-    // "## Declared Team" no longer renders (nxf h4d3, task 3): the address book below is the
+    // "## Declared Team" no longer renders (nxf h4d3, task 3): the directory below is the
     // section that names declared roles/channels now — see `render_declared_team`'s doc comment in
     // `crates/chat/src/facade.rs`.
     assert!(!text.contains("## Declared Team"), "{text}");

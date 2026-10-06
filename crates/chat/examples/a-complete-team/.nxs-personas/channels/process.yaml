@@ -1,0 +1,23 @@
+name: process
+members: []   # every participant is a step target below; this seats nobody extra
+steps:
+  # Writing declarations WRITES — the working copy is claimed for the whole round.
+  - id: draft
+    target: process-designer
+    next: check
+    resume: true    # a rework returns to the session that wrote the files
+  # No `next:` — this ends the round and the verdict goes back to whoever asked. One judge, not
+  # three: a declaration is one artefact judged on one question — what will it cause — and
+  # splitting that into dimensions would invent a structure the subject does not have.
+  - id: check
+    target: declaration-check
+    on_needs_rework: draft
+    max_passes: 3
+description: >-
+  Change how this team is put together — the personas that do the work and the channels that
+  order them. A designer writes the declaration and an independent reader judges it by what it
+  will CAUSE, and can send it back. Address it with what the team should be able to do that it
+  cannot do today, and with the board item behind it. Holds the working copy for the whole run.
+timeout: 2h
+working_tree: exclusive
+visibility: all_members

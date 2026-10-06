@@ -1298,8 +1298,8 @@ fn orchestration_rejection_parity_both_seams_refuse_identically_and_persist_noth
 const PERSONA: &str = "coder";
 const PEER: &str = "reviewer";
 
-/// Two personas and a channel, with an address book on one of them — so `list` has something to
-/// say in BOTH projections. A directory that came back empty on both seams would compare equal and
+/// Two personas and a channel — so `list` has something to say in BOTH projections, the whole team
+/// and one persona's derived view. A directory that came back empty on both seams would compare equal and
 /// prove nothing, which is the vacuous pass the assertions below rule out explicitly.
 fn seed_surface_declarations(dir: &Path) {
     let roles = dir.join(".nxs-personas");
@@ -1308,8 +1308,7 @@ fn seed_surface_declarations(dir: &Path) {
         roles.join(format!("{PERSONA}.yaml")),
         format!(
             "handle: {PERSONA}\njob_title: Implementer\njob_description: turns a work order into \
-             code\nstage: junior\nsystem_prompt: You are the implementer.\n\
-             address_book:\n  - to: {PEER}\n    why: get the work reviewed\n"
+             code\nstage: junior\nsystem_prompt: You are the implementer.\n"
         ),
     )
     .unwrap();

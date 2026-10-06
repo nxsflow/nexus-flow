@@ -1,0 +1,61 @@
+name: coding
+members: []   # every participant is a step target below; this seats nobody extra
+steps:
+  - id: build
+    target: coder
+    next: verify
+    resume: true    # a rework returns to the session that handed the branch over
+  # Its own step because it WRITES (build artefacts) while the reviewers after it only read —
+  # and a red suite goes back before three reviewer sessions are spent on it.
+  - id: verify
+    target: verifier
+    next: judge
+    on_needs_rework: build
+    max_passes: 3
+    # NOTHING from the run. The default would hand it the coder's own account of the work, and a
+    # verifier that reads "all green" before it measures is no longer a verifier. It judges the
+    # TREE; the ticket commission is all the context it needs.
+    input: []
+  # `target` is the `review` CHANNEL: three members judge independently, any ONE of them can
+  # pull the back edge, and the consolidator's summary carries no verdict.
+  - id: judge
+    target: review
+    next: finish
+    on_needs_rework: build
+    max_passes: 3
+    task: |
+      You are judging a CHANGE on a branch — the "at a CHANGE" list in your role is the one that
+      applies this round.
+
+      What you were handed names the branch and the base. Read, in this order:
+
+      1. The quality-gates log. You were HANDED the verifier's own reply — it names the log's
+         path and the commit the gates ran on. Use what it names; do not go looking for the
+         newest file in `.nxf/review/`, and do not run the gates again. If two runs overlap, the
+         newest file is somebody else's. A red gate in that log — a lint warning, a format diff,
+         a type error, a failing test — is grade-impacting unless the change explicitly
+         addresses it.
+      2. The diff and the changed-file list. If the request names a base, `git diff <base>...HEAD`;
+         otherwise work it out — branch commits exist, so `git diff main`; only uncommitted
+         changes, so `git diff HEAD`. Same command with `--name-only` for the file list.
+  # No `next:` — this ends the run. The back edge is real: the finisher re-runs the gates on
+  # the tree it is about to hand over, and the coder's green run proved a different tree.
+  - id: finish
+    target: finisher
+    on_needs_rework: build
+    max_passes: 3
+    # BOTH, and neither is optional. The verdict is what it must weigh before putting the branch
+    # up; the verifier's reply carries the commit hash its whole first rung rests on — "prove the
+    # tree is the one that was verified". The default would give it only the verdict, because the
+    # judge step is the one immediately before it.
+    input: [verify, judge]
+description: >-
+  One ticket, from nothing to a pull request: the coder builds it test-first, the verifier runs
+  the project's gates on what was handed over, the review round judges it, then the finisher
+  puts it up. Verification and review are STEPS of this flow — the coder commissions neither and
+  waits for neither. Any of the three can judge the work undeliverable and send it back to the
+  coder, at most three times per run. Address this channel with the ticket's id on
+  `--ref nxf_ids=`. Holds the working copy for the whole run.
+timeout: 6h
+working_tree: exclusive
+visibility: all_members
