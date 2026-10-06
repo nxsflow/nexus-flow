@@ -65,7 +65,7 @@ enum Command {
     },
     /// Who can be addressed here, and what for. Without `--persona` a human sees
     /// the whole declared team — which is also what an app renders as its directory — while a
-    /// running persona sees its own address book, recognised from its session. With `--persona` it
+    /// running persona sees its own view of it, recognised from its session. With `--persona` it
     /// is that persona's view, whoever is asking.
     List {
         /// Project the directory for this declared persona.
@@ -1906,7 +1906,7 @@ fn prime(
 
 /// `nxc list [--persona <name>]` (nxf 6j6v.p6m1, surface draft §4.4): who can be addressed here.
 ///
-/// Two audiences, one record. An explicit `--persona` projects that persona's own address book —
+/// Two audiences, one record. An explicit `--persona` projects that persona's own view —
 /// what an app asks for when it renders one agent's options. Without it the answer follows the same
 /// identity rule `prime` does: a running persona (recognised from its session) sees ITS view, and a
 /// human sees the complete declared team, which is the directory an app renders whole.

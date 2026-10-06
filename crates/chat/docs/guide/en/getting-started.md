@@ -49,23 +49,29 @@ you can read, review, and commit — not registered at runtime into one machine'
 first step is to write a persona:
 
 ```bash
-cat > .nxs-personas/coder.yaml <<'YAML'
-handle: coder
-job_title: Coder
-job_description: Implements a work order on a branch and merges it.
-system_prompt: |
-  You are the coder. Do what the trigger message asks. An answer from you means it is done; if
-  you cannot get there, say what you are missing rather than answering.
-tools: [Bash, Read, Write]
-YAML
+mkdir -p .nxs-personas/coder
+cat > .nxs-personas/coder/SKILL.md <<'MD'
+---
+name: coder
+description: Implements a work order on a branch and merges it.
+allowed-tools: Bash Read Write
+nxs:
+  title: Coder
+---
+You are the coder. Do what the trigger message asks. An answer from you means it is done; if
+you cannot get there, say what you are missing rather than answering.
+MD
 ```
 
-`handle` and `system_prompt` are the only required fields; everything else has a default. The full
-field set is in [personas](nxc-personas).
+A persona is a skill in the form of the Agent Skills specification: `name` and the body are all it
+needs, and everything nexus-flow adds sits under `nxs:`. A skill folder you found elsewhere works
+the same way — copy it in. The full field set, and the older one-file YAML form, are in
+[personas](nxc-personas).
 
 **The running example.** Every worked example in these guides comes from one small workspace: the
 `coder` above, two reviewer personas (`general` and `integrity`) that are reachable only through a
-channel, and a `channels.yaml` declaring an ordered `build-and-ship` channel and a `review` quorum.
+channel, and a `channels/` folder declaring an ordered `build-and-ship` channel and a `review`
+quorum.
 `nxc list` is the read over that folder — what a human checks, and what an app renders as its
 directory:
 
@@ -214,7 +220,7 @@ guide is where that reminder lives now, not chat's own block (nxf h4d3, task 3 d
 ## Next
 
 - [core-concepts](nxc-core-concepts) — the substrate, identity, threads, and delivery.
-- [personas](nxc-personas) — everything a `.nxs-personas/<handle>.yaml` can declare.
+- [personas](nxc-personas) — everything a `.nxs-personas/<name>/SKILL.md` can declare.
 - [channels](nxc-channels) — declaring a group, and the ordered channel that *is* a workflow.
 - [commands](nxc-commands) — the full reference, with `--json`.
 - [limits-and-safety](nxc-limits-and-safety) — what an agent does not decide for itself.

@@ -6,7 +6,8 @@ generalized: no repository names, no project-specific gate commands, every promp
 
 `examples/role-runtime-v3` is the SMALLEST set that demonstrates the runtime — one coder and a
 review quorum. This one is the OTHER end: ten personas and five channels, with every declaration
-surface in use at least once.
+surface in use at least once. Each persona is a skill folder, `<name>/SKILL.md`, and each channel a
+file of its own under `channels/` (`nxc guide personas`, `nxc guide channels`).
 
 ## What it declares
 
@@ -47,6 +48,7 @@ instead of building in the same directory.
 1. The gate commands. Every persona that runs the project's checks says "find them the way anybody
    would: `AGENTS.md` or `CLAUDE.md` first, then the manifest's scripts". Say it plainly in your
    own files instead once you know them.
-2. The board vocabulary in `pm.yaml` — item types and priorities are declared by your `nxf` plugin.
-3. `permissions:` and `tools:`. These personas run with broad permissions because the project they
-   come from decided that; decide it for yourself rather than inheriting it.
+2. The board vocabulary in `pm/SKILL.md` — item types and priorities are declared by your `nxf`
+   plugin.
+3. `nxs.permissions` and `allowed-tools`. These personas run with broad permissions because the
+   project they come from decided that; decide it for yourself rather than inheriting it.

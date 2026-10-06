@@ -26,8 +26,8 @@
 //!
 //! > **From a droppable identity you may derive CONTEXT, never a RESTRICTION.**
 //!
-//! Omitting your identity must not let you do MORE than declaring it. That is why the address book
-//! is *guidance* — rendered into prime, never enforced in [`crate::surface::send_to`] — while
+//! Omitting your identity must not let you do MORE than declaring it. That is why a persona's
+//! directory is *guidance* — rendered into prime, never enforced in [`crate::surface::send_to`] — while
 //! [`crate::role::Addressable`] IS enforced: it is a property of the TARGET, identical for every
 //! caller, so it cannot be widened by staying anonymous. The membership check the engine already
 //! runs is unchanged and remains the enforcement that exists.
@@ -128,26 +128,22 @@ pub struct PersonaEntry {
     /// declaration carries. Empty when the audience may simply send.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<String>,
-    /// Why THIS caller would address it — present only in an address-book projection, where the
-    /// line comes from the caller's own declaration rather than from the target's.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub why: Option<String>,
     /// Where this persona's declaration came from (nxf 6j6v.7k58) — stamped by
     /// [`Directory::with_declarations`], and absent from the wire form for the workspace's own
     /// folder, so a workspace without a user-level folder reads exactly as it did.
     #[serde(skip_serializing_if = "DeclarationOrigin::is_workspace")]
     pub origin: DeclarationOrigin,
+    /// The file this persona was read from — its form, its folder, and what a skill passes
+    /// through (nxf 6j6v.dw16). Stamped by [`Directory::with_declarations`]; `--json` only, the
+    /// human list does not show a form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<crate::definitions::DeclarationFile>,
 }
 
 impl PersonaEntry {
     /// One entry, answered FOR an audience — see [`direct`](PersonaEntry::direct) for why the
     /// answer cannot be audience-free any more, and [`route_in`] for what fills `channels`.
-    fn from_decl(
-        decl: &RoleDecl,
-        why: Option<String>,
-        audience: &Identity,
-        channels: &[ChannelDecl],
-    ) -> PersonaEntry {
+    fn from_decl(decl: &RoleDecl, audience: &Identity, channels: &[ChannelDecl]) -> PersonaEntry {
         let direct = decl.addressable.allows_direct_from(audience);
         PersonaEntry {
             handle: decl.handle.clone(),
@@ -159,8 +155,8 @@ impl PersonaEntry {
                 true => Vec::new(),
                 false => route_in(decl, channels),
             },
-            why,
             origin: DeclarationOrigin::Workspace,
+            declaration: None,
         }
     }
 }
@@ -188,16 +184,16 @@ pub struct ChannelEntry {
     /// declared none — the entry then carries only its members, which it always names anyway.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Why THIS caller would address it — address-book projection only, as on [`PersonaEntry`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub why: Option<String>,
     /// Where this channel's declaration came from — as on [`PersonaEntry::origin`].
     #[serde(skip_serializing_if = "DeclarationOrigin::is_workspace")]
     pub origin: DeclarationOrigin,
+    /// The file this channel was read from (nxf 6j6v.k3qy) — as on [`PersonaEntry::declaration`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<crate::definitions::DeclarationFile>,
 }
 
 impl ChannelEntry {
-    fn from_decl(decl: &ChannelDecl, why: Option<String>) -> ChannelEntry {
+    fn from_decl(decl: &ChannelDecl) -> ChannelEntry {
         ChannelEntry {
             name: decl.name.clone(),
             // **The CAST** (nxf 6j6v.g0yn): what a reader needs is who actually takes part, and on
@@ -206,8 +202,8 @@ impl ChannelEntry {
             // `members: coder` — the persona doing half the round appeared nowhere at all.
             members: crate::channel::cast(decl),
             description: decl.description.clone(),
-            why,
             origin: DeclarationOrigin::Workspace,
+            declaration: None,
         }
     }
 }
@@ -270,11 +266,6 @@ pub struct Directory {
     /// is what IT may address, and another project's door is not on that list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub public_channels: Vec<FrontDoor>,
-    /// Address-book targets that resolve to neither a declared persona nor a declared channel —
-    /// reported rather than dropped, because a typo in an address book is otherwise invisible: the
-    /// persona simply never hears about a peer its author believed it could reach.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub unresolved: Vec<String>,
     /// Where the declarations behind this directory came from, and where they belong (nxf
     /// 6j6v.dvyq) — attached by whoever resolved the catalogue, via
     /// [`Directory::with_declarations`].
@@ -306,14 +297,10 @@ impl Directory {
             persona: None,
             personas: roles
                 .iter()
-                .map(|r| PersonaEntry::from_decl(r, None, &audience, channels))
+                .map(|r| PersonaEntry::from_decl(r, &audience, channels))
                 .collect(),
-            channels: channels
-                .iter()
-                .map(|c| ChannelEntry::from_decl(c, None))
-                .collect(),
+            channels: channels.iter().map(ChannelEntry::from_decl).collect(),
             public_channels: Vec::new(),
-            unresolved: Vec::new(),
             declarations: None,
         }
     }
@@ -328,9 +315,11 @@ impl Directory {
         if let Some(source) = source {
             for p in &mut self.personas {
                 p.origin = source.origin_of(DeclarationKind::Persona, &p.handle);
+                p.declaration = source.file_of(DeclarationKind::Persona, &p.handle).cloned();
             }
             for c in &mut self.channels {
                 c.origin = source.origin_of(DeclarationKind::Channel, &c.name);
+                c.declaration = source.file_of(DeclarationKind::Channel, &c.name).cloned();
             }
         }
         self.declarations = source.cloned();
@@ -345,107 +334,42 @@ impl Directory {
         self
     }
 
-    /// One persona's own possibilities.
+    /// One persona's own possibilities: the whole catalogue minus the persona itself and minus the
+    /// channels it is a member of, each entry answered FOR this persona — directly addressable or
+    /// reached through a channel, by what the TARGET declares in `addressable`.
     ///
-    /// **Three states, and the middle one is the point** ([`RoleDecl::address_book`], nxf 6j6v.vce2):
+    /// **Derived, never declared** (nxf 6j6v.xjh3, owner decisions of 2026-10-03 and 2026-10-05). A
+    /// persona used to carry an `address_book` of its own; it was a second place the route was
+    /// written down, it could disagree with the target's own `addressable`, and its `why` lines
+    /// rotted when a target's job changed. The key is retired: a declaration that still carries it
+    /// loads, the key is ignored and `nxs prime` says so. "Commissions nothing" (`address_book: []`)
+    /// has no successor — a target appears in a persona's directory when the target admits it.
     ///
-    /// * a NON-EMPTY book — the projection is that book in the author's order, each entry resolved
-    ///   to the persona or channel it names;
-    /// * `address_book: []` — the persona **commissions nothing**, so the projection is empty. A
-    ///   pure reviewer, a summarizer, any role at a leaf of the tree: it answers on its own thread
-    ///   and calls nobody. Until this existed, `[]` produced the whole team — identical to omitting
-    ///   the key — so the only way to say "commission nothing" was a sentence in the
-    ///   `system_prompt`, which is the inversion of what a declaration file is for;
-    /// * NO book at all — the whole catalogue minus the persona itself, because an absent book means
-    ///   "nobody wrote this down", not "may address nobody", and the second reading would silently
-    ///   mute every persona declared before the field existed.
-    ///
-    /// **The DERIVED projection also drops the channels the persona is a member of.** Offering a
-    /// reviewer the `review` channel it sits in is help in no reading: commissioning your own
-    /// channel is not declaration cyclicity (that is refused at load time) and so passes every
-    /// check, which is exactly how the proving ground's three reviewers came to be offered it. A
-    /// book the author WROTE is left alone, entry for entry, including such a channel — the file is
-    /// the authority, and silently dropping what somebody declared is the failure mode `unresolved`
-    /// exists to avoid.
-    ///
-    /// **A book entry naming a channel-only persona also pulls in that persona's channels**, even
-    /// when the author did not list them. Otherwise the projection would carry a target the
-    /// rendering must drop (only directly addressable entries are shown) and nothing at all about
-    /// how to reach it — the author said "you may address this peer" and the reader would be told
-    /// nothing. Pulling the channel in at the DATA level, not in the renderer, is what makes the
-    /// promise total on both seams: an app reading the JSON sees the same route. Those pulled-in
-    /// channels are DERIVED, so the self-membership rule above applies to them too.
+    /// **The channels the persona sits in are dropped.** Offering a reviewer the `review` channel it
+    /// sits in is help in no reading: commissioning your own channel passes every check, which is
+    /// exactly how the proving ground's three reviewers came to be offered it.
     pub fn for_persona(roles: &[RoleDecl], channels: &[ChannelDecl], handle: &str) -> Directory {
-        let book = roles
-            .iter()
-            .find(|r| r.handle == handle)
-            .and_then(|r| r.address_book.as_deref());
         /// Whether `channel` already has this persona in it — the channel it sits in is never a
         /// target worth offering it.
         fn sits_in(channel: &ChannelDecl, handle: &str) -> bool {
             crate::channel::cast(channel).iter().any(|m| m == handle)
         }
         let audience = Identity::Persona(handle.to_string());
-        let (mut personas, mut listed, mut unresolved) = (Vec::new(), Vec::new(), Vec::new());
-        match book {
-            Some(entries) if !entries.is_empty() => {
-                for entry in entries {
-                    if let Some(decl) = roles.iter().find(|r| r.handle == entry.to) {
-                        personas.push(PersonaEntry::from_decl(
-                            decl,
-                            entry.why.clone(),
-                            &audience,
-                            channels,
-                        ));
-                    } else if let Some(decl) = channels.iter().find(|c| c.name == entry.to) {
-                        listed.push(ChannelEntry::from_decl(decl, entry.why.clone()));
-                    } else {
-                        unresolved.push(entry.to.clone());
-                    }
-                }
-                // The route to every channel-only persona the book named, appended after the
-                // author's own order (their entries stay where they put them) and never twice.
-                let via: Vec<String> = personas
-                    .iter()
-                    .filter(|p| !p.direct)
-                    .flat_map(|p| p.channels.iter().cloned())
-                    .collect();
-                for name in via {
-                    if listed.iter().any(|c| c.name == name) {
-                        continue;
-                    }
-                    if let Some(decl) = channels
-                        .iter()
-                        .find(|c| c.name == name && !sits_in(c, handle))
-                    {
-                        listed.push(ChannelEntry::from_decl(decl, None));
-                    }
-                }
-            }
-            // `Some(&[])` — the persona declared that it commissions nothing. Nothing is projected,
-            // and it falls through this arm rather than into the one below precisely because the two
-            // used to be the same answer.
-            Some(_) => {}
-            None => {
-                personas = roles
-                    .iter()
-                    .filter(|r| r.handle != handle)
-                    .map(|r| PersonaEntry::from_decl(r, None, &audience, channels))
-                    .collect();
-                listed = channels
-                    .iter()
-                    .filter(|c| !sits_in(c, handle))
-                    .map(|c| ChannelEntry::from_decl(c, None))
-                    .collect();
-            }
-        }
-        let channels = listed;
+        let personas = roles
+            .iter()
+            .filter(|r| r.handle != handle)
+            .map(|r| PersonaEntry::from_decl(r, &audience, channels))
+            .collect();
+        let channels = channels
+            .iter()
+            .filter(|c| !sits_in(c, handle))
+            .map(ChannelEntry::from_decl)
+            .collect();
         Directory {
             persona: Some(handle.to_string()),
             personas,
             channels,
             public_channels: Vec::new(),
-            unresolved,
             declarations: None,
         }
     }
@@ -457,10 +381,10 @@ impl Directory {
     /// "nothing is declared, and here is where it goes", and a front door that reached this
     /// workspace by sync does not make that untrue — it is somebody ELSE's declaration.
     pub fn is_empty(&self) -> bool {
-        self.personas.is_empty() && self.channels.is_empty() && self.unresolved.is_empty()
+        self.personas.is_empty() && self.channels.is_empty()
     }
 
-    /// The address book as Markdown: **how to address anyone, said once**, then one paragraph per
+    /// The directory as Markdown: **how to address anyone, said once**, then one paragraph per
     /// target you can actually address. `""` when there is nothing to show — the empty-string
     /// convention every session-start section renderer follows, so a caller can omit the whole
     /// section.
@@ -480,7 +404,7 @@ impl Directory {
     /// **The FRONT DOORS are not rendered here, by the same rule** (nxf 6j6v.yr59). A public
     /// channel of another project is DISCOVERABLE — that is why it rides on the record — but it is
     /// not addressable with `nxc send --to`, which resolves its target against the DECLARATIONS
-    /// and refuses a channel none of them names. Printing one in an address book would be the
+    /// and refuses a channel none of them names. Printing one in a directory would be the
     /// invitation-to-be-refused this section was cut down to remove. The record carries it for the
     /// app that renders discovery; the agent's brief does not.
     pub fn render_markdown(&self) -> String {
@@ -494,9 +418,6 @@ impl Directory {
             .map(render_persona_entry)
             .collect();
         entries.extend(self.channels.iter().map(render_channel_entry));
-        entries.extend(self.unresolved.iter().map(|name| {
-            format!("**{name}** — declared in the address book, but no such persona or channel.")
-        }));
         // Everything declared is channel-only and no channel is declared either: a real (broken)
         // state, and one the reader has to be told about rather than shown an empty heading.
         if entries.is_empty() {
@@ -522,9 +443,8 @@ const USER_LEVEL_QUALIFIER: &str = "from the user-level folder";
 ///
 /// The bold name is the human one (`job_title`), because that is what a reader recognises; the
 /// handle — the thing you actually type — is in the parenthesis beside it, with the seniority band
-/// that the parenthesis of a channel does not have. The trailing text is the caller's OWN reason
-/// (`why`, from its address book) when there is one, since a line written for this caller beats the
-/// target's general self-description, and that description otherwise.
+/// that the parenthesis of a channel does not have. The trailing text is the target's own
+/// description, in its own words — no caller writes a line about it any more (nxf 6j6v.xjh3).
 fn render_persona_entry(p: &PersonaEntry) -> String {
     let mut qualifiers = vec![format!("handle: `{}`", p.handle)];
     if let Some(stage) = p.stage {
@@ -538,7 +458,7 @@ fn render_persona_entry(p: &PersonaEntry) -> String {
         display_name(p.job_title.as_deref(), &p.handle),
         qualifiers.join(", ")
     );
-    if let Some(about) = p.why.clone().or_else(|| p.job_description.clone()) {
+    if let Some(about) = p.job_description.clone() {
         line.push_str(&format!(" — {about}"));
     }
     line
@@ -570,7 +490,7 @@ fn render_channel_entry(c: &ChannelEntry) -> String {
         display_name(None, &c.name),
         qualifiers.join(", ")
     );
-    if let Some(about) = c.why.clone().or_else(|| c.description.clone()) {
+    if let Some(about) = c.description.clone() {
         line.push_str(&format!(" — {about}"));
     }
     line
@@ -650,8 +570,17 @@ pub struct PersonaBrief {
     /// working directory, and the working directory a hurdle runs in — never the folder the
     /// declaration was read from; nothing in the engine resolves a path inside a declaration. A
     /// user-level persona whose knowledge lives beside its definition is told where that is.
+    ///
+    /// **A skill is always told** (nxf 6j6v.dw16), wherever it lives, and `declared_in` is then its
+    /// OWN folder: a skill's relative references mean that folder — the Agent Skills rule — which is
+    /// the opposite of the YAML rule above, so a session must be able to see which of the two
+    /// applies to it. [`declared_form`](PersonaBrief::declared_form) says which.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_in: Option<std::path::PathBuf>,
+    /// The form of the declaration [`declared_in`](PersonaBrief::declared_in) names — present
+    /// exactly when that is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_form: Option<crate::definitions::DeclarationForm>,
 }
 
 /// The `nxc` rules every persona is handed. Rendered in order; the answering rule comes first
@@ -731,11 +660,19 @@ impl PersonaBrief {
             channels: route_in(decl, channels),
             instructions: PERSONA_INSTRUCTIONS,
             declared_in: None,
+            declared_form: None,
         }
     }
 
-    /// Say where the declaration came from — see [`declared_in`](PersonaBrief::declared_in).
-    pub fn declared_in(mut self, folder: Option<std::path::PathBuf>) -> PersonaBrief {
+    /// Say where the declaration came from — see [`declared_in`](PersonaBrief::declared_in): the
+    /// persona's own folder for a skill, the user-level folder for a YAML file kept there, and
+    /// nothing for a YAML file in the workspace's own folder.
+    pub fn declared_in(
+        mut self,
+        folder: Option<std::path::PathBuf>,
+        form: crate::definitions::DeclarationForm,
+    ) -> PersonaBrief {
+        self.declared_form = folder.as_ref().map(|_| form);
         self.declared_in = folder;
         self
     }
@@ -827,14 +764,24 @@ impl PersonaBrief {
         if let Some(reachable) = reachable {
             lines.push(format!("- **Reachable:** {reachable}"));
         }
-        if let Some(folder) = &self.declared_in {
-            lines.push(format!(
+        match (&self.declared_in, self.declared_form) {
+            (Some(folder), Some(crate::definitions::DeclarationForm::Skill)) => {
+                lines.push(format!(
+                    "- **Declared in:** `{}`, as a skill (`SKILL.md`). A relative path in your \
+                     instructions means a file in THAT folder, wherever you run, unless they say \
+                     it is relative to the repository; the repository you work in is your \
+                     working directory.",
+                    folder.display()
+                ))
+            }
+            (Some(folder), _) => lines.push(format!(
                 "- **Declared in:** the user-level folder `{}`, not in this repository. A path your \
                  instructions give relative to this repository means THIS repository; files kept \
                  beside your declaration are under `{}`.",
                 folder.display(),
                 folder.display()
-            ));
+            )),
+            (None, _) => {}
         }
         lines.push(String::new());
         lines.push("### How you use `nxc`".to_string());
@@ -848,7 +795,6 @@ impl PersonaBrief {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::role::AddressBookEntry;
 
     fn role(handle: &str) -> RoleDecl {
         serde_yaml::from_str(&format!("handle: {handle}\nsystem_prompt: p\n")).unwrap()
@@ -956,45 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_address_book_is_the_projection_in_the_authors_order() {
-        let mut coder = role("coder");
-        coder.address_book = Some(vec![
-            AddressBookEntry {
-                to: "pm".into(),
-                why: Some("hand back the finished work order".into()),
-            },
-            AddressBookEntry {
-                to: "code-review".into(),
-                why: Some("ask for an assessment".into()),
-            },
-            AddressBookEntry {
-                to: "nobody".into(),
-                why: None,
-            },
-        ]);
-        let defs = defs(
-            vec![coder, role("pm"), role("designer")],
-            vec![channel("code-review", &["pm"])],
-        );
-        let dir = Directory::for_persona(defs.roles(), defs.channels(), "coder");
-        assert_eq!(dir.persona.as_deref(), Some("coder"));
-        assert_eq!(dir.personas.len(), 1, "only the book's own targets");
-        assert_eq!(dir.personas[0].handle, "pm");
-        assert_eq!(
-            dir.personas[0].why.as_deref(),
-            Some("hand back the finished work order")
-        );
-        assert_eq!(dir.channels.len(), 1);
-        assert_eq!(dir.channels[0].name, "code-review");
-        assert_eq!(
-            dir.unresolved,
-            ["nobody"],
-            "a target that resolves to nothing is reported, never dropped"
-        );
-    }
-
-    #[test]
-    fn no_address_book_shows_the_whole_team_minus_yourself_and_minus_the_channels_you_sit_in() {
+    fn a_persona_sees_the_whole_team_minus_itself_and_minus_the_channels_it_sits_in() {
         // nxf 6j6v.vce2's second half. `standup` has the reader in it; `release` does not. Offering
         // a persona the channel it is a MEMBER of is help in no reading — commissioning your own
         // channel is not declaration cyclicity, so it passes every check there is, which is exactly
@@ -1011,69 +919,6 @@ mod tests {
         assert_eq!(handles, ["pm"], "never yourself");
         let names: Vec<&str> = dir.channels.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["release"], "never the room you are already in");
-        assert!(dir.unresolved.is_empty());
-    }
-
-    #[test]
-    fn an_explicitly_empty_address_book_means_this_persona_commissions_nothing() {
-        // The whole of nxf 6j6v.vce2's first half: `[]` is now a DECLARATION, not a synonym for the
-        // omitted key. A pure reviewer says it in the file instead of in its system prompt.
-        let mut reviewer = role("reviewer");
-        reviewer.address_book = Some(Vec::new());
-        let defs = defs(
-            vec![reviewer, role("pm")],
-            vec![
-                channel("review", &["reviewer"]),
-                channel("release", &["pm"]),
-            ],
-        );
-
-        let dir = Directory::for_persona(defs.roles(), defs.channels(), "reviewer");
-        assert!(dir.personas.is_empty(), "commissions nobody: {dir:?}");
-        assert!(dir.channels.is_empty(), "and no channel either: {dir:?}");
-        assert!(dir.unresolved.is_empty());
-        assert!(dir.is_empty(), "so the surface omits the section entirely");
-        assert_eq!(dir.render_markdown(), "");
-    }
-
-    #[test]
-    fn an_omitted_address_book_still_shows_the_team_where_an_empty_one_shows_nothing() {
-        // The two states side by side over ONE catalogue — before this item they produced identical
-        // directories, and that identity is the defect.
-        let mut silent = role("reviewer");
-        silent.address_book = Some(Vec::new());
-        let catalogue = vec![channel("release", &["pm"])];
-
-        let written_down = defs(vec![silent, role("pm")], catalogue.clone());
-        let not_written_down = defs(vec![role("reviewer"), role("pm")], catalogue);
-
-        assert!(
-            Directory::for_persona(written_down.roles(), written_down.channels(), "reviewer")
-                .is_empty()
-        );
-        assert!(!Directory::for_persona(
-            not_written_down.roles(),
-            not_written_down.channels(),
-            "reviewer"
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn a_book_the_author_wrote_is_honoured_entry_for_entry_even_where_it_names_your_own_channel() {
-        // The asymmetry, deliberately: the DERIVED projection drops the channel you sit in, and a
-        // book somebody WROTE is left alone. The file is the authority, and silently dropping a
-        // declared entry is the failure `unresolved` exists to avoid.
-        let mut reviewer = role("reviewer");
-        reviewer.address_book = Some(vec![AddressBookEntry {
-            to: "review".into(),
-            why: Some("post the round's verdict".into()),
-        }]);
-        let defs = defs(vec![reviewer], vec![channel("review", &["reviewer"])]);
-
-        let dir = Directory::for_persona(defs.roles(), defs.channels(), "reviewer");
-        let names: Vec<&str> = dir.channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["review"], "the author said so: {dir:?}");
     }
 
     #[test]
@@ -1183,61 +1028,6 @@ mod tests {
             md.contains("**Review** (handle: `review`, members: code-quality, integrity)"),
             "and with no description the entry is still not mute:\n{md}"
         );
-    }
-
-    #[test]
-    fn a_book_that_names_a_channel_only_persona_gains_the_channel_that_reaches_it() {
-        // The author wrote "you may address this peer". Dropping it from the rendering (it is not
-        // directly addressable) while carrying nothing about its channel would leave the reader
-        // with nothing at all — the promise that the information MOVES rather than disappears has
-        // to hold in a book projection too, not just in the full catalogue.
-        let mut pm = role("pm");
-        pm.address_book = Some(vec![AddressBookEntry {
-            to: "reviewer".into(),
-            why: Some("get the work reviewed".into()),
-        }]);
-        let mut reviewer = role("reviewer");
-        reviewer.addressable = Addressable::ViaChannels(vec!["review".into()]);
-        let defs = defs(
-            vec![pm, reviewer],
-            vec![channel("review", &["reviewer"]), channel("other", &["pm"])],
-        );
-        let dir = Directory::for_persona(defs.roles(), defs.channels(), "pm");
-        assert_eq!(
-            dir.channels
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            ["review"],
-            "the channel that reaches the named peer, and no other"
-        );
-        let md = dir.render_markdown();
-        assert!(
-            md.contains("**Review** (handle: `review`, members: reviewer)"),
-            "{md}"
-        );
-        assert!(
-            !md.contains("--to reviewer"),
-            "still never an invocation that would be refused:\n{md}"
-        );
-    }
-
-    #[test]
-    fn the_callers_own_reason_beats_the_targets_self_description() {
-        // An address-book `why` was written FOR this caller, about this pairing; the target's own
-        // description is what it says to everyone. The specific one wins.
-        let mut coder = role("coder");
-        coder.job_title = Some("Coder".into());
-        coder.address_book = Some(vec![AddressBookEntry {
-            to: "pm".into(),
-            why: Some("hand back the finished work order".into()),
-        }]);
-        let mut pm = role("pm");
-        pm.job_description = Some("Runs the team's workflows.".into());
-        let defs = defs(vec![coder, pm], vec![]);
-        let md = Directory::for_persona(defs.roles(), defs.channels(), "coder").render_markdown();
-        assert!(md.contains("— hand back the finished work order"), "{md}");
-        assert!(!md.contains("Runs the team's workflows."), "{md}");
     }
 
     #[test]

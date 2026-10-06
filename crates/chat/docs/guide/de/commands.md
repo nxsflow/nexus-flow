@@ -75,9 +75,10 @@ Address any of them the same way: `nxc send --to <handle> -` — the `-` reads t
 ```
 
 Ohne `--persona` sieht ein Mensch das ganze deklarierte Team, während eine Persona, die unter ihrer
-eigenen Sitzung läuft, ihr eigenes Adressbuch sieht — erkannt an eben dieser Sitzung. `--persona
-<handle>` projiziert die Sicht dieser Persona, gleich wer fragt — nützlich, um vor dem Start zu
-prüfen, was ein Agent tatsächlich sehen wird.
+eigenen Sitzung läuft, ihre eigene Sicht darauf sieht — das Team ohne sie selbst und ohne die
+Kanäle, in denen sie sitzt —, erkannt an eben dieser Sitzung. `--persona <handle>` projiziert die
+Sicht dieser Persona, gleich wer fragt — nützlich, um vor dem Start zu prüfen, was ein Agent
+tatsächlich sehen wird.
 
 `--json` trägt `personas` (`handle`, `job_title`, `job_description`, `direct`), `channels` (`name`,
 `members`, `description`), ein Feld `public_channels` mit den sichtbaren Vordertüren (weggelassen,

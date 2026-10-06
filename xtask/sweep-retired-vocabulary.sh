@@ -950,6 +950,17 @@ VOCABULARY=(
   'ALSO READ THESE ITEMS'
   'COMPLETE PICTURE'
   'has the following parents'
+  #
+  # nxf 6j6v.xjh3 / 6j6v.2x7t (2026-10-05) — `address_book` is retired as a DECLARATION key: who a
+  # persona may address is derived from every target's `addressable`. `RoleDecl::address_book`,
+  # `AddressBookEntry`, the entries' `why` and the directory's `unresolved` went with it. Expected
+  # hits, all legitimate: the WARNING and the migration that name the key they ignore and drop
+  # (`skill.rs`, `declaration_quality.rs`, `persona_migration.rs`), the changelog fragments, the
+  # guides' sentence saying it is retired — and the DERIVED `address_book` field of
+  # `nxc prime --json` (facade.rs), which stays: it is the directory handed to a session, a
+  # different thing under the same name. `why` and `unresolved` are too common to list.
+  'AddressBookEntry'
+  'address_book'
 )
 
 # ---- THE EXCLUSIONS, each with the reason it is not a defect ----------------------------------

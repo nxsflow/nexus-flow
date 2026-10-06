@@ -1,0 +1,9 @@
+name: merging
+members: [merger]
+description: >-
+  Decide whether finished work goes in now or rides along with the next ticket — and when it
+  goes in, carry the merge out and prove the delivered result is green. Address it with the
+  finished ticket, the next planned ticket, and the branch.
+timeout: 45m
+working_tree: exclusive
+visibility: requester_only

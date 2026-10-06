@@ -104,6 +104,11 @@ pub struct DeclarationSource {
     /// now maintains centrally runs the old copy, and nobody would know.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed: Vec<DeclaredName>,
+    /// The file behind every entry of the merged catalogue (nxf 6j6v.dw16), in load order. Not on
+    /// this record's wire form — it is projected onto each directory entry instead, where a reader
+    /// looks for one persona's source.
+    #[serde(skip)]
+    pub files: Vec<DeclarationFile>,
 }
 
 /// One declaration by kind and name — how [`DeclarationSource`] names an entry's origin and a
@@ -148,6 +153,68 @@ impl DeclarationOrigin {
     pub fn is_workspace(&self) -> bool {
         *self == DeclarationOrigin::Workspace
     }
+}
+
+/// The form a declaration was written in (nxf 6j6v.dw16 / 6j6v.k3qy) — said in `--json` only; to a
+/// human a persona is a persona.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclarationForm {
+    /// A persona as `<handle>.yaml` — the older form, read until it is migrated.
+    Yaml,
+    /// A persona as `<name>/SKILL.md` ([`crate::skill`]).
+    Skill,
+    /// A channel in the list of `channels.yaml` — the older form, read until it is migrated.
+    ChannelList,
+    /// A channel as `channels/<name>.yaml`, one per file.
+    ChannelFile,
+}
+
+/// The FILE one entry of a catalogue was read from, and what that file says beyond the
+/// declaration every seam resolves through (nxf 6j6v.dw16): the fields a skill passes through, the
+/// capabilities it names, and the keys that were read and ignored.
+///
+/// Carried on [`DeclarationSource::files`] for every entry of the merged catalogue, and stamped
+/// onto the directory's entries, where `--json` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeclarationFile {
+    pub kind: DeclarationKind,
+    pub name: String,
+    pub file: PathBuf,
+    pub form: DeclarationForm,
+    /// The folder a relative reference in the declaration means: a skill's OWN folder, which is
+    /// the Agent Skills rule; for the other forms the declaration folder that holds the file —
+    /// shown for completeness, while a YAML persona's relative paths keep meaning the repository
+    /// the session runs in.
+    pub folder: PathBuf,
+    /// `nxs.requires` — capabilities the persona names. Read and shown, NOT checked and NOT bound in
+    /// this release.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// Passed through from the Agent Skills specification: not read, preserved, shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// Keys the file declares that were read and ignored — the material of the declaration
+    /// warnings `nxs prime` shows, not part of the wire form.
+    #[serde(skip)]
+    pub ignored: Vec<Ignored>,
+}
+
+/// One key a declaration file carries that has no effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ignored {
+    /// `address_book` — retired (nxf 6j6v.xjh3), with the number of entries it listed.
+    AddressBook { entries: usize },
+    /// `session`, `sub_agents` or `reports_to` — never had an effect.
+    Inert(String),
+    /// A nexus-flow key at the top level of a skill, where it is not read.
+    Misplaced(String),
+    /// A key under `nxs:` that names no field.
+    Unknown(String),
 }
 
 /// The USER-LEVEL declaration folder this process reads beside every workspace's own (nxf
@@ -200,10 +267,8 @@ pub fn merged_channels_with_user_dir(
 ) -> Result<Vec<ChannelDecl>> {
     let source = DeclarationSource::locate(root);
     let mut channels = crate::channel::load_all_channels(&source.read_dir)?;
-    reject_duplicates_in(&source.read_dir, &[], &channels)?;
     if let Some(user_dir) = user_folder_carrying_declarations(user_dir)? {
         let user_channels = crate::channel::load_all_channels(&user_dir)?;
-        reject_duplicates_in(&user_dir, &[], &user_channels)?;
         for channel in user_channels {
             if !channels.iter().any(|c| c.name == channel.name) {
                 channels.push(channel);
@@ -290,7 +355,7 @@ impl DeclarationSource {
         // The caller's OWN spelling of the root, not a canonicalized one. Considered and rejected:
         // canonicalizing would make two callers who reached the same workspace by different routes
         // report the same string, which is convenient for a differential — but this path is shown
-        // to a HUMAN ("declare one as <path>/<handle>.yaml"), and a path that is not the one they
+        // to a HUMAN ("declare one as <path>/<name>/SKILL.md"), and a path that is not the one they
         // opened the project with is worse than one that varies. It also matches every other path
         // this crate reports, `Workspace.dir` included, so there is one rule rather than two.
         let path = root.join(PERSONAS_DIR);
@@ -312,6 +377,7 @@ impl DeclarationSource {
             user_path: None,
             from_user: Vec::new(),
             shadowed: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -342,7 +408,7 @@ impl DeclarationSource {
     /// machine without one reads exactly as it did (acceptance point 8 of 6j6v.70dy).
     fn explain_workspace_half(&self) -> String {
         let where_it_belongs = format!(
-            "declare one as `{}/<handle>.yaml` (a persona) or `{}/channels.yaml` (a channel)",
+            "declare one as `{}/<name>/SKILL.md` (a persona) or `{}/channels/<name>.yaml` (a channel)",
             self.path.display(),
             self.path.display()
         );
@@ -420,6 +486,11 @@ impl DeclarationSource {
         self.kind == DeclarationSourceKind::LegacyRoles || self.user_path.is_some()
     }
 
+    /// The file the entry `name` of `kind` in this catalogue was read from (nxf 6j6v.dw16).
+    pub fn file_of(&self, kind: DeclarationKind, name: &str) -> Option<&DeclarationFile> {
+        self.files.iter().find(|f| f.kind == kind && f.name == name)
+    }
+
     /// Where the entry `name` of `kind` in this catalogue came from.
     pub fn origin_of(&self, kind: DeclarationKind, name: &str) -> DeclarationOrigin {
         match self
@@ -454,30 +525,36 @@ pub const PERSONAS_README_BODY: &str = "\
 
 Who your agents are, and where they talk. nexus-chat reads this folder — nothing writes it but you.
 
-## One file per persona: `<handle>.yaml`
+## One folder per persona: `<name>/SKILL.md`
 
-```yaml
-handle: coder
-job_title: Implementer
-job_description: Builds what the work order asks for, and says so when it cannot.
-system_prompt: |
-  You implement one task at a time and report back in the thread you were asked in.
+```markdown
+---
+name: coder
+description: Builds what the work order asks for, and says so when it cannot.
+nxs:
+  title: Implementer
+---
+You implement one task at a time and report back in the thread you were asked in.
 ```
 
-Address it with `nxc send --to coder -`, with the request on STDIN — `… - <<'EOF'`, your
-text, then `EOF` on its own line — so the shell evaluates nothing in it. A one-liner may be an
-argument instead.
+A persona is a skill in the form of the Agent Skills specification: a skill folder you found
+elsewhere works when you copy it in. Address it with `nxc send --to coder -`, with the request on
+STDIN — `… - <<'EOF'`, your text, then `EOF` on its own line — so the shell evaluates nothing in
+it. A one-liner may be an argument instead.
 
-## The channels they share: `channels.yaml`
+## One file per channel: `channels/<name>.yaml`
 
 ```yaml
-- name: review
-  members: [coder, reviewer]
-  timeout: 30m
+name: review
+members: [coder, reviewer]
+timeout: 30m
 ```
 
-Address it with `nxc send --to review -`, the same way. A channel may also declare a `flow:` —
-its members in order — and then a send walks that order step by step.
+Address it with `nxc send --to review -`, the same way. A channel may also declare `steps:` — its
+members in order — and then a send walks that order step by step.
+
+The older forms, `<handle>.yaml` and a `channels.yaml` list, are still read;
+`nxs personas migrate` rewrites them. `nxc guide personas` has every field.
 
 ## Nothing is declared until it is in here
 
@@ -486,7 +563,8 @@ declares, and nothing else. That is the point — a target that is declared is r
 and survives the run.
 ";
 
-/// Whether a folder carries at least one declaration — a top-level `*.yaml`. Cheap and parse-free
+/// Whether a folder carries at least one declaration — a top-level `*.yaml`, a sub-folder with a
+/// `SKILL.md`, or a `channels/*.yaml`. Cheap and parse-free
 /// on purpose (see [`DeclarationSource::locate`]); an unreadable directory answers `false`, which
 /// is the same answer the loaders give it.
 ///
@@ -502,7 +580,17 @@ fn carries_declarations(dir: &Path) -> bool {
             .flatten()
             .any(|e| e.path().extension().is_some_and(|ext| ext == "yaml") && e.path().is_file())
     }
-    has_yaml(dir)
+    // A skill folder (nxf 6j6v.dw16) or a channel file (nxf 6j6v.k3qy) is a declaration as much as
+    // a YAML file beside them is — a folder holding only the new form must not read as empty.
+    fn has_skill(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .any(|e| e.path().join(crate::skill::SKILL_FILE).is_file())
+    }
+    has_yaml(dir) || has_skill(dir) || has_yaml(&dir.join(crate::channel::CHANNELS_DIR))
 }
 
 /// Every role and channel declared for one workspace.
@@ -564,6 +652,15 @@ impl Definitions {
     pub fn new(roles: Vec<RoleDecl>, channels: Vec<ChannelDecl>) -> Result<Definitions> {
         for role in &roles {
             validate_role_handle(&role.handle)?;
+            // The folder `channels/` holds one file per channel (nxf 6j6v.k3qy), so the name is
+            // the channels' — a persona called so would be one folder name for two kinds.
+            if role.handle == crate::channel::CHANNELS_DIR {
+                return Err(NxfError::validation(format!(
+                    "a persona may not be called {:?}: the name is reserved for the folder that \
+                     holds one file per channel",
+                    role.handle
+                )));
+            }
         }
         reject_duplicates("role handle", roles.iter().map(|r| r.handle.as_str()))?;
         reject_duplicates("channel name", channels.iter().map(|c| c.name.as_str()))?;
@@ -640,6 +737,7 @@ impl Definitions {
         let mut source = source.clone();
         source.from_user.clear();
         source.shadowed.clear();
+        source.files.clear();
         Definitions::load(source)
     }
 
@@ -660,27 +758,39 @@ impl Definitions {
     /// error — the same fail-closed rule a malformed workspace file has, and for the same reason: a
     /// team half-read is worse than a team refused with the name of the file to fix.
     fn load(mut source: DeclarationSource) -> Result<Definitions> {
-        let mut roles = crate::role::load_all_roles(&source.read_dir)?;
-        let mut channels = crate::channel::load_all_channels(&source.read_dir)?;
+        let personas = crate::role::load_declared_personas(&source.read_dir)?;
+        let declared_channels = crate::channel::load_declared_channels(&source.read_dir)?;
+        let (mut roles, mut files): (Vec<RoleDecl>, Vec<DeclarationFile>) =
+            personas.into_iter().map(|p| (p.decl, p.file)).unzip();
+        let mut channels = Vec::with_capacity(declared_channels.len());
+        for (channel, file) in declared_channels {
+            channels.push(channel);
+            files.push(file);
+        }
         reject_duplicates_in(&source.read_dir, &roles, &channels)?;
         if let Some(user_dir) = source.user_path.clone() {
-            let user_roles = crate::role::load_all_roles(&user_dir)?;
-            let user_channels = crate::channel::load_all_channels(&user_dir)?;
-            reject_duplicates_in(&user_dir, &user_roles, &user_channels)?;
-            for role in user_roles {
+            let user_personas = crate::role::load_declared_personas(&user_dir)?;
+            let user_channels = crate::channel::load_declared_channels(&user_dir)?;
+            {
+                let roles: Vec<&RoleDecl> = user_personas.iter().map(|p| &p.decl).collect();
+                let channels: Vec<&ChannelDecl> = user_channels.iter().map(|(c, _)| c).collect();
+                reject_duplicate_refs_in(&user_dir, &roles, &channels)?;
+            }
+            for persona in user_personas {
                 let name = DeclaredName {
                     kind: DeclarationKind::Persona,
-                    name: role.handle.clone(),
+                    name: persona.decl.handle.clone(),
                 };
-                match roles.iter().any(|r| r.handle == role.handle) {
+                match roles.iter().any(|r| r.handle == persona.decl.handle) {
                     true => source.shadowed.push(name),
                     false => {
                         source.from_user.push(name);
-                        roles.push(role);
+                        roles.push(persona.decl);
+                        files.push(persona.file);
                     }
                 }
             }
-            for channel in user_channels {
+            for (channel, file) in user_channels {
                 let name = DeclaredName {
                     kind: DeclarationKind::Channel,
                     name: channel.name.clone(),
@@ -690,6 +800,7 @@ impl Definitions {
                     false => {
                         source.from_user.push(name);
                         channels.push(channel);
+                        files.push(file);
                     }
                 }
             }
@@ -699,6 +810,7 @@ impl Definitions {
         }
         let mut defs = Definitions::new(roles, channels)?;
         source.count = defs.len();
+        source.files = files;
         defs.source = Some(source);
         Ok(defs)
     }
@@ -841,8 +953,15 @@ impl Definitions {
 
 /// The role-handle form check, shared by construction and lookup (see [`Definitions::new`] for why
 /// each clause is here).
-fn validate_role_handle(handle: &str) -> Result<()> {
-    if handle.is_empty() || handle.contains('/') || handle.contains('\\') || handle.contains("..") {
+pub(crate) fn validate_role_handle(handle: &str) -> Result<()> {
+    // Whitespace and control characters too (review of PR #19, Integrity #6): a handle is
+    // rendered into every other persona's directory, and a copied skill's `name` is the handle.
+    if handle.is_empty()
+        || handle.contains('/')
+        || handle.contains('\\')
+        || handle.contains("..")
+        || handle.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return Err(NxfError::validation(format!(
             "invalid role handle: {handle:?}"
         )));
@@ -869,6 +988,16 @@ fn validate_role_handle(handle: &str) -> Result<()> {
 /// [`reject_duplicates`] for one folder's personas and channels, naming the folder — so a duplicate
 /// in the user-level folder is not mistaken for one in the workspace (nxf 6j6v.7k58).
 fn reject_duplicates_in(dir: &Path, roles: &[RoleDecl], channels: &[ChannelDecl]) -> Result<()> {
+    let roles: Vec<&RoleDecl> = roles.iter().collect();
+    let channels: Vec<&ChannelDecl> = channels.iter().collect();
+    reject_duplicate_refs_in(dir, &roles, &channels)
+}
+
+fn reject_duplicate_refs_in(
+    dir: &Path,
+    roles: &[&RoleDecl],
+    channels: &[&ChannelDecl],
+) -> Result<()> {
     reject_duplicates("role handle", roles.iter().map(|r| r.handle.as_str()))
         .and_then(|()| reject_duplicates("channel name", channels.iter().map(|c| c.name.as_str())))
         .map_err(|e| NxfError::validation(format!("{}: {}", dir.display(), e.msg)))

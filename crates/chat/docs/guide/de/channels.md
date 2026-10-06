@@ -1,16 +1,28 @@
 # Kanäle
 
 Ein **Kanal** ist eine deklarierte Gruppe — und weil die Reihenfolge seiner Mitglieder verbindlich
-gemacht werden kann, ist er zugleich der einzige Arbeitsablauf, den dieses System kennt. Beides steht
-in einer Datei, `.nxs-personas/channels.yaml`, als YAML-Liste:
+gemacht werden kann, ist er zugleich der einzige Arbeitsablauf, den dieses System kennt. Jeder Kanal
+ist eine Datei, `.nxs-personas/channels/<name>.yaml`, die diesen Kanal als Abbildung enthält:
 
 ```yaml
-- name: review
-  members: [general, integrity]
-  description: the review quorum — one round asks both reviewers and hands back one verdict
+# .nxs-personas/channels/review.yaml
+name: review
+members: [general, integrity]
+description: the review quorum — one round asks both reviewers and hands back one verdict
 ```
 
-`name` und `members` sind die einzigen Pflichtschlüssel. Angesprochen wird er genau wie eine Persona:
+`name` und `members` sind die einzigen Pflichtschlüssel. `name:` ist maßgeblich; der Dateiname ist
+Konvention. Ein Kanal ist kein Skill und hat kein Frontmatter — seine Felder sind die auf dieser
+Seite.
+
+**Die ältere Form wird weiterhin gelesen:** alle Kanäle als eine YAML-Liste in
+`.nxs-personas/channels.yaml`, jeder Eintrag dieselbe Abbildung mit einem `- ` davor. Die Beispiele
+auf dieser Seite zeigen einen Kanal, und das ist in beiden Dateien derselbe Text. Ein Kanal, der an
+beiden Stellen deklariert ist — in `channels.yaml` und in `channels/` —, wird beim Lesen des Ordners
+abgelehnt, mit beiden Dateien benannt; `nxs personas migrate` verschiebt die Liste nach `channels/`,
+eine Datei je Kanal, und behält Ihre Kommentare (`nxc guide personas`). Aus `channels/` gelesen,
+werden die Kanäle in der Reihenfolge ihrer Dateinamen aufgeführt. Angesprochen wird er genau wie
+eine Persona:
 
 ```bash
 nxc send --to review --ref nxf_ids=ab12.0008 "Judge the export change."
@@ -128,7 +140,7 @@ eine Antwort, welches Verb auch fragt.
 ein Auffächern beginnt den Zug eines Mitglieds immer auf einer frischen Sitzung, und eine `nxc reply
 --thread` in den eigenen Faden dieses Mitglieds setzt die Sitzung fort, die es bereits hat. Bis zu
 seiner Entfernung stand hier ein Schlüssel `member_session: fresh | resume` — er steuerte nichts und
-lehnte seinen eigenen zweiten Wert ab —, und eine `channels.yaml`, die ihn noch setzt, lädt
+lehnte seinen eigenen zweiten Wert ab —, und eine Kanaldeklaration, die ihn noch setzt, lädt
 unverändert; der Schlüssel wird ignoriert.
 
 Die eine Stelle, an der eine Deklaration es *doch* entscheidet, ist ein **Schritt**: er hat ein

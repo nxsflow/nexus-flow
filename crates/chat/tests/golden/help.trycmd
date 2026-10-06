@@ -35,7 +35,7 @@ Usage: nxc [OPTIONS] <COMMAND>
 Commands:
   init            Initialize chat in the current directory: ensure a `.nxs` workspace, register the `chat` module, then delegate the shared agent file + one SessionStart hook per active module to the `nxs` assembler (re-assembling every active module) — parity with `nxm init`
   agent-manifest  Emit nxc's declared contribution to the shared agent file (the prime command + the SessionStart hook) as data. `--json` is the machine contract the `nxs` umbrella assembles from
-  list            Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own address book, recognised from its session. With `--persona` it is that persona's view, whoever is asking
+  list            Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own view of it, recognised from its session. With `--persona` it is that persona's view, whoever is asking
   send            Open a conversation with a declared persona or channel: posts the first message, stamps a thread, and starts (or wakes) whoever is on the other side. Returns the thread id
   reply           Answer in a thread: posts into the thread's own channel and hands the turn back to whoever is on the other side of it
   threads         Thread quorum boards: `list` the caller's boards, or `show` one in full
@@ -101,7 +101,7 @@ Options:
 
 ```console
 $ nxc list --help
-Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own address book, recognised from its session. With `--persona` it is that persona's view, whoever is asking
+Who can be addressed here, and what for. Without `--persona` a human sees the whole declared team — which is also what an app renders as its directory — while a running persona sees its own view of it, recognised from its session. With `--persona` it is that persona's view, whoever is asking
 
 Usage: nxc list [OPTIONS]
 

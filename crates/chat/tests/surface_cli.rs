@@ -54,8 +54,7 @@ fn write_roles(tmp: &TempDir) {
     std::fs::write(
         roles.join("pm.yaml"),
         "handle: pm\njob_title: Product manager\njob_description: turns intent into work orders\n\
-         stage: senior\nsystem_prompt: You are the PM.\n\
-         address_book:\n  - to: coder\n    why: hand over an implementable work order\n",
+         stage: senior\nsystem_prompt: You are the PM.\n",
     )
     .unwrap();
     std::fs::write(
@@ -180,11 +179,11 @@ fn list_says_so_when_nothing_at_all_is_declared() {
     assert!(out.contains("nobody is declared here yet"), "{out}");
     // With the path (nxf 6j6v.dvyq step 4): "there is nothing" and "you have not declared anything
     // yet" are different states, and only the second one can be acted on.
-    assert!(out.contains(".nxs-personas/channels.yaml"), "{out}");
+    assert!(out.contains(".nxs-personas/channels/<name>.yaml"), "{out}");
 }
 
 #[test]
-fn list_shows_the_team_to_a_human_and_the_address_book_to_a_persona() {
+fn list_shows_the_team_to_a_human_and_its_derived_view_to_a_persona() {
     let tmp = workspace();
     write_roles(&tmp);
     let all = json_of(human(&tmp).args(["--json", "list"]));
@@ -201,10 +200,10 @@ fn list_shows_the_team_to_a_human_and_the_address_book_to_a_persona() {
         .iter()
         .map(|p| p["handle"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["coder"], "its own address book, not the team");
-    assert_eq!(
-        mine["personas"][0]["why"], "hand over an implementable work order",
-        "and what for"
+    assert_eq!(names, ["coder"], "the team minus the persona itself");
+    assert!(
+        mine["personas"][0].get("why").is_none(),
+        "the target described in its own words, never the caller's"
     );
 
     // An explicit `--persona` projects that view for anyone — the app's path.

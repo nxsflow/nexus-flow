@@ -177,14 +177,18 @@ fn without_a_user_level_declaration_the_resolution_is_the_one_from_before() {
 }
 
 #[test]
-fn two_user_level_files_declaring_one_handle_are_refused_naming_that_folder() {
+fn two_user_level_files_declaring_one_handle_are_refused_naming_both_files() {
     let m = Machine::new();
     declare(m.user.path(), "pm.yaml", CENTRAL_PM);
     declare(m.user.path(), "pm-copy.yaml", CENTRAL_PM);
     let err = m.resolve().unwrap_err();
     assert!(
-        err.msg.contains(&m.user.path().display().to_string())
-            && err.msg.contains("duplicate role handle"),
+        err.msg
+            .contains(&m.user.path().join("pm.yaml").display().to_string())
+            && err
+                .msg
+                .contains(&m.user.path().join("pm-copy.yaml").display().to_string())
+            && err.msg.contains("declared twice"),
         "{}",
         err.msg
     );
@@ -256,7 +260,7 @@ fn a_malformed_user_level_channels_file_fails_the_catalogue_with_its_path() {
 }
 
 #[test]
-fn two_user_level_channels_of_one_name_are_refused_naming_that_folder() {
+fn two_user_level_channels_of_one_name_are_refused_naming_the_file() {
     let m = Machine::new();
     declare(
         m.user.path(),
@@ -266,8 +270,9 @@ fn two_user_level_channels_of_one_name_are_refused_naming_that_folder() {
     declare(m.user.path(), "pm.yaml", CENTRAL_PM);
     let err = m.resolve().unwrap_err();
     assert!(
-        err.msg.contains(&m.user.path().display().to_string())
-            && err.msg.contains("duplicate channel name"),
+        err.msg
+            .contains(&m.user.path().join("channels.yaml").display().to_string())
+            && err.msg.contains("declared twice"),
         "{}",
         err.msg
     );

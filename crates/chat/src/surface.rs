@@ -444,11 +444,11 @@ fn with_service_finding(
 /// Channels resolve before personas because a channel name is the more specific claim: a declared
 /// channel is always addressable, whereas a persona may have declared that it is not.
 ///
-/// **[`crate::role::Addressable`] is enforced here and the address book is not**, which looks
+/// **[`crate::role::Addressable`] is enforced here and a persona's directory is not**, which looks
 /// inconsistent and is the whole point: addressability is the TARGET's own property and reads the
-/// same for every caller, while an address book is a property of the CALLER — and a caller's
-/// identity can be dropped, so deriving a restriction from it would mean that omitting `--persona`
-/// grants MORE. See [`crate::persona`] for the rule in full.
+/// same for every caller, while the directory is a view FOR the caller — and a caller's identity
+/// can be dropped, so deriving a restriction from it would mean that omitting `--persona` grants
+/// MORE. See [`crate::persona`] for the rule in full.
 pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<SendToReceipt> {
     // The refs obligation is resolved ONCE, here, before any branch — both target paths post a
     // message and both owe the caller the same answer about it (nxf 6j6v.ckeq §5). Resolved BEFORE

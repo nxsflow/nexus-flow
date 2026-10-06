@@ -70,8 +70,11 @@ Verschwendung für Arbeit, die sich selbst zeigt.
 **Die Regel in einem Satz: Was die Engine einspielt, gehört nicht in die Deklaration.** Eine Kopie
 driftet, und eine driftende Kopie, die der Engine widerspricht, produziert Fehlverhalten.
 
-Der zusammengesetzte Prompt ist geschichtet ([Personas](nxc-personas), „Wofür sie da ist"), und Ihr
-`system_prompt` ist eine Schicht von mehreren. Die folgenden vier Stücke schreibt die Engine, in
+Der zusammengesetzte Prompt ist geschichtet ([Personas](nxc-personas), „Wofür sie da ist"), und der
+Rumpf Ihrer Persona — der Text ihrer `SKILL.md` nach dem Frontmatter, `system_prompt` in der älteren
+YAML-Form — ist eine Schicht von mehreren. Die Beispiele auf dieser Seite zeigen die Felder in der
+älteren YAML-Form, in der jedes ein Schlüssel ist; in einer `SKILL.md` ist derselbe Text der Rumpf,
+`description` oder ein Feld unter `nxs:`. Die folgenden vier Stücke schreibt die Engine, in
 jede Sitzung, die dafür in Frage kommt — und sie hier zu benennen ist der Sinn dieses Abschnitts:
 damit Sie nachlesen können, was Sie nicht schreiben müssen.
 
@@ -187,12 +190,11 @@ Strukturfrage und erst danach eine Formulierungsfrage.
 
 **Die Regel: Sie beantwortet „wann rufst du mich?", nicht „woraus bestehe ich".**
 
-Bei einer Persona ist das `job_description`, bei einem Kanal `description`. Es ist das Einzige, was
-einem rufenden Agenten gezeigt wird, wenn er entscheidet, wen er anspricht — `nxc list` rendert es,
-und der Abschnitt „Who you can address" jedes daraus gebauten prime-Blocks ebenso. (Eines
-schlägt es: Hat der Rufer für Sie einen `address_book:`-Eintrag mit einem `why`, sieht dieser Rufer
-seine eigene Zeile. Das ist sein Satz über genau diese Paarung, und er ist spezifischer. Alle
-anderen sehen Ihren.)
+Bei einer Persona ist das `description` (`job_description` in der älteren YAML-Form), bei einem
+Kanal `description`. Es ist das Einzige, was einem rufenden Agenten gezeigt wird, wenn er
+entscheidet, wen er anspricht — `nxc list` rendert es, und der Abschnitt „Who you can address" jedes
+daraus gebauten prime-Blocks ebenso. Jeder Rufer sieht Ihren: Ein Rufer schreibt keine eigene Zeile
+mehr über Sie.
 
 Deklariert war in der gemessenen Menge Mechanik plus Themenliste: *jeder schätzt unabhängig ein,
 dann wird zusammengesetzt* — wahr, und nutzlos für jemanden, der entscheidet, wen er fragt. Drei
@@ -448,7 +450,7 @@ Ein Durchgang, sieben Fragen — die sieben Klassen, in ihrer eigenen Reihenfolg
    lautet, und nicht so, wie Sie es in Erinnerung haben. Vor allem: Sagt Ihr Text der Rolle, sie
    solle weiterarbeiten, während sie wartet, statt zu warten zu eskalieren, oder ihren Zug in einer
    Form beenden, die ihre Position nicht anbietet?
-3. **Beantwortet `job_description` — oder die `description` eines Kanals — „wann rufst du mich?"**
+3. **Beantwortet `description` — die einer Persona oder eines Kanals — „wann rufst du mich?"**
    Ankersituation, Abgrenzung, Bringschuld, statt einer Beschreibung der Mechanik.
 4. **Überlebt diese Deklaration das Kopieren in ein anderes Projekt?** Feste Pfade, Produktnamen,
    ein Brett-Präfix — oder ein Verfahren, sich den Stand zu verschaffen?

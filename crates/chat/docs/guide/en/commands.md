@@ -73,7 +73,8 @@ Address any of them the same way: `nxc send --to <handle> -` — the `-` reads t
 ```
 
 Without `--persona` a human sees the whole declared team, while a persona running under its own
-session sees its own address book, recognised from that session. `--persona <handle>` projects that
+session sees its own view of it — the team minus itself and the channels it sits in — recognised
+from that session. `--persona <handle>` projects that
 persona's view whoever is asking — useful for checking what an agent will actually see before you
 start it.
 

@@ -25,7 +25,6 @@ fn role(handle: &str) -> RoleDecl {
         prime: nexus_chat::role::PrimeDecl::All(true),
         stage: None,
         addressable: Default::default(),
-        address_book: None,
         working_tree: Default::default(),
     }
 }

@@ -273,14 +273,14 @@ fn a_missing_channels_yaml_yields_a_clean_roles_only_roster_with_no_spurious_err
 }
 
 #[test]
-fn human_output_renders_the_address_book_and_gates_declaration_errors_section() {
+fn human_output_renders_the_directory_and_gates_declaration_errors_section() {
     let tmp = workspace();
     write_role(&tmp, "pm");
     write_channels(&tmp, "- name: standup\n  members: [pm, ghost]\n");
 
     let out = nxc_interactive(&tmp).arg("prime").assert().success();
     let text = String::from_utf8_lossy(&out.get_output().stdout);
-    // "## Declared Team" no longer renders (nxf h4d3, task 3): the address book below is the
+    // "## Declared Team" no longer renders (nxf h4d3, task 3): the directory below is the
     // section that names declared roles/channels now — see `render_declared_team`'s doc comment in
     // `crates/chat/src/facade.rs`.
     assert!(!text.contains("## Declared Team"), "{text}");
@@ -489,3 +489,74 @@ fn a_clean_workspace_omits_the_key_and_still_gets_the_pointer() {
 // The partition rule they exercised is the same one
 // `broken_channels_yaml_excludes_all_its_channels_not_just_the_broken_one` above still holds, on
 // the declaration kind that survives.
+
+// ---- what only a FILE shows (nxf 6j6v.2x7t, acceptance point 8; review of PR #19, Test #1) -----
+
+/// `nxs prime` to a human names, per file, the retired `address_book`, a name outside the Agent
+/// Skills rule, the inert keys, a skill without `allowed-tools`, and — ONCE — the capabilities
+/// nothing binds yet; a spawned session is shown none of it. Each line names the file it is in.
+#[test]
+fn prime_warns_about_address_book_the_name_rule_inert_keys_and_requires() {
+    let tmp = workspace();
+    let personas = tmp.path().join(".nxs-personas");
+    std::fs::create_dir_all(personas.join("Helper")).unwrap();
+    std::fs::write(
+        personas.join("pm.yaml"),
+        "handle: pm\njob_description: Turns an idea into board items for whoever asks.\n\
+         system_prompt: You are the PM.\naddress_book: []\nreports_to: owner\n",
+    )
+    .unwrap();
+    std::fs::write(
+        personas.join("Helper/SKILL.md"),
+        "---\nname: Helper\ndescription: Helps with whatever you bring it, in one sentence.\n\
+         nxs:\n  requires: [mail]\n---\nHelp.\n",
+    )
+    .unwrap();
+
+    let out = nxc_interactive(&tmp).arg("prime").assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(text.contains("## Declaration Warnings"), "{text}");
+    for expected in [
+        "`pm.yaml`: `address_book` is retired and ignored",
+        "`pm.yaml`: `reports_to` has never had an effect",
+        "`Helper/SKILL.md`: the name `Helper` breaks the Agent Skills name rule",
+        "`Helper/SKILL.md`: `allowed-tools` is not declared",
+        "`nxs.requires` names capabilities for `Helper` (mail)",
+    ] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+    assert_eq!(
+        text.matches("nxs.requires").count(),
+        1,
+        "said once:\n{text}"
+    );
+
+    let spawned = nxc(&tmp).arg("prime").assert().success();
+    let text = String::from_utf8_lossy(&spawned.get_output().stdout);
+    assert!(!text.contains("## Declaration Warnings"), "{text}");
+}
+
+/// One broken channel FILE excludes its own channel from the roster and no other, and the error
+/// names that file (review of PR #19, Code Quality #1 and #2).
+#[test]
+fn a_broken_channel_file_excludes_only_its_own_channel_and_is_named() {
+    let tmp = workspace();
+    write_role(&tmp, "pm");
+    let channels = tmp.path().join(".nxs-personas/channels");
+    std::fs::create_dir_all(&channels).unwrap();
+    std::fs::write(channels.join("good.yaml"), "name: good\nmembers: [pm]\n").unwrap();
+    std::fs::write(channels.join("bad.yaml"), "name: bad\nmembers: [ghost]\n").unwrap();
+
+    let out = nxc_interactive(&tmp)
+        .args(["--json", "prime"])
+        .assert()
+        .success();
+    let v = json_of(&out.get_output().stdout);
+    assert_eq!(v["channels"], serde_json::json!(["good"]), "{v}");
+    let errors = v["declaration_errors"].to_string();
+    assert!(errors.contains("channels/bad.yaml"), "{errors}");
+    assert!(!errors.contains("\"channels.yaml\""), "{errors}");
+}

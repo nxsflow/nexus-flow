@@ -898,14 +898,107 @@ pub fn fan_out_targets(channel: &ChannelDecl, sender: &str) -> Vec<String> {
 /// the path (mirrors `role::load_role`'s/`workflow::load_workflow`'s identical choice — content is
 /// wrong, not an environment failure).
 pub fn load_all_channels(dir: &Path) -> Result<Vec<ChannelDecl>> {
-    let path = dir.join("channels.yaml");
-    if !path.is_file() {
-        return Ok(vec![]);
+    Ok(load_declared_channels(dir)?
+        .into_iter()
+        .map(|(channel, _)| channel)
+        .collect())
+}
+
+/// The folder that holds one file per channel (nxf 6j6v.k3qy) — and so a name no persona may take.
+pub const CHANNELS_DIR: &str = "channels";
+
+/// Every channel declared under `dir`, with the file behind each (nxf 6j6v.k3qy): first the list
+/// in `channels.yaml` — the older form, read until it is migrated — in its own order, then
+/// `channels/<name>.yaml` in file-name order, each file ONE channel as a map. `name:` is the
+/// truth; the file name is convention.
+///
+/// **A channel declared twice is refused, naming both files** — in `channels.yaml` and in
+/// `channels/` (a migration half done), in two files of `channels/`, or twice in the list.
+pub fn load_declared_channels(
+    dir: &Path,
+) -> Result<Vec<(ChannelDecl, crate::definitions::DeclarationFile)>> {
+    use crate::definitions::DeclarationForm;
+    let mut declared = Vec::new();
+    let list = dir.join(CHANNELS_FILE);
+    if list.is_file() {
+        let content = std::fs::read_to_string(&list)
+            .map_err(|e| NxfError::io(format!("reading channels file {}: {e}", list.display())))?;
+        let channels: Vec<ChannelDecl> = serde_yaml::from_str(&content).map_err(|e| {
+            NxfError::validation(format!("parsing channels file {}: {e}", list.display()))
+        })?;
+        for channel in channels {
+            let file = channel_file(&channel, &list, DeclarationForm::ChannelList, dir);
+            declared.push((channel, file));
+        }
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| NxfError::io(format!("reading channels file {}: {e}", path.display())))?;
-    serde_yaml::from_str(&content)
-        .map_err(|e| NxfError::validation(format!("parsing channels file {}: {e}", path.display())))
+    let folder = dir.join(CHANNELS_DIR);
+    if folder.is_dir() {
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+            .map_err(|e| NxfError::io(format!("reading channel folder {}: {e}", folder.display())))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "yaml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let content = crate::skill::read_declaration(&path)?;
+            let invalid =
+                |what: String| NxfError::validation(format!("{}: {what}", path.display()));
+            let value: serde_yaml::Value = serde_yaml::from_str(&content)
+                .map_err(|e| invalid(format!("parsing channel file: {e}")))?;
+            if value.is_sequence() {
+                return Err(invalid(
+                    "a file under channels/ declares ONE channel as a map — a list of channels \
+                     is the form of channels.yaml"
+                        .to_string(),
+                ));
+            }
+            let channel: ChannelDecl = serde_yaml::from_value(value)
+                .map_err(|e| invalid(format!("parsing channel file: {e}")))?;
+            let file = channel_file(&channel, &path, DeclarationForm::ChannelFile, &folder);
+            declared.push((channel, file));
+        }
+    }
+    for (i, (channel, file)) in declared.iter().enumerate() {
+        if let Some((_, first)) = declared[..i].iter().find(|(c, _)| c.name == channel.name) {
+            let hint = match (first.form, file.form) {
+                (DeclarationForm::ChannelList, DeclarationForm::ChannelFile) => {
+                    " Keep one: `nxs personas migrate` moves the list into channels/ and removes \
+                     it, or delete the entry you no longer mean."
+                }
+                _ => " Keep one.",
+            };
+            let place = match first.file == file.file {
+                true => format!("twice in {}", file.file.display()),
+                false => format!("in {} and in {}", first.file.display(), file.file.display()),
+            };
+            return Err(NxfError::validation(format!(
+                "channel {:?} is declared {place} — one name, one declaration.{hint}",
+                channel.name
+            )));
+        }
+    }
+    Ok(declared)
+}
+
+fn channel_file(
+    channel: &ChannelDecl,
+    path: &Path,
+    form: crate::definitions::DeclarationForm,
+    folder: &Path,
+) -> crate::definitions::DeclarationFile {
+    crate::definitions::DeclarationFile {
+        kind: crate::definitions::DeclarationKind::Channel,
+        name: channel.name.clone(),
+        file: path.to_path_buf(),
+        form,
+        folder: folder.to_path_buf(),
+        requires: Vec::new(),
+        license: None,
+        compatibility: None,
+        metadata: None,
+        ignored: Vec::new(),
+    }
 }
 
 /// A referential problem found by [`validate_channels`]. `file` always names the one declaration
