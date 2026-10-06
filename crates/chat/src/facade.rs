@@ -2309,22 +2309,61 @@ pub(crate) fn validate_declared(
     files: &[crate::definitions::DeclarationFile],
     folder: Option<&Path>,
 ) -> PrimeRoster {
-    let channel_errors = crate::channel::validate_channels(roles, channels);
-    // Whole-file scoping: any CHANNEL error excludes every channel this file declared — and only a
-    // channel error does. The persona pass below is appended after this is decided, deliberately:
-    // a persona's dangling reference says nothing about whether `channels.yaml` can be trusted, and
-    // letting it blank the channel roster would be the partition answering a question it was not
-    // asked (nxf 6j6v.st83).
-    let clean_channels: Vec<String> = if channel_errors.is_empty() {
-        channels.iter().map(|c| c.name.clone()).collect()
-    } else {
-        Vec::new()
+    // Every finding is named by the FILE it is in (review of PR #19, Code Quality #1): the
+    // validators name a channel by `channels.yaml` and a persona by `<handle>.yaml`, which is no
+    // longer where either has to live. A channel finding opens with `channel "<name>":`, which
+    // is how it is attributed.
+    let file_of = |kind: crate::definitions::DeclarationKind, name: &str| {
+        files
+            .iter()
+            .find(|f| f.kind == kind && f.name == name)
+            .map(|f| crate::declaration_quality::file_label(f, folder))
     };
+    let channel_of = |what: &str| {
+        let rest = what.strip_prefix("channel \"")?;
+        Some(rest[..rest.find('"')?].to_string())
+    };
+    let mut channel_errors = crate::channel::validate_channels(roles, channels);
+    for error in &mut channel_errors {
+        if let Some(label) = channel_of(&error.what)
+            .and_then(|name| file_of(crate::definitions::DeclarationKind::Channel, &name))
+        {
+            error.file = label;
+        }
+    }
+    // Whole-FILE scoping: a channel error excludes every channel its file declared — and only a
+    // channel error does. With one file per channel (nxf 6j6v.k3qy) that is the one channel; for
+    // `channels.yaml` it is the whole list, as before. A finding that cannot be attributed to a
+    // file excludes every channel, the old answer. The persona pass below is appended after this
+    // is decided, deliberately: a persona's dangling reference says nothing about whether a
+    // channel file can be trusted, and letting it blank the channel roster would be the partition
+    // answering a question it was not asked (nxf 6j6v.st83).
+    let tainted: Vec<&str> = channel_errors.iter().map(|e| e.file.as_str()).collect();
+    let unattributed = channel_errors.iter().any(|e| channel_of(&e.what).is_none());
+    let clean_channels: Vec<String> = channels
+        .iter()
+        .take(if unattributed { 0 } else { channels.len() })
+        .filter(|c| {
+            let file = file_of(crate::definitions::DeclarationKind::Channel, &c.name)
+                .unwrap_or_else(|| "channels.yaml".to_string());
+            !tainted.contains(&file.as_str())
+        })
+        .map(|c| c.name.clone())
+        .collect();
     // The PERSONA pass (nxf 6j6v.st83): the mirror of the channel one, reported beside it. Roles
     // stay in the roster whatever it finds — see [`PrimeRoster`], which has always said a role file
     // fails at LOAD time or not at all.
     let mut errors = channel_errors;
-    errors.extend(crate::role::validate_roles(roles, channels));
+    for mut error in crate::role::validate_roles(roles, channels) {
+        if let Some(label) = error
+            .file
+            .strip_suffix(".yaml")
+            .and_then(|handle| file_of(crate::definitions::DeclarationKind::Persona, handle))
+        {
+            error.file = label;
+        }
+        errors.push(error);
+    }
 
     // Over the SAME two slices, and deliberately not bounded by the partition above: a quality
     // warning is about how a declaration is written, so a referential error elsewhere in
@@ -3165,6 +3204,9 @@ pub(crate) fn prime_with(
                     crate::definitions::DeclarationForm::Yaml,
                 ),
             };
+            // Absolute, whatever spelling the workspace was reached by: the session resolves a
+            // relative path in its instructions against this folder (review of PR #19, #12).
+            let folder = folder.map(|f| std::path::absolute(&f).unwrap_or(f));
             PersonaBrief::from_decl(decl, channels).declared_in(folder, form)
         });
     let directory = match persona {

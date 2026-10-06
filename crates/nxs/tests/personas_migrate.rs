@@ -215,3 +215,32 @@ fn a_key_it_cannot_place_stops_the_run_naming_the_file() {
     );
     assert_eq!(listing(&repo.personas()), before);
 }
+
+/// The verb's `--json` IS the library seam's report (review of PR #19, Test Quality #4): an app
+/// calling `nexus_chat::persona_migration::migrate_declarations` and a person running the verb get
+/// the same answer.
+#[test]
+fn the_json_of_the_verb_is_the_library_report() {
+    let repo = Repo::new();
+    let from_cli = repo.json(&["personas", "--json", "migrate", "--dry-run"]);
+    let from_lib = nexus_chat::persona_migration::migrate_declarations(
+        &std::fs::canonicalize(repo.personas()).unwrap(),
+        false,
+    )
+    .unwrap();
+    let mut expected = serde_json::to_value(&from_lib).unwrap();
+    // The verb resolves the workspace its own way; compare paths canonically.
+    let canonical = |v: &mut Value| {
+        let s = serde_json::to_string(v).unwrap();
+        let tmp = std::fs::canonicalize(repo.dir.path()).unwrap();
+        let s = s.replace(
+            &repo.dir.path().display().to_string(),
+            &tmp.display().to_string(),
+        );
+        *v = serde_json::from_str(&s).unwrap();
+    };
+    let mut actual = from_cli;
+    canonical(&mut actual);
+    canonical(&mut expected);
+    assert_eq!(actual, expected);
+}

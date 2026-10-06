@@ -523,7 +523,11 @@ decision; `nxc` reads no other skill location (`.claude/skills/` included) by it
 
 - **Without `nxs:` it runs with every default:** addressable by anybody inside this workspace and
   by nobody outside it, at the default stage, with the tools its `allowed-tools` names, or the full
-  default set when it names none.
+  default set when it names none. **Mind that last case:** a published skill rarely names any, and
+  a persona without `allowed-tools` that is commissioned also gets the shell approved, because its
+  answer runs through `nxc reply` (see [what it runs as](#what-it-runs-as)). `nxs prime` warns
+  about every skill without `allowed-tools`; give it what it needs — `allowed-tools: Read` for a
+  skill that only reads its own files.
 - **Fields nexus-flow does not read are left alone.** Claude Code and other runtimes add fields of
   their own to the frontmatter (`when_to_use`, `hooks`, …); they are not an error. `license`,
   `compatibility` and `metadata`, the specification's own, are passed through: not read, kept by
@@ -532,6 +536,9 @@ decision; `nxc` reads no other skill location (`.claude/skills/` included) by it
 - **A nexus-flow key at the top level is not read.** `addressable: none` belongs under `nxs:`;
   written at the top it would be ignored, so `nxs prime` warns about it. A key under `nxs:` that
   names no field is warned about too.
+- **A name is a handle.** It may not contain whitespace or control characters, and a `SKILL.md`
+  larger than 1 MiB is refused — a skill is something people copy in, and the user-level folder is
+  re-read by every workspace.
 
 ## One definition for every repository
 
@@ -631,7 +638,10 @@ interactive context. A spawned persona is not shown its author's mistakes; a hum
 **Quality warnings arrive in the same place, under the same rule.** A declaration that copies text
 the engine supplies anyway, whose `description` cannot tell a caller when to call it, that still
 carries `address_book` or an inert key, whose name breaks the Agent Skills rule, or that names
-capabilities under `nxs.requires` that nothing binds yet, is not broken — so it is a *warning*: it
+capabilities under `nxs.requires` that nothing binds yet, is not broken — and neither is a skill
+without `allowed-tools`, or a persona that skips permission prompts (`bypassPermissions`,
+`dontAsk`) while admitting callers from other workspaces (`external`), though both are worth a
+second look — so it is a *warning*: it
 is listed for the human, it excludes nothing, and the declaration loads and runs exactly as it would
 otherwise. What is checked, what deliberately is not, and the four error classes no check can decide
 are in [writing-declarations](nxc-writing-declarations).

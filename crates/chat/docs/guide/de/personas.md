@@ -562,7 +562,12 @@ keinen anderen Skill-Ort (auch nicht `.claude/skills/`).
 
 - **Ohne `nxs:` läuft er mit lauter Vorgabewerten:** ansprechbar für jeden in diesem
   Arbeitsbereich und für niemanden außerhalb, auf der Vorgabestufe, mit den Werkzeugen, die sein
-  `allowed-tools` nennt, oder dem vollen Standardsatz, wenn es keine nennt.
+  `allowed-tools` nennt, oder dem vollen Standardsatz, wenn es keine nennt. **Achten Sie auf den
+  letzten Fall:** Ein veröffentlichter Skill nennt selten welche, und eine Persona ohne
+  `allowed-tools` bekommt, wenn sie beauftragt wird, auch die Shell freigegeben, weil ihre Antwort
+  über `nxc reply` läuft (siehe [Womit sie läuft](#womit-sie-lauft)). `nxs prime` warnt bei jedem
+  Skill ohne `allowed-tools`; geben Sie ihm, was er braucht — `allowed-tools: Read` für einen Skill,
+  der nur seine eigenen Dateien liest.
 - **Felder, die nexus-flow nicht liest, bleiben unangetastet.** Claude Code und andere Laufzeiten
   fügen dem Frontmatter eigene Felder hinzu (`when_to_use`, `hooks`, …); sie sind kein Fehler.
   `license`, `compatibility` und `metadata`, die eigenen der Spezifikation, werden durchgereicht:
@@ -572,6 +577,9 @@ keinen anderen Skill-Ort (auch nicht `.claude/skills/`).
 - **Ein nexus-flow-Schlüssel auf oberster Ebene wird nicht gelesen.** `addressable: none` gehört
   unter `nxs:`; oben geschrieben würde es ignoriert, deshalb warnt `nxs prime` davor. Vor einem
   Schlüssel unter `nxs:`, der kein Feld benennt, wird ebenfalls gewarnt.
+- **Ein Name ist ein Handle.** Er darf keine Leer- oder Steuerzeichen enthalten, und eine `SKILL.md`
+  über 1 MiB wird abgelehnt — einen Skill kopiert man herein, und den Ordner auf Benutzerebene liest
+  jeder Arbeitsbereich neu.
 
 ## Eine Definition für jedes Repo
 
@@ -680,7 +688,9 @@ vorgehalten; einem Menschen an der Tastatur schon.
 Text kopiert, den die Engine ohnehin einspielt, deren `description` einem Rufer nicht sagen kann,
 wann er ruft, die noch `address_book` oder einen wirkungslosen Schlüssel trägt, deren Name die Regel
 der Agent Skills verletzt oder die unter `nxs.requires` Fähigkeiten nennt, die noch nichts bindet,
-ist nicht kaputt — deshalb ist sie eine *Warnung*: Sie wird dem Menschen
+ist nicht kaputt — ebenso wenig ein Skill ohne `allowed-tools` oder eine Persona, die
+Rückfragen überspringt (`bypassPermissions`, `dontAsk`) und zugleich Rufer aus anderen
+Arbeitsbereichen zulässt (`external`); beides verdient aber einen zweiten Blick — deshalb ist sie eine *Warnung*: Sie wird dem Menschen
 aufgelistet, sie schließt nichts aus, und die Deklaration lädt und läuft genau wie sonst. Was
 geprüft wird, was bewusst nicht, und die vier Fehlerklassen, die keine Prüfung entscheiden kann,
 stehen in [Deklarationen schreiben](nxc-writing-declarations).

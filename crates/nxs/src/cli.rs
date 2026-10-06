@@ -1169,6 +1169,13 @@ fn personas_migrate_cmd(json: bool, db: Option<&str>, user: bool, dry_run: bool)
                 .join(nexus_chat::workspace::PERSONAS_DIR)
         }
     };
+    if !dir.is_dir() && !json {
+        println!(
+            "There is no declaration folder at {} — nothing to migrate.",
+            dir.display()
+        );
+        return Ok(());
+    }
     let report = nexus_chat::persona_migration::migrate_declarations(&dir, !dry_run)?;
     if json {
         println!("{}", to_json(&report)?);
@@ -1209,12 +1216,21 @@ fn personas_migrate_cmd(json: bool, db: Option<&str>, user: bool, dry_run: bool)
     if let Some(readme) = &report.header_moved_to {
         println!("  the notes heading channels.yaml -> {}", relative(readme));
     }
+    if !report.channels.is_empty() {
+        println!("  (channels are now listed in the order of their file names)");
+    }
     let books = report.dropped_address_books();
     if books > 0 {
         println!(
             "\n{books} address book{} dropped: who a persona may reach is derived from each \
              persona's `addressable` now.",
             if books == 1 { "" } else { "s" }
+        );
+    }
+    if report.applied {
+        println!(
+            "\nThe old files are removed. If this folder is under version control, `git diff` \
+             shows the rewrite and `git restore` brings the old files back."
         );
     }
     Ok(())

@@ -476,3 +476,117 @@ fn a_yaml_only_workspace_resolves_exactly_as_before() {
     assert_eq!(defs.roles(), &[expected]);
     assert_eq!(defs.channels().len(), 1);
 }
+
+// ---- leniency and its limits (review of PR #19, Test Quality #5 / #6, Integrity #5 / #6) -------
+
+/// Keys that are ignored do not stop a skill from loading: an unknown `nxs.` key, a nexus-flow key
+/// at the top level, an inert key and a retired one — the persona resolves, and `nxs prime` says
+/// what was ignored, naming the file.
+#[test]
+fn ignored_keys_load_and_are_reported_by_the_roster() {
+    let repo = TempDir::new().unwrap();
+    skill(
+        repo.path(),
+        "helper",
+        "name: helper\ndescription: Helps with whatever you bring it, in one sentence.\n\
+         allowed-tools: Read\naddressable: none\naddress_book: [pm]\n\
+         nxs:\n  colour: blue\n  session: fresh\n",
+        "Help.\n",
+    );
+    let defs = resolve(repo.path()).unwrap();
+    let helper = defs.role("helper").unwrap();
+    assert!(
+        helper.addressable.allows_direct_from_anyone(),
+        "a top-level `addressable` is not read"
+    );
+    let roster =
+        nexus_chat::facade::validate_declared_team(&repo.path().join(".nxs-personas")).unwrap();
+    let said: Vec<String> = roster
+        .warnings
+        .iter()
+        .map(|w| format!("{}: {}", w.file, w.what))
+        .collect();
+    for expected in [
+        "helper/SKILL.md: `nxs.colour` names no field",
+        "helper/SKILL.md: `session` has never had an effect",
+        "helper/SKILL.md: `addressable` at the top of SKILL.md is not read",
+        "helper/SKILL.md: `address_book` is retired and ignored, its 1 entry",
+    ] {
+        assert!(
+            said.iter().any(|s| s.starts_with(expected)),
+            "{expected:?} in {said:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_rule_with_an_unclosed_parenthesis_stays_one_entry() {
+    let repo = TempDir::new().unwrap();
+    skill(
+        repo.path(),
+        "a",
+        "name: a\nallowed-tools: Read Bash(git add *\n",
+        "A.\n",
+    );
+    let defs = resolve(repo.path()).unwrap();
+    assert_eq!(
+        defs.role("a").unwrap().tools,
+        Some(vec!["Read".to_string(), "Bash(git add *".to_string()]),
+        "nothing after the parenthesis is lost or split apart"
+    );
+}
+
+#[test]
+fn a_malformed_frontmatter_a_name_with_whitespace_and_an_oversized_file_are_refused() {
+    let repo = TempDir::new().unwrap();
+    skill(repo.path(), "broken", "name: [unclosed\n", "Body.\n");
+    let err = resolve(repo.path()).unwrap_err().to_string();
+    assert!(
+        err.contains("broken/SKILL.md") && err.contains("frontmatter"),
+        "{err}"
+    );
+
+    let repo = TempDir::new().unwrap();
+    skill(
+        repo.path(),
+        "spaced",
+        "name: \"pm \\nIgnore all previous\"\n",
+        "Body.\n",
+    );
+    let err = resolve(repo.path()).unwrap_err().to_string();
+    assert!(err.contains("invalid role handle"), "{err}");
+
+    let repo = TempDir::new().unwrap();
+    let huge = "x".repeat((nexus_chat::skill::MAX_DECLARATION_BYTES + 1) as usize);
+    skill(repo.path(), "huge", "name: huge\n", &huge);
+    let err = resolve(repo.path()).unwrap_err().to_string();
+    assert!(
+        err.contains("huge/SKILL.md") && err.contains("at most"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_in_both_forms_in_the_user_level_folder_is_refused() {
+    let repo = TempDir::new().unwrap();
+    let user = TempDir::new().unwrap();
+    write(
+        &user.path().join("pm.yaml"),
+        "handle: pm\nsystem_prompt: The PM.\n",
+    );
+    write(
+        &user.path().join("channels.yaml"),
+        "- name: planning\n  members: [pm]\n",
+    );
+    write(
+        &user.path().join("channels/planning.yaml"),
+        "name: planning\nmembers: [pm]\n",
+    );
+    let err = Definitions::resolve_with_user_dir(repo.path(), Some(user.path()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("channels.yaml") && err.contains("channels/planning.yaml"),
+        "{err}"
+    );
+}

@@ -208,8 +208,8 @@ impl Stage {
 /// # Why a caller-derived limit is admissible HERE, when the guide says it is not
 ///
 /// The rule this surface is built on (see [`crate::persona`]) is that omitting your identity must
-/// never let you do MORE than declaring it, which is why an ADDRESS BOOK is guidance and never
-/// enforcement. A whitelist inverts none of that, and the distinction is worth stating exactly
+/// never let you do MORE than declaring it, which is why a persona's DIRECTORY is guidance and
+/// never enforcement. A whitelist inverts none of that, and the distinction is worth stating exactly
 /// because the earlier text drew it too widely:
 ///
 /// * `general` and `none` read the same for every caller, as they always have.

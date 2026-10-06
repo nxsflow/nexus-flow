@@ -953,8 +953,15 @@ impl Definitions {
 
 /// The role-handle form check, shared by construction and lookup (see [`Definitions::new`] for why
 /// each clause is here).
-fn validate_role_handle(handle: &str) -> Result<()> {
-    if handle.is_empty() || handle.contains('/') || handle.contains('\\') || handle.contains("..") {
+pub(crate) fn validate_role_handle(handle: &str) -> Result<()> {
+    // Whitespace and control characters too (review of PR #19, Integrity #6): a handle is
+    // rendered into every other persona's directory, and a copied skill's `name` is the handle.
+    if handle.is_empty()
+        || handle.contains('/')
+        || handle.contains('\\')
+        || handle.contains("..")
+        || handle.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return Err(NxfError::validation(format!(
             "invalid role handle: {handle:?}"
         )));

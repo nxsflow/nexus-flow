@@ -152,10 +152,7 @@ pub fn warn_declarations_in(
     files: &[DeclarationFile],
     folder: Option<&Path>,
 ) -> Vec<DeclarationWarning> {
-    let label = |file: &DeclarationFile| match folder.and_then(|f| file.file.strip_prefix(f).ok()) {
-        Some(relative) => relative.display().to_string(),
-        None => file.file.display().to_string(),
-    };
+    let label = |file: &DeclarationFile| file_label(file, folder);
     let file_of =
         |kind: DeclarationKind, name: &str| files.iter().find(|f| f.kind == kind && f.name == name);
     let mut warnings = Vec::new();
@@ -173,6 +170,11 @@ pub fn warn_declarations_in(
     }
     for file in files {
         warn_file(file, &label(file), &mut warnings);
+        if file.kind == DeclarationKind::Persona {
+            if let Some(role) = roles.iter().find(|r| r.handle == file.name) {
+                warn_reach(role, file, &label(file), &mut warnings);
+            }
+        }
     }
     let requiring: Vec<String> = files
         .iter()
@@ -191,6 +193,58 @@ pub fn warn_declarations_in(
         });
     }
     warnings
+}
+
+/// How a finding names the file it is in: relative to the workspace's declaration `folder` when it
+/// lies under it (`pm/SKILL.md`), by its full path otherwise (the user-level folder's).
+pub(crate) fn file_label(file: &DeclarationFile, folder: Option<&Path>) -> String {
+    match folder.and_then(|f| file.file.strip_prefix(f).ok()) {
+        Some(relative) => relative.display().to_string(),
+        None => file.file.display().to_string(),
+    }
+}
+
+/// What a persona may DO, said where it is easy to miss (review of PR #19, Integrity #1 and #2;
+/// owner decisions of 2026-10-06):
+///
+/// - a skill that declares no `allowed-tools` runs with the runtime's full default toolset — the
+///   specification's default — and, once commissioned, the shell is APPROVED for it too, because
+///   its answer runs through `nxc reply` (`orchestration::grant_the_means_for_the_obligation`). A
+///   published skill almost never sets the key, so a copied folder gets that without a word;
+/// - a persona that skips permission prompts (`bypassPermissions`, `dontAsk`) AND admits callers
+///   from other workspaces (`external`) runs text from outside with nobody asked — the open
+///   decision 6j6v.avwc, warned about here until it is taken.
+fn warn_reach(
+    role: &RoleDecl,
+    file: &DeclarationFile,
+    label: &str,
+    out: &mut Vec<DeclarationWarning>,
+) {
+    if file.form == DeclarationForm::Skill && role.tools.is_none() {
+        out.push(DeclarationWarning {
+            file: label.to_string(),
+            what: "`allowed-tools` is not declared: this persona runs with the agent runtime's \
+                   full default toolset, and when it is commissioned the shell is approved for it \
+                   as well, because its answer runs through `nxc reply`. Declare `allowed-tools` \
+                   with what it needs — `Read` for a skill that only reads its own files"
+                .to_string(),
+        });
+    }
+    let skips_prompts = matches!(
+        role.permissions.as_deref(),
+        Some("bypassPermissions") | Some("dontAsk")
+    );
+    if skips_prompts && !role.addressable.external().is_empty() {
+        out.push(DeclarationWarning {
+            file: label.to_string(),
+            what: format!(
+                "`permissions: {}` together with `external` callers: a persona of another \
+                 workspace can hand it text that it acts on without any prompt. Narrow one of \
+                 the two unless that is meant",
+                role.permissions.as_deref().unwrap_or_default()
+            ),
+        });
+    }
 }
 
 /// What only a declaration's FILE shows: the keys it carries that are ignored, and its name.
@@ -429,6 +483,230 @@ mod tests {
 
     fn channel(yaml: &str) -> ChannelDecl {
         serde_yaml::from_str(yaml).expect("channel parses")
+    }
+
+    // ---- what only a FILE shows (nxf 6j6v.dw16 / 6j6v.2x7t; review of PR #19, Test Quality #1) -
+
+    fn file(
+        name: &str,
+        form: DeclarationForm,
+        folder: &str,
+        ignored: Vec<Ignored>,
+    ) -> DeclarationFile {
+        let folder = std::path::PathBuf::from(folder);
+        DeclarationFile {
+            kind: DeclarationKind::Persona,
+            name: name.to_string(),
+            file: match form {
+                DeclarationForm::Skill => folder.join("SKILL.md"),
+                _ => folder.join(format!("{name}.yaml")),
+            },
+            form,
+            folder,
+            requires: Vec::new(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            ignored,
+        }
+    }
+
+    /// Warnings about one persona declared by `decl` from `file`, the engine-text and routing ones
+    /// filtered out so each test sees only the class it is about.
+    fn file_warnings(decl: &str, file: DeclarationFile) -> Vec<String> {
+        let role = role(decl);
+        warn_declarations_in(&[role], &[], &[file], Some(Path::new("/ws/.nxs-personas")))
+            .into_iter()
+            .filter(|w| !w.what.contains("job_description") && !w.what.contains("engine supplies"))
+            .map(|w| format!("{}: {}", w.file, w.what))
+            .collect()
+    }
+
+    const DESCRIBED: &str =
+        "handle: pm\njob_description: Turns an idea into board items for you.\n\
+                             system_prompt: You are the PM.\ntools: [Read]\n";
+
+    #[test]
+    fn a_retired_address_book_is_named_with_and_without_entries() {
+        let some = file_warnings(
+            DESCRIBED,
+            file(
+                "pm",
+                DeclarationForm::Yaml,
+                "/ws/.nxs-personas",
+                vec![Ignored::AddressBook { entries: 3 }],
+            ),
+        );
+        assert_eq!(some.len(), 1, "{some:?}");
+        assert!(
+            some[0].starts_with("pm.yaml: `address_book` is retired and ignored, its 3 entries")
+        );
+        let none = file_warnings(
+            DESCRIBED,
+            file(
+                "pm",
+                DeclarationForm::Yaml,
+                "/ws/.nxs-personas",
+                vec![Ignored::AddressBook { entries: 0 }],
+            ),
+        );
+        assert!(
+            none[0].contains("`address_book` is retired and ignored: who"),
+            "{none:?}"
+        );
+        let one = file_warnings(
+            DESCRIBED,
+            file(
+                "pm",
+                DeclarationForm::Yaml,
+                "/ws/.nxs-personas",
+                vec![Ignored::AddressBook { entries: 1 }],
+            ),
+        );
+        assert!(one[0].contains("its 1 entry included"), "{one:?}");
+    }
+
+    #[test]
+    fn inert_misplaced_and_unknown_keys_are_each_named() {
+        let warnings = file_warnings(
+            DESCRIBED,
+            file(
+                "pm",
+                DeclarationForm::Skill,
+                "/ws/.nxs-personas/pm",
+                vec![
+                    Ignored::Inert("session".into()),
+                    Ignored::Misplaced("addressable".into()),
+                    Ignored::Unknown("nxs.colour".into()),
+                ],
+            ),
+        );
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].starts_with("pm/SKILL.md: `session` has never had an effect"));
+        assert!(warnings[1].contains("`addressable` at the top of SKILL.md is not read"));
+        assert!(warnings[2].contains("`nxs.colour` names no field"));
+    }
+
+    #[test]
+    fn the_name_rule_and_the_folder_name_are_checked_for_a_skill() {
+        let bad = file_warnings(
+            &DESCRIBED.replace("handle: pm", "handle: PM_1"),
+            file(
+                "PM_1",
+                DeclarationForm::Skill,
+                "/ws/.nxs-personas/pm",
+                vec![],
+            ),
+        );
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert!(
+            bad[0].contains("breaks the Agent Skills name rule"),
+            "{bad:?}"
+        );
+        assert!(bad[0].contains("folder name `pm`"), "{bad:?}");
+        // A YAML file has no folder of its own to match.
+        let yaml = file_warnings(
+            DESCRIBED,
+            file("pm", DeclarationForm::Yaml, "/ws/.nxs-personas", vec![]),
+        );
+        assert!(yaml.is_empty(), "{yaml:?}");
+    }
+
+    #[test]
+    fn requires_is_said_once_for_the_whole_team() {
+        let mut a = file("pm", DeclarationForm::Skill, "/ws/.nxs-personas/pm", vec![]);
+        a.requires = vec!["board".into()];
+        let mut b = file(
+            "coder",
+            DeclarationForm::Skill,
+            "/ws/.nxs-personas/coder",
+            vec![],
+        );
+        b.requires = vec!["mail".into(), "shell".into()];
+        let roles = [
+            role(DESCRIBED),
+            role(&DESCRIBED.replace("handle: pm", "handle: coder")),
+        ];
+        let notes: Vec<_> =
+            warn_declarations_in(&roles, &[], &[a, b], Some(Path::new("/ws/.nxs-personas")))
+                .into_iter()
+                .filter(|w| w.what.contains("nxs.requires"))
+                .collect();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0]
+                .what
+                .contains("`pm` (board), `coder` (mail, shell)"),
+            "{notes:?}"
+        );
+        assert!(notes[0].what.contains("nothing binds a capability yet"));
+    }
+
+    #[test]
+    fn a_skill_without_allowed_tools_is_warned_about_and_a_yaml_role_is_not() {
+        let open = DESCRIBED.replace("tools: [Read]\n", "");
+        let skill = file_warnings(
+            &open,
+            file("pm", DeclarationForm::Skill, "/ws/.nxs-personas/pm", vec![]),
+        );
+        assert_eq!(skill.len(), 1, "{skill:?}");
+        assert!(
+            skill[0].contains("`allowed-tools` is not declared"),
+            "{skill:?}"
+        );
+        assert!(file_warnings(
+            DESCRIBED,
+            file("pm", DeclarationForm::Skill, "/ws/.nxs-personas/pm", vec![])
+        )
+        .is_empty());
+        assert!(file_warnings(
+            &open,
+            file("pm", DeclarationForm::Yaml, "/ws/.nxs-personas", vec![])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn skipping_prompts_is_warned_about_only_with_external_callers() {
+        let bypass = format!("{DESCRIBED}permissions: bypassPermissions\n");
+        let alone = file_warnings(
+            &bypass,
+            file("pm", DeclarationForm::Yaml, "/ws/.nxs-personas", vec![]),
+        );
+        assert!(
+            alone.is_empty(),
+            "the own team is not warned about: {alone:?}"
+        );
+        let opened = format!("{bypass}addressable:\n  humans: true\n  external: [\"*/pm\"]\n");
+        let warned = file_warnings(
+            &opened,
+            file("pm", DeclarationForm::Yaml, "/ws/.nxs-personas", vec![]),
+        );
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("`permissions: bypassPermissions` together with `external`"));
+        let edits = opened.replace("bypassPermissions", "acceptEdits");
+        assert!(file_warnings(
+            &edits,
+            file("pm", DeclarationForm::Yaml, "/ws/.nxs-personas", vec![])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_file_outside_the_workspace_folder_is_named_by_its_full_path() {
+        let user = file_warnings(
+            DESCRIBED,
+            file(
+                "pm",
+                DeclarationForm::Yaml,
+                "/home/u/.nexusflow/personas",
+                vec![Ignored::Inert("sub_agents".into())],
+            ),
+        );
+        assert!(
+            user[0].starts_with("/home/u/.nexusflow/personas/pm.yaml: "),
+            "{user:?}"
+        );
     }
 
     /// A declaration that says nothing the engine says, and describes itself well enough to be

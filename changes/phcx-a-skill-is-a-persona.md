@@ -24,11 +24,17 @@ for the user-level folder), keeps your comments, reports what it leaves out, pro
 before it writes anything, refuses a key it cannot place, and finds nothing to do the second time.
 `nxs prime` warns about a name that breaks the Agent Skills name rule, the inert keys `session`,
 `sub_agents` and `reports_to`, a nexus-flow key at the top of a `SKILL.md`, and `nxs.requires`
-that nothing binds yet. For embedding apps: `DeclarationSource::files` and `file_of`,
+that nothing binds yet, a skill without `allowed-tools` (it runs with the full default toolset,
+and the shell is approved for its answer), and a persona that skips permission prompts while it
+admits callers from other workspaces. A handle may no longer contain whitespace or control
+characters, and a declaration file over 1 MiB is refused. `nxs prime` errors name the real file of
+a persona or channel, and a broken channel file excludes only its own channels from the roster. For
+embedding apps: `DeclarationSource::files` and `file_of`,
 `DeclarationFile` / `DeclarationForm`, `declaration` on `PersonaEntry` and `ChannelEntry`,
 `declared_form` on `PersonaBrief` (whose `declared_in` builder now takes the form), the modules
 `skill` and `persona_migration`, `role::load_declared_personas`, `channel::load_declared_channels`
-and `declaration_quality::warn_declarations_in`. An engine older than this one does not see a
+and `declaration_quality::warn_declarations_in`; `persona_migration::migrate_declarations` is the
+library seam of `nxs personas migrate`. An engine older than this one does not see a
 skill folder: migrate a repository an app reads only once the app runs this version.
 [de]
 Ein veröffentlichter Skill ist eine Persona. Eine Persona kann jetzt als Ordner
@@ -55,9 +61,15 @@ etwas schreibt, lehnt einen Schlüssel ab, den es nicht zuordnen kann, und finde
 nichts mehr zu tun. `nxs prime` warnt bei einem Namen, der die Namensregel der Agent-Skills-
 Spezifikation verletzt, bei den wirkungslosen Schlüsseln `session`, `sub_agents` und `reports_to`,
 bei einem nexus-flow-Schlüssel oben in einer `SKILL.md` und bei `nxs.requires`, das noch nichts
-bindet. Für einbettende Apps: `DeclarationSource::files` und `file_of`, `DeclarationFile` /
+bindet, bei einem Skill ohne `allowed-tools` (er läuft mit dem vollen Standard-Werkzeugsatz, und
+für seine Antwort wird die Shell freigegeben) und bei einer Persona, die Rückfragen überspringt und
+zugleich Rufer aus anderen Arbeitsbereichen zulässt. Ein Handle darf keine Leer- oder Steuerzeichen
+mehr enthalten, und eine Deklarationsdatei über 1 MiB wird abgelehnt. Fehler in `nxs prime` nennen
+die echte Datei einer Persona oder eines Kanals, und eine kaputte Kanaldatei schließt nur ihre
+eigenen Kanäle aus dem Roster aus. Für einbettende Apps: `DeclarationSource::files` und `file_of`, `DeclarationFile` /
 `DeclarationForm`, `declaration` an `PersonaEntry` und `ChannelEntry`, `declared_form` an
 `PersonaBrief` (dessen Builder `declared_in` jetzt die Form nimmt), die Module `skill` und
 `persona_migration`, `role::load_declared_personas`, `channel::load_declared_channels` und
-`declaration_quality::warn_declarations_in`. Ein älterer Engine-Stand sieht keinen Skill-Ordner:
+`declaration_quality::warn_declarations_in`; `persona_migration::migrate_declarations` ist die
+Bibliotheks-Naht von `nxs personas migrate`. Ein älterer Engine-Stand sieht keinen Skill-Ordner:
 Ein Repository, das eine App liest, erst migrieren, wenn die App auf diesem Stand ist.

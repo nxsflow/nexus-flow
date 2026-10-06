@@ -26,8 +26,8 @@
 //!
 //! > **From a droppable identity you may derive CONTEXT, never a RESTRICTION.**
 //!
-//! Omitting your identity must not let you do MORE than declaring it. That is why the address book
-//! is *guidance* — rendered into prime, never enforced in [`crate::surface::send_to`] — while
+//! Omitting your identity must not let you do MORE than declaring it. That is why a persona's
+//! directory is *guidance* — rendered into prime, never enforced in [`crate::surface::send_to`] — while
 //! [`crate::role::Addressable`] IS enforced: it is a property of the TARGET, identical for every
 //! caller, so it cannot be widened by staying anonymous. The membership check the engine already
 //! runs is unchanged and remains the enforcement that exists.
@@ -384,7 +384,7 @@ impl Directory {
         self.personas.is_empty() && self.channels.is_empty()
     }
 
-    /// The address book as Markdown: **how to address anyone, said once**, then one paragraph per
+    /// The directory as Markdown: **how to address anyone, said once**, then one paragraph per
     /// target you can actually address. `""` when there is nothing to show — the empty-string
     /// convention every session-start section renderer follows, so a caller can omit the whole
     /// section.
@@ -404,7 +404,7 @@ impl Directory {
     /// **The FRONT DOORS are not rendered here, by the same rule** (nxf 6j6v.yr59). A public
     /// channel of another project is DISCOVERABLE — that is why it rides on the record — but it is
     /// not addressable with `nxc send --to`, which resolves its target against the DECLARATIONS
-    /// and refuses a channel none of them names. Printing one in an address book would be the
+    /// and refuses a channel none of them names. Printing one in a directory would be the
     /// invitation-to-be-refused this section was cut down to remove. The record carries it for the
     /// app that renders discovery; the agent's brief does not.
     pub fn render_markdown(&self) -> String {
@@ -443,9 +443,8 @@ const USER_LEVEL_QUALIFIER: &str = "from the user-level folder";
 ///
 /// The bold name is the human one (`job_title`), because that is what a reader recognises; the
 /// handle — the thing you actually type — is in the parenthesis beside it, with the seniority band
-/// that the parenthesis of a channel does not have. The trailing text is the caller's OWN reason
-/// (`why`, from its address book) when there is one, since a line written for this caller beats the
-/// target's general self-description, and that description otherwise.
+/// that the parenthesis of a channel does not have. The trailing text is the target's own
+/// description, in its own words — no caller writes a line about it any more (nxf 6j6v.xjh3).
 fn render_persona_entry(p: &PersonaEntry) -> String {
     let mut qualifiers = vec![format!("handle: `{}`", p.handle)];
     if let Some(stage) = p.stage {
@@ -903,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn no_address_book_shows_the_whole_team_minus_yourself_and_minus_the_channels_you_sit_in() {
+    fn a_persona_sees_the_whole_team_minus_itself_and_minus_the_channels_it_sits_in() {
         // nxf 6j6v.vce2's second half. `standup` has the reader in it; `release` does not. Offering
         // a persona the channel it is a MEMBER of is help in no reading — commissioning your own
         // channel is not declaration cyclicity, so it passes every check there is, which is exactly

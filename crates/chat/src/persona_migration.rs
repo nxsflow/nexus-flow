@@ -151,24 +151,45 @@ pub fn migrate_declarations(dir: &Path, apply: bool) -> Result<MigrationReport> 
         removals.push(list);
     }
 
-    for (i, (to, _)) in writes.iter().enumerate() {
-        if to.exists() || writes[..i].iter().any(|(t, _)| t == to) {
+    // A target that already holds EXACTLY what this run would write is done, not a conflict: that
+    // is the state a run interrupted between writing and removing leaves, and running again has to
+    // finish it (review of PR #19, Code Quality #3 / Integrity #7). Anything else in the way stops
+    // the run before a file is written. Two targets differing only in case are one file on a
+    // case-insensitive filesystem, so they are compared that way (Integrity #9).
+    let mut pending = Vec::new();
+    for (i, (to, text)) in writes.iter().enumerate() {
+        let lower = to.to_string_lossy().to_lowercase();
+        let twice = writes[..i]
+            .iter()
+            .any(|(t, _)| t.to_string_lossy().to_lowercase() == lower);
+        let done = !twice && std::fs::read_to_string(to).is_ok_and(|existing| &existing == text);
+        if done {
+            continue;
+        }
+        if twice || to.exists() {
             return Err(NxfError::validation(format!(
                 "{} exists already — the migration writes nothing over a file; move it away or \
                  delete the declaration it duplicates, then run again",
                 to.display()
             )));
         }
+        pending.push((to, text));
     }
 
     if apply {
-        for (to, text) in &writes {
+        for (to, text) in pending {
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| NxfError::io(format!("creating {}: {e}", parent.display())))?;
             }
             let staged = to.with_extension("migrating");
-            std::fs::write(&staged, text)
+            let write = |path: &Path| -> std::io::Result<()> {
+                use std::io::Write;
+                let mut file = std::fs::File::create(path)?;
+                file.write_all(text.as_bytes())?;
+                file.sync_all()
+            };
+            write(&staged)
                 .map_err(|e| NxfError::io(format!("writing {}: {e}", staged.display())))?;
             std::fs::rename(&staged, to)
                 .map_err(|e| NxfError::io(format!("writing {}: {e}", to.display())))?;
@@ -275,6 +296,22 @@ fn indented(lines: Vec<String>) -> Vec<String> {
 fn rewrite_persona(path: &Path, content: &str) -> Result<PersonaRewrite> {
     let original: RoleDecl = serde_yaml::from_str(content)
         .map_err(|e| NxfError::validation(format!("parsing {}: {e}", path.display())))?;
+    // The handle becomes a folder name: it must be one, inside this folder, and not the folder that
+    // holds the channels (review of PR #19, Integrity #4).
+    crate::definitions::validate_role_handle(&original.handle).map_err(|e| {
+        NxfError::validation(format!(
+            "{}: {} — nothing was written",
+            path.display(),
+            e.msg
+        ))
+    })?;
+    if original.handle == CHANNELS_DIR || original.handle.starts_with('.') {
+        return Err(NxfError::validation(format!(
+            "{}: a persona may not be called {:?} — nothing was written",
+            path.display(),
+            original.handle
+        )));
+    }
     let raw: Value = serde_yaml::from_str(content)
         .map_err(|e| NxfError::validation(format!("parsing {}: {e}", path.display())))?;
     let (header, chunks, trailer) = top_level_chunks(path, content)?;
@@ -294,16 +331,12 @@ fn rewrite_persona(path: &Path, content: &str) -> Result<PersonaRewrite> {
             }
             "license" | "compatibility" | "metadata" => top.extend(rename_key(chunk, &chunk.key)),
             "job_title" => nxs.extend(indented(rename_key(chunk, "title"))),
-            RETIRED_FIELD => dropped.push(match raw.get(RETIRED_FIELD) {
-                Some(Value::Sequence(book)) if book.is_empty() => format!("{RETIRED_FIELD} ([])"),
-                Some(Value::Sequence(book)) => format!(
-                    "{RETIRED_FIELD} ({} {})",
-                    book.len(),
-                    if book.len() == 1 { "entry" } else { "entries" }
-                ),
-                _ => RETIRED_FIELD.to_string(),
-            }),
-            key if INERT_FIELDS.contains(&key) => dropped.push(key.to_string()),
+            // A dropped key's comments are kept, at the end of the frontmatter: a note may say
+            // more than the key it stood above.
+            key if key == RETIRED_FIELD || INERT_FIELDS.contains(&key) => {
+                closing.extend(chunk.leading.iter().cloned());
+                dropped.push(dropped_label(key, &raw));
+            }
             key if NXS_FIELDS.contains(&key) && key != "title" => {
                 nxs.extend(indented(rename_key(chunk, key)))
             }
@@ -369,6 +402,22 @@ fn rewrite_persona(path: &Path, content: &str) -> Result<PersonaRewrite> {
         text,
         dropped,
     })
+}
+
+/// How the report names a key it left out: `address_book (3 entries)`, `address_book ([])`, or
+/// the key alone.
+fn dropped_label(key: &str, raw: &Value) -> String {
+    match raw.get(key) {
+        Some(Value::Sequence(book)) if key == RETIRED_FIELD && book.is_empty() => {
+            format!("{key} ([])")
+        }
+        Some(Value::Sequence(book)) if key == RETIRED_FIELD => format!(
+            "{key} ({} {})",
+            book.len(),
+            if book.len() == 1 { "entry" } else { "entries" }
+        ),
+        _ => key.to_string(),
+    }
 }
 
 struct ChannelsRewrite {

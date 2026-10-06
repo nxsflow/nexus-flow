@@ -278,3 +278,133 @@ fn a_missing_folder_or_a_migrated_one_has_nothing_to_do() {
     let report = migrate_declarations(&repo.path().join(".nxs-personas"), true).unwrap();
     assert!(report.nothing_to_do());
 }
+
+// ---- the proof and the refusals (review of PR #19, Test Quality #2 / #3, Integrity #4 / #7) ----
+
+/// Run a migration expected to refuse, and return its message after checking that nothing in the
+/// folder changed.
+fn refused(dir: &Path) -> String {
+    let before = snapshot(dir);
+    let err = migrate_declarations(dir, true).unwrap_err().to_string();
+    assert_eq!(
+        snapshot(dir),
+        before,
+        "a file changed before the refusal: {err}"
+    );
+    err
+}
+
+#[test]
+fn a_rewrite_that_does_not_read_back_is_refused_before_anything_is_written() {
+    // The prompt's anchor is used by another key: the prompt becomes the body, the alias is left
+    // pointing at nothing, and the read-back proof is what catches it.
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    write(
+        &dir.join("zz-alias.yaml"),
+        "handle: zz-alias\nsystem_prompt: &p The prompt.\nexpected_output: *p\n",
+    );
+    let err = refused(&dir);
+    assert!(
+        err.contains("zz-alias.yaml") && err.contains("does not read back"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_that_does_not_read_back_on_its_own_is_refused_in_the_channel_phase() {
+    // The personas are fine and staged in memory; the channel list shares an anchor between two
+    // channels, which one file per channel cannot carry.
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    write(
+        &dir.join("channels.yaml"),
+        "- name: planning\n  members: &m [pm]\n- name: coding\n  members: *m\n",
+    );
+    let err = refused(&dir);
+    assert!(
+        err.contains("channels.yaml") && err.contains("does not read back on its own"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_whose_name_cannot_name_a_file_is_refused() {
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    write(&dir.join("channels.yaml"), "- name: a/b\n  members: [pm]\n");
+    let err = refused(&dir);
+    assert!(
+        err.contains("\"a/b\"") && err.contains("cannot name a file"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_handle_that_is_not_a_folder_name_is_refused() {
+    for handle in ["../outside", "channels", ".hidden"] {
+        let repo = team();
+        let dir = repo.path().join(".nxs-personas");
+        write(
+            &dir.join("odd.yaml"),
+            &format!("handle: \"{handle}\"\nsystem_prompt: Odd.\n"),
+        );
+        let err = refused(&dir);
+        assert!(
+            err.contains("odd.yaml") && err.contains("nothing was written"),
+            "{handle}: {err}"
+        );
+        assert!(!repo.path().join("outside").exists());
+    }
+}
+
+#[test]
+fn a_different_file_already_at_a_persona_target_is_refused() {
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    write(
+        &dir.join("pm/SKILL.md"),
+        "---\nname: pm\n---\nSomething else.\n",
+    );
+    let err = refused(&dir);
+    assert!(
+        err.contains("pm/SKILL.md") && err.contains("exists already"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_run_interrupted_before_the_removals_is_finished_by_running_again() {
+    // The state a run leaves when it wrote every new file and stopped before removing the old
+    // ones: both forms present. The loader refuses that folder; the migration finishes it.
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    migrate_declarations(&dir, true).unwrap();
+    write(&dir.join("pm.yaml"), PM);
+    write(&dir.join("channels.yaml"), CHANNELS);
+    assert!(Definitions::resolve_with_user_dir(repo.path(), None).is_err());
+
+    let again = migrate_declarations(&dir, true).unwrap();
+    assert_eq!(again.personas.len(), 1, "{again:?}");
+    assert!(!dir.join("pm.yaml").exists() && !dir.join("channels.yaml").exists());
+    Definitions::resolve_with_user_dir(repo.path(), None).expect("one form again");
+    assert!(migrate_declarations(&dir, true).unwrap().nothing_to_do());
+}
+
+#[test]
+fn comments_above_a_dropped_key_are_kept() {
+    let repo = team();
+    let dir = repo.path().join(".nxs-personas");
+    write(
+        &dir.join("zz-note.yaml"),
+        "handle: zz-note\n# Why this persona calls nobody: it only judges.\naddress_book: []\n\
+         system_prompt: Judge.\n",
+    );
+    migrate_declarations(&dir, true).unwrap();
+    let skill = std::fs::read_to_string(dir.join("zz-note/SKILL.md")).unwrap();
+    assert!(
+        skill.contains("# Why this persona calls nobody: it only judges."),
+        "{skill}"
+    );
+    assert!(!skill.contains("address_book"), "{skill}");
+}

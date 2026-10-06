@@ -941,9 +941,7 @@ pub fn load_declared_channels(
             .collect();
         paths.sort();
         for path in paths {
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                NxfError::io(format!("reading channel file {}: {e}", path.display()))
-            })?;
+            let content = crate::skill::read_declaration(&path)?;
             let invalid =
                 |what: String| NxfError::validation(format!("{}: {what}", path.display()));
             let value: serde_yaml::Value = serde_yaml::from_str(&content)

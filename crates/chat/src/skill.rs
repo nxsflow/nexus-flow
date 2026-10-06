@@ -117,9 +117,29 @@ pub struct LoadedPersona {
 
 /// Load `<folder>/SKILL.md` as a persona.
 pub fn load_skill(path: &Path) -> Result<LoadedPersona> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| NxfError::io(format!("reading skill file {}: {e}", path.display())))?;
+    let content = read_declaration(path)?;
     parse_skill(path, &content)
+}
+
+/// The most a declaration file may weigh. A skill folder is something people COPY in — into the
+/// user-level folder too, which every workspace re-reads on every resolve — so a file far larger
+/// than any prompt is refused before it is parsed (review of PR #19, Integrity #5). The largest
+/// declaration in use is about 40 KB.
+pub const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
+
+/// Read a declaration file, refusing one over [`MAX_DECLARATION_BYTES`].
+pub fn read_declaration(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)
+        .map_err(|e| NxfError::io(format!("reading {}: {e}", path.display())))?
+        .len();
+    if size > MAX_DECLARATION_BYTES {
+        return Err(NxfError::validation(format!(
+            "{}: {size} bytes — a declaration may be at most {MAX_DECLARATION_BYTES}",
+            path.display()
+        )));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| NxfError::io(format!("reading {}: {e}", path.display())))
 }
 
 /// [`load_skill`] over text already in hand, read as if it were the file at `path` — what the
@@ -210,7 +230,12 @@ pub fn parse_skill(path: &Path, content: &str) -> Result<LoadedPersona> {
         }
     }
     for key in top.keys().filter_map(Value::as_str) {
-        if NXS_ONLY.contains(&key) {
+        if key == RETIRED_FIELD {
+            // Retired wherever it is written — say that, not merely that it is misplaced.
+            ignored.push(Ignored::AddressBook {
+                entries: top[key].as_sequence().map(Vec::len).unwrap_or(0),
+            });
+        } else if NXS_ONLY.contains(&key) {
             ignored.push(Ignored::Misplaced(key.to_string()));
         }
     }
@@ -296,7 +321,11 @@ pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     for line in rest.split_inclusive('\n') {
         if line.trim_end() == "---" {
             let body = &rest[offset + line.len()..];
-            return Some((&rest[..offset], body.strip_prefix('\n').unwrap_or(body)));
+            let body = body
+                .strip_prefix("\r\n")
+                .or_else(|| body.strip_prefix('\n'))
+                .unwrap_or(body);
+            return Some((&rest[..offset], body));
         }
         offset += line.len();
     }
