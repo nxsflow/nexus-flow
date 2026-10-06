@@ -321,7 +321,7 @@ pub fn parse_allowed_tools(value: &Value) -> std::result::Result<Vec<String>, St
                 Value::String(text) => Ok(text.trim().to_string()),
                 _ => Err("lists something that is not text".to_string()),
             })
-            .filter(|item| item.as_ref().map_or(true, |t| !t.is_empty()))
+            .filter(|item| !matches!(item, Ok(text) if text.is_empty()))
             .collect(),
         _ => Err("is neither text nor a list".to_string()),
     }

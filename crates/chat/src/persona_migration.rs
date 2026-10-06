@@ -403,7 +403,7 @@ fn rewrite_channels(path: &Path, content: &str) -> Result<ChannelsRewrite> {
             let Some((_, body)) = items.last_mut() else {
                 return Err(unrewritable(path, "it opens with an indented line"));
             };
-            body.extend(pending.drain(..));
+            body.append(&mut pending);
             body.push(stripped.to_string());
         } else {
             return Err(unrewritable(

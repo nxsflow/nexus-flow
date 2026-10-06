@@ -299,10 +299,7 @@ impl Directory {
                 .iter()
                 .map(|r| PersonaEntry::from_decl(r, &audience, channels))
                 .collect(),
-            channels: channels
-                .iter()
-                .map(|c| ChannelEntry::from_decl(c))
-                .collect(),
+            channels: channels.iter().map(ChannelEntry::from_decl).collect(),
             public_channels: Vec::new(),
             declarations: None,
         }
