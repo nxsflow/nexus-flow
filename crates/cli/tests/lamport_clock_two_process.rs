@@ -13,7 +13,7 @@
 //!
 //! 1. [`a_long_lived_handle_does_not_lose_a_write_to_a_sibling_process`] — the CONSEQUENCE, and the
 //!    counter-proof. A handle whose clock stopped at the moment it opened mints a coordinate a
-//!    sibling process already used; `fold_lww`'s keep-if-beats is a STRICT `>`, so the equal
+//!    sibling process already used; a register's keep-if-beats is a STRICT `>`, so the equal
 //!    coordinate loses and the value is dropped without a word. Deterministic — no barrier, no race,
 //!    the sequence alone produces it — so this one is RED on the pre-fix binary every time, and it
 //!    is red on the symptom a user would report: the board reading `"from the subprocess"`, the
@@ -233,7 +233,7 @@ fn a_long_lived_handle_does_not_lose_a_write_to_a_sibling_process() {
 
 /// The SIBLING FAILURE named in 6j6v.fc5p, checked here rather than left to the argument that it has
 /// the same root: a write that lands not on an equal coordinate but strictly UNDER one the register
-/// already holds. `fold_lww` discards that just as silently — it is the same strict `>`, one step
+/// already holds. The register discards that just as silently — it is the same strict `>`, one step
 /// further along. In chat it reads "a late declaration falls under a reply that already answered
 /// it"; in flow it is a plain edit that never appears.
 ///

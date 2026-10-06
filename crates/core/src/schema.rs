@@ -3,7 +3,7 @@
 //! `ops` log + schema-version spine are the substrate's; this module re-exports them so existing
 //! `nexus_flow_core::schema::*` paths keep resolving, and owns only the flow-vocabulary DDL.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 // The substrate's schema-version spine, re-exported (the compatibility axis is foundation-wide).
 pub use nxs_foundation::schema::{
@@ -78,9 +78,13 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
              _placeholder INTEGER DEFAULT 0
          );
 
+         -- `lamport`/`site` (6j6v.vvw6, schema v8): the add op's coordinate, so `present_parent`
+         -- picks its winner from the row alone instead of joining the op log. NULL only on a row an
+         -- older binary added; this one fills it on its next open (`Store::refold_if_behind`).
          CREATE TABLE IF NOT EXISTS edge_adds(
              from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL,
-             tag TEXT PRIMARY KEY
+             tag TEXT PRIMARY KEY,
+             lamport INTEGER, site INTEGER
          );
          CREATE TABLE IF NOT EXISTS edge_removes(tag TEXT PRIMARY KEY);
 
@@ -110,15 +114,19 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE TABLE IF NOT EXISTS thread_link_adds(
              thread_id TEXT NOT NULL, item_id TEXT NOT NULL,
              relation  TEXT NOT NULL, weight  TEXT NOT NULL,
-             tag TEXT PRIMARY KEY
+             tag TEXT PRIMARY KEY,
+             lamport INTEGER, site INTEGER
          );
          CREATE TABLE IF NOT EXISTS thread_link_removes(tag TEXT PRIMARY KEY);
 
+         -- `lamport`/`site`/`created_at` (6j6v.vvw6, schema v8): the note-add op's coordinate and
+         -- `wall_clock`, which the note reads order and date by — they used to join the op log.
          CREATE TABLE IF NOT EXISTS notes(
              id TEXT PRIMARY KEY,
              item_id TEXT NOT NULL,
              author TEXT,
-             body TEXT
+             body TEXT,
+             lamport INTEGER, site INTEGER, created_at TEXT
          );
          CREATE TABLE IF NOT EXISTS note_tombstones(note_id TEXT PRIMARY KEY);
 
@@ -134,6 +142,16 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
              PRIMARY KEY(item_id, field)
          );
 
+         -- An item's creation and last change (6j6v.2kjy), folded (6j6v.vvw6): the `wall_clock` of
+         -- the lowest and of the highest `(lamport, site)` among the ops that target the item. Its
+         -- own table so a note or a custom field arriving before the item's own ops puts nothing
+         -- on the board. `''` is an unstamped op and reads as no timestamp.
+         CREATE TABLE IF NOT EXISTS item_timestamps(
+             item_id TEXT PRIMARY KEY,
+             created_at TEXT, created_v INTEGER, created_site INTEGER,
+             updated_at TEXT, updated_v INTEGER, updated_site INTEGER
+         );
+
          CREATE VIEW IF NOT EXISTS present_edges AS
              SELECT DISTINCT from_id, to_id, kind FROM edge_adds a
              WHERE NOT EXISTS (SELECT 1 FROM edge_removes r WHERE r.tag = a.tag);
@@ -142,46 +160,6 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE VIEW IF NOT EXISTS present_labels AS
              SELECT DISTINCT item_id, label FROM label_adds a
              WHERE NOT EXISTS (SELECT 1 FROM label_removes r WHERE r.tag = a.tag);
-
-         -- Thread links (nxf 6j6v.8dbe): the present links, with ONE (relation, weight) per
-         -- (thread, item) pair. Among a pair's present adds the winner is the one whose add-op has
-         -- the max (lamport, site, tag) — the SAME projection idiom `present_parent` below uses, and
-         -- for the same reason: it is a pure, convergent function of the converged add set.
-         --
-         -- This is what makes a link MOVABLE, which the ticket requires and a plain OR-set element
-         -- would not give: re-attaching the same pair with a different weight is an ordinary later
-         -- add that wins causally, so a link can firm up (passing -> bearing) or soften without a
-         -- remove-then-add dance and without inventing per-attribute LWW registers. Detaching is the
-         -- normal observed-remove: it tombstones every live add for the pair, whatever its
-         -- attributes, so the pair leaves this view entirely.
-         CREATE VIEW IF NOT EXISTS present_thread_links AS
-             SELECT a.thread_id, a.item_id, a.relation, a.weight
-             FROM thread_link_adds a JOIN ops o ON o.op_id = a.tag
-             WHERE NOT EXISTS (SELECT 1 FROM thread_link_removes r WHERE r.tag = a.tag)
-               AND NOT EXISTS (
-                   SELECT 1 FROM thread_link_adds a2 JOIN ops o2 ON o2.op_id = a2.tag
-                   WHERE a2.thread_id = a.thread_id AND a2.item_id = a.item_id
-                     AND NOT EXISTS (SELECT 1 FROM thread_link_removes r2 WHERE r2.tag = a2.tag)
-                     AND (o2.lamport, o2.site, a2.tag) > (o.lamport, o.site, a.tag));
-
-         -- sp6.3: the single current parent per child, projected from the `parent` OR-set edge.
-         -- Among a child's present `parent` edges, the winner is the one whose add-op has the max
-         -- (lamport, site, to_id) — the LWW-equivalent of the former `belongs_to` register, and a
-         -- pure, convergent function of the converged edge set. Under the ②a single-parent write
-         -- shim there is normally exactly one; the tiebreak keeps it deterministic in the transient
-         -- multi-parent state a concurrent merge can produce. `get_item`/`list_items` read
-         -- `parent_id AS belongs_to` from here, and `invariant` joins it — so every belongs_to
-         -- reader stays unchanged while the substrate becomes n:m-capable.
-         CREATE VIEW IF NOT EXISTS present_parent AS
-             SELECT a.from_id AS child_id, a.to_id AS parent_id
-             FROM edge_adds a JOIN ops o ON o.op_id = a.tag
-             WHERE a.kind = 'parent'
-               AND NOT EXISTS (SELECT 1 FROM edge_removes r WHERE r.tag = a.tag)
-               AND NOT EXISTS (
-                   SELECT 1 FROM edge_adds a2 JOIN ops o2 ON o2.op_id = a2.tag
-                   WHERE a2.from_id = a.from_id AND a2.kind = 'parent'
-                     AND NOT EXISTS (SELECT 1 FROM edge_removes r2 WHERE r2.tag = a2.tag)
-                     AND (o2.lamport, o2.site, a2.to_id) > (o.lamport, o.site, a.to_id));
 
          -- Per-item read indexes (perf, 1w5v). The projection tables PRIMARY-KEY on the op-id `tag`,
          -- so the hot per-item lookups scanned the WHOLE table on every call: `labels_of` (via the
@@ -205,7 +183,69 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE INDEX IF NOT EXISTS thread_link_adds_item ON thread_link_adds(item_id);
          CREATE INDEX IF NOT EXISTS thread_link_adds_thread ON thread_link_adds(thread_id);"
     ))?;
+    ensure_view(conn, "present_thread_links", PRESENT_THREAD_LINKS)?;
+    ensure_view(conn, "present_parent", PRESENT_PARENT)?;
     Ok(items_existed && !custom_fields_existed)
+}
+
+// Thread links (nxf 6j6v.8dbe): the present links, with ONE (relation, weight) per (thread, item)
+// pair. Among a pair's present adds the winner is the one whose add has the max (lamport, site,
+// tag) — the SAME projection idiom `present_parent` below uses, and for the same reason: it is a
+// pure, convergent function of the converged add set.
+//
+// This is what makes a link MOVABLE, which the ticket requires and a plain OR-set element would not
+// give: re-attaching the same pair with a different weight is an ordinary later add that wins
+// causally, so a link can firm up (passing -> bearing) or soften without a remove-then-add dance and
+// without inventing per-attribute LWW registers. Detaching is the normal observed-remove: it
+// tombstones every live add for the pair, whatever its attributes, so the pair leaves this view
+// entirely.
+//
+// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log.
+const PRESENT_THREAD_LINKS: &str = "CREATE VIEW present_thread_links AS
+    SELECT a.thread_id, a.item_id, a.relation, a.weight
+    FROM thread_link_adds a
+    WHERE NOT EXISTS (SELECT 1 FROM thread_link_removes r WHERE r.tag = a.tag)
+      AND NOT EXISTS (
+          SELECT 1 FROM thread_link_adds a2
+          WHERE a2.thread_id = a.thread_id AND a2.item_id = a.item_id
+            AND NOT EXISTS (SELECT 1 FROM thread_link_removes r2 WHERE r2.tag = a2.tag)
+            AND (a2.lamport, a2.site, a2.tag) > (a.lamport, a.site, a.tag))";
+
+// sp6.3: the single current parent per child, projected from the `parent` OR-set edge. Among a
+// child's present `parent` edges, the winner is the one whose add has the max (lamport, site, to_id)
+// — the LWW-equivalent of the former `belongs_to` register, and a pure, convergent function of the
+// converged edge set. Under the ②a single-parent write shim there is normally exactly one; the
+// tiebreak keeps it deterministic in the transient multi-parent state a concurrent merge can
+// produce. `get_item`/`list_items` read `parent_id AS belongs_to` from here, and `invariant` joins
+// it — so every belongs_to reader stays unchanged while the substrate becomes n:m-capable.
+//
+// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log.
+const PRESENT_PARENT: &str = "CREATE VIEW present_parent AS
+    SELECT a.from_id AS child_id, a.to_id AS parent_id
+    FROM edge_adds a
+    WHERE a.kind = 'parent'
+      AND NOT EXISTS (SELECT 1 FROM edge_removes r WHERE r.tag = a.tag)
+      AND NOT EXISTS (
+          SELECT 1 FROM edge_adds a2
+          WHERE a2.from_id = a.from_id AND a2.kind = 'parent'
+            AND NOT EXISTS (SELECT 1 FROM edge_removes r2 WHERE r2.tag = a2.tag)
+            AND (a2.lamport, a2.site, a2.to_id) > (a.lamport, a.site, a.to_id))";
+
+/// Create the view `name` as `ddl` says, or replace it when the database holds another definition
+/// of it — the definition an older binary created, which joins the op log (6j6v.vvw6). An older
+/// binary only ever creates its views IF NOT EXISTS, so it never puts its own back.
+fn ensure_view(conn: &Connection, name: &str, ddl: &str) -> rusqlite::Result<()> {
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name=?1",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if current.as_deref() != Some(ddl) {
+        conn.execute_batch(&format!("DROP VIEW IF EXISTS {name}; {ddl};"))?;
+    }
+    Ok(())
 }
 
 /// Whether a table exists — used to tell a fresh db (where the CREATE batch installs `custom_fields`

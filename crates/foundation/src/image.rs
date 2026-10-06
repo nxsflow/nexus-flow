@@ -139,6 +139,11 @@ pub struct Image {
     /// far that store had folded the log. `None` when the image carries no views.
     pub views_of: Option<String>,
     pub folded_through: i64,
+    /// The fold revision the views were folded at (6j6v.y3r4). Two builds between releases share
+    /// an engine version but not necessarily a fold; an image written before the revision existed
+    /// reads as 0.
+    #[serde(default)]
+    pub fold_revision: i64,
     /// Every table the store's registered reducers declare as views.
     pub views: Vec<Table>,
 }
@@ -210,6 +215,8 @@ pub enum RefoldReason {
     /// They are another product's views, or a different set of tables than this store's reducers
     /// fold into.
     OtherViews,
+    /// They were folded at another fold revision than this store's reducers fold at (6j6v.y3r4).
+    OtherRevision { written_at: i64 },
 }
 
 impl std::fmt::Display for RefoldReason {
@@ -228,6 +235,10 @@ impl std::fmt::Display for RefoldReason {
             RefoldReason::OtherViews => {
                 write!(f, "its views are not the ones this store folds into")
             }
+            RefoldReason::OtherRevision { written_at } => write!(
+                f,
+                "its views were folded at fold revision {written_at}, not at this store's"
+            ),
         }
     }
 }

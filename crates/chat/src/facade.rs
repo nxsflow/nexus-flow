@@ -6595,7 +6595,7 @@ mod tests {
     /// out the version-skew story: a future replica that invents a third disposition syncs its op
     /// here, `is_foldable` rejects the envelope (serde refuses the unknown variant), and the message
     /// simply never appears — the same forward-compat "store, don't fold" rule every unknown op
-    /// follows. `fold_message` then writes the column by re-serializing the typed enum, so a folded
+    /// follows. `MessageReducer::message` then writes the column by re-serializing the typed enum, so a folded
     /// row's `disposition` is `in_turn` or `next_session` by construction.
     #[test]
     fn an_unknown_disposition_op_is_stored_but_never_folded() {

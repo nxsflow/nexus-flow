@@ -11,7 +11,7 @@ use crate::model::{EdgeKind, LinkRelation, LinkWeight, MergeStrategy, Op};
 use crate::reducer::Reducer;
 use crate::schema;
 use crate::store::SEP;
-use rusqlite::{params, Connection};
+use nxs_foundation::change::{cells, Change, Version, Wins};
 
 /// flow's reducer over the `task` domain.
 pub struct TaskReducer;
@@ -66,141 +66,185 @@ impl TaskReducer {
         }
     }
 
-    /// Fold an item field `set`, dispatching on the merge strategy the op encodes (w213). Today
-    /// both strategies fold LWW: `Lww` is the register semantics; `CrdtText` is the reserved
+    /// The changes of an item field `set`, dispatching on the merge strategy the op encodes (w213).
+    /// Today both strategies fold LWW: `Lww` is the register semantics; `CrdtText` is the reserved
     /// note-body strategy that falls back to LWW until the text-CRDT reducer lands (4b39), so
     /// declaring it is lossless. This match IS the seam 4b39 splits — it replaces the `CrdtText`
     /// arm with the real text-CRDT fold, no other call site changing.
-    fn fold_item(conn: &Connection, op: &Op, strategy: MergeStrategy) {
+    fn item_changes(op: &Op, strategy: MergeStrategy) -> Vec<Change> {
         match strategy {
-            MergeStrategy::Lww | MergeStrategy::CrdtText => Self::fold_item_lww(conn, op),
+            MergeStrategy::Lww | MergeStrategy::CrdtText => vec![Self::item_lww(op)],
         }
     }
 
-    fn fold_item_lww(conn: &Connection, op: &Op) {
-        // SAFETY: is_foldable guarantees `op.field` is in ITEM_LWW_FIELDS; that whitelist is
-        // exactly what makes the `format!`-interpolated column name injection-safe.
-        debug_assert!(schema::ITEM_LWW_FIELDS.contains(&op.field.as_str()));
-        // Single keep-if-beats upsert: insert the cell, or on id-conflict overwrite it only when
-        // this op's (lamport, site) strictly beats the stored version. The row-value comparison
-        // expresses the LWW tie-break (lamport, then site) in one statement.
-        let f = &op.field;
-        let sql = format!(
-            "INSERT INTO items(id, {f}, {f}_v, {f}_site) VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-                 {f}=excluded.{f}, {f}_v=excluded.{f}_v, {f}_site=excluded.{f}_site
-             WHERE (excluded.{f}_v, excluded.{f}_site) > ({f}_v, {f}_site)"
-        );
-        conn.execute(&sql, params![op.target_id, op.value, op.lamport, op.site])
-            .unwrap();
-    }
-
-    /// Fold a plugin custom field `set` (spec §4) — a keep-if-beats LWW upsert keyed on
-    /// `(item_id, field)`, structurally identical to [`fold_item_lww`](Self::fold_item_lww) but on
-    /// the pair. Both merge strategies (`Lww`, `CrdtText`) fold whole-value LWW today; `crdt-text`
-    /// is a forward-compat marker (a future ticket may split it), so this deliberately does not
-    /// branch on the strategy. A clear is an empty `value`, stored verbatim — the read layer (T4)
-    /// treats an empty value as unset. Unlike `fold_item_lww` the field/value are BOUND params, not
-    /// interpolated column names, so no whitelist is needed (any foreign field name folds — §7).
-    fn fold_field(conn: &Connection, op: &Op) {
-        conn.execute(
-            "INSERT INTO custom_fields(item_id, field, value, value_v, value_site)
-                 VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(item_id, field) DO UPDATE SET
-                 value=excluded.value, value_v=excluded.value_v, value_site=excluded.value_site
-             WHERE (excluded.value_v, excluded.value_site) > (value_v, value_site)",
-            params![op.target_id, op.field, op.value, op.lamport, op.site],
+    /// One keep-if-beats LWW cell of `items`: the cell and its `_v`/`_site` version move together,
+    /// and only an op whose `(lamport, site)` strictly beats the stored version writes.
+    fn item_lww(op: &Op) -> Change {
+        // The column name comes from the whitelist, never from the op: `is_foldable` guarantees
+        // `op.field` is on it, and the applier interpolates column names.
+        let f = schema::ITEM_LWW_FIELDS
+            .iter()
+            .find(|f| **f == op.field)
+            .expect("is_foldable vetted the field");
+        Change::register(
+            "items",
+            cells([("id", op.target_id.as_str().into())]),
+            cells([(f, op.value.clone().into())]),
+            (&format!("{f}_v"), &format!("{f}_site")),
+            version(op),
+            Wins::Higher,
         )
-        .unwrap();
     }
 
-    fn fold_edge_add(conn: &Connection, op: &Op) {
+    /// A plugin custom field `set` (spec §4) — a keep-if-beats LWW register keyed on `(item_id,
+    /// field)`, structurally identical to [`item_lww`](Self::item_lww) but on the pair. Both merge
+    /// strategies (`Lww`, `CrdtText`) fold whole-value LWW today; `crdt-text` is a forward-compat
+    /// marker (a future ticket may split it), so this deliberately does not branch on the strategy.
+    /// A clear is an empty `value`, stored verbatim — the read layer (T4) treats an empty value as
+    /// unset. The field name is a KEY value here, not a column, so any foreign field name folds (§7).
+    fn field_change(op: &Op) -> Change {
+        Change::register(
+            "custom_fields",
+            cells([
+                ("item_id", op.target_id.as_str().into()),
+                ("field", op.field.as_str().into()),
+            ]),
+            cells([("value", op.value.clone().into())]),
+            ("value_v", "value_site"),
+            version(op),
+            Wins::Higher,
+        )
+    }
+
+    /// An item's creation and last change (6j6v.2kjy), folded instead of read off the log
+    /// (6j6v.vvw6): the `wall_clock` of the op with the LOWEST `(lamport, site)` among the ops that
+    /// target the item, and that of the HIGHEST. Every op whose `target_id` is the item emits these
+    /// — its own cells, its custom fields, its worklog notes; edges and labels target a composite
+    /// id and do not. An unstamped op carries `''`, kept as it is: the read treats it as "no
+    /// timestamp", exactly as it did reading the log.
+    ///
+    /// Their own table, not two more cells on `items`: a note or a custom field may arrive before
+    /// the item's own ops do, and a row in `items` is an item on the board.
+    fn timestamp_changes(op: &Op) -> [Change; 2] {
+        let key = || cells([("item_id", op.target_id.as_str().into())]);
+        [
+            Change::register(
+                "item_timestamps",
+                key(),
+                cells([("created_at", op.wall_clock.as_str().into())]),
+                ("created_v", "created_site"),
+                version(op),
+                Wins::Lower,
+            ),
+            Change::register(
+                "item_timestamps",
+                key(),
+                cells([("updated_at", op.wall_clock.as_str().into())]),
+                ("updated_v", "updated_site"),
+                version(op),
+                Wins::Higher,
+            ),
+        ]
+    }
+
+    /// An OR-set add: one row per add op, tagged with its op id (observed-remove), carrying the add
+    /// op's coordinate so the views that pick one element among several (`present_parent`,
+    /// `present_thread_links`) need nothing but the row (6j6v.vvw6).
+    fn edge_add(op: &Op) -> Vec<Change> {
         let Some((from, to, kind)) = Self::parse_edge(op) else {
-            return;
+            return Vec::new();
         };
-        // tag = op_id (observed-remove)
-        conn.execute(
-            "INSERT OR IGNORE INTO edge_adds(from_id, to_id, kind, tag) VALUES(?1,?2,?3,?4)",
-            params![from, to, kind, op.op_id],
-        )
-        .unwrap();
+        vec![Change::put(
+            "edge_adds",
+            cells([("tag", op.op_id.as_str().into())]),
+            cells([
+                ("from_id", from.into()),
+                ("to_id", to.into()),
+                ("kind", kind.into()),
+                ("lamport", op.lamport.into()),
+                ("site", op.site.into()),
+            ]),
+        )]
     }
 
-    fn fold_edge_remove(conn: &Connection, op: &Op) {
-        // value = SEP-joined observed add-tags this remove tombstones
-        if let Some(tags) = &op.value {
-            for tag in tags.split(SEP).filter(|t| !t.is_empty()) {
-                conn.execute("INSERT OR IGNORE INTO edge_removes(tag) VALUES(?1)", [tag])
-                    .unwrap();
-            }
-        }
+    /// An observed remove: `value` holds the SEP-joined add tags it tombstones, each a grow-only
+    /// row of `table`.
+    fn tombstones(op: &Op, table: &'static str) -> Vec<Change> {
+        op.value
+            .as_deref()
+            .map(|tags| {
+                tags.split(SEP)
+                    .filter(|t| !t.is_empty())
+                    .map(|tag| Change::put(table, cells([("tag", tag.into())]), Vec::new()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
-    fn fold_label_add(conn: &Connection, op: &Op) {
+    fn label_add(op: &Op) -> Vec<Change> {
         let Some((item_id, label)) = Self::parse_label(op) else {
-            return;
+            return Vec::new();
         };
         // tag = op_id (observed-remove), exactly as the edge OR-set.
-        conn.execute(
-            "INSERT OR IGNORE INTO label_adds(item_id, label, tag) VALUES(?1,?2,?3)",
-            params![item_id, label, op.op_id],
-        )
-        .unwrap();
+        vec![Change::put(
+            "label_adds",
+            cells([("tag", op.op_id.as_str().into())]),
+            cells([("item_id", item_id.into()), ("label", label.into())]),
+        )]
     }
 
-    fn fold_label_remove(conn: &Connection, op: &Op) {
-        // value = SEP-joined observed add-tags this remove tombstones (mirrors fold_edge_remove).
-        if let Some(tags) = &op.value {
-            for tag in tags.split(SEP).filter(|t| !t.is_empty()) {
-                conn.execute("INSERT OR IGNORE INTO label_removes(tag) VALUES(?1)", [tag])
-                    .unwrap();
-            }
-        }
-    }
-
-    fn fold_thread_link_add(conn: &Connection, op: &Op) {
+    fn thread_link_add(op: &Op) -> Vec<Change> {
         let Some((thread_id, item_id, relation, weight)) = Self::parse_thread_link(op) else {
-            return;
+            return Vec::new();
         };
-        // tag = op_id (observed-remove), exactly as the edge and label OR-sets.
-        conn.execute(
-            "INSERT OR IGNORE INTO thread_link_adds(thread_id, item_id, relation, weight, tag)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![thread_id, item_id, relation, weight, op.op_id],
-        )
-        .unwrap();
+        // tag = op_id (observed-remove), exactly as the edge and label OR-sets — and, like the
+        // edge add, with its coordinate for the projection that picks one link per pair.
+        vec![Change::put(
+            "thread_link_adds",
+            cells([("tag", op.op_id.as_str().into())]),
+            cells([
+                ("thread_id", thread_id.into()),
+                ("item_id", item_id.into()),
+                ("relation", relation.into()),
+                ("weight", weight.into()),
+                ("lamport", op.lamport.into()),
+                ("site", op.site.into()),
+            ]),
+        )]
     }
 
-    fn fold_thread_link_remove(conn: &Connection, op: &Op) {
-        // value = SEP-joined observed add-tags this remove tombstones (mirrors fold_edge_remove).
-        if let Some(tags) = &op.value {
-            for tag in tags.split(SEP).filter(|t| !t.is_empty()) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO thread_link_removes(tag) VALUES(?1)",
-                    [tag],
-                )
-                .unwrap();
-            }
-        }
-    }
-
-    fn fold_note_add(conn: &Connection, op: &Op) {
-        conn.execute(
-            "INSERT OR IGNORE INTO notes(id, item_id, author, body) VALUES(?1,?2,?3,?4)",
-            params![op.op_id, op.target_id, op.author, op.value],
+    fn note_add(op: &Op) -> Change {
+        Change::put(
+            "notes",
+            cells([("id", op.op_id.as_str().into())]),
+            cells([
+                ("item_id", op.target_id.as_str().into()),
+                ("author", op.author.as_str().into()),
+                ("body", op.value.clone().into()),
+                ("lamport", op.lamport.into()),
+                ("site", op.site.into()),
+                ("created_at", op.wall_clock.as_str().into()),
+            ]),
         )
-        .unwrap();
     }
 
     /// Redaction is a grow-only tombstone set keyed by note id (the redact op's `target_id` IS the
     /// note id). Order-independent: folding a redact before its `note_add` still tombstones the
     /// note, so any merge order converges (cf. §8).
-    fn fold_note_redact(conn: &Connection, op: &Op) {
-        conn.execute(
-            "INSERT OR IGNORE INTO note_tombstones(note_id) VALUES(?1)",
-            [&op.target_id],
+    fn note_redact(op: &Op) -> Change {
+        Change::put(
+            "note_tombstones",
+            cells([("note_id", op.target_id.as_str().into())]),
+            Vec::new(),
         )
-        .unwrap();
+    }
+}
+
+/// An op's coordinate, the version its registers compare on.
+fn version(op: &Op) -> Version {
+    Version {
+        lamport: op.lamport,
+        site: op.site,
     }
 }
 
@@ -243,32 +287,44 @@ impl Reducer for TaskReducer {
         }
     }
 
-    /// Fold a foldable op into the views. The caller (substrate) guarantees foldability
-    /// (`is_foldable`); any other shape is a bug, hence `unreachable!`.
-    fn fold(&self, conn: &Connection, op: &Op) {
+    /// The changes a foldable op makes to the views. The caller (substrate) guarantees
+    /// foldability (`is_foldable`); any other shape is a bug, hence `unreachable!`.
+    fn changes(&self, op: &Op) -> Vec<Change> {
         // w213: an item field `set` carries its merge strategy in the op_type — decode and dispatch
         // it (is_foldable already vetted the field). Every other op matches on its (kind, op_type).
-        if op.target_kind == "item" {
-            if let Some(strategy) = MergeStrategy::from_item_set_op_type(&op.op_type) {
-                return Self::fold_item(conn, op, strategy);
+        let mut changes = if op.target_kind == "item" {
+            let strategy = MergeStrategy::from_item_set_op_type(&op.op_type)
+                .expect("is_foldable vetted the strategy");
+            Self::item_changes(op, strategy)
+        } else if op.target_kind == "field" {
+            // A plugin custom field `set` folds into `custom_fields` (is_foldable vetted the shape).
+            vec![Self::field_change(op)]
+        } else {
+            match (op.target_kind.as_str(), op.op_type.as_str()) {
+                ("edge", "add") => Self::edge_add(op),
+                ("edge", "remove") => Self::tombstones(op, "edge_removes"),
+                ("label", "add") => Self::label_add(op),
+                ("label", "remove") => Self::tombstones(op, "label_removes"),
+                ("thread_link", "add") => Self::thread_link_add(op),
+                ("thread_link", "remove") => Self::tombstones(op, "thread_link_removes"),
+                ("note", "note_add") => vec![Self::note_add(op)],
+                ("note", "set") => vec![Self::note_redact(op)],
+                other => unreachable!("non-foldable op reached TaskReducer::changes(): {other:?}"),
             }
-        }
-        // A plugin custom field `set` folds into `custom_fields` (is_foldable vetted the shape).
-        if op.target_kind == "field" && MergeStrategy::from_item_set_op_type(&op.op_type).is_some()
+        };
+        // The ops whose target IS an item date it: its own cells, its custom fields, its notes.
+        if matches!(op.target_kind.as_str(), "item" | "field")
+            || (op.target_kind == "note" && op.op_type == "note_add")
         {
-            return Self::fold_field(conn, op);
+            changes.extend(Self::timestamp_changes(op));
         }
-        match (op.target_kind.as_str(), op.op_type.as_str()) {
-            ("edge", "add") => Self::fold_edge_add(conn, op),
-            ("edge", "remove") => Self::fold_edge_remove(conn, op),
-            ("label", "add") => Self::fold_label_add(conn, op),
-            ("label", "remove") => Self::fold_label_remove(conn, op),
-            ("thread_link", "add") => Self::fold_thread_link_add(conn, op),
-            ("thread_link", "remove") => Self::fold_thread_link_remove(conn, op),
-            ("note", "note_add") => Self::fold_note_add(conn, op),
-            ("note", "set") => Self::fold_note_redact(conn, op),
-            other => unreachable!("non-foldable op reached TaskReducer::fold(): {other:?}"),
-        }
+        changes
+    }
+
+    /// 1 (6j6v.vvw6): the OR-set adds and the notes carry their op's coordinate, and an item's
+    /// instants are folded — all filled only by folding the log again.
+    fn fold_revision(&self) -> i64 {
+        1
     }
 
     fn view_tables(&self) -> &'static [&'static str] {
@@ -283,6 +339,7 @@ impl Reducer for TaskReducer {
             "custom_fields",
             "thread_link_adds",
             "thread_link_removes",
+            "item_timestamps",
         ]
     }
 }

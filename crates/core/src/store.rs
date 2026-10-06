@@ -568,7 +568,7 @@ impl Store {
         for op in &rewritten {
             // The bound every fold dispatch applies (6j6v.m19v): this rebuild is one too.
             if op.lamport_in_bound() && reducer.is_foldable(op) {
-                reducer.fold(conn, op);
+                nxs_foundation::change::apply_sqlite(conn, &reducer.changes(op)).unwrap();
             }
         }
         conn.execute_batch("COMMIT").unwrap();
@@ -1098,10 +1098,11 @@ impl Store {
         Ok(out)
     }
 
-    /// The op-log-derived `(created_at, updated_at)` for an item (6j6v.2kjy): created_at is the
-    /// `wall_clock` stamped on the item's FIRST op (its create), updated_at that of its LAST op —
-    /// any op whose `target_id` is the item (its own cells, its custom fields, its worklog notes;
-    /// NOT edges/labels, whose op target is a composite id). An end with no stamped `wall_clock` (a
+    /// The `(created_at, updated_at)` for an item (6j6v.2kjy): created_at is the `wall_clock`
+    /// stamped on the item's FIRST op (its create), updated_at that of its LAST op — any op whose
+    /// `target_id` is the item (its own cells, its custom fields, its worklog notes; NOT
+    /// edges/labels, whose op target is a composite id). Folded into `item_timestamps` by the task
+    /// reducer (6j6v.vvw6), so this reads a view, not the log. An end with no stamped `wall_clock` (a
     /// legacy pre-wall_clock write, or a direct un-stamped seed) is `None`, so a fully un-stamped
     /// item — or a missing one — is `(None, None)`. Fallible: a db fault surfaces as `io`.
     pub fn item_timestamps_of(&self, item_id: &str) -> rusqlite::Result<ItemTimestamps> {
@@ -1114,13 +1115,10 @@ impl Store {
     /// `(created_at, updated_at)` for MANY items in ONE query per 500-id chunk (6j6v.2kjy) — the
     /// bulk sibling of [`item_timestamps_of`](Self::item_timestamps_of) for decorating a whole lane
     /// with **no N+1**, like [`custom_fields_of_bulk`](Self::custom_fields_of_bulk). Returns
-    /// `item_id → (created, updated)` for every id with ≥1 op carrying a non-empty `wall_clock`; an
-    /// id with none — or a missing id — is absent from the map (a miss means "no timestamps"), the
-    /// same sparse contract the label/custom bulk reads follow. `FIRST_VALUE`/`LAST_VALUE` over the
-    /// canonical `(lamport, site)` op order pick the create/last-change instants; the window frame is
-    /// spelled out so `LAST_VALUE` sees the whole partition, not just up to the current row. Chunked
-    /// at 500 to stay under SQLite's bound-`?` cap; the `ops_target` index makes `target_id IN (…)`
-    /// a SEARCH, not a SCAN.
+    /// `item_id → (created, updated)` for every id whose first or last op carries a non-empty
+    /// `wall_clock`; an id with neither — or a missing id — is absent from the map (a miss means "no
+    /// timestamps"), the same sparse contract the label/custom bulk reads follow. Chunked at 500 to
+    /// stay under SQLite's bound-`?` cap; the primary key makes `item_id IN (…)` a SEARCH.
     pub fn item_timestamps_of_bulk(
         &self,
         item_ids: &[&str],
@@ -1129,19 +1127,9 @@ impl Store {
         let mut out: BTreeMap<String, ItemTimestamps> = BTreeMap::new();
         for chunk in item_ids.chunks(CHUNK) {
             let placeholders = vec!["?"; chunk.len()].join(",");
-            // An op past the Lamport bound takes part in no fold (6j6v.m19v), so it is neither an
-            // item's creation nor its last change — it would otherwise always be the latter.
-            let max = nxs_foundation::model::MAX_LAMPORT;
             let sql = format!(
-                "SELECT DISTINCT target_id, \
-                    FIRST_VALUE(wall_clock) OVER w AS created, \
-                    LAST_VALUE(wall_clock) OVER w AS updated \
-                 FROM ops \
-                 WHERE target_id IN ({placeholders}) AND lamport <= {max} \
-                 WINDOW w AS ( \
-                     PARTITION BY target_id ORDER BY lamport, site \
-                     ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING \
-                 )"
+                "SELECT item_id, created_at, updated_at FROM item_timestamps \
+                 WHERE item_id IN ({placeholders})"
             );
             let mut stmt = self.conn().prepare(&sql)?;
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
@@ -1306,10 +1294,10 @@ impl Store {
     /// read-compute facade (`show`/`search`), so a db error is surfaced for the seam to map to `io`.
     pub fn notes_of(&self, item_id: &str) -> rusqlite::Result<Vec<(String, String)>> {
         let mut stmt = self.conn().prepare(
-            "SELECT n.id, n.body FROM notes n JOIN ops o ON o.op_id = n.id
+            "SELECT n.id, n.body FROM notes n
              WHERE n.item_id=?1
                AND n.id NOT IN (SELECT note_id FROM note_tombstones)
-             ORDER BY o.lamport, o.site",
+             ORDER BY n.lamport, n.site",
         )?;
         let rows = stmt.query_map([item_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -1318,7 +1306,8 @@ impl Store {
     }
 
     /// [`notes_of`](Self::notes_of) plus each note's `created_at` — the `wall_clock` the note-add op
-    /// stamped (6j6v.2kjy), the SAME op-log source item timestamps use, so a note's date is consistent
+    /// stamped (6j6v.2kjy), folded into the note row (6j6v.vvw6) from the same ops item timestamps
+    /// fold from, so a note's date is consistent
     /// with its item's (and deterministic under a pinned `now`) rather than the note ULID's real
     /// mint-instant. `None` when the note-add op carried no `wall_clock` (a legacy/un-stamped write).
     /// Same non-redacted set + canonical `(lamport, site)` order as `notes_of`.
@@ -1327,10 +1316,10 @@ impl Store {
         item_id: &str,
     ) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
         let mut stmt = self.conn().prepare(
-            "SELECT n.id, n.body, o.wall_clock FROM notes n JOIN ops o ON o.op_id = n.id
+            "SELECT n.id, n.body, n.created_at FROM notes n
              WHERE n.item_id=?1
                AND n.id NOT IN (SELECT note_id FROM note_tombstones)
-             ORDER BY o.lamport, o.site",
+             ORDER BY n.lamport, n.site",
         )?;
         let rows = stmt.query_map([item_id], |r| {
             Ok((
@@ -1680,8 +1669,9 @@ mod tests {
             fn is_foldable(&self, _op: &Op) -> bool {
                 true
             }
-            fn fold(&self, _conn: &Connection, _op: &Op) {
+            fn changes(&self, _op: &Op) -> Vec<nxs_foundation::change::Change> {
                 self.folds.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
             }
             fn clear_views(&self, _conn: &Connection) {}
         }

@@ -16,7 +16,7 @@ pub const KIND_THREAD: &str = "thread";
 // `KIND_READ_CURSOR` ("read_cursor") stood here until nxf 6j6v.4d2z removed the unread
 // apparatus. The kind is not re-used: a `read_cursor` op in an older log stays STORED and
 // simply stops being foldable, which is the substrate's ordinary treatment of a kind no
-// reducer claims (`MessageReducer::is_foldable` answers `false` and `fold` is never reached).
+// reducer claims (`MessageReducer::is_foldable` answers `false` and `changes` is never reached).
 
 // Op types.
 pub const OP_POST: &str = "post"; // message

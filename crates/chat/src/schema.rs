@@ -80,6 +80,9 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE TABLE IF NOT EXISTS threads(
              thread_id  TEXT PRIMARY KEY,
              origin     TEXT, channel_id TEXT, opener TEXT, created TEXT, parent TEXT,
+             -- The version of the root above (6j6v.vvw6, schema v8): the coordinate of the open op
+             -- it came from, so two opens of one id resolve by the lowest, not by arrival.
+             root_v INTEGER, root_site INTEGER,
              expects_reply_from TEXT,
              expects_reply_from_v INTEGER DEFAULT 0, expects_reply_from_site INTEGER DEFAULT 0,
              deadline TEXT, deadline_v INTEGER DEFAULT 0, deadline_site INTEGER DEFAULT 0,

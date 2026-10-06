@@ -9,6 +9,7 @@
 //! product (flow/memory/chat) builds on this; the foundation knows op-log mechanics, the reducer +
 //! handle seams and the contracts every product shares, never any product's vocabulary.
 
+pub mod change;
 pub mod engine;
 pub mod error;
 pub mod image;

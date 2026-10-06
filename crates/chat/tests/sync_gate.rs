@@ -537,7 +537,7 @@ fn a_malformed_message_op_pulled_through_the_engine_is_stored_not_folded() {
 
     // Seed the relay directly with a `message` op carrying a garbage envelope — a newer or buggy
     // peer (site 9) could author exactly this. The op shape is otherwise well-formed, so the message
-    // reducer WILL attempt it and must reject at `is_foldable`, not at (infallible) `fold`.
+    // reducer WILL attempt it and must reject at `is_foldable`, not at (infallible) `changes`.
     let bad = WireOp {
         envelope_version: ENVELOPE_VERSION,
         op_id: "01KXBAD0000000000000000000".into(),

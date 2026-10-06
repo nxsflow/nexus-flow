@@ -32,7 +32,17 @@ use rusqlite::{Connection, OptionalExtension};
 /// honest verdict on a row an older binary writes without knowing the column). Beside them the
 /// local trust list (`trusted_keys`) and the one definition of "an action may follow this op"
 /// (`acting_ops`). Additive, every new column NULLable or DEFAULTed, so the floor stays at 4.
-pub const SCHEMA_VERSION: i64 = 7;
+///
+/// v8 (6j6v.vvw6) takes the op log out of the views' reads. flow's OR-set adds carry their add op's
+/// coordinate (`edge_adds`/`thread_link_adds`.`lamport`, `site`), so `present_parent` and
+/// `present_thread_links` stop joining `ops` and are redefined over those columns; a note carries
+/// its add op's coordinate and `wall_clock` (`notes.lamport`, `site`, `created_at`); chat's thread
+/// root gets the version its register compares on (`threads.root_v`, `root_site`); and
+/// `view_watermarks` records the fold revision (`fold_revision`, `revision_through`, 6j6v.y3r4).
+/// Every new column is NULLable or DEFAULTed and the two views answer what they answered before,
+/// so the floor stays at 4. A row an older binary adds without the coordinate is filled the next
+/// time this one opens the file — see `Store::refold_if_behind`.
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The lowest schema version a peer must speak to safely touch a DB this binary writes — the
 /// **compatibility floor** (spec §4.3). Persisted into the DB header (`PRAGMA application_id`,
@@ -300,6 +310,46 @@ fn migrate_locked(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if from < 8 {
+        // v7 -> v8 (6j6v.vvw6): see `SCHEMA_VERSION`. Each column only where its table exists and
+        // the column does not (the product creates the table with it on a fresh db, after this
+        // runs). The two redefined views are the product's to replace, on every open — see flow's
+        // `ensure_view`.
+        for (table, column, ddl) in [
+            (
+                "view_watermarks",
+                "fold_revision",
+                "ALTER TABLE view_watermarks ADD COLUMN fold_revision INTEGER NOT NULL DEFAULT 0;",
+            ),
+            (
+                "view_watermarks",
+                "revision_through",
+                "ALTER TABLE view_watermarks ADD COLUMN revision_through INTEGER NOT NULL DEFAULT 0;",
+            ),
+            ("edge_adds", "lamport", "ALTER TABLE edge_adds ADD COLUMN lamport INTEGER;"),
+            ("edge_adds", "site", "ALTER TABLE edge_adds ADD COLUMN site INTEGER;"),
+            (
+                "thread_link_adds",
+                "lamport",
+                "ALTER TABLE thread_link_adds ADD COLUMN lamport INTEGER;",
+            ),
+            (
+                "thread_link_adds",
+                "site",
+                "ALTER TABLE thread_link_adds ADD COLUMN site INTEGER;",
+            ),
+            ("notes", "lamport", "ALTER TABLE notes ADD COLUMN lamport INTEGER;"),
+            ("notes", "site", "ALTER TABLE notes ADD COLUMN site INTEGER;"),
+            ("notes", "created_at", "ALTER TABLE notes ADD COLUMN created_at TEXT;"),
+            ("threads", "root_v", "ALTER TABLE threads ADD COLUMN root_v INTEGER;"),
+            ("threads", "root_site", "ALTER TABLE threads ADD COLUMN root_site INTEGER;"),
+        ] {
+            if table_exists(conn, table)? && !column_exists(conn, table, column)? {
+                conn.execute_batch(ddl)?;
+            }
+        }
+    }
+
     // The signing schema's view and index (6j6v.pzkb). Not version-gated, for the index's reason
     // below: both are invisible to an older binary, and both are re-attempted on every open.
     crate::trust::ensure_acting_ops(conn)?;
@@ -374,7 +424,7 @@ fn index_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
 ///    across sites a Lamport number says nothing (that is what Lamport clocks are for), but the
 ///    same number twice from the SAME stamp is something a correct implementation cannot produce.
 ///    A collision is therefore not bad luck but *proof* that a process wrote with a stale clock —
-///    and `fold_lww`'s keep-if-beats (strict `>`) would swallow the second write in silence. With
+///    and a register's keep-if-beats (strict `>`) would swallow the second write in silence. With
 ///    the index the log refuses the coordinate instead of the fold discarding the value.
 /// 2. **It pays for the refresh.** `lamport` leads the index, so the `MAX(lamport)` that
 ///    [`Store::emit`](crate::store::Store::emit) now reads before every local op is an index
@@ -544,9 +594,15 @@ pub fn try_apply(conn: &Connection) -> rusqlite::Result<()> {
          -- by store id because flow (`task`) and memory (`fact`) fold the SAME log into different
          -- views and advance independently. Additive baseline DDL (CREATE IF NOT EXISTS, like
          -- `ops`): an older binary simply never reads it, so no version-spine step / floor change.
+         --
+         -- `fold_revision` / `revision_through` (6j6v.y3r4, schema v8): the fold revision the views
+         -- were folded at, and how far a binary AT that revision has folded. An older binary
+         -- advances `folded_through` alone, which is how a newer one finds what it folded.
          CREATE TABLE IF NOT EXISTS view_watermarks(
              store_id TEXT PRIMARY KEY,
-             folded_through INTEGER NOT NULL DEFAULT 0
+             folded_through INTEGER NOT NULL DEFAULT 0,
+             fold_revision INTEGER NOT NULL DEFAULT 0,
+             revision_through INTEGER NOT NULL DEFAULT 0
          );",
     )?;
     conn.execute_batch(crate::trust::TRUST_TABLES)
@@ -652,12 +708,13 @@ mod tests {
             SCHEMA_VERSION,
             "version brought current"
         );
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(SCHEMA_VERSION, 8);
         assert_eq!(
             MIN_COMPATIBLE_SCHEMA_VERSION, 4,
             "the v4 breaking migration (parenthood → OR-set parent edge) raised the floor; the \
              additive v5 step (memory's classification + order), the additive v6 step (its \
-             written introduction) and the additive v7 step (the signed log) left it exactly there"
+             written introduction), the additive v7 step (the signed log) and the additive v8 step \
+             (the log-free views) left it exactly there"
         );
         let cols = columns(&conn, "items");
         for expected in [
@@ -716,7 +773,7 @@ mod tests {
             SCHEMA_VERSION,
             "version brought current (the v2→v3 closed_at ALTER + the v4 breaking step)"
         );
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(SCHEMA_VERSION, 8);
         assert_eq!(
             MIN_COMPATIBLE_SCHEMA_VERSION, 4,
             "the v4 breaking migration raised the floor; the additive v5, v6 and v7 steps left it there"

@@ -246,7 +246,7 @@ impl Store {
     /// this platform ships in: several agents in one workspace, a long-lived `Engine` handle beside
     /// short-lived `nxc`/`nxf` subprocesses, all on one `.nxs/db.sqlite` in WAL mode precisely so
     /// they can. Two such writers seeded at the same value mint the SAME `(lamport, site)` — same
-    /// device, so the same site — and `fold_lww`'s keep-if-beats (strict `>`) then drops the second
+    /// device, so the same site — and a register's keep-if-beats (strict `>`) then drops the second
     /// one without a word: exit 0, no error, the board still showing the old value.
     ///
     /// So the clock is refreshed **at emit** rather than only at open. That closes the same-replica
@@ -503,7 +503,7 @@ impl Store {
         // no reducer, or whose shape that reducer cannot fold, is stored-not-folded (§7).
         let folded = match self.folder_for(op) {
             Some(r) => {
-                r.fold(&self.conn, op);
+                fold(&self.conn, r, op);
                 true
             }
             None => false,
@@ -711,14 +711,87 @@ impl Store {
     /// already-folded op is a no-op. After an upgrade that understands an op shape previously
     /// stored-but-skipped, this materializes those ops. The views are a pure fold of the log.
     pub fn refold(&mut self) {
-        let ops = self.export();
         self.conn.execute_batch("BEGIN").unwrap();
-        for op in &ops {
+        self.fold_whole_log();
+        self.conn.execute_batch("COMMIT").unwrap();
+    }
+
+    /// Fold every foldable op of the log, inside the caller's transaction.
+    fn fold_whole_log(&self) {
+        for op in &self.export() {
             if let Some(r) = self.folder_for(op) {
-                r.fold(&self.conn, op);
+                fold(&self.conn, r, op);
             }
         }
+    }
+
+    /// The fold revision of this store's reducers (6j6v.y3r4) — their [`Reducer::fold_revision`]s
+    /// added up. A product store registers one reducer, so this is that reducer's revision; the sum
+    /// only keeps a store with several from mistaking one reducer's bump for none.
+    pub fn fold_revision(&self) -> i64 {
+        self.reducers.iter().map(|r| r.fold_revision()).sum()
+    }
+
+    /// What `view_watermarks` records for `store_id` beside `folded_through`: the fold revision the
+    /// views were folded at, and how far a binary AT that revision has folded (`(0, 0)` when there
+    /// is no row). An older binary writing the same file advances `folded_through` only — it does
+    /// not know the other two — so `revision_through` falling behind is how its writes are found.
+    fn recorded_revision(&self, store_id: &str) -> (i64, i64) {
+        self.conn
+            .query_row(
+                "SELECT fold_revision, revision_through FROM view_watermarks WHERE store_id = ?1",
+                params![store_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or((0, 0))
+    }
+
+    /// Bind this store to `store_id` and rebuild its views — clear them and fold the whole log
+    /// again — when this binary's fold revision (6j6v.y3r4) cannot vouch for them:
+    ///
+    /// - they were folded at an OLDER revision than its reducers', or
+    /// - they are at its revision, but ops were taken in since that this revision did not fold
+    ///   (`revision_through` behind the log): an older binary folding into the same file advances
+    ///   `folded_through` and nothing else, and what it wrote is its own rule's answer.
+    ///
+    /// A REBUILD, not a refold: a refold folds over the views as they stand, and a row a different
+    /// rule resolved (or a column an older fold never filled) is not corrected by folding the same
+    /// ops over it again. Decided again under the write lock, so two processes opening one file do
+    /// not both rebuild. A store at an older revision than the file's leaves it alone — the newer
+    /// binary catches up after it. Returns whether it rebuilt.
+    fn bind_views(&mut self, store_id: &str) -> bool {
+        self.views_key = Some(store_id.to_string());
+        let ours = self.fold_revision();
+        let needs_rebuild = |s: &Self| {
+            let (recorded, revision_through) = s.recorded_revision(store_id);
+            recorded < ours || (recorded == ours && revision_through < s.max_op_rowid())
+        };
+        if !needs_rebuild(self) {
+            return false;
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let rebuilt = needs_rebuild(self);
+        if rebuilt {
+            for reducer in &self.reducers {
+                reducer.clear_views(&self.conn);
+            }
+            self.fold_whole_log();
+            let boundary = self.max_op_rowid();
+            self.conn
+                .execute(
+                    "INSERT INTO view_watermarks(store_id, folded_through, fold_revision, revision_through)
+                     VALUES(?1, ?2, ?3, ?2)
+                     ON CONFLICT(store_id) DO UPDATE SET folded_through = excluded.folded_through,
+                         fold_revision = excluded.fold_revision,
+                         revision_through = excluded.revision_through",
+                    params![store_id, boundary, ours],
+                )
+                .unwrap();
+        }
         self.conn.execute_batch("COMMIT").unwrap();
+        rebuilt
     }
 
     /// The highest `ops.rowid` the `store_id` product store has folded into its views (0 if it has
@@ -743,14 +816,22 @@ impl Store {
 
     /// Raise the bound store's folded-through watermark to `rowid` (monotonic: never lowers it).
     /// A no-op for a raw substrate store, which binds no `views_key`.
+    ///
+    /// `revision_through` moves with it only while the recorded fold revision is this binary's own
+    /// (6j6v.y3r4): a binary of another revision folding here is exactly what that mark exists to
+    /// notice, so it must not be the one to move it.
     fn advance_watermark(&self, rowid: i64) {
         if let Some(key) = &self.views_key {
             self.conn
                 .execute(
-                    "INSERT INTO view_watermarks(store_id, folded_through) VALUES(?1, ?2)
-                     ON CONFLICT(store_id)
-                       DO UPDATE SET folded_through = MAX(folded_through, excluded.folded_through)",
-                    params![key, rowid],
+                    "INSERT INTO view_watermarks(store_id, folded_through, fold_revision, revision_through)
+                     VALUES(?1, ?2, ?3, ?2)
+                     ON CONFLICT(store_id) DO UPDATE SET
+                         folded_through = MAX(folded_through, excluded.folded_through),
+                         revision_through = CASE WHEN fold_revision = excluded.fold_revision
+                             THEN MAX(revision_through, excluded.revision_through)
+                             ELSE revision_through END",
+                    params![key, rowid, self.fold_revision()],
                 )
                 .unwrap();
         }
@@ -763,8 +844,14 @@ impl Store {
     /// refold). Idempotent: the fold is keep-if-beats, so a refold can never change the converged
     /// value (guarded by the differential oracle). The product store calls this right after
     /// registering its reducer.
+    ///
+    /// First (6j6v.y3r4) the views are rebuilt when this binary's fold revision cannot vouch for
+    /// them — see [`bind_views`](Self::bind_views); a rebuild folds the whole log, so nothing is
+    /// left to catch up after it.
     pub fn refold_if_behind(&mut self, store_id: &str) {
-        self.views_key = Some(store_id.to_string());
+        if self.bind_views(store_id) {
+            return;
+        }
         let boundary = self.max_op_rowid();
         if boundary > self.folded_through(store_id) {
             self.refold();
@@ -801,6 +888,7 @@ impl Store {
             ops,
             views_of: self.views_key.clone().filter(|_| !views.is_empty()),
             folded_through,
+            fold_revision: self.fold_revision(),
             views,
         })
     }
@@ -858,6 +946,10 @@ impl Store {
         } else if image.schema_version != schema::SCHEMA_VERSION {
             Err(RefoldReason::OtherSchema {
                 written_at: image.schema_version,
+            })
+        } else if image.fold_revision != self.fold_revision() {
+            Err(RefoldReason::OtherRevision {
+                written_at: image.fold_revision,
             })
         } else if image.views_of != self.views_key
             || theirs != ours
@@ -942,10 +1034,15 @@ impl Store {
                 image::insert_view(&self.conn, &table.name, table)?;
             }
             if let Some(key) = &self.views_key {
+                // Taken only at this store's own fold revision (see `load_image`), so they are
+                // recorded at it — and as folded by it, through where their source had folded.
                 self.conn.execute(
-                    "INSERT INTO view_watermarks(store_id, folded_through) VALUES(?1, ?2)
-                     ON CONFLICT(store_id) DO UPDATE SET folded_through = excluded.folded_through",
-                    params![key, image.folded_through],
+                    "INSERT INTO view_watermarks(store_id, folded_through, fold_revision, revision_through)
+                     VALUES(?1, ?2, ?3, ?2)
+                     ON CONFLICT(store_id) DO UPDATE SET folded_through = excluded.folded_through,
+                         fold_revision = excluded.fold_revision,
+                         revision_through = excluded.revision_through",
+                    params![key, image.folded_through, self.fold_revision()],
                 )?;
             }
         }
@@ -982,10 +1079,19 @@ impl Store {
     /// added a column), so steady-state reopens still take the O(1) [`refold_if_behind`] path.
     /// Idempotent: the fold is keep-if-beats, so forcing a refold never changes a converged value.
     pub fn force_refold(&mut self, store_id: &str) {
-        self.views_key = Some(store_id.to_string());
+        if self.bind_views(store_id) {
+            return;
+        }
         self.refold();
         self.advance_watermark(self.max_op_rowid());
     }
+}
+
+/// Fold `op` through `reducer`: its [described changes](crate::change), carried out by the SQLite
+/// applier inside the caller's transaction. A failure here is a broken view schema, never a bad op
+/// (an op the reducer cannot fold never reaches it), so it panics like every other fold statement.
+fn fold(conn: &Connection, reducer: &dyn Reducer, op: &Op) {
+    crate::change::apply_sqlite(conn, &reducer.changes(op)).unwrap();
 }
 
 /// The first Lamport number at or above `taken` that no op on `site` holds, given that `taken` is
@@ -1108,16 +1214,41 @@ mod tests {
         fn is_foldable(&self, op: &Op) -> bool {
             op.target_kind == "demo"
         }
-        fn fold(&self, conn: &Connection, op: &Op) {
-            conn.execute_batch("CREATE TABLE IF NOT EXISTS demo(id TEXT PRIMARY KEY)")
-                .unwrap();
-            conn.execute("INSERT OR IGNORE INTO demo(id) VALUES(?1)", [&op.target_id])
-                .unwrap();
+        fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
             self.folds.fetch_add(1, Ordering::SeqCst);
+            vec![crate::change::Change::put(
+                "demo",
+                crate::change::cells([("id", op.target_id.as_str().into())]),
+                Vec::new(),
+            )]
         }
         fn clear_views(&self, conn: &Connection) {
-            conn.execute_batch("DROP TABLE IF EXISTS demo").unwrap();
+            conn.execute_batch("DELETE FROM demo").unwrap();
         }
+    }
+
+    /// The demo reducer's one view. A reducer only describes changes, so the table it folds into
+    /// exists before the first op does — as every product's views do.
+    fn demo_table(s: &Store) {
+        s.connection()
+            .execute_batch("CREATE TABLE IF NOT EXISTS demo(id TEXT PRIMARY KEY)")
+            .unwrap();
+    }
+
+    /// The tally reducer's register: one LWW value per id.
+    fn tally_change(op: &Op) -> crate::change::Change {
+        use crate::change::{cells, Change, Version, Wins};
+        Change::register(
+            "tally",
+            cells([("id", op.target_id.as_str().into())]),
+            cells([("v", op.value.clone().into())]),
+            ("v_l", "v_s"),
+            Version {
+                lamport: op.lamport,
+                site: op.site,
+            },
+            Wins::Higher,
+        )
     }
 
     fn demo_op(op_id: &str, kind: &str, domain: &str) -> Op {
@@ -1202,6 +1333,7 @@ mod tests {
     fn dispatches_fold_to_the_reducer_registered_for_the_op_domain() {
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1224,6 +1356,7 @@ mod tests {
     fn emit_appends_a_local_op_and_advances_the_clock() {
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1237,6 +1370,7 @@ mod tests {
         // Invariant 1 (6j6v.xsf3): attribution is stamped at append, so it is readable off the
         // log itself — the property the E4 auth slice authenticates and the audit trail rests on.
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1252,6 +1386,7 @@ mod tests {
         // Invariant 1 (6j6v.xsf3): an unattributed op is unrepairable — the log is append-only,
         // so there is no later write that can say who did this. Fail at the append instead.
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1294,6 +1429,7 @@ mod tests {
     #[test]
     fn data_version_is_stable_across_own_commits() {
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1313,6 +1449,7 @@ mod tests {
         op.lamport = 42;
         s.apply(std::slice::from_ref(&op));
         // A subsequent local op must beat the merged-in lamport.
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1332,6 +1469,7 @@ mod tests {
     fn a_foreign_op_past_the_lamport_bound_is_kept_but_neither_folds_nor_moves_the_clock() {
         let folds = Arc::new(AtomicUsize::new(0));
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1581,6 +1719,7 @@ mod tests {
         let path = path.to_str().unwrap();
         {
             let mut s = Store::open(path, 1).unwrap();
+            demo_table(&s);
             s.register_reducer(Box::new(DemoReducer {
                 folds: Arc::new(AtomicUsize::new(0)),
             }));
@@ -1591,6 +1730,7 @@ mod tests {
         }
         let mut s = Store::open(path, 1).unwrap();
         assert_eq!(s.clock(), 1, "the seed at open skips it");
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1659,6 +1799,7 @@ mod tests {
         // folded-through watermark sits behind the log's max rowid, so the open detects it.
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1710,6 +1851,7 @@ mod tests {
 
         // Phase 2 — "upgraded binary": the reducer now understands the shape.
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1739,6 +1881,7 @@ mod tests {
         // the log, carried over the sync wire, and a row in nobody's view.
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1768,6 +1911,7 @@ mod tests {
         // of `emit`'s own assert, and it is what makes the "materializes nothing" claim above a
         // guarantee rather than a coincidence of today's `is_foldable`.
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1789,6 +1933,7 @@ mod tests {
         // "otherwise reads stay O(1)": a re-open with no new ops must NOT refold.
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1811,6 +1956,7 @@ mod tests {
         // progress, so a store that is caught up must not stop a sibling store from refolding.
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1848,6 +1994,7 @@ mod tests {
         // current (the single-device path stays O(1), no refold).
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1879,6 +2026,7 @@ mod tests {
         // later flow open does not refold what it already folded on the pull.
         let mut s = Store::open_in_memory(1);
         let folds = Arc::new(AtomicUsize::new(0));
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
@@ -1939,6 +2087,7 @@ mod tests {
         let marker = tmp.path().join("last-write");
         {
             let mut s = Store::open(db.to_str().unwrap(), 1).unwrap();
+            demo_table(&s);
             s.register_reducer(Box::new(DemoReducer {
                 folds: Arc::new(AtomicUsize::new(0)),
             }));
@@ -1957,6 +2106,7 @@ mod tests {
         let marker = tmp.path().join("last-write");
         {
             let mut s = Store::open(db.to_str().unwrap(), 1).unwrap();
+            demo_table(&s);
             s.register_reducer(Box::new(DemoReducer {
                 folds: Arc::new(AtomicUsize::new(0)),
             }));
@@ -1968,6 +2118,7 @@ mod tests {
     #[test]
     fn an_in_memory_store_has_no_marker_to_touch() {
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1994,6 +2145,7 @@ mod tests {
 
         {
             let mut s = Store::open(db.to_str().unwrap(), 1).unwrap();
+            demo_table(&s);
             s.register_reducer(Box::new(DemoReducer {
                 folds: Arc::new(AtomicUsize::new(0)),
             }));
@@ -2026,6 +2178,7 @@ mod tests {
 
         let folds = Arc::new(AtomicUsize::new(0));
         let mut long_lived = Store::open(path, 7).unwrap();
+        demo_table(&long_lived);
         long_lived.register_reducer(Box::new(DemoReducer {
             folds: Arc::clone(&folds),
         }));
@@ -2036,6 +2189,7 @@ mod tests {
         // has beside a long-lived `Engine`. It writes three ops the long-lived handle never sees.
         {
             let mut sibling = Store::open(path, 7).unwrap();
+            demo_table(&sibling);
             sibling.register_reducer(Box::new(DemoReducer {
                 folds: Arc::clone(&folds),
             }));
@@ -2065,6 +2219,7 @@ mod tests {
     #[test]
     fn a_foreign_op_on_a_taken_coordinate_is_refused_and_reported() {
         let mut s = Store::open_in_memory(1);
+        demo_table(&s);
         s.register_reducer(Box::new(DemoReducer {
             folds: Arc::new(AtomicUsize::new(0)),
         }));
@@ -2204,15 +2359,9 @@ mod tests {
         fn is_foldable(&self, op: &Op) -> bool {
             op.target_kind == "tally"
         }
-        fn fold(&self, conn: &Connection, op: &Op) {
-            conn.execute(
-                "INSERT INTO tally(id, v, v_l, v_s) VALUES(?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET v=excluded.v, v_l=excluded.v_l, v_s=excluded.v_s
-                 WHERE (excluded.v_l, excluded.v_s) > (v_l, v_s)",
-                params![op.target_id, op.value, op.lamport, op.site],
-            )
-            .unwrap();
+        fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
             self.folds.fetch_add(1, Ordering::SeqCst);
+            vec![tally_change(op)]
         }
         fn view_tables(&self) -> &'static [&'static str] {
             &["tally"]
@@ -2668,5 +2817,137 @@ mod tests {
         );
         assert_eq!(dst.export(), src.export(), "the log went in whole");
         assert_eq!(tally_rows(&dst), tally_rows(&src));
+    }
+
+    // ---- fold revision (6j6v.y3r4) -------------------------------------------------------------
+
+    /// A register whose fold RULE depends on its revision: revision 0 stores the value as written,
+    /// revision 1 in capitals. Two builds of one reducer, as two binaries on one file would be.
+    struct Revised(i64);
+    impl Reducer for Revised {
+        fn domain(&self) -> &'static str {
+            "tally"
+        }
+        fn is_foldable(&self, op: &Op) -> bool {
+            op.target_kind == "tally"
+        }
+        fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
+            let mut change = tally_change(op);
+            if self.0 > 0 {
+                if let crate::change::Effect::Register { cells, .. } = &mut change.effect {
+                    cells[0].1 = op.value.as_deref().map(str::to_uppercase).into();
+                }
+            }
+            vec![change]
+        }
+        fn fold_revision(&self) -> i64 {
+            self.0
+        }
+        fn view_tables(&self) -> &'static [&'static str] {
+            &["tally"]
+        }
+    }
+
+    fn revised_store(path: &str, revision: i64) -> Store {
+        let mut s = Store::open(path, 1).unwrap();
+        s.connection()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        s.register_reducer(Box::new(Revised(revision)));
+        s.refold_if_behind("tally");
+        s
+    }
+
+    fn tally_value(s: &Store, id: &str) -> Option<String> {
+        s.connection()
+            .query_row("SELECT v FROM tally WHERE id=?1", [id], |r| r.get(0))
+            .optional()
+            .unwrap()
+            .flatten()
+    }
+
+    #[test]
+    fn a_store_at_a_newer_fold_revision_rebuilds_its_views_once_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        {
+            let mut old = revised_store(path, 0);
+            old.emit("tally", "tally", "a", "v", "set", Some("low".into()), "u");
+            assert_eq!(tally_value(&old, "a").as_deref(), Some("low"));
+        }
+        // A refold would NOT do this: the stored version equals the op's, so keep-if-beats leaves
+        // the row as the old rule wrote it. Only clearing the view first gives the new rule a say.
+        let new = revised_store(path, 1);
+        assert_eq!(tally_value(&new, "a").as_deref(), Some("LOW"));
+        assert_eq!(new.recorded_revision("tally"), (1, new.max_op_rowid()));
+    }
+
+    #[test]
+    fn an_older_binary_writing_after_a_newer_one_is_caught_up_by_the_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        drop(revised_store(path, 1));
+        {
+            // The older binary folds by its own rule and advances only what it knows about —
+            // here the watermark it shares with every revision; the revision's mark stays put.
+            let mut old = revised_store(path, 0);
+            old.emit("tally", "tally", "b", "v", "set", Some("late".into()), "u");
+            assert_eq!(tally_value(&old, "b").as_deref(), Some("late"));
+            assert_eq!(
+                old.recorded_revision("tally"),
+                (1, 0),
+                "the older binary moved neither"
+            );
+        }
+        let new = revised_store(path, 1);
+        assert_eq!(tally_value(&new, "b").as_deref(), Some("LATE"));
+    }
+
+    #[test]
+    fn a_caught_up_store_at_its_own_revision_does_not_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        {
+            let mut s = revised_store(path, 1);
+            s.emit("tally", "tally", "a", "v", "set", Some("x".into()), "u");
+        }
+        // Planted where only a rebuild would remove it: an open that rebuilds clears it.
+        {
+            let s = Store::open(path, 1).unwrap();
+            s.connection()
+                .execute(
+                    "INSERT INTO tally(id, v, v_l, v_s) VALUES('marker', 'm', 0, 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let s = revised_store(path, 1);
+        assert_eq!(
+            tally_value(&s, "marker").as_deref(),
+            Some("m"),
+            "no rebuild"
+        );
+        assert_eq!(tally_value(&s, "a").as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn an_image_folded_at_another_revision_is_folded_again() {
+        let (mut src, _) = tally_store(1);
+        src.emit("tally", "tally", "a", "v", "set", Some("x".into()), "u");
+        let mut image = src.image().unwrap();
+        assert_eq!(image.fold_revision, 0);
+        image.fold_revision = 3;
+        let (mut dst, _) = tally_store(2);
+        assert_eq!(
+            dst.load_image(&image).unwrap(),
+            crate::image::Loaded::Refolded(crate::image::RefoldReason::OtherRevision {
+                written_at: 3
+            })
+        );
     }
 }

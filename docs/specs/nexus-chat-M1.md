@@ -158,7 +158,13 @@ VALUES (…parsed from the envelope…);
 ```
 
 Idempotency is double-guarded: the substrate already unions the log on `op_id` (a re-delivered op is
-`AlreadySeen`), and `message_id` is the `messages` PK (`INSERT OR IGNORE`). The envelope JSON is
+`AlreadySeen`), and `message_id` is the `messages` PK (`INSERT OR IGNORE`).
+
+> **Superseded 2026-10-06 (`6j6v.vvw6`).** The `INSERT OR IGNORE` above let the first op to
+> *arrive* keep a message id two ops claim — the one fold that depended on delivery order. The
+> reducer now describes the message as a register on `(lamport, site)` where the **lowest** wins
+> (`Wins::Lower`, `crates/foundation/src/change.rs`), so every replica keeps the same message. A
+> thread's root (§3.5) resolves the same way, on its own `root_v`/`root_site`. The envelope JSON is
 opaque to the foundation — only the message reducer parses it.
 
 **Envelope validity is enforced in `is_foldable`, not `fold`** (§3): a `message`/`post` op is foldable

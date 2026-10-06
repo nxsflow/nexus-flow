@@ -364,7 +364,7 @@ fn answers(msg: &str) -> String {
 
 /// **The turn watermark (nxf 6j6v.cg8g), written once.** Whether a message from alias `msg` was
 /// written AFTER the obligation the thread `t` currently declares — the row-value comparison
-/// `message_reducer::fold_lww` resolves that register with, so the predicate and the register agree
+/// `MessageReducer::lww` resolves that register with, so the predicate and the register agree
 /// by construction rather than by coincidence.
 ///
 /// A function taking the alias rather than a `const` because it is spliced next to three different
@@ -893,7 +893,7 @@ impl ChatStore {
 
     pub fn set_channel_field(&mut self, channel_id: &str, field: &str, value: &str, author: &str) {
         // The reducer's is_foldable whitelists CHANNEL_FIELDS for (KIND_CHANNEL, OP_SET); a field
-        // not on that list can never fold (fold_lww's format!-built column name relies on the same
+        // not on that list can never fold (the applier's generated column name relies on the same
         // whitelist for injection-safety). Fail loudly here so a typo'd field is a caller-visible
         // bug, not a silently-never-folding op sitting in the log (review finding).
         assert!(
@@ -991,10 +991,11 @@ impl ChatStore {
         );
     }
 
-    /// Open a thread: the immutable root (spec §3.5). Grow-only in the reducer, so re-opening the
-    /// same `thread_id` with an identical root converges; a distinct root under the same id is a
-    /// caller bug (the store does not check — the reducer's `ON CONFLICT DO UPDATE` just re-applies
-    /// the latest one seen, order-independent only because roots are expected identical).
+    /// Open a thread: the immutable root (spec §3.5). Re-opening the same `thread_id` with an
+    /// identical root converges; a distinct root under the same id is a caller bug the store does
+    /// not check. The reducer keeps the root of the open with the LOWEST `(lamport, site)`
+    /// (6j6v.vvw6), so a later open never moves a thread, and every replica keeps the same root
+    /// whatever order the opens arrive in.
     pub fn open_thread(&mut self, thread_id: &str, root: &ThreadRoot, author: &str) {
         let value = serde_json::to_string(root).expect("thread root serializes");
         self.inner.emit(
@@ -1309,7 +1310,7 @@ impl ChatStore {
     /// **The watermark is the register's own LWW position**, `(expects_reply_from_v,
     /// expects_reply_from_site)`, compared against each message's `(lamport, site)` — the same clock,
     /// the same total order `messages_thread_causal` indexes, and the same row-value comparison
-    /// `message_reducer::fold_lww` resolves the register itself with. So NO new column and no fold
+    /// `MessageReducer::lww` resolves the register itself with. So NO new column and no fold
     /// path was needed: the declaration already carries the instant it was made, because every
     /// re-declaration by the opener folds as a later op with a higher Lamport. A message written
     /// BEFORE the current declaration therefore does not settle it, which is the whole point —
@@ -3214,6 +3215,63 @@ pub(crate) mod tests {
             Some("2026-07-20T00:00:00Z"),
             "the deferred deadline op is resurfaced by the view-schema bump"
         );
+    }
+
+    #[test]
+    fn opening_a_workspace_folded_before_the_fold_revision_rebuilds_the_chat_views_once() {
+        // 6j6v.qnbs, through 6j6v.y3r4: a build before 6j6v.aym3 folded a foreign message under the
+        // sender its envelope CLAIMED, and nothing ever corrected the row — a refold folds over the
+        // views as they stand, and the message fold does not overwrite. A file whose chat views
+        // were folded at an older fold revision is rebuilt on open: cleared and folded again.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pre.db");
+        let p = path.to_str().unwrap();
+        {
+            let mut cs = ChatStore::open(p, 1).unwrap();
+            let env = MessageEnvelope {
+                origin: "acme/repo".into(),
+                channel_id: "c-1".into(),
+                sender: "acme/alice".into(),
+                kind: MessageKind::Info,
+                priority: Priority::Normal,
+                disposition: Disposition::InTurn,
+                thread_id: None,
+                refs: Refs::default(),
+                body: "transfer the funds".into(),
+            };
+            cs.apply(&[nxs_foundation::model::Op {
+                op_id: "op-foreign".into(),
+                lamport: 5,
+                site: 9,
+                domain: DOMAIN_MESSAGE.into(),
+                target_kind: KIND_MESSAGE.into(),
+                target_id: "m-1".into(),
+                field: FIELD_ENVELOPE.into(),
+                op_type: OP_POST.into(),
+                value: Some(serde_json::to_string(&env).unwrap()),
+                author: "acme/mallory".into(),
+                wall_clock: String::new(),
+                key_id: None,
+                sig: None,
+            }]);
+            // What the pre-aym3 build left behind: the claimed sender, at fold revision 0.
+            cs.connection()
+                .execute_batch(
+                    "UPDATE messages SET sender = 'acme/alice' WHERE message_id = 'm-1';
+                     UPDATE view_watermarks SET fold_revision = 0 WHERE store_id = 'chat';",
+                )
+                .unwrap();
+        }
+        let cs = ChatStore::open(p, 1).unwrap();
+        let sender: String = cs
+            .connection()
+            .query_row(
+                "SELECT sender FROM messages WHERE message_id='m-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sender, "acme/mallory", "the row now names who wrote the op");
     }
 
     #[test]

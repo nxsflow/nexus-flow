@@ -4,9 +4,9 @@
 //! membership, grow-only+LWW threads. Stateless unit struct.
 
 use crate::model::*;
+use nxs_foundation::change::{cells, Change, Version, Wins};
 use nxs_foundation::model::Op;
 use nxs_foundation::reducer::Reducer;
-use rusqlite::{params, Connection};
 
 /// nexus-chat's reducer over the `message` domain.
 pub struct MessageReducer;
@@ -29,7 +29,7 @@ impl MessageReducer {
 
     /// A `message`/`post` op is foldable only if its `value` parses as a complete [`MessageEnvelope`]
     /// (all required fields present, enums in range). This is where ALL message validation lives —
-    /// `fold` is infallible, so a bad envelope must be rejected here and deferred store-don't-fold
+    /// `changes` is infallible, so a bad envelope must be rejected here and deferred store-don't-fold
     /// (spec §3.1). Unknown extra envelope fields are ignored by serde (forward-compat).
     fn valid_envelope(op: &Op) -> bool {
         op.value
@@ -38,10 +38,11 @@ impl MessageReducer {
             .unwrap_or(false)
     }
 
-    fn fold_message(conn: &Connection, op: &Op) {
+    fn message(op: &Op) -> Change {
         // is_foldable guaranteed the parse; `message_id`/`created` come from the op, not the payload.
         let env: MessageEnvelope = serde_json::from_str(op.value.as_deref().unwrap()).unwrap();
         let refs = serde_json::to_string(&env.refs).unwrap();
+        let token = |v: serde_json::Value| v.as_str().unwrap().to_string();
         // `sender` is `op.author`, NOT the envelope's own `sender` (6j6v.aym3). The two agree on
         // every locally written op — `ChatStore::post_message` stamps the author FROM the envelope
         // — but on a foreign op nothing reconciles them, and `apply` may not reject one (§7). Once
@@ -53,108 +54,111 @@ impl MessageReducer {
         // all, so dropping it would make new messages invisible across a mixed version stand — it
         // simply has no authority any more.
         //
-        // FORWARD-ONLY, deliberately (PR #314 review, Code Quality #1 — tracked as 6j6v.q2vd). A
-        // row a PRE-FIX build already folded from a foreign op still holds that op's CLAIMED
-        // sender, and nothing here corrects it: `ChatStore::open` only forces a refold on a
-        // chat-view schema change, and a refold would not help anyway — `refold` folds over the
-        // EXISTING views (it does not clear them), so the `INSERT OR IGNORE` below no-ops on a row
-        // that is already there. Correcting those rows needs a genuine rebuild (clear + refold),
-        // which is its own decision: it would also re-resolve grow-only "first write wins" from
-        // arrival order to `(lamport, site)` order, and that belongs in a change that is about
-        // exactly that. What it must NOT become is an upsert here — a second op reusing a
-        // message_id would then re-attribute an existing message to whoever wrote it last, which
-        // is a re-attribution vector this fold has never had (see the grow-only test
-        // `a_distinct_op_reusing_a_message_id_is_ignored_grow_only`).
-        conn.execute(
-            "INSERT OR IGNORE INTO messages(message_id, origin, channel_id, sender, kind, priority,
-                 disposition, thread_id, refs, body, created, lamport, site)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            params![
-                op.target_id,
-                env.origin,
-                env.channel_id,
-                op.author,
-                serde_json::to_value(env.kind).unwrap().as_str().unwrap(),
-                serde_json::to_value(env.priority)
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                serde_json::to_value(env.disposition)
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                env.thread_id,
-                refs,
-                env.body,
-                op.wall_clock,
-                op.lamport,
-                op.site
-            ],
+        // **Two ops claiming one message id: the lowest `(lamport, site)` wins** (6j6v.vvw6). It
+        // used to be the first to ARRIVE (`INSERT OR IGNORE`), the one fold in the platform that
+        // depended on delivery order — two replicas receiving the two ops in opposite orders showed
+        // two different messages under one id, for ever. The rule is now a pure function of the
+        // ops, like every other register here. What it is NOT is an upsert by the latest writer: a
+        // second op reusing an id cannot take over a message by being written later, which is the
+        // re-attribution the grow-only fold was guarding against. A writer that FORGES a lower
+        // coordinate can — exactly as it can win any LWW register by forging a higher one, while
+        // the relay authenticates nobody; which ops a replica acts on is the signature's question
+        // (6j6v.pzkb), not the fold's. The fold revision bump that comes with this rebuilds the
+        // chat views once, which is also what corrects rows a pre-aym3 build folded with the
+        // envelope's claimed sender (6j6v.qnbs).
+        Change::register(
+            "messages",
+            cells([("message_id", op.target_id.as_str().into())]),
+            cells([
+                ("origin", env.origin.into()),
+                ("channel_id", env.channel_id.into()),
+                ("sender", op.author.as_str().into()),
+                (
+                    "kind",
+                    token(serde_json::to_value(env.kind).unwrap()).into(),
+                ),
+                (
+                    "priority",
+                    token(serde_json::to_value(env.priority).unwrap()).into(),
+                ),
+                (
+                    "disposition",
+                    token(serde_json::to_value(env.disposition).unwrap()).into(),
+                ),
+                ("thread_id", env.thread_id.into()),
+                ("refs", refs.into()),
+                ("body", env.body.into()),
+                ("created", op.wall_clock.as_str().into()),
+            ]),
+            ("lamport", "site"),
+            version(op),
+            Wins::Lower,
         )
-        .unwrap();
     }
 
-    /// One keep-if-beats LWW upsert on `table`, keyed by `id_col`, for the whitelisted field
-    /// `op.field`. The whitelist (checked in `is_foldable`) is exactly what makes the
-    /// `format!`-interpolated column name injection-safe (mirrors flow's `fold_item_lww`).
-    fn fold_lww(conn: &Connection, op: &Op, table: &str, id_col: &str) {
-        // Defense-in-depth: fold_lww serves KIND_CHANNEL, KIND_PROFILE and KIND_THREAD, so op.field
-        // must be on ONE of those whitelists for the format!-interpolated column name below to be
-        // injection-safe. is_foldable already guarantees this per-kind; this is the same
-        // belt-and-suspenders check as flow's fold_item_lww (crates/core/src/task_reducer.rs).
-        debug_assert!(
-            CHANNEL_FIELDS.contains(&op.field.as_str())
-                || PROFILE_FIELDS.contains(&op.field.as_str())
-                || THREAD_FIELDS.contains(&op.field.as_str()),
-            "fold_lww on non-whitelisted field: {}",
-            op.field
-        );
-        let f = &op.field;
-        let sql = format!(
-            "INSERT INTO {table}({id_col}, {f}, {f}_v, {f}_site) VALUES(?1,?2,?3,?4)
-             ON CONFLICT({id_col}) DO UPDATE SET
-                 {f}=excluded.{f}, {f}_v=excluded.{f}_v, {f}_site=excluded.{f}_site
-             WHERE (excluded.{f}_v, excluded.{f}_site) > ({f}_v, {f}_site)"
-        );
-        conn.execute(&sql, params![op.target_id, op.value, op.lamport, op.site])
-            .unwrap();
+    /// One keep-if-beats LWW register on `table`, keyed by `id_col`, for the whitelisted field
+    /// `op.field`. The column name comes from the whitelist the op was checked against in
+    /// `is_foldable`, never from the op — the applier interpolates column names.
+    fn lww(op: &Op, table: &'static str, id_col: &str) -> Change {
+        let field = CHANNEL_FIELDS
+            .iter()
+            .chain(PROFILE_FIELDS)
+            .chain(THREAD_FIELDS)
+            .find(|f| **f == op.field)
+            .unwrap_or_else(|| unreachable!("lww on non-whitelisted field: {}", op.field));
+        Change::register(
+            table,
+            cells([(id_col, op.target_id.as_str().into())]),
+            cells([(field, op.value.clone().into())]),
+            (&format!("{field}_v"), &format!("{field}_site")),
+            version(op),
+            Wins::Higher,
+        )
     }
 
-    fn fold_membership_add(conn: &Connection, op: &Op) {
+    fn membership_add(op: &Op) -> Vec<Change> {
         // target_id = channel{SEP}handle; tag = op_id (observed-remove), mirroring flow's edge OR-set.
         let Some((channel_id, handle)) = split2(&op.target_id) else {
-            return;
+            return Vec::new();
         };
-        conn.execute(
-            "INSERT OR IGNORE INTO membership_adds(tag, channel_id, handle, lamport, site)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![op.op_id, channel_id, handle, op.lamport, op.site],
-        )
-        .unwrap();
+        vec![Change::put(
+            "membership_adds",
+            cells([("tag", op.op_id.as_str().into())]),
+            cells([
+                ("channel_id", channel_id.into()),
+                ("handle", handle.into()),
+                ("lamport", op.lamport.into()),
+                ("site", op.site.into()),
+            ]),
+        )]
     }
 
-    fn fold_membership_remove(conn: &Connection, op: &Op) {
-        // value = SEP-joined observed add-tags this remove tombstones (mirrors fold_edge_remove).
-        if let Some(tags) = &op.value {
-            for tag in tags.split(SEP).filter(|t| !t.is_empty()) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO membership_removes(tag) VALUES(?1)",
-                    [tag],
-                )
-                .unwrap();
-            }
-        }
+    fn membership_remove(op: &Op) -> Vec<Change> {
+        // value = SEP-joined observed add-tags this remove tombstones (mirrors flow's edge remove).
+        op.value
+            .as_deref()
+            .map(|tags| {
+                tags.split(SEP)
+                    .filter(|t| !t.is_empty())
+                    .map(|tag| {
+                        Change::put(
+                            "membership_removes",
+                            cells([("tag", tag.into())]),
+                            Vec::new(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
-    fn fold_thread_open(conn: &Connection, op: &Op) {
-        // Immutable root; upsert so it converges whether or not a `set` already created the row
-        // (root values are identical across any duplicate open).
+    fn thread_open(op: &Op) -> Vec<Change> {
         let Some(root) = op
             .value
             .as_deref()
             .and_then(|v| serde_json::from_str::<ThreadRoot>(v).ok())
         else {
-            return;
+            return Vec::new();
         };
         // `opener` is `op.author` for the same reason `messages.sender` is (6j6v.aym3), and here
         // it is not even a display field: `facade::set_expects` is opener-only and compares the
@@ -162,24 +166,35 @@ impl MessageReducer {
         // an authorization claim anyone could write. `root.opener` stays in the payload for
         // backward-compatible parsing; it just no longer decides anything.
         // `parent` (nxf 6j6v.a71h §3.1) travels with the other immutable root fields — it is written
-        // once by the op that opens the thread and never re-set, so it needs no LWW version pair.
-        // A root op carries `None`, which lands as NULL: the tree's ROOT is the absence of an edge.
-        conn.execute(
-            "INSERT INTO threads(thread_id, origin, channel_id, opener, created, parent)
-             VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(thread_id) DO UPDATE SET
-                 origin=excluded.origin, channel_id=excluded.channel_id,
-                 opener=excluded.opener, created=excluded.created, parent=excluded.parent",
-            params![
-                op.target_id,
-                root.origin,
-                root.channel_id,
-                op.author,
-                root.created,
-                root.parent
-            ],
-        )
-        .unwrap();
+        // once by the op that opens the thread and never re-set. A root op carries `None`, which
+        // lands as NULL: the tree's ROOT is the absence of an edge.
+        //
+        // The root is a register of its own, keyed by the open op's coordinate (6j6v.vvw6): every
+        // honest open of one thread carries the same root, and when two do not, the lowest
+        // `(lamport, site)` keeps it — not the last to arrive, which is what an unconditional
+        // overwrite used to mean. A second open is still what holds the thread (`held_sql`).
+        vec![Change::register(
+            "threads",
+            cells([("thread_id", op.target_id.as_str().into())]),
+            cells([
+                ("origin", root.origin.into()),
+                ("channel_id", root.channel_id.into()),
+                ("opener", op.author.as_str().into()),
+                ("created", root.created.into()),
+                ("parent", root.parent.into()),
+            ]),
+            ("root_v", "root_site"),
+            version(op),
+            Wins::Lower,
+        )]
+    }
+}
+
+/// An op's coordinate, the version its registers compare on.
+fn version(op: &Op) -> Version {
+    Version {
+        lamport: op.lamport,
+        site: op.site,
     }
 }
 
@@ -211,17 +226,23 @@ impl Reducer for MessageReducer {
         }
     }
 
-    fn fold(&self, conn: &Connection, op: &Op) {
+    fn changes(&self, op: &Op) -> Vec<Change> {
         match (op.target_kind.as_str(), op.op_type.as_str()) {
-            (KIND_MESSAGE, OP_POST) => Self::fold_message(conn, op),
-            (KIND_CHANNEL, OP_SET) => Self::fold_lww(conn, op, "channels", "channel_id"),
-            (KIND_PROFILE, OP_SET) => Self::fold_lww(conn, op, "profiles", "handle"),
-            (KIND_MEMBERSHIP, OP_ADD) => Self::fold_membership_add(conn, op),
-            (KIND_MEMBERSHIP, OP_REMOVE) => Self::fold_membership_remove(conn, op),
-            (KIND_THREAD, OP_OPEN) => Self::fold_thread_open(conn, op),
-            (KIND_THREAD, OP_SET) => Self::fold_lww(conn, op, "threads", "thread_id"),
-            other => unreachable!("non-foldable op reached MessageReducer::fold(): {other:?}"),
+            (KIND_MESSAGE, OP_POST) => vec![Self::message(op)],
+            (KIND_CHANNEL, OP_SET) => vec![Self::lww(op, "channels", "channel_id")],
+            (KIND_PROFILE, OP_SET) => vec![Self::lww(op, "profiles", "handle")],
+            (KIND_MEMBERSHIP, OP_ADD) => Self::membership_add(op),
+            (KIND_MEMBERSHIP, OP_REMOVE) => Self::membership_remove(op),
+            (KIND_THREAD, OP_OPEN) => Self::thread_open(op),
+            (KIND_THREAD, OP_SET) => vec![Self::lww(op, "threads", "thread_id")],
+            other => unreachable!("non-foldable op reached MessageReducer::changes(): {other:?}"),
         }
+    }
+
+    /// 1 (6j6v.vvw6): a message id two ops claim, and a thread two ops open, resolve by the lowest
+    /// `(lamport, site)` instead of by arrival.
+    fn fold_revision(&self) -> i64 {
+        1
     }
 
     /// The chat views — and ONLY them. The session map, transcripts, leases, the working-tree queue
@@ -259,7 +280,7 @@ mod tests {
         Op {
             // Sanitize SEP out of the op_id: for composite target_ids (membership's
             // `channel{SEP}handle`), op_id becomes the OR-set tag, and a raw SEP byte inside a
-            // tag would corrupt fold_membership_remove's `value.split(SEP)` (the tag would get
+            // tag would corrupt membership_remove's `value.split(SEP)` (the tag would get
             // sheared into fragments that never match the stored tag). tid.into() below keeps
             // the real composite id on op.target_id for split2 to consume.
             op_id: format!("op-{}-{field}-{lamport}-{site}", tid.replace(SEP, "_")),
@@ -454,7 +475,7 @@ mod tests {
 
         assert!(
             !MessageReducer.is_foldable(&legacy),
-            "the reducer must not claim a kind it no longer folds — if it does, `fold` is reached \
+            "the reducer must not claim a kind it no longer folds — if it does, `changes` is reached \
              and its `unreachable!()` takes the process down on an op a peer is entitled to send"
         );
 
@@ -560,13 +581,14 @@ mod tests {
     }
 
     #[test]
-    fn a_distinct_op_reusing_a_message_id_is_ignored_grow_only() {
-        // Unlike re-delivery of the SAME op (proven above and short-circuited at the substrate's
-        // op-log dedup before fold() ever runs again), this exercises TWO DISTINCT ops (different
-        // op_id/lamport, different envelope) that target the SAME message_id — the case the
-        // reducer's own `INSERT OR IGNORE INTO messages` (keyed on message_id) exists for.
-        let mut s = store();
-        let a = op(
+    fn two_ops_claiming_one_message_id_resolve_to_the_lowest_coordinate_in_either_order() {
+        // Unlike re-delivery of the SAME op (short-circuited at the substrate's op-log dedup before
+        // the reducer runs again), these are TWO DISTINCT ops targeting ONE message_id. It used to
+        // be the first to ARRIVE that stayed — so two replicas receiving them in opposite orders
+        // showed different messages under one id for ever. Now the lowest (lamport, site) stays,
+        // whichever order they come in (6j6v.vvw6) — and a LATER write still cannot take an
+        // existing message over, which is what the grow-only fold was guarding.
+        let early = op(
             KIND_MESSAGE,
             "m-1",
             FIELD_ENVELOPE,
@@ -575,35 +597,102 @@ mod tests {
             1,
             1,
         );
-        let b = op(
-            KIND_MESSAGE,
-            "m-1",
-            FIELD_ENVELOPE,
-            OP_POST,
-            Some(&envelope_json("c-1", "changed")),
-            2,
+        let late = authored_by(
+            "acme/mallory",
+            op(
+                KIND_MESSAGE,
+                "m-1",
+                FIELD_ENVELOPE,
+                OP_POST,
+                Some(&envelope_json("c-1", "changed")),
+                2,
+                1,
+            ),
+        );
+        assert_ne!(
+            early.op_id, late.op_id,
+            "must be distinct ops, not a re-delivery"
+        );
+        for order in [[&early, &late], [&late, &early]] {
+            let mut s = store();
+            for o in order {
+                s.apply(std::slice::from_ref(o));
+            }
+            let rows: Vec<(String, String, i64)> = s
+                .connection()
+                .prepare("SELECT body, sender, lamport FROM messages")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(
+                rows,
+                vec![(
+                    "hi".to_string(),
+                    "nxsflow/nexus-flow/PmAgent".to_string(),
+                    1
+                )],
+                "one message, the lowest coordinate's — arriving {} first",
+                order[0].op_id
+            );
+        }
+    }
+
+    #[test]
+    fn two_opens_of_one_thread_keep_the_lowest_coordinates_root_in_either_order() {
+        // The thread root used to be overwritten by whichever open ARRIVED last (6j6v.vvw6).
+        let root = |channel: &str| {
+            serde_json::to_string(&ThreadRoot {
+                origin: "nxsflow/nexus-flow".into(),
+                channel_id: channel.into(),
+                opener: String::new(),
+                created: String::new(),
+                parent: None,
+            })
+            .unwrap()
+        };
+        let first = op(
+            KIND_THREAD,
+            "t-1",
+            FIELD_ROOT,
+            OP_OPEN,
+            Some(&root("c-1")),
+            3,
             1,
         );
-        assert_ne!(a.op_id, b.op_id, "must be distinct ops, not a re-delivery");
-        s.apply(&[a]);
-        s.apply(&[b]);
-        let n: i64 = s
-            .connection()
-            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            n, 1,
-            "grow-only, ignores a second op for the same message_id"
+        let second = authored_by(
+            "acme/mallory",
+            op(
+                KIND_THREAD,
+                "t-1",
+                FIELD_ROOT,
+                OP_OPEN,
+                Some(&root("c-evil")),
+                4,
+                1,
+            ),
         );
-        let body: String = s
-            .connection()
-            .query_row(
-                "SELECT body FROM messages WHERE message_id='m-1'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(body, "hi", "messages are immutable: first write wins");
+        for order in [[&first, &second], [&second, &first]] {
+            let mut s = store();
+            for o in order {
+                s.apply(std::slice::from_ref(o));
+            }
+            let (channel, opener): (String, String) = s
+                .connection()
+                .query_row(
+                    "SELECT channel_id, opener FROM threads WHERE thread_id='t-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (channel.as_str(), opener.as_str()),
+                ("c-1", "nxsflow/nexus-flow/PmAgent"),
+                "arriving {} first",
+                order[0].op_id
+            );
+        }
     }
 
     #[test]
