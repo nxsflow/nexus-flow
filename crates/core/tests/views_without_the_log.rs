@@ -183,12 +183,12 @@ fn a_workspace_written_at_schema_v7_opens_with_its_views_moved_off_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v7.db");
     let p = path.to_str().unwrap();
-    {
+    let expected = {
         let mut s = Store::open(p, 1).unwrap();
         s.apply(&board().export());
-        let expected = projections(s.connection());
-        assert!(!expected[0].is_empty());
-    }
+        projections(s.connection())
+    };
+    assert!(!expected[0].is_empty());
     // Put the file back to what a v7 binary left: the views without the v8 columns and table,
     // the two projections joining the log, and no fold revision recorded.
     {
@@ -226,11 +226,9 @@ fn a_workspace_written_at_schema_v7_opens_with_its_views_moved_off_the_log() {
     }
 
     let s = Store::open(p, 1).unwrap();
-    let mut fresh = Store::open_in_memory(1);
-    fresh.apply(&board().export());
     assert_eq!(
         projections(s.connection()),
-        projections(fresh.connection()),
+        expected,
         "every projection is answered from the folded rows, filled on the open"
     );
     for view in ["present_parent", "present_thread_links"] {
@@ -247,4 +245,75 @@ fn a_workspace_written_at_schema_v7_opens_with_its_views_moved_off_the_log() {
             "{view} no longer reads the log: {sql}"
         );
     }
+}
+
+#[test]
+fn a_row_an_older_binary_adds_after_the_upgrade_neither_doubles_a_parent_nor_stays_unfilled() {
+    // Review of PR #22, Code Quality #1. An older binary still writing the file adds an edge row
+    // without the coordinate. Until this build opens the file again the projection must still give
+    // the child ONE parent — a NULL in the compare used to make every row a winner — and the open
+    // then fills the row and decides by the real coordinates.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w.db");
+    let p = path.to_str().unwrap();
+    {
+        let mut s = Store::open(p, 1).unwrap();
+        s.create_item("ab12.0001", "epic", "One", "u");
+        s.create_item("ab12.0002", "epic", "Two", "u");
+        s.create_item("ab12.0003", "task", "Child", "u");
+        s.add_parent("ab12.0003", "ab12.0001", "u");
+    }
+    // What the older binary does for a second parent edge: the op into the log, the row without
+    // the coordinate, and nothing to the revision's mark.
+    {
+        let conn = Connection::open(p).unwrap();
+        let next: i64 = conn
+            .query_row("SELECT MAX(lamport) + 1 FROM ops", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ops(op_id, lamport, site, domain, target_kind, target_id, field, op_type,
+                             value, author, wall_clock)
+             VALUES('older-binary-op', ?1, 1, 'task', 'edge',
+                    'ab12.0003' || char(31) || 'ab12.0002' || char(31) || 'parent',
+                    'present', 'add', NULL, 'u', '')",
+            [next],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edge_adds(from_id, to_id, kind, tag)
+             VALUES('ab12.0003', 'ab12.0002', 'parent', 'older-binary-op')",
+            [],
+        )
+        .unwrap();
+        let parents: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM present_parent WHERE child_id='ab12.0003'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parents, 1, "one present parent while the row is unfilled");
+    }
+    let s = Store::open(p, 1).unwrap();
+    let unfilled: i64 = s
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM edge_adds WHERE lamport IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unfilled, 0, "the open filled the older binary's row");
+    let winner: String = s
+        .connection()
+        .query_row(
+            "SELECT parent_id FROM present_parent WHERE child_id='ab12.0003'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        winner, "ab12.0002",
+        "the later add wins by its real coordinate"
+    );
 }

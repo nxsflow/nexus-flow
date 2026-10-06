@@ -200,7 +200,10 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
 // tombstones every live add for the pair, whatever its attributes, so the pair leaves this view
 // entirely.
 //
-// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log.
+// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log. A row
+// an older binary added carries none until this one fills it on its next open; it counts as -1, so
+// the pair still has exactly ONE present link meanwhile (a NULL in the compare would make every row
+// of the pair a winner — review of PR #22, Code Quality #1).
 const PRESENT_THREAD_LINKS: &str = "CREATE VIEW present_thread_links AS
     SELECT a.thread_id, a.item_id, a.relation, a.weight
     FROM thread_link_adds a
@@ -209,7 +212,8 @@ const PRESENT_THREAD_LINKS: &str = "CREATE VIEW present_thread_links AS
           SELECT 1 FROM thread_link_adds a2
           WHERE a2.thread_id = a.thread_id AND a2.item_id = a.item_id
             AND NOT EXISTS (SELECT 1 FROM thread_link_removes r2 WHERE r2.tag = a2.tag)
-            AND (a2.lamport, a2.site, a2.tag) > (a.lamport, a.site, a.tag))";
+            AND (COALESCE(a2.lamport, -1), COALESCE(a2.site, -1), a2.tag)
+              > (COALESCE(a.lamport, -1), COALESCE(a.site, -1), a.tag))";
 
 // sp6.3: the single current parent per child, projected from the `parent` OR-set edge. Among a
 // child's present `parent` edges, the winner is the one whose add has the max (lamport, site, to_id)
@@ -219,7 +223,9 @@ const PRESENT_THREAD_LINKS: &str = "CREATE VIEW present_thread_links AS
 // produce. `get_item`/`list_items` read `parent_id AS belongs_to` from here, and `invariant` joins
 // it — so every belongs_to reader stays unchanged while the substrate becomes n:m-capable.
 //
-// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log.
+// The coordinate is the add row's own (6j6v.vvw6) — it used to be joined in from the op log. A row
+// an older binary added counts as -1 until it is filled, as in `PRESENT_THREAD_LINKS`, so a child
+// keeps exactly one present parent meanwhile.
 const PRESENT_PARENT: &str = "CREATE VIEW present_parent AS
     SELECT a.from_id AS child_id, a.to_id AS parent_id
     FROM edge_adds a
@@ -229,23 +235,47 @@ const PRESENT_PARENT: &str = "CREATE VIEW present_parent AS
           SELECT 1 FROM edge_adds a2
           WHERE a2.from_id = a.from_id AND a2.kind = 'parent'
             AND NOT EXISTS (SELECT 1 FROM edge_removes r2 WHERE r2.tag = a2.tag)
-            AND (a2.lamport, a2.site, a2.to_id) > (a.lamport, a.site, a.to_id))";
+            AND (COALESCE(a2.lamport, -1), COALESCE(a2.site, -1), a2.to_id)
+              > (COALESCE(a.lamport, -1), COALESCE(a.site, -1), a.to_id))";
 
 /// Create the view `name` as `ddl` says, or replace it when the database holds another definition
 /// of it — the definition an older binary created, which joins the op log (6j6v.vvw6). An older
 /// binary only ever creates its views IF NOT EXISTS, so it never puts its own back.
+///
+/// Decided and done under the write lock (review of PR #22, Code Quality #6): two processes opening
+/// one file both see the old definition, and without the lock both drop and create — the second
+/// `CREATE` fails on a view the first already made. A reader meanwhile keeps the snapshot it had.
 fn ensure_view(conn: &Connection, name: &str, ddl: &str) -> rusqlite::Result<()> {
-    let current: Option<String> = conn
-        .query_row(
+    let current = |conn: &Connection| -> rusqlite::Result<Option<String>> {
+        conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type='view' AND name=?1",
             [name],
             |r| r.get(0),
         )
-        .optional()?;
-    if current.as_deref() != Some(ddl) {
-        conn.execute_batch(&format!("DROP VIEW IF EXISTS {name}; {ddl};"))?;
+        .optional()
+    };
+    if current(conn)?.as_deref() == Some(ddl) {
+        return Ok(());
     }
-    Ok(())
+    let own_transaction = conn.is_autocommit();
+    if own_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+    }
+    let replaced = (|| {
+        if current(conn)?.as_deref() != Some(ddl) {
+            conn.execute_batch(&format!("DROP VIEW IF EXISTS {name}; {ddl};"))?;
+        }
+        Ok(())
+    })();
+    if own_transaction {
+        match &replaced {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+    replaced
 }
 
 /// Whether a table exists — used to tell a fresh db (where the CREATE batch installs `custom_fields`
@@ -419,15 +449,27 @@ mod tests {
             "custom_fields_of_bulk must SEARCH the (item_id, field) PK, not SCAN: {p}"
         );
 
-        // `notes_of` — the `show` notes read.
+        // `notes_of` — the `show` notes read (off the log since 6j6v.vvw6).
         let p = plan(
-            "SELECT n.id, n.body FROM notes n JOIN ops o ON o.op_id = n.id
+            "SELECT n.id, n.body FROM notes n
              WHERE n.item_id=?1
                AND n.id NOT IN (SELECT note_id FROM note_tombstones)
-             ORDER BY o.lamport, o.site",
+             ORDER BY n.lamport, n.site",
             &[&"x"],
         );
         assert!(p.contains("notes_item"), "notes_of plan: {p}");
+
+        // `item_timestamps_of_bulk` (6j6v.vvw6) — the lane decoration with created/updated, folded
+        // into its own table: the `item_id IN (…)` must SEARCH its primary key, not SCAN.
+        let p = plan(
+            "SELECT item_id, created_at, updated_at FROM item_timestamps \
+             WHERE item_id IN (?1,?2)",
+            &[&"x", &"y"],
+        );
+        assert!(
+            p.contains("SEARCH item_timestamps") && !p.contains("SCAN item_timestamps"),
+            "item_timestamps_of_bulk must SEARCH its primary key: {p}"
+        );
 
         // `deps_of`/`targets_of_result` — the per-dep read behind `deps_with_status`.
         let p = plan(

@@ -6194,9 +6194,7 @@ pub fn open_child_thread(
 ) -> String {
     let author = ctx.caller_handle();
     store.set_wall_clock(ctx.now);
-    let thread_id = store.mint_thread_id();
-    store.open_thread(
-        &thread_id,
+    store.open_new_thread(
         &crate::model::ThreadRoot {
             origin: ctx.origin.to_string(),
             channel_id: channel_id.to_string(),
@@ -6205,8 +6203,7 @@ pub fn open_child_thread(
             parent: parent.map(str::to_string),
         },
         &author,
-    );
-    thread_id
+    )
 }
 
 /// Which thread `thread` competes for the working-tree lease UNDER: **the root of its OPERATION**

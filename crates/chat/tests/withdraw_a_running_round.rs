@@ -754,7 +754,7 @@ fn a_running_holder_with_a_rival(b: &Bench) -> (String, String, String) {
 /// one id resolve to the LOWEST coordinate, so a later open cannot move a thread — which is the
 /// point of that change, and why no op can build this shape any more. The view row is all the
 /// claim area reads, and nothing in these tests rebuilds the views after it is written.
-fn hang_under(b: &Bench, thread: &str, parent: &str, _created: &str) {
+fn hang_under(b: &Bench, thread: &str, parent: &str) {
     let ws = Workspace::resolve(None, b.root()).expect("resolve workspace");
     let store = ws.open_chat_store().expect("open chat store");
     let moved = store
@@ -1148,7 +1148,7 @@ fn a_host_that_cannot_stop_sessions_is_refused_and_nothing_changes() {
     let b = Bench::that_cannot_stop();
     let (thread, session, solo) = a_running_holder_with_a_rival(&b);
     let scope = scope_of(&thread);
-    hang_under(&b, &solo, &thread, QUEUED);
+    hang_under(&b, &solo, &thread);
     assert_eq!(
         b.store().thread_subtree(&thread).expect("subtree reads"),
         vec![thread.clone(), solo.clone()],
@@ -1897,7 +1897,7 @@ fn a_queued_commission_and_a_running_round_in_one_area_are_withdrawn_behind_one_
     let b = Bench::new();
     let (thread, session, rival) = a_running_holder_with_a_rival(&b);
     let scope = scope_of(&thread);
-    hang_under(&b, &rival, &thread, QUEUED);
+    hang_under(&b, &rival, &thread);
     assert_eq!(
         b.store().thread_subtree(&thread).expect("subtree reads"),
         vec![thread.clone(), rival.clone()],

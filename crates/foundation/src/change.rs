@@ -103,9 +103,10 @@ pub enum Effect {
     },
     Register {
         cells: Cells,
-        /// The columns holding the register's version: `(lamport column, site column)`.
-        version_columns: (String, String),
-        version: Version,
+        /// The register's version, compared in order: each version column and the value this
+        /// change brings for it. Usually `(lamport column, site column)`; a ranked register puts a
+        /// rank in front ([`Change::register_ranked`]).
+        version: Vec<(String, i64)>,
         wins: Wins,
     },
 }
@@ -137,7 +138,7 @@ impl Change {
         }
     }
 
-    /// An [`Effect::Register`] change.
+    /// An [`Effect::Register`] change on a `(lamport, site)` version.
     pub fn register(
         table: &'static str,
         key: Cells,
@@ -151,11 +152,33 @@ impl Change {
             key,
             effect: Effect::Register {
                 cells,
-                version_columns: (version_columns.0.to_string(), version_columns.1.to_string()),
-                version,
+                version: vec![
+                    (version_columns.0.to_string(), version.lamport),
+                    (version_columns.1.to_string(), version.site),
+                ],
                 wins,
             },
         }
+    }
+
+    /// An [`Effect::Register`] change whose version is `(rank, lamport, site)`: the rank decides
+    /// first, the coordinate only between equal ranks. What a message id uses (6j6v.vvw6): the op
+    /// the id was minted from ranks 0 and every other claimant 1, so under [`Wins::Lower`] the op
+    /// that owns the id keeps it against any coordinate another op brings.
+    pub fn register_ranked(
+        table: &'static str,
+        key: Cells,
+        cells: Cells,
+        rank: (&str, i64),
+        version_columns: (&str, &str),
+        version: Version,
+        wins: Wins,
+    ) -> Change {
+        let mut change = Change::register(table, key, cells, version_columns, version, wins);
+        if let Effect::Register { version, .. } = &mut change.effect {
+            version.insert(0, (rank.0.to_string(), rank.1));
+        }
+        change
     }
 }
 
@@ -175,90 +198,88 @@ pub fn apply_sqlite(conn: &Connection, changes: &[Change]) -> rusqlite::Result<(
 
 fn apply_one(conn: &Connection, change: &Change) -> rusqlite::Result<()> {
     let table = change.table;
-    let key_columns: Vec<&str> = change.key.iter().map(|(c, _)| c.as_str()).collect();
-    let conflict = key_columns.join(", ");
-    let (sql, values): (String, Vec<&Cell>) = match &change.effect {
-        Effect::Ensure { cells } => {
-            let (columns, values) = row(&change.key, cells, None);
-            (
-                format!(
-                    "INSERT OR IGNORE INTO {table}({}) VALUES({})",
-                    columns.join(", "),
-                    placeholders(columns.len())
-                ),
-                values,
-            )
+    let cells = match &change.effect {
+        Effect::Ensure { cells } | Effect::Put { cells } | Effect::Register { cells, .. } => cells,
+    };
+    let version: &[(String, i64)] = match &change.effect {
+        Effect::Register { version, .. } => version,
+        _ => &[],
+    };
+    let version_cells: Vec<Cell> = version.iter().map(|(_, v)| Cell::Int(*v)).collect();
+    // Every name the SQL is built from, checked before it is: the reducers in this repository take
+    // them from fixed lists, but `Change` is public and an embedder's reducer is not.
+    let mut columns: Vec<&str> = Vec::new();
+    let mut values: Vec<&Cell> = Vec::new();
+    for (c, v) in change.key.iter().chain(cells.iter()) {
+        columns.push(c);
+        values.push(v);
+    }
+    for ((c, _), v) in version.iter().zip(&version_cells) {
+        columns.push(c);
+        values.push(v);
+    }
+    for name in std::iter::once(table).chain(columns.iter().copied()) {
+        if !is_identifier(name) {
+            return Err(rusqlite::Error::InvalidColumnName(name.to_string()));
         }
-        Effect::Put { cells } => {
-            let (columns, values) = row(&change.key, cells, None);
-            let sql = if cells.is_empty() {
-                format!(
-                    "INSERT OR IGNORE INTO {table}({}) VALUES({})",
-                    columns.join(", "),
-                    placeholders(columns.len())
-                )
-            } else {
-                format!(
-                    "INSERT INTO {table}({}) VALUES({}) ON CONFLICT({conflict}) DO UPDATE SET {}",
-                    columns.join(", "),
-                    placeholders(columns.len()),
-                    assignments(cells.iter().map(|(c, _)| c.as_str()))
-                )
-            };
-            (sql, values)
+    }
+    let conflict = change
+        .key
+        .iter()
+        .map(|(c, _)| c.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = format!(
+        "INSERT INTO {table}({}) VALUES({})",
+        columns.join(", "),
+        placeholders(columns.len())
+    );
+    let sql = match &change.effect {
+        Effect::Ensure { .. } => format!("INSERT OR IGNORE{}", &insert["INSERT".len()..]),
+        Effect::Put { cells } if cells.is_empty() => {
+            format!("INSERT OR IGNORE{}", &insert["INSERT".len()..])
         }
-        Effect::Register {
-            cells,
-            version_columns: (v, s),
-            version,
-            wins,
-        } => {
-            let lamport = Cell::Int(version.lamport);
-            let site = Cell::Int(version.site);
-            let (columns, values) = row(&change.key, cells, Some((v, s, &lamport, &site)));
+        Effect::Put { cells } => format!(
+            "{insert} ON CONFLICT({conflict}) DO UPDATE SET {}",
+            assignments(cells.iter().map(|(c, _)| c.as_str()))
+        ),
+        Effect::Register { cells, wins, .. } => {
             let beats = match wins {
                 Wins::Higher => ">",
                 Wins::Lower => "<",
             };
-            let moved = cells
+            let names: Vec<&str> = version.iter().map(|(c, _)| c.as_str()).collect();
+            let unwritten = names
                 .iter()
-                .map(|(c, _)| c.as_str())
-                .chain([v.as_str(), s.as_str()]);
-            let sql = format!(
-                "INSERT INTO {table}({}) VALUES({}) ON CONFLICT({conflict}) DO UPDATE SET {}
-                 WHERE {table}.{v} IS NULL OR {table}.{s} IS NULL
-                    OR (excluded.{v}, excluded.{s}) {beats} ({table}.{v}, {table}.{s})",
-                columns.join(", "),
-                placeholders(columns.len()),
-                assignments(moved)
-            );
-            // `values` borrows the two version cells, which live only in this arm.
-            return conn
-                .execute(&sql, rusqlite::params_from_iter(values.iter()))
-                .map(drop);
+                .map(|c| format!("{table}.{c} IS NULL"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let theirs = names
+                .iter()
+                .map(|c| format!("excluded.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let stored = names
+                .iter()
+                .map(|c| format!("{table}.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{insert} ON CONFLICT({conflict}) DO UPDATE SET {}
+                 WHERE {unwritten} OR ({theirs}) {beats} ({stored})",
+                assignments(cells.iter().map(|(c, _)| c.as_str()).chain(names))
+            )
         }
     };
     conn.execute(&sql, rusqlite::params_from_iter(values.iter()))
         .map(drop)
 }
 
-/// The columns and values of a whole row: its key, its cells and, for a register, the version.
-fn row<'a>(
-    key: &'a Cells,
-    cells: &'a Cells,
-    version: Option<(&'a String, &'a String, &'a Cell, &'a Cell)>,
-) -> (Vec<&'a str>, Vec<&'a Cell>) {
-    let mut columns = Vec::new();
-    let mut values = Vec::new();
-    for (c, v) in key.iter().chain(cells.iter()) {
-        columns.push(c.as_str());
-        values.push(v);
-    }
-    if let Some((v, s, lamport, site)) = version {
-        columns.extend([v.as_str(), s.as_str()]);
-        values.extend([lamport, site]);
-    }
-    (columns, values)
+/// A plain SQL identifier: a letter or `_`, then letters, digits and `_`.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn placeholders(n: usize) -> String {
@@ -431,5 +452,126 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&conn, "v"), None);
+    }
+
+    #[test]
+    fn a_higher_register_on_a_row_a_lower_register_created_is_unwritten_not_lost() {
+        // The reverse of the case above: the LOWER register created the row, so the higher
+        // register's version columns hold their DEFAULT 0 here — any real version beats it.
+        let conn = db();
+        apply_sqlite(&conn, &[set("x", "first", at(7, 1), Wins::Lower)]).unwrap();
+        apply_sqlite(&conn, &[set("x", "a", at(1, 1), Wins::Higher)]).unwrap();
+        assert_eq!(read(&conn, "v").as_deref(), Some("a"));
+        assert_eq!(read(&conn, "first").as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_ranked_register_lets_the_rank_decide_before_the_coordinate() {
+        // A message id (6j6v.vvw6): the op the id belongs to ranks 0, any other claimant 1. The
+        // claimant brings a far lower coordinate and still loses, in either order.
+        let conn_for = |order: [usize; 2]| {
+            let conn = db();
+            conn.execute_batch("ALTER TABLE reg ADD COLUMN rank INTEGER")
+                .unwrap();
+            let claim = |value: &str, rank: i64, version: Version| {
+                Change::register_ranked(
+                    "reg",
+                    cells([("id", "x".into())]),
+                    cells([("first", value.into())]),
+                    ("rank", rank),
+                    ("first_l", "first_s"),
+                    version,
+                    Wins::Lower,
+                )
+            };
+            let writes = [claim("owner", 0, at(900, 5)), claim("forger", 1, at(1, 1))];
+            for i in order {
+                apply_sqlite(&conn, std::slice::from_ref(&writes[i])).unwrap();
+            }
+            conn
+        };
+        for order in [[0, 1], [1, 0]] {
+            assert_eq!(
+                read(&conn_for(order), "first").as_deref(),
+                Some("owner"),
+                "order {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_naming_a_table_or_column_that_is_no_identifier_is_refused_before_any_sql() {
+        let conn = db();
+        let bad_table = Change::put(
+            "reg; DROP TABLE reg",
+            cells([("id", "x".into())]),
+            Vec::new(),
+        );
+        let bad_column = Change::put(
+            "reg",
+            cells([("id", "x".into())]),
+            cells([("v = 'y' --", "z".into())]),
+        );
+        for change in [bad_table, bad_column] {
+            assert!(matches!(
+                apply_sqlite(&conn, &[change]),
+                Err(rusqlite::Error::InvalidColumnName(_))
+            ));
+        }
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reg", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "nothing was written");
+    }
+
+    #[test]
+    fn a_change_the_schema_cannot_take_is_an_error_not_a_panic() {
+        // An unknown table, an unknown column, a NOT NULL column left empty: each comes back as
+        // the error, for the caller to hold its transaction against.
+        let conn = db();
+        let unknown_table = Change::put("nope", cells([("id", "x".into())]), Vec::new());
+        let unknown_column = Change::put(
+            "reg",
+            cells([("id", "x".into())]),
+            cells([("nope", "z".into())]),
+        );
+        let not_null = Change::put(
+            "pair",
+            cells([("a", "x".into()), ("b", Cell::Null)]),
+            Vec::new(),
+        );
+        for change in [unknown_table, unknown_column] {
+            assert!(apply_sqlite(&conn, &[change]).is_err());
+        }
+        // `pair` is a Put without cells (an OR IGNORE insert): the NULL key is ignored, not
+        // stored — a set element missing its key is no element.
+        apply_sqlite(&conn, &[not_null]).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pair", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_batch_stops_at_its_first_failing_change_and_the_caller_rolls_back() {
+        let conn = db();
+        conn.execute_batch("BEGIN").unwrap();
+        let result = apply_sqlite(
+            &conn,
+            &[
+                set("x", "a", at(1, 1), Wins::Higher),
+                Change::put("nope", cells([("id", "x".into())]), Vec::new()),
+                set("y", "b", at(1, 1), Wins::Higher),
+            ],
+        );
+        assert!(result.is_err());
+        conn.execute_batch("ROLLBACK").unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reg", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "the change before the failure went with the transaction"
+        );
     }
 }

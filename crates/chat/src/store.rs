@@ -873,22 +873,59 @@ impl ChatStore {
     }
 
     // ---- write helpers --------------------------------------------------------
-    /// Append a message and return its minted global id (`m-`+ULID, spec §2.2; deterministic under
-    /// the golden switch). The envelope rides in the op's `value`; the reducer folds it into
-    /// `messages`. The op author IS the message sender (the acting agent's qualified handle).
+    /// Append a message and return its global id (spec §2.2). The envelope rides in the op's
+    /// `value`; the reducer folds it into `messages`. The op author IS the message sender (the
+    /// acting agent's qualified handle).
+    ///
+    /// The id is `m-` followed by the post op's OWN id (6j6v.vvw6, owner decision 2026-10-06), so the
+    /// message belongs to that op: another op claiming the same id never takes the message over,
+    /// whatever coordinate it brings (see `MessageReducer::message`). Under the golden switch the
+    /// id stays the deterministic counter — readable output over binding, for tests only.
     pub fn post_message(&mut self, env: &MessageEnvelope) -> String {
-        let message_id = self.mint_id("m-", "messages");
         let value = serde_json::to_string(env).expect("envelope serializes");
-        self.inner.emit(
+        if nxs_foundation::workspace::deterministic_ids_enabled() {
+            let message_id = self.mint_id("m-", "messages");
+            self.inner.emit(
+                DOMAIN_MESSAGE,
+                KIND_MESSAGE,
+                &message_id,
+                FIELD_ENVELOPE,
+                OP_POST,
+                Some(value),
+                &env.sender,
+            );
+            return message_id;
+        }
+        self.inner.emit_owned(
             DOMAIN_MESSAGE,
             KIND_MESSAGE,
-            &message_id,
+            OWNED_ID_PREFIX,
             FIELD_ENVELOPE,
             OP_POST,
             Some(value),
             &env.sender,
-        );
-        message_id
+        )
+    }
+
+    /// Open a NEW thread and return its id — `m-` followed by the open op's own id, so the root
+    /// belongs to that op (6j6v.vvw6), exactly as a message belongs to its post. The deterministic
+    /// counter under the golden switch, as [`post_message`](Self::post_message).
+    pub fn open_new_thread(&mut self, root: &ThreadRoot, author: &str) -> String {
+        if nxs_foundation::workspace::deterministic_ids_enabled() {
+            let thread_id = self.mint_thread_id();
+            self.open_thread(&thread_id, root, author);
+            return thread_id;
+        }
+        let value = serde_json::to_string(root).expect("thread root serializes");
+        self.inner.emit_owned(
+            DOMAIN_MESSAGE,
+            KIND_THREAD,
+            OWNED_ID_PREFIX,
+            FIELD_ROOT,
+            OP_OPEN,
+            Some(value),
+            author,
+        )
     }
 
     pub fn set_channel_field(&mut self, channel_id: &str, field: &str, value: &str, author: &str) {
@@ -991,11 +1028,12 @@ impl ChatStore {
         );
     }
 
-    /// Open a thread: the immutable root (spec §3.5). Re-opening the same `thread_id` with an
-    /// identical root converges; a distinct root under the same id is a caller bug the store does
-    /// not check. The reducer keeps the root of the open with the LOWEST `(lamport, site)`
-    /// (6j6v.vvw6), so a later open never moves a thread, and every replica keeps the same root
-    /// whatever order the opens arrive in.
+    /// Open a thread under an id the caller chose: the immutable root (spec §3.5). Re-opening the
+    /// same `thread_id` with an identical root converges; a distinct root under the same id is a
+    /// caller bug the store does not check. The reducer keeps the root of the open the id belongs to
+    /// ([`open_new_thread`](Self::open_new_thread)), else of the open with the LOWEST `(lamport,
+    /// site)` (6j6v.vvw6), so a later open never moves a thread and every replica keeps the same
+    /// root whatever order the opens arrive in. New threads go through `open_new_thread`.
     pub fn open_thread(&mut self, thread_id: &str, root: &ThreadRoot, author: &str) {
         let value = serde_json::to_string(root).expect("thread root serializes");
         self.inner.emit(
@@ -3218,6 +3256,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_posted_message_and_a_new_thread_are_minted_from_their_own_op() {
+        // 6j6v.vvw6 (owner decision 2026-10-06): the id is `m-` + the creating op's own id, which is
+        // what lets the reducer tell that op from any other claimant of the id.
+        let mut s = ChatStore::open_in_memory(1);
+        let root = ThreadRoot {
+            origin: "o".into(),
+            channel_id: "c-1".into(),
+            opener: "o/a".into(),
+            created: String::new(),
+            parent: None,
+        };
+        let thread = s.open_new_thread(&root, "o/a");
+        let message = s.post_message(&MessageEnvelope {
+            origin: "o".into(),
+            channel_id: "c-1".into(),
+            sender: "o/a".into(),
+            kind: MessageKind::Info,
+            priority: Priority::Normal,
+            disposition: Disposition::InTurn,
+            thread_id: Some(thread.clone()),
+            refs: Refs::default(),
+            body: "hi".into(),
+        });
+        let ops = s.export();
+        for id in [&thread, &message] {
+            let op = ops
+                .iter()
+                .find(|o| &o.target_id == id)
+                .expect("its op is in the log");
+            assert!(
+                op.owns_target(OWNED_ID_PREFIX),
+                "{id} is {OWNED_ID_PREFIX}{}",
+                op.op_id
+            );
+        }
+        let claim: i64 = s
+            .connection()
+            .query_row(
+                "SELECT claim FROM messages WHERE message_id=?1",
+                [&message],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(claim, 0, "folded as the owning claimant");
+    }
+
+    #[test]
     fn opening_a_workspace_folded_before_the_fold_revision_rebuilds_the_chat_views_once() {
         // 6j6v.qnbs, through 6j6v.y3r4: a build before 6j6v.aym3 folded a foreign message under the
         // sender its envelope CLAIMED, and nothing ever corrected the row — a refold folds over the
@@ -3272,6 +3357,27 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(sender, "acme/mallory", "the row now names who wrote the op");
+        drop(cs);
+        // ONCE: the rebuild recorded this revision, so the next open leaves the views as they are —
+        // a row planted in between survives it, which a second rebuild would clear.
+        ChatStore::open(p, 1)
+            .unwrap()
+            .connection()
+            .execute(
+                "UPDATE messages SET body = 'planted' WHERE message_id = 'm-1'",
+                [],
+            )
+            .unwrap();
+        let body: String = ChatStore::open(p, 1)
+            .unwrap()
+            .connection()
+            .query_row(
+                "SELECT body FROM messages WHERE message_id='m-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(body, "planted", "no second rebuild");
     }
 
     #[test]

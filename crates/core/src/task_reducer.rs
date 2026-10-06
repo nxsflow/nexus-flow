@@ -343,3 +343,86 @@ impl Reducer for TaskReducer {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nxs_foundation::change::{Cell, Effect};
+
+    fn op(target_kind: &str, target_id: &str, field: &str, op_type: &str) -> Op {
+        Op {
+            op_id: "op-1".into(),
+            lamport: 7,
+            site: 3,
+            domain: crate::model::DOMAIN_TASK.into(),
+            target_kind: target_kind.into(),
+            target_id: target_id.into(),
+            field: field.into(),
+            op_type: op_type.into(),
+            value: None,
+            author: "u".into(),
+            wall_clock: "2026-10-06T00:00:00Z".into(),
+            key_id: None,
+            sig: None,
+        }
+    }
+
+    fn cell<'a>(change: &'a Change, column: &str) -> &'a Cell {
+        let cells = match &change.effect {
+            Effect::Ensure { cells } | Effect::Put { cells } | Effect::Register { cells, .. } => {
+                cells
+            }
+        };
+        &cells.iter().find(|(c, _)| c == column).expect(column).1
+    }
+
+    #[test]
+    fn the_adds_and_the_note_carry_their_op_coordinate_and_the_note_its_wall_clock() {
+        // What `present_parent`, `present_thread_links` and the note reads order by now that they
+        // no longer join the log (6j6v.vvw6).
+        let edge = op("edge", &format!("a{SEP}b{SEP}parent"), "present", "add");
+        let link = op(
+            "thread_link",
+            &format!("t-1{SEP}a{SEP}worked_on{SEP}bearing"),
+            "present",
+            "add",
+        );
+        let note = op("note", "a", "body", "note_add");
+        for o in [&edge, &link, &note] {
+            let changes = TaskReducer.changes(o);
+            let row = &changes[0];
+            assert_eq!(cell(row, "lamport"), &Cell::Int(7), "{}", o.target_kind);
+            assert_eq!(cell(row, "site"), &Cell::Int(3), "{}", o.target_kind);
+        }
+        assert_eq!(
+            cell(&TaskReducer.changes(&note)[0], "created_at"),
+            &Cell::Text("2026-10-06T00:00:00Z".into())
+        );
+    }
+
+    #[test]
+    fn only_the_ops_whose_target_is_the_item_date_it() {
+        let dates = |o: &Op| {
+            TaskReducer
+                .changes(o)
+                .iter()
+                .filter(|c| c.table == "item_timestamps")
+                .count()
+        };
+        let mut set = op("item", "a", "title", "set");
+        set.value = Some("T".into());
+        assert_eq!(dates(&set), 2, "an item cell");
+        assert_eq!(dates(&op("field", "a", "size", "set")), 2, "a custom field");
+        assert_eq!(dates(&op("note", "a", "body", "note_add")), 2, "a note");
+        assert_eq!(
+            dates(&op("note", "n-1", "deleted", "set")),
+            0,
+            "a redaction targets the note"
+        );
+        assert_eq!(
+            dates(&op("edge", &format!("a{SEP}b{SEP}dep"), "present", "add")),
+            0,
+            "an edge targets a composite"
+        );
+    }
+}

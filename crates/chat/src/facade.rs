@@ -4656,9 +4656,7 @@ pub fn ask_under(
     };
     let author = format!("{}/{}", req.origin, req.actor);
     store.set_wall_clock(req.now);
-    let thread_id = store.mint_thread_id();
-    store.open_thread(
-        &thread_id,
+    let thread_id = store.open_new_thread(
         &ThreadRoot {
             origin: req.origin.to_string(),
             channel_id: req.channel.to_string(),

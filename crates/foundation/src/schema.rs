@@ -36,8 +36,9 @@ use rusqlite::{Connection, OptionalExtension};
 /// v8 (6j6v.vvw6) takes the op log out of the views' reads. flow's OR-set adds carry their add op's
 /// coordinate (`edge_adds`/`thread_link_adds`.`lamport`, `site`), so `present_parent` and
 /// `present_thread_links` stop joining `ops` and are redefined over those columns; a note carries
-/// its add op's coordinate and `wall_clock` (`notes.lamport`, `site`, `created_at`); chat's thread
-/// root gets the version its register compares on (`threads.root_v`, `root_site`); and
+/// its add op's coordinate and `wall_clock` (`notes.lamport`, `site`, `created_at`); a chat message
+/// and thread root get the rank their register compares first (`messages.claim`,
+/// `threads.root_claim`) and the root its coordinate (`threads.root_v`, `root_site`); and
 /// `view_watermarks` records the fold revision (`fold_revision`, `revision_through`, 6j6v.y3r4).
 /// Every new column is NULLable or DEFAULTed and the two views answer what they answered before,
 /// so the floor stays at 4. A row an older binary adds without the coordinate is filled the next
@@ -341,11 +342,24 @@ fn migrate_locked(conn: &Connection) -> rusqlite::Result<()> {
             ("notes", "lamport", "ALTER TABLE notes ADD COLUMN lamport INTEGER;"),
             ("notes", "site", "ALTER TABLE notes ADD COLUMN site INTEGER;"),
             ("notes", "created_at", "ALTER TABLE notes ADD COLUMN created_at TEXT;"),
+            ("messages", "claim", "ALTER TABLE messages ADD COLUMN claim INTEGER;"),
+            (
+                "threads",
+                "root_claim",
+                "ALTER TABLE threads ADD COLUMN root_claim INTEGER;",
+            ),
             ("threads", "root_v", "ALTER TABLE threads ADD COLUMN root_v INTEGER;"),
             ("threads", "root_site", "ALTER TABLE threads ADD COLUMN root_site INTEGER;"),
         ] {
             if table_exists(conn, table)? && !column_exists(conn, table, column)? {
                 conn.execute_batch(ddl)?;
+                if column == "revision_through" {
+                    // What a store folded before the revision existed it folded at revision 0, so
+                    // its mark is where it had folded to: a product whose reducer is still at 0
+                    // (memory) then does not rebuild for nothing, and one whose reducer moved on
+                    // rebuilds anyway, because its recorded revision is older.
+                    conn.execute_batch("UPDATE view_watermarks SET revision_through = folded_through;")?;
+                }
             }
         }
     }

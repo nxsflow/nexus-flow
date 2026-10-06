@@ -1,7 +1,8 @@
 //! nexus-chat's message reducer (spec §3): folds `message`-domain ops into the chat views. The
 //! third registered reducer in the platform (after task + fact). Dispatches on `target_kind` then
-//! `(op_type, field)` — grow-only messages, per-field LWW channels/profiles, observed-remove OR-set
-//! membership, grow-only+LWW threads. Stateless unit struct.
+//! `(op_type, field)` — messages and thread roots held by the op their id belongs to (else the
+//! lowest coordinate), per-field LWW channels/profiles, observed-remove OR-set membership, LWW
+//! thread fields. Stateless unit struct.
 
 use crate::model::*;
 use nxs_foundation::change::{cells, Change, Version, Wins};
@@ -54,19 +55,18 @@ impl MessageReducer {
         // all, so dropping it would make new messages invisible across a mixed version stand — it
         // simply has no authority any more.
         //
-        // **Two ops claiming one message id: the lowest `(lamport, site)` wins** (6j6v.vvw6). It
-        // used to be the first to ARRIVE (`INSERT OR IGNORE`), the one fold in the platform that
-        // depended on delivery order — two replicas receiving the two ops in opposite orders showed
-        // two different messages under one id, for ever. The rule is now a pure function of the
-        // ops, like every other register here. What it is NOT is an upsert by the latest writer: a
-        // second op reusing an id cannot take over a message by being written later, which is the
-        // re-attribution the grow-only fold was guarding against. A writer that FORGES a lower
-        // coordinate can — exactly as it can win any LWW register by forging a higher one, while
-        // the relay authenticates nobody; which ops a replica acts on is the signature's question
-        // (6j6v.pzkb), not the fold's. The fold revision bump that comes with this rebuilds the
-        // chat views once, which is also what corrects rows a pre-aym3 build folded with the
-        // envelope's claimed sender (6j6v.qnbs).
-        Change::register(
+        // **Two ops claiming one message id: the op the id belongs to keeps it** (6j6v.vvw6, owner
+        // decision 2026-10-06). It used to be the first to ARRIVE (`INSERT OR IGNORE`), the one fold
+        // in the platform that depended on delivery order — two replicas receiving two claimants in
+        // opposite orders showed two different messages under one id, for ever. A message id is now
+        // minted from its post op's own id (`ChatStore::post_message`), so the claimant whose op id
+        // gives the id ranks 0 and every other claimant 1, and the lowest (rank, lamport, site)
+        // wins: the owning op keeps its message against any coordinate another op brings, in every
+        // order, and a message stays what its author wrote. An id minted before (or under the
+        // golden switch) belongs to no op; there every claimant ranks 1 and the lowest coordinate
+        // wins — deterministic, and `is_foldable` refuses a number below 1, so a claimant cannot
+        // undercut every honest op by sending 0 or a negative one.
+        Change::register_ranked(
             "messages",
             cells([("message_id", op.target_id.as_str().into())]),
             cells([
@@ -90,6 +90,7 @@ impl MessageReducer {
                 ("body", env.body.into()),
                 ("created", op.wall_clock.as_str().into()),
             ]),
+            ("claim", claim_rank(op)),
             ("lamport", "site"),
             version(op),
             Wins::Lower,
@@ -169,11 +170,12 @@ impl MessageReducer {
         // once by the op that opens the thread and never re-set. A root op carries `None`, which
         // lands as NULL: the tree's ROOT is the absence of an edge.
         //
-        // The root is a register of its own, keyed by the open op's coordinate (6j6v.vvw6): every
-        // honest open of one thread carries the same root, and when two do not, the lowest
-        // `(lamport, site)` keeps it — not the last to arrive, which is what an unconditional
-        // overwrite used to mean. A second open is still what holds the thread (`held_sql`).
-        vec![Change::register(
+        // The root is a register of its own (6j6v.vvw6), ranked like a message: the open a new
+        // thread's id was minted from (`ChatStore::open_new_thread`) keeps the root, and between
+        // opens of an id no op owns the lowest `(lamport, site)` does — not the last to arrive, which
+        // is what an unconditional overwrite used to mean. A second open is still what holds the
+        // thread (`held_sql`).
+        vec![Change::register_ranked(
             "threads",
             cells([("thread_id", op.target_id.as_str().into())]),
             cells([
@@ -183,11 +185,29 @@ impl MessageReducer {
                 ("created", root.created.into()),
                 ("parent", root.parent.into()),
             ]),
+            ("root_claim", claim_rank(op)),
             ("root_v", "root_site"),
             version(op),
             Wins::Lower,
         )]
     }
+}
+
+/// How a claimant of a message or thread id ranks (6j6v.vvw6): 0 for the op the id was minted
+/// from, 1 for any other. The lower rank wins before any coordinate is compared.
+fn claim_rank(op: &Op) -> i64 {
+    if op.owns_target(OWNED_ID_PREFIX) {
+        0
+    } else {
+        1
+    }
+}
+
+/// Whether `op`'s Lamport number may take part in a lowest-wins register: 1 or more, the first
+/// number any replica mints. Below it, an op would undercut every honest claimant of an id no op
+/// owns (see `Op::lamport_in_bound`).
+fn mintable_lamport(op: &Op) -> bool {
+    op.lamport >= 1
 }
 
 /// An op's coordinate, the version its registers compare on.
@@ -206,7 +226,10 @@ impl Reducer for MessageReducer {
     fn is_foldable(&self, op: &Op) -> bool {
         match (op.target_kind.as_str(), op.op_type.as_str()) {
             (KIND_MESSAGE, OP_POST) => {
-                op.field == FIELD_ENVELOPE && Self::attributable(op) && Self::valid_envelope(op)
+                op.field == FIELD_ENVELOPE
+                    && mintable_lamport(op)
+                    && Self::attributable(op)
+                    && Self::valid_envelope(op)
             }
             (KIND_CHANNEL, OP_SET) => CHANNEL_FIELDS.contains(&op.field.as_str()),
             (KIND_PROFILE, OP_SET) => PROFILE_FIELDS.contains(&op.field.as_str()),
@@ -214,6 +237,7 @@ impl Reducer for MessageReducer {
             (KIND_MEMBERSHIP, OP_REMOVE) => split2(&op.target_id).is_some(),
             (KIND_THREAD, OP_OPEN) => {
                 op.field == FIELD_ROOT
+                    && mintable_lamport(op)
                     && Self::attributable(op)
                     && op
                         .value
@@ -580,68 +604,160 @@ mod tests {
         assert_eq!(n, 1, "grow-only, idempotent on message_id");
     }
 
-    #[test]
-    fn two_ops_claiming_one_message_id_resolve_to_the_lowest_coordinate_in_either_order() {
-        // Unlike re-delivery of the SAME op (short-circuited at the substrate's op-log dedup before
-        // the reducer runs again), these are TWO DISTINCT ops targeting ONE message_id. It used to
-        // be the first to ARRIVE that stayed — so two replicas receiving them in opposite orders
-        // showed different messages under one id for ever. Now the lowest (lamport, site) stays,
-        // whichever order they come in (6j6v.vvw6) — and a LATER write still cannot take an
-        // existing message over, which is what the grow-only fold was guarding.
-        let early = op(
-            KIND_MESSAGE,
-            "m-1",
-            FIELD_ENVELOPE,
-            OP_POST,
-            Some(&envelope_json("c-1", "hi")),
-            1,
-            1,
-        );
-        let late = authored_by(
-            "acme/mallory",
-            op(
-                KIND_MESSAGE,
-                "m-1",
-                FIELD_ENVELOPE,
-                OP_POST,
-                Some(&envelope_json("c-1", "changed")),
-                2,
-                1,
-            ),
-        );
-        assert_ne!(
-            early.op_id, late.op_id,
-            "must be distinct ops, not a re-delivery"
-        );
-        for order in [[&early, &late], [&late, &early]] {
-            let mut s = store();
-            for o in order {
-                s.apply(std::slice::from_ref(o));
+    /// Every order in which `ops` can arrive, each folded into a fresh store.
+    fn in_every_order(ops: &[Op], check: impl Fn(&Store, &[usize])) {
+        fn permutations(n: usize) -> Vec<Vec<usize>> {
+            if n == 0 {
+                return vec![Vec::new()];
             }
-            let rows: Vec<(String, String, i64)> = s
-                .connection()
-                .prepare("SELECT body, sender, lamport FROM messages")
-                .unwrap()
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect();
-            assert_eq!(
-                rows,
-                vec![(
-                    "hi".to_string(),
-                    "nxsflow/nexus-flow/PmAgent".to_string(),
-                    1
-                )],
-                "one message, the lowest coordinate's — arriving {} first",
-                order[0].op_id
-            );
+            let mut out = Vec::new();
+            for p in permutations(n - 1) {
+                for at in 0..=p.len() {
+                    let mut q = p.clone();
+                    q.insert(at, n - 1);
+                    out.push(q);
+                }
+            }
+            out
+        }
+        for order in permutations(ops.len()) {
+            let mut s = store();
+            for &i in &order {
+                s.apply(std::slice::from_ref(&ops[i]));
+            }
+            check(&s, &order);
         }
     }
 
+    /// A post that OWNS its message id: `m-` followed by its own op id, as `post_message` mints it.
+    fn owned_post(body: &str, lamport: i64, site: i64) -> Op {
+        let mut o = op(
+            KIND_MESSAGE,
+            "placeholder",
+            FIELD_ENVELOPE,
+            OP_POST,
+            Some(&envelope_json("c-1", body)),
+            lamport,
+            site,
+        );
+        o.target_id = format!("{OWNED_ID_PREFIX}{}", o.op_id);
+        o
+    }
+
+    /// Another op claiming `message_id` — any op id but the one the id was minted from.
+    fn claimant(message_id: &str, body: &str, lamport: i64, site: i64) -> Op {
+        let mut o = authored_by(
+            "acme/mallory",
+            op(
+                KIND_MESSAGE,
+                message_id,
+                FIELD_ENVELOPE,
+                OP_POST,
+                Some(&envelope_json("c-1", body)),
+                lamport,
+                site,
+            ),
+        );
+        o.op_id = format!("forged-{lamport}-{site}");
+        o
+    }
+
+    fn the_message(s: &Store) -> Vec<(String, String)> {
+        s.connection()
+            .prepare("SELECT message_id, body FROM messages")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     #[test]
-    fn two_opens_of_one_thread_keep_the_lowest_coordinates_root_in_either_order() {
-        // The thread root used to be overwritten by whichever open ARRIVED last (6j6v.vvw6).
+    fn a_message_belongs_to_its_post_and_no_lower_coordinate_takes_it_over() {
+        // Review of PR #22, Integrity #1 — the owner decision of 2026-10-06. Lowest-coordinate-wins
+        // alone let any op claim an existing message id with a lower number and rewrite the message
+        // on every replica. The id is the post op's own now, and its owner keeps it against forged
+        // claimants far below it, on its own site and on another, in every order.
+        let owner = owned_post("approve the release", 900, 5);
+        let id = owner.target_id.clone();
+        let ops = [
+            owner,
+            claimant(&id, "reject it", 1, 1),
+            claimant(&id, "reject it harder", 900, 4),
+        ];
+        in_every_order(&ops, |s, order| {
+            assert_eq!(
+                the_message(s),
+                vec![(id.clone(), "approve the release".to_string())],
+                "order {order:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn claimants_of_an_id_no_op_owns_resolve_by_lamport_then_site_in_every_order() {
+        // An id minted before ids belonged to their op (or under the golden switch): no claimant
+        // owns it, so the lowest (lamport, site) wins — and on EQUAL lamports the site decides,
+        // which a lamport-only compare would not.
+        let ops = [
+            claimant("m-legacy", "lamport 4", 4, 1),
+            claimant("m-legacy", "site 7", 3, 7),
+            claimant("m-legacy", "site 2", 3, 2),
+        ];
+        in_every_order(&ops, |s, order| {
+            assert_eq!(
+                the_message(s),
+                vec![("m-legacy".to_string(), "site 2".to_string())],
+                "order {order:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_message_or_thread_open_numbered_below_one_is_stored_never_folded() {
+        // In a lowest-wins register a 0 or a negative number would undercut every honest claimant
+        // of an id no op owns; no replica mints one, so it is store-don't-fold (§7).
+        let r = MessageReducer;
+        for lamport in [0, -1, i64::MIN] {
+            assert!(
+                !r.is_foldable(&claimant("m-legacy", "x", lamport, 1)),
+                "{lamport}"
+            );
+            let root = serde_json::to_string(&ThreadRoot {
+                origin: "o".into(),
+                channel_id: "c-1".into(),
+                opener: String::new(),
+                created: String::new(),
+                parent: None,
+            })
+            .unwrap();
+            assert!(
+                !r.is_foldable(&op(
+                    KIND_THREAD,
+                    "t-1",
+                    FIELD_ROOT,
+                    OP_OPEN,
+                    Some(&root),
+                    lamport,
+                    1
+                )),
+                "{lamport}"
+            );
+        }
+        let mut s = store();
+        s.apply(&[
+            claimant("m-legacy", "honest", 5, 1),
+            claimant("m-legacy", "zero", 0, 1),
+        ]);
+        assert_eq!(
+            the_message(&s),
+            vec![("m-legacy".to_string(), "honest".to_string())]
+        );
+        assert_eq!(s.export().len(), 2, "the refused op is kept in the log");
+    }
+
+    #[test]
+    fn a_thread_root_belongs_to_its_open_and_otherwise_to_the_lowest_coordinate() {
         let root = |channel: &str| {
             serde_json::to_string(&ThreadRoot {
                 origin: "nxsflow/nexus-flow".into(),
@@ -652,47 +768,77 @@ mod tests {
             })
             .unwrap()
         };
-        let first = op(
+        let channel_of = |s: &Store, id: &str| -> String {
+            s.connection()
+                .query_row(
+                    "SELECT channel_id FROM threads WHERE thread_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        // The open the id was minted from keeps the root against lower forged opens.
+        let mut owner = op(
             KIND_THREAD,
-            "t-1",
+            "x",
             FIELD_ROOT,
             OP_OPEN,
             Some(&root("c-1")),
+            50,
             3,
-            1,
         );
-        let second = authored_by(
-            "acme/mallory",
-            op(
+        owner.target_id = format!("{OWNED_ID_PREFIX}{}", owner.op_id);
+        let id = owner.target_id.clone();
+        let forged = |channel: &str, lamport: i64, site: i64| {
+            let mut o = authored_by(
+                "acme/mallory",
+                op(
+                    KIND_THREAD,
+                    &id,
+                    FIELD_ROOT,
+                    OP_OPEN,
+                    Some(&root(channel)),
+                    lamport,
+                    site,
+                ),
+            );
+            o.op_id = format!("forged-{lamport}-{site}");
+            o
+        };
+        in_every_order(
+            &[
+                owner.clone(),
+                forged("c-evil", 1, 1),
+                forged("c-worse", 50, 2),
+            ],
+            |s, order| {
+                assert_eq!(channel_of(s, &id), "c-1", "order {order:?}");
+            },
+        );
+        // An id no open owns: lowest (lamport, site), the site deciding between equal lamports.
+        let legacy = |channel: &str, lamport: i64, site: i64| {
+            let mut o = op(
                 KIND_THREAD,
-                "t-1",
+                "t-legacy",
                 FIELD_ROOT,
                 OP_OPEN,
-                Some(&root("c-evil")),
-                4,
-                1,
-            ),
-        );
-        for order in [[&first, &second], [&second, &first]] {
-            let mut s = store();
-            for o in order {
-                s.apply(std::slice::from_ref(o));
-            }
-            let (channel, opener): (String, String) = s
-                .connection()
-                .query_row(
-                    "SELECT channel_id, opener FROM threads WHERE thread_id='t-1'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(
-                (channel.as_str(), opener.as_str()),
-                ("c-1", "nxsflow/nexus-flow/PmAgent"),
-                "arriving {} first",
-                order[0].op_id
+                Some(&root(channel)),
+                lamport,
+                site,
             );
-        }
+            o.op_id = format!("open-{lamport}-{site}");
+            o
+        };
+        in_every_order(
+            &[
+                legacy("c-a", 4, 1),
+                legacy("c-b", 3, 9),
+                legacy("c-c", 3, 2),
+            ],
+            |s, order| {
+                assert_eq!(channel_of(s, "t-legacy"), "c-c", "order {order:?}");
+            },
+        );
     }
 
     #[test]

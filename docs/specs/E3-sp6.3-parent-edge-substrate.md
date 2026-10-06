@@ -40,6 +40,10 @@ Add a dedicated **`EdgeKind::Parent`** (wire string `"parent"`).
 longer a column on fresh DBs). Instead a **SQL view `present_parent(child_id, parent_id)`** projects
 the single **LWW-winning** parent edge per child:
 
+> **Superseded 2026-10-06 (`6j6v.vvw6`).** The view no longer joins `ops`: `edge_adds` carries its
+> add op's `lamport`/`site`, and `present_parent` compares those (`crates/core/src/schema.rs`,
+> `PRESENT_PARENT`). The rule — max `(lamport, site, to_id)` — is unchanged.
+
 ```sql
 -- per child, the present `parent` edge whose add-op has the max (lamport, site, to_id)
 CREATE VIEW present_parent AS

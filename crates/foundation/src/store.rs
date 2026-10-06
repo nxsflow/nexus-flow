@@ -290,7 +290,7 @@ impl Store {
         let (op_id, ingest) = self.build_and_ingest(
             domain,
             target_kind,
-            target_id,
+            Target::Given(target_id),
             field,
             op_type,
             value,
@@ -301,6 +301,42 @@ impl Store {
             "emit must only build fresh, foldable ops (is the domain's reducer registered?)"
         );
         op_id
+    }
+
+    /// [`emit`](Self::emit) an op whose `target_id` is minted FROM the op's own id: `prefix`
+    /// followed by the op id (6j6v.vvw6). Returns that target id.
+    ///
+    /// What makes an id the op's own rather than a name any op can claim: another op claiming it
+    /// has another op id, so a reducer can tell the op an id was minted from ([`Op::owns_target`])
+    /// from every other claimant and let the first keep it whatever coordinate the others bring.
+    /// A chat message id is minted this way.
+    ///
+    /// [`Op::owns_target`]: crate::model::Op::owns_target
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_owned(
+        &mut self,
+        domain: &str,
+        target_kind: &str,
+        prefix: &str,
+        field: &str,
+        op_type: &str,
+        value: Option<String>,
+        author: &str,
+    ) -> String {
+        let (op_id, ingest) = self.build_and_ingest(
+            domain,
+            target_kind,
+            Target::Owned(prefix),
+            field,
+            op_type,
+            value,
+            author,
+        );
+        debug_assert!(
+            matches!(ingest, Ingest::Folded),
+            "emit_owned must only build fresh, foldable ops (is the domain's reducer registered?)"
+        );
+        format!("{prefix}{op_id}")
     }
 
     /// Build + persist one LOCAL op that this build deliberately does **not** fold into any view —
@@ -330,7 +366,7 @@ impl Store {
         let (op_id, ingest) = self.build_and_ingest(
             domain,
             target_kind,
-            target_id,
+            Target::Given(target_id),
             field,
             op_type,
             value,
@@ -353,7 +389,7 @@ impl Store {
         &mut self,
         domain: &str,
         target_kind: &str,
-        target_id: &str,
+        target: Target<'_>,
         field: &str,
         op_type: &str,
         value: Option<String>,
@@ -384,13 +420,18 @@ impl Store {
         // by which time the `MAX` it read may be stale.
         self.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         self.refresh_clock();
+        let op_id = ulid::Ulid::new().to_string();
+        let target_id = match target {
+            Target::Given(id) => id.to_string(),
+            Target::Owned(prefix) => format!("{prefix}{op_id}"),
+        };
         let mut op = Op {
-            op_id: ulid::Ulid::new().to_string(),
+            op_id,
             lamport: 0,
             site: self.site,
             domain: domain.to_string(),
             target_kind: target_kind.to_string(),
-            target_id: target_id.to_string(),
+            target_id,
             field: field.to_string(),
             op_type: op_type.to_string(),
             value,
@@ -512,8 +553,8 @@ impl Store {
         // deferred alike: from THIS store's standpoint the log is processed through here (a
         // deferred op of a foreign domain is one it will never fold; a sibling store with its own
         // views_key tracks its own progress). Keeps the single-device reopen O(1) — no refold
-        // (aye.36).
-        self.advance_watermark(op_rowid);
+        // (aye.36). Its revision's mark moves only across ops this revision folded (6j6v.y3r4).
+        self.advance_watermark_after(op_rowid);
         if folded {
             Ingest::Folded
         } else {
@@ -771,7 +812,7 @@ impl Store {
         if !needs_rebuild(self) {
             return false;
         }
-        self.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        self.begin_immediate_patiently();
         let rebuilt = needs_rebuild(self);
         if rebuilt {
             for reducer in &self.reducers {
@@ -792,6 +833,27 @@ impl Store {
         }
         self.conn.execute_batch("COMMIT").unwrap();
         rebuilt
+    }
+
+    /// `BEGIN IMMEDIATE` for a rebuild, waiting as long as another process holds the write lock —
+    /// which may be another opener rebuilding the same file (review of PR #22, Integrity #3). A
+    /// rebuild folds the whole log under that lock, which can outlast the connection's busy
+    /// timeout; the waiter takes the lock afterwards, finds the views current and does nothing.
+    /// Gives up, loudly, only after ten minutes — a lock held that long is no rebuild.
+    fn begin_immediate_patiently(&self) {
+        let started = std::time::Instant::now();
+        loop {
+            match self.conn.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => return,
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy
+                        && started.elapsed() < std::time::Duration::from_secs(600) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => panic!("cannot take the write lock to rebuild the views: {e}"),
+            }
+        }
     }
 
     /// The highest `ops.rowid` the `store_id` product store has folded into its views (0 if it has
@@ -819,7 +881,9 @@ impl Store {
     ///
     /// `revision_through` moves with it only while the recorded fold revision is this binary's own
     /// (6j6v.y3r4): a binary of another revision folding here is exactly what that mark exists to
-    /// notice, so it must not be the one to move it.
+    /// notice, so it must not be the one to move it. This form is for after a fold of the WHOLE log
+    /// at this revision, which vouches for every op up to `rowid`; one op's ingest uses
+    /// [`advance_watermark_after`](Self::advance_watermark_after).
     fn advance_watermark(&self, rowid: i64) {
         if let Some(key) = &self.views_key {
             self.conn
@@ -830,6 +894,31 @@ impl Store {
                          folded_through = MAX(folded_through, excluded.folded_through),
                          revision_through = CASE WHEN fold_revision = excluded.fold_revision
                              THEN MAX(revision_through, excluded.revision_through)
+                             ELSE revision_through END",
+                    params![key, rowid, self.fold_revision()],
+                )
+                .unwrap();
+        }
+    }
+
+    /// [`advance_watermark`](Self::advance_watermark) for ONE op just ingested at `rowid` — which
+    /// vouches for that op alone. `revision_through` moves to it only when it already stands at the
+    /// op before (review of PR #22, Integrity #2): a long-lived handle whose next write lands after
+    /// rows an older binary appended in between would otherwise jump the mark over them, and they
+    /// would never be rebuilt. Left behind, the mark makes the next open rebuild.
+    fn advance_watermark_after(&self, rowid: i64) {
+        if let Some(key) = &self.views_key {
+            self.conn
+                .execute(
+                    "INSERT INTO view_watermarks(store_id, folded_through, fold_revision, revision_through)
+                     VALUES(?1, ?2, ?3, CASE WHEN ?2 = (SELECT MIN(rowid) FROM ops) THEN ?2 ELSE 0 END)
+                     ON CONFLICT(store_id) DO UPDATE SET
+                         folded_through = MAX(folded_through, excluded.folded_through),
+                         revision_through = CASE
+                             WHEN fold_revision = excluded.fold_revision
+                              AND revision_through >= COALESCE(
+                                      (SELECT MAX(rowid) FROM ops WHERE rowid < ?2), 0)
+                             THEN MAX(revision_through, ?2)
                              ELSE revision_through END",
                     params![key, rowid, self.fold_revision()],
                 )
@@ -1085,6 +1174,13 @@ impl Store {
         self.refold();
         self.advance_watermark(self.max_op_rowid());
     }
+}
+
+/// Where a local op's `target_id` comes from: the caller, or the op's own id behind a prefix
+/// ([`Store::emit_owned`]).
+enum Target<'a> {
+    Given(&'a str),
+    Owned(&'a str),
 }
 
 /// Fold `op` through `reducer`: its [described changes](crate::change), carried out by the SQLite
@@ -2905,6 +3001,87 @@ mod tests {
         }
         let new = revised_store(path, 1);
         assert_eq!(tally_value(&new, "b").as_deref(), Some("LATE"));
+    }
+
+    #[test]
+    fn a_long_lived_handle_writing_after_an_older_binary_does_not_vouch_for_its_rows() {
+        // Review of PR #22, Integrity #2, with two writers on one file at once: a newer handle
+        // stays open while an older binary appends; the newer handle's next write must not carry
+        // its revision's mark over the older binary's row, or no open would ever rebuild it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        let mut new = revised_store(path, 1);
+        new.emit("tally", "tally", "a", "v", "set", Some("first".into()), "u");
+        {
+            let mut old = revised_store(path, 0);
+            old.emit(
+                "tally",
+                "tally",
+                "b",
+                "v",
+                "set",
+                Some("between".into()),
+                "u",
+            );
+        }
+        new.emit("tally", "tally", "c", "v", "set", Some("after".into()), "u");
+        let (_, revision_through) = new.recorded_revision("tally");
+        assert!(
+            revision_through < new.max_op_rowid(),
+            "the mark stopped before the older binary's row"
+        );
+        drop(new);
+        let reopened = revised_store(path, 1);
+        assert_eq!(tally_value(&reopened, "b").as_deref(), Some("BETWEEN"));
+        assert_eq!(tally_value(&reopened, "c").as_deref(), Some("AFTER"));
+    }
+
+    #[test]
+    fn a_store_at_an_older_revision_than_the_file_leaves_the_views_alone() {
+        // The newer binary was here; an older one opening the file must not rebuild by its own
+        // rules — it folds what it writes and leaves the catching up to the newer one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        {
+            let mut new = revised_store(path, 1);
+            new.emit("tally", "tally", "a", "v", "set", Some("x".into()), "u");
+        }
+        let old = revised_store(path, 0);
+        assert_eq!(
+            tally_value(&old, "a").as_deref(),
+            Some("X"),
+            "not rebuilt as lowercase"
+        );
+        assert_eq!(
+            old.recorded_revision("tally").0,
+            1,
+            "the file stays at the newer revision"
+        );
+    }
+
+    #[test]
+    fn a_fresh_file_does_not_rebuild_on_its_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.db");
+        let path = path.to_str().unwrap();
+        {
+            let mut s = revised_store(path, 1);
+            s.emit("tally", "tally", "a", "v", "set", Some("x".into()), "u");
+            s.connection()
+                .execute(
+                    "INSERT INTO tally(id, v, v_l, v_s) VALUES('marker', 'm', 0, 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let s = revised_store(path, 1);
+        assert_eq!(
+            tally_value(&s, "marker").as_deref(),
+            Some("m"),
+            "no rebuild"
+        );
     }
 
     #[test]
