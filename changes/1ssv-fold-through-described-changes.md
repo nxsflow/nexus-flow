@@ -1,5 +1,6 @@
 ---
 type: changed
+facade: breaking
 ---
 [en]
 The views no longer lean on the op log. The parent of an item, the weight of a thread link, the
@@ -13,7 +14,11 @@ a workspace it rebuilds the board's and the chat's views once from the log; that
 messages an old build had recorded under the sender their payload claimed. An item's created and
 updated instants now count the ops this version folds; an op it keeps but cannot fold no longer
 moves them. The workspace schema goes to v8; older versions keep working on the same file, and
-whatever they write there is folded again the next time this version opens it.
+whatever they write there is folded again the next time this version opens it. For embedding
+apps: a `Reducer` no longer folds into a connection — it returns the changes an op makes
+(`Reducer::changes`, built from `nxs_foundation::change`), and the substrate carries them out; a
+reducer declares `fold_revision` when its rules change. `Image` gains `fold_revision` and
+`RefoldReason` gains `OtherRevision`.
 [de]
 Die Ansichten stützen sich nicht mehr auf das Op-Log. Das Elternteil eines Tickets, das Gewicht
 einer Faden-Verknüpfung, der Erstellungs- und Änderungszeitpunkt eines Tickets sowie Reihenfolge und
@@ -29,3 +34,7 @@ Nutzlast behaupteten Absender abgelegt hatte. Erstellungs- und Änderungszeitpun
 zählen jetzt die Ops, die diese Version faltet; eine Op, die sie aufbewahrt, aber nicht falten kann,
 verschiebt sie nicht mehr. Das Workspace-Schema geht auf v8; ältere Versionen arbeiten auf derselben
 Datei weiter, und was sie dort schreiben, wird beim nächsten Öffnen durch diese Version neu gefaltet.
+Für einbettende Apps: Ein `Reducer` faltet nicht mehr selbst in eine Verbindung, sondern gibt die
+Änderungen zurück, die eine Op bewirkt (`Reducer::changes`, gebaut aus `nxs_foundation::change`);
+das Substrat setzt sie um. Ändern sich seine Regeln, erhöht ein Reducer `fold_revision`. `Image`
+bekommt `fold_revision`, `RefoldReason` bekommt `OtherRevision`.
