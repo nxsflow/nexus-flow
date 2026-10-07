@@ -257,6 +257,10 @@ fn next_json_parent_is_null_for_a_deleted_parent_but_keeps_belongs_to() {
     open_task(&mut s, "ab12.0002", "child", "0");
     s.set_parent("ab12.0002", "ab12.0001", "t").unwrap();
     s.delete_item("ab12.0001", "t");
+    // CLAIMED, so it stays in `next`: a parent outside the active tickets counts as closed
+    // (6j6v.jr42, owner decision 2026-10-06), and an OPEN child of a closed parent rests — the
+    // closed-mask bites open children only. What this test is about is the parent join.
+    s.set_field("ab12.0002", "status", Some("in_progress".into()), "t");
 
     let items = read::next(&cfg(), &s, NOW, None).unwrap();
     let v = read::next_to_value(&s, &items).unwrap();

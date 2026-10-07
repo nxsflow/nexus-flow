@@ -414,7 +414,8 @@ pub fn promoted_children(conn: &Connection, now: &str) -> rusqlite::Result<Vec<(
 pub fn dependents_count(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
     let sql = "SELECT COUNT(*) FROM present_edges d JOIN items i ON i.id=d.from_id
                WHERE d.to_id=?1 AND d.kind='dep'
-                 AND COALESCE(i.deleted,'0')<>'1' AND i.status<>'closed'";
+                 AND COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL
+                 AND i.status IN ('open','in_progress')";
     Ok(conn.query_row(sql, params![id], |r| r.get::<_, i64>(0))? as usize)
 }
 

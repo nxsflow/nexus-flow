@@ -501,17 +501,30 @@ fn deps_with_status(store: &Store, id: &str) -> Result<Vec<(String, Option<Strin
     Ok(out)
 }
 
-/// The OPEN blockers of `id`: deps whose target is still live and not closed — the concrete
-/// reason `id` is not ready, as `(id, core-status)` pairs. Id-sorted, deterministic. A closed
-/// or deleted dep is satisfied and never listed (consistent with `derive::ready`).
+/// The OPEN blockers of `id`: deps whose target is ACTIVE — live, not archived, `open` or
+/// `in_progress` — the concrete reason `id` is not ready, as `(id, core-status)` pairs. Id-sorted,
+/// deterministic. Any other dep counts as closed and is never listed (6j6v.jr42, the rule
+/// [`crate::read`]'s lanes and `nexus_flow_core::graph` share).
 fn open_blockers(store: &Store, id: &str) -> Result<Vec<(String, String)>> {
-    Ok(deps_with_status(store, id)?
-        .into_iter()
-        .filter_map(|(d, st)| match st {
-            Some(s) if s != "closed" => Some((d, s)),
-            _ => None,
-        })
-        .collect())
+    let mut out = Vec::new();
+    for (d, _) in deps_with_status(store, id)? {
+        if let Some(b) = store.get_item(&d)? {
+            let active = b.deleted.as_deref() != Some("1")
+                && b.archived.is_none()
+                && matches!(b.status.as_deref(), Some("open") | Some("in_progress"));
+            if active {
+                out.push((d, b.status.unwrap_or_default()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every lane, derived once by the graph library over the active tickets (6j6v.vvw6 point 4,
+/// 6j6v.jr42) — the same code a server runs over its "active" index. The selection is this
+/// store's SQL; the decision is the library's.
+fn lanes(store: &Store, now: &str) -> Result<nexus_flow_core::graph::Lanes> {
+    Ok(nexus_flow_core::graph::select(store.connection())?.lanes(now))
 }
 
 // ---- list ------------------------------------------------------------------
@@ -565,7 +578,7 @@ pub fn blocked(
     sort: Option<SortKey>,
 ) -> Result<Vec<BlockedItem>> {
     let mut rows: Vec<BlockedItem> = Vec::new();
-    for id in derive::blocked(store.connection())? {
+    for id in lanes(store, "")?.blocked {
         let Some(item) = store.get_item(&id)? else {
             continue;
         };
@@ -618,14 +631,15 @@ pub fn blocked_to_value(rows: &[BlockedItem]) -> Value {
 
 /// The `deferred` lane: open, unblocked, acyclic work whose `defer_until` is still in the future,
 /// ordered by `sort` (default [`DEFAULT_SORT_DEFERRED`], defer-date ascending — soonest first).
-/// `now` is the defer boundary. Disjoint from `ready`/`blocked` by construction (`derive::deferred`).
+/// `now` is the defer boundary. Disjoint from `ready`/`blocked` by construction (the graph library's
+/// lanes, held equal to `derive::deferred`).
 pub fn deferred(
     cfg: &PluginConfig,
     store: &Store,
     now: &str,
     sort: Option<SortKey>,
 ) -> Result<Vec<ItemRow>> {
-    let ids = derive::deferred(store.connection(), now)?;
+    let ids = lanes(store, now)?.deferred;
     let mut items = resolve_items(store, &ids)?;
     order_by(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_DEFERRED));
     Ok(items)
@@ -774,7 +788,16 @@ pub fn next(
     // signals separately would run that walk four times over (the xn8s ratio guard below catches
     // precisely that). `next_candidates` IS `ready ∪ in_progress` by construction — same CTE, same
     // actionability — so the set is identical to the two-call form, at a quarter of the cost.
-    let candidates = derive::next_candidates(store.connection(), now)?;
+    let candidates: Vec<derive::NextCandidate> = lanes(store, now)?
+        .candidates
+        .into_iter()
+        .map(|c| derive::NextCandidate {
+            status: if c.in_progress { "in_progress" } else { "open" }.to_string(),
+            id: c.id,
+            finishable: c.finishable,
+            promoter: c.promoter,
+        })
+        .collect();
     let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
     let mut items = resolve_items(store, &ids)?;
     match sort.unwrap_or(DEFAULT_SORT_NEXT) {
@@ -1695,14 +1718,12 @@ struct EffectiveLaneSets {
 
 impl EffectiveLaneSets {
     fn compute(store: &Store, now: &str) -> Result<Self> {
-        let conn = store.connection();
+        let lanes = lanes(store, now)?;
         Ok(Self {
-            ready: derive::ready(conn, now)?.into_iter().collect(),
-            deferred_own: derive::deferred(conn, now)?.into_iter().collect(),
-            suppressed_blocked: derive::suppressed_by_blocked(conn)?.into_iter().collect(),
-            suppressed_deferred_only: derive::suppressed_by_deferred_only(conn, now)?
-                .into_iter()
-                .collect(),
+            ready: lanes.ready.into_iter().collect(),
+            deferred_own: lanes.deferred.into_iter().collect(),
+            suppressed_blocked: lanes.suppressed_by_blocked.into_iter().collect(),
+            suppressed_deferred_only: lanes.suppressed_by_deferred_only.into_iter().collect(),
         })
     }
 }
@@ -2511,7 +2532,7 @@ pub struct BlockedEntry {
 /// Pure visibility — it never changes the `next` ranking (nexus-flow-bcj).
 fn prime_blocked_entries(store: &Store) -> Result<Vec<BlockedEntry>> {
     let mut entries: Vec<BlockedEntry> = Vec::new();
-    for id in derive::blocked(store.connection())? {
+    for id in lanes(store, "")?.blocked {
         let mut blockers = Vec::new();
         for (bid, status) in open_blockers(store, &id)? {
             blockers.push(Blocker {
