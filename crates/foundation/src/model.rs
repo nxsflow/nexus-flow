@@ -82,9 +82,21 @@ pub struct Op {
 }
 
 impl Op {
+    /// Whether this op's `target_id` was minted from its own id — `prefix` followed by the op id
+    /// ([`Store::emit_owned`](crate::store::Store::emit_owned), 6j6v.vvw6). No other op can own
+    /// that target: the op id is the log's identity, so an op carrying another id is another op.
+    pub fn owns_target(&self, prefix: &str) -> bool {
+        self.target_id
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest == self.op_id)
+    }
+
     /// Whether this op's Lamport number is one the fold and the clock may take into account — at
-    /// most [`MAX_LAMPORT`] (6j6v.m19v). Only the top is bounded: a negative number cannot move a
-    /// clock that only ever advances, and it loses every compare it enters, so it harms nothing.
+    /// most [`MAX_LAMPORT`] (6j6v.m19v). Only the top is bounded here: a negative number cannot
+    /// move a clock that only ever advances, and it loses every keep-if-beats compare where the
+    /// HIGHEST version wins. Where the LOWEST wins (a register built with `Wins::Lower`, 6j6v.vvw6)
+    /// it would win instead — so a reducer folding such a register refuses an op whose number is
+    /// below 1, the first number any replica mints (chat's message and thread-open fold do).
     pub fn lamport_in_bound(&self) -> bool {
         self.lamport <= MAX_LAMPORT
     }

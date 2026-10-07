@@ -16,7 +16,7 @@ pub const KIND_THREAD: &str = "thread";
 // `KIND_READ_CURSOR` ("read_cursor") stood here until nxf 6j6v.4d2z removed the unread
 // apparatus. The kind is not re-used: a `read_cursor` op in an older log stays STORED and
 // simply stops being foldable, which is the substrate's ordinary treatment of a kind no
-// reducer claims (`MessageReducer::is_foldable` answers `false` and `fold` is never reached).
+// reducer claims (`MessageReducer::is_foldable` answers `false` and `changes` is never reached).
 
 // Op types.
 pub const OP_POST: &str = "post"; // message
@@ -104,6 +104,12 @@ pub const CHANNEL_KIND_PUBLIC: &str = "public";
 /// Composite-`target_id` separator (unit separator), matching flow's edge convention
 /// (`crates/core/src/store.rs`). Used for `channel{SEP}handle`.
 pub const SEP: char = '\u{1f}';
+
+/// The prefix of an id minted from the op that creates it — a message's post, a new thread's open
+/// (6j6v.vvw6): `m-` followed by that op's id. The same `m-` every other minted id carries, so an id
+/// reads the same wherever it is shown; what makes it the op's own is the op id behind it
+/// ([`Op::owns_target`](nxs_foundation::model::Op::owns_target)).
+pub const OWNED_ID_PREFIX: &str = "m-";
 
 /// The LWW-register field whitelists — injection-safe column names for the `format!`-built upsert
 /// (a field not on the list is not foldable, so it can never reach the SQL).

@@ -389,14 +389,19 @@ mod tests {
         fn is_foldable(&self, op: &Op) -> bool {
             op.target_kind == "tally"
         }
-        fn fold(&self, conn: &Connection, op: &Op) {
-            conn.execute(
-                "INSERT INTO tally(id, v, v_l, v_s) VALUES(?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET v=excluded.v, v_l=excluded.v_l, v_s=excluded.v_s
-                 WHERE (excluded.v_l, excluded.v_s) > (v_l, v_s)",
-                params![op.target_id, op.value, op.lamport, op.site],
-            )
-            .unwrap();
+        fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
+            use crate::change::{cells, Change, Version, Wins};
+            vec![Change::register(
+                "tally",
+                cells([("id", op.target_id.as_str().into())]),
+                cells([("v", op.value.clone().into())]),
+                ("v_l", "v_s"),
+                Version {
+                    lamport: op.lamport,
+                    site: op.site,
+                },
+                Wins::Higher,
+            )]
         }
     }
 

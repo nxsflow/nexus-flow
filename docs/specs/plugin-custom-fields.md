@@ -153,7 +153,7 @@ the T1 implementation, name the kind `custom` instead (`("custom", set*)`) — a
 with no semantic effect on the structural fold below.
 
 A `field set` op is **foldable purely structurally** — the reducer folds *any* `("field", set*)` op
-into `custom_fields` by `(item_id, field)` keep-if-beats LWW, identical in shape to `fold_item_lww`
+into `custom_fields` by `(item_id, field)` keep-if-beats LWW, identical in shape to `fold_item_lww` (since 6j6v.vvw6 the change builder `TaskReducer::item_lww`)
 (`crates/core/src/task_reducer.rs:54`) but keyed on the pair. It needs no plugin config, so a custom
 field from *another* plugin/version still folds and syncs (§7); the **plugin** decides only what may
 be *written* (§5) and what *surfaces* (§6). `is_foldable` (`task_reducer.rs:144`) gains the

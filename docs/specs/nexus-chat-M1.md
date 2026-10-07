@@ -158,8 +158,23 @@ VALUES (…parsed from the envelope…);
 ```
 
 Idempotency is double-guarded: the substrate already unions the log on `op_id` (a re-delivered op is
-`AlreadySeen`), and `message_id` is the `messages` PK (`INSERT OR IGNORE`). The envelope JSON is
-opaque to the foundation — only the message reducer parses it.
+`AlreadySeen`), and `message_id` is the `messages` PK (`INSERT OR IGNORE`).
+
+The envelope JSON is opaque to the foundation — only the message reducer parses it.
+
+> **Superseded 2026-10-06 (`6j6v.vvw6`, owner decision on the review of PR #22).** The
+> `INSERT OR IGNORE` above let the first op to *arrive* keep a message id two ops claim — the one
+> fold that depended on delivery order. A message id is now minted from its post op's own id
+> (`m-<op_id>`, `ChatStore::post_message`), and the reducer describes the message as a ranked
+> register (`Change::register_ranked`, `crates/foundation/src/change.rs`): the op the id belongs to
+> ranks 0, any other claimant 1, and the lowest `(rank, lamport, site)` wins. So a message stays what
+> its author wrote against any coordinate another op brings, and every replica keeps the same one. An
+> id minted before (no op owns it) falls back to the lowest `(lamport, site)`, and an op numbered
+> below 1 is store-don't-fold. A thread root (§3.5) resolves the same way (`root_claim`, `root_v`,
+> `root_site`; `ChatStore::open_new_thread`). "Immutable" in this document means exactly this from
+> then on. The reducer no longer has a `fold`: it returns the changes an op makes
+> (`Reducer::changes`), equally infallible, and the `fold_*` helpers named in §3.2–§3.4 became the
+> reducers' change builders.
 
 **Envelope validity is enforced in `is_foldable`, not `fold`** (§3): a `message`/`post` op is foldable
 only if `value` parses as JSON carrying every NOT-NULL `messages` column (`origin`, `channel_id`,
@@ -289,6 +304,10 @@ another kind.
 |---|---|---|---|---|
 | `thread` | `open` | `<thread ULID>` | `root` | canonical JSON `{ origin, channel_id, opener, created }` |
 | `thread` | `set` | `<thread ULID>` | `expects_reply_from` | JSON array of handles |
+
+> **Superseded 2026-10-06 (`6j6v.vvw6`)** for the paragraph below: the root is a ranked register
+> now (see the note in §3.1) — the open the thread id was minted from keeps it, else the lowest
+> `(lamport, site)`; it is no longer an unconditional upsert.
 
 `open` folds the immutable root into `threads` via an **upsert** (`INSERT … ON CONFLICT(thread_id)
 DO UPDATE SET origin=…, channel_id=…, opener=…, created=…`) — not a bare `INSERT OR IGNORE`, so it

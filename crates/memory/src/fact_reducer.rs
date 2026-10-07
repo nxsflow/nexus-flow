@@ -19,9 +19,9 @@ use crate::model::{
     FACT_FIELD, FACT_KIND, FIELD_CATEGORY, FIELD_INTRODUCTION, FIELD_ORDINAL, FIELD_REFS,
     FIELD_SCOPE, OP_FORGET, OP_SET,
 };
+use nxs_foundation::change::{cells, Change, Version, Wins};
 use nxs_foundation::model::Op;
 use nxs_foundation::reducer::Reducer;
-use rusqlite::{params, Connection};
 
 /// memory's reducer over the `fact` domain.
 pub struct FactReducer;
@@ -89,8 +89,8 @@ impl Reducer for FactReducer {
             }
     }
 
-    /// Fold one foldable op into `memories`. Three statements, each commutative or keep-if-beats, so
-    /// the result is independent of delivery order (spec §3.2):
+    /// The changes one foldable op makes to `memories`. Three, each commutative or keep-if-beats,
+    /// so the result is independent of delivery order (spec §3.2):
     ///
     /// 1. **ensure the row** — every register of an as-yet-unseen key starts at its status-quo
     ///    DEFAULT, and a classification op that overtakes its own body op materializes a row that
@@ -102,57 +102,70 @@ impl Reducer for FactReducer {
     /// 3. **the register this op writes** — keep-if-beats on that register's own `(v, site)`. For
     ///    the body that is the whole `body`/`author`/`updated`/`active` state moving together, so
     ///    `body` is a pure function of the winning op (spec §3.2, why `forget` NULLs it).
-    fn fold(&self, conn: &Connection, op: &Op) {
-        conn.execute(
-            "INSERT OR IGNORE INTO memories(key, author, updated, created_v, created_site)
-             VALUES(?1, '', '', ?2, ?3)",
-            params![op.target_id, op.lamport, op.site],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE memories SET created_v=?2, created_site=?3
-             WHERE key=?1 AND (?2, ?3) < (created_v, created_site)",
-            params![op.target_id, op.lamport, op.site],
-        )
-        .unwrap();
-
-        match op.field.as_str() {
+    fn changes(&self, op: &Op) -> Vec<Change> {
+        let key = || cells([("key", op.target_id.as_str().into())]);
+        let at = Version {
+            lamport: op.lamport,
+            site: op.site,
+        };
+        let ensure = Change::ensure(
+            "memories",
+            key(),
+            cells([
+                ("author", "".into()),
+                ("updated", "".into()),
+                ("created_v", op.lamport.into()),
+                ("created_site", op.site.into()),
+            ]),
+        );
+        let created = Change::register(
+            "memories",
+            key(),
+            Vec::new(),
+            ("created_v", "created_site"),
+            at,
+            Wins::Lower,
+        );
+        let register = match op.field.as_str() {
             FACT_FIELD => {
                 let (body, active): (Option<&str>, i64) = match op.op_type.as_str() {
                     OP_SET => (op.value.as_deref(), 1),
                     OP_FORGET => (None, 0),
-                    other => unreachable!("non-foldable op reached FactReducer::fold(): {other}"),
+                    other => {
+                        unreachable!("non-foldable op reached FactReducer::changes(): {other}")
+                    }
                 };
-                conn.execute(
-                    "UPDATE memories SET body=?2, author=?3, updated=?4, active=?5, v=?6, site=?7
-                     WHERE key=?1 AND (?6, ?7) > (v, site)",
-                    params![
-                        op.target_id,
-                        body,
-                        op.author,
-                        op.wall_clock,
-                        active,
-                        op.lamport,
-                        op.site
-                    ],
+                Change::register(
+                    "memories",
+                    key(),
+                    cells([
+                        ("body", body.into()),
+                        ("author", op.author.as_str().into()),
+                        ("updated", op.wall_clock.as_str().into()),
+                        ("active", active.into()),
+                    ]),
+                    ("v", "site"),
+                    at,
+                    Wins::Higher,
                 )
-                .unwrap();
             }
             field => {
-                let column = register_column(field)
-                    .unwrap_or_else(|| unreachable!("non-foldable field reached fold(): {field}"));
                 // The column names come from `register_column`, never from the op — the op only
                 // chooses WHICH of the fixed registers is written.
-                conn.execute(
-                    &format!(
-                        "UPDATE memories SET {column}=?2, {column}_v=?3, {column}_site=?4
-                         WHERE key=?1 AND (?3, ?4) > ({column}_v, {column}_site)"
-                    ),
-                    params![op.target_id, op.value, op.lamport, op.site],
+                let column = register_column(field).unwrap_or_else(|| {
+                    unreachable!("non-foldable field reached changes(): {field}")
+                });
+                Change::register(
+                    "memories",
+                    key(),
+                    cells([(column, op.value.clone().into())]),
+                    (&format!("{column}_v"), &format!("{column}_site")),
+                    at,
+                    Wins::Higher,
                 )
-                .unwrap();
             }
-        }
+        };
+        vec![ensure, created, register]
     }
 
     fn view_tables(&self) -> &'static [&'static str] {

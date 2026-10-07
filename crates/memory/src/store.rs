@@ -1235,6 +1235,16 @@ mod tests {
                 [],
             )
             .unwrap();
+            // The body row above is the fold of THIS op: the views are a pure fold of the log, and
+            // since the fold revision (6j6v.y3r4) an open may rebuild them from it.
+            conn.execute(
+                "INSERT INTO ops(op_id, lamport, site, domain, target_kind, target_id, field,
+                                 op_type, value, author, wall_clock)
+                 VALUES('op-body', 1, 2, 'fact', 'fact', 'auth', 'body', 'set',
+                        'auth uses JWT', 'peer-a', '')",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO ops(op_id, lamport, site, domain, target_kind, target_id, field,
                                  op_type, value, author, wall_clock)

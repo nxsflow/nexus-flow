@@ -76,11 +76,18 @@ fn snapshot(s: &Store) -> String {
         .map(Result::unwrap)
         .collect();
     out.push_str(&format!("thread_links={links:?}\n"));
+    // The folded instants (6j6v.vvw6): an item's created/updated and each note's date and order
+    // are registers and coordinates in the rows now, so a fold-order bug would show here.
     for it in s.list_items().unwrap() {
         out.push_str(&format!(
             "notes[{}]={:?}\n",
             it.id,
-            s.notes_of(&it.id).unwrap()
+            s.notes_with_created_of(&it.id).unwrap()
+        ));
+        out.push_str(&format!(
+            "timestamps[{}]={:?}\n",
+            it.id,
+            s.item_timestamps_of(&it.id).unwrap()
         ));
     }
     out
@@ -96,9 +103,13 @@ fn dedup_by_op_id(ops: Vec<Op>) -> Vec<Op> {
 /// A pool of ops touching every fold path, with genuine cross-site concurrency.
 fn rich_pool() -> Vec<Op> {
     let mut a = Store::open_in_memory(1);
+    // Distinct wall clocks per site, so the folded created/updated instants have something to
+    // disagree about if their registers depended on arrival order.
+    a.set_wall_clock("2026-01-01T00:00:01Z");
     a.create_item("g.A", "task", "A", "u");
     a.create_item("g.B", "task", "B", "u");
     let mut b = Store::open_in_memory(2);
+    b.set_wall_clock("2026-01-01T00:00:02Z");
     b.apply(&a.export()); // both replicas observe A and B
 
     // Concurrent same-cell LWW (two sites write g.A.title without seeing each other),

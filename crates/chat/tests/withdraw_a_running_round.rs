@@ -749,29 +749,25 @@ fn a_running_holder_with_a_rival(b: &Bench) -> (String, String, String) {
 /// the claim area that HOLDS the working copy, and the reason it has to be built rather than
 /// commissioned is written on the test that uses it.
 ///
-/// It re-opens the thread with its own recorded root fields and one changed edge, which is exactly
-/// what `ChatStore::open_thread`'s doc calls a hand-built tree: the `thread`/`open` op folds
-/// `parent=excluded.parent`, so the later op is the edge that stands.
-fn hang_under(b: &Bench, thread: &str, parent: &str, created: &str) {
+/// It writes the edge straight into the folded `threads` row. It used to re-open the thread with
+/// one changed edge and rely on the later open overwriting the root; since 6j6v.vvw6 two opens of
+/// one id resolve to the LOWEST coordinate, so a later open cannot move a thread — which is the
+/// point of that change, and why no op can build this shape any more. The view row is all the
+/// claim area reads, and nothing in these tests rebuilds the views after it is written.
+fn hang_under(b: &Bench, thread: &str, parent: &str) {
     let ws = Workspace::resolve(None, b.root()).expect("resolve workspace");
-    let origin = nexus_chat::workspace::origin_of(&ws).to_string();
-    let mut store = ws.open_chat_store().expect("open chat store");
-    let root = nexus_chat::model::ThreadRoot {
-        origin,
-        channel_id: store
-            .thread_channel(thread)
-            .expect("the thread was opened in a channel"),
-        // Read back and written back unchanged: the discharge below re-declares what the thread
-        // expects AS ITS OPENER, so an opener this rewrote would turn the withdrawal into a
-        // `forbidden` rather than into the shape under test.
-        opener: store
-            .thread_opener(thread)
-            .expect("opener reads")
-            .expect("the thread has an opener"),
-        created: created.to_string(),
-        parent: Some(parent.to_string()),
-    };
-    store.open_thread(thread, &root, "carsten");
+    let store = ws.open_chat_store().expect("open chat store");
+    let moved = store
+        .connection()
+        .execute(
+            "UPDATE threads SET parent = ?2 WHERE thread_id = ?1",
+            [thread, parent],
+        )
+        .expect("the edge is written");
+    assert_eq!(
+        moved, 1,
+        "the thread {thread} exists to be hung under {parent}"
+    );
 }
 
 // ---- the run ------------------------------------------------------------------------------------
@@ -1152,7 +1148,7 @@ fn a_host_that_cannot_stop_sessions_is_refused_and_nothing_changes() {
     let b = Bench::that_cannot_stop();
     let (thread, session, solo) = a_running_holder_with_a_rival(&b);
     let scope = scope_of(&thread);
-    hang_under(&b, &solo, &thread, QUEUED);
+    hang_under(&b, &solo, &thread);
     assert_eq!(
         b.store().thread_subtree(&thread).expect("subtree reads"),
         vec![thread.clone(), solo.clone()],
@@ -1901,7 +1897,7 @@ fn a_queued_commission_and_a_running_round_in_one_area_are_withdrawn_behind_one_
     let b = Bench::new();
     let (thread, session, rival) = a_running_holder_with_a_rival(&b);
     let scope = scope_of(&thread);
-    hang_under(&b, &rival, &thread, QUEUED);
+    hang_under(&b, &rival, &thread);
     assert_eq!(
         b.store().thread_subtree(&thread).expect("subtree reads"),
         vec![thread.clone(), rival.clone()],

@@ -8,6 +8,7 @@
 //! reducer per domain (how ops fold into views) vs. n plugins per product (how the views are
 //! presented).
 
+use crate::change::Change;
 use crate::model::Op;
 use rusqlite::Connection;
 
@@ -29,9 +30,24 @@ pub trait Reducer: Send {
     /// dropped, refolded once a later version understands it (§7).
     fn is_foldable(&self, op: &Op) -> bool;
 
-    /// Fold `op` into this reducer's views, on `conn`, inside the substrate's open transaction.
-    /// Only ever called for ops where [`is_foldable`](Reducer::is_foldable) returned true.
-    fn fold(&self, conn: &Connection, op: &Op);
+    /// What folding `op` does to this reducer's views, as [described changes](crate::change)
+    /// (6j6v.vvw6). Only ever called for ops where [`is_foldable`](Reducer::is_foldable) returned
+    /// true.
+    ///
+    /// **This is the one place an op's meaning for the views is written down.** The substrate
+    /// carries the list out through the SQLite applier; a server carries the same list out through
+    /// its own. A reducer therefore never touches a connection to fold — it only says what changes.
+    fn changes(&self, op: &Op) -> Vec<Change>;
+
+    /// The revision of what [`changes`](Reducer::changes) produces (6j6v.y3r4). Bump it with any
+    /// change that makes the same ops fold to different views — a new column filled, a rule that
+    /// resolves differently — even when no schema step comes with it.
+    ///
+    /// The substrate records it beside the folded-through watermark; a store whose recorded
+    /// revision is older than its reducers' clears its views and folds them again once, on open.
+    fn fold_revision(&self) -> i64 {
+        0
+    }
 
     /// The tables this reducer folds into — its materialized views, and nothing it keeps beside
     /// them. **The one list** (6j6v.mxt2): [`clear_views`](Reducer::clear_views) empties exactly

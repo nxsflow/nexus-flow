@@ -30,7 +30,10 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              origin      TEXT NOT NULL, channel_id TEXT NOT NULL, sender TEXT NOT NULL,
              kind        TEXT NOT NULL, priority TEXT NOT NULL, disposition TEXT NOT NULL,
              thread_id   TEXT, refs TEXT, body TEXT NOT NULL, created TEXT,
-             lamport     INTEGER NOT NULL, site INTEGER NOT NULL
+             lamport     INTEGER NOT NULL, site INTEGER NOT NULL,
+             -- 0 when the post op the id was minted from holds the row, 1 for any other claimant
+             -- (6j6v.vvw6, schema v8): ranked before the coordinate, lowest wins.
+             claim       INTEGER
          );
          -- Causal-order reads (0b1m): back `WHERE channel_id=? / thread_id=? ORDER BY lamport, site,
          -- message_id` so the deterministic history/thread reads stay an index scan, not a sort. The
@@ -80,6 +83,9 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE TABLE IF NOT EXISTS threads(
              thread_id  TEXT PRIMARY KEY,
              origin     TEXT, channel_id TEXT, opener TEXT, created TEXT, parent TEXT,
+             -- The version of the root above (6j6v.vvw6, schema v8): the coordinate of the open op
+             -- it came from, so two opens of one id resolve by the lowest, not by arrival.
+             root_v INTEGER, root_site INTEGER, root_claim INTEGER,
              expects_reply_from TEXT,
              expects_reply_from_v INTEGER DEFAULT 0, expects_reply_from_site INTEGER DEFAULT 0,
              deadline TEXT, deadline_v INTEGER DEFAULT 0, deadline_site INTEGER DEFAULT 0,

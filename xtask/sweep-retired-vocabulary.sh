@@ -961,6 +961,18 @@ VOCABULARY=(
   # different thing under the same name. `why` and `unresolved` are too common to list.
   'AddressBookEntry'
   'address_book'
+  #
+  # nxf 6j6v.1ssv (PR 1 of 6j6v.vvw6, 2026-10-06) — a reducer no longer folds into a connection: it
+  # returns the changes an op makes (`Reducer::changes`) and one applier carries them out, so
+  # `Reducer::fold` and the per-shape `fold_*` helpers went. The views stopped joining the op log
+  # for the parent / thread-link projections and the note reads, and a message id two ops claim no
+  # longer resolves by arrival (`INSERT OR IGNORE INTO messages`). Expected hits, all legitimate:
+  # the supersession notes in docs/specs and the historical plans under docs/specs/plans. A hit in a
+  # crate is prose to correct.
+  'Reducer::fold'
+  'fold_(lww|item_lww|message|edge_add|edge_remove|note_add|note_redact|thread_open|thread_link_(add|remove)|membership_(add|remove)|label_(add|remove)|field)\b'
+  'INSERT OR IGNORE INTO messages'
+  'JOIN ops o ON o\.op_id'
 )
 
 # ---- THE EXCLUSIONS, each with the reason it is not a defect ----------------------------------

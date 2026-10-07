@@ -2309,6 +2309,7 @@ dependencies = [
  "automerge",
  "nxs-foundation",
  "rusqlite",
+ "tempfile",
  "ulid",
 ]
 

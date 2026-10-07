@@ -157,7 +157,7 @@ with the winning op:
 - if a `forget` op wins → `body = NULL`, `active = 0`, `author/updated` = its metadata.
 
 The fold is **one** upsert (keep-if-beats), exactly following the pattern of flow's
-`fold_item_lww`:
+`fold_item_lww` (since 6j6v.vvw6 the change builder `TaskReducer::item_lww`):
 
 ```sql
 INSERT INTO memories(key, body, author, updated, active, v, site)
