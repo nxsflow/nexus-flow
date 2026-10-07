@@ -55,7 +55,31 @@
 //! gates it, and `blocked`/`deferred` here still report each item's OWN lane (the effective lane is a
 //! read-layer concern — see `docs/specs/07a-parent-child-status-coupling.md`).
 
-use crate::invariant::CYCLE_CTE;
+// ---- the active set (6j6v.vvw6 / 6j6v.jr42) --------------------------------
+//
+// Every derivation below reads its counterparts through `active`: the live, non-archived tickets
+// that are `open` or `in_progress`. A counterpart outside it counts as CLOSED (owner decision
+// 2026-10-06) — a dependency on it is satisfied, a parent outside it lets its child rest, a child
+// outside it holds no parent back, a cycle needs active tickets all the way round, and suppression
+// only walks down through active tickets. That is the rule the Rust library in [`crate::graph`]
+// applies to the active tickets a server selects from its index, and the two are held to the same
+// output by a differential test. (Before, an archived-but-open blocker still blocked, a deleted
+// parent was ignored rather than closed, and a cycle through a closed ticket still counted — states
+// only a merge of concurrent edits produces.)
+const CYCLE_CTE: &str = "\
+    active(id) AS (
+        SELECT id FROM items
+        WHERE COALESCE(deleted,'0')<>'1' AND archived IS NULL AND status IN ('open','in_progress')),
+    edges(f, t) AS (
+        SELECT from_id, to_id FROM present_edges
+        WHERE kind='dep' AND from_id IN (SELECT id FROM active) AND to_id IN (SELECT id FROM active)),
+    walk(start, node, depth) AS (
+        SELECT f, t, 1 FROM edges
+        UNION ALL
+        SELECT w.start, e.t, w.depth+1
+        FROM walk w JOIN edges e ON e.f = w.node
+        WHERE w.depth <= (SELECT count(*) FROM edges)
+    )";
 use rusqlite::{params, Connection};
 
 // ---- shared gating CTEs (07a.2/07a.3) --------------------------------------
@@ -73,9 +97,8 @@ const BLOCKED_GATING_CTE: &str = "blocked_gating(id) AS (
     SELECT i.id FROM items i
     WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
       AND ( i.id IN (SELECT id FROM cyclic)
-         OR EXISTS (SELECT 1 FROM present_edges d JOIN items b ON b.id=d.to_id
-                    WHERE d.from_id=i.id AND d.kind='dep'
-                      AND COALESCE(b.deleted,'0')<>'1' AND b.status<>'closed') ) )";
+         OR EXISTS (SELECT 1 FROM present_edges d
+                    WHERE d.from_id=i.id AND d.kind='dep' AND d.to_id IN (SELECT id FROM active)) ) )";
 
 /// `deferred_gating(id)`: open, live, non-archived items deferred into the future (`defer_until >
 /// ?1`) that are NOT blocked (no cycle, no open dep) — disjoint from `blocked_gating` by the blocker
@@ -85,9 +108,8 @@ const DEFERRED_GATING_CTE: &str = "deferred_gating(id) AS (
     WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
       AND i.defer_until > ?1
       AND i.id NOT IN (SELECT id FROM cyclic)
-      AND NOT EXISTS (SELECT 1 FROM present_edges d JOIN items b ON b.id=d.to_id
-                      WHERE d.from_id=i.id AND d.kind='dep'
-                        AND COALESCE(b.deleted,'0')<>'1' AND b.status<>'closed') )";
+      AND NOT EXISTS (SELECT 1 FROM present_edges d
+                      WHERE d.from_id=i.id AND d.kind='dep' AND d.to_id IN (SELECT id FROM active)) )";
 
 /// `actionable_items(id, status)`: THE actionability filter — live, non-archived, not in a dep-cycle,
 /// not suppressed by a gating ancestor (07a.2), not deferred into the future, not closed-masked
@@ -104,12 +126,12 @@ const ACTIONABLE_CTE: &str = "
     -- convergence-delivered parent loop still terminates (cycles are write-seam rejected).
     suppressed(id) AS (
         SELECT e.from_id FROM present_edges e
-          WHERE e.kind='parent'
+          WHERE e.kind='parent' AND e.from_id IN (SELECT id FROM active)
             AND ( e.to_id IN (SELECT id FROM blocked_gating)
                OR e.to_id IN (SELECT id FROM deferred_gating) )
         UNION
         SELECT e.from_id FROM present_edges e JOIN suppressed s ON e.to_id = s.id
-          WHERE e.kind='parent'
+          WHERE e.kind='parent' AND e.from_id IN (SELECT id FROM active)
     ),
     actionable_items(id, status) AS (
         SELECT i.id, i.status FROM items i
@@ -122,16 +144,12 @@ const ACTIONABLE_CTE: &str = "
           -- carries parent_closed_reason; §4). Only bites for open items; an in_progress child
           -- shows its own status. A deleted parent is not a live parent.
           AND ( i.status<>'open'
-             OR NOT ( EXISTS (SELECT 1 FROM present_edges pe JOIN items p ON p.id=pe.to_id
+             OR NOT ( EXISTS (SELECT 1 FROM present_edges pe
+                              WHERE pe.from_id=i.id AND pe.kind='parent')
+                  AND NOT EXISTS (SELECT 1 FROM present_edges pe
                               WHERE pe.from_id=i.id AND pe.kind='parent'
-                                AND COALESCE(p.deleted,'0')<>'1')
-                  AND NOT EXISTS (SELECT 1 FROM present_edges pe JOIN items p ON p.id=pe.to_id
-                              WHERE pe.from_id=i.id AND pe.kind='parent'
-                                AND COALESCE(p.deleted,'0')<>'1' AND p.status<>'closed') ) )
-          AND NOT EXISTS (
-              SELECT 1 FROM present_edges d JOIN items b ON b.id=d.to_id
-              WHERE d.from_id=i.id AND d.kind='dep'
-                AND COALESCE(b.deleted,'0')<>'1' AND b.status<>'closed') )";
+                                AND pe.to_id IN (SELECT id FROM active)) ) )
+          AND NOT EXISTS (SELECT 1 FROM present_edges d WHERE d.from_id=i.id AND d.kind='dep' AND d.to_id IN (SELECT id FROM active)) )";
 
 /// The full CTE prelude behind every actionability query: the cycle walk, the two gating halves
 /// (07a.2 — open, live, non-archived items that are NOT ready, whose descendants are suppressed;
@@ -188,10 +206,7 @@ pub fn deferred(conn: &Connection, now: &str) -> rusqlite::Result<Vec<String>> {
              WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
                AND i.id NOT IN (SELECT id FROM cyclic)
                AND i.defer_until IS NOT NULL AND i.defer_until > ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM present_edges d JOIN items b ON b.id=d.to_id
-                   WHERE d.from_id=i.id AND d.kind='dep'
-                     AND COALESCE(b.deleted,'0')<>'1' AND b.status<>'closed')
+               AND NOT EXISTS (SELECT 1 FROM present_edges d WHERE d.from_id=i.id AND d.kind='dep' AND d.to_id IN (SELECT id FROM active))
              ORDER BY i.id"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -207,10 +222,7 @@ pub fn blocked(conn: &Connection) -> rusqlite::Result<Vec<String>> {
              SELECT i.id FROM items i
              WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
                AND ( i.id IN (SELECT id FROM cyclic)
-                  OR EXISTS (
-                       SELECT 1 FROM present_edges d JOIN items b ON b.id=d.to_id
-                       WHERE d.from_id=i.id AND d.kind='dep'
-                         AND COALESCE(b.deleted,'0')<>'1' AND b.status<>'closed') )
+                  OR EXISTS (SELECT 1 FROM present_edges d WHERE d.from_id=i.id AND d.kind='dep' AND d.to_id IN (SELECT id FROM active)) )
              ORDER BY i.id"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -233,9 +245,10 @@ pub fn suppressed_by_blocked(conn: &Connection) -> rusqlite::Result<Vec<String>>
                sb(id) AS (
                    SELECT e.from_id FROM present_edges e
                      WHERE e.kind='parent' AND e.to_id IN (SELECT id FROM blocked_gating)
+                       AND e.from_id IN (SELECT id FROM active)
                    UNION
                    SELECT e.from_id FROM present_edges e JOIN sb ON e.to_id = sb.id
-                     WHERE e.kind='parent'
+                     WHERE e.kind='parent' AND e.from_id IN (SELECT id FROM active)
                )
              SELECT i.id FROM items i
              WHERE i.id IN (SELECT id FROM sb)
@@ -263,16 +276,18 @@ pub fn suppressed_by_deferred_only(conn: &Connection, now: &str) -> rusqlite::Re
                sb(id) AS (
                    SELECT e.from_id FROM present_edges e
                      WHERE e.kind='parent' AND e.to_id IN (SELECT id FROM blocked_gating)
+                       AND e.from_id IN (SELECT id FROM active)
                    UNION
                    SELECT e.from_id FROM present_edges e JOIN sb ON e.to_id = sb.id
-                     WHERE e.kind='parent'
+                     WHERE e.kind='parent' AND e.from_id IN (SELECT id FROM active)
                ),
                sd(id) AS (
                    SELECT e.from_id FROM present_edges e
                      WHERE e.kind='parent' AND e.to_id IN (SELECT id FROM deferred_gating)
+                       AND e.from_id IN (SELECT id FROM active)
                    UNION
                    SELECT e.from_id FROM present_edges e JOIN sd ON e.to_id = sd.id
-                     WHERE e.kind='parent'
+                     WHERE e.kind='parent' AND e.from_id IN (SELECT id FROM active)
                )
              SELECT i.id FROM items i
              WHERE i.id IN (SELECT id FROM sd)
@@ -329,10 +344,9 @@ pub fn next_candidates(conn: &Connection, now: &str) -> rusqlite::Result<Vec<Nex
                     -- Tier 1: no live (undeleted) child still open or in_progress. A closed child
                     -- does not hold its parent back; covers the childless leaf too.
                     NOT EXISTS (
-                        SELECT 1 FROM present_edges c JOIN items ch ON ch.id=c.from_id
+                        SELECT 1 FROM present_edges c
                         WHERE c.to_id=a.id AND c.kind='parent'
-                          AND COALESCE(ch.deleted,'0')<>'1'
-                          AND ch.status IN ('open','in_progress')) AS finishable,
+                          AND c.from_id IN (SELECT id FROM active)) AS finishable,
                     -- Tier 2: the smallest actionable in-progress parent of this OPEN child. Both
                     -- sides come from actionable_items, so a promoted child's parent is always a
                     -- header (§3.3) and a suppressed child is never promoted.
