@@ -67,6 +67,99 @@ fn blocked_carries_its_open_blockers() {
 }
 
 #[test]
+fn a_blocker_that_is_not_active_blocks_nothing_and_is_not_listed() {
+    // 6j6v.jr42 (owner rule 2026-10-06): an archived ticket whose status says open — a merge —
+    // counts as closed, so the ticket depending on it is ready and `blocked` names no blocker.
+    let mut s = Store::open_in_memory(1);
+    open_task(&mut s, "ab12.0001", "A", "0");
+    open_task(&mut s, "ab12.0002", "Archived, open again", "0");
+    open_task(&mut s, "ab12.0003", "Still blocking", "0");
+    s.set_field(
+        "ab12.0002",
+        "archived",
+        Some("2026-06-01T00:00:00Z".into()),
+        "t",
+    );
+    s.add_edge("ab12.0001", "ab12.0002", EdgeKind::Dep, "t");
+    let ids = |items: Vec<nexus_flow_core::model::ItemRow>| -> Vec<String> {
+        items.into_iter().map(|i| i.id).collect()
+    };
+    assert!(read::blocked(&cfg(), &s, None).unwrap().is_empty());
+    assert!(ids(read::next(&cfg(), &s, NOW, None).unwrap()).contains(&"ab12.0001".to_string()));
+
+    // With an active blocker beside it, only the active one is listed.
+    s.add_edge("ab12.0001", "ab12.0003", EdgeKind::Dep, "t");
+    let rows = read::blocked(&cfg(), &s, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].blockers,
+        vec![("ab12.0003".to_string(), "open".to_string())]
+    );
+}
+
+#[test]
+fn a_cycle_through_a_closed_ticket_blocks_nothing() {
+    let mut s = Store::open_in_memory(1);
+    open_task(&mut s, "ab12.0001", "A", "0");
+    open_task(&mut s, "ab12.0002", "B", "0");
+    s.add_edge("ab12.0001", "ab12.0002", EdgeKind::Dep, "t");
+    s.add_edge("ab12.0002", "ab12.0001", EdgeKind::Dep, "t");
+    assert_eq!(
+        read::blocked(&cfg(), &s, None).unwrap().len(),
+        2,
+        "a live cycle blocks both"
+    );
+    s.set_field("ab12.0002", "status", Some("closed".into()), "t");
+    assert!(read::blocked(&cfg(), &s, None).unwrap().is_empty());
+    let next: Vec<String> = read::next(&cfg(), &s, NOW, None)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(next, ["ab12.0001"]);
+}
+
+#[test]
+fn an_open_child_whose_only_parent_is_gone_rests_and_says_why() {
+    // A deleted parent and a parent id no ticket has both count as closed (6j6v.jr42): the child
+    // leaves `next`, `search` files it under CLOSED (not blocked — review of PR #23, Code Quality
+    // #1), and `show`'s closed-parent reason names the parent.
+    for gone in ["deleted", "never seen"] {
+        let mut s = Store::open_in_memory(1);
+        match_task(&mut s, "ab12.0001", "0"); // a ready sibling
+        match_task(&mut s, "ab12.0004", "0"); // blocked by the sibling
+        s.add_edge("ab12.0004", "ab12.0001", EdgeKind::Dep, "t");
+        match_task(&mut s, "ab12.0003", "0"); // the child
+        let parent = if gone == "deleted" {
+            s.create_item("ab12.0002", "epic", "Gone", "t");
+            s.delete_item("ab12.0002", "t");
+            "ab12.0002"
+        } else {
+            "ab12.9999"
+        };
+        s.add_parent("ab12.0003", parent, "t");
+
+        let next: Vec<String> = read::next(&cfg(), &s, NOW, None)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(next, ["ab12.0001"], "{gone}");
+        assert_eq!(
+            search_ids(&cfg(), &s, read::SearchArgs::default()),
+            ["ab12.0001", "ab12.0004", "ab12.0003"],
+            "{gone}: ready, then blocked, then the resting child in the closed group"
+        );
+        let child = s.get_item("ab12.0003").unwrap().unwrap();
+        assert_eq!(
+            read::parent_closed_reason(&s, &child).unwrap(),
+            vec![(parent.to_string(), None)],
+            "{gone}"
+        );
+    }
+}
+
+#[test]
 fn next_always_includes_claimed_work_and_ranks_it_first() {
     // C4 (#916.3) as amended by the finish-first tiers: claimed work is ALWAYS in `next` (the
     // `include_in_progress` flag is gone — hiding started work is what let a finished-but-open epic

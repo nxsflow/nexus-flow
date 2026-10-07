@@ -45,7 +45,7 @@
 //! **Status of the rollout in THIS module.** `ready`/`next` (the [`actionable`] engine) now **gate on
 //! ancestors**: a child whose transitive `parent` chain holds a `blocked`/`deferred` ancestor is
 //! **suppressed** (07a.2, the shared `blocked_gating`/`deferred_gating` CTEs feeding `suppressed`),
-//! and a still-open child whose every live parent is `closed` is **closed-masked** out of
+//! and a still-open child none of whose parents is ACTIVE (6j6v.jr42) is **closed-masked** out of
 //! `ready`/`next` (07a.3). Claiming a child also propagates `in_progress` up the chain (07a.1, write
 //! layer). The effective-lane *display* lives in the read layer: the facade surfaces
 //! `parent_closed_reason` on `show`/`list`/`next` and groups `search` over **effective** lanes (07a.3
@@ -64,9 +64,14 @@
 // only walks down through active tickets. That is the rule the Rust library in [`crate::graph`]
 // applies to the active tickets a server selects from its index, and the two are held to the same
 // output by a differential test. (Before, an archived-but-open blocker still blocked, a deleted
-// parent was ignored rather than closed, and a cycle through a closed ticket still counted — states
-// only a merge of concurrent edits produces.)
-const CYCLE_CTE: &str = "\
+// or never-seen parent was ignored rather than closed, and a cycle through a closed ticket still
+// counted — states only a merge of concurrent edits, or an edge that arrived before its parent,
+// produces.)
+//
+// The `active` CTE spells `model::ACTIVE_SQL` (a test holds them equal), and the cycle walk is the
+// lanes' own: the write seam's `invariant::CYCLE_CTE` deliberately walks EVERY dep edge, because
+// refusing a cycle at write time is stricter than ignoring one through a closed ticket at read time.
+const ACTIVE_CYCLE_CTE: &str = "\
     active(id) AS (
         SELECT id FROM items
         WHERE COALESCE(deleted,'0')<>'1' AND archived IS NULL AND status IN ('open','in_progress')),
@@ -89,7 +94,7 @@ use rusqlite::{params, Connection};
 // These two CTE fragments are the SINGLE source of that predicate: `actionable` unions them for its
 // `suppressed` walk (behaviour unchanged from the old combined `gating`), and the effective-lane
 // search grouping (07a.3 §8) walks each half separately to group a suppressed child under its
-// gating ancestor's lane. Both require `cyclic(id)` already in scope (from `CYCLE_CTE`).
+// gating ancestor's lane. Both require `cyclic(id)` already in scope (from `ACTIVE_CYCLE_CTE`).
 
 /// `blocked_gating(id)`: open, live, non-archived items that are BLOCKED — in a dep-cycle, or with a
 /// present `dep` on an item still open/undeleted. Carries no `now` parameter.
@@ -139,10 +144,11 @@ const ACTIONABLE_CTE: &str = "
           AND i.id NOT IN (SELECT id FROM cyclic)
           AND i.id NOT IN (SELECT id FROM suppressed)
           AND (i.defer_until IS NULL OR i.defer_until <= ?1)
-          -- 07a.3 closed-mask: a still-OPEN child whose every LIVE parent is closed is
+          -- 07a.3 closed-mask: a still-OPEN child that has a parent and NO active parent is
           -- effectively closed — excluded from ready/next (it groups under the closed lane and
           -- carries parent_closed_reason; §4). Only bites for open items; an in_progress child
-          -- shows its own status. A deleted parent is not a live parent.
+          -- shows its own status. A parent that is not active — closed, archived, deleted, or an
+          -- id no ticket has — counts as closed (6j6v.jr42).
           AND ( i.status<>'open'
              OR NOT ( EXISTS (SELECT 1 FROM present_edges pe
                               WHERE pe.from_id=i.id AND pe.kind='parent')
@@ -156,7 +162,7 @@ const ACTIONABLE_CTE: &str = "
 /// their union is the old combined gating set), then [`ACTIONABLE_CTE`]. Follows `WITH RECURSIVE`.
 /// Binds `now` as `?1`.
 fn actionable_prelude() -> String {
-    format!("{CYCLE_CTE},\n cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start),\n {BLOCKED_GATING_CTE},\n {DEFERRED_GATING_CTE},{ACTIONABLE_CTE}")
+    format!("{ACTIVE_CYCLE_CTE},\n cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start),\n {BLOCKED_GATING_CTE},\n {DEFERRED_GATING_CTE},{ACTIONABLE_CTE}")
 }
 
 /// Items of a given `status` that are actionable ([`ACTIONABLE_CTE`]). The shared engine behind
@@ -200,7 +206,7 @@ pub fn in_progress(conn: &Connection, now: &str) -> rusqlite::Result<Vec<String>
 /// construction, which is what lets the lane verbs partition the open space cleanly (C3 #916.4).
 pub fn deferred(conn: &Connection, now: &str) -> rusqlite::Result<Vec<String>> {
     let sql = format!(
-        "WITH RECURSIVE {CYCLE_CTE},
+        "WITH RECURSIVE {ACTIVE_CYCLE_CTE},
                cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start)
              SELECT i.id FROM items i
              WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
@@ -217,7 +223,7 @@ pub fn deferred(conn: &Connection, now: &str) -> rusqlite::Result<Vec<String>> {
 /// blocked = open, not deleted, not archived, and either has an open blocker dep or is in a cycle.
 pub fn blocked(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let sql = format!(
-        "WITH RECURSIVE {CYCLE_CTE},
+        "WITH RECURSIVE {ACTIVE_CYCLE_CTE},
                cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start)
              SELECT i.id FROM items i
              WHERE COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL AND i.status='open'
@@ -239,7 +245,7 @@ pub fn blocked(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// belong to higher-precedence lanes the read layer classifies first.
 pub fn suppressed_by_blocked(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let sql = format!(
-        "WITH RECURSIVE {CYCLE_CTE},
+        "WITH RECURSIVE {ACTIVE_CYCLE_CTE},
                cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start),
                {BLOCKED_GATING_CTE},
                sb(id) AS (
@@ -269,7 +275,7 @@ pub fn suppressed_by_blocked(conn: &Connection) -> rusqlite::Result<Vec<String>>
 /// they are exactly the suppression `ready`/`next` enforce. Id-sorted; binds `now` as `?1`.
 pub fn suppressed_by_deferred_only(conn: &Connection, now: &str) -> rusqlite::Result<Vec<String>> {
     let sql = format!(
-        "WITH RECURSIVE {CYCLE_CTE},
+        "WITH RECURSIVE {ACTIVE_CYCLE_CTE},
                cyclic(id) AS (SELECT DISTINCT start FROM walk WHERE node = start),
                {BLOCKED_GATING_CTE},
                {DEFERRED_GATING_CTE},
@@ -412,11 +418,13 @@ pub fn promoted_children(conn: &Connection, now: &str) -> rusqlite::Result<Vec<(
 /// deleted dependent is not counted (it is no longer waiting). Fallible like the other derivations
 /// (#76u.14): `prime` reads it on the long-lived seam, so a db error surfaces as `io`, not a panic.
 pub fn dependents_count(conn: &Connection, id: &str) -> rusqlite::Result<usize> {
-    let sql = "SELECT COUNT(*) FROM present_edges d JOIN items i ON i.id=d.from_id
-               WHERE d.to_id=?1 AND d.kind='dep'
-                 AND COALESCE(i.deleted,'0')<>'1' AND i.archived IS NULL
-                 AND i.status IN ('open','in_progress')";
-    Ok(conn.query_row(sql, params![id], |r| r.get::<_, i64>(0))? as usize)
+    let sql = format!(
+        "SELECT COUNT(*) FROM present_edges d
+         WHERE d.to_id=?1 AND d.kind='dep'
+           AND d.from_id IN (SELECT id FROM items WHERE {})",
+        crate::model::ACTIVE_SQL
+    );
+    Ok(conn.query_row(&sql, params![id], |r| r.get::<_, i64>(0))? as usize)
 }
 
 // Ranking ("what to work on next") is deliberately NOT in the meaning-free core: priority
@@ -1148,26 +1156,34 @@ mod tests {
 
     #[test]
     fn dependents_count_is_direct_fanout_of_still_open_items() {
-        // B blocks A, C, D, E. Closing B would unblock the still-open dependents only:
-        // A (open) and C (in_progress) count; D (closed) and E (deleted) do not.
+        // B blocks A, C, D, E, F. Closing B would unblock the ACTIVE dependents only (6j6v.jr42):
+        // A (open) and C (in_progress) count; D (closed), E (deleted) and F (archived, though its
+        // status says open — a merge) do not.
         let mut s = Store::open_in_memory(1);
-        for id in ["c1.A", "c1.B", "c1.C", "c1.D", "c1.E"] {
+        for id in ["c1.A", "c1.B", "c1.C", "c1.D", "c1.E", "c1.F"] {
             task(&mut s, id);
         }
-        for dep in ["c1.A", "c1.C", "c1.D", "c1.E"] {
+        for dep in ["c1.A", "c1.C", "c1.D", "c1.E", "c1.F"] {
             s.add_edge(dep, "c1.B", EdgeKind::Dep, "x");
         }
         s.set_field("c1.C", "status", Some("in_progress".into()), "x");
         s.set_field("c1.D", "status", Some("closed".into()), "x");
         s.delete_item("c1.E", "x");
+        s.set_field("c1.F", "archived", Some("2026-10-01T00:00:00Z".into()), "x");
 
         assert_eq!(
             dependents_count(s.connection(), "c1.B").unwrap(),
             2,
-            "only still-open (open or in_progress) direct dependents count"
+            "only active (live, not archived, open or in_progress) direct dependents count"
         );
         // An item nobody depends on has zero leverage.
         assert_eq!(dependents_count(s.connection(), "c1.A").unwrap(), 0);
+    }
+
+    #[test]
+    fn the_active_cte_spells_the_one_active_rule() {
+        // `model::ACTIVE_SQL` is the rule; the lanes' CTE has to say exactly that (6j6v.jr42).
+        assert!(ACTIVE_CYCLE_CTE.contains(crate::model::ACTIVE_SQL));
     }
 
     #[test]

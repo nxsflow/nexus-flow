@@ -155,6 +155,18 @@ impl Board {
         out
     }
 
+    /// The blocked lane alone: open tickets in an active cycle or held by an active dependency. It
+    /// depends on no instant, which is why it takes none; [`lanes`](Self::lanes) yields the same.
+    pub fn blocked(&self) -> Vec<String> {
+        let cyclic = self.cyclic();
+        self.tickets
+            .values()
+            .filter(|t| !t.in_progress)
+            .filter(|t| cyclic.contains(&t.id) || self.active_deps(&t.id).next().is_some())
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     /// Derive every lane at `now`.
     pub fn lanes(&self, now: &str) -> Lanes {
         let cyclic = self.cyclic();
@@ -247,11 +259,14 @@ impl Board {
 /// The selection for a local board (6j6v.jr42): the active tickets and the present edges that
 /// touch one, read with SQL. A server makes the same selection from its "active" index.
 pub fn select(conn: &Connection) -> rusqlite::Result<Board> {
-    let mut stmt = conn.prepare(
-        "SELECT id, status, defer_until FROM items
-          WHERE COALESCE(deleted,'0')<>'1' AND archived IS NULL
-            AND status IN ('open','in_progress')",
-    )?;
+    // One read transaction for both statements, so a commit in between cannot hand the library an
+    // edge whose ticket the first read did not see (review of PR #23, Integrity #4). Dropped, not
+    // committed: it wrote nothing.
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(&format!(
+        "SELECT id, status, defer_until FROM items WHERE {}",
+        crate::model::ACTIVE_SQL
+    ))?;
     let tickets = stmt
         .query_map([], |r| {
             Ok(Ticket {
@@ -261,7 +276,7 @@ pub fn select(conn: &Connection) -> rusqlite::Result<Board> {
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut stmt = conn
+    let mut stmt = tx
         .prepare("SELECT from_id, to_id, kind FROM present_edges WHERE kind IN ('dep','parent')")?;
     let edges = stmt
         .query_map([], |r| {
@@ -279,4 +294,153 @@ pub fn select(conn: &Connection) -> rusqlite::Result<Board> {
         .filter_map(|(from, to, kind)| EdgeKind::parse(&kind).map(|kind| Edge { from, to, kind }))
         .collect();
     Ok(Board::new(tickets, edges))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: &str = "2026-10-07T12:00:00Z";
+
+    fn t(id: &str) -> Ticket {
+        Ticket {
+            id: id.into(),
+            in_progress: false,
+            defer_until: None,
+        }
+    }
+
+    fn started(id: &str) -> Ticket {
+        Ticket {
+            in_progress: true,
+            ..t(id)
+        }
+    }
+
+    fn deferred(id: &str) -> Ticket {
+        Ticket {
+            defer_until: Some("2027-01-01T00:00:00Z".into()),
+            ..t(id)
+        }
+    }
+
+    fn e(from: &str, to: &str, kind: EdgeKind) -> Edge {
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            kind,
+        }
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_promoter_is_the_smallest_actionable_started_parent_and_finishable_ignores_inactive_children(
+    ) {
+        // c has two started parents (p1 < p2) and one parent outside the active set (gone): it is
+        // promoted by p1. p2 has c as an active child, so it is not finishable; p3's only child is
+        // not active (closed or archived — the server never sends it), so p3 is.
+        let board = Board::new(
+            [started("p1"), started("p2"), started("p3"), t("c")],
+            [
+                e("c", "p2", EdgeKind::Parent),
+                e("c", "p1", EdgeKind::Parent),
+                e("c", "gone", EdgeKind::Parent),
+                e("done-child", "p3", EdgeKind::Parent),
+            ],
+        );
+        let lanes = board.lanes(NOW);
+        let c = lanes.candidates.iter().find(|c| c.id == "c").unwrap();
+        assert_eq!(c.promoter.as_deref(), Some("p1"));
+        let finishable: Vec<&str> = lanes
+            .candidates
+            .iter()
+            .filter(|c| c.finishable && c.in_progress)
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(finishable, vec!["p3"]);
+    }
+
+    #[test]
+    fn a_child_with_one_active_parent_among_inactive_ones_does_not_rest() {
+        let board = Board::new(
+            [t("p"), t("c")],
+            [
+                e("c", "p", EdgeKind::Parent),
+                e("c", "closed", EdgeKind::Parent),
+            ],
+        );
+        assert_eq!(board.lanes(NOW).ready, ids(&["c", "p"]));
+        // …and with none active it rests: in no lane at all, not dropped into blocked.
+        let board = Board::new([t("c")], [e("c", "closed", EdgeKind::Parent)]);
+        let lanes = board.lanes(NOW);
+        assert!(lanes.ready.is_empty() && lanes.blocked.is_empty() && lanes.deferred.is_empty());
+    }
+
+    #[test]
+    fn suppressed_by_deferred_only_leaves_out_what_a_blocked_ancestor_already_suppresses() {
+        // b is blocked (held by x), d deferred; c hangs under both, e under d alone.
+        let board = Board::new(
+            [t("b"), t("x"), deferred("d"), t("c"), t("e")],
+            [
+                e("b", "x", EdgeKind::Dep),
+                e("c", "b", EdgeKind::Parent),
+                e("c", "d", EdgeKind::Parent),
+                e("e", "d", EdgeKind::Parent),
+            ],
+        );
+        let lanes = board.lanes(NOW);
+        assert_eq!(lanes.blocked, ids(&["b"]));
+        assert_eq!(lanes.deferred, ids(&["d"]));
+        assert_eq!(lanes.suppressed_by_blocked, ids(&["c"]));
+        assert_eq!(lanes.suppressed_by_deferred_only, ids(&["e"]));
+        assert_eq!(lanes.ready, ids(&["x"]));
+    }
+
+    #[test]
+    fn edges_of_other_kinds_change_nothing() {
+        let board = Board::new(
+            [t("a"), t("b")],
+            [
+                e("a", "b", EdgeKind::ContributesTo),
+                e("a", "b", EdgeKind::Mentions),
+            ],
+        );
+        assert_eq!(board.lanes(NOW).ready, ids(&["a", "b"]));
+    }
+
+    #[test]
+    fn blocked_depends_on_no_instant() {
+        let board = Board::new(
+            [t("a"), deferred("b"), t("c"), t("d")],
+            [
+                e("a", "c", EdgeKind::Dep),
+                e("b", "c", EdgeKind::Dep),
+                e("c", "d", EdgeKind::Dep),
+                e("d", "c", EdgeKind::Dep),
+            ],
+        );
+        let expected = ids(&["a", "b", "c", "d"]);
+        assert_eq!(board.blocked(), expected);
+        for now in ["", NOW, "9999-12-31T23:59:59Z"] {
+            assert_eq!(board.lanes(now).blocked, expected, "now = {now:?}");
+        }
+    }
+
+    #[test]
+    fn a_defer_date_equal_to_now_has_passed() {
+        // The SQL compares `defer_until > now`; an instant equal to now is not in the future.
+        let board = Board::new(
+            [Ticket {
+                defer_until: Some(NOW.into()),
+                ..t("a")
+            }],
+            [],
+        );
+        let lanes = board.lanes(NOW);
+        assert_eq!(lanes.ready, ids(&["a"]));
+        assert!(lanes.deferred.is_empty());
+    }
 }
