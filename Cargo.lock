@@ -2437,6 +2437,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nxs-fold-ddb"
+version = "0.204.0"
+dependencies = [
+ "aws-sdk-dynamodb",
+ "nexus-chat",
+ "nexus-flow-core",
+ "nexus-memory",
+ "nxs-foundation",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "nxs-foundation"
 version = "0.204.0"
 dependencies = [

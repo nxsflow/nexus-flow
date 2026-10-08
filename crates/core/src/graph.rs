@@ -112,20 +112,65 @@ impl Board {
         self.tickets.contains_key(id)
     }
 
-    /// Active tickets on a `dep` cycle of active tickets.
+    /// Active tickets on a `dep` cycle of active tickets: the members of every strongly connected
+    /// component of more than one ticket, and every ticket that depends on itself.
+    ///
+    /// Tarjan's algorithm, iterative so a long dependency chain cannot overflow the stack, and
+    /// linear in tickets plus edges — a server derives the lanes on every read (review of PR #23).
     fn cyclic(&self) -> BTreeSet<String> {
-        let mut cyclic = BTreeSet::new();
-        for start in self.tickets.keys() {
-            // Depth-first from `start` over active dep targets; `start` is cyclic iff it comes back.
-            let mut seen = BTreeSet::new();
-            let mut stack: Vec<&str> = self.active_deps(start).collect();
-            while let Some(n) = stack.pop() {
-                if n == start {
-                    cyclic.insert(start.clone());
-                    break;
+        let ids: Vec<&str> = self.tickets.keys().map(String::as_str).collect();
+        let at: BTreeMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let succ: Vec<Vec<usize>> = ids
+            .iter()
+            .map(|id| self.active_deps(id).map(|t| at[t]).collect())
+            .collect();
+        let n = ids.len();
+        let (mut index, mut low) = (vec![usize::MAX; n], vec![0; n]);
+        let mut on_stack = vec![false; n];
+        let (mut stack, mut next, mut cyclic) = (Vec::new(), 0, BTreeSet::new());
+        for root in 0..n {
+            if index[root] != usize::MAX {
+                continue;
+            }
+            // Each frame is a ticket and how many of its successors it has walked.
+            let mut frames = vec![(root, 0)];
+            index[root] = next;
+            low[root] = next;
+            next += 1;
+            stack.push(root);
+            on_stack[root] = true;
+            while let Some(&(v, walked)) = frames.last() {
+                if let Some(&w) = succ[v].get(walked) {
+                    frames.last_mut().expect("a frame is open").1 += 1;
+                    if index[w] == usize::MAX {
+                        index[w] = next;
+                        low[w] = next;
+                        next += 1;
+                        stack.push(w);
+                        on_stack[w] = true;
+                        frames.push((w, 0));
+                    } else if on_stack[w] {
+                        low[v] = low[v].min(index[w]);
+                    }
+                    continue;
                 }
-                if seen.insert(n) {
-                    stack.extend(self.active_deps(n));
+                frames.pop();
+                if let Some(&(parent, _)) = frames.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut component = Vec::new();
+                    loop {
+                        let w = stack.pop().expect("v is on the stack");
+                        on_stack[w] = false;
+                        component.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if component.len() > 1 || succ[v].contains(&v) {
+                        cyclic.extend(component.into_iter().map(|w| ids[w].to_string()));
+                    }
                 }
             }
         }
@@ -427,6 +472,42 @@ mod tests {
         for now in ["", NOW, "9999-12-31T23:59:59Z"] {
             assert_eq!(board.lanes(now).blocked, expected, "now = {now:?}");
         }
+    }
+
+    #[test]
+    fn a_cycle_holds_its_members_and_not_what_merely_leads_into_it() {
+        // c → d → e → c is a cycle; t leads into it and s depends on itself; u hangs off s. Only the
+        // members and the self edge are cyclic — `t` and `u` are blocked because they are HELD.
+        let board = Board::new(
+            [t("c"), t("d"), t("e"), t("t"), t("s"), t("u"), t("free")],
+            [
+                e("c", "d", EdgeKind::Dep),
+                e("d", "e", EdgeKind::Dep),
+                e("e", "c", EdgeKind::Dep),
+                e("t", "c", EdgeKind::Dep),
+                e("s", "s", EdgeKind::Dep),
+                e("u", "s", EdgeKind::Dep),
+            ],
+        );
+        assert_eq!(
+            board.cyclic(),
+            ids(&["c", "d", "e", "s"]).into_iter().collect()
+        );
+        assert_eq!(board.blocked(), ids(&["c", "d", "e", "s", "t", "u"]));
+        assert_eq!(board.lanes(NOW).ready, ids(&["free"]));
+    }
+
+    #[test]
+    fn a_long_dependency_chain_is_walked_without_recursion() {
+        // 100 000 tickets in one chain, closed into a ring by the last edge: a recursive walk would
+        // overflow the test thread's stack long before the end.
+        let n = 100_000;
+        let id = |i: usize| format!("t{i:06}");
+        let board = Board::new(
+            (0..n).map(|i| t(&id(i))),
+            (0..n).map(|i| e(&id(i), &id((i + 1) % n), EdgeKind::Dep)),
+        );
+        assert_eq!(board.cyclic().len(), n);
     }
 
     #[test]

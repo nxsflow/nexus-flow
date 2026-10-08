@@ -244,10 +244,20 @@ impl ItemRow {
     /// as closed. [`ACTIVE_SQL`] is the same rule for a query; `graph::select` and `derive`'s
     /// `active` CTE are built from it.
     pub fn is_active(&self) -> bool {
-        self.deleted.as_deref() != Some("1")
-            && self.archived.is_none()
-            && matches!(self.status.as_deref(), Some("open") | Some("in_progress"))
+        is_active(
+            self.deleted.as_deref(),
+            self.archived.as_deref(),
+            self.status.as_deref(),
+        )
     }
+}
+
+/// The active rule over the three cells it reads — what [`ItemRow::is_active`] asks, for a reader
+/// that holds the cells but no `ItemRow` (a server's folded row, 6j6v.k7w7).
+pub fn is_active(deleted: Option<&str>, archived: Option<&str>, status: Option<&str>) -> bool {
+    deleted != Some("1")
+        && archived.is_none()
+        && matches!(status, Some("open") | Some("in_progress"))
 }
 
 /// [`ItemRow::is_active`] as a SQL predicate over `items` (unqualified columns) — the one place the

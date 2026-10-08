@@ -73,3 +73,20 @@ pub trait Reducer: Send {
         }
     }
 }
+
+/// The reducer among `reducers` that folds `op`, if any: the one for its domain, when it folds this
+/// shape and the op's Lamport number is in bound. **The one dispatch rule** — the substrate asks it
+/// at ingest and on refold, and a server folding the same ops elsewhere asks it too (6j6v.k7w7), so
+/// both fold exactly the same ops.
+pub fn folder_for<'a>(
+    reducers: impl IntoIterator<Item = &'a dyn Reducer>,
+    op: &Op,
+) -> Option<&'a dyn Reducer> {
+    if !op.lamport_in_bound() {
+        return None;
+    }
+    reducers
+        .into_iter()
+        .find(|r| r.domain() == op.domain)
+        .filter(|r| r.is_foldable(op))
+}
