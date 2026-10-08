@@ -3,6 +3,22 @@
     "alpha": [],
     "beta": [
       {
+        "version": "0.205.1",
+        "date": "2026-10-08",
+        "items": [
+          {
+            "type": "fixed",
+            "en": "A run that claims the working copy now lets it go as soon as its last step's session ends and\nthe result is delivered. Before, the release was only asked when a step replied — and the last\nstep's reply comes while its session is still running, so the answer was no — and the run held the\nworking copy until the latest deadline any of its threads had declared, often hours, with the next\nruns queued behind it. If that release cannot be decided, the session-end receipt now says so\n(`lease_undecided`, new in `ConsequenceClass` for embedding apps) instead of only printing to the\nsidecar's standard error.",
+            "de": "Ein Lauf, der die Arbeitskopie für sich beansprucht, gibt sie jetzt frei, sobald die Session seines\nletzten Schritts endet und das Ergebnis zugestellt ist. Bisher wurde die Freigabe nur geprüft, wenn\nein Schritt antwortete — und die Antwort des letzten Schritts kommt, während seine Session noch\nläuft, also lautete die Antwort nein. Der Lauf hielt die Arbeitskopie dann bis zur spätesten Frist,\ndie einer seiner Fäden erklärt hatte, oft Stunden, und die nächsten Läufe warteten dahinter. Lässt sich diese Freigabe nicht entscheiden, sagt es die Quittung des Session-Endes jetzt\n(`lease_undecided`, für einbettende Apps neu in `ConsequenceClass`), statt es nur auf die\nStandardfehlerausgabe des Sidecars zu schreiben.",
+            "facade": "changed"
+          }
+        ],
+        "notes": {
+          "en": "### Fixed\n- A run that claims the working copy now lets it go as soon as its last step's session ends and\nthe result is delivered. Before, the release was only asked when a step replied — and the last\nstep's reply comes while its session is still running, so the answer was no — and the run held the\nworking copy until the latest deadline any of its threads had declared, often hours, with the next\nruns queued behind it. If that release cannot be decided, the session-end receipt now says so\n(`lease_undecided`, new in `ConsequenceClass` for embedding apps) instead of only printing to the\nsidecar's standard error.\n\n### Facade Contract\n- `changed` · A run that claims the working copy now lets it go as soon as its last step's session ends and\nthe result is delivered. Before, the release was only asked when a step replied — and the last\nstep's reply comes while its session is still running, so the answer was no — and the run held the\nworking copy until the latest deadline any of its threads had declared, often hours, with the next\nruns queued behind it. If that release cannot be decided, the session-end receipt now says so\n(`lease_undecided`, new in `ConsequenceClass` for embedding apps) instead of only printing to the\nsidecar's standard error.",
+          "de": "### Behoben\n- Ein Lauf, der die Arbeitskopie für sich beansprucht, gibt sie jetzt frei, sobald die Session seines\nletzten Schritts endet und das Ergebnis zugestellt ist. Bisher wurde die Freigabe nur geprüft, wenn\nein Schritt antwortete — und die Antwort des letzten Schritts kommt, während seine Session noch\nläuft, also lautete die Antwort nein. Der Lauf hielt die Arbeitskopie dann bis zur spätesten Frist,\ndie einer seiner Fäden erklärt hatte, oft Stunden, und die nächsten Läufe warteten dahinter. Lässt sich diese Freigabe nicht entscheiden, sagt es die Quittung des Session-Endes jetzt\n(`lease_undecided`, für einbettende Apps neu in `ConsequenceClass`), statt es nur auf die\nStandardfehlerausgabe des Sidecars zu schreiben.\n\n### Facade-Kontrakt\n- `changed` · Ein Lauf, der die Arbeitskopie für sich beansprucht, gibt sie jetzt frei, sobald die Session seines\nletzten Schritts endet und das Ergebnis zugestellt ist. Bisher wurde die Freigabe nur geprüft, wenn\nein Schritt antwortete — und die Antwort des letzten Schritts kommt, während seine Session noch\nläuft, also lautete die Antwort nein. Der Lauf hielt die Arbeitskopie dann bis zur spätesten Frist,\ndie einer seiner Fäden erklärt hatte, oft Stunden, und die nächsten Läufe warteten dahinter. Lässt sich diese Freigabe nicht entscheiden, sagt es die Quittung des Session-Endes jetzt\n(`lease_undecided`, für einbettende Apps neu in `ConsequenceClass`), statt es nur auf die\nStandardfehlerausgabe des Sidecars zu schreiben."
+        }
+      },
+      {
         "version": "0.205.0",
         "date": "2026-10-08",
         "items": [
