@@ -137,6 +137,13 @@ Double-apply is safe: the fold ops are set-/max-based (keep-if-beats LWW, OR-set
 is a named invariant with its own test, not a mere assertion. Re-sync after a partial
 push/pull therefore converges without double-counting.
 
+The relay keeps the same union on its side: every backend appends idempotently by `op_id`, so a
+re-pushed op answers with the cursor it already has and the log does not grow. SQLite and Postgres
+do it with `UNIQUE (stream_id, op_id)`; DynamoDB, which has no secondary unique constraint, with a
+claim item per op written in the same transaction (`6j6v.tm4k`, contract in `store_ddb.rs`). There
+a re-push burns the seq it allocated, so the sequence gaps where SQLite's does not; nothing reads
+density.
+
 ### 4.5 Machine presence (added 2026-09-21, `6j6v.f0b5`)
 
 A later addition, and the relay's one piece of state that is **not history**. After every pass it

@@ -21,6 +21,7 @@
 //! |--------|-----------------------------|------------------------------------------------|
 //! | `0`    | the per-stream counter      | `next_seq` (N) — the highest seq handed out    |
 //! | `>= 1` | one op                      | one attribute per [`WireOp`] field (see below) |
+//! | `< 0`  | one op's claim (`6j6v.tm4k`) | `op_id` (S), `op_seq` (N) — the seq that op is stored at |
 //!
 //! An op item's attributes are named exactly as the `WireOp` field: `envelope_version` (N),
 //! `op_id` (S), `lamport` (N), `site` (N), `domain` (S), `target_kind` (S), `target_id` (S),
@@ -63,9 +64,11 @@
 //!
 //! **Note for the Phase-2 reader.** The nexus-flow engine will later fold these same ops
 //! from this same table. A naive `Query stream_id = X` picks up the counter item at
-//! `seq = 0` along with the ops — and it carries none of the envelope attributes, so
-//! item-to-`WireOp` conversion fails on it. A reader must constrain the query to `seq > 0`,
-//! as [`DynamoDbOpStore::read_since`] does. Sequence numbers are unique and monotone but
+//! `seq = 0` and every claim item below it along with the ops — and they carry none of the
+//! envelope attributes, so item-to-`WireOp` conversion fails on them. A reader must constrain
+//! the query to `seq > 0`, as [`DynamoDbOpStore::read_since`] does. The same holds for a
+//! consumer of a DynamoDB stream on this table: an item with `seq <= 0` is bookkeeping, never
+//! an op. Sequence numbers are unique and monotone but
 //! **not** dense: see the allocation section below.
 //!
 //! # Design notes
@@ -86,12 +89,12 @@
 //! `UpdateItem` `ADD` on the counter item (`seq = 0`, attribute `next_seq`) — atomic and
 //! read-free, so two concurrent allocations can never observe the same value (an earlier
 //! read-then-`PutItem` shape did exactly that, racily). The op itself then goes in with a
-//! `PutItem` conditioned on `attribute_not_exists(stream_id)` at that `(stream_id, seq)`:
+//! put conditioned on `attribute_not_exists(stream_id)` at that `(stream_id, seq)`:
 //! belt and braces, not redundant defenses of the same thing. The counter (the belt)
 //! already guarantees *uniqueness* — no other allocation call can ever be handed this same
 //! value again. The condition (the braces) guarantees *safety of the write*: if a seq were
 //! ever computed twice anyway (a bug in the allocation path, a replayed request), the
-//! second `PutItem` fails loudly instead of silently overwriting the first writer's op. On
+//! second put fails loudly instead of silently overwriting the first writer's op. On
 //! `ConditionalCheckFailedException` the whole allocate-then-put is retried from scratch,
 //! bounded by [`APPEND_ATTEMPTS`].
 //!
@@ -108,26 +111,31 @@
 //! for a whole batch), so this ceiling is reached inside the store, not at the HTTP edge.
 //! It is a real Phase-1 constraint of this backend, not a shared one.
 //!
-//! **Idempotent append is deliberately out of scope here.** SQLite and Postgres dedupe a
-//! re-pushed op via `UNIQUE (stream_id, op_id)`, so a retried push returns the existing seq
-//! and the log never grows. DynamoDB has no secondary unique constraint and this data model
-//! carries no op-id index, so this backend does NOT dedupe: a duplicate push is stored again
-//! under a fresh seq. Convergence is unaffected — the engine folds an op-log idempotently by
-//! `op_id`, so a duplicated op folds to the same state. Two consequences are worth stating
-//! plainly rather than shrugging off:
+//! **Append is idempotent by `op_id`** (`6j6v.tm4k`), as on SQLite and Postgres, where
+//! `UNIQUE (stream_id, op_id)` does it. DynamoDB has no secondary unique constraint, so each op
+//! carries a **claim item** in the same partition: its range key is a negative number derived
+//! from the op's `op_id` ([`claim_seq`]), and it records the op's id and the seq the op went in
+//! at. The op and its claim are written by ONE `TransactWriteItems`, each conditioned on its
+//! key being free, so a claim exists exactly when its op does. A re-pushed op finds its claim
+//! taken, reads it, and returns the op's EXISTING seq: the log does not grow, and the SDK's
+//! own retry of a write whose response was lost in flight — a duplicate source SQLite and
+//! Postgres never had — is absorbed the same way.
 //!
-//! * **It is a cost curve, not a no-op.** A client stuck in a retry storm re-pushes the same
-//!   ops indefinitely and every attempt appends. There is no compaction and no TTL, so the
-//!   log grows without bound in storage, in read cost, and in the time every subsequent
-//!   full-stream fold takes.
-//! * **This backend introduces a duplicate source the others do not have.** Beyond a client
-//!   retry, the SDK itself retries a `PutItem` internally when a response is lost in flight;
-//!   the first attempt may well have committed. That produces a genuine duplicate op with no
-//!   client involvement at all — precisely the case `UNIQUE (stream_id, op_id)` absorbs
-//!   silently on SQLite and Postgres.
+//! What it costs and where it differs from the other two backends:
 //!
-//! Building the `op_id` index that would close this is tracked as a follow-up, not built
-//! here.
+//! * **The re-push still burns a seq.** The seq is allocated before the transaction finds the
+//!   claim taken, so a duplicate leaves a gap where SQLite leaves none. Gaps are already normal
+//!   here (above), and nothing reads density.
+//! * **Ops stored before the claim items existed have none.** Re-pushing such an op stores it
+//!   once more, with a claim this time; every later re-push is then absorbed.
+//! * **The claim key is a 63-bit hash, so two op ids can share it.** The claim records the op
+//!   id it was written for, so a shared key is detected rather than mistaken for a duplicate:
+//!   the second op is then stored WITHOUT a claim, exactly as before this change, and only it
+//!   loses the dedupe. Nothing is ever lost or overwritten by a collision.
+//! * **No new table, index or IAM action.** The claim lives in the op table under the same key
+//!   schema, it is written with `PutItem` inside the transaction and read with `Query`, the two
+//!   actions the op table's role already has. Every op write now costs a transaction, which
+//!   DynamoDB bills at twice the plain write, for two items.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -309,6 +317,20 @@ fn parse_s(item: &HashMap<String, AttributeValue>, key: &str) -> StoreResult<Str
 /// invisible to reads — no filter needed to keep it out of a page.
 const COUNTER_SEQ: i64 = 0;
 
+/// The range key of an op's claim item: the first 63 bits of `SHA-256(op_id)`, negated and
+/// moved down by one, so it lands in `i64::MIN..=-1` — below the counter at 0, where no
+/// `seq > cursor` read can ever reach it. A hash, not the op id itself, because the range key
+/// is a number (`seq` is `N`); SHA-256, not `std`'s hasher, because the key is stored and must
+/// come out the same from every build that ever reads it. Two op ids sharing a key is handled,
+/// not ruled out (see the module doc).
+fn claim_seq(op_id: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(op_id.as_bytes());
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&digest[..8]);
+    -((u64::from_be_bytes(head) >> 1) as i64) - 1
+}
+
 /// Bound on allocate-then-put retries after a `ConditionalCheckFailedException`. A named,
 /// finite bound rather than an unbounded loop: exhausting it means something is
 /// structurally wrong (e.g. a bug that keeps recomputing the same seq), and that must
@@ -317,11 +339,14 @@ const APPEND_ATTEMPTS: u32 = 32;
 
 /// Outcome of one conditional-put attempt at an allocated seq. `Collided` means the
 /// caller should allocate a fresh seq and try again — never overwrite what is already
-/// there. `PartialEq`/`Debug` exist for [`classify_put_error`]'s unit tests.
+/// there. `Existing` means the op was already stored, at the seq it carries: the append is
+/// done, and that seq is its answer. `PartialEq`/`Debug` exist for [`classify_put_error`]'s
+/// unit tests.
 #[derive(Debug, PartialEq, Eq)]
 enum PutOutcome {
     Written,
     Collided,
+    Existing(i64),
 }
 
 /// Classify a failed `PutItem` on the op table: a `ConditionalCheckFailedException` is the
@@ -360,6 +385,7 @@ where
         let (seq, outcome) = cycle().await?;
         match outcome {
             PutOutcome::Written => return Ok(Cursor(seq)),
+            PutOutcome::Existing(stored) => return Ok(Cursor(stored)),
             PutOutcome::Collided => continue,
         }
     }
@@ -367,6 +393,42 @@ where
         "append: exhausted {APPEND_ATTEMPTS} attempts allocating a seq for stream \
          {stream_id:?} without a successful conditional put"
     )))
+}
+
+/// Why an append's `TransactWriteItems` (index 0 = the claim, index 1 = the op — see
+/// [`DynamoDbOpStore::try_append_op`]) was cancelled, when the cancellation is an outcome
+/// rather than a fault.
+#[derive(Debug, PartialEq, Eq)]
+enum AppendCancellation {
+    /// The claim's key is taken: this op — or one whose id shares the key — is stored.
+    Claimed,
+    /// The op's seq is taken: allocate a fresh one.
+    SeqTaken,
+    /// Lost to concurrency or capacity: try again, with a fresh seq.
+    Retryable,
+}
+
+/// Classify a cancelled append from its positional per-item codes. Pure for the same reason
+/// [`classify_cancellation`] is: DynamoDB Local serialises transactions, so the transient
+/// codes never reach an acceptance test. A taken claim outranks everything: it is definitive,
+/// and it means the op is already stored, so the seq question no longer matters.
+fn classify_append_cancellation(
+    claim_code: Option<&str>,
+    op_code: Option<&str>,
+) -> Result<AppendCancellation, String> {
+    if claim_code == Some("ConditionalCheckFailed") {
+        return Ok(AppendCancellation::Claimed);
+    }
+    if op_code == Some("ConditionalCheckFailed") {
+        return Ok(AppendCancellation::SeqTaken);
+    }
+    if is_retryable_code(claim_code) || is_retryable_code(op_code) {
+        return Ok(AppendCancellation::Retryable);
+    }
+    Err(format!(
+        "append transaction cancelled for a reason other than a taken claim or seq \
+         (claim item code: {claim_code:?}, op item code: {op_code:?})"
+    ))
 }
 
 fn item_to_wire(item: &HashMap<String, AttributeValue>) -> StoreResult<WireOp> {
@@ -454,20 +516,8 @@ impl DynamoDbOpStore {
         parse_n::<i64>(attrs, "next_seq")
     }
 
-    /// Put the op at `seq`, conditioned on nothing already occupying this exact
-    /// `(stream_id, seq)`. On a composite key, `attribute_not_exists(stream_id)` is
-    /// evaluated against the item addressed by the request's own key — so it reads as "no
-    /// item at this stream_id+seq pair", not "stream_id is absent from the table" (which
-    /// would be true of every other seq in the same stream). A collision here means
-    /// `allocate_seq` must be called again for a fresh value — see `append`'s retry loop
-    /// for why both this condition and the atomic counter exist.
-    async fn try_put_op(
-        client: &Client,
-        table: &str,
-        stream_id: &str,
-        seq: i64,
-        op: WireOp,
-    ) -> StoreResult<PutOutcome> {
+    /// The op's item at `seq`: one attribute per [`WireOp`] field (see the module doc).
+    fn op_item(stream_id: &str, seq: i64, op: WireOp) -> HashMap<String, AttributeValue> {
         // Encoded before the field-by-field moves below consume `op`.
         let extra = encode_extra(&op);
         let mut item: HashMap<String, AttributeValue> = HashMap::new();
@@ -498,11 +548,30 @@ impl DynamoDbOpStore {
         if !op.extra.is_empty() {
             item.insert("extra".into(), AttributeValue::S(extra));
         }
+        item
+    }
 
+    /// Put the op at `seq` WITHOUT a claim, conditioned on nothing already occupying this
+    /// exact `(stream_id, seq)`. On a composite key, `attribute_not_exists(stream_id)` is
+    /// evaluated against the item addressed by the request's own key — so it reads as "no
+    /// item at this stream_id+seq pair", not "stream_id is absent from the table" (which
+    /// would be true of every other seq in the same stream). A collision here means
+    /// `allocate_seq` must be called again for a fresh value — see `append`'s retry loop
+    /// for why both this condition and the atomic counter exist.
+    ///
+    /// Only reached when the op's claim key belongs to a different op id (see the module
+    /// doc): such an op is stored as every op was before the claims existed.
+    async fn try_put_op(
+        client: &Client,
+        table: &str,
+        stream_id: &str,
+        seq: i64,
+        op: WireOp,
+    ) -> StoreResult<PutOutcome> {
         let result = client
             .put_item()
             .table_name(table)
-            .set_item(Some(item))
+            .set_item(Some(Self::op_item(stream_id, seq, op)))
             .condition_expression("attribute_not_exists(stream_id)")
             .send()
             .await;
@@ -510,6 +579,115 @@ impl DynamoDbOpStore {
         match result {
             Ok(_) => Ok(PutOutcome::Written),
             Err(err) => classify_put_error(err.into_service_error()),
+        }
+    }
+
+    /// Put the op at `seq` together with its claim, in one transaction: index 0 the claim at
+    /// [`claim_seq`], index 1 the op, each conditioned on its own key being free (the same
+    /// `attribute_not_exists(stream_id)` reading as [`Self::try_put_op`]). A taken claim means
+    /// the op is already stored, so this answers with the seq the claim recorded — unless the
+    /// claim was written for a different op id, in which case the op goes in unclaimed.
+    async fn try_append_op(
+        client: &Client,
+        table: &str,
+        stream_id: &str,
+        seq: i64,
+        op: WireOp,
+    ) -> StoreResult<PutOutcome> {
+        let claim = claim_seq(&op.op_id);
+        let op_id = op.op_id.clone();
+        // `build()` can only fail on a required field left unset, and every one is set here;
+        // mapped rather than unwrapped for the reason `try_claim` gives.
+        let claim_put = Put::builder()
+            .table_name(table)
+            .item("stream_id", AttributeValue::S(stream_id.to_string()))
+            .item("seq", AttributeValue::N(claim.to_string()))
+            .item("op_id", AttributeValue::S(op_id.clone()))
+            .item("op_seq", AttributeValue::N(seq.to_string()))
+            .condition_expression("attribute_not_exists(stream_id)")
+            .build()
+            .map_err(|e| StoreError(e.to_string()))?;
+        let op_put = Put::builder()
+            .table_name(table)
+            .set_item(Some(Self::op_item(stream_id, seq, op.clone())))
+            .condition_expression("attribute_not_exists(stream_id)")
+            .build()
+            .map_err(|e| StoreError(e.to_string()))?;
+
+        let result = client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().put(claim_put).build())
+            .transact_items(TransactWriteItem::builder().put(op_put).build())
+            .send()
+            .await;
+
+        let reasons = match result {
+            Ok(_) => return Ok(PutOutcome::Written),
+            Err(err) => match err.into_service_error() {
+                TransactWriteItemsError::TransactionCanceledException(e) => {
+                    e.cancellation_reasons().to_vec()
+                }
+                other => return Err(ddb_err(other)),
+            },
+        };
+        let claim_code = reasons.first().and_then(|r| r.code());
+        let op_code = reasons.get(1).and_then(|r| r.code());
+        match classify_append_cancellation(claim_code, op_code) {
+            Ok(AppendCancellation::Claimed) => {
+                match Self::claimed(client, table, stream_id, claim).await? {
+                    Some((claimed_for, stored)) if claimed_for == op_id => {
+                        Ok(PutOutcome::Existing(stored))
+                    }
+                    // The key is another op id's: store this op without a claim.
+                    Some(_) => Self::try_put_op(client, table, stream_id, seq, op).await,
+                    None => Err(StoreError(format!(
+                        "append: the claim for op {op_id:?} at {claim} in stream {stream_id:?} \
+                         was reported taken but cannot be read back"
+                    ))),
+                }
+            }
+            // A conflict is retried like a taken seq: the next round draws a fresh one, and if
+            // the conflicting transaction was this op's own re-push, finds its claim taken.
+            Ok(AppendCancellation::SeqTaken | AppendCancellation::Retryable) => {
+                Ok(PutOutcome::Collided)
+            }
+            Err(msg) => {
+                // The service's own sentences (an item past 400 KB, say) are carried along:
+                // the codes alone do not say which validation failed.
+                let detail = reasons
+                    .iter()
+                    .filter_map(|r| r.message())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let message = format!("append: {msg}: {detail} (stream {stream_id:?})");
+                eprintln!("nxf-relay: dynamodb error: {message}");
+                Err(StoreError(message))
+            }
+        }
+    }
+
+    /// Read the claim at `claim`: the op id it was written for and the seq that op is stored
+    /// at. A strongly consistent `Query` on the exact key rather than a `GetItem`, so the op
+    /// table's role needs no action it did not already have.
+    async fn claimed(
+        client: &Client,
+        table: &str,
+        stream_id: &str,
+        claim: i64,
+    ) -> StoreResult<Option<(String, i64)>> {
+        let resp = client
+            .query()
+            .table_name(table)
+            .key_condition_expression("stream_id = :sid AND seq = :claim")
+            .expression_attribute_values(":sid", AttributeValue::S(stream_id.to_string()))
+            .expression_attribute_values(":claim", AttributeValue::N(claim.to_string()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(ddb_err)?;
+        match resp.items().first() {
+            Some(item) => Ok(Some((parse_s(item, "op_id")?, parse_n(item, "op_seq")?))),
+            None => Ok(None),
         }
     }
 }
@@ -524,8 +702,9 @@ impl OpStore for DynamoDbOpStore {
             // Belt and braces (see the module doc for the full reasoning): `allocate_seq`
             // alone already guarantees no two calls are ever handed the same value, so in
             // the overwhelmingly common case this cycle runs exactly once. The conditional
-            // put in `try_put_op` is what makes a seq collision — however it arose — a
-            // retried allocation instead of a silently overwritten op.
+            // put in `try_append_op` is what makes a seq collision — however it arose — a
+            // retried allocation instead of a silently overwritten op, and its claim is what
+            // makes a re-pushed op answer with the seq it already has.
             append_with_retry(&stream_id, || {
                 // Re-borrowing inside the closure (rather than capturing it) keeps the
                 // returned future borrowing the enclosing scope, not the closure itself —
@@ -534,7 +713,7 @@ impl OpStore for DynamoDbOpStore {
                 let op = op.clone();
                 async move {
                     let seq = Self::allocate_seq(client, table, stream_id).await?;
-                    let outcome = Self::try_put_op(client, table, stream_id, seq, op).await?;
+                    let outcome = Self::try_append_op(client, table, stream_id, seq, op).await?;
                     Ok((seq, outcome))
                 }
             })
@@ -1263,6 +1442,71 @@ mod tests {
         .expect_err("a hard error surfaces");
         assert_eq!(calls.get(), 1, "no retry on a non-collision failure");
         assert!(err.to_string().contains("table gone"));
+    }
+
+    #[test]
+    fn append_answers_an_already_stored_op_with_its_existing_seq() {
+        // The allocated seq (7) is burned; the answer is the seq the op already has (3).
+        let cursor = drive(append_with_retry("s", || async {
+            Ok((7, PutOutcome::Existing(3)))
+        }))
+        .expect("an already stored op is an answer, not an error");
+        assert_eq!(cursor, Cursor(3));
+    }
+
+    // ----- claim_seq + classify_append_cancellation --------------------------------------
+
+    #[test]
+    fn a_claim_key_lies_below_the_counter_and_is_stable_per_op_id() {
+        for op_id in ["", "o1", "ab12.0001@1", &"x".repeat(4096)] {
+            let key = claim_seq(op_id);
+            assert!(
+                key < COUNTER_SEQ,
+                "{op_id:?} -> {key} must sit below the counter"
+            );
+            assert_eq!(
+                key,
+                claim_seq(op_id),
+                "the key is a pure function of the op id"
+            );
+        }
+        assert_ne!(claim_seq("o1"), claim_seq("o2"));
+        // Pinned: the key is STORED, so a build that derived it differently would stop
+        // recognising every claim written before it.
+        assert_eq!(claim_seq("o1"), -1_272_668_462_371_106_663);
+    }
+
+    #[test]
+    fn a_taken_claim_outranks_a_taken_seq_and_a_conflict() {
+        let ccf = Some("ConditionalCheckFailed");
+        assert_eq!(
+            classify_append_cancellation(ccf, ccf),
+            Ok(AppendCancellation::Claimed)
+        );
+        assert_eq!(
+            classify_append_cancellation(ccf, Some("TransactionConflict")),
+            Ok(AppendCancellation::Claimed)
+        );
+        assert_eq!(
+            classify_append_cancellation(Some("None"), ccf),
+            Ok(AppendCancellation::SeqTaken)
+        );
+        assert_eq!(
+            classify_append_cancellation(Some("TransactionConflict"), Some("None")),
+            Ok(AppendCancellation::Retryable)
+        );
+        assert_eq!(
+            classify_append_cancellation(None, Some("ThrottlingError")),
+            Ok(AppendCancellation::Retryable)
+        );
+    }
+
+    #[test]
+    fn any_other_append_cancellation_is_a_hard_error() {
+        let err = classify_append_cancellation(Some("None"), Some("ValidationError"))
+            .expect_err("a validation failure is a fault, never a retry");
+        assert!(err.contains("ValidationError"), "{err}");
+        assert!(classify_append_cancellation(None, None).is_err());
     }
 
     // ----- retry_claim -------------------------------------------------------------------
