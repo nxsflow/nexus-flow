@@ -503,13 +503,8 @@ fn the_session_end_that_completes_the_chain_hands_the_working_copy_to_the_next_c
     let (coder_session, slot) = open_round(&engine, &worker);
     worker.mark_running(&coder_session);
     answer(&engine, &coder_session, &slot, "built");
-    worker.running.lock().unwrap().remove(&coder_session);
-    engine
-        .session_ended(caller("coder"), &coder_session)
-        .unwrap();
-    let finisher = worker.only_for("finisher");
-    let (fs, ft) = (finisher.internal_session, finisher.reply_thread.unwrap());
-    worker.mark_running(&fs);
+    let holder = |tmp: &TempDir| seed_store(tmp).working_tree_holder(NOW).unwrap();
+    let first_chain = holder(&tmp).expect("the first chain claimed the working copy");
 
     // A second commission arrives while the first chain holds the copy: it queues.
     engine
@@ -530,12 +525,28 @@ fn the_session_end_that_completes_the_chain_hands_the_working_copy_to_the_next_c
         "the second round waits for the working copy"
     );
 
+    // A session end that does NOT complete the chain keeps the copy: the finisher is still owed.
+    worker.running.lock().unwrap().remove(&coder_session);
+    engine
+        .session_ended(caller("coder"), &coder_session)
+        .unwrap();
+    assert_eq!(
+        holder(&tmp).as_deref(),
+        Some(first_chain.as_str()),
+        "the chain still owes its finisher's step: the coder's session end must not let go"
+    );
+    assert_eq!(coders(&worker), 1);
+    let finisher = worker.only_for("finisher");
+    let (fs, ft) = (finisher.internal_session, finisher.reply_thread.unwrap());
+    worker.mark_running(&fs);
+
     answer(&engine, &fs, &ft, "finished, PR open");
     assert_eq!(
         coders(&worker),
         1,
         "the finisher's process is still writing: its reply must not hand the copy on"
     );
+    assert_eq!(holder(&tmp).as_deref(), Some(first_chain.as_str()));
 
     worker.running.lock().unwrap().remove(&fs);
     engine.session_ended(caller("finisher"), &fs).unwrap();
@@ -552,11 +563,75 @@ fn the_session_end_that_completes_the_chain_hands_the_working_copy_to_the_next_c
             .complete,
         "the premise: the first chain delivered"
     );
+    let now_held = holder(&tmp).expect("the queued round claimed the working copy");
+    assert_ne!(
+        now_held, first_chain,
+        "the lease itself moved off the finished chain at its last session end"
+    );
     assert_eq!(
         coders(&worker),
         2,
         "the chain is over and nobody is writing: the queued round must have the working copy now, \
          not at the lease's bound"
+    );
+}
+
+/// **One member's session end does not free a copy another member is still writing in** (nxf
+/// 6j6v.r91p, review of PR #27, Integrity #2). Both members of a parallel working-copy channel have
+/// answered; the coder's session ends, the finisher's still runs. The release asked at that end must
+/// find the chain owing — the round has not consolidated — and keep the copy, with a second
+/// commission waiting; only the finisher's end hands it on.
+#[test]
+fn a_member_s_session_end_keeps_the_copy_while_another_member_is_still_writing() {
+    let (tmp, engine, worker) = team(EXCLUSIVE_PARALLEL);
+    let send = |actor: &str, body: &str| {
+        engine
+            .send_to(
+                caller(actor),
+                SendToRequest {
+                    machine: None,
+                    to: "coding",
+                    body,
+                    refs: SendToRefs::ExplicitlyNone,
+                },
+            )
+            .expect("the commission is accepted");
+    };
+    send("pm", "both of you, now");
+    let coder = worker.only_for("coder");
+    let finisher = worker.only_for("finisher");
+    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    let (fs, ft) = (finisher.internal_session, finisher.reply_thread.unwrap());
+    worker.mark_running(&cs);
+    worker.mark_running(&fs);
+    let holder = |tmp: &TempDir| seed_store(tmp).working_tree_holder(NOW).unwrap();
+    let first_chain = holder(&tmp).expect("the round claimed the working copy");
+    send("pm2", "the next round");
+    let started = |w: &LiveSessionWorker| w.handles().len();
+    assert_eq!(
+        started(&worker),
+        2,
+        "the second round waits for the working copy"
+    );
+
+    answer(&engine, &cs, &ct, "coder done");
+    answer(&engine, &fs, &ft, "finisher done");
+    worker.running.lock().unwrap().remove(&cs);
+    engine.session_ended(caller("coder"), &cs).unwrap();
+    assert_eq!(
+        holder(&tmp).as_deref(),
+        Some(first_chain.as_str()),
+        "the finisher is still writing in the working copy: the coder's end must not hand it on"
+    );
+    assert_eq!(started(&worker), 2);
+
+    worker.running.lock().unwrap().remove(&fs);
+    engine.session_ended(caller("finisher"), &fs).unwrap();
+    assert_ne!(holder(&tmp).expect("the next round holds it"), first_chain);
+    assert_eq!(
+        started(&worker),
+        4,
+        "both members of the queued round start"
     );
 }
 
