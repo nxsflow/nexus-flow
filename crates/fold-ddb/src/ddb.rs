@@ -234,6 +234,14 @@ impl Table for DynamoDbTable {
             {
                 Ok(Outcome::Kept)
             }
+            // "Item size has exceeded the maximum allowed size" / "Item size to update has
+            // exceeded…": the row stays as it was, as with any refused write.
+            Err(e)
+                if e.code() == Some("ValidationException")
+                    && e.message().is_some_and(|m| m.contains("size")) =>
+            {
+                Ok(Outcome::TooLarge)
+            }
             Err(e) => Err(DdbError(format!(
                 "{} ({})",
                 DisplayErrorContext(&e),

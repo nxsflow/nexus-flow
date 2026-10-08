@@ -24,7 +24,7 @@
 //! coordinate.
 
 use crate::board;
-use crate::layout::{Layout, LayoutError, WATERMARK_KEY};
+use crate::layout::{Layout, LayoutError, MAX_ITEM_BYTES, MAX_KEY_BYTES, WATERMARK_KEY};
 use crate::table::{Outcome, Table};
 use crate::write::{plan, Cond, Write};
 use nxs_foundation::change::{Cell, Change, Wins};
@@ -56,6 +56,23 @@ pub struct Watermark {
     pub folded_through: i64,
     /// Each reducer's fold revision, by domain.
     pub revisions: BTreeMap<String, i64>,
+}
+
+/// What [`Folder::fold`] did with an op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Folded {
+    Folded,
+    /// No reducer folds it — a domain or shape this build does not know.
+    NotFolded,
+    /// The table cannot hold it, wholly or in part.
+    Refused(Refusal),
+}
+
+/// An op the table could not hold, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub op_id: String,
+    pub reason: String,
 }
 
 /// Why a fold stopped. Nothing after the failing op was written.
@@ -115,41 +132,86 @@ impl Folder {
             .unwrap_or_default()
     }
 
-    /// Fold one op: carry out its changes, then keep the board's indexes. Returns whether a reducer
-    /// folded it.
-    pub async fn fold<T: Table>(&self, table: &T, op: &Op) -> Result<bool, FoldError<T::Error>> {
+    /// Fold one op: carry out its changes, then keep the board's indexes.
+    ///
+    /// An op the table cannot hold — a key past `MAX_KEY_BYTES`, a row past `MAX_ITEM_BYTES` — is
+    /// [`Folded::Refused`] before it writes anything, rather than failing the batch for ever: the
+    /// relay keeps it, as it keeps any op a server does not fold. A row that only outgrows the limit
+    /// through earlier ops refuses the one write that would break it ([`Outcome::TooLarge`]); the
+    /// op's other writes stand. That last case is the one place the result depends on the order ops
+    /// arrive in — which op's cell made the row too large — and a local replica, which has no item
+    /// limit, holds all of it.
+    pub async fn fold<T: Table>(&self, table: &T, op: &Op) -> Result<Folded, FoldError<T::Error>> {
         let changes = self.changes(op);
         if changes.is_empty() {
-            return Ok(false);
+            return Ok(Folded::NotFolded);
         }
         let writes = changes
             .iter()
             .map(|c| plan(&self.layout, c))
             .collect::<Result<Vec<_>, _>>()
             .map_err(FoldError::Layout)?;
+        let refuse = |reason: String| {
+            Folded::Refused(Refusal {
+                op_id: op.op_id.clone(),
+                reason,
+            })
+        };
+        for key in writes
+            .iter()
+            .map(|w| &w.sk)
+            .chain(&board::derived_keys(&changes))
+        {
+            if key.len() > MAX_KEY_BYTES {
+                return Ok(refuse(format!(
+                    "a key of {} bytes, past the {MAX_KEY_BYTES} a sort key may have",
+                    key.len()
+                )));
+            }
+        }
+        if let Some(w) = writes.iter().find(|w| w.bytes() > MAX_ITEM_BYTES) {
+            return Ok(refuse(format!(
+                "a row of {} bytes, past the {MAX_ITEM_BYTES} an item may have",
+                w.bytes()
+            )));
+        }
+        let mut too_large = Vec::new();
         for write in &writes {
-            table.write(write).await.map_err(FoldError::Table)?;
+            if table.write(write).await.map_err(FoldError::Table)? == Outcome::TooLarge {
+                too_large.push(write.sk.clone());
+            }
         }
         board::after(table, &changes)
             .await
             .map_err(FoldError::Table)?;
-        Ok(true)
+        if too_large.is_empty() {
+            Ok(Folded::Folded)
+        } else {
+            Ok(refuse(format!(
+                "rows that would outgrow {MAX_ITEM_BYTES} bytes kept their state: {}",
+                too_large.join(", ")
+            )))
+        }
     }
 
     /// Fold a batch of ops pulled from the relay — each with its relay position — and move the
-    /// watermark to the highest position among them.
+    /// watermark to the highest position among them. Returns the ops it refused, for the caller to
+    /// log; they do not hold the watermark back.
     pub async fn fold_batch<T: Table>(
         &self,
         table: &T,
         ops: &[(i64, Op)],
-    ) -> Result<(), FoldError<T::Error>> {
+    ) -> Result<Vec<Refusal>, FoldError<T::Error>> {
+        let mut refused = Vec::new();
         for (_, op) in ops {
-            self.fold(table, op).await?;
+            if let Folded::Refused(r) = self.fold(table, op).await? {
+                refused.push(r);
+            }
         }
         if let Some(through) = ops.iter().map(|(seq, _)| *seq).max() {
             self.advance(table, through).await?;
         }
-        Ok(())
+        Ok(refused)
     }
 
     /// Move the watermark to `through` — never backwards — with this folder's revisions.
@@ -205,13 +267,18 @@ impl Folder {
         mark.revisions == self.revisions()
     }
 
-    /// Delete every row of the stream — the views, the adjacency entries and the watermark.
+    /// Delete every row of the stream — the views, the adjacency entries and the watermark, the
+    /// watermark LAST: a clear that dies half way leaves a stream whose watermark still names the old
+    /// revisions, so the next run clears it again instead of taking the leftovers for a fresh stream
+    /// (review of PR #24, Integrity #3).
     pub async fn clear<T: Table>(table: &T) -> Result<(), T::Error> {
         for row in table.query_prefix("").await? {
             if let Some(Cell::Text(sk)) = row.get(crate::layout::SK) {
-                table.delete(sk).await?;
+                if sk != WATERMARK_KEY {
+                    table.delete(sk).await?;
+                }
             }
         }
-        Ok(())
+        table.delete(WATERMARK_KEY).await
     }
 }

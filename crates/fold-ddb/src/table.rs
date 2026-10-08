@@ -1,5 +1,5 @@
 //! The five requests a server fold makes of its table, as a trait: [`MemTable`](crate::mem::MemTable)
-//! answers them in memory for the tests, [`DynamoDbTable`](crate::ddb) answers them with DynamoDB.
+//! answers them in memory for the tests, `ddb::DynamoDbTable` (feature `dynamodb`) answers them with DynamoDB.
 //! None of them is a Scan — every read names its partition, and the two board reads name an index.
 
 use crate::write::Write;
@@ -16,6 +16,8 @@ pub enum Outcome {
     Written,
     /// Its condition did not hold; the row is as it was.
     Kept,
+    /// The row would outgrow what the table stores (`MAX_ITEM_BYTES`); the row is as it was.
+    TooLarge,
 }
 
 /// A lane of the `dated` index.

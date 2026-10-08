@@ -20,7 +20,7 @@
 //! | partition key        | `stream_id`              | S    | one partition per stream                                               |
 //! | sort key             | `sk`                     | S    | `<view table>#<key cells>`, `.adj#<ticket>#<tag>`, `.meta#watermark`   |
 //! | GSI `active`         | `nxf_active` / `sk`      | S/S  | sparse: active tickets and the present dep/parent edges touching one   |
-//! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by instant       |
+//! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by `<instant>␟<id>` |
 //!
 //! Both indexes project ALL attributes, so a lane is one Query and no follow-up reads. Billing mode
 //! is the deployment's call. No local secondary index: without one, DynamoDB sets no limit on the
@@ -31,6 +31,24 @@
 //!
 //! Every row of view table `t` carries its columns as attributes of the same name ([`layout`]); a
 //! NULL cell is DynamoDB's NULL, an integer a number, text a string.
+//!
+//! # Freshness
+//!
+//! A row read (`GetItem`, a Query on the table) is strongly consistent. The two index reads —
+//! `board::select` and `board::dated` — are eventually consistent, as every DynamoDB GSI read is:
+//! right after a fold they may answer the state before it, for as long as the index takes to catch
+//! up (typically well under a second). The lanes are the local lanes of THAT state. A reader that
+//! must see its own write reads the ticket's row instead.
+//!
+//! # Limits
+//!
+//! An op the table cannot hold — a sort key past 1,024 bytes, a row past 400 KB — is refused
+//! (`fold::Folded::Refused`) and reported by `Folder::fold_batch`, instead of failing every run at
+//! the same op; the relay keeps it. Every request is awaited in sequence, so a fold run sets its
+//! own deadline: a client operation timeout on the SDK client it hands in, and a bound on the batch
+//! it folds. An op's work is proportional to what it says — one write per change, one per edge of a
+//! ticket whose activity flips — and is not capped here, because a capped fold would no longer be
+//! the local fold.
 //!
 //! # Cost
 //!

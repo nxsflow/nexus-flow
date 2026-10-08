@@ -67,7 +67,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
                 &s,
                 "SELECT id FROM items WHERE COALESCE(deleted,'0')<>'1' AND archived IS NULL
                    AND status='closed'
-                 ORDER BY CASE WHEN COALESCE(closed_at,'')='' THEN '0' ELSE closed_at END DESC, id"
+                 ORDER BY CASE WHEN COALESCE(closed_at,'')='' THEN '0' ELSE closed_at END DESC, id DESC"
             ),
             "closed lane, {ctx}"
         );
@@ -76,7 +76,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
             sql_ids(
                 &s,
                 "SELECT id FROM items WHERE COALESCE(deleted,'0')<>'1' AND archived IS NOT NULL
-                 ORDER BY CASE WHEN archived='' THEN '0' ELSE archived END DESC, id"
+                 ORDER BY CASE WHEN archived='' THEN '0' ELSE archived END DESC, id DESC"
             ),
             "archived lane, {ctx}"
         );

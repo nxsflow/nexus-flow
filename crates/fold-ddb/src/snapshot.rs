@@ -154,6 +154,12 @@ pub async fn export<T: Table>(table: &T, folder: &Folder) -> Result<Option<Snaps
 }
 
 /// Start the empty stream `table` from `snapshot`.
+///
+/// The snapshot is taken as given, rows and `folded_through` alike: it must come from storage the
+/// caller trusts — its own export, or a replica it vouches for — because a crafted one can claim a
+/// position past ops it never folded, and those would then never be folded here. Its size is the
+/// caller's to bound before it parses one. What is checked is that it fits: its stream, format,
+/// revisions, tables, columns and cell types, all before the first row is written.
 pub async fn import<T: Table>(
     table: &T,
     folder: &Folder,

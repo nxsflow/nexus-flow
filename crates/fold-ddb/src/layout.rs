@@ -31,6 +31,11 @@ pub const ACTIVE_INDEX: &str = "active";
 /// The `dated` index.
 pub const DATED_INDEX: &str = "dated";
 
+/// The longest sort key — and `dated` index sort key — DynamoDB stores, in bytes.
+pub const MAX_KEY_BYTES: usize = 1024;
+/// The largest item DynamoDB stores, in bytes, counting attribute names and values.
+pub const MAX_ITEM_BYTES: usize = 400 * 1024;
+
 /// Attribute names no view column may take: the table's own keys and the index attributes.
 pub const RESERVED: [&str; 5] = [PK, SK, ACTIVE, DATED, DATED_AT];
 

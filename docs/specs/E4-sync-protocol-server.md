@@ -236,7 +236,16 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
   When a ticket's activity flips, the fold rewrites the flag of every edge touching it, found
   through `.adj#<ticket>#<tag>` entries — one Query and at most three reads and one write per edge.
 - **GSI `dated`** (`nxf_dated` / `nxf_dated_at`): sparse — `<stream>#closed` by `closed_at`,
-  `<stream>#archived` by `archived`, newest first.
+  `<stream>#archived` by `archived`, newest first; the sort key is `<instant>U+001F<id>`, so tickets
+  of one instant keep one order and a `limit` cuts the lane at the same place every time.
+- **Index reads are eventually consistent**; row reads are strong. The lanes right after a fold may
+  be those of the state before it.
+- **An op the table cannot hold** (a sort key past 1,024 bytes, a row past 400 KB) is refused and
+  reported, not retried for ever; the relay keeps it. A row that only outgrows the limit through
+  several ops keeps its state at the write that would break it — the one result that depends on
+  arrival order, and only for rows a local replica can hold but DynamoDB cannot.
+- **Edge flags are rewritten before the ticket's own flag**, so a run that dies between the two
+  still sees the flip when it folds the op again.
 - **No Scan.** Every read names its partition. The `dynamodb-local` CI job records every request a
   fold and a read send.
 - **One writer per stream.** The rows converge under any number of folders; the index flags are
@@ -246,7 +255,7 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
 **The watermark** (`.meta#watermark`) is `folded_through` — a relay position, per decision 4 above —
 plus each reducer's fold revision. A batch folds, then moves the mark forward; a run that dies in
 between folds part of a batch again, which changes nothing. A release whose revisions differ clears
-the stream and folds it from position 0.
+the stream — the watermark last, so a clear that dies is done again — and folds it from position 0.
 
 **A snapshot is tables plus watermark, without the log** — only to start a fold run. It is taken
 without a lock, the watermark first and the tables after, so the tables may hold ops past the mark

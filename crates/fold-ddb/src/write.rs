@@ -66,6 +66,30 @@ impl Write {
     }
 }
 
+/// What one attribute weighs toward the item limit, as DynamoDB counts it: its name and its value
+/// — a number at its widest, 21 bytes.
+pub fn attribute_bytes(name: &str, cell: &Cell) -> usize {
+    name.len()
+        + match cell {
+            Cell::Null => 1,
+            Cell::Text(v) => v.len(),
+            Cell::Int(_) => 21,
+        }
+}
+
+impl Write {
+    /// What this write alone puts into its row, the sort key included.
+    pub fn bytes(&self) -> usize {
+        crate::layout::SK.len()
+            + self.sk.len()
+            + self
+                .set
+                .iter()
+                .map(|(n, c)| attribute_bytes(n, c))
+                .sum::<usize>()
+    }
+}
+
 /// The write that carries `change` out.
 pub fn plan(layout: &Layout, change: &Change) -> Result<Write, LayoutError> {
     let table = layout.table(change.table)?;

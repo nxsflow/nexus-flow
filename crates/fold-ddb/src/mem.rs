@@ -1,12 +1,15 @@
 //! [`MemTable`]: one stream's partition in memory, with DynamoDB's condition semantics — what the
 //! tests fold into, and what an embedder's own tests can fold into without an endpoint.
 //!
+//! It refuses a row past `MAX_ITEM_BYTES`, counted as [`attribute_bytes`] counts — DynamoDB's own
+//! count differs by a few bytes per attribute at most.
+//!
 //! It counts the requests it answers ([`Requests`]), so the cost of a fold — the flag fan-out above
 //! all — is measured on the same code path the DynamoDB table runs.
 
-use crate::layout::{ACTIVE, DATED, DATED_AT, PK, SK};
+use crate::layout::{ACTIVE, DATED, DATED_AT, MAX_ITEM_BYTES, PK, SK};
 use crate::table::{Dated, Outcome, Row, Table};
-use crate::write::{beats, Cond, Write};
+use crate::write::{attribute_bytes, beats, Cond, Write};
 use nxs_foundation::change::Cell;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -99,7 +102,7 @@ impl Table for MemTable {
                 return Ok(Outcome::Kept);
             }
         }
-        let row = rows.entry(write.sk.clone()).or_insert_with(|| {
+        let mut row = rows.get(&write.sk).cloned().unwrap_or_else(|| {
             Row::from([
                 (PK.to_string(), Cell::Text(self.stream.clone())),
                 (SK.to_string(), Cell::Text(write.sk.clone())),
@@ -111,6 +114,15 @@ impl Table for MemTable {
         for a in &write.remove {
             row.remove(a);
         }
+        if row
+            .iter()
+            .map(|(n, c)| attribute_bytes(n, c))
+            .sum::<usize>()
+            > MAX_ITEM_BYTES
+        {
+            return Ok(Outcome::TooLarge);
+        }
+        rows.insert(write.sk.clone(), row);
         Ok(Outcome::Written)
     }
 

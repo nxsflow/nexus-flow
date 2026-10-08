@@ -23,9 +23,9 @@
 //!
 //! Sparse too: a closed ticket that is neither archived nor deleted sits in partition
 //! `<stream>#closed` under its `closed_at`; an archived ticket that is not deleted in
-//! `<stream>#archived` under its `archived` instant. A ticket without the instant sits under `"0"`,
-//! which sorts after every date — last, as the local lanes put it. [`dated`] reads one lane newest
-//! first.
+//! `<stream>#archived` under its `archived` instant, the id appended ([`dated_key`]) so tickets of
+//! one instant keep one order. A ticket without the instant sits under `"0"`, which sorts after
+//! every date — last, as the local lanes put it. [`dated`] reads one lane newest first.
 //!
 //! # One writer per stream
 //!
@@ -36,14 +36,21 @@
 //! from the rows if that was ever broken.
 
 use crate::layout::{
-    adjacency_key, adjacency_prefix, row_key, table_prefix, ACTIVE, DATED, DATED_AT, SK,
+    adjacency_key, adjacency_prefix, row_key, table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES,
+    SK,
 };
 use crate::table::{text, Dated, Row, Table};
 use crate::write::{Cond, Write};
 use nexus_flow_core::graph::{Board, Edge, Ticket};
 use nexus_flow_core::model::EdgeKind;
-use nxs_foundation::change::{Cell, Change};
+use nxs_foundation::change::{Cell, Change, Effect};
 use std::collections::{BTreeMap, BTreeSet};
+
+fn effect_cells(change: &Change) -> &[(String, Cell)] {
+    match &change.effect {
+        Effect::Ensure { cells } | Effect::Put { cells } | Effect::Register { cells, .. } => cells,
+    }
+}
 
 /// The key cell of a `Change` on `items` / `edge_adds` / `edge_removes`.
 fn key_text<'a>(change: &'a Change, column: &str) -> Option<&'a str> {
@@ -82,6 +89,20 @@ pub fn lane(row: &Row) -> Option<(Dated, String)> {
     (text(row, "status") == Some("closed")).then(|| (Dated::Closed, at(text(row, "closed_at"))))
 }
 
+/// The `dated` sort key of ticket `id` entering its lane at `at`: the instant, then the id, so that
+/// tickets with the same instant still have one order — by id, descending, as the index reads newest
+/// first. The separator is U+001F, below every printable character, so an instant that is a prefix
+/// of another still sorts before it, exactly as the instants alone compare. An instant too long for
+/// an index key (`MAX_KEY_BYTES` with the id) sorts as `"0"`, with the tickets that have none.
+pub fn dated_key(at: &str, id: &str) -> String {
+    let key = format!("{at}\u{1f}{id}");
+    if key.len() <= MAX_KEY_BYTES {
+        key
+    } else {
+        format!("0\u{1f}{id}")
+    }
+}
+
 /// Keep the indexes after one op's changes were carried out.
 pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(), T::Error> {
     let mut items = BTreeSet::new();
@@ -109,14 +130,26 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
 
 /// Set ticket `id`'s index attributes from its row; when its activity flipped, refresh every edge
 /// touching it.
+///
+/// The edges go FIRST, told the ticket's new activity, and the ticket's own flag after: the flag is
+/// what says whether the activity flipped, so a run that dies in between still sees the flip when
+/// it folds the op again, and redoes the fan-out (review of PR #24, Integrity #2).
 pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T::Error> {
     let sk = item_key(id);
     let Some(row) = table.get(&sk).await? else {
         return Ok(());
     };
     let active = is_active(&row);
-    let lane = lane(&row);
     let was_active = row.contains_key(ACTIVE);
+    if active != was_active {
+        for entry in table.query_prefix(&adjacency_prefix(id)).await? {
+            if let Some(tag) = text(&entry, "tag") {
+                if let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? {
+                    flag_edge(table, tag, edge, Some((id, active))).await?;
+                }
+            }
+        }
+    }
     let mut set = Vec::new();
     let mut remove = Vec::new();
     if active != was_active {
@@ -126,9 +159,7 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             remove.push(ACTIVE.to_string());
         }
     }
-    let dated_now = lane
-        .as_ref()
-        .map(|(l, at)| (l.partition(table.stream()), at.clone()));
+    let dated_now = lane(&row).map(|(l, at)| (l.partition(table.stream()), dated_key(&at, id)));
     let dated_was = match (row.get(DATED), row.get(DATED_AT)) {
         (Some(Cell::Text(p)), Some(Cell::Text(at))) => Some((p.clone(), at.clone())),
         _ => None,
@@ -156,13 +187,6 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             condition: Some(Cond::RowPresent),
         })
         .await?;
-    if active != was_active {
-        for entry in table.query_prefix(&adjacency_prefix(id)).await? {
-            if let Some(tag) = text(&entry, "tag") {
-                refresh_edge(table, tag).await?;
-            }
-        }
-    }
     Ok(())
 }
 
@@ -183,18 +207,24 @@ pub(crate) async fn link_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::E
             ))
             .await?;
     }
-    flag_edge(table, tag, edge).await
+    flag_edge(table, tag, edge, None).await
 }
 
 /// Set edge `tag`'s flag from its row, its remove and its ends.
 pub(crate) async fn refresh_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
     match table.get(&tag_key("edge_adds", tag)).await? {
-        Some(edge) => flag_edge(table, tag, edge).await,
+        Some(edge) => flag_edge(table, tag, edge, None).await,
         None => Ok(()),
     }
 }
 
-async fn flag_edge<T: Table>(table: &T, tag: &str, edge: Row) -> Result<(), T::Error> {
+/// `known` is a ticket whose activity the caller knows ahead of its stored flag.
+async fn flag_edge<T: Table>(
+    table: &T,
+    tag: &str,
+    edge: Row,
+    known: Option<(&str, bool)>,
+) -> Result<(), T::Error> {
     let indexed = matches!(
         text(&edge, "kind").and_then(EdgeKind::parse),
         Some(EdgeKind::Dep | EdgeKind::Parent)
@@ -206,11 +236,14 @@ async fn flag_edge<T: Table>(table: &T, tag: &str, edge: Row) -> Result<(), T::E
             .into_iter()
             .flatten()
         {
-            if table
-                .get(&item_key(end))
-                .await?
-                .is_some_and(|r| r.contains_key(ACTIVE))
-            {
+            let end_active = match known {
+                Some((id, active)) if id == end => active,
+                _ => table
+                    .get(&item_key(end))
+                    .await?
+                    .is_some_and(|r| r.contains_key(ACTIVE)),
+            };
+            if end_active {
                 any_active = true;
                 break;
             }
@@ -263,6 +296,10 @@ pub struct Selection {
 }
 
 /// The selection for a hosted board: one Query on the `active` index (6j6v.vvw6 point 4).
+///
+/// Eventually consistent, as every index read: right after a fold it may still answer the state
+/// before it (see the crate doc, "Freshness"). A ticket the index still lists but whose row is no
+/// longer active is left out.
 pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
     let mut items = BTreeMap::new();
     let mut tickets = Vec::new();
@@ -302,17 +339,32 @@ pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
 }
 
 /// One `dated` lane, newest first — the closed or the archived tickets' rows, at most `limit`.
-/// Tickets with the same instant come in id order.
+/// Tickets with the same instant come in id order, descending ([`dated_key`]); the index holds
+/// that order itself, so a `limit` cuts it at the same place every time.
 pub async fn dated<T: Table>(
     table: &T,
     lane: Dated,
     limit: Option<usize>,
 ) -> Result<Vec<Row>, T::Error> {
-    let mut rows = table.query_dated(lane, limit).await?;
-    rows.sort_by(|a, b| {
-        text(b, DATED_AT)
-            .cmp(&text(a, DATED_AT))
-            .then_with(|| text(a, "id").cmp(&text(b, "id")))
-    });
-    Ok(rows)
+    table.query_dated(lane, limit).await
+}
+
+/// Edge-touching keys the board would write for these changes, beside the rows the changes name:
+/// one adjacency entry per end of every edge add. What [`Folder`](crate::fold::Folder) checks
+/// against the key limit before an op writes anything.
+pub(crate) fn derived_keys(changes: &[Change]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for change in changes.iter().filter(|c| c.table == "edge_adds") {
+        let tag = key_text(change, "tag").unwrap_or_default();
+        let cell = |c: &str| {
+            effect_cells(change).iter().find_map(|(n, v)| match v {
+                Cell::Text(t) if n == c => Some(t.clone()),
+                _ => None,
+            })
+        };
+        for end in [cell("from_id"), cell("to_id")].into_iter().flatten() {
+            keys.push(adjacency_key(&end, tag));
+        }
+    }
+    keys
 }

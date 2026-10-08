@@ -90,3 +90,53 @@ pub fn folder_for<'a>(
         .find(|r| r.domain() == op.domain)
         .filter(|r| r.is_foldable(op))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Folds `kind = "yes"` ops of its domain and nothing else.
+    struct Picky(&'static str);
+
+    impl Reducer for Picky {
+        fn domain(&self) -> &'static str {
+            self.0
+        }
+        fn is_foldable(&self, op: &Op) -> bool {
+            op.target_kind == "yes"
+        }
+        fn changes(&self, _: &Op) -> Vec<Change> {
+            Vec::new()
+        }
+    }
+
+    fn op(domain: &str, kind: &str, lamport: i64) -> Op {
+        Op {
+            op_id: "op-1".into(),
+            lamport,
+            site: 1,
+            domain: domain.into(),
+            target_kind: kind.into(),
+            target_id: "t".into(),
+            field: "f".into(),
+            op_type: "set".into(),
+            value: None,
+            author: "u".into(),
+            wall_clock: String::new(),
+            key_id: None,
+            sig: None,
+        }
+    }
+
+    #[test]
+    fn the_reducer_of_the_ops_domain_folds_it_when_it_knows_the_shape_and_the_number_is_in_bound() {
+        let reducers: Vec<Box<dyn Reducer>> = vec![Box::new(Picky("a")), Box::new(Picky("b"))];
+        let pick = |op: &Op| folder_for(reducers.iter().map(Box::as_ref), op).map(|r| r.domain());
+        assert_eq!(pick(&op("b", "yes", 7)), Some("b"));
+        // A shape its reducer does not fold, a domain nobody folds, a number past the bound.
+        assert_eq!(pick(&op("b", "no", 7)), None);
+        assert_eq!(pick(&op("c", "yes", 7)), None);
+        assert_eq!(pick(&op("a", "yes", crate::model::MAX_LAMPORT)), Some("a"));
+        assert_eq!(pick(&op("a", "yes", crate::model::MAX_LAMPORT + 1)), None);
+    }
+}

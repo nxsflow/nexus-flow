@@ -148,7 +148,7 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
     let name = fresh_table(&client, "fold").await;
     let folder = Folder::platform().unwrap();
 
-    for seed in [3, 19] {
+    for seed in [3, 8, 19, 27, 41, 55] {
         let s = merged(seed);
         let ops = delivered(&s, seed);
         let stream = format!("stream-{seed}");
@@ -195,12 +195,14 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
                     .map(|r| text(r, "id").unwrap().to_string())
                     .collect()
             };
-            let want = ids(board::dated(&mem, lane, None).await.unwrap());
-            let got = eventually(&want, || async move {
-                ids(board::dated(ddb_ref, lane, None).await.unwrap())
-            })
-            .await;
-            assert_eq!(got, want, "{lane:?}, seed {seed}");
+            for limit in [None, Some(1), Some(3)] {
+                let want = ids(board::dated(&mem, lane, limit).await.unwrap());
+                let got = eventually(&want, || async move {
+                    ids(board::dated(ddb_ref, lane, limit).await.unwrap())
+                })
+                .await;
+                assert_eq!(got, want, "{lane:?} limit {limit:?}, seed {seed}");
+            }
         }
         // Two streams share the table without seeing each other: the second fold's partition
         // holds only its own rows (checked above), and its reads named its partition.
@@ -323,4 +325,53 @@ async fn a_snapshot_taken_from_dynamodb_starts_another_stream_with_the_same_item
         strip(source.query_prefix("").await.unwrap())
     );
     assert!(!recorder.take().contains_key("Scan"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_larger_than_one_query_page_reads_back_whole() {
+    let Some(url) = endpoint("pages") else { return };
+    let recorder = Recorder::default();
+    let client = client(&url, &recorder);
+    let name = fresh_table(&client, "pages").await;
+    let folder = Folder::platform().unwrap();
+    // 300 active tickets with 8 KB descriptions: some 2.4 MB on the `active` index, where a Query
+    // page stops at 1 MB — the reads must follow the pages to the end.
+    let mut s = Store::open_in_memory(1);
+    for i in 0..300 {
+        let id = format!("ab12.{i:04}");
+        s.create_item(&id, "task", "T", "u");
+        s.set_field(&id, "description", Some("d".repeat(8 * 1024)), "u");
+    }
+    let ops: Vec<(i64, _)> = s
+        .export()
+        .into_iter()
+        .enumerate()
+        .map(|(i, op)| (i as i64 + 1, op))
+        .collect();
+    let ddb = DynamoDbTable::new(client.clone(), &name, "stream-pages");
+    folder.fold_batch(&ddb, &ops).await.unwrap();
+    recorder.take();
+    let ddb_ref = &ddb;
+    let ready = eventually(&300usize, || async move {
+        board::select(ddb_ref)
+            .await
+            .unwrap()
+            .board
+            .lanes(NOW)
+            .ready
+            .len()
+    })
+    .await;
+    assert_eq!(ready, 300);
+    assert_eq!(
+        ddb.query_prefix("items#").await.unwrap().len(),
+        300,
+        "the base table pages too"
+    );
+    let sent = recorder.take();
+    assert!(
+        sent.get("Query").copied().unwrap_or(0) >= 4,
+        "more than one page per read: {sent:?}"
+    );
+    assert!(!sent.contains_key("Scan"));
 }
