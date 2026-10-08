@@ -2056,9 +2056,10 @@ fn expired_but_still_writing(
 /// key, so the compare-and-swap itself says yes) and starts. The release then hands the copy to the
 /// next area while that step is running. This is the same exposure [`inherits_the_held_claim`]
 /// already names from the acquire end in full — "'owed now' is not 'owed throughout'" — and it is
-/// bounded by the same fact: only a reply inside the chain's OWN area can reach this function at
-/// all. Closing it would take the obligation read and the release into one transaction, which is
-/// the shape 6j6v.jzaj's own note points at and is not what that item was raised for.
+/// bounded by the same fact: only an event inside the chain's OWN area can reach this function at
+/// all — a reply in it, or since nxf 6j6v.r91p the end of a session that stood in one of its steps.
+/// Closing it would take the obligation read and the release into one transaction, which is the
+/// shape 6j6v.jzaj's own note points at and is not what that item was raised for.
 fn release_working_tree_if_scope_is_done(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -10350,6 +10351,13 @@ pub enum ConsequenceClass {
     /// [`FailedConsequence::session`] names the pinning session; [`FailedConsequence::reason`] is
     /// `None`.
     WithdrawnHolderWedged,
+    /// **Whether the working copy may go could not be decided** (nxf 6j6v.r91p, review of PR #27) —
+    /// the read behind the release failed after a session END completed its chain. The working copy
+    /// stays where it was, and nothing on this path will ask again: until the lease's own bound
+    /// elapses, the queue behind it waits — the symptom r91p was raised for, so it is said rather
+    /// than left on the stderr of a sidecar that is exiting. [`FailedConsequence::thread`] is the
+    /// ended session's slot; [`FailedConsequence::reason`] is `None`: nothing was being started.
+    LeaseUndecided,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -10377,6 +10385,19 @@ impl FailedConsequence {
             thread: thread.map(str::to_string),
             session: session.map(str::to_string),
             reason: Some(reason),
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
+    /// The release question failed after a session end completed its chain (nxf 6j6v.r91p).
+    pub(crate) fn lease_undecided(thread: &str, detail: impl Into<String>) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::LeaseUndecided,
+            thread: Some(thread.to_string()),
+            session: None,
+            reason: None,
             detail: detail.into(),
             precondition: None,
             declaration: None,
@@ -12843,7 +12864,10 @@ pub struct SessionEndedReceipt {
 /// **It is a read plus a re-ask, not a new piece of routing.** Marking the row is the whole of the
 /// write; everything after it hands the SAME [`supervisor_consider_set`] the same question a reply
 /// would have asked, so a flow that declined to advance while this session was writing advances now
-/// through one code path rather than two. Nothing here decides anything a reply does not.
+/// through one code path rather than two. Nothing here decides anything a reply does not — and
+/// that includes the working copy: once the reconsideration has run, the same release question a
+/// reply asks is asked here (nxf 6j6v.r91p), because it is this end, not the last reply, that
+/// completes a working-copy chain.
 ///
 /// **Idempotent.** [`ChatStore::mark_session_ended`] is first-wins, and the reconsideration is the
 /// one `tick` already documents as safe to repeat — a channel that has consolidated no longer
@@ -12900,7 +12924,22 @@ pub fn session_ended(
     let ctx = &with_declarations(ctx, frozen.as_ref());
     let run = supervisor_consider_set(ctx, store, &channel_thread, &thread, hop)?;
     debug_assert_one_place(&run.warnings, run.wake_skipped.as_ref());
+    // **The end that completes a chain asks whether the working copy may go** (nxf 6j6v.r91p): the
+    // last step's reply asked while its session still ran and was told no, so this is where the
+    // question is answered. The early returns above skip it on purpose — no thread, no channel step:
+    // nothing of a claimed chain ended there.
     let mut warnings = armed;
+    if let Err(e) = release_working_tree_if_scope_is_done(ctx, store, &thread) {
+        let finding = FailedConsequence::lease_undecided(
+            &thread,
+            format!(
+                "could not decide whether the working copy may go after session \
+                 {internal_session} ended: {e}; it stays held until the lease's bound elapses"
+            ),
+        );
+        eprintln!("warning: {finding}");
+        warnings.push(finding);
+    }
     warnings.extend(run.warnings);
     Ok(SessionEndedReceipt {
         session: internal_session.to_string(),
