@@ -488,6 +488,78 @@ fn a_parallel_channel_that_claims_the_working_copy_is_gated_too_and_that_is_deli
     );
 }
 
+/// **The session end that completes the chain lets the working copy go** (nxf 6j6v.r91p).
+///
+/// Measured in the foreign project `agents` on 2026-10-08: a coding run delivered cleanly — every
+/// member thread answered, every session ended, the result passed through to its requester — and its
+/// working copy stayed held for hours, to the latest deadline any of its threads declared, with two
+/// more runs queued behind it. The last step's REPLY asks whether the lease may go, and the answer
+/// is no, rightly: its session is still running, so the channel has not consolidated and the
+/// requester is still owed. What consolidates is the session END (nxf 6j6v.10yb), and that path
+/// never asked again.
+#[test]
+fn the_session_end_that_completes_the_chain_hands_the_working_copy_to_the_next_commission() {
+    let (tmp, engine, worker) = team(EXCLUSIVE_CODING);
+    let (coder_session, slot) = open_round(&engine, &worker);
+    worker.mark_running(&coder_session);
+    answer(&engine, &coder_session, &slot, "built");
+    worker.running.lock().unwrap().remove(&coder_session);
+    engine
+        .session_ended(caller("coder"), &coder_session)
+        .unwrap();
+    let finisher = worker.only_for("finisher");
+    let (fs, ft) = (finisher.internal_session, finisher.reply_thread.unwrap());
+    worker.mark_running(&fs);
+
+    // A second commission arrives while the first chain holds the copy: it queues.
+    engine
+        .send_to(
+            caller("pm2"),
+            SendToRequest {
+                machine: None,
+                to: "coding",
+                body: "build T6",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+        .expect("the second commission is accepted");
+    let coders = |w: &LiveSessionWorker| w.handles().iter().filter(|h| *h == "coder").count();
+    assert_eq!(
+        coders(&worker),
+        1,
+        "the second round waits for the working copy"
+    );
+
+    answer(&engine, &fs, &ft, "finished, PR open");
+    assert_eq!(
+        coders(&worker),
+        1,
+        "the finisher's process is still writing: its reply must not hand the copy on"
+    );
+
+    worker.running.lock().unwrap().remove(&fs);
+    engine.session_ended(caller("finisher"), &fs).unwrap();
+
+    let channel_thread = seed_store(&tmp)
+        .thread_parent(&ft)
+        .unwrap()
+        .expect("the channel thread");
+    assert!(
+        seed_store(&tmp)
+            .thread_quorum(&channel_thread, NOW)
+            .unwrap()
+            .expect("a board")
+            .complete,
+        "the premise: the first chain delivered"
+    );
+    assert_eq!(
+        coders(&worker),
+        2,
+        "the chain is over and nobody is writing: the queued round must have the working copy now, \
+         not at the lease's bound"
+    );
+}
+
 /// A store opened separately from the handle — for the board state a worker cannot report.
 fn seed_store(dir: &TempDir) -> nexus_chat::store::ChatStore {
     Workspace::resolve(None, dir.path())

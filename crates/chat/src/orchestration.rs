@@ -12900,6 +12900,21 @@ pub fn session_ended(
     let ctx = &with_declarations(ctx, frozen.as_ref());
     let run = supervisor_consider_set(ctx, store, &channel_thread, &thread, hop)?;
     debug_assert_one_place(&run.warnings, run.wake_skipped.as_ref());
+    // **The end that completes a chain asks whether the working copy may go** (nxf 6j6v.r91p). Since
+    // 6j6v.10yb a step of a working-copy channel is over when its SESSION ends, not when its reply
+    // lands, so the last step's reply asks this question too early — the channel has not
+    // consolidated, its requester is still owed — and gets a correct no. The consolidation then
+    // happens HERE, and without this call nothing asked again: a chain that delivered cleanly held
+    // the copy to its latest declared deadline, hours, with the queue waiting behind it. The same
+    // three questions decide as on every reply (nothing owed, nothing handed back, not withdrawn),
+    // so a chain that still owes anything keeps the copy exactly as before.
+    if let Err(e) = release_working_tree_if_scope_is_done(ctx, store, &thread) {
+        eprintln!(
+            "warning: could not decide whether the working-tree lease is releasable after the \
+             session {internal_session} ended: {e}; a chain waiting for the working copy may sit \
+             until the lease's bound elapses"
+        );
+    }
     let mut warnings = armed;
     warnings.extend(run.warnings);
     Ok(SessionEndedReceipt {
