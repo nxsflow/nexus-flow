@@ -5,9 +5,10 @@
 use rusqlite::Connection;
 
 /// Shared cycle-detection CTE body (the `edges` + bounded `walk` definitions only —
-/// no leading `WITH RECURSIVE`, no trailing select). Consolidated here because the
-/// identical prefix is convergence-critical and used by `derive::ready`,
-/// `derive::blocked`, and `cyclic_nodes`; a single source prevents drift. A node is in
+/// no leading `WITH RECURSIVE`, no trailing select) behind `cyclic_nodes` — the WRITE seam's
+/// cycle check, over every present dep edge. The
+/// lanes in `derive` walk their own, active-only cycle (6j6v.jr42): a cycle through a closed
+/// ticket blocks nothing there, while the write seam still refuses to create one. A node is in
 /// a cycle iff a walk starting at it reaches itself (`node = start`). The depth bound
 /// (<= edge count) guarantees termination on cyclic graphs (method from E0.5).
 pub(crate) const CYCLE_CTE: &str = "\

@@ -238,6 +238,23 @@ pub struct ItemRow {
     pub closed_at: Option<String>,
 }
 
+impl ItemRow {
+    /// Whether this ticket is ACTIVE (6j6v.jr42): live, not archived, and `open` or `in_progress`.
+    /// The one Rust spelling of the rule the lanes follow — a counterpart that is not active counts
+    /// as closed. [`ACTIVE_SQL`] is the same rule for a query; `graph::select` and `derive`'s
+    /// `active` CTE are built from it.
+    pub fn is_active(&self) -> bool {
+        self.deleted.as_deref() != Some("1")
+            && self.archived.is_none()
+            && matches!(self.status.as_deref(), Some("open") | Some("in_progress"))
+    }
+}
+
+/// [`ItemRow::is_active`] as a SQL predicate over `items` (unqualified columns) — the one place the
+/// rule is written for queries (6j6v.jr42).
+pub const ACTIVE_SQL: &str =
+    "COALESCE(deleted,'0')<>'1' AND archived IS NULL AND status IN ('open','in_progress')";
+
 #[cfg(test)]
 mod tests {
     use super::*;

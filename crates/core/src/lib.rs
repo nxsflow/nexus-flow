@@ -3,6 +3,7 @@
 //! docs/specs/E1-core-data-model.md.
 
 pub mod derive;
+pub mod graph;
 pub mod history;
 pub mod id;
 pub mod invariant;

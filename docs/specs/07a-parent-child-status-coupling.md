@@ -112,7 +112,9 @@ open-ancestor ladder over the full *ancestor* chain, while this section phrases 
 child's *parents*. These are deliberately different scopes, and the implementation makes the split
 explicit: **suppression** (a blocked/deferred ancestor) walks the **full transitive `parent` chain**
 (§7), but the **closed-mask** keys on the child's **direct parents only** — a child is closed-masked iff
-**every direct, live parent is `closed`**. The two never conflict because they partition the space (§2):
+**every direct, live parent is `closed`** (superseded 2026-10-07, 6j6v.jr42: iff it has a direct
+parent and **no direct parent is active** — a parent that is closed, archived, deleted or an id no
+ticket has counts as closed; `ItemRow::is_active`, `model::ACTIVE_SQL`). The two never conflict because they partition the space (§2):
 if any direct parent is still open, the open-ancestor ladder decides; only when *every* direct parent is
 closed does the closed-mask take over. (A blocked grand-ancestor reached *through* a closed parent does
 not re-suppress a closed-masked child — the closed-mask, evaluated first, wins; `derive::actionable`
