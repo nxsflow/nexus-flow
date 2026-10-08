@@ -5,8 +5,8 @@
 //!
 //! The pieces, in the order a fold run uses them: [`fold::Folder`] maps each op through the
 //! platform's reducers and [`write::plan`] turns every change into a [`write::Write`];
-//! [`board`] keeps the indexes and reads the lanes; [`snapshot`] starts a stream without folding
-//! its whole history. [`table::Table`] is the seam to storage: [`mem::MemTable`] in memory, and
+//! [`board`] keeps the indexes and reads the lanes; [`chunks`] reads an item's live chunks;
+//! [`snapshot`] starts a stream without folding its whole history. [`table::Table`] is the seam to storage: [`mem::MemTable`] in memory, and
 //! with the `dynamodb` feature `ddb::DynamoDbTable`.
 //!
 //! # The table contract (point 5)
@@ -59,6 +59,7 @@
 //! index. The `dynamodb-local` CI job counts the requests of a fold and proves it.
 
 pub mod board;
+pub mod chunks;
 pub mod fold;
 pub mod layout;
 pub mod mem;

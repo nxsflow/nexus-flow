@@ -1353,6 +1353,48 @@ pub fn note_add(store: &mut Store, now: &str, actor: &str, id: &str, text: &str)
     Ok(store.add_note(id, text, actor))
 }
 
+// ---- chunks ----------------------------------------------------------------
+
+/// Append an opaque chunk to an item's chunk field (6j6v.c0kn). Returns the chunk's id. The engine
+/// never reads `payload`; it refuses one past [`MAX_CHUNK_BYTES`](nexus_flow_core::model::MAX_CHUNK_BYTES).
+pub fn chunk_append(
+    store: &mut Store,
+    now: &str,
+    actor: &str,
+    id: &str,
+    field: &str,
+    payload: &str,
+) -> Result<String> {
+    let actor = validate::actor(actor)?;
+    let field = validate::chunk_field(field)?;
+    validate::chunk_size(payload.len())?;
+    require_item(store, id)?;
+    stamp_now(store, now)?;
+    Ok(store.append_chunk(id, field, payload, actor))
+}
+
+/// Replace chunks of an item's chunk field with one new chunk (6j6v.c0kn) — how a writer compacts
+/// what it appended. Returns the new chunk's id. The size limit counts the replaced ids too.
+pub fn chunk_supersede(
+    store: &mut Store,
+    now: &str,
+    actor: &str,
+    id: &str,
+    field: &str,
+    replaced: &[&str],
+    payload: &str,
+) -> Result<String> {
+    let actor = validate::actor(actor)?;
+    let field = validate::chunk_field(field)?;
+    let replaced = validate::chunk_ids(replaced)?;
+    // The value is the ids joined by one byte each, one byte of separator, then the payload.
+    let ids_bytes: usize = replaced.iter().map(|r| r.len() + 1).sum();
+    validate::chunk_size(ids_bytes + payload.len())?;
+    require_item(store, id)?;
+    stamp_now(store, now)?;
+    Ok(store.supersede_chunks(id, field, &replaced, payload, actor))
+}
+
 #[cfg(test)]
 mod tests {
     //! Relationship-matrix enforcement (sp6.6, ②b) — `check_parent` against a Store with a TEST

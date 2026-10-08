@@ -137,6 +137,24 @@ Double-apply is safe: the fold ops are set-/max-based (keep-if-beats LWW, OR-set
 is a named invariant with its own test, not a mere assertion. Re-sync after a partial
 push/pull therefore converges without double-counting.
 
+### 4.4.1 Opaque chunks (added 2026-10-08, `6j6v.c0kn`)
+
+The relay and the sync engine carry chunk ops (`target_kind = chunk`, `op_type` `append` /
+`supersede`; rules in E1 §3.2) like every other op: opaque, deduplicated by `op_id`, folded as a set.
+What the protocol adds is only the size discipline a stream of them needs:
+
+| bound | where | what happens |
+|---|---|---|
+| `MAX_CHUNK_BYTES` (300 KiB) per op value | the write seam, the reducer | refused at write; stored-not-folded if it arrives anyway |
+| 400 KB per stored op / folded row | DynamoDB relay, `nxs-fold-ddb` | below it by construction |
+| `MAX_PUSH_BYTES` (8 MiB) per push body | relay, client engine | the engine splits a page by bytes (`6j6v.3gq0`) |
+| `MAX_PUSH_OPS` (1000) per push | relay | the engine's pages stay below it |
+
+A stream is bounded too (a hosted stream by op count and bytes), so a writer that appends must also
+supersede: that is what keeps a field's live chunks, and the log's growth, in proportion to the
+content instead of to the number of edits. A pre-c0kn replica stores chunk ops without folding them
+and folds them once it is upgraded (task fold revision 2).
+
 ### 4.5 Machine presence (added 2026-09-21, `6j6v.f0b5`)
 
 A later addition, and the relay's one piece of state that is **not history**. After every pass it

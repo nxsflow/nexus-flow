@@ -283,6 +283,46 @@ impl Engine {
             .with_state_mut(|s| write::note_add(&mut s.store, now, actor, id, text))
     }
 
+    /// Append an opaque chunk to an item's chunk field (6j6v.c0kn); returns the chunk's id. The
+    /// engine transports chunks and never reads them; `validation` past
+    /// [`MAX_CHUNK_BYTES`](crate::MAX_CHUNK_BYTES) or for a malformed field, `not_found` for a
+    /// missing item.
+    pub fn chunk_append(
+        &self,
+        now: &str,
+        actor: &str,
+        id: &str,
+        field: &str,
+        payload: &str,
+    ) -> Result<String> {
+        self.handle
+            .with_state_mut(|s| write::chunk_append(&mut s.store, now, actor, id, field, payload))
+    }
+
+    /// Replace the chunks `replaced` of an item's chunk field with one new chunk (6j6v.c0kn);
+    /// returns its id. Replaced chunks leave [`chunks`](Engine::chunks) on every replica, whatever
+    /// order the ops arrive in.
+    pub fn chunk_supersede(
+        &self,
+        now: &str,
+        actor: &str,
+        id: &str,
+        field: &str,
+        replaced: &[&str],
+        payload: &str,
+    ) -> Result<String> {
+        self.handle.with_state_mut(|s| {
+            write::chunk_supersede(&mut s.store, now, actor, id, field, replaced, payload)
+        })
+    }
+
+    /// The live chunks of an item's chunk field, in canonical op order (6j6v.c0kn). Not part of
+    /// [`show`](Engine::show), search or any rendered text. `not_found` for a missing item.
+    pub fn chunks(&self, id: &str, field: &str) -> Result<Vec<crate::Chunk>> {
+        self.handle
+            .try_with_state(|s| read::chunks(&s.store, id, field))
+    }
+
     /// Archive a batch of roots, cascading DOWN each fully-closed subtree (C5 #916.5). Partial:
     /// atomic per root, independent between roots; the result reports each root's outcome plus the
     /// full set of ids actually archived (incl. cascaded).

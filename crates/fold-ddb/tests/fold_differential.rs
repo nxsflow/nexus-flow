@@ -2,7 +2,7 @@
 //!
 //! Two replicas write generated boards — tickets in every status, archived and deleted ones, defer
 //! dates, dependencies and parents with removes, labels, notes and redactions, custom fields,
-//! thread links — and merge. The merged log is then folded twice: locally, through the SQLite
+//! thread links, chunks and supersedes — and merge. The merged log is then folded twice: locally, through the SQLite
 //! applier, in the order the replica took it in; and through this crate into a [`MemTable`], in a
 //! SHUFFLED order with ops delivered twice, as a relay without deduplication hands them over. Every
 //! row of every view table, every lane of the library and both dated lanes must come out the same,
@@ -12,10 +12,10 @@ use nexus_flow_core::graph;
 use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
 use nexus_flow_core::task_reducer::TaskReducer;
-use nxs_fold_ddb::board;
 use nxs_fold_ddb::fold::Folder;
 use nxs_fold_ddb::mem::{ready, MemTable};
 use nxs_fold_ddb::table::{text, Dated};
+use nxs_fold_ddb::{board, chunks};
 use nxs_foundation::reducer::Reducer;
 use std::collections::BTreeMap;
 
@@ -43,6 +43,7 @@ fn sql_ids(s: &Store, sql: &str) -> Vec<String> {
 fn the_server_fold_in_any_order_answers_as_the_local_fold() {
     let folder = Folder::platform().unwrap();
     let mut active_seen = 0;
+    let mut chunks_seen = 0;
     for seed in 0..120 {
         let s = merged(seed);
         let t = serve(&s, seed, &folder);
@@ -55,6 +56,18 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
                 "{table}, {ctx}"
             );
         }
+
+        // An item's live chunks, read the way each side reads them (6j6v.c0kn).
+        for item in sql_ids(&s, "SELECT DISTINCT item_id FROM chunks") {
+            for field in ["doc", "draft"] {
+                assert_eq!(
+                    ready(chunks::chunks(&t, &item, field)).unwrap(),
+                    s.chunks_of(&item, field).unwrap(),
+                    "chunks of {item}/{field}, {ctx}"
+                );
+            }
+        }
+        chunks_seen += sql_ids(&s, "SELECT chunk_id FROM chunk_superseded").len();
 
         let local = graph::select(s.connection()).unwrap().lanes(NOW);
         let served = ready(board::select(&t)).unwrap();
@@ -97,6 +110,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
         assert_eq!(recomputed.len(), kept.len(), "{ctx}");
     }
     assert!(active_seen > 0, "the generated boards have active tickets");
+    assert!(chunks_seen > 0, "the generated boards supersede chunks");
 }
 
 #[test]

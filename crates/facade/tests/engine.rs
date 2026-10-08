@@ -1010,3 +1010,87 @@ fn handle_links_an_unknown_thread_and_existence_checks_only_the_item() {
     assert!(engine.thread_links(&a.id).unwrap().is_empty());
     assert!(engine.thread_items(THREAD).unwrap().is_empty());
 }
+
+#[test]
+fn chunks_are_appended_superseded_and_read_at_the_engine_seam_and_nowhere_else() {
+    // 6j6v.c0kn, at the seam the products speak.
+    let tmp = seeded_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let id = "ab12.0001";
+
+    let first = engine.chunk_append(NOW, ACTOR, id, "doc", "AAEC").unwrap();
+    let second = engine.chunk_append(NOW, ACTOR, id, "doc", "AwQF").unwrap();
+    let bodies = |e: &Engine| -> Vec<String> {
+        e.chunks(id, "doc")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect()
+    };
+    assert_eq!(bodies(&engine), ["AAEC", "AwQF"], "in op order");
+
+    let merged = engine
+        .chunk_supersede(NOW, ACTOR, id, "doc", &[&first, &second], "AAECAwQF")
+        .unwrap();
+    let live = engine.chunks(id, "doc").unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(
+        (live[0].id.as_str(), live[0].body.as_str()),
+        (merged.as_str(), "AAECAwQF")
+    );
+    assert_eq!(live[0].author, ACTOR);
+    assert!(engine.chunks(id, "other").unwrap().is_empty());
+
+    // Not a note, not in show, not searchable.
+    assert!(engine.show(id).unwrap().notes.is_empty());
+    assert!(
+        engine
+            .search(NOW, "AAECAwQF", None, None, true, false)
+            .unwrap()
+            .is_empty(),
+        "a chunk's payload is never search text"
+    );
+
+    // Refused loudly, never cut short.
+    let huge = "x".repeat(nexus_flow_facade::MAX_CHUNK_BYTES + 1);
+    let err = engine
+        .chunk_append(NOW, ACTOR, id, "doc", &huge)
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(err.to_string().contains("at most"), "{err}");
+    let err = engine
+        .chunk_supersede(NOW, ACTOR, id, "doc", &[&merged], &huge)
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(
+        bodies(&engine),
+        ["AAECAwQF"],
+        "a refused chunk left nothing behind"
+    );
+
+    assert_eq!(
+        engine
+            .chunk_append(NOW, ACTOR, id, "a field", "x")
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation
+    );
+    assert_eq!(
+        engine
+            .chunk_supersede(NOW, ACTOR, id, "doc", &[], "x")
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation
+    );
+    assert_eq!(
+        engine
+            .chunk_append(NOW, ACTOR, "ab12.9999", "doc", "x")
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        engine.chunks("ab12.9999", "doc").unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
