@@ -2,8 +2,9 @@
 //! (spec §4.3/§4.4). One `sync` pass:
 //!
 //! 1. **PUSH** every un-pushed **local-origin** op (rowid > `pushed_through`) to the
-//!    relay in bounded batches (`page_limit` ops each), advancing `pushed_through` per
-//!    batch — so the relay can cap per-request work without rejecting a large history.
+//!    relay in bounded batches (`page_limit` ops each, split further so no request body passes
+//!    [`MAX_PUSH_BYTES`]), advancing `pushed_through` per batch — so the relay can cap
+//!    per-request work without rejecting a large history.
 //! 2. **PULL** `read_since(pulled_through)` and fold each op through `core::apply`,
 //!    advancing `pulled_through` per page until the relay's cursor stops advancing. The stop
 //!    condition is the CURSOR, never the page's shape — see [`Transport::pull`].
@@ -24,6 +25,7 @@ use nexus_flow_core::store::Store;
 use crate::presence::{self, Presence};
 use crate::protocol::{
     Cursor, MachineHello, MachinesResponse, RegisterOutcome, RegisterRequest, StreamId,
+    MAX_PUSH_BYTES,
 };
 use crate::wire::{WireOp, ENVELOPE_VERSION};
 
@@ -206,6 +208,15 @@ impl std::error::Error for TransportError {}
 pub enum SyncError {
     Storage(String),
     Transport(String),
+    /// One local op is too large to push at all: a request carrying it alone would pass the
+    /// relay's body ceiling (`6j6v.3gq0`). Every op before it was pushed and the pass still
+    /// pulled; this op and the ones after it wait. Not retried into a 413 and never cut short —
+    /// the op stays whole in the local log, and the error names it.
+    OpTooLarge {
+        op_id: String,
+        bytes: usize,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for SyncError {
@@ -213,6 +224,15 @@ impl std::fmt::Display for SyncError {
         match self {
             SyncError::Storage(m) => write!(f, "sync storage: {m}"),
             SyncError::Transport(m) => write!(f, "sync transport: {m}"),
+            SyncError::OpTooLarge {
+                op_id,
+                bytes,
+                limit,
+            } => write!(
+                f,
+                "sync push: op {op_id} needs a {bytes}-byte request on its own, over the relay's \
+                 {limit}-byte limit; it cannot be pushed, and the local ops after it wait behind it"
+            ),
         }
     }
 }
@@ -338,6 +358,7 @@ pub fn sync(
         transport,
         page_limit,
         PULL_PAGE_CEILING,
+        MAX_PUSH_BYTES,
         budget,
     )
 }
@@ -347,7 +368,9 @@ pub fn sync(
 /// not the production 20,000 — looping that for real would make the test needlessly slow without
 /// exercising anything the mechanism doesn't already prove at a smaller number. `sync` is the
 /// only production caller (always passing [`PULL_PAGE_CEILING`]); this file's own test on a
-/// relay that never exhausts the stream calls this directly with a small ceiling.
+/// relay that never exhausts the stream calls this directly with a small ceiling. The push body
+/// ceiling is a parameter for the same reason: a test proves the split with bodies of a few
+/// hundred bytes instead of 8 MiB.
 #[allow(clippy::too_many_arguments)]
 fn sync_with_pull_ceiling(
     store: &mut Store,
@@ -357,6 +380,7 @@ fn sync_with_pull_ceiling(
     transport: &dyn Transport,
     page_limit: usize,
     pull_page_ceiling: usize,
+    push_body_ceiling: usize,
     budget: &dyn PassBudget,
 ) -> Result<SyncOutcome, SyncError> {
     // A zero page would panic `chunks(0)` in push (and spin the pull loop). The sole caller
@@ -371,16 +395,35 @@ fn sync_with_pull_ceiling(
     // legitimate history (k64). pushed_through advances PER batch — a transport failure
     // partway through leaves the already-pushed batches durable and the watermark exact, so
     // the next pass resumes without re-pushing or skipping an op.
+    //
+    // Each page is split further by BYTES (6j6v.3gq0): the relay refuses a body over its ceiling
+    // with 413, and a page refused that way would be resent identically on every pass, so a page
+    // of large ops would stall the push for good. One op too large to go even alone stops the push
+    // there — everything before it is durable — and is reported once the pull has run, so it holds
+    // up neither the ops this replica receives nor the ones it already sent.
     let local = local_ops_since(store.connection(), local_site, marks.pushed_through)?;
-    let pushed = local.len();
-    for batch in local.chunks(page_limit) {
-        let max_rowid = batch
-            .last()
-            .map(|(rowid, _)| *rowid)
-            .expect("chunk is non-empty");
-        let ops: Vec<WireOp> = batch.iter().map(|(_, w)| w.clone()).collect();
-        transport.push(stream, &ops)?;
-        marks.pushed_through = max_rowid;
+    let mut pushed = 0;
+    let mut too_large = None;
+    'pages: for page in local.chunks(page_limit) {
+        let split = split_by_body_size(page, push_body_ceiling);
+        for batch in split.batches {
+            let max_rowid = batch
+                .last()
+                .map(|(rowid, _)| *rowid)
+                .expect("a split batch is non-empty");
+            let ops: Vec<WireOp> = batch.iter().map(|(_, w)| w.clone()).collect();
+            transport.push(stream, &ops)?;
+            marks.pushed_through = max_rowid;
+            pushed += batch.len();
+        }
+        if let Some((op_id, bytes)) = split.too_large {
+            too_large = Some(SyncError::OpTooLarge {
+                op_id,
+                bytes,
+                limit: push_body_ceiling,
+            });
+            break 'pages;
+        }
     }
 
     // ---- PULL: read_since(cursor), fold each op, paginate until exhausted (or capped) ----
@@ -446,6 +489,9 @@ fn sync_with_pull_ceiling(
         }
     }
 
+    if let Some(err) = too_large {
+        return Err(err);
+    }
     Ok(SyncOutcome {
         pushed,
         pulled,
@@ -456,6 +502,57 @@ fn sync_with_pull_ceiling(
         signatures_stripped,
         unsigned_from_signers,
     })
+}
+
+/// The bytes `{"ops":[` and `]}` add around a push body's ops.
+const PUSH_BODY_FRAME: usize = r#"{"ops":[]}"#.len();
+
+/// One page cut into push requests whose bodies stay within a ceiling.
+struct BodySplit<'a> {
+    /// Consecutive runs of the page, in order, each one request.
+    batches: Vec<&'a [(i64, WireOp)]>,
+    /// The first op that would pass the ceiling even alone — its id and the body size it needs.
+    /// The batches stop before it.
+    too_large: Option<(String, usize)>,
+}
+
+/// Cut `page` into consecutive runs whose push body — `{"ops":[` + the ops' compact JSON joined by
+/// commas + `]}`, exactly what [`PushRequest`](crate::protocol::PushRequest) serializes to — is
+/// at most `ceiling` bytes. Greedy and order-keeping: `pushed_through` is a rowid watermark, so a
+/// batch can only ever be a contiguous run, and an op that does not fit alone ends the split.
+fn split_by_body_size(page: &[(i64, WireOp)], ceiling: usize) -> BodySplit<'_> {
+    let mut batches = Vec::new();
+    let (mut start, mut body) = (0, PUSH_BODY_FRAME);
+    for (i, (_, op)) in page.iter().enumerate() {
+        // A `WireOp` is plain data; serializing it cannot fail.
+        let len = serde_json::to_vec(op)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
+        let alone = PUSH_BODY_FRAME.saturating_add(len);
+        if alone > ceiling {
+            if i > start {
+                batches.push(&page[start..i]);
+            }
+            return BodySplit {
+                batches,
+                too_large: Some((op.op_id.clone(), alone)),
+            };
+        }
+        let comma = usize::from(i > start);
+        if body + comma + len > ceiling {
+            batches.push(&page[start..i]);
+            (start, body) = (i, alone);
+        } else {
+            body += comma + len;
+        }
+    }
+    if start < page.len() {
+        batches.push(&page[start..]);
+    }
+    BodySplit {
+        batches,
+        too_large: None,
+    }
 }
 
 /// Count the silent downgrades on one pull page (6j6v.pzkb): see
@@ -1285,6 +1382,216 @@ mod tests {
         );
     }
 
+    /// A relay that refuses a push body over `ceiling` the way the real one does (413 from its
+    /// `DefaultBodyLimit`), measuring the body exactly as `HttpTransport` sends it, and records the
+    /// size of every body it accepted.
+    struct BodyCeilingRelay {
+        inner: MemTransport,
+        ceiling: usize,
+        accepted: RefCell<Vec<usize>>,
+    }
+
+    impl BodyCeilingRelay {
+        fn new(ceiling: usize) -> BodyCeilingRelay {
+            BodyCeilingRelay {
+                inner: MemTransport::new(),
+                ceiling,
+                accepted: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Transport for BodyCeilingRelay {
+        fn push(&self, stream: &StreamId, ops: &[WireOp]) -> Result<(), TransportError> {
+            let body = crate::protocol::PushRequest { ops: ops.to_vec() };
+            let bytes = serde_json::to_vec(&body).unwrap().len();
+            if bytes > self.ceiling {
+                return Err(TransportError(format!("413: a {bytes}-byte body")));
+            }
+            self.accepted.borrow_mut().push(bytes);
+            self.inner.push(stream, ops)
+        }
+        fn pull(
+            &self,
+            stream: &StreamId,
+            since: Cursor,
+            limit: usize,
+        ) -> Result<(Vec<WireOp>, Cursor), TransportError> {
+            self.inner.pull(stream, since, limit)
+        }
+        fn register(
+            &self,
+            stream: &StreamId,
+            prefix: &str,
+            uuid: &str,
+        ) -> Result<RegisterOutcome, TransportError> {
+            self.inner.register(stream, prefix, uuid)
+        }
+    }
+
+    /// Sync with a push body ceiling of `ceiling` bytes and otherwise production bounds.
+    fn sync_under(
+        store: &mut Store,
+        site: i64,
+        marks: &mut Watermarks,
+        relay: &dyn Transport,
+        page: usize,
+        ceiling: usize,
+    ) -> Result<SyncOutcome, SyncError> {
+        sync_with_pull_ceiling(
+            store,
+            site,
+            &StreamId("s".into()),
+            marks,
+            relay,
+            page,
+            PULL_PAGE_CEILING,
+            ceiling,
+            &Unbounded,
+        )
+    }
+
+    #[test]
+    fn the_split_measures_each_body_exactly_and_packs_it_greedily() {
+        let mut a = Store::open_in_memory(1);
+        for i in 1..=6 {
+            a.create_item(
+                &format!("aaaa.000{i}"),
+                "task",
+                &"x".repeat(100 * i),
+                "alice",
+            );
+        }
+        let page = local_ops_since(a.connection(), 1, 0).unwrap();
+        let body = |run: &[(i64, WireOp)]| {
+            let ops = run.iter().map(|(_, w)| w.clone()).collect();
+            serde_json::to_vec(&crate::protocol::PushRequest { ops })
+                .unwrap()
+                .len()
+        };
+        let ceiling = 1500;
+        let split = split_by_body_size(&page, ceiling);
+        assert!(split.too_large.is_none());
+        assert!(split.batches.len() > 1, "the fixture must need a split");
+        assert_eq!(
+            split.batches.concat(),
+            page,
+            "the batches are the page, in order, nothing dropped or repeated"
+        );
+        for (i, run) in split.batches.iter().enumerate() {
+            assert!(body(run) <= ceiling, "batch {i} is {} bytes", body(run));
+            if let Some(next) = split.batches.get(i + 1) {
+                let joined = [*run, &next[..1]].concat();
+                assert!(
+                    body(&joined) > ceiling,
+                    "batch {i} would have taken the next op: the split is greedy"
+                );
+            }
+        }
+        // The frame arithmetic is the serializer's, not a guess.
+        assert_eq!(body(&[]), PUSH_BODY_FRAME);
+    }
+
+    #[test]
+    fn a_page_of_large_ops_is_split_under_the_body_ceiling_and_converges() {
+        // 6j6v.3gq0: a page that fits the op count but not the byte ceiling used to be sent
+        // whole, refused with 413, and resent identically on every pass. Split, it goes through.
+        let mut a = Store::open_in_memory(1);
+        for i in 1..=4 {
+            a.create_item(&format!("aaaa.000{i}"), "task", &"x".repeat(600), "alice");
+        }
+        let total = local_ops_since(a.connection(), 1, 0).unwrap().len();
+        let ceiling = 2000;
+        let relay = BodyCeilingRelay::new(ceiling);
+        let mut ma = Watermarks::default();
+
+        let outcome = sync_under(&mut a, 1, &mut ma, &relay, 500, ceiling).unwrap();
+
+        let accepted = relay.accepted.borrow().clone();
+        assert!(accepted.len() > 1, "one page went out as several requests");
+        assert!(accepted.iter().all(|&b| b <= ceiling));
+        assert_eq!(outcome.pushed, total);
+        assert_eq!(ma.pushed_through, total as i64);
+
+        let mut b = Store::open_in_memory(2);
+        let mut mb = Watermarks::default();
+        sync_under(&mut b, 2, &mut mb, &relay, 500, ceiling).unwrap();
+        assert_eq!(
+            materialized(&a),
+            materialized(&b),
+            "the split push converges"
+        );
+    }
+
+    #[test]
+    fn an_op_too_large_to_push_alone_is_named_and_holds_up_neither_the_ops_before_it_nor_the_pull()
+    {
+        // The one case no split can fix. The ops before it go out, the pull still runs, and the
+        // pass fails with an error naming the op — every pass, until something is done about it,
+        // never by cutting the op short and never by re-pushing what already went.
+        let ceiling = 2000;
+        let relay = BodyCeilingRelay::new(ceiling);
+        // Something foreign waiting on the relay, to prove the pull ran.
+        let mut other = Store::open_in_memory(2);
+        other.create_item("bbbb.0001", "task", "from elsewhere", "bob");
+        let mut mo = Watermarks::default();
+        sync_under(&mut other, 2, &mut mo, &relay, 500, ceiling).unwrap();
+
+        let mut a = Store::open_in_memory(1);
+        a.create_item("aaaa.0001", "task", "small", "alice");
+        let before = local_ops_since(a.connection(), 1, 0).unwrap().len();
+        a.create_item("aaaa.0002", "task", &"x".repeat(5000), "alice");
+        let huge = local_ops_since(a.connection(), 1, 0)
+            .unwrap()
+            .into_iter()
+            .find(|(_, w)| w.value.as_deref().is_some_and(|v| v.len() >= 5000))
+            .expect("the large title is one op")
+            .1;
+        let mut ma = Watermarks::default();
+
+        for pass in 0..2 {
+            let err = sync_under(&mut a, 1, &mut ma, &relay, 500, ceiling)
+                .expect_err("an op over the ceiling fails the pass");
+            match &err {
+                SyncError::OpTooLarge {
+                    op_id,
+                    bytes,
+                    limit,
+                } => {
+                    assert_eq!(op_id, &huge.op_id, "pass {pass}: the error names the op");
+                    assert!(bytes > limit && *limit == ceiling);
+                }
+                other => panic!("pass {pass}: expected OpTooLarge, got {other:?}"),
+            }
+            assert!(err.to_string().contains(&huge.op_id), "{err}");
+            assert!(
+                ma.pushed_through >= before as i64,
+                "pass {pass}: the ops before it are durable"
+            );
+            assert!(
+                a.get_item("bbbb.0001").unwrap().is_some(),
+                "pass {pass}: the pull ran despite the stuck op"
+            );
+        }
+        let pushed_ids: Vec<String> = relay.inner.streams.borrow()["s"]
+            .iter()
+            .filter(|w| w.site == 1)
+            .map(|w| w.op_id.clone())
+            .collect();
+        assert!(
+            !pushed_ids.contains(&huge.op_id),
+            "the op was never cut short and sent"
+        );
+        let mut deduped = pushed_ids.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            pushed_ids.len(),
+            "nothing before it went twice"
+        );
+    }
+
     #[test]
     fn a_zero_page_limit_is_clamped_not_a_panic() {
         // `sync` is public; a 0 page_limit must not panic (`chunks(0)`) — it is clamped to 1.
@@ -1967,7 +2274,15 @@ mod tests {
         let mut ma = Watermarks::default();
 
         let outcome = sync_with_pull_ceiling(
-            &mut a, 1, &stream, &mut ma, &relay, page, ceiling, &Unbounded,
+            &mut a,
+            1,
+            &stream,
+            &mut ma,
+            &relay,
+            page,
+            ceiling,
+            MAX_PUSH_BYTES,
+            &Unbounded,
         )
         .unwrap();
 
@@ -1988,7 +2303,15 @@ mod tests {
         // (still-endless) relay is capped again — proving the resume is real, not just that the
         // first call stopped.
         let outcome2 = sync_with_pull_ceiling(
-            &mut a, 1, &stream, &mut ma, &relay, page, ceiling, &Unbounded,
+            &mut a,
+            1,
+            &stream,
+            &mut ma,
+            &relay,
+            page,
+            ceiling,
+            MAX_PUSH_BYTES,
+            &Unbounded,
         )
         .unwrap();
         assert!(outcome2.pull_ceiling_hit);
@@ -2096,6 +2419,7 @@ mod tests {
             &TricklingRelay,
             10,
             20_000,
+            MAX_PUSH_BYTES,
             &budget,
         )
         .unwrap();
@@ -2129,6 +2453,7 @@ mod tests {
             &TricklingRelay,
             10,
             20_000,
+            MAX_PUSH_BYTES,
             &AfterPages::new(3),
         )
         .unwrap();
@@ -2143,6 +2468,7 @@ mod tests {
             &TricklingRelay,
             10,
             20_000,
+            MAX_PUSH_BYTES,
             &AfterPages::new(3),
         )
         .unwrap();
@@ -2159,9 +2485,18 @@ mod tests {
         let mut ma = Watermarks::default();
         // The cursor stands still on the first page — the one true stop.
         let relay = EmptyRelay;
-        let outcome =
-            sync_with_pull_ceiling(&mut a, 1, &stream, &mut ma, &relay, 10, 20_000, &Unbounded)
-                .unwrap();
+        let outcome = sync_with_pull_ceiling(
+            &mut a,
+            1,
+            &stream,
+            &mut ma,
+            &relay,
+            10,
+            20_000,
+            MAX_PUSH_BYTES,
+            &Unbounded,
+        )
+        .unwrap();
         assert!(!outcome.budget_exhausted);
         assert!(!outcome.pull_ceiling_hit);
         assert_eq!(outcome.pull_pages, 0);
@@ -2181,6 +2516,7 @@ mod tests {
             &TricklingRelay,
             10,
             20_000,
+            MAX_PUSH_BYTES,
             &AfterPages::new(4),
         )
         .unwrap();
@@ -2198,9 +2534,18 @@ mod tests {
         let relay = EndlessPull { page_limit: page };
         let mut a = Store::open_in_memory(1);
         let mut ma = Watermarks::default();
-        let outcome =
-            sync_with_pull_ceiling(&mut a, 1, &stream, &mut ma, &relay, page, 4, &Unbounded)
-                .unwrap();
+        let outcome = sync_with_pull_ceiling(
+            &mut a,
+            1,
+            &stream,
+            &mut ma,
+            &relay,
+            page,
+            4,
+            MAX_PUSH_BYTES,
+            &Unbounded,
+        )
+        .unwrap();
         assert_eq!(outcome.pull_pages, 4);
         assert_eq!(
             outcome.pull_empty_pages, 0,

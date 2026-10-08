@@ -26,6 +26,12 @@ impl Cursor {
     pub const BEGINNING: Cursor = Cursor(0);
 }
 
+/// The relay's ceiling on one push request BODY, in bytes: a larger body is refused with 413
+/// before a handler runs. Here, beside [`PushRequest`], because both ends need the same number —
+/// the relay enforces it (`DefaultBodyLimit`, k64) and the client engine sizes its push batches
+/// under it (`6j6v.3gq0`), so a page of large ops is split instead of refused over and over.
+pub const MAX_PUSH_BYTES: usize = 8 * 1024 * 1024;
+
 /// `POST /streams/{id}/ops` body: a batch of opaque ops to append in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushRequest {

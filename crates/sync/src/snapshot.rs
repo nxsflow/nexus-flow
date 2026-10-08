@@ -204,6 +204,9 @@ impl From<SyncError> for SnapshotError {
         match e {
             SyncError::Storage(m) => SnapshotError::Storage(m),
             SyncError::Transport(m) => SnapshotError::Transport(m),
+            too_large @ SyncError::OpTooLarge { .. } => {
+                SnapshotError::Transport(too_large.to_string())
+            }
         }
     }
 }
