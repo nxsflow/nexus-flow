@@ -304,7 +304,16 @@ async fn a_snapshot_taken_from_dynamodb_starts_another_stream_with_the_same_item
         by_key(rows)
             .into_iter()
             .map(|(k, mut r)| {
+                // The partition and the index attributes name their stream; everything else is the
+                // same across the two.
                 r.remove("stream_id");
+                for attr in ["nxf_active", "nxf_dated"] {
+                    if let Some(nxs_foundation::change::Cell::Text(v)) = r.get_mut(attr) {
+                        *v = v
+                            .replacen("stream-a", "<stream>", 1)
+                            .replacen("stream-b", "<stream>", 1);
+                    }
+                }
                 (k, r)
             })
             .collect::<BTreeMap<_, _>>()
