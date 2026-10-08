@@ -196,14 +196,7 @@ impl Store {
     /// op past [`MAX_LAMPORT`](crate::model::MAX_LAMPORT) (6j6v.m19v), whatever its shape: every
     /// fold dispatch — the one at ingest and the one in [`refold`](Self::refold) — asks here.
     fn folder_for(&self, op: &Op) -> Option<&dyn Reducer> {
-        if !op.lamport_in_bound() {
-            return None;
-        }
-        self.reducers
-            .iter()
-            .map(Box::as_ref)
-            .find(|r| r.domain() == op.domain)
-            .filter(|r| r.is_foldable(op))
+        crate::reducer::folder_for(self.reducers.iter().map(Box::as_ref), op)
     }
 
     /// Set the wall-clock timestamp stamped onto subsequently emitted LOCAL ops. The op's

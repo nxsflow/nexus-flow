@@ -1,0 +1,30 @@
+[package]
+name = "nxs-fold-ddb"
+version.workspace = true
+edition = "2021"
+description = "Folding on a server (6j6v.vvw6): the reducers' described changes carried out against DynamoDB, the board's active and dated indexes, next/blocked over them, snapshots as tables plus watermark"
+publish = false
+
+[features]
+default = []
+# The DynamoDB half: `DynamoDbTable` over the AWS SDK and the table definition. Opt-in for the
+# reason `nxs-server`'s own `dynamodb` feature is: the SDK pulls `aws-lc-sys`, a native C build that
+# needs a C toolchain and `cmake`, and the default `cargo test --all` must not. Everything else in
+# this crate — the layout, the write plan, the board index, the in-memory table the tests fold
+# into, snapshots — builds without it, so the rules are tested on every run and only the SDK
+# adapter waits for the `dynamodb-local` CI job.
+dynamodb = ["dep:aws-sdk-dynamodb"]
+
+[dependencies]
+nxs-foundation = { path = "../foundation" }
+nexus-flow-core = { path = "../core" }
+# The engine only — no CLI or onboarding closure (see nexus-chat's `cli` feature).
+nexus-chat = { path = "../chat", default-features = false }
+nexus-memory = { path = "../memory" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aws-sdk-dynamodb = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

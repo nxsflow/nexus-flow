@@ -218,6 +218,57 @@ Slice 1: a single SQLite impl carries **both** traits and proves convergence. Th
 backends (§10) are split **per trait**, because `PrefixRegistry` only comes into being with
 `bab` (slice 2) — a graph claiming a half-trait backend "done after T5" would be wrong.
 
+### 5.1 Folding on a server (added 2026-10-08, `6j6v.vvw6`, `6j6v.k7w7`)
+
+The relay stays a dumb op-carrier. A server that FOLDS a stream — a hosted fold run beside the
+relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, the same dispatch rule
+(`nxs_foundation::reducer::folder_for`), and every described change carried out as one conditional
+`UpdateItem`. The views table is the contract, written down in the crate doc of `nxs-fold-ddb`:
+
+- **Keys.** PK `stream_id`, SK `<view table>#<key cells>` (`%` and `#` in a key value escaped). A
+  row's columns are attributes of the same name; a column a row never wrote reads as the `DEFAULT`
+  the local schema declares, and a register version compares against that default as the local
+  `ON CONFLICT … WHERE` does. The defaults are read from the local schema itself, so they cannot
+  drift.
+- **GSI `active`** (`nxf_active` / `sk`, projecting all): sparse — active tickets, and present
+  `dep`/`parent` edges with at least one active end. One Query is the whole input of
+  `nexus_flow_core::graph`: next, blocked and deferred come from the same library as locally.
+  When a ticket's activity flips, the fold rewrites the flag of every edge touching it, found
+  through `.adj#<ticket>#<tag>` entries — one Query and at most three reads and one write per edge.
+- **GSI `dated`** (`nxf_dated` / `nxf_dated_at`): sparse — `<stream>#closed` by `closed_at`,
+  `<stream>#archived` by `archived`, newest first; the sort key is `<instant>U+001F<id>`, so tickets
+  of one instant keep one order and a `limit` cuts the lane at the same place every time.
+- **Index reads are eventually consistent**; row reads are strong. The lanes right after a fold may
+  be those of the state before it.
+- **An op the table cannot hold** (a sort key past 1,024 bytes, a row past 400 KB) is refused and
+  reported, not retried for ever; the relay keeps it. A row that only outgrows the limit through
+  several ops keeps its state at the write that would break it — the one result that depends on
+  arrival order, and only for rows a local replica can hold but DynamoDB cannot.
+- **Edge flags are rewritten before the ticket's own flag**, so a run that dies between the two
+  still sees the flip when it folds the op again.
+- **No Scan.** Every read names its partition. The `dynamodb-local` CI job records every request a
+  fold and a read send.
+- **One writer per stream.** The rows converge under any number of folders; the index flags are
+  derived (read, then write), so a stream is folded by one run at a time, and `board::reindex`
+  recomputes them from the rows.
+
+**The watermark** (`.meta#watermark`) is `folded_through` — a relay position, per decision 4 above —
+plus each reducer's fold revision. A batch folds, then moves the mark forward; a run that dies in
+between folds part of a batch again, which changes nothing. A release whose revisions differ clears
+the stream — the watermark last, so a clear that dies is done again — and folds it from position 0.
+
+**A snapshot is tables plus watermark, without the log** — only to start a fold run. It is taken
+without a lock, the watermark first and the tables after, so the tables may hold ops past the mark
+and the run that starts from it folds those again, harmlessly. The log stays on the relay. A local
+replica's own snapshot (`nxs sync snapshot`, `6j6v.mxt2`) keeps carrying its log, so that a replica
+started from it remains an ordinary replica that can refold.
+
+**Decided 2026-10-06 (owner): no version vector for uploaded client snapshots.** Decision 4 stands. A
+snapshot is accepted only when everything in it is already on the relay — `nxs sync snapshot`
+refuses a replica with unpushed ops — so one relay position describes it completely; a per-origin
+watermark would be needed only for a snapshot carrying ops the relay has not seen, and that is the
+case the export refuses.
+
 ## 6. `bab` — Prefix Distinctness (P1 precondition)
 
 Cross-replica uniqueness today rests solely on the 4-char prefix, which is minted per replica

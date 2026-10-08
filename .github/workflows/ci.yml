@@ -879,13 +879,17 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      # The server fold (6j6v.k7w7) is the second DynamoDB adapter: `nxs-fold-ddb --features
+      # dynamodb`. Its rules run on every `cargo test` against the in-memory table; only the SDK
+      # adapter needs this job — the same items as in memory, the same lanes, and a recorder that
+      # proves no request is a Scan.
       - name: Clippy (dynamodb backend, warnings are errors)
-        run: cargo clippy -p nxs-server --all-targets --features dynamodb -- -D warnings
+        run: cargo clippy -p nxs-server -p nxs-fold-ddb --all-targets --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb -- -D warnings
 
       - name: DynamoDB Local tests (debug)
-        run: cargo test -p nxs-server --features dynamodb
+        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb
 
       # Same staggering as the other two release steps (6j6v.6e0e).
       - name: DynamoDB Local tests (release)
         if: github.event_name != 'pull_request'
-        run: cargo test -p nxs-server --features dynamodb --release
+        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
