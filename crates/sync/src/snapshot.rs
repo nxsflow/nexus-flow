@@ -472,7 +472,9 @@ mod tests {
     }
 
     /// The relay double: an append-only log, seq = position + 1 — and, like the DynamoDB backend
-    /// (6j6v.4qjw), one that stores a push TWICE `twice_pct` percent of the time.
+    /// before it appended idempotently (6j6v.4qjw, fixed by 6j6v.tm4k; streams written before
+    /// then still hold the duplicates), one that stores a push TWICE `twice_pct` percent of the
+    /// time.
     struct Relay {
         log: RefCell<Vec<WireOp>>,
         twice_pct: u64,
@@ -836,10 +838,10 @@ mod tests {
         );
     }
 
-    /// A relay whose log was rebuilt — here, deduplicated, as fixing 6j6v.4qjw would do to a
-    /// DynamoDB stream — renumbers every entry after the first duplicate. A snapshot's position
-    /// then points somewhere else, and trusting it would skip ops. The anchor catches it, and the
-    /// replica pulls from the start instead: slower, never short.
+    /// A relay whose log was rebuilt — here, deduplicated, as cleaning up a DynamoDB stream
+    /// doubled before 6j6v.tm4k would — renumbers every entry after the first duplicate. A
+    /// snapshot's position then points somewhere else, and trusting it would skip ops. The anchor
+    /// catches it, and the replica pulls from the start instead: slower, never short.
     #[test]
     fn a_position_the_relay_does_not_confirm_is_pulled_from_the_start_instead_of_trusted() {
         let doubled = Relay::new(1, 100);

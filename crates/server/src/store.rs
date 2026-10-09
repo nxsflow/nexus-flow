@@ -74,6 +74,9 @@ pub(crate) fn decode_extra(
 pub trait OpStore {
     /// Append one opaque op and assign it the next monotone sequence **for its stream**.
     /// Atomic under concurrent writers (the contract the durable backends must honour).
+    /// Idempotent by `op_id` (spec §4.4): an op the stream already holds is not stored again, and
+    /// the answer is the position THAT OP holds — which may lie below the stream's current end,
+    /// so the result is never "the position the stream has reached".
     fn append(&self, stream: &StreamId, op: &WireOp) -> StoreResult<Cursor>;
 
     /// One page of ops with `seq > cursor`, ordered by seq, at most `limit`. Never returns the

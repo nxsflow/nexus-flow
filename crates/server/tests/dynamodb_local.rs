@@ -53,6 +53,9 @@ use nxs_sync::protocol::{
 };
 use nxs_sync::wire::{WireOp, ENVELOPE_VERSION};
 
+#[path = "support/idempotence.rs"]
+mod idempotence;
+
 // ----- harness -----------------------------------------------------------------------
 
 /// Returns the DynamoDB Local endpoint, or `None` (with a loud skip) when
@@ -291,38 +294,205 @@ fn append_read_since_round_trips_a_batch_in_order() {
 }
 
 #[test]
-fn re_appending_the_same_op_id_stores_it_again_under_a_fresh_seq() {
-    // PINS A DOCUMENTED DIVERGENCE, not a desirable property. SQLite and Postgres carry
-    // UNIQUE (stream_id, op_id) and so make a re-pushed op idempotent: it returns its
-    // EXISTING cursor and the log neither grows nor gaps (spec §4.4). DynamoDB has no
-    // secondary unique constraint and this table has no op-id index, so the same push lands
-    // twice. Convergence is unaffected (the engine folds an op-log idempotently by op_id),
-    // but the log grows — see the module doc in store_ddb.rs and nexus-flow 4qjw.
-    //
-    // The test exists so the divergence cannot change silently in EITHER direction: if
-    // dedupe is ever added, this fails and the doc + 4qjw must be updated with it.
-    let Some(ep) = endpoint("re_appending_the_same_op_id_stores_it_again_under_a_fresh_seq") else {
+fn dynamodb_appends_idempotently_by_op_id() {
+    // 6j6v.tm4k: the contract SQLite and Postgres keep (spec §4.4), run from the same script. The
+    // one documented difference: a re-push burns the seq it allocated, so the stream is not dense.
+    let Some(ep) = endpoint("dynamodb_appends_idempotently_by_op_id") else {
         return;
     };
-    let store = opstore(&ep);
+    idempotence::assert_idempotent_append(&opstore(&ep), wire, false);
+}
+
+/// Put an item straight into the op table, as the store writes an op — without its claim. What a
+/// stream written before the claims existed holds.
+fn put_unclaimed_op(ep: &str, table: &str, seq: i64, op_id: &str) {
+    let client = admin_client(ep);
+    admin_rt().block_on(async {
+        client
+            .put_item()
+            .table_name(table)
+            .item("stream_id", AttributeValue::S("s".into()))
+            .item("seq", AttributeValue::N(seq.to_string()))
+            .item(
+                "envelope_version",
+                AttributeValue::N(ENVELOPE_VERSION.to_string()),
+            )
+            .item("op_id", AttributeValue::S(op_id.into()))
+            .item("lamport", AttributeValue::N("1".into()))
+            .item("site", AttributeValue::N("1".into()))
+            .item("domain", AttributeValue::S("task".into()))
+            .item("target_kind", AttributeValue::S("item".into()))
+            .item("target_id", AttributeValue::S("ab12.0001".into()))
+            .item("field", AttributeValue::S("title".into()))
+            .item("op_type", AttributeValue::S("set".into()))
+            .item("value", AttributeValue::S("t".into()))
+            .item("author", AttributeValue::S("a".into()))
+            .item("wall_clock", AttributeValue::S(String::new()))
+            .send()
+            .await
+            .expect("plant an unclaimed op");
+    });
+}
+
+#[test]
+fn an_op_stored_before_the_claims_is_stored_once_more_and_then_absorbed() {
+    // The documented trade-off for streams written before 6j6v.tm4k. The legacy op sits at seq 1
+    // with no counter, so the first allocation (1) also collides on the op's own seq and must be
+    // retried at a fresh one — the taken-seq path, for real.
+    let Some(ep) = endpoint("an_op_stored_before_the_claims_is_stored_once_more_and_then_absorbed")
+    else {
+        return;
+    };
+    ensure_fake_credentials();
+    let table = unique_ops_table(&ep);
+    put_unclaimed_op(&ep, &table, 1, "legacy");
+    let store = DynamoDbOpStore::new(table, Some(ep.clone()), None);
     let s = StreamId("s".into());
 
-    let first = store.append(&s, &wire("dup")).unwrap();
-    let again = store.append(&s, &wire("dup")).unwrap();
-    assert_eq!(first, Cursor(1));
+    let again = store.append(&s, &wire("legacy")).unwrap();
+    assert!(
+        again > Cursor(1),
+        "stored once more, at a fresh seq: {again:?}"
+    );
     assert_eq!(
+        store.append(&s, &wire("legacy")).unwrap(),
         again,
-        Cursor(2),
-        "no op-id dedupe on this backend: the re-push consumes a fresh seq"
+        "from then on its claim absorbs every re-push"
+    );
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(
+        ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
+        ["legacy", "legacy"]
+    );
+}
+
+#[test]
+fn concurrent_re_pushes_of_the_same_ops_store_each_op_once() {
+    // The cold-start re-push the bug report describes, raced: eight writers push the same
+    // fifty ops at once. Every writer must be told the same seq for the same op, and the
+    // stream must hold each op exactly once.
+    let Some(ep) = endpoint("concurrent_re_pushes_of_the_same_ops_store_each_op_once") else {
+        return;
+    };
+    let store = Arc::new(opstore(&ep));
+    let s = StreamId("s".into());
+    const THREADS: usize = 8;
+    const OPS: usize = 50;
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let store = Arc::clone(&store);
+            let s = s.clone();
+            thread::spawn(move || {
+                (0..OPS)
+                    .map(|i| store.append(&s, &wire(&format!("o{i}"))).unwrap())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let answers: Vec<Vec<Cursor>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    for other in &answers[1..] {
+        assert_eq!(
+            other, &answers[0],
+            "every writer is told the same seq per op"
+        );
+    }
+
+    // Read the stream one op per page: the page's cursor is that op's seq.
+    let mut stored: Vec<(String, Cursor)> = Vec::new();
+    let mut cursor = Cursor::BEGINNING;
+    loop {
+        let (ops, next) = store.read_since(&s, cursor, 1).unwrap();
+        let Some(op) = ops.into_iter().next() else {
+            break;
+        };
+        stored.push((op.op_id, next));
+        cursor = next;
+    }
+    let mut ids: Vec<&str> = stored.iter().map(|(id, _)| id.as_str()).collect();
+    ids.sort_unstable();
+    let mut expected: Vec<String> = (0..OPS).map(|i| format!("o{i}")).collect();
+    expected.sort();
+    assert_eq!(
+        ids, expected,
+        "each of the fifty ops is stored exactly once"
+    );
+    for (i, answer) in answers[0].iter().enumerate() {
+        let at = stored
+            .iter()
+            .find(|(id, _)| *id == format!("o{i}"))
+            .unwrap()
+            .1;
+        assert_eq!(
+            *answer, at,
+            "o{i}: every writer was told the seq it is stored at"
+        );
+    }
+}
+
+#[test]
+fn an_op_whose_claim_key_belongs_to_another_op_id_is_stored_not_dropped() {
+    // The claim key is a 63-bit hash of the op id, so two ids can share it. Plant a claim
+    // for a DIFFERENT op id at the key "victim" hashes to, then append "victim": it must be
+    // stored (unclaimed, so without dedupe), never answered with the other op's seq.
+    let Some(ep) = endpoint("an_op_whose_claim_key_belongs_to_another_op_id_is_stored_not_dropped")
+    else {
+        return;
+    };
+    ensure_fake_credentials();
+    let table = unique_ops_table(&ep);
+    let store = DynamoDbOpStore::new(table.clone(), Some(ep.clone()), None);
+    let s = StreamId("s".into());
+
+    let key = nxs_server::store_ddb::claim_seq("victim");
+    let client = admin_client(&ep);
+    admin_rt().block_on(async {
+        client
+            .put_item()
+            .table_name(&table)
+            .item("stream_id", AttributeValue::S("s".into()))
+            .item("seq", AttributeValue::N(key.to_string()))
+            .item("op_id", AttributeValue::S("someone-else".into()))
+            .item("op_seq", AttributeValue::N("99".into()))
+            .send()
+            .await
+            .expect("plant a foreign claim");
+    });
+
+    let cursor = store.append(&s, &wire("victim")).unwrap();
+    assert_ne!(cursor, Cursor(99), "never answered with another op's seq");
+    let again = store.append(&s, &wire("victim")).unwrap();
+    assert!(
+        again > cursor,
+        "unclaimed, so a re-push is stored again — the documented cost"
+    );
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(
+        ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
+        ["victim", "victim"],
+        "the op is stored even though its claim key is taken"
     );
 
-    let (ops, next) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
-    assert_eq!(ops.len(), 2, "the op is stored twice, not once");
-    assert!(
-        ops.iter().all(|o| o.op_id == "dup"),
-        "both stored items are the same op"
+    let planted = admin_rt().block_on(async {
+        client
+            .query()
+            .table_name(&table)
+            .key_condition_expression("stream_id = :s AND seq = :k")
+            .expression_attribute_values(":s", AttributeValue::S("s".into()))
+            .expression_attribute_values(":k", AttributeValue::N(key.to_string()))
+            .send()
+            .await
+            .unwrap()
+    });
+    let item = &planted.items()[0];
+    assert_eq!(
+        (
+            item["op_id"].as_s().unwrap().as_str(),
+            item["op_seq"].as_n().unwrap().as_str()
+        ),
+        ("someone-else", "99"),
+        "the other op's claim is left as it was"
     );
-    assert_eq!(next, Cursor(2));
 }
 
 #[test]
@@ -348,15 +518,17 @@ fn an_op_over_dynamodbs_400kb_item_ceiling_fails_loudly() {
         "the error names the size limit rather than being opaque: {err}"
     );
 
-    // The failure is confined to the oversized op: the stream still works afterwards. (The
-    // seq it consumed is gone — allocate_seq runs before the put — which is exactly the
-    // "gaps are normal in production" property the module doc documents.)
+    // The failure is confined to the oversized op: the stream still works afterwards, and the
+    // failed transaction left no claim behind that would answer a retry with a seq nothing
+    // occupies. (The seq it consumed is gone — allocate_seq runs before the put — which is
+    // exactly the "gaps are normal in production" property the module doc documents.)
     store.append(&s, &wire("after")).unwrap();
+    store.append(&s, &wire("huge")).unwrap();
     let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
     assert_eq!(
         ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
-        ["after"],
-        "the oversized op was never stored, and the stream is still usable"
+        ["after", "huge"],
+        "the oversized op was never stored, its id is still free, and the stream is usable"
     );
 }
 
