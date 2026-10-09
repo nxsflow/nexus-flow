@@ -633,9 +633,9 @@ dem letzten Fehler und entweder `retrying at <Zeitpunkt>` oder `not retried`, `s
 warten; ein Start, der an einem `io`-Fehler scheitert — einer Zeitüberschreitung, einer belegten
 Platte —, wird vom Hintergrunddienst erneut versucht, insgesamt bis zu drei Mal, im Abstand von ein
 bis zwei Minuten. Jeder andere Fehler, oder einer, der diese Versuche übersteht, bleibt am Vorgang
-stehen, bis `nxc withdraw` ihn verwirft. Das sind die Dinge, an denen ein Leser etwas tun kann, und zusammen sind sie das
-Kennzeichen `live` an jedem ausgegebenen Vorgang. Beachten Sie, was *nicht*
-auf dieser Liste steht: eine Wurzel, die beantwortet und noch nicht gelesen ist. Das ist
+stehen, bis `nxc withdraw` ihn verwirft. Das sind die Dinge, an denen ein Leser etwas tun kann,
+und zusammen sind sie das Kennzeichen `live` an jedem ausgegebenen Vorgang. Beachten Sie, was
+*nicht* auf dieser Liste steht: eine Wurzel, die beantwortet und noch nicht gelesen ist. Das ist
 `awaiting_human`, und es hielt einen Vorgang früher in der Liste — womit nie etwas die Ansicht
 verließ, denn das Kennzeichen leitet sich aus Tatsachen ab, die nie aufhören zu gelten (die Wurzel
 hat gefragt; die Wurzel wurde beantwortet). Nach einem Tag echter Nutzung zeigte die Ansicht dreizehn

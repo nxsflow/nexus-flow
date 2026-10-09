@@ -476,6 +476,36 @@ pub struct FailedStart {
     pub retry_at: Option<String>,
 }
 
+/// **The longest worker error a `failed_starts` row keeps**, in characters (review of PR #32,
+/// Integrity #4). A worker's message can carry a whole command line with paths in it, and the row
+/// is read on every `nxc status`; the start of it says what went wrong.
+pub const FAILED_START_ERROR_MAX: usize = 500;
+
+/// `text` cut to at most `max` characters, on a character boundary, with `…` marking a cut.
+fn cut_to(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        None => text.to_string(),
+        Some((at, _)) => format!("{}…", &text[..at]),
+    }
+}
+
+/// [`to_utc_rfc3339`], cut to WHOLE SECONDS — the form a `failed_starts` instant is stored and
+/// compared in (review of PR #32, Integrity #7). The due-check compares RFC3339 strings, which is
+/// sound only when both sides have the same precision: `…:00.5Z` sorts BEFORE `…:00Z`, because `.`
+/// sorts before `Z`, so a sub-second `now` could find a retry stamped for that very second not yet
+/// due. A retry a fraction of a second late changes nothing.
+pub(crate) fn to_utc_whole_seconds(instant: &str) -> Result<String> {
+    let parsed = OffsetDateTime::parse(instant, &Rfc3339).map_err(|e| {
+        NxfError::validation(format!("not a valid RFC3339 instant: {instant} ({e})"))
+    })?;
+    parsed
+        .to_offset(time::UtcOffset::UTC)
+        .replace_nanosecond(0)
+        .map_err(|e| NxfError::io(format!("cutting an instant to whole seconds: {e}")))?
+        .format(&Rfc3339)
+        .map_err(|e| NxfError::io(format!("formatting UTC instant: {e}")))
+}
+
 /// The columns [`failed_start_from_row`] reads, in its order.
 const FAILED_START_COLS: &str =
     "session, role, thread, attempts, error, first_failed_at, last_failed_at, retry_at";
@@ -1532,32 +1562,41 @@ impl ChatStore {
         Ok(removed == 1)
     }
 
-    /// **Record that `entry` was taken off the queue and could not be started** (nxf 6j6v.br25), as
-    /// its `attempts`-th failed attempt, with `error` and the instant the tick may try again
-    /// (`retry_at`, `None` for no further automatic attempt). The first failure inserts the row and
-    /// stamps `first_failed_at`; a later one updates it in place. See the `failed_starts` table for
-    /// why the row carries the trigger's inputs.
-    pub fn note_failed_start(
+    /// **Record that `entry` was taken off the queue and could not be started** (nxf 6j6v.br25),
+    /// and return how many starts of it have failed now, this one included.
+    ///
+    /// The count is kept by the database (`attempts + 1` in the upsert, read back with
+    /// `RETURNING`) rather than read by the caller and written back: a caller that could not read
+    /// the old count would otherwise restart it at one and defeat [`MAX_START_ATTEMPTS`]'s bound
+    /// (review of PR #32, Code Quality #6). The row is left with no retry scheduled and not in
+    /// flight; the caller decides the retry afterwards ([`Self::schedule_failed_start_retry`]),
+    /// because that decision depends on the count this returns.
+    ///
+    /// `error` is stored cut to [`FAILED_START_ERROR_MAX`] characters: it is a worker's message,
+    /// which can carry a whole command line, and it is shown on every status read.
+    ///
+    /// [`MAX_START_ATTEMPTS`]: crate::orchestration::MAX_START_ATTEMPTS
+    pub fn record_failed_start(
         &mut self,
         entry: &QueuedTrigger,
-        attempts: u32,
         error: &str,
-        retry_at: Option<&str>,
         now: &str,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let now = to_utc_rfc3339(now)?;
         let enqueued_at = to_utc_rfc3339(entry.enqueued_at.as_deref().unwrap_or(&now))?;
-        let retry_at = retry_at.map(to_utc_rfc3339).transpose()?;
-        self.connection().execute(
+        let error = cut_to(error, FAILED_START_ERROR_MAX);
+        Ok(self.connection().query_row(
             "INSERT INTO failed_starts(
                  session, scope_key, role, thread, message, model, depth, priority, enqueued_at,
-                 first_failed_at, last_failed_at, attempts, error, retry_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12, ?13)
+                 first_failed_at, last_failed_at, attempts, error, retry_at, in_flight_until
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 1, ?11, NULL, NULL)
              ON CONFLICT(session) DO UPDATE SET
                  last_failed_at = excluded.last_failed_at,
-                 attempts = excluded.attempts,
+                 attempts = failed_starts.attempts + 1,
                  error = excluded.error,
-                 retry_at = excluded.retry_at",
+                 retry_at = NULL,
+                 in_flight_until = NULL
+             RETURNING attempts",
             params![
                 entry.session,
                 entry.scope_key,
@@ -1569,24 +1608,21 @@ impl ChatStore {
                 entry.priority as i64,
                 enqueued_at,
                 now,
-                attempts,
                 error,
-                retry_at,
             ],
-        )?;
-        Ok(())
+            |r| r.get(0),
+        )?)
     }
 
-    /// The failed start recorded for `session`, if any.
-    pub fn failed_start(&self, session: &str) -> Result<Option<FailedStart>> {
-        Ok(self
-            .connection()
-            .query_row(
-                &format!("SELECT {FAILED_START_COLS} FROM failed_starts WHERE session = ?1"),
-                params![session],
-                failed_start_from_row,
-            )
-            .optional()?)
+    /// Give the failed start of `session` a retry at `retry_at` (whole seconds, UTC — see
+    /// [`to_utc_whole_seconds`] for why the precision matters to the comparison that finds it due).
+    pub fn schedule_failed_start_retry(&mut self, session: &str, retry_at: &str) -> Result<()> {
+        let retry_at = to_utc_whole_seconds(retry_at)?;
+        self.connection().execute(
+            "UPDATE failed_starts SET retry_at = ?2 WHERE session = ?1",
+            params![session, retry_at],
+        )?;
+        Ok(())
     }
 
     /// Every recorded failed start, oldest failure first — what `nxc status` attributes to its
@@ -1603,21 +1639,39 @@ impl ChatStore {
     }
 
     /// **Claim the failed starts whose retry is due at `now`** (nxf 6j6v.br25), and hand back the
-    /// trigger each one is to fire again. The claim clears `retry_at` in the same statement that
-    /// reads the row (`UPDATE … RETURNING`), so two ticks that overlap cannot both start one
-    /// session: the second finds nothing due. A claimed retry that fails again records a new
-    /// `retry_at` (or none) through [`Self::note_failed_start`].
-    pub fn claim_due_failed_starts(&mut self, now: &str) -> Result<Vec<QueuedTrigger>> {
-        let now = to_utc_rfc3339(now)?;
+    /// trigger each one is to fire again.
+    ///
+    /// The claim is one statement (`UPDATE … RETURNING`), so two ticks that overlap cannot both
+    /// start one session: the second finds nothing due. It does not clear `retry_at` — it pushes it
+    /// to `hold_until`, and marks the row IN FLIGHT until then (review of PR #32, Integrity #3 and
+    /// #2):
+    ///
+    /// - **Crash-safe.** A process that dies between this claim and recording the outcome leaves a
+    ///   row that falls due again at `hold_until`, instead of one with no retry that `nxc status`
+    ///   reports as "not retried" with attempts left.
+    /// - **Not withdrawn under a start.** [`Self::discard_failed_start`] refuses a row in flight, so
+    ///   a `withdraw` racing a retry that is starting the session reports it as started meanwhile
+    ///   rather than discharging a thread a session is about to run in.
+    ///
+    /// The outcome then clears the mark: a start forgets the row ([`Self::forget_failed_start`]),
+    /// a failure records it again ([`Self::record_failed_start`]).
+    pub fn claim_due_failed_starts(
+        &mut self,
+        now: &str,
+        hold_until: &str,
+    ) -> Result<Vec<QueuedTrigger>> {
+        let now = to_utc_whole_seconds(now)?;
+        let hold_until = to_utc_whole_seconds(hold_until)?;
         let conn = self.connection();
         let mut st = conn.prepare(
-            "UPDATE failed_starts SET retry_at = NULL
+            "UPDATE failed_starts SET retry_at = ?2, in_flight_until = ?2
               WHERE retry_at IS NOT NULL AND retry_at <= ?1
+                AND (in_flight_until IS NULL OR in_flight_until <= ?1)
               RETURNING 0, scope_key, role, session, thread, message, model, depth, priority,
                         enqueued_at",
         )?;
         let mut rows = st
-            .query_map(params![now], queued_trigger_from_row)?
+            .query_map(params![now, hold_until], queued_trigger_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.sort_by(|a, b| {
             (a.priority as i64, &a.enqueued_at, &a.session).cmp(&(
@@ -1629,13 +1683,27 @@ impl ChatStore {
         Ok(rows)
     }
 
-    /// Forget the failed start of `session`, reporting whether there was one. Called when the
-    /// session is started after all (the trigger funnel), when a retry put the trigger back in the
-    /// queue, and when `withdraw` discards it — `false` there means somebody else got to it first.
+    /// Forget the failed start of `session`, reporting whether there was one — whether or not a
+    /// retry has it in flight. Called when the session is started after all (the trigger funnel),
+    /// and when a retry put the trigger back in the queue or found nothing left to start it for.
     pub fn forget_failed_start(&mut self, session: &str) -> Result<bool> {
         let removed = self.connection().execute(
             "DELETE FROM failed_starts WHERE session = ?1",
             params![session],
+        )?;
+        Ok(removed == 1)
+    }
+
+    /// **Discard the failed start of `session` for `withdraw`** — unless a retry has it in flight
+    /// at `now` ([`Self::claim_due_failed_starts`]). `false` means it was not discarded: gone
+    /// already, or being started right now, and the caller says so instead of discharging a thread
+    /// a session may be about to run in.
+    pub fn discard_failed_start(&mut self, session: &str, now: &str) -> Result<bool> {
+        let now = to_utc_whole_seconds(now)?;
+        let removed = self.connection().execute(
+            "DELETE FROM failed_starts
+              WHERE session = ?1 AND (in_flight_until IS NULL OR in_flight_until <= ?2)",
+            params![session, now],
         )?;
         Ok(removed == 1)
     }
@@ -2082,6 +2150,78 @@ mod tests {
     }
 
     const T0: &str = "2026-08-22T09:00:00Z";
+
+    fn a_queued_coder() -> QueuedTrigger {
+        QueuedTrigger {
+            id: 0,
+            scope_key: "thread:t-a".into(),
+            role: "coder".into(),
+            session: "s-coder".into(),
+            thread: Some("t-a".into()),
+            message: "build it".into(),
+            model: None,
+            depth: 1,
+            priority: Priority::Normal,
+            enqueued_at: Some(T0.into()),
+        }
+    }
+
+    /// **A failed start keeps a bounded piece of the worker's message** (review of PR #32,
+    /// Integrity #4): the start of it, on a character boundary, marked as cut.
+    #[test]
+    fn a_failed_start_keeps_at_most_a_bounded_error() {
+        let mut s = ChatStore::open_in_memory(1);
+        let long = "ä".repeat(FAILED_START_ERROR_MAX * 3);
+        s.record_failed_start(&a_queued_coder(), &long, T0).unwrap();
+        let kept = &s.failed_starts().unwrap()[0].error;
+        assert_eq!(
+            kept.chars().count(),
+            FAILED_START_ERROR_MAX + 1,
+            "the cap plus the mark"
+        );
+        assert!(kept.ends_with('…'));
+        let short = "io: it timed out";
+        s.record_failed_start(&a_queued_coder(), short, T0).unwrap();
+        assert_eq!(
+            s.failed_starts().unwrap()[0].error,
+            short,
+            "a short one is kept whole"
+        );
+    }
+
+    /// **The attempt count belongs to the database** (review of PR #32, Code Quality #6): every
+    /// failure adds one to what is stored, whatever the caller believes it was.
+    #[test]
+    fn every_recorded_failure_counts_one_attempt_on_top_of_the_stored_ones() {
+        let mut s = ChatStore::open_in_memory(1);
+        let counts: Vec<u32> = (0..3)
+            .map(|_| {
+                s.record_failed_start(&a_queued_coder(), "io: x", T0)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(counts, vec![1, 2, 3]);
+    }
+
+    /// **The due-check compares whole seconds** (review of PR #32, Integrity #7): a retry stamped
+    /// for 09:01:00 is due at 09:01:00.5, which a plain string comparison of the two RFC3339 forms
+    /// gets wrong (`.` sorts before `Z`).
+    #[test]
+    fn a_retry_is_due_within_its_own_second() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.record_failed_start(&a_queued_coder(), "io: x", T0)
+            .unwrap();
+        s.schedule_failed_start_retry("s-coder", "2026-08-22T09:01:00Z")
+            .unwrap();
+        let due = s
+            .claim_due_failed_starts("2026-08-22T09:01:00.5Z", "2026-08-22T09:11:00Z")
+            .unwrap();
+        assert_eq!(
+            due.len(),
+            1,
+            "due at a sub-second instant inside its second"
+        );
+    }
 
     /// **The all-or-nothing rule, in one table** (nxf 6j6v.8y6t; branch coverage added by the review
     /// of PR #376, Test Quality #1 and Integrity #3, which found every one of these arms untested).

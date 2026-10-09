@@ -569,12 +569,16 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          --
          -- The row carries the trigger's raw INPUTS (the `working_tree_queue` columns, same
          -- encodings) so the tick can fire it again exactly as the release would have, plus what
-         -- went wrong: `attempts` so far, the latest `error`, and `retry_at` — the instant the tick
-         -- may try again, NULL when no further automatic attempt is due (the bound is reached, or
-         -- the failure is not one waiting can fix). It goes when the session is started (the
-         -- trigger funnel forgets it), when a retry puts it back in the queue, or when `withdraw`
-         -- discards it. Keyed by the internal session: one session, one trigger that failed.
-         -- Device-local for the queue's own reason.
+         -- went wrong: `attempts` so far, the latest `error` (cut to a bounded length), and
+         -- `retry_at` — the instant the tick may try again, NULL when no further automatic attempt
+         -- is due (the bound is reached, or the failure is not one waiting can fix).
+         -- `in_flight_until` is set while a tick's retry is starting it, so a `withdraw` racing that
+         -- start does not discard it; a claim also pushes `retry_at` to the same instant, so a
+         -- process that dies mid-retry leaves a row that falls due again. Both instants are stored
+         -- in whole UTC seconds. It goes when the session is started (the trigger funnel forgets
+         -- it), when a retry puts it back in the queue, or when `withdraw` discards it. Keyed by the
+         -- internal session: one session, one trigger that failed. Device-local for the queue's own
+         -- reason.
          CREATE TABLE IF NOT EXISTS failed_starts(
              session         TEXT PRIMARY KEY,
              scope_key       TEXT NOT NULL,
@@ -589,7 +593,8 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              last_failed_at  TEXT NOT NULL,
              attempts        INTEGER NOT NULL,
              error           TEXT NOT NULL,
-             retry_at        TEXT
+             retry_at        TEXT,
+             in_flight_until TEXT
          );",
     )?;
     // The M2 sparse-key minor (spec §7): a pre-M2 `threads` table lacks the `deadline` LWW columns.

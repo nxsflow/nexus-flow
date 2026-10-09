@@ -16,7 +16,10 @@ until `nxc withdraw` discards it. A tick that completes a channel now also lets 
 working copy go, as a reply and a session end already did, and a reply that cannot decide the
 release now says so on its receipt (`lease_undecided`). For embedding apps: `ConsequenceClass`
 gains `StartFailed` and `StartRequeued`, `StatusOperation` gains `start_failed`
-(`working_tree::FailedStart`), and `orchestration::MAX_START_ATTEMPTS` names the bound.
+(`working_tree::FailedStart`), and `orchestration::MAX_START_ATTEMPTS` names the bound. A retry
+whose thread has been answered in the meantime is dropped instead of started, a retry that takes
+the working copy and fails again hands it on, and withdrawing such a commission lets the copy go
+when nothing else in its operation still needs it.
 [de]
 Eine Beauftragung, die auf die Arbeitskopie wartete und nicht gestartet werden konnte, als die Kopie
 frei wurde, geht nicht mehr verloren. Bisher erreichte der Fehler nur die Standardfehlerausgabe des
@@ -33,4 +36,7 @@ Channel abschließt, gibt die Arbeitskopie einer fertigen Kette jetzt ebenfalls 
 Antwort und ein Session-Ende schon taten, und eine Antwort, die über die Freigabe nicht entscheiden
 kann, sagt das jetzt in ihrer Quittung (`lease_undecided`). Für einbettende Apps: `ConsequenceClass`
 bekommt `StartFailed` und `StartRequeued`, `StatusOperation` bekommt `start_failed`
-(`working_tree::FailedStart`), und `orchestration::MAX_START_ATTEMPTS` benennt die Grenze.
+(`working_tree::FailedStart`), und `orchestration::MAX_START_ATTEMPTS` benennt die Grenze. Ein
+erneuter Versuch, dessen Faden inzwischen beantwortet ist, wird verworfen statt gestartet; ein
+Versuch, der die Arbeitskopie bekommt und wieder scheitert, gibt sie weiter; und wer eine solche
+Beauftragung zurücknimmt, gibt die Kopie frei, wenn in ihrem Vorgang nichts anderes sie noch braucht.

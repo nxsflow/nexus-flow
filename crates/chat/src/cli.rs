@@ -4508,6 +4508,35 @@ mod tests {
 
     use super::*;
 
+    /// **The `START FAILED` detail line says who, how often, what, and what next** (nxf 6j6v.br25;
+    /// review of PR #32, Test Quality #7) — both next steps, each naming the withdrawal.
+    #[test]
+    fn a_failed_start_line_names_the_next_step() {
+        let mut f = crate::working_tree::FailedStart {
+            session: "s-1".into(),
+            role: "coder".into(),
+            thread: Some("m-2".into()),
+            attempts: 2,
+            error: "io: timed out".into(),
+            first_failed_at: "2026-10-08T16:39:00Z".into(),
+            last_failed_at: "2026-10-08T16:40:00Z".into(),
+            retry_at: Some("2026-10-08T16:42:00Z".into()),
+        };
+        assert_eq!(
+            start_failed_line(&f, "m-1"),
+            "  start failed: coder on thread m-2 (session s-1), 2 attempt(s), last at \
+             2026-10-08T16:40:00Z: io: timed out — retrying at 2026-10-08T16:42:00Z; `nxc \
+             withdraw --thread m-1` discards it"
+        );
+        f.retry_at = None;
+        assert!(
+            start_failed_line(&f, "m-1")
+                .ends_with("— not retried; `nxc withdraw --thread m-1` discards it"),
+            "{}",
+            start_failed_line(&f, "m-1")
+        );
+    }
+
     /// An anchor as the engine records one — full sha, a real branch, and a fingerprint.
     fn anchored(branch: &str, dirty: bool) -> crate::anchor::Anchor {
         crate::anchor::Anchor {

@@ -588,9 +588,9 @@ last error and either `retrying at <instant>` or `not retried`, `start_failed` i
 working copy is handed on, the commissions waiting for it are started; a start that fails on an
 `io` error — a timeout, a busy disk — is tried again by the background service, up to three
 attempts in all, a minute or two apart. Any other failure, or one that outlasts those attempts,
-stays on the operation until `nxc withdraw` discards it. Those are the things a reader can act on, and together they are the
-`live` flag on every operation the command prints. Note what is *not* on that list: a root
-that has been answered and not yet read. That is `awaiting_human`, and it used to keep an operation
+stays on the operation until `nxc withdraw` discards it. Those are the things a reader can act on,
+and together they are the `live` flag on every operation the command prints. Note what is *not* on
+that list: a root that has been answered and not yet read. That is `awaiting_human`, and it used to keep an operation
 listed — which meant nothing ever left the view, because the flag is derived from facts that never
 stop being true (the root asked; the root was answered). After a day of real use the view showed
 thirteen operations and 424 lines, nine of them with nothing open at all. `awaiting_human` is still
