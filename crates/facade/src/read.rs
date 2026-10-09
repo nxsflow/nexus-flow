@@ -2048,6 +2048,15 @@ pub fn show_value_with_custom(cfg: &PluginConfig, store: &Store, id: &str) -> Re
 // take an already-resolved id (the caller resolves a bare suffix, exactly like `show`/`blocked`)
 // and guard existence with `require_item`, so a list on a missing item is `not_found`, not empty.
 
+/// The live chunks of an item's chunk field (6j6v.c0kn), in canonical op order — what a client
+/// puts together. `not_found` if the item is missing/deleted, like [`notes`]; an item with no
+/// chunks in that field is an empty list.
+pub fn chunks(store: &Store, id: &str, field: &str) -> Result<Vec<nexus_flow_core::model::Chunk>> {
+    let field = crate::validate::chunk_field(field)?;
+    require_item(store, id)?;
+    Ok(store.chunks_of(id, field)?)
+}
+
 /// An item's worklog notes as `(note_id, body)` pairs, in canonical oldest-first order (`notes_of`).
 /// `not_found` if the item is missing/deleted (explicit lookup, not enumeration — as `show`).
 pub fn notes(store: &Store, id: &str) -> Result<Vec<(String, String)>> {

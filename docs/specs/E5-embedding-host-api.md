@@ -37,7 +37,9 @@ stability tier in §4) falls under the guarantees in §3/§5. Modules are re-exp
   - `Engine` (`Clone + Send + Sync`): `open`, `subscribe`;
     reads `ready`/`blocked`/`next`/`show`/`list`/`prime`, `plugin_config`, `workspace`;
     writes `create`/`update`/`claim`/`close`, `dep_add`/`dep_remove`,
-    `mention_add`/`mention_remove`, `contributes_add`/`contributes_remove`, `note_add`.
+    `mention_add`/`mention_remove`, `contributes_add`/`contributes_remove`, `note_add`;
+    opaque chunks (`6j6v.c0kn`, E1 §3.2) `chunk_append`/`chunk_supersede` and their read
+    `chunks`.
 - **`error`** — every consumer's error envelope: `ErrorKind`, `NxfError` (+ constructors),
   `Result<T>`.
 - **`watch`** — change notification: `Change`.
@@ -47,7 +49,8 @@ stability tier in §4) falls under the guarantees in §3/§5. Modules are re-exp
   `Blocker`, `BlockedEntry`, `PrimeReport`.
 - **`write`** — the shared mutation layer: `NewItem`, `UPDATABLE_FIELDS`, `create`, `update`,
   `claim`, `close`, `dep_add`/`dep_remove`, `mention_add`/`mention_remove`,
-  `contributes_add`/`contributes_remove`, `note_add`.
+  `contributes_add`/`contributes_remove`, `note_add`, `chunk_append`/`chunk_supersede` (read:
+  `chunks`; type `Chunk`, limit `MAX_CHUNK_BYTES`, both at the crate root).
 - **`record`** — the canonical, presentation-independent JSON record: `CanonicalItem`,
   `item_value`, `items_value`, `raw_field`.
 - **`plugin`** — the declarative plugin config + the compile-time self-registration registry

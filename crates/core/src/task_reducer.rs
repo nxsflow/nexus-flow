@@ -7,7 +7,10 @@
 //! this file moves to the `nexus-flow` crate while the substrate + [`Reducer`] trait stay in the
 //! foundation — the reducer is exactly the seam that makes that split clean.)
 
-use crate::model::{EdgeKind, LinkRelation, LinkWeight, MergeStrategy, Op};
+use crate::model::{
+    is_valid_chunk_field, is_valid_chunk_id, EdgeKind, LinkRelation, LinkWeight, MergeStrategy, Op,
+    CHUNK_PAYLOAD_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED,
+};
 use crate::reducer::Reducer;
 use crate::schema;
 use crate::store::SEP;
@@ -228,6 +231,73 @@ impl TaskReducer {
         )
     }
 
+    /// A chunk op's shape (6j6v.c0kn): the item in `target_id`, the chunk field in `field`, a
+    /// `value` within [`MAX_CHUNK_BYTES`]. For a supersede, the replaced ids and the payload, split
+    /// at the first [`CHUNK_PAYLOAD_SEP`]; for an append, the payload whole. `None` for anything
+    /// else, which is then stored and never folded — the same on every replica and on a server, so
+    /// an oversized chunk from a writer that skipped the seam's check cannot diverge them.
+    fn parse_chunk(op: &Op) -> Option<(Vec<&str>, &str)> {
+        let value = op.value.as_deref()?;
+        // Every id becomes a key cell, so each is bounded where a server's key is (see
+        // MAX_CHUNK_ID_BYTES): past it, neither applier folds the op.
+        if op.target_id.is_empty()
+            || op.target_id.len() > MAX_CHUNK_ID_BYTES
+            || op.target_id.contains(SEP)
+            || op.op_id.len() > MAX_CHUNK_ID_BYTES
+            || !is_valid_chunk_field(&op.field)
+            || value.len() > MAX_CHUNK_BYTES
+        {
+            return None;
+        }
+        match op.op_type.as_str() {
+            "append" => Some((Vec::new(), value)),
+            "supersede" => {
+                let (ids, payload) = value.split_once(CHUNK_PAYLOAD_SEP)?;
+                let ids: Vec<&str> = ids.split(SEP).collect();
+                (ids.len() <= MAX_SUPERSEDED && ids.iter().all(|id| is_valid_chunk_id(id)))
+                    .then_some((ids, payload))
+            }
+            _ => None,
+        }
+    }
+
+    /// A chunk append or supersede: the carried chunk joins the item field's grow set under the
+    /// op's id, and each id a supersede names joins the grow-only replaced set. Order-independent:
+    /// a supersede folded before a chunk it names still hides it, so any merge order converges.
+    fn chunk_changes(op: &Op) -> Vec<Change> {
+        let Some((replaced, payload)) = Self::parse_chunk(op) else {
+            return Vec::new();
+        };
+        let (item, field) = (op.target_id.as_str(), op.field.as_str());
+        let mut changes = vec![Change::put(
+            "chunks",
+            cells([
+                ("item_id", item.into()),
+                ("field", field.into()),
+                ("id", op.op_id.as_str().into()),
+            ]),
+            cells([
+                ("author", op.author.as_str().into()),
+                ("body", payload.into()),
+                ("lamport", op.lamport.into()),
+                ("site", op.site.into()),
+                ("created_at", op.wall_clock.as_str().into()),
+            ]),
+        )];
+        changes.extend(replaced.into_iter().map(|id| {
+            Change::put(
+                "chunk_superseded",
+                cells([
+                    ("item_id", item.into()),
+                    ("field", field.into()),
+                    ("chunk_id", id.into()),
+                ]),
+                Vec::new(),
+            )
+        }));
+        changes
+    }
+
     /// Redaction is a grow-only tombstone set keyed by note id (the redact op's `target_id` IS the
     /// note id). Order-independent: folding a redact before its `note_add` still tombstones the
     /// note, so any merge order converges (cf. §8).
@@ -283,6 +353,7 @@ impl Reducer for TaskReducer {
             ("thread_link", "remove") => true,
             ("note", "note_add") => true,
             ("note", "set") => op.field == "deleted",
+            ("chunk", "append") | ("chunk", "supersede") => Self::parse_chunk(op).is_some(),
             _ => false,
         }
     }
@@ -309,6 +380,9 @@ impl Reducer for TaskReducer {
                 ("thread_link", "remove") => Self::tombstones(op, "thread_link_removes"),
                 ("note", "note_add") => vec![Self::note_add(op)],
                 ("note", "set") => vec![Self::note_redact(op)],
+                // A chunk does not date its item: the engine does not read it, and a writer that
+                // streams many small chunks would otherwise move the item on every keystroke.
+                ("chunk", _) => Self::chunk_changes(op),
                 other => unreachable!("non-foldable op reached TaskReducer::changes(): {other:?}"),
             }
         };
@@ -323,8 +397,9 @@ impl Reducer for TaskReducer {
 
     /// 1 (6j6v.vvw6): the OR-set adds and the notes carry their op's coordinate, and an item's
     /// instants are folded — all filled only by folding the log again.
+    /// 2 (6j6v.c0kn): chunk ops fold, and a store that held them unfolded folds them once.
     fn fold_revision(&self) -> i64 {
-        1
+        2
     }
 
     fn view_tables(&self) -> &'static [&'static str] {
@@ -336,6 +411,8 @@ impl Reducer for TaskReducer {
             "label_removes",
             "notes",
             "note_tombstones",
+            "chunks",
+            "chunk_superseded",
             "custom_fields",
             "thread_link_adds",
             "thread_link_removes",

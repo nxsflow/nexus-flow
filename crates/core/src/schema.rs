@@ -130,6 +130,22 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          );
          CREATE TABLE IF NOT EXISTS note_tombstones(note_id TEXT PRIMARY KEY);
 
+         -- Opaque chunks on an item (6j6v.c0kn): a grow set per (item, chunk field), keyed by the
+         -- carrying op's id, and the grow-only set of the chunks a supersede replaced. A chunk is
+         -- live while no supersede of the same item and field names it. Their own tables, never
+         -- `notes`: nothing that reads notes, searches or renders an item may see them. Keyed with
+         -- the item and field leftmost, so one item's field is one range — here and on a server.
+         CREATE TABLE IF NOT EXISTS chunks(
+             item_id TEXT NOT NULL, field TEXT NOT NULL, id TEXT NOT NULL,
+             author TEXT, body TEXT,
+             lamport INTEGER, site INTEGER, created_at TEXT,
+             PRIMARY KEY(item_id, field, id)
+         );
+         CREATE TABLE IF NOT EXISTS chunk_superseded(
+             item_id TEXT NOT NULL, field TEXT NOT NULL, chunk_id TEXT NOT NULL,
+             PRIMARY KEY(item_id, field, chunk_id)
+         );
+
          -- Plugin custom fields (6j6v epic): a folded EAV view over the op-log, ONE row per
          -- (item, custom field) that has ever been set. `value` is TEXT like every canonical LWW
          -- cell; the `value_v`/`value_site` pair carries the LWW Lamport metadata the keep-if-beats
@@ -320,6 +336,8 @@ mod tests {
             "label_removes",
             "notes",
             "note_tombstones",
+            "chunks",
+            "chunk_superseded",
             "custom_fields",
             "thread_link_adds",
             "thread_link_removes",

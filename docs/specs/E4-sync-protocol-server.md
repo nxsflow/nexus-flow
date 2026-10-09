@@ -120,7 +120,15 @@ Step 1  PUSH: local ops with rowid > pushed_through to the relay (append) — in
         the pull); advance pushed_through PER batch. The relay sets a deliberate
         request limit (DefaultBodyLimit + op-count cap, 413 on overflow); client
         pagination keeps every batch below it, so a large history is not
-        rejected (k64). A partial push leaves pushed_through exact → the next pass
+        rejected (k64). A page is split further so no body passes
+        protocol::MAX_PUSH_BYTES, the number both ends share (3gq0), and a
+        413 the relay answers anyway (a lower limit, a proxy) halves the batch
+        and tries again; one op too large to go alone stops the push there,
+        the pull still runs, and the pass fails naming that op
+        (SyncError::OpTooLarge, carrying what the pass moved), never cutting
+        it. This bounds the HTTP body only: an op a backend cannot store
+        (DynamoDB, 400 KB) is a server error today (6j6v.gwpc).
+        A partial push leaves pushed_through exact → the next pass
         resumes without pushing an op twice or skipping one.
 Step 2  PULL: read_since(stream_id, pulled_through) -> (WireOps, next_cursor);
         apply each op via core::apply() (dedup-by-op_id, §4.4);
@@ -143,6 +151,31 @@ do it with `UNIQUE (stream_id, op_id)`; DynamoDB, which has no secondary unique 
 claim item per op written in the same transaction (`6j6v.tm4k`, contract in `store_ddb.rs`). There
 a re-push burns the seq it allocated, so the sequence gaps where SQLite's does not; nothing reads
 density.
+
+### 4.4.1 Opaque chunks (added 2026-10-08, `6j6v.c0kn`)
+
+The relay and the sync engine carry chunk ops (`target_kind = chunk`, `op_type` `append` /
+`supersede`; rules in E1 §3.2) like every other op: opaque, deduplicated by `op_id`, folded as a set.
+What the protocol adds is only the size discipline a stream of them needs:
+
+| bound | where | what happens |
+|---|---|---|
+| `MAX_CHUNK_BYTES` (300 KiB) per op value | the write seam, the reducer | refused at write; stored-not-folded if it arrives anyway |
+| `MAX_CHUNK_ID_BYTES` (128) per id, `MAX_SUPERSEDED` (1024) ids per supersede | the write seam, the reducer | as above — keeps every key a server row needs under its 1,024 bytes, and one op's writes bounded |
+| 400 KB per folded row | `nxs-fold-ddb` | below it for every chunk op that folds, because the reducer bounds the value |
+| 400 KB per stored op | DynamoDB relay | below it for every op the write seam builds; a foreign op over it is refused by the relay as a server error (`6j6v.gwpc`) |
+| `MAX_PUSH_BYTES` (8 MiB) per push body | relay, client engine | the engine splits a page by bytes (`6j6v.3gq0`, PR #30) |
+| `MAX_PUSH_OPS` (1000) per push | relay | the engine's pages stay below it |
+
+A stream is bounded too (a hosted stream by op count and bytes), so a writer that appends must also
+supersede: that is what keeps a field's live chunks, and the log's growth, in proportion to the
+content instead of to the number of edits. A pre-c0kn replica stores chunk ops without folding them
+and folds them once it is upgraded (task fold revision 2). The bounds above are fold semantics:
+changing one changes which ops fold, so it goes with a fold revision.
+
+A known property, not a defect of this slice: a supersede may name any id of its item's field, so
+anyone who can push to a stream can hide any chunk in it (the log keeps the data). That is the same
+trust every op in a stream carries today; signed-op enforcement (6j6v.pzkb) is what narrows it.
 
 ### 4.5 Machine presence (added 2026-09-21, `6j6v.f0b5`)
 

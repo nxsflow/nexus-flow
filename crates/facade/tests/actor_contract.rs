@@ -291,6 +291,33 @@ fn cases() -> Vec<Case> {
                 outcome(&s, before, r)
             }),
         ),
+        (
+            "chunk_append",
+            Box::new(|b: &Boundary| {
+                let (mut s, _, ids) = fixture(1);
+                let before = s.export().len();
+                let r = write::chunk_append(&mut s, NOW, b.actor, &ids[0], "doc", "AAEC");
+                outcome(&s, before, r)
+            }),
+        ),
+        (
+            "chunk_supersede",
+            Box::new(|b: &Boundary| {
+                let (mut s, _, ids) = fixture(1);
+                let first = write::chunk_append(&mut s, NOW, SEEDER, &ids[0], "doc", "AA").unwrap();
+                let before = s.export().len();
+                let r = write::chunk_supersede(
+                    &mut s,
+                    NOW,
+                    b.actor,
+                    &ids[0],
+                    "doc",
+                    &[first.as_str()],
+                    "AAEC",
+                );
+                outcome(&s, before, r)
+            }),
+        ),
     ]
 }
 
@@ -315,7 +342,7 @@ fn the_pinned_set_is_every_entry_point_that_validates_an_actor() {
         &[actor_contract::Delegator {
             name: "actor",
             reason: "`validate::actor` IS the rule under flow's own name — it forwards to \
-                     `nxs_foundation::model::validate_author` and writes nothing itself; the 17 \
+                     `nxs_foundation::model::validate_author` and writes nothing itself; the 19 \
                      entry points above are its only callers",
         }],
     );
@@ -323,6 +350,6 @@ fn the_pinned_set_is_every_entry_point_that_validates_an_actor() {
 
 // The substrate claim carried over from PR #311 — a refused write leaves the log exactly as it
 // found it — used to live here as its own test. It now runs inside the shared runner, on every
-// boundary of every entry point of all THREE surfaces rather than the 17 of this one (PR #317
+// boundary of every entry point of all THREE surfaces rather than the 19 of this one (PR #317
 // review, Test Quality #1): `outcome` above reports the appended ops on the refusal path too, and
 // `assert_actor_contract` requires them to be none.

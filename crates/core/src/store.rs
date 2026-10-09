@@ -1289,6 +1289,74 @@ impl Store {
         self.emit_task("note", note_id, "deleted", "set", Some("1".into()), author);
     }
 
+    /// Append an opaque chunk to an item's chunk field (6j6v.c0kn). Returns the chunk's id — the
+    /// op id, which a later supersede names. The facade validates the field and the size first.
+    pub fn append_chunk(
+        &mut self,
+        item_id: &str,
+        field: &str,
+        payload: &str,
+        author: &str,
+    ) -> String {
+        self.emit_task(
+            "chunk",
+            item_id,
+            field,
+            "append",
+            Some(payload.to_string()),
+            author,
+        )
+    }
+
+    /// Replace chunks of an item's chunk field with one new chunk (6j6v.c0kn): the replaced ids
+    /// and the payload travel in one op, so no replica ever sees the new chunk without the
+    /// replacement or the other way round. Returns the new chunk's id.
+    pub fn supersede_chunks(
+        &mut self,
+        item_id: &str,
+        field: &str,
+        replaced: &[&str],
+        payload: &str,
+        author: &str,
+    ) -> String {
+        assert!(
+            !replaced.is_empty()
+                && replaced
+                    .iter()
+                    .all(|id| crate::model::is_valid_chunk_id(id)),
+            "a supersede names at least one well-formed chunk id: {replaced:?}"
+        );
+        let value = crate::model::supersede_value(replaced, payload);
+        self.emit_task("chunk", item_id, field, "supersede", Some(value), author)
+    }
+
+    /// The live chunks of an item's chunk field — every chunk no supersede of that field names —
+    /// in the canonical op order `(lamport, site, id)`, the same on every replica.
+    pub fn chunks_of(
+        &self,
+        item_id: &str,
+        field: &str,
+    ) -> rusqlite::Result<Vec<crate::model::Chunk>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT c.id, c.body, c.author, c.lamport, c.site, c.created_at FROM chunks c
+             WHERE c.item_id=?1 AND c.field=?2
+               AND NOT EXISTS (SELECT 1 FROM chunk_superseded s
+                               WHERE s.item_id=c.item_id AND s.field=c.field AND s.chunk_id=c.id)
+             ORDER BY c.lamport, c.site, c.id",
+        )?;
+        let rows = stmt.query_map(params![item_id, field], |r| {
+            Ok(crate::model::Chunk {
+                id: r.get(0)?,
+                body: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                author: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                lamport: r.get(3)?,
+                site: r.get(4)?,
+                created_at: r.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Non-redacted notes for an item, ordered by the canonical op order `(lamport, site)` —
     /// replica-independent, consistent with history/export. Fallible (#76u.13): reached by the
     /// read-compute facade (`show`/`search`), so a db error is surfaced for the seam to map to `io`.
@@ -1502,6 +1570,95 @@ mod tests {
             s.get_item("c1.N").unwrap().unwrap().description.as_deref(),
             Some("tagged")
         );
+    }
+
+    fn chunk_bodies(s: &Store, item: &str, field: &str) -> Vec<String> {
+        s.chunks_of(item, field)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect()
+    }
+
+    #[test]
+    fn chunks_converge_in_any_order_with_duplicates_and_a_supersede_across_replicas() {
+        // 6j6v.c0kn: chunks fold as a set by op id. Two replicas append concurrently, one
+        // compacts what it saw; every delivery order, with every op delivered twice, ends in the
+        // same live list, and a supersede that arrives BEFORE a chunk it names still hides it.
+        let mut a = Store::open_in_memory(1);
+        a.create_item("g.X", "task", "t", "x");
+        let mut b = Store::open_in_memory(2);
+        b.apply(&a.export());
+
+        let a1 = a.append_chunk("g.X", "doc", "a1", "x");
+        let a2 = a.append_chunk("g.X", "doc", "a2", "x");
+        let b1 = b.append_chunk("g.X", "doc", "b1", "y");
+        a.apply(&b.export());
+        let merged = a.supersede_chunks("g.X", "doc", &[&a1, &a2, &b1], "a1+a2+b1", "x");
+        a.append_chunk("g.X", "doc", "a3", "x");
+        a.append_chunk("g.X", "other", "elsewhere", "x");
+
+        let ops = a.export();
+        let expected = chunk_bodies(&a, "g.X", "doc");
+        assert_eq!(expected, ["a1+a2+b1", "a3"], "the replaced chunks are gone");
+        assert_eq!(
+            a.chunks_of("g.X", "doc").unwrap()[0].id,
+            merged,
+            "a chunk's id is its op id"
+        );
+        assert_eq!(
+            chunk_bodies(&a, "g.X", "other"),
+            ["elsewhere"],
+            "fields are apart"
+        );
+        assert!(
+            a.notes_of("g.X").unwrap().is_empty(),
+            "a chunk is never a note"
+        );
+
+        // Reversed, and every op twice: the supersede lands before the chunks it names.
+        let mut reversed: Vec<_> = ops.iter().rev().cloned().collect();
+        reversed.extend(ops.iter().cloned());
+        let mut c = Store::open_in_memory(3);
+        c.apply(&reversed);
+        assert_eq!(chunk_bodies(&c, "g.X", "doc"), expected);
+
+        // One op at a time, supersede first.
+        let mut d = Store::open_in_memory(4);
+        let (sup, rest): (Vec<_>, Vec<_>) = ops.iter().cloned().partition(|o| o.op_id == merged);
+        d.apply(&sup);
+        for op in rest {
+            d.apply(std::slice::from_ref(&op));
+            d.apply(&[op]);
+        }
+        assert_eq!(chunk_bodies(&d, "g.X", "doc"), expected);
+    }
+
+    #[test]
+    fn a_chunk_op_past_the_limit_is_stored_and_never_folded() {
+        // An oversized chunk from a writer that skipped the facade's check (this store's own emit
+        // refuses to build one): kept in the log, left out of the views on every replica alike —
+        // and the ops around it fold.
+        let mut a = Store::open_in_memory(1);
+        a.create_item("g.X", "task", "t", "x");
+        let small = a.append_chunk("g.X", "doc", "small", "x");
+        let mut huge = a.export().into_iter().find(|o| o.op_id == small).unwrap();
+        huge.op_id = "foreign-huge".into();
+        huge.site = 9;
+        huge.value = Some("x".repeat(crate::model::MAX_CHUNK_BYTES + 1));
+        huge.key_id = None;
+        huge.sig = None;
+
+        let mut b = Store::open_in_memory(2);
+        b.apply(&[huge.clone()]);
+        b.apply(&a.export());
+        assert_eq!(chunk_bodies(&b, "g.X", "doc"), ["small"]);
+        assert!(
+            b.export().iter().any(|o| o.op_id == "foreign-huge"),
+            "the oversized op stays in the log"
+        );
+        b.append_chunk("g.X", "doc", "after", "y");
+        assert_eq!(chunk_bodies(&b, "g.X", "doc"), ["small", "after"]);
     }
 
     #[test]
@@ -3093,6 +3250,8 @@ mod tests {
             "x",
         );
         s.remove_thread_link("t-1", "c1.A", "x");
+        let chunk = s.append_chunk("c1.A", "doc", "c", "x");
+        s.supersede_chunks("c1.A", "doc", &[&chunk], "c2", "x");
 
         let tables: Vec<String> = s
             .connection()

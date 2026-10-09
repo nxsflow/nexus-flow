@@ -73,6 +73,76 @@ pub fn thread_id(value: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Validate an item's chunk field name (6j6v.c0kn) — see
+/// [`is_valid_chunk_field`](nexus_flow_core::model::is_valid_chunk_field) for the rule.
+pub fn chunk_field(field: &str) -> Result<&str> {
+    if nexus_flow_core::model::is_valid_chunk_field(field) {
+        Ok(field)
+    } else {
+        Err(NxfError::validation(format!(
+            "'{field}' is not a chunk field: 1 to 64 ASCII letters, digits, '_', '-' or '.'"
+        )))
+    }
+}
+
+/// Validate the ids a supersede replaces (6j6v.c0kn): at least one and at most
+/// [`MAX_SUPERSEDED`](nexus_flow_core::model::MAX_SUPERSEDED), each non-empty, at most
+/// [`MAX_CHUNK_ID_BYTES`](nexus_flow_core::model::MAX_CHUNK_ID_BYTES) and free of the two separators
+/// a supersede value uses. Whether an id names a chunk this replica holds is not asked: a chunk
+/// may still be on its way, and a supersede that arrives first hides it anyway.
+pub fn chunk_ids<'a>(ids: &[&'a str]) -> Result<Vec<&'a str>> {
+    use nexus_flow_core::model::{MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED};
+    if ids.is_empty() {
+        return Err(NxfError::validation(
+            "a supersede must name at least one chunk it replaces",
+        ));
+    }
+    if ids.len() > MAX_SUPERSEDED {
+        return Err(NxfError::validation(format!(
+            "a supersede replaces at most {MAX_SUPERSEDED} chunks, this one {}: supersede in rounds",
+            ids.len()
+        )));
+    }
+    if let Some(bad) = ids
+        .iter()
+        .find(|id| !nexus_flow_core::model::is_valid_chunk_id(id))
+    {
+        return Err(NxfError::validation(format!(
+            "'{}' is not a chunk id: it must be 1 to {MAX_CHUNK_ID_BYTES} bytes and free of \
+             U+001E and U+001F",
+            bad.escape_debug()
+        )));
+    }
+    Ok(ids.to_vec())
+}
+
+/// Refuse a chunk on an item whose id is longer than a chunk op may name
+/// ([`MAX_CHUNK_ID_BYTES`](nexus_flow_core::model::MAX_CHUNK_ID_BYTES)): the reducer would never
+/// fold it.
+pub fn chunk_item(id: &str) -> Result<&str> {
+    let limit = nexus_flow_core::model::MAX_CHUNK_ID_BYTES;
+    if id.len() > limit {
+        return Err(NxfError::validation(format!(
+            "an item id carries chunks only up to {limit} bytes"
+        )));
+    }
+    Ok(id)
+}
+
+/// Refuse a chunk op whose `value` would pass [`MAX_CHUNK_BYTES`](nexus_flow_core::model::MAX_CHUNK_BYTES)
+/// (6j6v.c0kn) — never cut it short: a truncated opaque chunk is a corrupt one. `bytes` is the
+/// whole value, the replaced ids included.
+pub fn chunk_size(bytes: usize) -> Result<()> {
+    let limit = nexus_flow_core::model::MAX_CHUNK_BYTES;
+    if bytes > limit {
+        return Err(NxfError::validation(format!(
+            "a chunk op carries at most {limit} bytes, this one {bytes}: split the chunk, or \
+             supersede fewer chunks at once"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
