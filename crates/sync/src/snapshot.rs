@@ -204,6 +204,8 @@ impl From<SyncError> for SnapshotError {
         match e {
             SyncError::Storage(m) => SnapshotError::Storage(m),
             SyncError::Transport(m) => SnapshotError::Transport(m),
+            // The pull ran; the push could not. To a snapshot start that is a transport failure, and
+            // the message names the op.
             too_large @ SyncError::OpTooLarge { .. } => {
                 SnapshotError::Transport(too_large.to_string())
             }
@@ -1206,5 +1208,28 @@ mod tests {
             import(&mut fresh, &bytes, &stream(), &Relay::new(14, 0)),
             Err(SnapshotError::FormatTooNew { .. })
         ));
+    }
+
+    #[test]
+    fn an_op_too_large_reaches_a_snapshot_start_as_a_transport_failure_naming_it() {
+        let err = SyncError::OpTooLarge {
+            op_id: "op-1".into(),
+            bytes: 10,
+            limit: Some(5),
+            outcome: crate::engine::SyncOutcome {
+                pushed: 0,
+                pulled: 0,
+                pull_ceiling_hit: false,
+                budget_exhausted: false,
+                pull_pages: 0,
+                pull_empty_pages: 0,
+                signatures_stripped: 0,
+                unsigned_from_signers: 0,
+            },
+        };
+        match SnapshotError::from(err) {
+            SnapshotError::Transport(m) => assert!(m.contains("op-1"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
