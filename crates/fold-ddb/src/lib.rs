@@ -6,8 +6,8 @@
 //! The pieces, in the order a fold run uses them: [`fold::Folder`] maps each op through the
 //! platform's reducers and [`write::plan`] turns every change into a [`write::Write`];
 //! [`board`] keeps the indexes and reads the lanes; [`chunks`] reads an item's live chunks;
-//! [`snapshot`] starts a stream without folding its whole history. [`table::Table`] is the seam to storage: [`mem::MemTable`] in memory, and
-//! with the `dynamodb` feature `ddb::DynamoDbTable`.
+//! [`snapshot`] starts a stream without folding its whole history. [`table::Table`] is the seam
+//! to storage: [`mem::MemTable`] in memory, and with the `dynamodb` feature `ddb::DynamoDbTable`.
 //!
 //! # The table contract (point 5)
 //!

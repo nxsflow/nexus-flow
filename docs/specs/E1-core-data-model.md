@@ -111,9 +111,11 @@ backed by the Automerge differential oracle (see §8).
     it, so the fold is a set by `op_id`: idempotent, order-independent, and a supersede that
     arrives before a chunk it names still hides it. This is how a writer compacts what it
     appended, and why it must: every chunk is an op in a bounded stream.
-  - A chunk op's `value` holds at most `MAX_CHUNK_BYTES` (300 KiB): the write seam refuses a
-    larger one, and the reducer stores-not-folds one that arrives anyway, on every replica and on
-    a server alike.
+  - A chunk op's `value` holds at most `MAX_CHUNK_BYTES` (300 KiB), each id it names (its item,
+    its own op id, each replaced id) at most `MAX_CHUNK_ID_BYTES` (128 bytes), and a supersede
+    replaces at most `MAX_SUPERSEDED` (1024) chunks: the write seam refuses anything past them, and
+    the reducer stores-not-folds one that arrives anyway, on every replica and on a server alike.
+    These are fold semantics — changing one goes with a fold revision.
   - Views `chunks` / `chunk_superseded`, keyed `(item_id, field, …)`; read with
     `Engine::chunks` (a replica) or `nxs_fold_ddb::chunks::chunks` (a server). Never a note, never
     in `show`, search, history or MCP text, and a chunk does not change its item's `updated_at`.

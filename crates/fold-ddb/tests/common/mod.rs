@@ -106,13 +106,20 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
             // Chunks (6j6v.c0kn): appends to two fields, and now and then a supersede of a random
             // part of what this replica sees — with a chunk the other replica wrote, once merged.
             14 => {
-                let field = ["doc", "draft"][r.next(2) as usize];
-                let live: Vec<String> = s
+                // `doc` is a prefix of `doc2`: the server's per-field range must not mix them.
+                let (field, other) = [("doc", "doc2"), ("doc2", "doc")][r.next(2) as usize];
+                let mut live: Vec<String> = s
                     .chunks_of(&a, field)
                     .unwrap()
                     .into_iter()
                     .map(|c| c.id)
                     .collect();
+                // Now and then also a chunk of the OTHER field and one nobody wrote: a supersede
+                // names ids, it does not check them, and neither may hide anything it should not.
+                if r.next(4) == 0 {
+                    live.extend(s.chunks_of(&a, other).unwrap().into_iter().map(|c| c.id));
+                    live.push(format!("nobody-{step}"));
+                }
                 let replaced: Vec<&str> = live
                     .iter()
                     .filter(|_| r.next(2) == 0)

@@ -216,7 +216,23 @@ pub const DOMAIN_TASK: &str = "task";
 /// (DynamoDB), with room for the rest of the op and the row. The write seam refuses a larger one,
 /// and the reducer leaves a larger one unfolded — stored, never folded — on every replica alike,
 /// so one that arrives from elsewhere neither diverges the views nor stops a fold.
+///
+/// **Fold semantics, like every limit below:** it decides which ops fold. Changing it changes the
+/// views of a log already written, so it goes with a bump of the task reducer's `fold_revision`,
+/// and a replica and a server on different values would fold the same log differently.
 pub const MAX_CHUNK_BYTES: usize = 300 * 1024;
+
+/// The longest id a chunk op may name, in bytes (6j6v.c0kn) — its item, its own op id, and each id
+/// a supersede replaces. Every one of them is a key cell of a folded row, and a server stores a
+/// row's sort key in at most 1,024 bytes (`nxs_fold_ddb`, with `#`/`%` escaped to three bytes):
+/// an op whose key it could not store would be refused there and folded here. Within this bound
+/// both appliers fold it, or neither does. Fold semantics, as [`MAX_CHUNK_BYTES`].
+pub const MAX_CHUNK_ID_BYTES: usize = 128;
+
+/// The most chunks one supersede may replace (6j6v.c0kn): each is one row written by the fold, so
+/// the bound is what one op may cost a server. A writer with more to compact supersedes in rounds.
+/// Fold semantics, as [`MAX_CHUNK_BYTES`].
+pub const MAX_SUPERSEDED: usize = 1024;
 
 /// What ends the list of replaced chunk ids in a supersede op's `value`, before its payload
 /// (6j6v.c0kn). U+001E, the record separator: the ids inside the list are joined by U+001F, and
@@ -233,10 +249,17 @@ pub fn is_valid_chunk_field(field: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
-/// Whether `id` may name a chunk a supersede replaces: non-empty, and free of both separators a
-/// supersede value uses. A chunk's id is the op id of the op that carried it.
+/// Whether `id` may name a chunk a supersede replaces: non-empty, at most [`MAX_CHUNK_ID_BYTES`],
+/// and free of both separators a supersede value uses. A chunk's id is the op id of the op that
+/// carried it.
 pub fn is_valid_chunk_id(id: &str) -> bool {
-    !id.is_empty() && !id.contains(['\u{1f}', CHUNK_PAYLOAD_SEP])
+    !id.is_empty() && id.len() <= MAX_CHUNK_ID_BYTES && !id.contains(['\u{1f}', CHUNK_PAYLOAD_SEP])
+}
+
+/// A supersede op's `value`: the replaced ids joined by U+001F, then [`CHUNK_PAYLOAD_SEP`], then
+/// the payload. The one place the layout is written; the reducer reads it back.
+pub fn supersede_value(replaced: &[&str], payload: &str) -> String {
+    format!("{}{CHUNK_PAYLOAD_SEP}{payload}", replaced.join("\u{1f}"))
 }
 
 /// One live chunk of an item's chunk field, as the fold keeps it (6j6v.c0kn). The engine never

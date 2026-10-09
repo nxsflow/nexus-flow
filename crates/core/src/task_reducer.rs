@@ -9,7 +9,7 @@
 
 use crate::model::{
     is_valid_chunk_field, is_valid_chunk_id, EdgeKind, LinkRelation, LinkWeight, MergeStrategy, Op,
-    CHUNK_PAYLOAD_SEP, MAX_CHUNK_BYTES,
+    CHUNK_PAYLOAD_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED,
 };
 use crate::reducer::Reducer;
 use crate::schema;
@@ -238,8 +238,12 @@ impl TaskReducer {
     /// an oversized chunk from a writer that skipped the seam's check cannot diverge them.
     fn parse_chunk(op: &Op) -> Option<(Vec<&str>, &str)> {
         let value = op.value.as_deref()?;
+        // Every id becomes a key cell, so each is bounded where a server's key is (see
+        // MAX_CHUNK_ID_BYTES): past it, neither applier folds the op.
         if op.target_id.is_empty()
+            || op.target_id.len() > MAX_CHUNK_ID_BYTES
             || op.target_id.contains(SEP)
+            || op.op_id.len() > MAX_CHUNK_ID_BYTES
             || !is_valid_chunk_field(&op.field)
             || value.len() > MAX_CHUNK_BYTES
         {
@@ -250,8 +254,7 @@ impl TaskReducer {
             "supersede" => {
                 let (ids, payload) = value.split_once(CHUNK_PAYLOAD_SEP)?;
                 let ids: Vec<&str> = ids.split(SEP).collect();
-                ids.iter()
-                    .all(|id| is_valid_chunk_id(id))
+                (ids.len() <= MAX_SUPERSEDED && ids.iter().all(|id| is_valid_chunk_id(id)))
                     .then_some((ids, payload))
             }
             _ => None,

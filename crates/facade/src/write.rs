@@ -1368,6 +1368,7 @@ pub fn chunk_append(
     let actor = validate::actor(actor)?;
     let field = validate::chunk_field(field)?;
     validate::chunk_size(payload.len())?;
+    let id = validate::chunk_item(id)?;
     require_item(store, id)?;
     stamp_now(store, now)?;
     Ok(store.append_chunk(id, field, payload, actor))
@@ -1387,9 +1388,8 @@ pub fn chunk_supersede(
     let actor = validate::actor(actor)?;
     let field = validate::chunk_field(field)?;
     let replaced = validate::chunk_ids(replaced)?;
-    // The value is the ids joined by one byte each, one byte of separator, then the payload.
-    let ids_bytes: usize = replaced.iter().map(|r| r.len() + 1).sum();
-    validate::chunk_size(ids_bytes + payload.len())?;
+    validate::chunk_size(nexus_flow_core::model::supersede_value(&replaced, payload).len())?;
+    let id = validate::chunk_item(id)?;
     require_item(store, id)?;
     stamp_now(store, now)?;
     Ok(store.supersede_chunks(id, field, &replaced, payload, actor))

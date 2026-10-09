@@ -146,14 +146,21 @@ What the protocol adds is only the size discipline a stream of them needs:
 | bound | where | what happens |
 |---|---|---|
 | `MAX_CHUNK_BYTES` (300 KiB) per op value | the write seam, the reducer | refused at write; stored-not-folded if it arrives anyway |
-| 400 KB per stored op / folded row | DynamoDB relay, `nxs-fold-ddb` | below it by construction |
-| `MAX_PUSH_BYTES` (8 MiB) per push body | relay, client engine | the engine splits a page by bytes (`6j6v.3gq0`) |
+| `MAX_CHUNK_ID_BYTES` (128) per id, `MAX_SUPERSEDED` (1024) ids per supersede | the write seam, the reducer | as above — keeps every key a server row needs under its 1,024 bytes, and one op's writes bounded |
+| 400 KB per folded row | `nxs-fold-ddb` | below it for every chunk op that folds, because the reducer bounds the value |
+| 400 KB per stored op | DynamoDB relay | below it for every op the write seam builds; a foreign op over it is refused by the relay as a server error (`6j6v.gwpc`) |
+| `MAX_PUSH_BYTES` (8 MiB) per push body | relay, client engine | the engine splits a page by bytes (`6j6v.3gq0`, PR #30) |
 | `MAX_PUSH_OPS` (1000) per push | relay | the engine's pages stay below it |
 
 A stream is bounded too (a hosted stream by op count and bytes), so a writer that appends must also
 supersede: that is what keeps a field's live chunks, and the log's growth, in proportion to the
 content instead of to the number of edits. A pre-c0kn replica stores chunk ops without folding them
-and folds them once it is upgraded (task fold revision 2).
+and folds them once it is upgraded (task fold revision 2). The bounds above are fold semantics:
+changing one changes which ops fold, so it goes with a fold revision.
+
+A known property, not a defect of this slice: a supersede may name any id of its item's field, so
+anyone who can push to a stream can hide any chunk in it (the log keeps the data). That is the same
+trust every op in a stream carries today; signed-op enforcement (6j6v.pzkb) is what narrows it.
 
 ### 4.5 Machine presence (added 2026-09-21, `6j6v.f0b5`)
 

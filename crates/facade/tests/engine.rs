@@ -1020,6 +1020,13 @@ fn chunks_are_appended_superseded_and_read_at_the_engine_seam_and_nowhere_else()
 
     let first = engine.chunk_append(NOW, ACTOR, id, "doc", "AAEC").unwrap();
     let second = engine.chunk_append(NOW, ACTOR, id, "doc", "AwQF").unwrap();
+    assert!(
+        engine
+            .search(NOW, "AwQF", None, None, true, false)
+            .unwrap()
+            .is_empty(),
+        "a live chunk's payload is never search text"
+    );
     let bodies = |e: &Engine| -> Vec<String> {
         e.chunks(id, "doc")
             .unwrap()
@@ -1092,5 +1099,72 @@ fn chunks_are_appended_superseded_and_read_at_the_engine_seam_and_nowhere_else()
     assert_eq!(
         engine.chunks("ab12.9999", "doc").unwrap_err().kind,
         ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn a_chunk_op_of_exactly_the_limit_is_taken_and_folded_and_one_byte_more_is_refused() {
+    // The facade's size check and the reducer's must draw the line at the same byte, for an append
+    // and for a supersede whose ids count toward it: otherwise the seam accepts what no replica
+    // folds, or refuses what every replica would.
+    use nexus_flow_facade::MAX_CHUNK_BYTES;
+    let tmp = seeded_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let id = "ab12.0001";
+    let live = |e: &Engine| e.chunks(id, "doc").unwrap();
+
+    let exact = "x".repeat(MAX_CHUNK_BYTES);
+    let appended = engine.chunk_append(NOW, ACTOR, id, "doc", &exact).unwrap();
+    assert_eq!(
+        live(&engine).last().unwrap().id,
+        appended,
+        "folded, not just accepted"
+    );
+    assert_eq!(
+        engine
+            .chunk_append(NOW, ACTOR, id, "doc", &format!("{exact}x"))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation
+    );
+
+    let small = engine.chunk_append(NOW, ACTOR, id, "doc", "s").unwrap();
+    let ids = [appended.as_str(), small.as_str()];
+    // The value is the ids, one separator after each, then the payload.
+    let room = MAX_CHUNK_BYTES - ids.iter().map(|i| i.len() + 1).sum::<usize>();
+    let merged = engine
+        .chunk_supersede(NOW, ACTOR, id, "doc", &ids, &"y".repeat(room))
+        .unwrap();
+    let after: Vec<String> = live(&engine).into_iter().map(|c| c.id).collect();
+    assert_eq!(
+        after,
+        [merged.clone()],
+        "a supersede of exactly the limit folds"
+    );
+    assert_eq!(
+        engine
+            .chunk_supersede(
+                NOW,
+                ACTOR,
+                id,
+                "doc",
+                &[merged.as_str()],
+                &"y".repeat(MAX_CHUNK_BYTES)
+            )
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation,
+        "the ids count toward the limit"
+    );
+    let too_many: Vec<String> = (0..=nexus_flow_core::model::MAX_SUPERSEDED)
+        .map(|i| format!("c{i}"))
+        .collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    assert_eq!(
+        engine
+            .chunk_supersede(NOW, ACTOR, id, "doc", &too_many, "z")
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation
     );
 }

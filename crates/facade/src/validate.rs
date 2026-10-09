@@ -85,25 +85,48 @@ pub fn chunk_field(field: &str) -> Result<&str> {
     }
 }
 
-/// Validate the ids a supersede replaces (6j6v.c0kn): at least one, each non-empty and free of the
-/// two separators a supersede value uses. Whether an id names a chunk this replica holds is not
-/// asked: a chunk may still be on its way, and a supersede that arrives first hides it anyway.
+/// Validate the ids a supersede replaces (6j6v.c0kn): at least one and at most
+/// [`MAX_SUPERSEDED`](nexus_flow_core::model::MAX_SUPERSEDED), each non-empty, at most
+/// [`MAX_CHUNK_ID_BYTES`](nexus_flow_core::model::MAX_CHUNK_ID_BYTES) and free of the two separators
+/// a supersede value uses. Whether an id names a chunk this replica holds is not asked: a chunk
+/// may still be on its way, and a supersede that arrives first hides it anyway.
 pub fn chunk_ids<'a>(ids: &[&'a str]) -> Result<Vec<&'a str>> {
+    use nexus_flow_core::model::{MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED};
     if ids.is_empty() {
         return Err(NxfError::validation(
             "a supersede must name at least one chunk it replaces",
         ));
+    }
+    if ids.len() > MAX_SUPERSEDED {
+        return Err(NxfError::validation(format!(
+            "a supersede replaces at most {MAX_SUPERSEDED} chunks, this one {}: supersede in rounds",
+            ids.len()
+        )));
     }
     if let Some(bad) = ids
         .iter()
         .find(|id| !nexus_flow_core::model::is_valid_chunk_id(id))
     {
         return Err(NxfError::validation(format!(
-            "'{}' is not a chunk id: it must be non-empty and free of U+001E and U+001F",
+            "'{}' is not a chunk id: it must be 1 to {MAX_CHUNK_ID_BYTES} bytes and free of \
+             U+001E and U+001F",
             bad.escape_debug()
         )));
     }
     Ok(ids.to_vec())
+}
+
+/// Refuse a chunk on an item whose id is longer than a chunk op may name
+/// ([`MAX_CHUNK_ID_BYTES`](nexus_flow_core::model::MAX_CHUNK_ID_BYTES)): the reducer would never
+/// fold it.
+pub fn chunk_item(id: &str) -> Result<&str> {
+    let limit = nexus_flow_core::model::MAX_CHUNK_ID_BYTES;
+    if id.len() > limit {
+        return Err(NxfError::validation(format!(
+            "an item id carries chunks only up to {limit} bytes"
+        )));
+    }
+    Ok(id)
 }
 
 /// Refuse a chunk op whose `value` would pass [`MAX_CHUNK_BYTES`](nexus_flow_core::model::MAX_CHUNK_BYTES)

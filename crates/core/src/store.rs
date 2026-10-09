@@ -1326,11 +1326,7 @@ impl Store {
                     .all(|id| crate::model::is_valid_chunk_id(id)),
             "a supersede names at least one well-formed chunk id: {replaced:?}"
         );
-        let value = format!(
-            "{}{}{payload}",
-            replaced.join(&SEP.to_string()),
-            crate::model::CHUNK_PAYLOAD_SEP
-        );
+        let value = crate::model::supersede_value(replaced, payload);
         self.emit_task("chunk", item_id, field, "supersede", Some(value), author)
     }
 

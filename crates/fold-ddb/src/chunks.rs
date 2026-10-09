@@ -2,8 +2,9 @@
 //! `Store::chunks_of` answers on a replica: every chunk of the field that no supersede of the same
 //! field names, in the canonical op order `(lamport, site, id)`.
 //!
-//! Two Queries, both on the item's own range and strongly consistent: the field's chunks and the
-//! field's replaced set. `chunks` and `chunk_superseded` key on `(item_id, field, …)`, so each is
+//! Two Queries, each on the item's own range and strongly consistent on its own (not as a pair: a
+//! fold between them may show a chunk whose supersede landed just after the first read, which the
+//! next read then hides): the field's replaced set, then the field's chunks. `chunks` and `chunk_superseded` key on `(item_id, field, …)`, so each is
 //! one `begins_with` on the sort key and reads nothing of any other item or field. The engine
 //! never reads a chunk's body.
 
@@ -28,10 +29,10 @@ fn field_prefix(table: &str, item: &str, field: &str) -> String {
     prefix
 }
 
-fn int(row: &Row, column: &str) -> i64 {
+fn int(row: &Row, column: &str) -> Option<i64> {
     match row.get(column) {
-        Some(Cell::Int(v)) => *v,
-        _ => 0,
+        Some(Cell::Int(v)) => Some(*v),
+        _ => None,
     }
 }
 
@@ -47,14 +48,17 @@ pub async fn chunks<T: Table>(table: &T, item: &str, field: &str) -> Result<Vec<
         .query_prefix(&field_prefix("chunks", item, field))
         .await?
         .iter()
+        // Every row the fold writes carries its coordinate; one without it would sort nowhere
+        // true, so it is left out rather than ordered as if it were the oldest.
         .filter_map(|row| {
             let id = text(row, "id")?;
+            let (lamport, site) = (int(row, "lamport")?, int(row, "site")?);
             (!replaced.contains(id)).then(|| Chunk {
                 id: id.to_string(),
                 body: text(row, "body").unwrap_or_default().to_string(),
                 author: text(row, "author").unwrap_or_default().to_string(),
-                lamport: int(row, "lamport"),
-                site: int(row, "site"),
+                lamport,
+                site,
                 created_at: text(row, "created_at")
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
