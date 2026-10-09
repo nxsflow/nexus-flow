@@ -2830,6 +2830,8 @@ pub(crate) mod tests {
             "withdrawn_holders",
             "withdrawn_sessions",
             "session_interruption",
+            // A queued trigger the release could not start (nxf 6j6v.br25): this machine's queue.
+            "failed_starts",
             // The border record (nxf 6j6v.4gp2): where the other half of a conversation lives on
             // THIS machine, and what of it was handed to this side's party.
             "border_threads",

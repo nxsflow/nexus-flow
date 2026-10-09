@@ -401,6 +401,12 @@ If a commission starts between this command reading the queue and writing to it,
 is interrupted all the same, so it runs on its own, and the closing line says so: it names the
 exception and the call that stops it too (`nxc withdraw --thread <id>` once more).
 
+**A commission whose start failed.** When the working copy is handed on, the commissions queued for
+it are taken off the queue and started. If a start fails (`nxc status` marks the operation `START
+FAILED`), nothing runs for it, and `withdraw` takes it back like a commission that never started —
+it is listed under `withdrew`, its thread is discharged, and the background service does not try it
+again.
+
 A thread with nothing waiting and nothing running under it is a `not_found` saying so.
 
 ### `nxc resume --thread <THREAD>`
@@ -572,11 +578,17 @@ $ NXC_ACTOR=alice nxc status --all --json
 **What "still going on" means, exactly**: the operation has an open thread, or an unanswered
 hand-back, or this device's working copy, or a dead end that *failed* — a thread whose answer
 arrived and whose consequence never did (`ORPHANED`, marked `· dead end` on the operation line).
-Two more keep it listed once everything else about it has settled: **work parked on a branch that
+Three more keep it listed once everything else about it has settled: **work parked on a branch that
 nobody has come back for** (a line `parked on <branch> at <commit> since <instant>` under the
-operation, `parked` in `--json`), and **a park that was refused and is being retried** (the mark
+operation, `parked` in `--json`), **a park that was refused and is being retried** (the mark
 `· PARK REFUSED`, a line `park refused (<refusal>): <what to fix> — retrying since <instant>`,
-`park_refused` in `--json`). Those are the things a reader can act on, and together they are the
+`park_refused` in `--json`), and **a queued commission whose start failed** (the mark
+`· START FAILED`, a line `start failed: <role> on thread <id> …` with the number of attempts, the
+last error and either `retrying at <instant>` or `not retried`, `start_failed` in `--json`). When the
+working copy is handed on, the commissions waiting for it are started; a start that fails on an
+`io` error — a timeout, a busy disk — is tried again by the background service, up to three
+attempts in all, a minute or two apart. Any other failure, or one that outlasts those attempts,
+stays on the operation until `nxc withdraw` discards it. Those are the things a reader can act on, and together they are the
 `live` flag on every operation the command prints. Note what is *not* on that list: a root
 that has been answered and not yet read. That is `awaiting_human`, and it used to keep an operation
 listed — which meant nothing ever left the view, because the flag is derived from facts that never

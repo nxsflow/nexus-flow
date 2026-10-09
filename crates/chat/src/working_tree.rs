@@ -428,6 +428,71 @@ fn priority_from_ordinal(ordinal: i64) -> Priority {
     }
 }
 
+/// [`Model`]'s column form — its lowercase serde wire string — which [`queued_trigger_from_row`]
+/// reads back. Written once for the two tables that store a trigger's inputs (the queue and
+/// `failed_starts`).
+fn model_to_column(model: Option<Model>) -> Option<String> {
+    model.map(|m| {
+        serde_json::to_value(m)
+            .expect("Model serializes")
+            .as_str()
+            .expect("Model serializes to a string")
+            .to_string()
+    })
+}
+
+/// **A queued trigger the release could not start** (nxf 6j6v.br25) — one `failed_starts` row, as
+/// `nxc status` shows it on its operation and `withdraw` finds it.
+///
+/// Before this record such a trigger existed nowhere: the release had taken it off the queue, the
+/// start had failed, and the only trace was a line on the stderr of whichever process released —
+/// for the background service, a log file. `withdraw` found nothing waiting, `resume` nothing on
+/// hold, and the operation sat with stale threads and no process.
+///
+/// `#[non_exhaustive]` like its neighbours on [`crate::facade::StatusOperation`]: a read model, not
+/// something a caller builds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct FailedStart {
+    /// The internal session that was minted for the trigger and has no process.
+    pub session: String,
+    /// The role it was to start.
+    pub role: String,
+    /// The thread it owes its answer on, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// How many starts have failed so far.
+    pub attempts: u32,
+    /// What the latest failed start said.
+    pub error: String,
+    /// When the first start failed, UTC-normalized.
+    pub first_failed_at: String,
+    /// When the latest start failed, UTC-normalized.
+    pub last_failed_at: String,
+    /// When the background service tries again. `None` once no further automatic attempt is due —
+    /// the bound is reached or the failure is not one waiting can fix — and the way out is
+    /// `withdraw`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
+}
+
+/// The columns [`failed_start_from_row`] reads, in its order.
+const FAILED_START_COLS: &str =
+    "session, role, thread, attempts, error, first_failed_at, last_failed_at, retry_at";
+
+fn failed_start_from_row(r: &Row) -> rusqlite::Result<FailedStart> {
+    Ok(FailedStart {
+        session: r.get(0)?,
+        role: r.get(1)?,
+        thread: r.get(2)?,
+        attempts: r.get(3)?,
+        error: r.get(4)?,
+        first_failed_at: r.get(5)?,
+        last_failed_at: r.get(6)?,
+        retry_at: r.get(7)?,
+    })
+}
+
 /// Delete `scope_key`'s OWN lease row, reporting how many rows that was (0 or 1).
 ///
 /// **Deliberately scoped to `scope_key`'s own row**: a release naming a scope that is not the
@@ -1353,13 +1418,7 @@ impl ChatStore {
         // carries one already is a promotion going back into the queue, and it keeps the place in
         // line it has already waited for — see [`QueuedTrigger::enqueued_at`].
         let enqueued_at = to_utc_rfc3339(q.enqueued_at.as_deref().unwrap_or(now))?;
-        let model = q.model.map(|m| {
-            serde_json::to_value(m)
-                .expect("Model serializes")
-                .as_str()
-                .expect("Model serializes to a string")
-                .to_string()
-        });
+        let model = model_to_column(q.model);
         self.connection().execute(
             "INSERT INTO working_tree_queue(
                  scope_key, role, session, thread, message, model, depth, priority, enqueued_at
@@ -1470,6 +1529,114 @@ impl ChatStore {
         let removed = self
             .connection()
             .execute("DELETE FROM working_tree_queue WHERE id = ?1", params![id])?;
+        Ok(removed == 1)
+    }
+
+    /// **Record that `entry` was taken off the queue and could not be started** (nxf 6j6v.br25), as
+    /// its `attempts`-th failed attempt, with `error` and the instant the tick may try again
+    /// (`retry_at`, `None` for no further automatic attempt). The first failure inserts the row and
+    /// stamps `first_failed_at`; a later one updates it in place. See the `failed_starts` table for
+    /// why the row carries the trigger's inputs.
+    pub fn note_failed_start(
+        &mut self,
+        entry: &QueuedTrigger,
+        attempts: u32,
+        error: &str,
+        retry_at: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        let now = to_utc_rfc3339(now)?;
+        let enqueued_at = to_utc_rfc3339(entry.enqueued_at.as_deref().unwrap_or(&now))?;
+        let retry_at = retry_at.map(to_utc_rfc3339).transpose()?;
+        self.connection().execute(
+            "INSERT INTO failed_starts(
+                 session, scope_key, role, thread, message, model, depth, priority, enqueued_at,
+                 first_failed_at, last_failed_at, attempts, error, retry_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12, ?13)
+             ON CONFLICT(session) DO UPDATE SET
+                 last_failed_at = excluded.last_failed_at,
+                 attempts = excluded.attempts,
+                 error = excluded.error,
+                 retry_at = excluded.retry_at",
+            params![
+                entry.session,
+                entry.scope_key,
+                entry.role,
+                entry.thread,
+                entry.message,
+                model_to_column(entry.model),
+                entry.depth,
+                entry.priority as i64,
+                enqueued_at,
+                now,
+                attempts,
+                error,
+                retry_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The failed start recorded for `session`, if any.
+    pub fn failed_start(&self, session: &str) -> Result<Option<FailedStart>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!("SELECT {FAILED_START_COLS} FROM failed_starts WHERE session = ?1"),
+                params![session],
+                failed_start_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Every recorded failed start, oldest failure first — what `nxc status` attributes to its
+    /// operations and what `withdraw` looks through.
+    pub fn failed_starts(&self) -> Result<Vec<FailedStart>> {
+        let conn = self.connection();
+        let mut st = conn.prepare(&format!(
+            "SELECT {FAILED_START_COLS} FROM failed_starts ORDER BY first_failed_at, session"
+        ))?;
+        let rows = st
+            .query_map([], failed_start_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// **Claim the failed starts whose retry is due at `now`** (nxf 6j6v.br25), and hand back the
+    /// trigger each one is to fire again. The claim clears `retry_at` in the same statement that
+    /// reads the row (`UPDATE … RETURNING`), so two ticks that overlap cannot both start one
+    /// session: the second finds nothing due. A claimed retry that fails again records a new
+    /// `retry_at` (or none) through [`Self::note_failed_start`].
+    pub fn claim_due_failed_starts(&mut self, now: &str) -> Result<Vec<QueuedTrigger>> {
+        let now = to_utc_rfc3339(now)?;
+        let conn = self.connection();
+        let mut st = conn.prepare(
+            "UPDATE failed_starts SET retry_at = NULL
+              WHERE retry_at IS NOT NULL AND retry_at <= ?1
+              RETURNING 0, scope_key, role, session, thread, message, model, depth, priority,
+                        enqueued_at",
+        )?;
+        let mut rows = st
+            .query_map(params![now], queued_trigger_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.sort_by(|a, b| {
+            (a.priority as i64, &a.enqueued_at, &a.session).cmp(&(
+                b.priority as i64,
+                &b.enqueued_at,
+                &b.session,
+            ))
+        });
+        Ok(rows)
+    }
+
+    /// Forget the failed start of `session`, reporting whether there was one. Called when the
+    /// session is started after all (the trigger funnel), when a retry put the trigger back in the
+    /// queue, and when `withdraw` discards it — `false` there means somebody else got to it first.
+    pub fn forget_failed_start(&mut self, session: &str) -> Result<bool> {
+        let removed = self.connection().execute(
+            "DELETE FROM failed_starts WHERE session = ?1",
+            params![session],
+        )?;
         Ok(removed == 1)
     }
 
