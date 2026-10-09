@@ -38,7 +38,7 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
             step % 24
         ));
         let (a, b) = (id(r.next(n)), id(r.next(n + 1)));
-        match r.next(15) {
+        match r.next(16) {
             0 => s.create_item(&a, "task", "T", "u"),
             1 => s.set_field(&a, "status", Some("in_progress".into()), "u"),
             2 => {
@@ -101,6 +101,34 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
                         [LinkRelation::WorkedOn, LinkRelation::Cited][r.next(2) as usize];
                     let weight = [LinkWeight::Bearing, LinkWeight::Passing][r.next(2) as usize];
                     s.add_thread_link(&thread, &a, relation, weight, "u");
+                }
+            }
+            // Chunks (6j6v.c0kn): appends to two fields, and now and then a supersede of a random
+            // part of what this replica sees — with a chunk the other replica wrote, once merged.
+            14 => {
+                // `doc` is a prefix of `doc2`: the server's per-field range must not mix them.
+                let (field, other) = [("doc", "doc2"), ("doc2", "doc")][r.next(2) as usize];
+                let mut live: Vec<String> = s
+                    .chunks_of(&a, field)
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| c.id)
+                    .collect();
+                // Now and then also a chunk of the OTHER field and one nobody wrote: a supersede
+                // names ids, it does not check them, and neither may hide anything it should not.
+                if r.next(4) == 0 {
+                    live.extend(s.chunks_of(&a, other).unwrap().into_iter().map(|c| c.id));
+                    live.push(format!("nobody-{step}"));
+                }
+                let replaced: Vec<&str> = live
+                    .iter()
+                    .filter(|_| r.next(2) == 0)
+                    .map(String::as_str)
+                    .collect();
+                if replaced.is_empty() || r.next(3) != 0 {
+                    s.append_chunk(&a, field, &format!("c{step}"), "u");
+                } else {
+                    s.supersede_chunks(&a, field, &replaced, &format!("m{step}"), "u");
                 }
             }
             _ => s.set_custom_field_merge(

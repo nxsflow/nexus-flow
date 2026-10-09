@@ -2,20 +2,21 @@
 //!
 //! Two replicas write generated boards — tickets in every status, archived and deleted ones, defer
 //! dates, dependencies and parents with removes, labels, notes and redactions, custom fields,
-//! thread links — and merge. The merged log is then folded twice: locally, through the SQLite
-//! applier, in the order the replica took it in; and through this crate into a [`MemTable`], in a
-//! SHUFFLED order with ops delivered twice, as a relay without deduplication hands them over. Every
-//! row of every view table, every lane of the library and both dated lanes must come out the same,
-//! and the incrementally kept indexes must be exactly what a full reindex computes.
+//! thread links, chunks and supersedes — and merge. The merged log is then folded twice: locally,
+//! through the SQLite applier, in the order the replica took it in; and through this crate into a
+//! [`MemTable`], in a SHUFFLED order with ops delivered twice, as a relay without deduplication
+//! hands them over. Every row of every view table, every lane of the library and both dated lanes
+//! must come out the same, and the incrementally kept indexes must be exactly what a full reindex
+//! computes.
 
 use nexus_flow_core::graph;
 use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
 use nexus_flow_core::task_reducer::TaskReducer;
-use nxs_fold_ddb::board;
 use nxs_fold_ddb::fold::Folder;
 use nxs_fold_ddb::mem::{ready, MemTable};
 use nxs_fold_ddb::table::{text, Dated};
+use nxs_fold_ddb::{board, chunks};
 use nxs_foundation::reducer::Reducer;
 use std::collections::BTreeMap;
 
@@ -43,6 +44,7 @@ fn sql_ids(s: &Store, sql: &str) -> Vec<String> {
 fn the_server_fold_in_any_order_answers_as_the_local_fold() {
     let folder = Folder::platform().unwrap();
     let mut active_seen = 0;
+    let mut chunks_seen = 0;
     for seed in 0..120 {
         let s = merged(seed);
         let t = serve(&s, seed, &folder);
@@ -55,6 +57,18 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
                 "{table}, {ctx}"
             );
         }
+
+        // An item's live chunks, read the way each side reads them (6j6v.c0kn).
+        for item in sql_ids(&s, "SELECT DISTINCT item_id FROM chunks") {
+            for field in ["doc", "doc2"] {
+                assert_eq!(
+                    ready(chunks::chunks(&t, &item, field)).unwrap(),
+                    s.chunks_of(&item, field).unwrap(),
+                    "chunks of {item}/{field}, {ctx}"
+                );
+            }
+        }
+        chunks_seen += sql_ids(&s, "SELECT chunk_id FROM chunk_superseded").len();
 
         let local = graph::select(s.connection()).unwrap().lanes(NOW);
         let served = ready(board::select(&t)).unwrap();
@@ -97,6 +111,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
         assert_eq!(recomputed.len(), kept.len(), "{ctx}");
     }
     assert!(active_seen > 0, "the generated boards have active tickets");
+    assert!(chunks_seen > 0, "the generated boards supersede chunks");
 }
 
 #[test]
@@ -282,4 +297,115 @@ fn a_flip_costs_one_query_and_three_reads_per_edge_and_no_more() {
             .len(),
         n as usize
     );
+}
+
+#[test]
+fn chunk_ops_past_every_bound_fold_on_neither_applier_and_stop_nothing() {
+    // 6j6v.c0kn: ops no write seam would build, as a peer that skipped it could push them — a
+    // chunk over MAX_CHUNK_BYTES, a supersede naming an id past MAX_CHUNK_ID_BYTES (a key the
+    // server could not store), one naming MAX_SUPERSEDED + 1 ids, one with no payload separator,
+    // an item id and an op id past the id bound. Both appliers must leave every one unfolded,
+    // agree row for row, refuse nothing on the server, and fold the valid ops around them.
+    use nexus_flow_core::model::{MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED};
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", "task", "T", "u");
+    let kept = s.append_chunk("ab12.0001", "doc", "kept", "u");
+    let template = s.export().into_iter().find(|o| o.op_id == kept).unwrap();
+
+    let long_id = "i".repeat(MAX_CHUNK_ID_BYTES + 1);
+    let many: Vec<String> = (0..=MAX_SUPERSEDED).map(|i| format!("x{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let hostile = |n: i64, f: &dyn Fn(&mut nexus_flow_core::model::Op)| {
+        let mut op = template.clone();
+        op.op_id = format!("hostile-{n}");
+        op.site = 9;
+        op.lamport = 100 + n;
+        op.key_id = None;
+        op.sig = None;
+        f(&mut op);
+        op
+    };
+    let supersede = |ids: &[&str]| nexus_flow_core::model::supersede_value(ids, "p");
+    let ops = vec![
+        hostile(1, &|o| o.value = Some("x".repeat(MAX_CHUNK_BYTES + 1))),
+        hostile(2, &|o| {
+            o.op_type = "supersede".into();
+            o.value = Some(supersede(&[&kept, &long_id]));
+        }),
+        hostile(3, &|o| {
+            o.op_type = "supersede".into();
+            o.value = Some(supersede(&many));
+        }),
+        hostile(4, &|o| {
+            o.op_type = "supersede".into();
+            o.value = Some(kept.clone());
+        }),
+        hostile(5, &|o| o.target_id = "a".repeat(MAX_CHUNK_ID_BYTES + 1)),
+        hostile(6, &|o| o.op_id = "o".repeat(MAX_CHUNK_ID_BYTES + 1)),
+    ];
+    s.apply(&ops);
+    s.append_chunk("ab12.0001", "doc", "after", "u");
+
+    let t = MemTable::new("stream-1");
+    let refused = ready(folder.fold_batch(&t, &common::delivered(&s, 7))).unwrap();
+    assert!(
+        refused.is_empty(),
+        "the server refused nothing: {refused:?}"
+    );
+    for table in ["chunks", "chunk_superseded"] {
+        assert_eq!(
+            served_rows(&t, &folder, table),
+            sqlite_rows(&s, table),
+            "{table}"
+        );
+    }
+    let bodies = |chunks: Vec<nexus_flow_core::model::Chunk>| -> Vec<String> {
+        chunks.into_iter().map(|c| c.body).collect()
+    };
+    assert_eq!(
+        bodies(s.chunks_of("ab12.0001", "doc").unwrap()),
+        ["kept", "after"]
+    );
+    assert_eq!(
+        bodies(ready(chunks::chunks(&t, "ab12.0001", "doc")).unwrap()),
+        ["kept", "after"]
+    );
+}
+
+#[test]
+fn chunks_converge_on_both_appliers_in_every_sampled_order() {
+    // A fixed log — two writers, a supersede across both, a supersede of a superseded chunk —
+    // folded by the server in 64 seeded orders with duplicates, each against the local fold.
+    let folder = Folder::platform().unwrap();
+    let mut a = Store::open_in_memory(1);
+    a.create_item("ab12.0001", "task", "T", "u");
+    let mut b = Store::open_in_memory(2);
+    b.apply(&a.export());
+    let a1 = a.append_chunk("ab12.0001", "doc", "a1", "u");
+    let b1 = b.append_chunk("ab12.0001", "doc", "b1", "u");
+    a.apply(&b.export());
+    let m1 = a.supersede_chunks("ab12.0001", "doc", &[&a1, &b1], "m1", "u");
+    let a2 = a.append_chunk("ab12.0001", "doc", "a2", "u");
+    a.supersede_chunks("ab12.0001", "doc", &[&m1, &a2], "m2", "u");
+    a.append_chunk("ab12.0001", "doc2", "elsewhere", "u");
+    let local = a.chunks_of("ab12.0001", "doc").unwrap();
+    assert_eq!(
+        local.iter().map(|c| c.body.as_str()).collect::<Vec<_>>(),
+        ["m2"]
+    );
+
+    for seed in 0..64 {
+        let t = serve(&a, seed, &folder);
+        assert_eq!(
+            ready(chunks::chunks(&t, "ab12.0001", "doc")).unwrap(),
+            local,
+            "seed {seed}"
+        );
+        assert_eq!(
+            ready(chunks::chunks(&t, "ab12.0001", "doc2")).unwrap(),
+            a.chunks_of("ab12.0001", "doc2").unwrap(),
+            "seed {seed}"
+        );
+    }
 }

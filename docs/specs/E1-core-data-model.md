@@ -68,10 +68,10 @@ operation log** is the single source of truth. It unifies three concerns:
 | `op_id` | TEXT PK | ULID of the writing replica → globally unique, time-sortable per replica. In OR-sets it also serves as the add tag. |
 | `lamport` | INTEGER | Lamport counter of the replica (counted past everything merged in). |
 | `site` | INTEGER | Replica/site id (tiebreak). |
-| `target_kind` | TEXT | `item` \| `edge` \| `note` |
+| `target_kind` | TEXT | `item` \| `edge` \| `note` \| `chunk` (§3.2) |
 | `target_id` | TEXT | Item id; edge composite `{from}{to}{kind}`; or note id. |
 | `field` | TEXT | Affected attribute (`title`, `status`, `present`, `body`, …). |
-| `op_type` | TEXT | `set` (LWW) \| `add` / `remove` (OR-set) \| `note_add`. |
+| `op_type` | TEXT | `set` (LWW) \| `add` / `remove` (OR-set) \| `note_add` \| `append` / `supersede` (chunks). |
 | `value` | TEXT/NULL | New value (NULL allowed). For `remove`: list of observed add tags. |
 | `author` | TEXT | Who (for display). |
 | `wall_clock` | TEXT | Timestamp **for display only**; canonical ordering remains `(lamport, site)`. |
@@ -99,6 +99,26 @@ backed by the Automerge differential oracle (see §8).
   required by the vision for dependencies; the spike had simplified this to an LWW bool).
 - **Grow-only notes**: each note is a `note_add` with immutable content; redaction via a
   separate LWW `deleted` field on the note (tombstone), not an edit.
+- **Opaque chunks** (added 2026-10-08, `6j6v.c0kn`): a product hangs a growing set of chunks the
+  engine never reads on a named chunk field of an item — the transport for, say, a text CRDT's
+  updates, which the client puts together. Ops: `target_kind = chunk`, `target_id` = the item,
+  `field` = the chunk field (1–64 of `[A-Za-z0-9_.-]`).
+  - `append`: `value` is the chunk. It joins the field's grow set under the op's `op_id` — the
+    chunk's id.
+  - `supersede`: `value` is the ids it replaces, joined by U+001F, then U+001E, then the new
+    chunk. The new chunk joins the set like an append, and each named id joins the field's
+    grow-only *replaced* set. A chunk is live while no supersede of the same item and field names
+    it, so the fold is a set by `op_id`: idempotent, order-independent, and a supersede that
+    arrives before a chunk it names still hides it. This is how a writer compacts what it
+    appended, and why it must: every chunk is an op in a bounded stream.
+  - A chunk op's `value` holds at most `MAX_CHUNK_BYTES` (300 KiB), each id it names (its item,
+    its own op id, each replaced id) at most `MAX_CHUNK_ID_BYTES` (128 bytes), and a supersede
+    replaces at most `MAX_SUPERSEDED` (1024) chunks: the write seam refuses anything past them, and
+    the reducer stores-not-folds one that arrives anyway, on every replica and on a server alike.
+    These are fold semantics — changing one goes with a fold revision.
+  - Views `chunks` / `chunk_superseded`, keyed `(item_id, field, …)`; read with
+    `Engine::chunks` (a replica) or `nxs_fold_ddb::chunks::chunks` (a server). Never a note, never
+    in `show`, search, history or MCP text, and a chunk does not change its item's `updated_at`.
 
 ### 3.3 Materialized Views
 
