@@ -834,9 +834,9 @@ mod tests {
     }
 
     /// A relay whose log was rebuilt — here, deduplicated, as cleaning up a DynamoDB stream
-    /// doubled before 6j6v.tm4k would — renumbers every entry after the first duplicate. A snapshot's position
-    /// then points somewhere else, and trusting it would skip ops. The anchor catches it, and the
-    /// replica pulls from the start instead: slower, never short.
+    /// doubled before 6j6v.tm4k would — renumbers every entry after the first duplicate. A
+    /// snapshot's position then points somewhere else, and trusting it would skip ops. The anchor
+    /// catches it, and the replica pulls from the start instead: slower, never short.
     #[test]
     fn a_position_the_relay_does_not_confirm_is_pulled_from_the_start_instead_of_trusted() {
         let doubled = Relay::new(1, 100);

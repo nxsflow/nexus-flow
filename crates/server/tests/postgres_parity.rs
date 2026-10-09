@@ -32,6 +32,8 @@ use nxs_server::store_pg::{PostgresOpStore, OPSTORE_LOCK_CLASS, REGISTRY_LOCK_CL
 use nxs_sync::protocol::{Cursor, MachineHello, RegisterOutcome, StreamId};
 
 mod common;
+#[path = "support/idempotence.rs"]
+mod idempotence;
 
 use common::{base_url, isolated_url, wire, wire_from_a_newer_client};
 
@@ -108,6 +110,14 @@ fn opstore_parity_postgres_matches_sqlite() {
         sqlite_trace, pg_trace,
         "Postgres op store must be observably identical to SQLite"
     );
+}
+
+#[test]
+fn postgres_appends_idempotently_by_op_id() {
+    let Some(base) = base_url("postgres_appends_idempotently_by_op_id") else {
+        return;
+    };
+    idempotence::assert_idempotent_append(&pg_opstore(&base), wire, true);
 }
 
 #[test]

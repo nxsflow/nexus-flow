@@ -17,10 +17,10 @@
 //! **Ops table** — `NXF_RELAY_DDB_TABLE`, default `nxf_stream_ops`. PK `stream_id` (S),
 //! SK `seq` (N):
 //!
-//! | `seq`  | item                        | attributes                                     |
-//! |--------|-----------------------------|------------------------------------------------|
-//! | `0`    | the per-stream counter      | `next_seq` (N) — the highest seq handed out    |
-//! | `>= 1` | one op                      | one attribute per [`WireOp`] field (see below) |
+//! | `seq`  | item                         | attributes                                               |
+//! |--------|------------------------------|----------------------------------------------------------|
+//! | `0`    | the per-stream counter       | `next_seq` (N) — the highest seq handed out              |
+//! | `>= 1` | one op                       | one attribute per [`WireOp`] field (see below)           |
 //! | `< 0`  | one op's claim (`6j6v.tm4k`) | `op_id` (S), `op_seq` (N) — the seq that op is stored at |
 //!
 //! An op item's attributes are named exactly as the `WireOp` field: `envelope_version` (N),
@@ -68,8 +68,8 @@
 //! envelope attributes, so item-to-`WireOp` conversion fails on them. A reader must constrain
 //! the query to `seq > 0`, as [`DynamoDbOpStore::read_since`] does. The same holds for a
 //! consumer of a DynamoDB stream on this table: an item with `seq <= 0` is bookkeeping, never
-//! an op. Sequence numbers are unique and monotone but
-//! **not** dense: see the allocation section below.
+//! an op. Sequence numbers are unique and monotone but **not** dense: see the allocation
+//! section below.
 //!
 //! # Design notes
 //!
@@ -124,8 +124,10 @@
 //! What it costs and where it differs from the other two backends:
 //!
 //! * **The re-push still burns a seq.** The seq is allocated before the transaction finds the
-//!   claim taken, so a duplicate leaves a gap where SQLite leaves none. Gaps are already normal
-//!   here (above), and nothing reads density.
+//!   claim taken, so a duplicate leaves a gap where SQLite leaves none — and every round a writer
+//!   loses to a concurrent transaction burns one more, which is why such a round first reads the
+//!   claim and then backs off before it allocates again. Gaps are already normal here (above),
+//!   and nothing reads density.
 //! * **Ops stored before the claim items existed have none.** Re-pushing such an op stores it
 //!   once more, with a claim this time; every later re-push is then absorbed.
 //! * **The claim key is a 63-bit hash, so two op ids can share it.** The claim records the op
@@ -323,7 +325,8 @@ const COUNTER_SEQ: i64 = 0;
 /// is a number (`seq` is `N`); SHA-256, not `std`'s hasher, because the key is stored and must
 /// come out the same from every build that ever reads it. Two op ids sharing a key is handled,
 /// not ruled out (see the module doc).
-fn claim_seq(op_id: &str) -> i64 {
+#[doc(hidden)] // public only so the DynamoDB Local suite plants a claim at the real key
+pub fn claim_seq(op_id: &str) -> i64 {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(op_id.as_bytes());
     let mut head = [0u8; 8];
@@ -340,13 +343,15 @@ const APPEND_ATTEMPTS: u32 = 32;
 /// Outcome of one conditional-put attempt at an allocated seq. `Collided` means the
 /// caller should allocate a fresh seq and try again — never overwrite what is already
 /// there. `Existing` means the op was already stored, at the seq it carries: the append is
-/// done, and that seq is its answer. `PartialEq`/`Debug` exist for [`classify_put_error`]'s
-/// unit tests.
+/// done, and that seq is its answer. `Conflicted` means the transaction lost to a concurrent one
+/// or to capacity: wait ([`claim_backoff`]), then allocate afresh. `PartialEq`/`Debug` exist for
+/// [`classify_put_error`]'s unit tests.
 #[derive(Debug, PartialEq, Eq)]
 enum PutOutcome {
     Written,
     Collided,
     Existing(i64),
+    Conflicted,
 }
 
 /// Classify a failed `PutItem` on the op table: a `ConditionalCheckFailedException` is the
@@ -381,12 +386,15 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = StoreResult<(i64, PutOutcome)>>,
 {
-    for _ in 0..APPEND_ATTEMPTS {
+    for attempt in 0..APPEND_ATTEMPTS {
         let (seq, outcome) = cycle().await?;
         match outcome {
             PutOutcome::Written => return Ok(Cursor(seq)),
             PutOutcome::Existing(stored) => return Ok(Cursor(stored)),
             PutOutcome::Collided => continue,
+            // Writers re-pushing the same op all contend on its one claim key; retrying in
+            // lockstep would burn a seq per round for each of them. Doubling, as the registry.
+            PutOutcome::Conflicted => tokio::time::sleep(claim_backoff(attempt)).await,
         }
     }
     Err(StoreError(format!(
@@ -634,22 +642,34 @@ impl DynamoDbOpStore {
         let op_code = reasons.get(1).and_then(|r| r.code());
         match classify_append_cancellation(claim_code, op_code) {
             Ok(AppendCancellation::Claimed) => {
-                match Self::claimed(client, table, stream_id, claim).await? {
+                match Self::read_claim(client, table, stream_id, claim).await? {
                     Some((claimed_for, stored)) if claimed_for == op_id => {
                         Ok(PutOutcome::Existing(stored))
                     }
                     // The key is another op id's: store this op without a claim.
-                    Some(_) => Self::try_put_op(client, table, stream_id, seq, op).await,
-                    None => Err(StoreError(format!(
-                        "append: the claim for op {op_id:?} at {claim} in stream {stream_id:?} \
-                         was reported taken but cannot be read back"
-                    ))),
+                    Some((claimed_for, _)) => {
+                        eprintln!(
+                            "nxf-relay: op {op_id:?} shares its claim key {claim} with op \
+                             {claimed_for:?} in stream {stream_id:?}; stored without a claim, \
+                             so a re-push of it is stored again"
+                        );
+                        Self::try_put_op(client, table, stream_id, seq, op).await
+                    }
+                    // Reported taken, read back absent: nothing deletes a claim today, so this is
+                    // a race with something that does. Try again rather than fail the push.
+                    None => Ok(PutOutcome::Collided),
                 }
             }
-            // A conflict is retried like a taken seq: the next round draws a fresh one, and if
-            // the conflicting transaction was this op's own re-push, finds its claim taken.
-            Ok(AppendCancellation::SeqTaken | AppendCancellation::Retryable) => {
-                Ok(PutOutcome::Collided)
+            Ok(AppendCancellation::SeqTaken) => Ok(PutOutcome::Collided),
+            // The transaction that won may have been this op's own re-push: if its claim now
+            // stands, that is the answer, and no further seq is burnt.
+            Ok(AppendCancellation::Retryable) => {
+                match Self::read_claim(client, table, stream_id, claim).await? {
+                    Some((claimed_for, stored)) if claimed_for == op_id => {
+                        Ok(PutOutcome::Existing(stored))
+                    }
+                    _ => Ok(PutOutcome::Conflicted),
+                }
             }
             Err(msg) => {
                 // The service's own sentences (an item past 400 KB, say) are carried along:
@@ -669,7 +689,7 @@ impl DynamoDbOpStore {
     /// Read the claim at `claim`: the op id it was written for and the seq that op is stored
     /// at. A strongly consistent `Query` on the exact key rather than a `GetItem`, so the op
     /// table's role needs no action it did not already have.
-    async fn claimed(
+    async fn read_claim(
         client: &Client,
         table: &str,
         stream_id: &str,
@@ -1442,6 +1462,32 @@ mod tests {
         .expect_err("a hard error surfaces");
         assert_eq!(calls.get(), 1, "no retry on a non-collision failure");
         assert!(err.to_string().contains("table gone"));
+    }
+
+    #[test]
+    fn a_conflicted_round_backs_off_and_then_allocates_afresh() {
+        // A lost transaction is retried after a pause, not in lockstep — and still with a fresh
+        // seq: the stand-in hands out 1, 2, 3 and lands the third.
+        let calls = std::cell::Cell::new(0i64);
+        let started = std::time::Instant::now();
+        let cursor = drive(append_with_retry("s", || {
+            let seq = calls.get() + 1;
+            calls.set(seq);
+            async move {
+                let outcome = if seq < 3 {
+                    PutOutcome::Conflicted
+                } else {
+                    PutOutcome::Written
+                };
+                Ok((seq, outcome))
+            }
+        }))
+        .expect("the third attempt lands");
+        assert_eq!(cursor, Cursor(3));
+        assert!(
+            started.elapsed() >= claim_backoff(0) + claim_backoff(1),
+            "both conflicted rounds waited their backoff"
+        );
     }
 
     #[test]
