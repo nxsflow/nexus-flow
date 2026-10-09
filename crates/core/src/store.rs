@@ -1599,7 +1599,7 @@ mod tests {
         let b1 = b.append_chunk("g.X", "doc", "b1", "y");
         a.apply(&b.export());
         let merged = a.supersede_chunks("g.X", "doc", &[&a1, &a2, &b1], "a1+a2+b1", "x");
-        let a3 = a.append_chunk("g.X", "doc", "a3", "x");
+        a.append_chunk("g.X", "doc", "a3", "x");
         a.append_chunk("g.X", "other", "elsewhere", "x");
 
         let ops = a.export();
@@ -1632,11 +1632,10 @@ mod tests {
         let (sup, rest): (Vec<_>, Vec<_>) = ops.iter().cloned().partition(|o| o.op_id == merged);
         d.apply(&sup);
         for op in rest {
-            d.apply(&[op.clone()]);
+            d.apply(std::slice::from_ref(&op));
             d.apply(&[op]);
         }
         assert_eq!(chunk_bodies(&d, "g.X", "doc"), expected);
-        let _ = a3;
     }
 
     #[test]
