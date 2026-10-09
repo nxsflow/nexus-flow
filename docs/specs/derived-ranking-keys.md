@@ -1,6 +1,6 @@
 # Derived ranking keys — ranking over the graph, declared by the plugin (6j6v.e354)
 
-**Status: DRAFT for owner approval.** Nothing here is built until the owner approves this document.
+**Status: decided by the owner on 2026-10-09** (§10). The cuts that build it are listed in §11.
 Fourth cut of `6j6v.kfs7` (cut with the owner on 2026-10-09). The three cuts before it add the
 plumbing this one ranks with:
 
@@ -85,10 +85,18 @@ deterministic.
 `mentioned_by` with `type = "project"` IS the requester's "mention frequency": the number of items of
 that type with a `mentions` edge to the candidate.
 
-### 3.3 `sum` — several counts as one value
+### 3.3 `sum` — several counts as one value (decided §10.3)
 
-Only if the owner wants it (open question 3): `{ sum = [<count>, <count>], dir = "desc" }`. Case 2
-reads more naturally as one combined weight than as two keys in sequence.
+```toml
+{ sum = [ { count = "mentioned_by", type = "project" },
+          { count = "mentioned_by", type = "action", label = "waiting", status = ["open", "in_progress"] } ],
+  dir = "desc" }
+```
+
+The listed counts are added with equal weight and compared as one value. A summand takes only the
+parts of a `count`; `dir` belongs to the `sum`. An optional `weight` per summand is deliberately
+LEFT OUT. The syntax keeps room for it, so adding it later breaks no declaration. It comes when
+real data shows that equal weights rank badly.
 
 ## 4. `"rank"` of a neighbour, and why it terminates
 
@@ -102,10 +110,11 @@ by its goals' rank. Load-time rules keep this finite and cheap:
 - **Ranks are computed bottom-up, once per query.** First the types nothing depends on, then their
   dependents. Each type's rank is a dense position over its items. A neighbour's rank is therefore
   a lookup, never a recursion.
-- **The scope of "rank" is the type's candidates under the same verb rules.** For `next` these are
-  the actionable items of that type. For `list` they are the items `list` would return for that
-  type without paging. A neighbour outside that scope (closed, archived, deleted, or a goal `next`
-  would not list) has no rank and reads as null. The same rule makes the server agree (§6).
+- **The scope of "rank" is the type's candidates under the verb that ranks it.** For `next` these
+  are the actionable items of that type. For `list` they are the live items of that type that
+  `list` would return without paging (not deleted; archived only where `list` includes them). A
+  neighbour outside that scope has no rank and reads as null. For example: a closed project under
+  `next`, or a deleted person. The server follows the same rule (§6).
 
 ## 5. Cost
 
@@ -124,15 +133,39 @@ derived key pays nothing.
 `nxs-fold-ddb` answers `next` from a sparse index of ACTIVE tickets through `graph::Board`
 (6j6v.k7w7). Derived keys must give the same order there.
 
-- `Board` gains the edge kinds the keys need (`contributes_to`, `mentions`) and each ticket's type,
-  status, labels and the fields the keys read.
-- **The rule that makes this possible is the one `Board` already has:** a counterpart that is not an
-  active ticket counts as absent. For `next` that is exactly §4's scope.
-- For `list` it is not. A person is long-lived and may be in a status `next` never sees. A
-  server-side `list` with derived keys therefore needs either a second index of the types `list`
-  ranks, or a rule that `list` ranks only active items (open question 4).
-- A differential test holds the SQL path and the `Board` path to the same order on generated
-  boards, as for the lanes today.
+**`next`.**
+- `Board` gains the edge kinds the keys need (`contributes_to`, `mentions`), and each ticket's
+  type, status, labels and the fields the keys read.
+- The rule that makes this possible is the one `Board` already has: a counterpart that is not an
+  active ticket counts as absent, which is exactly §4's scope for `next`.
+
+**`list` needs a second index (decided §10.4).** Objects that `list` ranks, such as a person, are
+long-lived and have no "active" status. If they did, they would rank through `next`, and `list`
+would not be needed for them. So the server cannot rank them from the `active` index. The table
+gains a second sparse index, keyed by type:
+
+| what | name | type | role |
+|---|---|---|---|
+| GSI `typed` | `nxf_typed` / `sk` | S/S | `<stream>#<type>` on every LIVE item row (not deleted). Projection ALL. One Query lists a type's items. |
+
+- **Kept by the fold like `active`.** Every write to an item's `type` or `deleted` cell sets or
+  removes the attribute. It is replay-safe in the same way: the attribute is written after the row.
+- **Generic.** The fold indexes every live item by its type, so it needs no plugin knowledge of
+  which types `list` ranks. The price is one index write per item, not only for the ranked types.
+- **Edges.** A derived key on a `list`-ranked type reads that item's `contributes_to` and `mentions`
+  neighbours, and the counts read their inbound edges. Today the adjacency entries (`.adj#`) are
+  kept only for `dep`/`parent` edges that touch an active ticket. They are widened to every present
+  edge of a kind some key names, between live items. That widening is the open design work of the
+  server cut (§11), together with what it costs per edge write.
+- **Archived items.** They are in the index, because they are live. `list` filters them at read,
+  as it does locally.
+- **It changes the table contract.** The deploying stack (the web package's CDK) must add the GSI
+  before a fold that writes `nxf_typed` runs against it. A fold against a table without the index
+  still writes the attribute, which costs nothing. Only the `list` read needs the index. The
+  rollout order is therefore: the stack first, then the read.
+
+A differential test holds the SQL path and the server path to the same order on generated boards,
+for `next` and for `list`, as for the lanes today.
 
 ## 7. Validation at load
 
@@ -162,14 +195,15 @@ order = [
 
 [ranking.list.person]
 order = [
-  { count = "mentioned_by", type = "project", dir = "desc" },
-  { count = "mentioned_by", type = "action", label = "waiting", status = ["open", "in_progress"], dir = "desc" },
+  { sum = [ { count = "mentioned_by", type = "project" },
+            { count = "mentioned_by", type = "action", label = "waiting", status = ["open", "in_progress"] } ],
+    dir = "desc" },
   { related = "contributes_to", type = "project", of = "rank", pick = "min", nulls = "last" },
 ]
 ```
 
 `order` on a goal stands for the field that carries the goals' declared sequence: a custom field
-the plugin declares (`plugin-custom-fields.md`) or the priority (open question 2).
+the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
 
 ## 9. Tests
 
@@ -182,12 +216,31 @@ the plugin declares (`plugin-custom-fields.md`) or the priority (open question 2
 - **Bounded cost:** a ratio guard in the style of `xn8s`. A query with derived keys runs the edge
   pass once, not once per candidate.
 
-## 10. Open questions for the owner
+## 10. Decisions (owner, 2026-10-09)
 
-1. **Approve superseding the tiers spec's non-goal** (§0)?
-2. **What carries a goal's "declared order"?** A custom field (proposal: the plugin declares a
-   numeric field, here called `order`), or the priority? The engine needs no answer; the requester's
-   plugin does.
-3. **Combined weight for persons:** two keys in sequence (§8 as written), or a `sum` (§3.3)?
-4. **`list` on the server:** does a hosted `list` with derived keys need a second index, or may it
-   rank only active items, as `next` does? Locally both work; this only decides the server.
+1. **The tiers spec's non-goal is superseded** (§0): derived keys become part of the ranking
+   language; the tiers stay. The alternatives were declined. A separate mechanism outside
+   `[ranking.*]` would be two ways to the same thing. Ranking only in the product would give a
+   paging order (15ed) that is not the order the product shows.
+2. **A goal's declared order is a plugin custom field** (for example a numeric `order`), read with
+   `of = { field = ... }`. `of = "rank"` stays available, so the product can move to ranking goals
+   by their own order without an engine change. The engine is indifferent; the product's plugin
+   decides.
+3. **Persons rank by `sum`** (§3.3), equal weights, `weight` left out until data asks for it.
+   Strictly sequential keys were declined: one more mention would always beat any number of open
+   waiting-fors.
+4. **A hosted `list` with derived keys uses a second index** (§6, GSI `typed`). Ranking only active
+   items was declined: the objects `list` ranks have no active status by design. If they had one,
+   they would rank through `next`, and `list` would not be needed. Leaving `list` unranked on the
+   server was declined because the product reads through the hosted path.
+
+## 11. Cuts
+
+- **Derived keys, local.** The three key kinds, load-time validation and the type chain over the
+  SQL path. Usable in `next` (after `z9jk`) and `list` (after `n698`).
+- **Derived keys on the server, `next`.** `graph::Board` with the extra edges and fields; the
+  differential test.
+- **The `typed` index and a ranked hosted `list`.** The GSI, the widened adjacency, the read, and
+  the table-contract note for the deploying stack, coordinated with app-foundations.
+- **Shared with `6j6v.q29p`.** The reverse mention lookup and `count = "mentioned_by"` use one
+  implementation.
