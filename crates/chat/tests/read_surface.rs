@@ -668,7 +668,13 @@ const SURFACE: &[Member] = &[
                    that held the working copy, that its work is to be parked",
             by: &["status"],
         },
-        causes: Causes::Nothing,
+        causes: Causes::OnlyWhatWasCommissioned {
+            starts: "the round queued behind the working copy, when what it takes back held the \
+                     copy or was a failed start that still owed an answer: it asks the release \
+                     question once the threads are discharged, and a release starts what was \
+                     queued behind the copy (nxf 6j6v.br25)",
+            commissioned_by: "send_to",
+        },
         why: "THE THIRD WRITE, added by nxf 6j6v.0djn, and since nxf 6j6v.12nn it is here BY THE \
               CRITERION rather than by widening a count. It takes back a commission that is still \
               PARKED behind the working-copy lease — no session has started, no transcript exists, \
@@ -685,17 +691,17 @@ const SURFACE: &[Member] = &[
               pin the claim; the human line says in as many words that the work is \"waiting to \
               park\". \
               \
-              AGAINST THE CRITERION — can it cause work that was not already commissioned? It \
-              causes NONE, and that is the source's answer rather than this row's: no path out of \
-              it reaches the spawn funnel, which is the one place a session is ever started — \
-              measured again after the running case landed, and the measurement is what found the \
-              two edges the by-name join had invented (see [`chat_sources`]; neither the \
-              discharge of the chain a withdrawal interrupts, nor the park preconditions, nor the \
-              service finding reaches a spawn path). The \
-              running case makes the point sharper, not weaker: the one process-level act it \
-              performs is a STOP, the opposite of a start, and the park that follows is the \
-              tick's, not this call's — the hand-off it causes there starts only what was already \
-              queued behind the copy, exactly as any release does. \
+              AGAINST THE CRITERION — can it cause work that was not already commissioned? NO, \
+              but since nxf 6j6v.br25 it can START work, and the source says so: it reaches the \
+              spawn funnel. A failed start it takes back may be the very thing the working copy \
+              is held for, so once the threads are discharged it asks the release question every \
+              other end of a chain asks, and a release starts the round queued behind the copy. \
+              That round is a `send_to` someone made earlier, which is why the row passes the \
+              criterion — `session_ended`'s reason, not a new one. Until br25 no path out of it \
+              reached the spawn funnel (measured after the running case landed; that measurement \
+              found the two edges the by-name join had invented, see [`chat_sources`]). The \
+              running case still makes the point: the one process-level act it performs there is \
+              a STOP, the opposite of a start, and the park that follows is the tick's. \
               \
               WHAT IT DOES WRITE, said here because \"it only takes something away\" is the loose \
               kind of argument this rule replaced: it removes the queue entry, retargets the \
@@ -1096,8 +1102,9 @@ const THE_TWO_WAYS_TO_SPEAK: &[&str] = &["reply_thread", "send_to"];
 /// The writes admitted by the CRITERION rather than by the count — the receipt of that category,
 /// not its gate (nxf 6j6v.12nn).
 ///
-/// The gate is the criterion, held row by row against the source: `withdraw` and `name_thread`
-/// reach no spawn path at all. This list exists for [`THE_RECORDED_AND_UNREADABLE`]'s reason one
+/// The gate is the criterion, held row by row against the source: `name_thread` reaches no spawn
+/// path at all, and `withdraw` starts only the round queued behind the working copy it lets go
+/// (since nxf 6j6v.br25), which `send_to` had commissioned. This list exists for [`THE_RECORDED_AND_UNREADABLE`]'s reason one
 /// rule over — an admission that joins in silence is the next broken assurance — and each of these
 /// two was an owner decision with an item behind it (`6j6v.0djn`, `6j6v.e76c`).
 ///

@@ -559,7 +559,43 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          -- A session interrupted, taken up, and interrupted again is the case the append-only table
          -- exists for, and a plain unique index would forbid exactly that.
          CREATE UNIQUE INDEX IF NOT EXISTS session_interruption_one_open
-             ON session_interruption(session) WHERE resumed_at IS NULL;",
+             ON session_interruption(session) WHERE resumed_at IS NULL;
+
+         -- **A queued trigger the release took off the queue and could NOT start** (nxf
+         -- 6j6v.br25). Measured in the `agents` workspace on 0.205.1: the lease went, four queued
+         -- rounds were taken off the queue, every start failed on a transient timeout, and nothing
+         -- anywhere held them any more — `withdraw` found nothing waiting, `status` showed stale
+         -- threads with no reason, and the only record was a line in the service's stderr log.
+         --
+         -- The row carries the trigger's raw INPUTS (the `working_tree_queue` columns, same
+         -- encodings) so the tick can fire it again exactly as the release would have, plus what
+         -- went wrong: `attempts` so far, the latest `error` (cut to a bounded length), and
+         -- `retry_at` — the instant the tick may try again, NULL when no further automatic attempt
+         -- is due (the bound is reached, or the failure is not one waiting can fix).
+         -- `in_flight_until` is set while a tick's retry is starting it, so a `withdraw` racing that
+         -- start does not discard it; a claim also pushes `retry_at` to the same instant, so a
+         -- process that dies mid-retry leaves a row that falls due again. Both instants are stored
+         -- in whole UTC seconds. It goes when the session is started (the trigger funnel forgets
+         -- it), when a retry puts it back in the queue, or when `withdraw` discards it. Keyed by the
+         -- internal session: one session, one trigger that failed. Device-local for the queue's own
+         -- reason.
+         CREATE TABLE IF NOT EXISTS failed_starts(
+             session         TEXT PRIMARY KEY,
+             scope_key       TEXT NOT NULL,
+             role            TEXT NOT NULL,
+             thread          TEXT,
+             message         TEXT NOT NULL,
+             model           TEXT,
+             depth           INTEGER NOT NULL,
+             priority        INTEGER NOT NULL,
+             enqueued_at     TEXT NOT NULL,
+             first_failed_at TEXT NOT NULL,
+             last_failed_at  TEXT NOT NULL,
+             attempts        INTEGER NOT NULL,
+             error           TEXT NOT NULL,
+             retry_at        TEXT,
+             in_flight_until TEXT
+         );",
     )?;
     // The M2 sparse-key minor (spec §7): a pre-M2 `threads` table lacks the `deadline` LWW columns.
     // `CREATE TABLE IF NOT EXISTS` above is a no-op for it, so add the columns in place. Idempotent —
@@ -1224,6 +1260,7 @@ mod tests {
             "park_refusals",
             "withdrawn_holders",
             "withdrawn_sessions",
+            "failed_starts",
         ] {
             let n: i64 = conn
                 .query_row(

@@ -1103,6 +1103,18 @@ pub fn trigger_role(
         );
     }
 
+    // **…and it is no longer a start that failed** (nxf 6j6v.br25). Whichever way this session got
+    // going — the tick's retry, a reply into its thread, a resume — the `START FAILED` record is
+    // about a process that now exists. After the spawn for the reason the line above gives: a spawn
+    // the worker refused started nothing, and the record stays true. A no-op for every session no
+    // start ever failed for.
+    if let Err(e) = store.forget_failed_start(&internal_session) {
+        eprintln!(
+            "warning: session {internal_session} was started, but forgetting that an earlier start \
+             of it failed did not work ({e}); `nxc status` may still show it as START FAILED"
+        );
+    }
+
     // **AFTER the spawn, and that is the whole meaning of the row** (nxf 6j6v.pkw9): it holds the
     // version the last spawn of this role RAN under, so a trigger the worker refused must not
     // advance it. Recording before would make the very next spawn compare against a version nothing
@@ -2002,10 +2014,11 @@ fn expired_but_still_writing(
 /// conversation can do it, never any reply anywhere.
 ///
 /// **Nothing here may fail the reply.** The reply is persisted and durable by the time this runs, so
-/// every failure — the store read, the release, the promoted trigger's own spawn — is a breadcrumb
-/// and an `Ok`, exactly as [`trigger_and_bind`] and every wake site in this module already treat
-/// theirs. The general place for a failed consequence to become VISIBLE to a caller is nxf
-/// 6j6v.hq71; this is deliberately the narrow slice.
+/// no failure here may turn into the caller's error. Since nxf 6j6v.br25 none is a bare breadcrumb
+/// either: what the release did comes back as the [`Promotions`] (`None` when it did not release),
+/// a promoted trigger that could not be started is recorded and reported in them
+/// ([`note_the_failed_start`]), and [`ask_the_release`] — which every caller goes through — turns
+/// an `Err` from the reads into a [`ConsequenceClass::LeaseUndecided`] finding on the receipt.
 ///
 /// **"Nothing is outstanding" is not the same as "the claim thread is CLOSED", and both are asked**
 /// (nxf 6j6v.1xw1, question (3) below). An escalating reply — and an open question — discharges the
@@ -2064,13 +2077,13 @@ fn release_working_tree_if_scope_is_done(
     ctx: &Ctx,
     store: &mut ChatStore,
     thread_id: &str,
-) -> Result<()> {
+) -> Result<Option<Promotions>> {
     let Some(holder) = store.working_tree_holder(ctx.now)? else {
-        return Ok(());
+        return Ok(None);
     };
     // An unparseable key is left alone rather than guessed at — see [`WorkScope::parse`].
     let Some(scope) = WorkScope::parse(&holder) else {
-        return Ok(());
+        return Ok(None);
     };
     // ONE resolution of the claim area, for all three questions below (branch review of nxf
     // 6j6v.1xw1, Minor 8). Since that item the area is a SUBTREE, so resolving it costs a read of
@@ -2087,10 +2100,10 @@ fn release_working_tree_if_scope_is_done(
     // mutation of it passed for exactly that reason during 6j6v.1xw1's fix round.
     let threads = store.work_scope_threads(&scope)?;
     if !threads.iter().any(|t| t == thread_id) {
-        return Ok(());
+        return Ok(None);
     }
     if store.threads_have_outstanding(&threads, ctx.now)? {
-        return Ok(());
+        return Ok(None);
     }
     // **A WITHDRAWN holder does not let go here** (nxf 6j6v.b9nf, requirement 8 of that item's
     // brief). The discharge `withdraw` performs leaves this claim area owing nothing — which is
@@ -2111,7 +2124,7 @@ fn release_working_tree_if_scope_is_done(
     // for this holder is not a hand-back it might be raced to but the park, which is the only thing
     // that moves this copy. One indexed read on a table with at most one row per claim.
     if store.withdrawn_holder(&holder)?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     // (3) …and was the claim HANDED BACK rather than closed? (nxf 6j6v.1xw1). Nothing being
     // outstanding is not the same as the claim thread being closed: an escalating reply — and an
@@ -2132,15 +2145,19 @@ fn release_working_tree_if_scope_is_done(
         if let Err(e) = note_the_contention(ctx, store) {
             eprintln!("warning: could not tell whether the working copy is contended: {e}");
         }
-        return Ok(());
+        return Ok(None);
     }
     // The whole claim area at the head, not one entry — see
     // [`ChatStore::release_working_tree_and_take_next`]. Every promoted entry is fired, and a
-    // failure on one is a breadcrumb that does NOT abandon the ones queued beside it: they share a
+    // failure on one is recorded and reported but does NOT abandon the ones queued beside it: they share a
     // scope, so they were always going to run together, and stopping at the first failure would
     // strand the rest exactly as popping a single entry used to.
-    release_and_fire(ctx, store, HandOff::Released(&scope), &holder)?;
-    Ok(())
+    Ok(Some(release_and_fire(
+        ctx,
+        store,
+        HandOff::Released(&scope),
+        &holder,
+    )?))
 }
 
 /// One trigger that had been parked behind the working-tree lease and has now been started
@@ -2203,6 +2220,13 @@ pub struct Promotions {
     /// The first cut of that item shipped exactly that breadcrumb and called this path "the one
     /// spawn path with no receipt to put it on". The receipt was here; what was missing was a field
     /// on it.
+    ///
+    /// **It also carries one [`ConsequenceClass::StartFailed`] per entry in
+    /// [`failed`](Self::failed)** (nxf 6j6v.br25), with the error and what happens next — the same
+    /// argument made for the same reader: a start that failed under the unattended tick was a
+    /// stderr line and nothing else. The paths whose receipt has no `Promotions` (a reply, a
+    /// session end, a tick that completed a channel) lift these into their own `warnings`
+    /// ([`ask_the_release`]).
     pub warnings: Vec<FailedConsequence>,
 }
 
@@ -2216,7 +2240,8 @@ impl Promotions {
     /// which is what [`sweep_expired_working_tree`] then has to arm a look for.
     ///
     /// [`warnings`](Self::warnings) is deliberately not consulted: it says what starting an entry
-    /// NOTICED, so it is only ever non-empty beside an entry that did start.
+    /// NOTICED, or that one could not be started, so it is only ever non-empty beside an entry in
+    /// [`started`](Self::started) or [`failed`](Self::failed).
     ///
     /// `pub(crate)` for `cli::sweep_headline`, which asks the same question of the same value
     /// (independent review of PR #478, Code Quality #2). It used to re-derive this by De Morgan
@@ -2388,14 +2413,15 @@ fn release_and_fire(
                     out.started.push(promoted);
                 }
                 Ok(TriggerAdmission::Queued { .. }) => out.requeued.push(promoted),
+                // **Recorded, reported, and retried when waiting can fix it** (nxf 6j6v.br25). This
+                // arm used to be a stderr line and nothing else, on every path that reaches it — so
+                // a start that failed under the background service was a line in a log file, the
+                // entry was off the queue, and nothing anywhere could find it again: measured in
+                // the `agents` workspace, four rounds orphaned by a transient timeout.
                 Err(e) => {
-                    eprintln!(
-                        "warning: the working tree was released by {held_by}, but the trigger \
-                         waiting for it (role {}, session {}) could not be started: {e}; its \
-                         message is persisted and its session is minted, but nothing is running \
-                         for it",
-                        entry.role, entry.session
-                    );
+                    let what = format!("the working tree was released by {held_by}, but");
+                    out.warnings
+                        .push(note_the_failed_start(ctx, store, entry, &what, &e));
                     out.failed.push(promoted);
                 }
             }
@@ -2418,6 +2444,362 @@ fn release_and_fire(
         held_by = granted_key;
         next = store.release_working_tree_and_take_next(&granted, ctx.now, &granted_until)?;
     }
+}
+
+/// **How many times a queued trigger is started before the background service stops trying** (nxf
+/// 6j6v.br25) — the first attempt, made by the release, plus two retries by the tick.
+///
+/// Measured: the failures that orphaned four rounds in the `agents` workspace were a 30-second
+/// timeout on `nxf prime` and a 60-second one on `git rev-parse`, on a project on an external
+/// volume; both commands took 2.3 s and 0.06 s a few minutes later. A retry a minute or two on is
+/// what that case needs. A failure that survives three attempts minutes apart is not the transient
+/// kind, and starting it again and again would only hide that — so past the bound the record stays
+/// for `nxc status` to show and `withdraw` to discard, and nothing retries it.
+pub const MAX_START_ATTEMPTS: u32 = 3;
+
+/// **How far apart the retries of a failed start are**, in seconds: the n-th failure is retried
+/// `n ×` this later — one minute after the first, two after the second. Its own constant rather than
+/// a borrowed liveness cadence (review of PR #32, Code Quality #5): the two answer different
+/// questions and may well move apart.
+const START_RETRY_SPACING_SECS: i64 = 60;
+
+/// **How long a claimed retry counts as in flight**, in seconds — the window in which `withdraw`
+/// leaves the row alone, and after which a retry whose process died falls due again
+/// ([`ChatStore::claim_due_failed_starts`]). Far longer than any start takes, short enough that a
+/// crashed retry is not lost for long.
+const START_RETRY_HOLD_SECS: i64 = 600;
+
+/// **Whether waiting can fix a failed start** — the one question the retry turns on.
+///
+/// An `io` error is the environment failing to carry the start out: a wall-clock timeout on a
+/// command the spawn runs, a lock, a disk that did not answer. That is what
+/// [`crate::worker::TriggerError::Failed`]'s own doc calls "worth retrying", and it is the kind the
+/// measured failure had: the bounded runner every bundled worker starts its commands through
+/// (`nxs_init::spawn`) reports a wall-clock breach as `NxfError::io`, and the field log printed it
+/// as `io: \`nxf prime …\` exceeded the 30s wall-clock timeout`. Every other kind is the call itself
+/// being wrong — a role deleted from the catalogue (`not_found`), a depth cap or a second start of a
+/// running session (`validation`), a refusal (`forbidden`) — and the same call a minute later meets
+/// the same answer. Asked of the KIND, never of the message: the message is for a human.
+///
+/// `io` also covers some failures waiting does not fix (a worker that cannot write its spec file at
+/// all). They cost [`MAX_START_ATTEMPTS`]` - 1` wasted ticks, bounded, and end in the same record.
+fn start_failure_is_transient(e: &NxfError) -> bool {
+    e.kind == crate::error::ErrorKind::Io
+}
+
+/// **Record a queued trigger that could not be started, decide whether it is retried, and say so**
+/// (nxf 6j6v.br25) — the one place both callers go through: the release's own first attempt
+/// ([`release_and_fire`]) and the tick's retry ([`retry_the_failed_starts`]).
+///
+/// `what` opens the sentence — who took the entry off the queue — and the rest is the same for both:
+/// the error, that nothing runs for it, and the one next step that applies (retried at an instant;
+/// not retried because waiting cannot fix it, because the bound is reached, or because the record or
+/// its instant could not be written), each naming `nxc withdraw` as the way to discard it. On stderr
+/// as well, for the reader with a terminal, as every finding in this module.
+///
+/// **The attempt count is the database's** ([`ChatStore::record_failed_start`]): it is never read
+/// here and written back, so a read that fails cannot restart it and defeat the bound.
+///
+/// **Best-effort writes, said when they fail.** The record and the timer are what make the entry
+/// visible and retried; neither may turn a failed start into a failed release, which has already
+/// committed. A record that could not be written is named in the finding, because without it
+/// `withdraw` cannot find the entry either.
+fn note_the_failed_start(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    entry: &QueuedTrigger,
+    what: &str,
+    e: &NxfError,
+) -> FailedConsequence {
+    let transient = start_failure_is_transient(e);
+    let thread = entry.thread.as_deref();
+    let withdraw = match thread.map(|t| store.thread_root(t)) {
+        Some(Ok(root)) => format!("`nxc withdraw --thread {root}` discards it"),
+        _ => "`nxc withdraw --thread <the operation's first thread>` discards it".to_string(),
+    };
+    let next = match store.record_failed_start(entry, &e.to_string(), ctx.now) {
+        Err(write) => format!(
+            "recording it for `nxc status` and `withdraw` failed ({write}), so neither will find \
+             it and nothing starts it again"
+        ),
+        Ok(_) if !transient => format!(
+            "waiting will not change this kind of failure, so nothing starts it again: `nxc \
+             status` shows it, and {withdraw}"
+        ),
+        Ok(attempts) if attempts >= MAX_START_ATTEMPTS => format!(
+            "it has now failed {attempts} time(s), the most this is retried, so nothing starts it \
+             again: `nxc status` shows it, and {withdraw}"
+        ),
+        Ok(attempts) => match schedule_the_retry(ctx, store, entry, attempts) {
+            Ok(at) => format!(
+                "the failure is one waiting can fix, so the background service starts it again \
+                     at {at} (attempt {} of {MAX_START_ATTEMPTS}); `nxc status` shows it until \
+                     then, and {withdraw}",
+                attempts + 1
+            ),
+            Err(why) => format!(
+                "the failure is one waiting can fix, but {why}, so nothing starts it again: \
+                     `nxc status` shows it, and {withdraw}"
+            ),
+        },
+    };
+    let detail = format!(
+        "{what} the trigger waiting for it (role {}, session {}) could not be started: {e}; its \
+         message is persisted and its session is minted, but nothing is running for it — {next}",
+        entry.role, entry.session
+    );
+    eprintln!("warning: {detail}");
+    FailedConsequence::start_failed(thread, Some(&entry.session), detail)
+}
+
+/// Give the `attempts`-th failure of `entry` its retry instant and arm the tick for it. `Err` says,
+/// as the end of a sentence, why no retry was scheduled; a timer that could not be armed is not one
+/// of those — the next tick from anywhere finds the row due, and the message says so.
+fn schedule_the_retry(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    entry: &QueuedTrigger,
+    attempts: u32,
+) -> std::result::Result<String, String> {
+    let at = facade::instant_after(
+        ctx.now,
+        time::Duration::seconds(START_RETRY_SPACING_SECS * i64::from(attempts)),
+        "the retry of a failed start",
+    )
+    .map_err(|e| format!("its retry instant could not be computed ({e})"))?;
+    store
+        .schedule_failed_start_retry(&entry.session, &at)
+        .map_err(|e| format!("its retry could not be recorded ({e})"))?;
+    if let Some(t) = entry.thread.as_deref() {
+        if let Err(arm) = ctx.timer.schedule(t, &at, &crate::timer::tick_command(t)) {
+            return Ok(format!(
+                "{at} (arming the tick for it failed: {arm}; the next tick from anywhere starts it)"
+            ));
+        }
+    }
+    Ok(at)
+}
+
+/// **Start again the queued triggers whose start failed and whose retry is due** (nxf 6j6v.br25) —
+/// run at the front of every [`tick`], beside the sweep, because the tick is the clock that
+/// [`note_the_failed_start`] armed.
+///
+/// Each one is fired through [`fire_queued_trigger`], exactly as the release fired it: it asks for
+/// the working copy again, so it starts if the copy is free or its own claim area's, and otherwise
+/// goes back in the queue with the place it had ([`TriggerAdmission::Queued`]) — no longer an
+/// orphan either way, so its record goes (the trigger funnel forgets it on a start, this function
+/// on a requeue). A retry that fails again is recorded again, with the next instant or none — and
+/// then the copy it may have just taken is handed on ([`hand_on_a_copy_nothing_runs_in`]).
+///
+/// The claim on a due row is taken before the fire ([`ChatStore::claim_due_failed_starts`]), so two
+/// overlapping ticks do not both start a session, a `withdraw` meanwhile leaves it alone, and a
+/// retry whose process dies falls due again.
+///
+/// **A trigger nobody is waiting for any more is not started** (review of PR #32, Integrity #5).
+/// The thread may have been answered or discharged since the start failed — by hand, or by
+/// something other than `withdraw`, which discards the record itself. The register is asked the
+/// question the release path's [`fire_queued_trigger`] asks ([`facade::owes_reply`]); a role that
+/// owes nothing there loses its record and is not started.
+///
+/// Returns what it has to say; it never fails the tick.
+fn retry_the_failed_starts(ctx: &Ctx, store: &mut ChatStore) -> Vec<FailedConsequence> {
+    let mut warnings = Vec::new();
+    let claimed = facade::instant_after(
+        ctx.now,
+        time::Duration::seconds(START_RETRY_HOLD_SECS),
+        "the hold on a claimed retry",
+    )
+    .and_then(|hold_until| store.claim_due_failed_starts(ctx.now, &hold_until));
+    let due = match claimed {
+        Ok(due) => due,
+        Err(e) => {
+            let detail = format!(
+                "the failed starts due for a retry could not be read ({e}); they stay recorded and \
+                 the next tick tries again"
+            );
+            eprintln!("warning: {detail}");
+            warnings.push(FailedConsequence::start_failed(None, None, detail));
+            return warnings;
+        }
+    };
+    for entry in due {
+        if entry.thread.is_some() {
+            match facade::owes_reply(
+                store,
+                entry.thread.as_deref(),
+                ctx.origin,
+                &entry.role,
+                ctx.now,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "note: the failed start of session {} (role {}) was due for a retry, but \
+                         its thread no longer waits for an answer from it; it is not started and \
+                         its record is removed",
+                        entry.session, entry.role
+                    );
+                    let _ = store.forget_failed_start(&entry.session);
+                    continue;
+                }
+                // Not knowing is not a reason to drop it: fire, as the release path would.
+                Err(_) => {}
+            }
+        }
+        match fire_queued_trigger(ctx, store, &entry) {
+            Ok(TriggerAdmission::Spawned {
+                declaration_changed,
+            }) => {
+                if let Some(finding) = declaration_changed {
+                    eprintln!("warning: {finding}");
+                    warnings.push(finding);
+                }
+            }
+            Ok(TriggerAdmission::Queued { .. }) => {
+                if let Err(e) = store.forget_failed_start(&entry.session) {
+                    eprintln!(
+                        "warning: the failed start of session {} is back in the queue, but its \
+                         record could not be removed ({e}); `nxc status` may still show it",
+                        entry.session
+                    );
+                }
+            }
+            Err(e) => {
+                warnings.push(note_the_failed_start(
+                    ctx,
+                    store,
+                    &entry,
+                    "a retry of a failed start was due, but",
+                    &e,
+                ));
+                warnings.extend(hand_on_a_copy_nothing_runs_in(ctx, store, &entry));
+            }
+        }
+    }
+    warnings
+}
+
+/// **A retry that took the working copy and then failed hands it on** (review of PR #32,
+/// Integrity #1).
+///
+/// [`trigger_role`] acquires the lease BEFORE the worker is asked, and a worker that refuses
+/// returns with the lease still written for the claim area. On the release path that cannot strand
+/// the copy — [`release_and_fire`] hands it on when nothing in a granted area started — but a retry
+/// fired by the tick had no such step: the copy stayed with an area in which nothing ran, and the
+/// queue behind it waited for the dead-holder sweep or the lease's bound.
+///
+/// So when the holder is the failed entry's own claim area and nothing in that area is running, the
+/// copy goes on exactly as [`release_and_fire`] would hand it on. **Only a worker that answers the
+/// liveness question may conclude "nothing runs"** — [`holder_is_provably_dead`]'s rule: "I never
+/// looked" is not evidence, and a sibling still writing in the tree must not lose it. Anything this
+/// could not decide is a [`ConsequenceClass::LeaseUndecided`] finding.
+fn hand_on_a_copy_nothing_runs_in(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    entry: &QueuedTrigger,
+) -> Vec<FailedConsequence> {
+    let anchor = entry.thread.clone().unwrap_or_default();
+    let handed = (|| -> Result<Option<Promotions>> {
+        if !ctx.worker.answers_liveness() {
+            return Ok(None);
+        }
+        let Some(holder) = store.working_tree_holder(ctx.now)? else {
+            return Ok(None);
+        };
+        if holder != entry.scope_key {
+            return Ok(None);
+        }
+        let Some(scope) = WorkScope::parse(&holder) else {
+            return Ok(None);
+        };
+        let threads = store.work_scope_threads(&scope)?;
+        if !sessions_still_running(ctx, store, &threads)?.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(release_and_fire(
+            ctx,
+            store,
+            HandOff::Released(&scope),
+            &holder,
+        )?))
+    })();
+    match handed {
+        Ok(Some(promotions)) => release_findings(promotions),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            let finding = FailedConsequence::lease_undecided(
+                &anchor,
+                format!(
+                    "a retry of session {} failed after it may have taken the working copy, and \
+                     whether the copy can go on could not be decided: {e}; it stays held until the \
+                     dead-holder sweep or the lease's bound moves it",
+                    entry.session
+                ),
+            );
+            eprintln!("warning: {finding}");
+            vec![finding]
+        }
+    }
+}
+
+/// **Ask whether the working copy may go, and report what came of it** (nxf 6j6v.br25) — the
+/// release question every path asks once its own work is done ([`reply`] twice, [`session_ended`],
+/// [`tick_the_thread`]), with its answer turned into findings for a receipt that carries no
+/// [`Promotions`] of its own.
+///
+/// Three things reach the caller this way, and before this function only the first did, on one
+/// path of four:
+///
+/// - the decision could not be made ([`ConsequenceClass::LeaseUndecided`]);
+/// - a promoted entry could not be started ([`ConsequenceClass::StartFailed`], already in
+///   [`Promotions::warnings`] beside what starting the others noticed);
+/// - a promoted entry went straight back into the queue ([`ConsequenceClass::StartRequeued`]).
+///
+/// `after` completes "could not decide whether the working copy may go after …".
+fn ask_the_release(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    after: &str,
+) -> Vec<FailedConsequence> {
+    let promotions = match release_working_tree_if_scope_is_done(ctx, store, thread) {
+        Ok(Some(promotions)) => promotions,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            let finding = FailedConsequence::lease_undecided(
+                thread,
+                format!(
+                    "could not decide whether the working copy may go after {after}: {e}; it \
+                     stays held until the lease's bound elapses"
+                ),
+            );
+            eprintln!("warning: {finding}");
+            return vec![finding];
+        }
+    };
+    release_findings(promotions)
+}
+
+/// What a release's [`Promotions`] has to say on a receipt that carries none of its own: its
+/// [`warnings`](Promotions::warnings) (what starting the entries noticed, and every start that
+/// failed), plus one [`ConsequenceClass::StartRequeued`] per entry that went straight back into the
+/// queue.
+fn release_findings(promotions: Promotions) -> Vec<FailedConsequence> {
+    let mut findings = promotions.warnings;
+    for p in &promotions.requeued {
+        let thread = (!p.thread.is_empty()).then_some(p.thread.as_str());
+        findings.push(FailedConsequence::start_requeued(
+            thread,
+            &p.session,
+            format!(
+                "the working copy was released and {} on thread {} was taken off the queue to \
+                 start, but by then the copy had moved on again, so it is waiting again in the \
+                 place it already had; nothing is running for it yet",
+                p.role, p.thread
+            ),
+        ));
+    }
+    findings
 }
 
 // `ReleaseReceipt` and `pub fn release_working_tree` were here — the manual "give the working copy
@@ -10357,7 +10739,32 @@ pub enum ConsequenceClass {
     /// elapses, the queue behind it waits — the symptom r91p was raised for, so it is said rather
     /// than left on the stderr of a sidecar that is exiting. [`FailedConsequence::thread`] is the
     /// ended session's slot; [`FailedConsequence::reason`] is `None`: nothing was being started.
+    ///
+    /// Since nxf 6j6v.br25 every path that asks the release question reports it this way — a reply,
+    /// a session end and a tick that completes a channel — not only the session end.
     LeaseUndecided,
+    /// **A queued trigger was taken off the queue and could NOT be started** (nxf 6j6v.br25). The
+    /// working copy was handed to its claim area, the start failed, and nothing is running for it;
+    /// its message is persisted and its session is minted. It is recorded where `nxc status` shows
+    /// it (`START FAILED` on its operation), the background service tries again when the failure
+    /// is one waiting can fix (an `io` error — a timeout, a busy disk), a bounded number of times,
+    /// and `nxc withdraw` on the operation discards it. The detail says which of those applies.
+    /// [`FailedConsequence::thread`] is the thread it owes its answer on,
+    /// [`FailedConsequence::session`] the minted session; [`FailedConsequence::reason`] is `None`.
+    ///
+    /// **Both `thread` and `session` are `None` in one case only**: the tick could not even read
+    /// which failed starts were due for a retry. That is the same consequence — recorded starts
+    /// that will not be started on this tick — for every one of them at once, and naming none is
+    /// the truth about which: the read that would name them is the one that failed.
+    StartFailed,
+    /// **A queued trigger was taken off the queue and went straight back into it** (nxf
+    /// 6j6v.br25) — [`Promotions::requeued`], reported on a receipt that carries no
+    /// [`Promotions`] of its own (a reply, a session end, a tick that completed a channel). The
+    /// release was expected to start it and did not: by the time it was fired the working copy was
+    /// no longer its claim area's. Nothing has to be done — it is in line with the place it had,
+    /// and `nxc status` shows it waiting — but a caller is told rather than left to assume it
+    /// started. Fields as for [`StartFailed`](Self::StartFailed).
+    StartRequeued,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -10391,7 +10798,46 @@ impl FailedConsequence {
         }
     }
 
-    /// The release question failed after a session end completed its chain (nxf 6j6v.r91p).
+    /// A queued trigger the release (or the tick's retry) took off the queue and could not start
+    /// (nxf 6j6v.br25). `thread` and `session` name it; both are `None` only when the failed-start
+    /// records could not be READ at all, so no single trigger can be named — see
+    /// [`ConsequenceClass::StartFailed`].
+    pub(crate) fn start_failed(
+        thread: Option<&str>,
+        session: Option<&str>,
+        detail: impl Into<String>,
+    ) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::StartFailed,
+            thread: thread.map(str::to_string),
+            session: session.map(str::to_string),
+            reason: None,
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
+    /// A queued trigger the release took off the queue and that went straight back into it (nxf
+    /// 6j6v.br25), reported on a receipt that carries no [`Promotions`] of its own.
+    pub(crate) fn start_requeued(
+        thread: Option<&str>,
+        session: &str,
+        detail: impl Into<String>,
+    ) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::StartRequeued,
+            thread: thread.map(str::to_string),
+            session: Some(session.to_string()),
+            reason: None,
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
+    /// The release question could not be answered (nxf 6j6v.r91p; since 6j6v.br25 on every path that
+    /// asks it). `thread` is the thread the question was asked for.
     pub(crate) fn lease_undecided(thread: &str, detail: impl Into<String>) -> Self {
         FailedConsequence {
             class: ConsequenceClass::LeaseUndecided,
@@ -10875,12 +11321,12 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
                             wake_skipped = Some(skip);
                         }
                     }
-                    if let Err(e) = release_working_tree_if_scope_is_done(ctx, store, tid) {
-                        eprintln!(
-                            "warning: could not decide whether the working-tree lease is releasable \
-                             after the reply in thread {tid}: {e}"
-                        );
-                    }
+                    warnings.extend(ask_the_release(
+                        ctx,
+                        store,
+                        tid,
+                        &format!("the reply in thread {tid}"),
+                    ));
                     return Ok(ReplyReceipt {
                         handed_to: None,
                         posted: true,
@@ -11216,15 +11662,15 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
     // be a named residual pinned by a characterisation test is now closed by construction, which is
     // what 6j6v.rp8k's own closing condition asked for.
     //
-    // Nothing in here may fail the reply: it is persisted and durable by now.
+    // Nothing in here may fail the reply: it is persisted and durable by now. What it could not do
+    // — decide, or start what was waiting — is on the receipt (nxf 6j6v.br25).
     if let Some(tid) = receipt.thread_id.as_deref() {
-        if let Err(e) = release_working_tree_if_scope_is_done(ctx, store, tid) {
-            eprintln!(
-                "warning: could not decide whether the working-tree lease is releasable after the \
-                 reply in thread {tid}: {e}; the reply IS posted, but a chain waiting for the \
-                 working copy may sit until the lease's own two-hour bound elapses"
-            );
-        }
+        also_failed.extend(ask_the_release(
+            ctx,
+            store,
+            tid,
+            &format!("the reply in thread {tid} (the reply IS posted)"),
+        ));
     }
 
     debug_assert_one_place(&also_failed, wake_skipped.as_ref());
@@ -12929,17 +13375,12 @@ pub fn session_ended(
     // question is answered. The early returns above skip it on purpose — no thread, no channel step:
     // nothing of a claimed chain ended there.
     let mut warnings = armed;
-    if let Err(e) = release_working_tree_if_scope_is_done(ctx, store, &thread) {
-        let finding = FailedConsequence::lease_undecided(
-            &thread,
-            format!(
-                "could not decide whether the working copy may go after session \
-                 {internal_session} ended: {e}; it stays held until the lease's bound elapses"
-            ),
-        );
-        eprintln!("warning: {finding}");
-        warnings.push(finding);
-    }
+    warnings.extend(ask_the_release(
+        ctx,
+        store,
+        &thread,
+        &format!("session {internal_session} ended"),
+    ));
     warnings.extend(run.warnings);
     Ok(SessionEndedReceipt {
         session: internal_session.to_string(),
@@ -14354,6 +14795,10 @@ pub struct WithdrawReceipt {
     /// queued — and then [`stopped`](Self::stopped) is not: a call that finds nothing waiting AND
     /// nothing running is a `not_found`, so a caller never has to tell "I took something back"
     /// from "there was nothing there" by inspecting two arrays' lengths.
+    ///
+    /// Since nxf 6j6v.br25 it also holds the commissions a release took off the queue and could not
+    /// start (`START FAILED` on `nxc status`), after the queued ones: they never started either, and
+    /// withdrawing one discards its record so the background service does not try it again.
     pub withdrawn: Vec<WithdrawnCommission>,
     /// Entries that were in the queue when this call looked and gone when it reached them — the
     /// release path took them in between, so they are RUNNING now and were deliberately not touched.
@@ -14535,6 +14980,21 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
                 .is_some_and(|t| area.iter().any(|in_area| in_area == t))
         })
         .collect();
+    // **A start that failed is a commission that never started** (nxf 6j6v.br25), and it is the
+    // case this verb used to answer "nothing is waiting or running" for: the release had taken it
+    // off the queue, so it was not parked, and its start had failed, so nothing ran. Measured in
+    // the `agents` workspace, where four such rounds could only be re-sent by hand beside the
+    // orphans. It is taken back exactly like a parked one — nothing ran, nothing is lost — and its
+    // record goes, so the tick does not start it again afterwards.
+    let failed: Vec<_> = store
+        .failed_starts()?
+        .into_iter()
+        .filter(|f| {
+            f.thread
+                .as_deref()
+                .is_some_and(|t| area.iter().any(|in_area| in_area == t))
+        })
+        .collect();
     // **The running half** (nxf 6j6v.b9nf): every unended session in the area that the worker says
     // has a live process — the same two reads, in the same order, as `sessions_still_running`.
     let running = sessions_running_under(ctx, store, &area)?;
@@ -14546,7 +15006,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
             && !r.state.is_final()
             && area.contains(&r.thread_id)
     });
-    if parked.is_empty() && running.is_empty() && !border_open {
+    if parked.is_empty() && failed.is_empty() && running.is_empty() && !border_open {
         // **A worker that cannot LOOK does not get to say nothing is running** (fix round 3 of this
         // item's review, Code Quality #7 (a)). `running` is empty for two different reasons: the
         // worker looked and found nothing, or the worker cannot look at all — a custom worker
@@ -14587,7 +15047,8 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         };
         return Err(NxfError::not_found(format!(
             "nothing under thread {thread_id} is waiting or running: no commission is queued \
-             behind the working copy and {nothing_running}, so there is nothing to withdraw"
+             behind the working copy or recorded as a start that failed, and {nothing_running}, \
+             so there is nothing to withdraw"
         )));
     }
     // **REFUSED WHOLE, before anything changes.** Asked here, after both reads and before the
@@ -14720,6 +15181,40 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
             session: entry.session,
         });
     }
+    let mut discarded_a_failed_start = false;
+    for entry in failed {
+        let thread = entry.thread.clone().unwrap_or_default();
+        // `false` is the race the queue loop above has too, from either side: a retry started it
+        // between the read and this write, or a retry has it IN FLIGHT right now (review of PR #32,
+        // Integrity #2) — so it is running, or about to be, and the next call finds it there. A
+        // row in flight is never discarded under the start that claimed it.
+        if !store.discard_failed_start(&entry.session, ctx.now)? {
+            started_meanwhile.push(thread);
+            continue;
+        }
+        discarded_a_failed_start = true;
+        // A FIXED sentence, never the worker's error (review of PR #32, Integrity #4): this message
+        // goes into the thread, which is synced, and the error is this machine's own text — a
+        // command line, a path. `nxc status` showed it here; the attempt count is enough there.
+        discharge_a_withdrawn_thread(
+            ctx,
+            store,
+            &thread,
+            &withdrawn_qualified,
+            &format!(
+                "[withdrawn by {withdrawn_by}] this commission for {} was taken off the queue to \
+                 start and could not be started ({} attempt(s)) — no session ran and nothing was \
+                 written; it is discarded",
+                entry.role, entry.attempts
+            ),
+            None,
+        )?;
+        withdrawn.push(WithdrawnCommission {
+            thread,
+            role: entry.role,
+            session: entry.session,
+        });
+    }
 
     // **The running round: discharge, then stop** (nxf 6j6v.b9nf), in that order on purpose. The
     // register saying the round is over is the part a person reads and the part every other path
@@ -14838,6 +15333,24 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         .chain(discharged.iter().cloned())
         .collect();
     interrupt_the_chain_above(ctx, store, thread_id, &taken_back, &withdrawn_qualified)?;
+
+    // **A discarded failed start can leave its claim area holding the copy with nothing in it**
+    // (review of PR #32, Integrity #1). The area keeps the lease while anything in it still owes —
+    // and the failed start's own thread owed until the line above discharged it. Measured with a
+    // parallel round whose second member started and finished while the first could not start:
+    // the finished member's end asked the release question, the failed member's thread still owed,
+    // and the copy stayed with an operation nothing ran in, the next commission queued behind it.
+    // Now that everything under this thread is discharged, the release question is asked as any
+    // other path asks it. Not when this call stopped a running holder: that copy is the tick's to
+    // park first, and the withdrawn-holder marker makes the release decline there anyway.
+    if discarded_a_failed_start && !holds_the_copy {
+        warnings.extend(ask_the_release(
+            ctx,
+            store,
+            thread_id,
+            &format!("the withdrawal of thread {thread_id}"),
+        ));
+    }
 
     for session in running {
         // **Three outcomes, and only one of them is a failure** (fix round 3 of this item's
@@ -15569,6 +16082,10 @@ fn tick_reporting_its_own_failures(
     // reason the two sweeps above do — it is about the WORKSPACE, and it must not depend on how the
     // channel half below decides, including its refusals.
     park_warnings.extend(sweep_held_deliveries(ctx, store));
+    // **The fourth, on the same terms** (nxf 6j6v.br25): the queued triggers whose start failed on
+    // something waiting can fix, once their instant has come. After the sweeps, so a copy they just
+    // freed is there to be taken.
+    park_warnings.extend(retry_the_failed_starts(ctx, store));
     let mut receipt = tick_the_thread(ctx, store, req)?;
     receipt.working_tree = sweep.swept;
     receipt.parked = park.parked;
@@ -15791,6 +16308,11 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
             ));
         }
         warnings.extend(run.warnings);
+        // **No release question here, deliberately** (nxf 6j6v.br25 asks it on the completion
+        // below). This branch either starts the next step — which registers its expectation, so the
+        // chain still owes — or, per the paragraph below, consolidates a settled set that
+        // ESCALATED, which question (3) of [`release_working_tree_if_scope_is_done`] declines by
+        // rule. Neither can let the working copy go, so asking would be a read that always says no.
         debug_assert_one_place(&warnings, run.wake_skipped.as_ref());
         // **`completed` used to be `None` on every path that reaches here, and since nxf 6j6v.ma7v
         // it is not.** The old reasoning was that `supervisor_consider_set` takes its ADVANCE branch
@@ -15897,6 +16419,18 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // later read (PR #265 review, Integrity & Robustness #1/#2) — and they are the parts that make
     // `acted: true` mean something.
     warnings.extend(routed.warnings);
+    // **The pull path completes a channel too, so it asks the release question too** (nxf
+    // 6j6v.br25). [`reply`] asks it after its own completion and [`session_ended`] after its
+    // reconsideration; this completion asked nothing, so a chain the TICK completed held the working
+    // copy until the lease's bound with the queue waiting behind it. After the routing, for
+    // [`reply`]'s step (6) reason: a follow-up the completion commissioned has registered its
+    // expectation by now and keeps the copy where it is.
+    warnings.extend(ask_the_release(
+        ctx,
+        store,
+        thread_id,
+        &format!("a tick completed thread {thread_id}"),
+    ));
     debug_assert_one_place(&warnings, routed.wake_skipped.as_ref());
     Ok(TickReceipt {
         thread_id: thread_id.to_string(),

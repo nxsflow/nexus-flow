@@ -927,6 +927,19 @@ pub struct StatusOperation {
     /// unaffected; a struct literal built outside the crate already could not name this type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<WithdrawnHolderStatus>,
+    /// **Commissions of this operation a release took off the queue and could not start** (nxf
+    /// 6j6v.br25) — every `failed_starts` row whose thread is in this tree, oldest failure first.
+    ///
+    /// Before this field such a commission was visible nowhere: off the queue, so not waiting;
+    /// never started, so not running; its threads stale with no process and no reason. Each entry
+    /// says how often its start failed, what the last attempt said, and when the background service
+    /// tries again (`retry_at`, absent once nothing will) — and `nxc withdraw` on this operation
+    /// discards it. An entry goes when its session starts, when a retry puts it back in the queue,
+    /// or when it is withdrawn.
+    ///
+    /// Empty for every operation where no start failed, and omitted from `--json` then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub start_failed: Vec<crate::working_tree::FailedStart>,
 }
 
 /// **The `withdrawn_holders` marker, as `nxc status` shows it** (nxf 6j6v.b9nf, Integrity #2 of this
@@ -3789,6 +3802,9 @@ pub fn status(
     // table that holds at most one row per claim, plus a worker call per session of the ONE claim
     // that wins attribution.
     let withdrawn = withdrawn_holders_for(store, worker, &id_list, &forest.root_of)?;
+    // Queued commissions whose start failed (nxf 6j6v.br25) — one statement over a table that is
+    // empty unless a start failed, attributed by the root of the thread each one owes its answer on.
+    let start_failed = failed_starts_for(store, &forest.root_of)?;
     // Answers held for a commissioner still mid-turn (nxf 6j6v.4gp2) — the twelfth read, one
     // statement over `pending_wakes`, which is empty unless an answer is on its way to a busy
     // session. It keeps such a sub-round "in flight" on its parent's row; see
@@ -3873,6 +3889,9 @@ pub fn status(
         let parked_here = parked.get(root).cloned().unwrap_or_default();
         let refused_here = park_refused.get(root).cloned();
         let withdrawn_here = withdrawn.get(root).cloned();
+        // A start that failed keeps its operation listed for `withdrawn`'s reason: it is the one
+        // thing a reader still has to act on, and every other signal may already be quiet.
+        let start_failed_here = start_failed.get(root).cloned().unwrap_or_default();
         let live = open > 0
             || needs_decision
             || border_live
@@ -3881,7 +3900,8 @@ pub fn status(
             || interrupted
             || !parked_here.is_empty()
             || refused_here.is_some()
-            || withdrawn_here.is_some();
+            || withdrawn_here.is_some()
+            || !start_failed_here.is_empty();
         // `--thread` shows the tree it was asked about and `--all` shows every tree, finished or
         // not; the two plain LISTING forms show only what is still going on.
         if matches!(scope, StatusScope::Threads(_) | StatusScope::All(_)) || live {
@@ -3902,6 +3922,7 @@ pub fn status(
                 parked: parked_here,
                 park_refused: refused_here,
                 withdrawn: withdrawn_here,
+                start_failed: start_failed_here,
             });
         }
     }
@@ -4113,6 +4134,24 @@ fn park_refusals_for(
         if newer {
             by_root.insert((*root).to_string(), note.clone());
         }
+    }
+    Ok(by_root)
+}
+
+/// **The failed starts of this report's operations, attributed by ROOT** (nxf 6j6v.br25) — each
+/// [`crate::working_tree::FailedStart`] belongs to the operation whose tree holds the thread it owes
+/// its answer on. A row with no thread (a session-scoped trigger, which holds no claim and is never
+/// queued in practice) or a thread outside this report's selection is left out.
+fn failed_starts_for(
+    store: &ChatStore,
+    root_of: &BTreeMap<&str, &str>,
+) -> Result<BTreeMap<String, Vec<crate::working_tree::FailedStart>>> {
+    let mut by_root: BTreeMap<String, Vec<crate::working_tree::FailedStart>> = BTreeMap::new();
+    for row in store.failed_starts()? {
+        let Some(root) = row.thread.as_deref().and_then(|t| root_of.get(t)) else {
+            continue;
+        };
+        by_root.entry((*root).to_string()).or_default().push(row);
     }
     Ok(by_root)
 }

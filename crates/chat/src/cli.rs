@@ -3444,6 +3444,13 @@ fn status(
             if op.withdrawn.is_some() {
                 marks.push("WITHDRAWN");
             }
+            // **The mark for a commission a release could not start** (nxf 6j6v.br25). Without it
+            // the operation printed stale threads and nothing else — the state the `agents`
+            // workspace found four rounds in, with `withdraw` and `resume` both answering that
+            // nothing was there. The lines under the header say what failed and what happens next.
+            if !op.start_failed.is_empty() {
+                marks.push("START FAILED");
+            }
             // The fourth reason an operation is listed, and the only one with no flag of its own on
             // the record (nxf 6j6v.1vxs): a dead end that FAILED. Derived from the rows the
             // operation already carries, exactly as the two above are derived at the seam — without
@@ -3536,16 +3543,36 @@ fn status(
 /// A withdrawn holder first (nxf 6j6v.b9nf, Integrity #2 of this item's review) — it explains why
 /// nothing else here has moved yet, and it is the state a reader has to act on if the sessions it
 /// names outlive a reasonable wait. Then a refused park (nxf 6j6v.8bv9) — the state of the copy NOW
-/// otherwise — then the operation's unresumed parks, newest first. An operation with none of the
-/// three prints nothing here, exactly as it always has; see [`StatusOperation::withdrawn`],
-/// [`StatusOperation::parked`] and [`StatusOperation::park_refused`] for the attribution rule.
+/// otherwise — then the operation's unresumed parks, newest first, then the commissions a release
+/// could not start (nxf 6j6v.br25). An operation with none of the four prints nothing here, exactly
+/// as it always has; see [`StatusOperation::withdrawn`], [`StatusOperation::parked`],
+/// [`StatusOperation::park_refused`] and [`StatusOperation::start_failed`] for the attribution rule.
 fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
     op.withdrawn
         .iter()
         .map(withdrawn_line)
         .chain(op.park_refused.iter().map(park_refused_line))
         .chain(op.parked.iter().map(parked_line))
+        .chain(
+            op.start_failed
+                .iter()
+                .map(|f| start_failed_line(f, &op.root)),
+        )
         .collect()
+}
+
+/// One commission a release could not start (nxf 6j6v.br25): who, how often, what the last attempt
+/// said, and the one next step that applies — the retry's instant, or the withdrawal.
+fn start_failed_line(f: &crate::working_tree::FailedStart, root: &str) -> String {
+    let thread = f.thread.as_deref().unwrap_or("-");
+    let next = match &f.retry_at {
+        Some(at) => format!("retrying at {at}; `nxc withdraw --thread {root}` discards it"),
+        None => format!("not retried; `nxc withdraw --thread {root}` discards it"),
+    };
+    format!(
+        "  start failed: {} on thread {thread} (session {}), {} attempt(s), last at {}: {} — {next}",
+        f.role, f.session, f.attempts, f.last_failed_at, f.error
+    )
 }
 
 /// One `nxc status` line for a round taken back on purpose, still waiting for its park: who
@@ -4480,6 +4507,35 @@ mod tests {
     }
 
     use super::*;
+
+    /// **The `START FAILED` detail line says who, how often, what, and what next** (nxf 6j6v.br25;
+    /// review of PR #32, Test Quality #7) — both next steps, each naming the withdrawal.
+    #[test]
+    fn a_failed_start_line_names_the_next_step() {
+        let mut f = crate::working_tree::FailedStart {
+            session: "s-1".into(),
+            role: "coder".into(),
+            thread: Some("m-2".into()),
+            attempts: 2,
+            error: "io: timed out".into(),
+            first_failed_at: "2026-10-08T16:39:00Z".into(),
+            last_failed_at: "2026-10-08T16:40:00Z".into(),
+            retry_at: Some("2026-10-08T16:42:00Z".into()),
+        };
+        assert_eq!(
+            start_failed_line(&f, "m-1"),
+            "  start failed: coder on thread m-2 (session s-1), 2 attempt(s), last at \
+             2026-10-08T16:40:00Z: io: timed out — retrying at 2026-10-08T16:42:00Z; `nxc \
+             withdraw --thread m-1` discards it"
+        );
+        f.retry_at = None;
+        assert!(
+            start_failed_line(&f, "m-1")
+                .ends_with("— not retried; `nxc withdraw --thread m-1` discards it"),
+            "{}",
+            start_failed_line(&f, "m-1")
+        );
+    }
 
     /// An anchor as the engine records one — full sha, a real branch, and a fingerprint.
     fn anchored(branch: &str, dirty: bool) -> crate::anchor::Anchor {

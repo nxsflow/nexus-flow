@@ -433,6 +433,12 @@ Die Kette darüber ist trotzdem unterbrochen, sie läuft also für sich, und die
 das: Sie nennt die Ausnahme und den Aufruf, der auch sie stoppt (`nxc withdraw --thread <id>` noch
 einmal).
 
+**Eine Beauftragung, deren Start fehlschlug.** Wird die Arbeitskopie weitergegeben, nimmt das System
+die Beauftragungen, die auf sie warten, aus der Warteschlange und startet sie. Schlägt ein Start fehl
+(`nxc status` markiert den Vorgang mit `START FAILED`), läuft nichts für sie, und `withdraw` nimmt sie
+zurück wie eine Beauftragung, die nie begonnen hat — sie steht unter `withdrew`, ihr Faden wird
+entlastet, und der Hintergrunddienst versucht sie nicht noch einmal.
+
 Ein Faden, unter dem nichts wartet und nichts läuft, ist ein `not_found`, das das sagt.
 
 ### `nxc resume --thread <THREAD>`
@@ -615,14 +621,21 @@ $ NXC_ACTOR=alice nxc status --all --json
 **Was „noch am Laufen" genau heißt**: Der Vorgang hat einen offenen Faden, oder eine unbeantwortete
 Rückgabe, oder die Arbeitskopie dieses Geräts, oder eine *gescheiterte* Sackgasse — einen Faden,
 dessen Antwort ankam und dessen Folge nie kam (`ORPHANED`, an der Vorgangszeile mit `· dead end`
-markiert). Zwei weitere halten ihn in der Liste, wenn sich alles andere an ihm erledigt hat:
+markiert). Drei weitere halten ihn in der Liste, wenn sich alles andere an ihm erledigt hat:
 **Arbeit, die auf einem Zweig geparkt ist und die niemand zurückgeholt hat** (eine Zeile
-`parked on <Zweig> at <Commit> since <Zeitpunkt>` unter dem Vorgang, `parked` in `--json`), und
+`parked on <Zweig> at <Commit> since <Zeitpunkt>` unter dem Vorgang, `parked` in `--json`),
 **ein abgelehntes Parken, das wiederholt wird** (die Markierung `· PARK REFUSED`, eine Zeile
 `park refused (<Ablehnung>): <was zu beheben ist> — retrying since <Zeitpunkt>`, `park_refused` in
-`--json`). Das sind die Dinge, an denen ein Leser etwas tun kann, und zusammen sind sie das
-Kennzeichen `live` an jedem ausgegebenen Vorgang. Beachten Sie, was *nicht*
-auf dieser Liste steht: eine Wurzel, die beantwortet und noch nicht gelesen ist. Das ist
+`--json`), und **eine wartende Beauftragung, deren Start fehlschlug** (die Markierung
+`· START FAILED`, eine Zeile `start failed: <Rolle> on thread <id> …` mit der Zahl der Versuche,
+dem letzten Fehler und entweder `retrying at <Zeitpunkt>` oder `not retried`, `start_failed` in
+`--json`). Wird die Arbeitskopie weitergegeben, startet das System die Beauftragungen, die auf sie
+warten; ein Start, der an einem `io`-Fehler scheitert — einer Zeitüberschreitung, einer belegten
+Platte —, wird vom Hintergrunddienst erneut versucht, insgesamt bis zu drei Mal, im Abstand von ein
+bis zwei Minuten. Jeder andere Fehler, oder einer, der diese Versuche übersteht, bleibt am Vorgang
+stehen, bis `nxc withdraw` ihn verwirft. Das sind die Dinge, an denen ein Leser etwas tun kann,
+und zusammen sind sie das Kennzeichen `live` an jedem ausgegebenen Vorgang. Beachten Sie, was
+*nicht* auf dieser Liste steht: eine Wurzel, die beantwortet und noch nicht gelesen ist. Das ist
 `awaiting_human`, und es hielt einen Vorgang früher in der Liste — womit nie etwas die Ansicht
 verließ, denn das Kennzeichen leitet sich aus Tatsachen ab, die nie aufhören zu gelten (die Wurzel
 hat gefragt; die Wurzel wurde beantwortet). Nach einem Tag echter Nutzung zeigte die Ansicht dreizehn
