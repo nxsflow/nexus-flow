@@ -120,7 +120,15 @@ Step 1  PUSH: local ops with rowid > pushed_through to the relay (append) — in
         the pull); advance pushed_through PER batch. The relay sets a deliberate
         request limit (DefaultBodyLimit + op-count cap, 413 on overflow); client
         pagination keeps every batch below it, so a large history is not
-        rejected (k64). A partial push leaves pushed_through exact → the next pass
+        rejected (k64). A page is split further so no body passes
+        protocol::MAX_PUSH_BYTES, the number both ends share (3gq0), and a
+        413 the relay answers anyway (a lower limit, a proxy) halves the batch
+        and tries again; one op too large to go alone stops the push there,
+        the pull still runs, and the pass fails naming that op
+        (SyncError::OpTooLarge, carrying what the pass moved), never cutting
+        it. This bounds the HTTP body only: an op a backend cannot store
+        (DynamoDB, 400 KB) is a server error today (6j6v.gwpc).
+        A partial push leaves pushed_through exact → the next pass
         resumes without pushing an op twice or skipping one.
 Step 2  PULL: read_since(stream_id, pulled_through) -> (WireOps, next_cursor);
         apply each op via core::apply() (dedup-by-op_id, §4.4);
