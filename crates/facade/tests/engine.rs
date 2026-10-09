@@ -1138,7 +1138,7 @@ fn a_chunk_op_of_exactly_the_limit_is_taken_and_folded_and_one_byte_more_is_refu
     let after: Vec<String> = live(&engine).into_iter().map(|c| c.id).collect();
     assert_eq!(
         after,
-        [merged.clone()],
+        std::slice::from_ref(&merged),
         "a supersede of exactly the limit folds"
     );
     assert_eq!(
