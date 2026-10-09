@@ -1017,6 +1017,11 @@ pub fn run_pass_announcing(
     meta.pulled_through = marks.pulled_through;
     save(ws, &meta)?;
 
+    // An op too large to push still let the pass pull: the machine was here and synced what it
+    // could, so it announces itself before the pass reports the stuck op (6j6v.3gq0).
+    if let (Err(engine::SyncError::OpTooLarge { .. }), Some(hello)) = (&result, hello) {
+        let _ = transport.announce(&stream, hello);
+    }
     let outcome = result.map_err(|e| NxfError::io(format!("sync failed: {e}")))?;
 
     let presence = hello.map(|hello| match transport.announce(&stream, hello) {

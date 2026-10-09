@@ -60,8 +60,9 @@ const DEFAULT_LIMIT: usize = 500;
 /// Explicit, intentional ceiling on a single push request body, in bytes. Makes the
 /// request size a deliberate contract rather than relying on axum's implicit default; an
 /// over-limit body is rejected by the [`DefaultBodyLimit`] layer with 413 before a handler
-/// runs (k64).
-const MAX_PUSH_BYTES: usize = 8 * 1024 * 1024;
+/// runs (k64). The number lives in the protocol, because the client engine sizes its push
+/// batches under the same one (6j6v.3gq0).
+const MAX_PUSH_BYTES: usize = nxs_sync::protocol::MAX_PUSH_BYTES;
 
 /// The body ceiling of the presence route. A valid announcement is under 300 bytes; without its own
 /// limit the route inherited [`MAX_PUSH_BYTES`] and an anonymous caller could make the relay buffer
@@ -73,9 +74,8 @@ const MAX_PRESENCE_BYTES: usize = 4 * 1024;
 /// ops can be well under the byte ceiling yet still amount to an abusive op count. It sits
 /// ABOVE the client's push page size (`SYNC_PAGE_LIMIT`, 500) so a client that paginates
 /// push into bounded batches never trips the OP-COUNT cap; a giant batch is rejected with
-/// 413 instead of forcing unbounded per-request work. (Note: client pagination bounds the
-/// op COUNT only — a page of unusually large-bodied ops could still hit the byte ceiling;
-/// byte-aware sub-pagination is tracked as nexus-flow-7qe.)
+/// 413 instead of forcing unbounded per-request work. The client splits a page further when its
+/// body would pass [`MAX_PUSH_BYTES`] (6j6v.3gq0), so a page of large ops trips neither axis.
 pub const MAX_PUSH_OPS: usize = 1000;
 
 /// Build the relay router over the op log + registry, on the system clock. Loopback, no auth (a
