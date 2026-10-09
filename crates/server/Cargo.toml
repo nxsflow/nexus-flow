@@ -34,8 +34,9 @@ postgres = [
 # build host, so a contributor without those cannot compile `--features dynamodb` at all
 # (`cargo build` and `cargo test` without the feature are unaffected).
 # `tokio/time` is required, not incidental: the registry's bounded retry after a
-# TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry).
-dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "tokio/time"]
+# TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry). `sha2` derives
+# the range key of an op's claim item, which makes append idempotent (store_ddb::claim_seq).
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "dep:sha2", "tokio/time"]
 
 [dependencies]
 # Wire types ONLY — no `engine` feature, so core's fold code never enters this graph.
@@ -77,6 +78,7 @@ rustls-pemfile = { version = "2", optional = true }
 # rather than bending the trait toward async.
 aws-sdk-dynamodb = { version = "1", optional = true }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
+sha2 = { version = "0.10", optional = true }
 
 [[example]]
 name = "managed-pg"
