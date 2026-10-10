@@ -23,6 +23,7 @@
 //! defaults `now` to the clock. [`Caller`] is what is left over: who is calling, and nothing that
 //! can be derived from that.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -1833,7 +1834,7 @@ fn the_queue_goes_before_a_newcomer(
     // Who the copy is about to go to — read for the SENTENCE and not for a decision: the park runs
     // either way (see this function's doc), and what the queue changes is only whether the finding a
     // refusal carries says "something else is waiting" or "this trigger is taking it over".
-    let waiting = store.peek_working_tree_queue()?.is_some();
+    let waiting = store.first_waiting_for_the_working_tree()?.is_some();
     let who = if waiting {
         "and something else is waiting for the copy"
     } else {
@@ -2173,6 +2174,16 @@ pub struct PromotedTrigger {
     pub session: String,
 }
 
+impl PromotedTrigger {
+    fn of(entry: &QueuedTrigger) -> Self {
+        PromotedTrigger {
+            thread: entry.thread.clone().unwrap_or_default(),
+            role: entry.role.clone(),
+            session: entry.session.clone(),
+        }
+    }
+}
+
 /// What a release actually promoted: the entries that started, the ones that went back in line, and
 /// the ones nothing will come back for.
 ///
@@ -2201,6 +2212,13 @@ pub struct Promotions {
     /// claims a session is working while the trigger is sitting in a queue" is what
     /// [`TriggerAdmission`] exists to make impossible.
     pub requeued: Vec<PromotedTrigger>,
+    /// **Put back in line because it is a later step of an ordered run** (nxf 6j6v.9g8j): an
+    /// earlier step of the same run was started beside it, or is still running. Nothing is running
+    /// for it. It waits in the queue under the key that now holds the copy, in the place it already
+    /// had, and starts once the step before it is over ([`start_the_steps_whose_turn_has_come`]).
+    /// It is not a failure and needs nothing done about it. It is reported because a receipt that
+    /// listed only the started steps would hide where the rest of the run went.
+    pub deferred: Vec<PromotedTrigger>,
     /// Taken off the queue and NOT started: the lease is gone, the entry is gone, and nothing is
     /// running for it. Its message is persisted and its session is minted, so this names what a
     /// reader has to go and look at.
@@ -2231,7 +2249,8 @@ pub struct Promotions {
 }
 
 impl Promotions {
-    /// **Nothing left the queue** — no entry started, none went back in line, none failed on the way.
+    /// **Nothing left the queue** — no entry started, none went back in line, none was put back to
+    /// wait for an earlier step of its run, none failed on the way.
     ///
     /// For a hand-off that reached its reclaim, this is exactly the compare-and-swap having LOST:
     /// the queue was not empty (every caller that asks has just peeked a head), so a reclaim that
@@ -2248,7 +2267,10 @@ impl Promotions {
     /// because it could not reach the method — correct then, and nothing would have kept the two
     /// forms in step the day [`Promotions`] gains a field.
     pub(crate) fn nothing_moved(&self) -> bool {
-        self.started.is_empty() && self.requeued.is_empty() && self.failed.is_empty()
+        self.started.is_empty()
+            && self.requeued.is_empty()
+            && self.deferred.is_empty()
+            && self.failed.is_empty()
     }
 }
 
@@ -2375,56 +2397,46 @@ fn release_and_fire(
             return Ok(out);
         };
         let (started_before, requeued_before) = (out.started.len(), out.requeued.len());
-        for entry in &next {
-            let promoted = PromotedTrigger {
-                thread: entry.thread.clone().unwrap_or_default(),
-                role: entry.role.clone(),
-                session: entry.session.clone(),
-            };
-            match fire_queued_trigger(ctx, store, entry) {
-                // EXHAUSTIVE, with no `_` arm: a third admission is a compile error right here, so
-                // whoever adds one has to decide what it means for a receipt — the same
-                // construction `working_tree::hands_the_task_back` uses, and for the same reason. A
-                // wildcard would sort the next answer into "started", which is the bug this arm
-                // pair was written to fix.
-                Ok(TriggerAdmission::Spawned {
-                    declaration_changed,
-                }) => {
-                    // **On the receipt AND on stderr** (nxf 6j6v.pkw9; review of PR #425, Integrity
-                    // & Robustness #1). A promoted entry is started by whoever RELEASED the working
-                    // copy rather than by the caller that commissioned it — so this loop is the
-                    // only place that can report what starting it noticed.
-                    //
-                    // The first cut breadcrumbed it and nothing else, on the argument that
-                    // `Promotions` had no field for it. That argument was wrong about which reader
-                    // matters: this very loop runs inside `sweep_expired_working_tree`, at the top
-                    // of `tick`, which the background service runs with no terminal at all. A
-                    // stderr-only finding there is invisible by construction — the shape this whole
-                    // item exists to end. `Promotions::warnings` is the field; see its doc.
-                    //
-                    // The breadcrumb stays beside it for the reader who DOES have a terminal — a
-                    // reply, a fresh commission that goes before a queued rival, or a resume that
-                    // secures an interrupted tree can all reach this loop synchronously — which is
-                    // the same both-halves rule every other finding in this module follows.
-                    if let Some(finding) = declaration_changed {
-                        eprintln!("warning: {finding}");
-                        out.warnings.push(finding);
-                    }
-                    out.started.push(promoted);
-                }
-                Ok(TriggerAdmission::Queued { .. }) => out.requeued.push(promoted),
-                // **Recorded, reported, and retried when waiting can fix it** (nxf 6j6v.br25). This
-                // arm used to be a stderr line and nothing else, on every path that reaches it — so
-                // a start that failed under the background service was a line in a log file, the
-                // entry was off the queue, and nothing anywhere could find it again: measured in
-                // the `agents` workspace, four rounds orphaned by a transient timeout.
+        // **One step per ordered run, every member of a parallel round** (nxf 6j6v.9g8j). The area
+        // came off the queue whole, and that is right for the members of a declared fan-out. It is
+        // wrong for two steps of one ordered run, which the field produced when the first step's
+        // window lapsed in the queue and the flow moved on to the second (nxf 6j6v.1wep): both were
+        // started at once, into one working copy. So a later step goes back in line here, in the
+        // place it had, and [`start_the_steps_whose_turn_has_come`] starts it once the step before
+        // it is over.
+        let InLine {
+            start,
+            wait,
+            undecided,
+        } = one_step_per_ordered_run(ctx, store, next);
+        let mut start = start;
+        // **Undecided starts, here and only here.** The entry is already off the queue, so the old
+        // behaviour (start it) is the one answer that cannot lose it.
+        start.extend(undecided);
+        for entry in wait {
+            match store.enqueue_working_tree(&entry, ctx.now) {
+                Ok(_) => out.deferred.push(PromotedTrigger::of(&entry)),
                 Err(e) => {
-                    let what = format!("the working tree was released by {held_by}, but");
-                    out.warnings
-                        .push(note_the_failed_start(ctx, store, entry, &what, &e));
-                    out.failed.push(promoted);
+                    eprintln!(
+                        "warning: {} on thread {} is a later step of an ordered run and was to \
+                         wait for the step before it, but it could not be put back in line ({e}); \
+                         it is started now instead",
+                        entry.role,
+                        entry.thread.as_deref().unwrap_or_default()
+                    );
+                    start.push(entry);
                 }
             }
+        }
+        if start.is_empty() {
+            // Every entry of the area waits for a step of its own run that is still RUNNING, so
+            // the area is using the copy it was just given. Holding it is correct, and handing it
+            // on below would take it from a live session.
+            return Ok(out);
+        }
+        let what = format!("the working tree was released by {held_by}, but");
+        for entry in &start {
+            fire_promoted(ctx, store, entry, &what, &mut out);
         }
         if out.started.len() > started_before || out.requeued.len() > requeued_before {
             return Ok(out);
@@ -2444,6 +2456,239 @@ fn release_and_fire(
         held_by = granted_key;
         next = store.release_working_tree_and_take_next(&granted, ctx.now, &granted_until)?;
     }
+}
+
+/// **Start one promoted entry and file the answer in `out`** — the one place a queued trigger is
+/// fired and its admission read. Shared by [`release_and_fire`] and, since nxf 6j6v.9g8j,
+/// [`start_the_steps_whose_turn_has_come`]. `what` begins the failure finding's sentence ("…, but
+/// it could not be started").
+fn fire_promoted(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    entry: &QueuedTrigger,
+    what: &str,
+    out: &mut Promotions,
+) {
+    let promoted = PromotedTrigger::of(entry);
+    match fire_queued_trigger(ctx, store, entry) {
+        // EXHAUSTIVE, with no `_` arm: a third admission is a compile error right here, so
+        // whoever adds one has to decide what it means for a receipt — the same
+        // construction `working_tree::hands_the_task_back` uses, and for the same reason. A
+        // wildcard would sort the next answer into "started", which is the bug this arm
+        // pair was written to fix.
+        Ok(TriggerAdmission::Spawned {
+            declaration_changed,
+        }) => {
+            // **On the receipt AND on stderr** (nxf 6j6v.pkw9; review of PR #425, Integrity
+            // & Robustness #1). A promoted entry is started by whoever RELEASED the working
+            // copy rather than by the caller that commissioned it — so this loop is the
+            // only place that can report what starting it noticed.
+            //
+            // The first cut breadcrumbed it and nothing else, on the argument that
+            // `Promotions` had no field for it. That argument was wrong about which reader
+            // matters: this very loop runs inside `sweep_expired_working_tree`, at the top
+            // of `tick`, which the background service runs with no terminal at all. A
+            // stderr-only finding there is invisible by construction — the shape this whole
+            // item exists to end. `Promotions::warnings` is the field; see its doc.
+            //
+            // The breadcrumb stays beside it for the reader who DOES have a terminal — a
+            // reply, a fresh commission that goes before a queued rival, or a resume that
+            // secures an interrupted tree can all reach this loop synchronously — which is
+            // the same both-halves rule every other finding in this module follows.
+            if let Some(finding) = declaration_changed {
+                eprintln!("warning: {finding}");
+                out.warnings.push(finding);
+            }
+            out.started.push(promoted);
+        }
+        Ok(TriggerAdmission::Queued { .. }) => out.requeued.push(promoted),
+        // **Recorded, reported, and retried when waiting can fix it** (nxf 6j6v.br25). This
+        // arm used to be a stderr line and nothing else, on every path that reaches it — so
+        // a start that failed under the background service was a line in a log file, the
+        // entry was off the queue, and nothing anywhere could find it again: measured in
+        // the `agents` workspace, four rounds orphaned by a transient timeout.
+        Err(e) => {
+            out.warnings
+                .push(note_the_failed_start(ctx, store, entry, what, &e));
+            out.failed.push(promoted);
+        }
+    }
+}
+
+/// **Where a promoted area's entries go: started now, back in line, or undecided** (nxf
+/// 6j6v.9g8j) — [`one_step_per_ordered_run`]'s answer, each list in the queue's own order.
+struct InLine {
+    /// Nothing of its own ordered run stands before it: start it.
+    start: Vec<QueuedTrigger>,
+    /// A step of its own ordered run is ahead of it, in the queue or running: it waits.
+    wait: Vec<QueuedTrigger>,
+    /// The question could not be answered (a read failed). The caller decides, because the right
+    /// default depends on whether the entry is still in the queue — see the two callers.
+    undecided: Vec<QueuedTrigger>,
+}
+
+/// **The rule of nxf 6j6v.9g8j: one step per ordered run, every member of a parallel round.**
+///
+/// An entry is a step of an ordered run when its thread is a slot under a channel thread whose
+/// channel declares an order (`flow: sequential`, or `steps:`). It may start unless, for some such
+/// channel above it,
+///
+/// - an entry EARLIER in `entries` serves a different step of that same channel thread, or
+/// - a session is still running under a different step of that same channel thread.
+///
+/// Everything else starts together: the members of a parallel round (their channel declares no
+/// order), entries of a thread that is no channel slot, entries with no thread. A parallel round
+/// nested as ONE step of an ordered channel counts as that one step, so its members start together
+/// and the ordered channel's other steps wait for all of them. "Earlier" is the queue's own
+/// `(priority, enqueued_at, id)` order, which `entries` is in. The first entry of a run therefore
+/// always starts unless something of the run is running. An entry already chosen to wait claims
+/// its step too, so a third step cannot overtake a second one that is waiting.
+///
+/// **Why the check is made here and not when the step was opened.** The supervisor already refuses
+/// to open the next step while the previous one is unanswered or its session runs (nxf 6j6v.10yb).
+/// Two steps reach the queue together only when the first one's answer window lapsed while it
+/// waited for the working copy (nxf 6j6v.1wep): the flow counted the silent step as settled and
+/// opened the next. Whatever 6j6v.1wep decides about that lapse, the hand-off is the last place
+/// that sees both entries before anything runs, and it must not start them side by side.
+fn one_step_per_ordered_run(ctx: &Ctx, store: &ChatStore, entries: Vec<QueuedTrigger>) -> InLine {
+    let mut claimed: HashMap<String, String> = HashMap::new();
+    let mut out = InLine {
+        start: Vec::new(),
+        wait: Vec::new(),
+        undecided: Vec::new(),
+    };
+    for entry in entries {
+        let decided = (|| -> Result<(Vec<(String, String)>, bool)> {
+            let Some(thread) = entry.thread.as_deref() else {
+                return Ok((Vec::new(), false));
+            };
+            let steps = ordered_steps_of(ctx, store, thread)?;
+            for (channel_thread, step) in &steps {
+                if claimed.get(channel_thread).is_some_and(|s| s != step)
+                    || another_step_is_running(ctx, store, channel_thread, step)?
+                {
+                    return Ok((steps, true));
+                }
+            }
+            Ok((steps, false))
+        })();
+        match decided {
+            Ok((steps, waits)) => {
+                for (channel_thread, step) in steps {
+                    claimed.entry(channel_thread).or_insert(step);
+                }
+                if waits {
+                    out.wait.push(entry);
+                } else {
+                    out.start.push(entry);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not tell whether {} on thread {} waits for an earlier step of \
+                     its ordered run: {e}",
+                    entry.role,
+                    entry.thread.as_deref().unwrap_or_default()
+                );
+                out.undecided.push(entry);
+            }
+        }
+    }
+    out
+}
+
+/// **Every ordered run `thread` is a step of**, innermost first: one `(channel thread, step slot)`
+/// pair per channel thread above it whose channel declares an order. The step slot is the child of
+/// that channel thread on the way down to `thread`, which is `thread` itself for a role step and
+/// the nested channel's thread for a channel step.
+///
+/// Read against the catalogue the thread's OWN operation is bound to (nxf 6j6v.n92p), as
+/// [`fire_queued_trigger`] re-composes the entry against it. The walk follows
+/// [`supervising_parent`], so it stops at the first thread that is no channel slot, and it stops
+/// on a cycle rather than looping.
+fn ordered_steps_of(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Vec<(String, String)>> {
+    let frozen = operation_declarations(ctx, store, thread)?;
+    let ctx = &with_declarations(ctx, frozen.as_ref());
+    let mut steps = Vec::new();
+    let mut seen = HashSet::new();
+    let mut slot = thread.to_string();
+    while seen.insert(slot.clone()) {
+        let Some(channel_thread) = supervising_parent(store, &slot)? else {
+            break;
+        };
+        let ordered = store
+            .thread_quorums(&[channel_thread.as_str()], ctx.now)?
+            .first()
+            .and_then(|q| declared_channel_of(ctx, q))
+            .is_some_and(|c| c.is_stepped() || c.flow == crate::channel::Flow::Sequential);
+        if ordered {
+            steps.push((channel_thread.clone(), slot));
+        }
+        slot = channel_thread;
+    }
+    Ok(steps)
+}
+
+/// Whether a session is still running under any step of `channel_thread` other than `step` — in
+/// that step's slot or anywhere below it, so a nested round's members count for their step.
+///
+/// The liveness answer is [`sessions_still_running`]'s, with its documented fail-open default: a
+/// worker that never answers liveness reports nothing running, and the order then rests on the
+/// queue alone. A session that announced its end is not counted whatever the worker says.
+fn another_step_is_running(
+    ctx: &Ctx,
+    store: &ChatStore,
+    channel_thread: &str,
+    step: &str,
+) -> Result<bool> {
+    for sibling in store.supervised_children(channel_thread)? {
+        if sibling == step {
+            continue;
+        }
+        let below = store.thread_subtree(&sibling)?;
+        if !sessions_still_running(ctx, store, &below)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// **Start the waiting steps of the holder's own ordered runs whose turn has come** (nxf 6j6v.9g8j)
+/// — the other half of [`release_and_fire`] putting a later step back in line.
+///
+/// Such an entry sits in the queue under the key that HOLDS the copy, so no release will ever take
+/// it: its own area cannot release while that step still owes its answer. What starts it is the
+/// step before it ending, and every path that can notice that asks here first: a reply, a session
+/// end and a tick, through [`ask_the_release`], plus every tick's workspace-wide questions for a
+/// session that died without a word.
+///
+/// The same rule decides as at the hand-off ([`one_step_per_ordered_run`]), over the holder's own
+/// entries in queue order. An entry is taken off the queue by its id before it is fired, so two
+/// processes asking at once start it once. An UNDECIDED entry stays where it is: it is still in
+/// line, and the next question will ask again.
+///
+/// Measured against the lease row, expired or not: an expired holder whose step ended may still
+/// start its next one, and that start renews the lease through the ordinary inherit.
+fn start_the_steps_whose_turn_has_come(ctx: &Ctx, store: &mut ChatStore) -> Result<Promotions> {
+    let mut out = Promotions::default();
+    let Some((holder, _)) = store.working_tree_lease_row()? else {
+        return Ok(out);
+    };
+    let own: Vec<QueuedTrigger> = store
+        .list_working_tree_queue()?
+        .into_iter()
+        .filter(|q| q.scope_key == holder)
+        .collect();
+    if own.is_empty() {
+        return Ok(out);
+    }
+    let what = format!("the step before it in operation {holder} is over, but");
+    for entry in one_step_per_ordered_run(ctx, store, own).start {
+        if store.remove_working_tree_queue_entry(entry.id)? {
+            fire_promoted(ctx, store, &entry, &what, &mut out);
+        }
+    }
+    Ok(out)
 }
 
 /// **How many times a queued trigger is started before the background service stops trying** (nxf
@@ -2755,6 +3000,10 @@ fn hand_on_a_copy_nothing_runs_in(
 ///   [`Promotions::warnings`] beside what starting the others noticed);
 /// - a promoted entry went straight back into the queue ([`ConsequenceClass::StartRequeued`]).
 ///
+/// Since nxf 6j6v.9g8j it asks one question before the release: whether a waiting step of the
+/// holder's own ordered run may start now ([`start_the_steps_whose_turn_has_come`]). The same
+/// three kinds of finding come back from that.
+///
 /// `after` completes "could not decide whether the working copy may go after …".
 fn ask_the_release(
     ctx: &Ctx,
@@ -2762,9 +3011,27 @@ fn ask_the_release(
     thread: &str,
     after: &str,
 ) -> Vec<FailedConsequence> {
+    // **First: a waiting step of the holder's own ordered run whose turn has come** (nxf 6j6v.9g8j).
+    // Before the release question, because a step started here is what the area still owes, and
+    // the release question must see that debt rather than hand the copy away from under it.
+    let mut findings = match start_the_steps_whose_turn_has_come(ctx, store) {
+        Ok(promotions) => release_findings(promotions),
+        Err(e) => {
+            let finding = FailedConsequence::lease_undecided(
+                thread,
+                format!(
+                    "could not decide whether a step waiting for an earlier step of its ordered \
+                     run may start after {after}: {e}; it stays in line and the next reply, \
+                     session end or tick asks again"
+                ),
+            );
+            eprintln!("warning: {finding}");
+            vec![finding]
+        }
+    };
     let promotions = match release_working_tree_if_scope_is_done(ctx, store, thread) {
         Ok(Some(promotions)) => promotions,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return findings,
         Err(e) => {
             let finding = FailedConsequence::lease_undecided(
                 thread,
@@ -2774,10 +3041,12 @@ fn ask_the_release(
                 ),
             );
             eprintln!("warning: {finding}");
-            return vec![finding];
+            findings.push(finding);
+            return findings;
         }
     };
-    release_findings(promotions)
+    findings.extend(release_findings(promotions));
+    findings
 }
 
 /// What a release's [`Promotions`] has to say on a receipt that carries none of its own: its
@@ -3197,7 +3466,7 @@ fn sweep_expired_working_tree(
         return Ok(SweepStep::default());
     };
     // The head is what a re-arm has to be keyed on, and "is anybody waiting?" is the same read.
-    let Some(head) = store.peek_working_tree_queue()? else {
+    let Some(head) = store.first_waiting_for_the_working_tree()? else {
         // **The occasion is over**: this one moves the copy for somebody who is waiting for it, and
         // nobody is. A refusal EITHER occasion recorded is not being retried by anybody any more and
         // goes with it (fix round 1 of nxf 6j6v.8bv9) — the clauses below are reasons not to act
@@ -3818,7 +4087,7 @@ fn note_the_contention(ctx: &Ctx, store: &mut ChatStore) -> Result<Option<String
         store.note_working_tree_contention(None)?;
         Ok(None)
     };
-    if store.peek_working_tree_queue()?.is_none() {
+    if store.first_waiting_for_the_working_tree()?.is_none() {
         return clear(store);
     }
     // An unreadable key is left alone rather than guessed at, exactly as the release and the sweep
@@ -4315,7 +4584,7 @@ fn park_is_refused(store: &ChatStore, holder: &str) -> bool {
 /// Nobody waiting is not a failure: a copy nobody waits for is never handed on from the tick, so
 /// there is nothing to come back for. A queue that cannot be read IS one, and is said.
 fn arm_the_park_retry(ctx: &Ctx, store: &ChatStore) -> Option<FailedConsequence> {
-    let head = match store.peek_working_tree_queue() {
+    let head = match store.first_waiting_for_the_working_tree() {
         Ok(Some(head)) => head,
         Ok(None) => return None,
         Err(e) => {
@@ -14452,7 +14721,7 @@ fn park_an_interrupted_holder(
     warnings: &mut Vec<FailedConsequence>,
 ) -> Result<Option<ParkStep>> {
     let holds = store.standing_interruptions()?;
-    if holds.is_empty() || store.peek_working_tree_queue()?.is_none() {
+    if holds.is_empty() || store.first_waiting_for_the_working_tree()?.is_none() {
         forget_a_refusal_of_this_occasion(store, ParkOccasion::AvailabilityBoundary);
         return Ok(None);
     }
@@ -16086,6 +16355,24 @@ fn tick_reporting_its_own_failures(
     // something waiting can fix, once their instant has come. After the sweeps, so a copy they just
     // freed is there to be taken.
     park_warnings.extend(retry_the_failed_starts(ctx, store));
+    // **The fifth** (nxf 6j6v.9g8j): a later step of the holder's own ordered run that waits in
+    // line for the step before it. A reply or a session end normally starts it; this is the backstop
+    // for a step whose session died without announcing its end, for the reason the held deliveries
+    // above have one.
+    match start_the_steps_whose_turn_has_come(ctx, store) {
+        Ok(promotions) => park_warnings.extend(release_findings(promotions)),
+        Err(e) => {
+            let finding = FailedConsequence::lease_undecided(
+                req.thread_id,
+                format!(
+                    "could not decide whether a step waiting for an earlier step of its ordered \
+                     run may start: {e}; it stays in line and the next tick asks again"
+                ),
+            );
+            eprintln!("warning: {finding}");
+            park_warnings.push(finding);
+        }
+    }
     let mut receipt = tick_the_thread(ctx, store, req)?;
     receipt.working_tree = sweep.swept;
     receipt.parked = park.parked;

@@ -2697,7 +2697,7 @@ fn tick(json: bool, db: Option<&str>, thread_id: &str) -> Result<()> {
 /// landed, so `--json` would otherwise be the one place a reader looks that never learns the
 /// requester was left un-woken. They cost nothing here — the receipt is serialized whole, so no
 /// adapter code can drift from the library seam's answer.
-/// What a hand-off of the working copy started, in words — the THREE lists plus what starting them
+/// What a hand-off of the working copy started, in words — the FOUR lists plus what starting them
 /// noticed, written once for the two hand-offs a tick can report (nxf 6j6v.de9s).
 ///
 /// It was inline in the sweep's block and the park needs exactly the same account; a second copy is
@@ -2716,6 +2716,14 @@ fn print_promotions(promotions: &crate::orchestration::Promotions) {
         println!(
             "back in line: {} on thread {} — the working copy had moved on again by the time it \
              was started, so it is waiting again, in the place it already had",
+            p.role, p.thread
+        );
+    }
+    // A later step of an ordered run, put back to wait for the step before it (nxf 6j6v.9g8j).
+    for p in &promotions.deferred {
+        println!(
+            "waiting for the step before it: {} on thread {} — an earlier step of the same ordered \
+             run comes first, and this one starts when that step's session is over",
             p.role, p.thread
         );
     }

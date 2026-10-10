@@ -594,6 +594,20 @@ fn take_queue_head(conn: &Connection) -> Result<Option<QueuedTrigger>> {
 /// head, exactly as before, and scope-awareness applies only afterwards. No claim area can jump the
 /// queue by having more members on it.
 ///
+/// **One exception to that order: the OUTGOING holder's own entries go last** (nxf 6j6v.9g8j).
+/// Since that item the queue can hold entries of the area that holds the copy: a later step of an
+/// ordered run that waits for the step before it, which `orchestration::release_and_fire` puts back
+/// in line instead of starting it beside that step. Such an entry has usually waited longer than
+/// any rival, because it queued behind the PREVIOUS holder. By plain order it would then win the
+/// copy back for the very operation that is giving it up, and a reclaim that exists to hand the
+/// copy to a rival would hand it straight back. So the head is the first entry of ANOTHER area. The
+/// outgoing area's own entries are taken only when nobody else is waiting. All of this is the
+/// `scope_key = ?1` term at the front of the `ORDER BY`.
+///
+/// **The whole area is still taken, steps of one ordered run included.** Which of them may START
+/// is decided in `orchestration::release_and_fire`, because that needs the declared channel and
+/// the worker's liveness answer, and this module has neither.
+///
 /// **Two statements, so this is for callers that already hold a write transaction** — today
 /// [`hand_the_working_tree_on`], which both hand-off entrances run inside their own `BEGIN
 /// IMMEDIATE`. Reading
@@ -601,11 +615,12 @@ fn take_queue_head(conn: &Connection) -> Result<Option<QueuedTrigger>> {
 /// which is the whole hazard [`ChatStore::take_working_tree_queue`]'s single statement exists to
 /// avoid. `DELETE ... RETURNING` makes no promise about the ORDER it yields rows in, so the result
 /// is sorted back into the queue's own order rather than trusting it.
-fn take_queue_scope(conn: &Connection) -> Result<Vec<QueuedTrigger>> {
+fn take_queue_scope(conn: &Connection, outgoing: &str) -> Result<Vec<QueuedTrigger>> {
     let head: Option<String> = conn
         .query_row(
-            "SELECT scope_key FROM working_tree_queue ORDER BY priority, enqueued_at, id LIMIT 1",
-            [],
+            "SELECT scope_key FROM working_tree_queue
+             ORDER BY (scope_key = ?1), priority, enqueued_at, id LIMIT 1",
+            params![outgoing],
             |r| r.get(0),
         )
         .optional()?;
@@ -677,12 +692,16 @@ enum WhyTheLeaseIsForfeit {
 ///
 /// An empty queue writes nothing at all: the lease row stays deleted and the working copy is free,
 /// which is the whole of what a release with nobody waiting means.
+///
+/// `outgoing` is the key whose row the caller has just deleted; its own queued entries go last
+/// ([`take_queue_scope`] says why).
 fn hand_the_working_tree_on(
     tx: &Connection,
+    outgoing: &str,
     now: &str,
     granted_expires: &str,
 ) -> Result<Vec<QueuedTrigger>> {
-    let taken = take_queue_scope(tx)?;
+    let taken = take_queue_scope(tx, outgoing)?;
     if let Some(head) = taken.first() {
         // A plain INSERT rather than an upsert: both callers have just deleted the row in this same
         // transaction, so a conflict here would mean the delete did not do what its own return
@@ -1109,7 +1128,7 @@ impl ChatStore {
         // nothing left for the tick's withdrawn occasion to park — and a marker left standing would
         // park this key's NEXT claim the moment it took the copy.
         forget_withdrawn_holder(&tx, &scope_key)?;
-        let next = hand_the_working_tree_on(&tx, &now, &granted_expires)?;
+        let next = hand_the_working_tree_on(&tx, &scope_key, &now, &granted_expires)?;
         tx.commit()?;
         Ok(next)
     }
@@ -1229,7 +1248,7 @@ impl ChatStore {
         // marker with it (nxf 6j6v.b9nf), for the release's reason too.
         crate::park::forget_park_refusal(&tx, holder_key)?;
         forget_withdrawn_holder(&tx, holder_key)?;
-        let next = hand_the_working_tree_on(&tx, &now, &granted_expires)?;
+        let next = hand_the_working_tree_on(&tx, holder_key, &now, &granted_expires)?;
         tx.commit()?;
         Ok(next)
     }
@@ -1468,8 +1487,44 @@ impl ChatStore {
         Ok(self.connection().last_insert_rowid())
     }
 
+    /// **The first entry that is waiting for the working copy**: the queue's head among the
+    /// entries of every area EXCEPT the one that holds the lease row (nxf 6j6v.9g8j). `None` when
+    /// nobody else is waiting.
+    ///
+    /// Every question of the form "is somebody waiting for this copy?" asks this, not
+    /// [`Self::peek_working_tree_queue`]: the contention memo, the park and sweep occasions, and
+    /// the fairness gate of a newcomer's acquire. Until 6j6v.9g8j the two were the same read,
+    /// because the queue only held entries of areas that did NOT hold the copy. Now the holder can
+    /// have entries of its own in line: a later step of an ordered run that waits for the step
+    /// before it (`orchestration::release_and_fire`). That entry waits for its PREDECESSOR, not for
+    /// the copy, because its area already has the copy. Counting it as a rival would let an
+    /// operation contend with itself and park its own work to hand the copy to its own next step.
+    ///
+    /// Measured against the lease ROW, expired or not, for the same reason: an expired holder's own
+    /// later step is still not somebody else who wants the copy.
+    pub fn first_waiting_for_the_working_tree(&self) -> Result<Option<QueuedTrigger>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {QUEUE_COLS} FROM working_tree_queue
+                     WHERE scope_key NOT IN (
+                         SELECT scope_key FROM working_tree_lease WHERE tree = 'default'
+                     )
+                     ORDER BY priority, enqueued_at, id
+                     LIMIT 1"
+                ),
+                [],
+                queued_trigger_from_row,
+            )
+            .optional()?)
+    }
+
     /// The queue's current head — the entry [`Self::take_working_tree_queue`] would return — without
     /// consuming it. `None` when the queue is empty.
+    ///
+    /// It counts the holder's own waiting entries too. To ask whether somebody ELSE is waiting for
+    /// the copy, use [`Self::first_waiting_for_the_working_tree`].
     pub fn peek_working_tree_queue(&self) -> Result<Option<QueuedTrigger>> {
         Ok(self
             .connection()
@@ -3334,6 +3389,69 @@ mod tests {
             "the urgent claim area goes first, and it takes only its OWN entries"
         );
         assert_eq!(store.working_tree_queue_len().unwrap(), 2);
+    }
+
+    #[test]
+    fn the_outgoing_holders_own_waiting_step_goes_after_every_rival() {
+        // nxf 6j6v.9g8j. A later step of the holder's own ordered run waits in line under the
+        // holder's key, and it queued before the rival did. A hand-off away from that holder must
+        // not hand the copy straight back to it.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-rival", "rival"), LATER)
+            .unwrap();
+
+        let promoted = store
+            .release_working_tree_and_take_next(&holder, NOW, EXPIRES)
+            .unwrap();
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["rival"],
+            "the rival gets the copy, although the holder's own step waited longer"
+        );
+
+        // When nobody else is waiting, the holder's own entries ARE the queue, and they go next.
+        let rival = WorkScope::Thread("th-rival".to_string());
+        let promoted = store
+            .release_working_tree_and_take_next(&rival, NOW, EXPIRES)
+            .unwrap();
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["verifier"]
+        );
+    }
+
+    #[test]
+    fn the_holders_own_waiting_step_is_nobody_waiting_for_the_copy() {
+        // nxf 6j6v.9g8j. The contention memo, the park and the sweep all ask "is somebody waiting
+        // for this copy?". The holder's own later step waits for its predecessor, not for the copy.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        assert_eq!(store.first_waiting_for_the_working_tree().unwrap(), None);
+        assert!(
+            store.peek_working_tree_queue().unwrap().is_some(),
+            "the plain head still counts it"
+        );
+
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-rival", "rival"), LATER)
+            .unwrap();
+        assert_eq!(
+            store
+                .first_waiting_for_the_working_tree()
+                .unwrap()
+                .map(|q| q.role),
+            Some("rival".to_string())
+        );
     }
 
     #[test]

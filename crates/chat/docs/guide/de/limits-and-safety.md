@@ -177,7 +177,11 @@ der sie greift:
   geparkt hat. Die Warteschlange ist Wer-zuerst-kommt, und eine Freigabe befördert das ganze
   Anspruchsgebiet an der Spitze, nie einen einzelnen Eintrag: mehrere Mitglieder einer Auffächerung
   teilen sich einen Anspruch, und eines zu starten, während seine Geschwister geparkt bleiben,
-  verklemmt die Tafel.
+  verklemmt die Tafel. **Die Schritte eines geordneten Ablaufs starten trotzdem einer nach dem
+  anderen.** Warten zwei Schritte desselben Durchlaufs zusammen (`flow: sequential` oder `steps:`),
+  startet die Freigabe den früheren, und der spätere bleibt in der Warteschlange, bis die Session
+  des früheren Schritts vorbei ist. Zwei Schritte eines Durchlaufs starten nie nebeneinander in
+  einer Arbeitskopie.
 - **Was ihn freigibt.** Eine Antwort innerhalb des Gebiets gibt den Anspruch frei, wenn nichts in
   diesem Gebiet noch eine Antwort schuldet *und* das letzte Wort keine Rückgabe war. Eine
   **Eskalation hält den Anspruch** — die Frage wandert noch nach oben, die Aufgabe ist noch in der
