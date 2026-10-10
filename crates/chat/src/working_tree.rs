@@ -2004,8 +2004,9 @@ impl ChatStore {
     ///
     /// **The re-declaration may land ABOVE the hand-back rather than on it** (nxf 6j6v.ys54). An
     /// ordered run answered on its channel thread starts again in NEW step threads, so the
-    /// escalating step's own watermark never moves. A declaration on any thread above it, after it,
-    /// answers it too — see [`Self::unanswered_hand_back`], and
+    /// escalating step's own watermark never moves. A declaration on any thread above an
+    /// ESCALATION, after it, answers it too (a question waits in its own thread) — see
+    /// [`Self::unanswered_hand_back`], and
     /// `an_escalation_answered_above_lets_the_copy_go.rs` for the measured case.
     ///
     /// **That door is the channel one, and it is not the only thread in an area** (branch re-review
@@ -2050,11 +2051,20 @@ impl ChatStore {
     /// 6j6v.ys54). The release path names it when it says no, so a delivered operation that keeps
     /// the copy says why.
     ///
-    /// **A hand-back is unanswered while nothing above it was asked again.** A thread's last reply
-    /// hands the task back ([`hands_the_task_back`]), and neither its own turn nor the turn of any
-    /// thread above it in the claim area was declared again after that reply. The thread's own
-    /// re-declaration was always the door ([`ChatStore::last_reply_kind`] reads only the current
-    /// turn); the threads above it are the other door, and before 6j6v.ys54 this missed it.
+    /// **A hand-back is unanswered until it is asked again where its answer comes from.** A
+    /// thread's last reply hands the task back ([`hands_the_task_back`]), and its own turn was not
+    /// declared again after that reply. The thread's own re-declaration was always the door
+    /// ([`ChatStore::last_reply_kind`] reads only the current turn). An ESCALATION has a second
+    /// door, and before 6j6v.ys54 this missed it: the turn of a thread ABOVE it in the claim area,
+    /// declared again after it.
+    ///
+    /// **Only an escalation, because only an escalation is answered from above.** The guide says
+    /// so in as many words: `--escalate` goes UP, to whoever commissioned the sender, and the
+    /// commissioner continuing above it is the answer. A QUESTION is not handed upward; it waits
+    /// in its own thread, and a level above that is asked again about something else has not
+    /// answered it. `an_escalating_board_is_handed_back_and_a_session_scope_has_nothing_to_ask`
+    /// pins that: a question on a DM under a board still holds after the board is asked again and
+    /// reports.
     ///
     /// **Measured in the `agents` workspace on 2026-10-10 (0.206.1).** A verify step of an ordered
     /// run escalated. The requester answered on the channel thread above it, which is how an
@@ -2076,10 +2086,10 @@ impl ChatStore {
     ///
     /// **What it still holds, and what it may now release.** A hand-back nobody answered holds the
     /// copy exactly as before, and so does one answered on an ad-hoc DM without a re-declaration
-    /// (see [`Self::work_scope_handed_back`]). What it releases is a hand-back above which somebody
-    /// asked again, once that new turn has been answered too — the outstanding rule still holds the
-    /// copy while it has not. That includes a requester who asks the level above again without
-    /// meaning the hand-back below; the operation then ends on that level's answer.
+    /// (see [`Self::work_scope_handed_back`]), and so does every question until its own thread is
+    /// asked again. What it releases is an escalation above which the commissioner asked again,
+    /// once that new turn has been answered too — the outstanding rule still holds the copy while
+    /// it has not.
     ///
     /// Only threads INSIDE `threads` are walked, so a declaration outside the claim area answers
     /// nothing in it. Only a declaration an action may follow counts
@@ -2093,7 +2103,9 @@ impl ChatStore {
             if !hands_the_task_back(&kind) {
                 continue;
             }
-            if self.asked_again_above(thread_id, lamport, site, &area)? {
+            if kind == crate::model::KIND_ESCALATION
+                && self.asked_again_above(thread_id, lamport, site, &area)?
+            {
                 continue;
             }
             return Ok(Some(HandBack {
@@ -2134,7 +2146,8 @@ impl ChatStore {
     /// [`Self::threads_handed_back`] next door.
     ///
     /// That one asks *what did the last REPLY say*, and its answer stays `true` until the escalating
-    /// party replies again or a thread above it is asked again (nxf 6j6v.ys54) — which is correct
+    /// party replies again or, for an escalation, a thread above it is asked again (nxf
+    /// 6j6v.ys54) — which is correct
     /// for the LEASE, whose rule is that a hand-back does not release. It is wrong for a PARK. A human who answers an escalation puts the
     /// operation back to work without becoming an expected replier, so the escalation goes on being
     /// the last reply while somebody is once again writing in the working copy — and parking there
