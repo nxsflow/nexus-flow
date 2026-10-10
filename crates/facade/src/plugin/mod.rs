@@ -193,9 +193,45 @@ impl RankKey {
     }
 }
 
+/// One per-type `next` order — a `[ranking.next.<type>]` sub-table (6j6v.z9jk). The same key
+/// language as the default [`RankSpec::order`]: field keys and precedence keys. It replaces the
+/// default order for items of that one type; it never adds to it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeOrder {
+    pub order: Vec<RankKey>,
+}
+
+/// The `next` ranking policy, TOML `[ranking.next]`.
+///
+/// - `order` is the default order, and the only one a plugin without per-type orders has. Such a
+///   plugin ranks exactly as before 6j6v.z9jk.
+/// - `[ranking.next.<type>]` (6j6v.z9jk) gives one item type its own `order`. A type without one
+///   falls back to the default `order`.
+/// - `types = [...]` is the cross-type order: where items of different types stand against each
+///   other once types rank apart. Optional; without it the default order's first precedence key on
+///   `type` serves. A plugin with per-type orders must have one of the two (checked at load).
+///
+/// **How two items compare** ([`RankSpec::splits_by_type`]). Without per-type orders and without
+/// `types`: the default `order`, then id — unchanged. With either: items of DIFFERENT types compare
+/// by their type's position in the cross-type order (an unlisted type after every listed one, two
+/// unlisted types by name); items of the SAME type compare by that type's order (its own, or the
+/// default), then id. That is a lexicographic key `(type position, type name, the type's keys, id)`,
+/// so the order stays total and transitive. Comparing two types each by its own keys cannot be: the
+/// keys of a project and of an action need not agree on anything.
+///
+/// A type named `order` or `types` cannot have a sub-table: those two names are the keys above.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RankSpec {
     pub order: Vec<RankKey>,
+    /// The cross-type order (6j6v.z9jk): declared type names, first ranks first. Empty ⇒ the
+    /// default order's first `type` precedence key, if any.
+    #[serde(default)]
+    pub types: Vec<String>,
+    /// The per-type orders, `type → [ranking.next.<type>]` (6j6v.z9jk). Every other key under
+    /// `[ranking.next]` lands here, so a misspelt `order` is a loud parse error, not a silent no-op.
+    #[serde(flatten)]
+    pub by_type: BTreeMap<String, TypeOrder>,
 }
 
 impl RankSpec {
@@ -203,17 +239,107 @@ impl RankSpec {
     /// review #2). A precedence key orders strictly by the value's position in its list and ignores
     /// `dir`/`nulls`, so setting them is a silent no-op that signals a misunderstanding — caught
     /// loudly at load, like the matrix's cardinality-`0` rejection, rather than quietly dropped.
+    /// The same rule holds in every per-type order (6j6v.z9jk).
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for key in &self.order {
-            if !key.precedence.is_empty() && (key.dir != Dir::Asc || key.nulls != Nulls::Last) {
-                return Err(format!(
-                    "ranking key '{}' sets a precedence list together with dir/nulls; a precedence \
-                     key orders by the list's index and ignores dir/nulls — drop the dir/nulls",
-                    key.field
-                ));
+        let per_type = self
+            .by_type
+            .iter()
+            .map(|(t, o)| (format!("[ranking.next.{t}] "), &o.order));
+        for (scope, order) in std::iter::once((String::new(), &self.order)).chain(per_type) {
+            for key in order {
+                if !key.precedence.is_empty() && (key.dir != Dir::Asc || key.nulls != Nulls::Last) {
+                    return Err(format!(
+                        "{scope}ranking key '{}' sets a precedence list together with dir/nulls; a \
+                         precedence key orders by the list's index and ignores dir/nulls — drop \
+                         the dir/nulls",
+                        key.field
+                    ));
+                }
             }
         }
         Ok(())
+    }
+
+    /// The type-dependent rules (6j6v.z9jk), checked against the plugin's declared types:
+    ///
+    /// - a per-type order names a type in `[types].list`;
+    /// - `types` names only declared types, each once;
+    /// - per-type orders need a cross-type order (`types`, or a `type` precedence key in the
+    ///   default order), else items of different types would have nothing to compare by;
+    /// - a per-type order holds no key on `type`: every item it ranks has the same type, so such a
+    ///   key never decides — a silent no-op, refused like a precedence key with `dir`.
+    pub fn validate_types(
+        &self,
+        declared: &std::collections::BTreeSet<String>,
+    ) -> std::result::Result<(), String> {
+        for (ty, o) in &self.by_type {
+            if !declared.contains(ty) {
+                return Err(format!(
+                    "[ranking.next.{ty}] names a type the plugin does not declare — add '{ty}' \
+                     to [types].list or drop the table"
+                ));
+            }
+            if o.order.iter().any(|k| k.field == "type") {
+                return Err(format!(
+                    "[ranking.next.{ty}] has a key on 'type'; every item it ranks is a '{ty}', \
+                     so the key never decides — drop it (the cross-type order is `types`)"
+                ));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for ty in &self.types {
+            if !declared.contains(ty) {
+                return Err(format!(
+                    "`types` lists '{ty}', a type the plugin does not declare in [types].list"
+                ));
+            }
+            if !seen.insert(ty.as_str()) {
+                return Err(format!("`types` lists '{ty}' twice"));
+            }
+        }
+        if !self.by_type.is_empty() && self.cross_type_order().is_empty() {
+            return Err(
+                "per-type orders need a cross-type order: declare `types = [...]` under \
+                 [ranking.next], or a precedence key on 'type' in its `order`"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether types rank apart (6j6v.z9jk): the plugin declares a per-type order or `types`.
+    /// When false, every item ranks by the default `order` — the behaviour before per-type orders.
+    pub fn splits_by_type(&self) -> bool {
+        !self.by_type.is_empty() || !self.types.is_empty()
+    }
+
+    /// The order an item of `item_type` ranks by within its type: its own `[ranking.next.<type>]`
+    /// order, or the default `order`.
+    pub fn order_for(&self, item_type: Option<&str>) -> &[RankKey] {
+        item_type
+            .and_then(|t| self.by_type.get(t))
+            .map_or(&self.order, |o| &o.order)
+    }
+
+    /// The cross-type order: `types`, else the precedence list of the default order's first key on
+    /// `type`, else empty.
+    pub fn cross_type_order(&self) -> &[String] {
+        if !self.types.is_empty() {
+            return &self.types;
+        }
+        self.order
+            .iter()
+            .find(|k| k.field == "type" && !k.precedence.is_empty())
+            .map_or(&[], |k| &k.precedence)
+    }
+
+    /// The position of `item_type` in the [cross-type order](Self::cross_type_order); an unlisted
+    /// or absent type sorts after every listed one.
+    pub fn type_ordinal(&self, item_type: Option<&str>) -> usize {
+        let order = self.cross_type_order();
+        item_type
+            .and_then(|t| order.iter().position(|o| o == t))
+            .unwrap_or(order.len())
     }
 }
 
@@ -454,12 +580,16 @@ fn load_registration(reg: &PluginRegistration) -> Result<PluginConfig> {
     cfg.types.validate().map_err(|e| {
         NxfError::validation(format!("plugin '{}' has an invalid [types]: {e}", reg.name))
     })?;
-    cfg.ranking.next.validate().map_err(|e| {
-        NxfError::validation(format!(
-            "plugin '{}' has an invalid [ranking.next]: {e}",
-            reg.name
-        ))
-    })?;
+    cfg.ranking
+        .next
+        .validate()
+        .and_then(|()| cfg.ranking.next.validate_types(&cfg.types.list))
+        .map_err(|e| {
+            NxfError::validation(format!(
+                "plugin '{}' has an invalid [ranking.next]: {e}",
+                reg.name
+            ))
+        })?;
     // w213: a mis-declared `[merge]` field is caught at load (a typo would otherwise silently
     // no-op at fold time), the same loud posture as the `[types]`/`[ranking]` checks above. Now on
     // the registration path, so a consumer/external plugin gets the same [merge] validation.
@@ -707,6 +837,8 @@ mod tests {
                 nulls,
                 precedence: vec!["epic".into(), "bug".into()],
             }],
+            types: Vec::new(),
+            by_type: BTreeMap::new(),
         };
         assert!(
             prec(Dir::Desc, Nulls::Last).validate().is_err(),
@@ -726,6 +858,8 @@ mod tests {
                 nulls: Nulls::First,
                 precedence: Vec::new(),
             }],
+            types: Vec::new(),
+            by_type: BTreeMap::new(),
         };
         assert!(field.validate().is_ok());
     }
@@ -1119,6 +1253,199 @@ mod tests {
                 "{name} declares no custom fields yet"
             );
             assert!(cfg.validate_fields().is_ok(), "{name} validates clean");
+        }
+    }
+
+    // ---- per-type `next` orders (6j6v.z9jk) ------------------------------------------------
+
+    /// A plugin TOML over the types `project`/`action`/`note` whose `[ranking.next]` section is
+    /// `ranking` — the fixture the per-type order tests vary. Loaded through `load_registration`,
+    /// the path every plugin takes, so the tests see the load-time validation.
+    fn load_with_ranking(ranking: &str) -> Result<PluginConfig> {
+        let toml = format!(
+            r#"
+            name = "rank-fixture"
+            [description]
+            en = "x"
+            de = "y"
+            [priority]
+            labels = ["P1", "P2"]
+            [types]
+            list = ["project", "action", "note"]
+            [vocabulary.status]
+            open = "open"
+            in_progress = "in progress"
+            closed = "closed"
+            [presentation.list]
+            columns = ["id"]
+            {ranking}
+            "#
+        );
+        let reg = registry::PluginRegistration {
+            name: "rank-fixture",
+            toml: Box::leak(toml.into_boxed_str()),
+            order: 0,
+        };
+        load_registration(&reg)
+    }
+
+    const PER_TYPE: &str = r#"
+        [ranking.next]
+        types = ["action", "project"]
+        order = [ { field = "priority", dir = "asc" } ]
+        [ranking.next.action]
+        order = [ { field = "due", dir = "asc", nulls = "last" } ]
+        [ranking.next.project]
+        order = [ { field = "priority", dir = "desc" } ]
+    "#;
+
+    #[test]
+    fn a_plain_ranking_next_parses_as_before_with_no_per_type_orders() {
+        // Backward compatibility: `[ranking.next]` with only `order` is the default order and
+        // nothing else, so the plugin ranks exactly as before (no type split).
+        let cfg = load_with_ranking(
+            "[ranking.next]\norder = [ { field = \"priority\", dir = \"asc\" } ]",
+        )
+        .unwrap();
+        let spec = &cfg.ranking.next;
+        assert_eq!(spec.order.len(), 1);
+        assert!(spec.types.is_empty() && spec.by_type.is_empty());
+        assert!(!spec.splits_by_type());
+        assert_eq!(spec.order_for(Some("action")), spec.order.as_slice());
+    }
+
+    #[test]
+    fn per_type_orders_parse_and_a_type_without_one_falls_back_to_the_default() {
+        let cfg = load_with_ranking(PER_TYPE).unwrap();
+        let spec = &cfg.ranking.next;
+        assert!(spec.splits_by_type());
+        assert_eq!(spec.order_for(Some("action"))[0].field, "due");
+        assert_eq!(spec.order_for(Some("project"))[0].dir, Dir::Desc);
+        assert_eq!(
+            spec.order_for(Some("note")),
+            spec.order.as_slice(),
+            "no [ranking.next.note] ⇒ the default order"
+        );
+        assert_eq!(spec.order_for(None), spec.order.as_slice());
+        // The cross-type order: listed types by position, an unlisted one after them.
+        assert_eq!(spec.type_ordinal(Some("action")), 0);
+        assert_eq!(spec.type_ordinal(Some("project")), 1);
+        assert_eq!(spec.type_ordinal(Some("note")), 2);
+    }
+
+    #[test]
+    fn the_cross_type_order_falls_back_to_a_type_precedence_key() {
+        let cfg = load_with_ranking(
+            r#"
+            [ranking.next]
+            order = [ { field = "type", precedence = ["project", "action"] } ]
+            [ranking.next.action]
+            order = [ { field = "due" } ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ranking.next.cross_type_order(), ["project", "action"]);
+        assert_eq!(cfg.ranking.next.type_ordinal(Some("action")), 1);
+    }
+
+    #[test]
+    fn a_per_type_order_for_an_undeclared_type_is_refused_at_load() {
+        let err = load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["action"]
+            order = [ { field = "priority" } ]
+            [ranking.next.goal]
+            order = [ { field = "priority" } ]
+            "#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation);
+        assert!(
+            err.msg.contains("rank-fixture") && err.msg.contains("[ranking.next.goal]"),
+            "names the plugin and the table: {}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn a_bad_key_in_a_per_type_order_is_refused_at_load() {
+        // The same rule as the default order: a precedence key with dir/nulls.
+        let err = load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["action"]
+            order = [ { field = "priority" } ]
+            [ranking.next.action]
+            order = [ { field = "status", precedence = ["open"], dir = "desc" } ]
+            "#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation);
+        assert!(
+            err.msg.contains("[ranking.next.action]") && err.msg.contains("status"),
+            "names the table and the key: {}",
+            err.msg
+        );
+        // A key on `type` inside a per-type order never decides — refused too.
+        let err = load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["action"]
+            order = [ { field = "priority" } ]
+            [ranking.next.action]
+            order = [ { field = "type", precedence = ["action"] } ]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.msg.contains("'type'"), "{}", err.msg);
+        // A key in a per-type table that is not `order` is a parse error, not a silent no-op.
+        let err = load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["action"]
+            order = [ { field = "priority" } ]
+            [ranking.next.action]
+            ordr = [ { field = "due" } ]
+            "#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrorKind::Io, "{}", err.msg);
+    }
+
+    #[test]
+    fn the_cross_type_order_is_validated_at_load() {
+        // Per-type orders with nothing to compare two types by.
+        let err = load_with_ranking(
+            r#"
+            [ranking.next]
+            order = [ { field = "priority" } ]
+            [ranking.next.action]
+            order = [ { field = "due" } ]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.msg.contains("cross-type order"), "{}", err.msg);
+        // `types` naming an undeclared type, or a type twice.
+        let err = load_with_ranking(
+            "[ranking.next]\ntypes = [\"goal\"]\norder = [ { field = \"priority\" } ]",
+        )
+        .unwrap_err();
+        assert!(err.msg.contains("'goal'"), "{}", err.msg);
+        let err = load_with_ranking(
+            "[ranking.next]\ntypes = [\"note\", \"note\"]\norder = [ { field = \"priority\" } ]",
+        )
+        .unwrap_err();
+        assert!(err.msg.contains("twice"), "{}", err.msg);
+    }
+
+    #[test]
+    fn the_bundled_plugins_declare_no_per_type_orders() {
+        // Their ranking is the default order alone, so `next` ranks exactly as before 6j6v.z9jk.
+        for name in ["issue-tracker", "personal-todo"] {
+            let spec = load(name).unwrap().ranking.next;
+            assert!(spec.by_type.is_empty() && spec.types.is_empty(), "{name}");
+            assert!(!spec.splits_by_type(), "{name}");
         }
     }
 }

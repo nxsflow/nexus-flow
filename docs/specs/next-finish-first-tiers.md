@@ -173,6 +173,15 @@ Build a per-candidate classification from §3, then order by the tuple:
 
 The whole order is total and deterministic (id is always the last tiebreak).
 
+**Per-type orders (6j6v.z9jk).** A plugin may give an item type its own order,
+`[ranking.next.<type>]`, and declare a cross-type order, `types = [...]` under `[ranking.next]`.
+Within a tier (and for cluster ordering), `next` then compares two items with `next_rank_cmp`: by
+their type's position in the cross-type order, then by type name, then by their type's order (its
+own, or the default `order`), then id. A plugin without either ranks by `rank_cmp`, as above. The
+tiers themselves are unchanged: per-type orders never move an item between tiers. `list --sort rank`
+and `blocked` keep the default order (`rank_cmp`) until `list` gets its own per-type orders
+(6j6v.n698).
+
 ### 4.4 The `parent` join is retained
 
 `next_to_value`/`prime_next_value` already attach each row's resolved `parent` (`parent_of` →

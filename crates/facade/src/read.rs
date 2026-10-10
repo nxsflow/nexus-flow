@@ -1135,12 +1135,15 @@ impl NextQuery {
         self
     }
 
-    /// The cache key a snapshot is bound to: sort and filter, never `now` or `limit` — a reader
-    /// may change the page size between pages, and `now` moves on its own.
-    fn key(&self) -> String {
+    /// The cache key a snapshot is bound to: sort, filter and the plugin's `next` ranking, never
+    /// `now` or `limit` — a reader may change the page size between pages, and `now` moves on its
+    /// own. The ranking is in the key (6j6v.z9jk) so a token handed out under one plugin order
+    /// restarts under another instead of paging through a list ranked differently.
+    fn key(&self, cfg: &PluginConfig) -> String {
         json!({
             "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
             "filter": self.filter.key(),
+            "rank": format!("{:?}", cfg.ranking.next),
         })
         .to_string()
     }
@@ -1238,7 +1241,7 @@ pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<Nex
     let Some(n) = limit else {
         return Ok(truncate_next(fresh, q.limit));
     };
-    let key = q.key();
+    let key = q.key(cfg);
     if let Some(token) = &q.token {
         if let Some((snap, pos)) = resume(store, token, &key, &fresh)? {
             let end = (pos + n).min(snap.ids.len());
@@ -1318,12 +1321,13 @@ const CLUSTER_CHILD: u8 = 1;
 
 /// Order the `ready ∪ in_progress` candidates into the finish-first tiers (§4.3), in place.
 ///
-/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`rank_cmp`] as the
-/// tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
+/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`next_rank_cmp`] as
+/// the tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
 /// Clusters themselves are ordered by their **header's** rank, so a cluster is contiguous and a
 /// low-priority child never drags its epic up (nor a high-priority backlog item slice a cluster
-/// apart). `rank_cmp` ends in an id tiebreak, so the whole composed order is total and
-/// deterministic.
+/// apart). `next_rank_cmp` ends in an id tiebreak, so the whole composed order is total and
+/// deterministic. Per-type orders (6j6v.z9jk) live inside `next_rank_cmp`: they order WITHIN a
+/// tier and never move an item between tiers.
 fn order_next_tiered(
     cfg: &PluginConfig,
     candidates: &[derive::NextCandidate],
@@ -1361,7 +1365,7 @@ fn order_next_tiered(
             .copied()
             .collect();
         headers.sort_by(|a, b| match (by_id.get(a), by_id.get(b)) {
-            (Some(x), Some(y)) => rank_cmp(cfg, x, y),
+            (Some(x), Some(y)) => next_rank_cmp(cfg, x, y),
             _ => a.cmp(b), // unreachable (a header is a candidate); stays deterministic anyway
         });
         let cluster_ord: HashMap<&str, usize> =
@@ -1398,7 +1402,7 @@ fn order_next_tiered(
             .get(&b.id)
             .copied()
             .unwrap_or((TIER_BACKLOG, 0, CLUSTER_HEADER));
-        ka.cmp(&kb).then_with(|| rank_cmp(cfg, a, b))
+        ka.cmp(&kb).then_with(|| next_rank_cmp(cfg, a, b))
     });
 }
 
@@ -2007,14 +2011,45 @@ pub fn list_to_value_with_custom(
 /// them. The status precedence that ranks `in_progress` ahead of `open` is no longer hardcoded here
 /// (sp6.5): it is the first `ranking.next` key both bundled plugins declare, so ranking is entirely
 /// plugin-driven — no command-code special-case undercuts the "all policy flows from the config" seam.
+///
+/// This is the DEFAULT order only. Per-type orders (6j6v.z9jk) apply to `next` alone, through
+/// [`next_rank_cmp`]; `list --sort rank` and `blocked` keep this one until `list` gets its own
+/// per-type orders (6j6v.n698).
 fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
-    for key in &cfg.ranking.next.order {
+    keys_cmp(a, b, &cfg.ranking.next.order)
+}
+
+/// `keys` in declared order, then the id tiebreak — the total order every rank ends in.
+fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
+    for key in keys {
         let c = cmp_rank_key(a, b, key);
         if c != std::cmp::Ordering::Equal {
             return c;
         }
     }
     a.id.cmp(&b.id)
+}
+
+/// The rank `next` orders by within a tier (6j6v.z9jk). A plugin that declares neither a per-type
+/// order nor `types` ranks by [`rank_cmp`], exactly as before. Otherwise two items of different
+/// types compare by their type's position in the cross-type order
+/// ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by type name; two items
+/// of one type by that type's order ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)),
+/// then id. A lexicographic key, so the order is total — the tiers and the paging snapshot rely on
+/// that. Shared by the store path and the store-free path through [`order_next_tiered`].
+fn next_rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
+    let spec = &cfg.ranking.next;
+    if !spec.splits_by_type() {
+        return rank_cmp(cfg, a, b);
+    }
+    let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
+    if ta != tb {
+        return spec
+            .type_ordinal(ta)
+            .cmp(&spec.type_ordinal(tb))
+            .then_with(|| ta.cmp(&tb));
+    }
+    keys_cmp(a, b, spec.order_for(ta))
 }
 
 // ---- ordering axis (C2 #916.2) ---------------------------------------------
