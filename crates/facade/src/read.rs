@@ -881,7 +881,17 @@ pub struct NextPage {
     /// The rows to render — already ordered, already filtered, already cut.
     pub items: Vec<ItemRow>,
     /// How many candidates there were BEFORE the cut. Equals `items.len()` when nothing was cut.
+    /// Under `--paginate` it is the length of the whole cached list the page was cut from.
     pub total: usize,
+    /// The position of the first row in that whole list: `0` for every first page, and for every
+    /// answer that does not paginate (6j6v.15ed).
+    pub start: usize,
+    /// The token that asks for the page after this one ([`next_page`]). `None` without
+    /// `--paginate`, and on the last page.
+    pub next_token: Option<String>,
+    /// The caller passed a token that was stale or invalid, so this is the FIRST page of a fresh
+    /// list instead of the page it asked for (owner decision of 2026-10-09).
+    pub restarted: bool,
 }
 
 impl NextPage {
@@ -889,7 +899,7 @@ impl NextPage {
     ///
     /// [`total`]: NextPage::total
     pub fn truncated(&self) -> bool {
-        self.items.len() < self.total
+        self.start > 0 || self.items.len() < self.total
     }
 }
 
@@ -907,7 +917,440 @@ pub fn truncate_next(items: Vec<ItemRow>, limit: Option<usize>) -> NextPage {
         Some(n) => items.into_iter().take(n).collect(),
         None => items,
     };
-    NextPage { items, total }
+    NextPage {
+        items,
+        total,
+        start: 0,
+        next_token: None,
+        restarted: false,
+    }
+}
+
+// ---- next: filters and paging (6j6v.15ed) -----------------------------------
+
+/// What a `next` answer can be narrowed to (6j6v.15ed). Every filter keeps the ranked order: it
+/// removes rows, it never re-ranks the rest. The tiers are computed over the whole board first, so a
+/// filtered list is the unfiltered one with rows taken out — a child whose started epic is filtered
+/// away still sits where the epic's cluster put it.
+///
+/// THE one membership rule (`NextFilter::keeps`) behind the store path ([`next_filtered`],
+/// [`next_page`], [`Engine::next_query`]) and the store-free path ([`next_active_filtered`]), so a
+/// server and a replica filter alike.
+///
+/// `#[non_exhaustive]`: build it with [`NextFilter::new`] and the `with_*` methods.
+///
+/// [`Engine::next_query`]: crate::engine::Engine::next_query
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NextFilter {
+    /// Only items of these plugin types (the stored `type`, as `list --type` reads it). Empty: any
+    /// type.
+    pub types: Vec<String>,
+    /// Only items IN this container: items whose current parent (`belongs_to`, the parent edge) it
+    /// is, OR that contribute to it (a present `contributes_to` edge). An id nothing points at
+    /// yields an empty list, as an unknown label does.
+    pub within: Option<String>,
+    /// Only items carrying this user label.
+    pub label: Option<String>,
+}
+
+impl NextFilter {
+    /// No filter: every candidate.
+    pub fn new() -> NextFilter {
+        NextFilter::default()
+    }
+
+    /// Also admit items of type `ty` (repeatable: the types are alternatives).
+    pub fn with_type(mut self, ty: impl Into<String>) -> NextFilter {
+        self.types.push(ty.into());
+        self
+    }
+
+    /// Only items in the container `id` (its children and its contributors). `id` is the full
+    /// item id, as every id the Engine takes (`Engine::show` and the rest): a caller holding a
+    /// short id resolves it first, as the CLI does with `resolve_id`.
+    pub fn with_container(mut self, id: impl Into<String>) -> NextFilter {
+        self.within = Some(id.into());
+        self
+    }
+
+    /// Only items carrying `label`.
+    pub fn with_label(mut self, label: impl Into<String>) -> NextFilter {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Whether this filter keeps every row.
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.within.is_none() && self.label.is_none()
+    }
+
+    /// THE membership rule: whether `item`, with its `labels` and its `contributes_to` targets,
+    /// passes. The callers read the joins only for the filters that are set.
+    fn keeps(&self, item: &ItemRow, labels: &[String], contributes_to: &[String]) -> bool {
+        let ty = self.types.is_empty()
+            || item
+                .item_type
+                .as_deref()
+                .is_some_and(|t| self.types.iter().any(|f| f == t));
+        let within = self.within.as_deref().is_none_or(|c| {
+            item.belongs_to.as_deref() == Some(c) || contributes_to.iter().any(|t| t == c)
+        });
+        let label = self
+            .label
+            .as_deref()
+            .is_none_or(|l| labels.iter().any(|x| x == l));
+        ty && within && label
+    }
+
+    /// The filter's canonical spelling, part of a cached snapshot's query key: the same filter
+    /// spelled with its types in another order or repeated is the same key.
+    fn key(&self) -> Value {
+        let mut types = self.types.clone();
+        types.sort();
+        types.dedup();
+        json!({ "types": types, "in": self.within, "label": self.label })
+    }
+}
+
+/// Narrow an ordered store-path `next` result by `filter`, keeping its order.
+fn filter_next_store(
+    store: &Store,
+    items: Vec<ItemRow>,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    if filter.is_empty() {
+        return Ok(items);
+    }
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let mut labels = match filter.label {
+        Some(_) => store.labels_of_bulk(&ids)?,
+        None => BTreeMap::new(),
+    };
+    let mut contributes = match filter.within {
+        Some(_) => store.contributes_to_of_bulk(&ids)?,
+        None => BTreeMap::new(),
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let item_contributes = contributes.remove(&item.id).unwrap_or_default();
+        let item_labels = labels.remove(&item.id).unwrap_or_default();
+        if filter.keeps(&item, &item_labels, &item_contributes) {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
+/// [`next`], narrowed by `filter` — the same ranked order with the rows the filter rejects taken
+/// out (6j6v.15ed).
+pub fn next_filtered(
+    cfg: &PluginConfig,
+    store: &Store,
+    now: &str,
+    sort: Option<SortKey>,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    let items = next(cfg, store, now, sort)?;
+    filter_next_store(store, items, filter)
+}
+
+/// How long a cached `next` snapshot answers its tokens: one hour from when it was computed. Long
+/// enough to read a list page by page with work in between; short enough that the table holds only
+/// what somebody might still be paging through.
+pub const NEXT_CACHE_TTL_SECS: i64 = 60 * 60;
+
+/// How many cached `next` snapshots a workspace keeps at most. Every new snapshot evicts the
+/// expired ones, then the oldest of its own query beyond [`NEXT_CACHE_MAX_PER_QUERY`], then the
+/// oldest beyond this, so the table cannot grow without limit however many first pages are asked
+/// for. A token whose snapshot was evicted restarts.
+pub const NEXT_CACHE_MAX_SNAPSHOTS: usize = 64;
+
+/// How many cached snapshots one query — one sort and filter — keeps at most. A reader that keeps
+/// asking for first pages of one query (a UI polling `next`) evicts its own older snapshots, not
+/// another query's, so it cannot restart a pager reading another list (review of #43,
+/// Integrity #3). Readers asking the SAME query share these slots.
+pub const NEXT_CACHE_MAX_PER_QUERY: usize = 8;
+
+// A query's own slots are a share of the whole, or the per-query cap would never bite.
+const _: () = assert!(NEXT_CACHE_MAX_PER_QUERY < NEXT_CACHE_MAX_SNAPSHOTS);
+
+/// One `next` request with its filters and paging (6j6v.15ed) — the input of [`next_page`] and
+/// [`Engine::next_query`].
+///
+/// - No `limit`: the whole list.
+/// - `limit` alone: the head of it, with the total disclosed and no token (as `--limit` has been).
+/// - `limit` + `paginate`: the head of it plus a `next_token` while rows remain. The list is cached
+///   machine-locally; a `token` asks for the page after the one that handed it out. A stale or
+///   invalid token answers the FIRST page of a fresh list with `restarted: true` — `limit` stays.
+///
+/// `#[non_exhaustive]`: build it with [`NextQuery::new`] and the builder methods.
+///
+/// [`Engine::next_query`]: crate::engine::Engine::next_query
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NextQuery {
+    /// The reference time (ISO-8601 / RFC3339).
+    pub now: String,
+    /// The order; `None` is the tiered default ([`DEFAULT_SORT_NEXT`]).
+    pub sort: Option<SortKey>,
+    /// The filters; empty keeps every candidate.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+}
+
+impl NextQuery {
+    /// The whole unfiltered list at `now`, in the default order.
+    pub fn new(now: impl Into<String>) -> NextQuery {
+        NextQuery {
+            now: now.into(),
+            sort: None,
+            filter: NextFilter::new(),
+            limit: None,
+            paginate: false,
+            token: None,
+        }
+    }
+
+    /// Order by `sort` instead of the tiered default.
+    pub fn sort(mut self, sort: SortKey) -> NextQuery {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> NextQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> NextQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> NextQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> NextQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: sort, filter and the plugin's `next` ranking, never
+    /// `now` or `limit` — a reader may change the page size between pages, and `now` moves on its
+    /// own. The ranking is in the key (6j6v.z9jk) so a token handed out under one plugin order
+    /// restarts under another instead of paging through a list ranked differently. It is carried as
+    /// [`rank_fingerprint`], a fixed-size hash of the ranking's canonical JSON, not the ranking
+    /// itself (review of #44, Code #6 / Integrity #6).
+    fn key(&self, cfg: &PluginConfig) -> String {
+        json!({
+            "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
+            "filter": self.filter.key(),
+            "rank": rank_fingerprint(cfg),
+        })
+        .to_string()
+    }
+}
+
+/// A fixed-size fingerprint of the plugin's `next` ranking: FNV-1a (64 bit) over its canonical JSON
+/// (`serde_json` over the `Serialize` derive; the per-type orders are a `BTreeMap`, so the bytes
+/// are deterministic). FNV is spelled out here because it is stable across Rust releases, which
+/// `DefaultHasher` does not promise. A collision would only let a token survive a ranking change
+/// whose new order the snapshot check in `resume` still compares against.
+fn rank_fingerprint(cfg: &PluginConfig) -> String {
+    let canonical = serde_json::to_string(&cfg.ranking.next).unwrap_or_default();
+    let hash = canonical.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
+}
+
+/// Unix seconds now — the clock the snapshot expiry reads. Not `now`: that is the caller's
+/// reference time for the defer boundary, and a test pins it far from the wall clock.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// A page token: `<snapshot id>.<position>`.
+fn parse_token(token: &str) -> Option<(&str, usize)> {
+    let (id, pos) = token.rsplit_once('.')?;
+    if id.is_empty() {
+        return None;
+    }
+    Some((id, pos.parse().ok()?))
+}
+
+/// The snapshot and position a token names, if it still answers: it exists here, is younger than
+/// [`NEXT_CACHE_TTL_SECS`], was computed under the same `key`, points inside its list, and nothing
+/// since bears on the list it holds. Owner decision of 2026-10-09: ONLY an op that bears on the
+/// already loaded list invalidates it, which is checked two ways:
+///
+/// 1. an op appended after the snapshot TARGETS one of its items — its cells, custom fields,
+///    labels, notes, chunks, thread links, or an edge with it at either end;
+/// 2. the fresh list, restricted to the snapshot's items, no longer is the snapshot — one of them
+///    left the list or moved against the others (a blocker reopened, a child closed so its epic
+///    became finishable).
+///
+/// Check 1 is the owner's rule as worded. Check 2 also restarts on an op whose TARGET is outside
+/// the snapshot, when it moves an item in it; that reading of "bears on the loaded list" is an
+/// open decision for the owner (6j6v.15ed, PR #43). Without it, a later page would show an item
+/// that has left the list (a now-blocked item), or skip one that moved back.
+///
+/// An item outside the snapshot that now qualifies passes check 1 and, as long as it moves no item
+/// of the snapshot, check 2: it appears on the next fresh query.
+fn resume(
+    store: &Store,
+    token: &str,
+    key: &str,
+    fresh: &[ItemRow],
+    clock: i64,
+) -> Result<Option<(nexus_flow_core::next_cache::CachedResult, usize)>> {
+    let Some((id, pos)) = parse_token(token) else {
+        return Ok(None);
+    };
+    let Some(snap) = store.next_cache_get(id)? else {
+        return Ok(None);
+    };
+    if snap.query != key
+        || snap.created < clock - NEXT_CACHE_TTL_SECS
+        || pos == 0
+        || pos >= snap.ids.len()
+        // A log below the watermark, or another op at it, is a different log (a reset or
+        // restored workspace): nothing vouches for "since" (review of #43, Integrity #6).
+        || store.ops_watermark()? < snap.watermark
+        || store.op_at(snap.watermark)? != snap.watermark_op
+    {
+        return Ok(None);
+    }
+    let held: HashSet<&str> = snap.ids.iter().map(String::as_str).collect();
+    let touched = store.items_touched_since(snap.watermark)?;
+    if touched.iter().any(|t| held.contains(t.as_str())) {
+        return Ok(None);
+    }
+    let still: Vec<&str> = fresh
+        .iter()
+        .map(|i| i.id.as_str())
+        .filter(|i| held.contains(i))
+        .collect();
+    if still != snap.ids.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Ok(None);
+    }
+    Ok(Some((snap, pos)))
+}
+
+/// One `next` page (6j6v.15ed): the list `q` asks for, filtered, ordered, cut, and — under
+/// `paginate` — cached machine-locally so the next page comes from the same list. See
+/// [`NextQuery`] for the three shapes and the private `resume` for when a token still answers.
+///
+/// Every call computes the fresh list: it is what a first page is cut from, and what a token's
+/// snapshot is checked against. The cache buys a list that does not move between pages, not a
+/// cheaper read. Rejected with `validation`: a malformed `now`, `paginate` without a non-zero
+/// `limit`, a `token` without `paginate`.
+///
+/// A first page whose snapshot cannot be written — a read-only workspace, a lock held past the
+/// busy timeout — is still answered, with `next_token: None`: the read does not fail on the cache
+/// (review of #43, Integrity #2). `total` still says how much was cut.
+pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<NextPage> {
+    next_page_at(cfg, store, q, unix_now())
+}
+
+/// [`next_page`] on the clock `clock` (unix seconds) — what the expiry reads, injected so it can be
+/// tested.
+fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) -> Result<NextPage> {
+    crate::validate::iso_date(&q.now)?;
+    if q.token.is_some() && !q.paginate {
+        return Err(NxfError::validation("a page token needs paginate"));
+    }
+    let limit = match (q.paginate, q.limit) {
+        (false, _) => None,
+        (true, Some(n)) if n > 0 => Some(n),
+        (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
+    };
+    // The watermark BEFORE the list: an op that lands while the list is computed is then above it
+    // and counts as "since" — a spurious restart at worst, never a missed one.
+    let watermark = store.ops_watermark()?;
+    let watermark_op = store.op_at(watermark)?;
+    let fresh = next_filtered(cfg, store, &q.now, q.sort, &q.filter)?;
+    let Some(n) = limit else {
+        return Ok(truncate_next(fresh, q.limit));
+    };
+    let key = q.key(cfg);
+    if let Some(token) = &q.token {
+        if let Some((snap, pos)) = resume(store, token, &key, &fresh, clock)? {
+            // `pos < len` (resume checked it); a limit up to `usize::MAX` must not overflow.
+            let end = pos.saturating_add(n).min(snap.ids.len());
+            let mut by_id: HashMap<&str, &ItemRow> =
+                fresh.iter().map(|i| (i.id.as_str(), i)).collect();
+            let items = snap.ids[pos..end]
+                .iter()
+                .filter_map(|id| by_id.remove(id.as_str()).cloned())
+                .collect();
+            return Ok(NextPage {
+                items,
+                total: snap.ids.len(),
+                start: pos,
+                next_token: (end < snap.ids.len()).then(|| format!("{}.{end}", snap.id)),
+                restarted: false,
+            });
+        }
+    }
+    let restarted = q.token.is_some();
+    let total = fresh.len();
+    let next_token = if total > n {
+        let snap = nexus_flow_core::next_cache::CachedResult {
+            id: ulid::Ulid::new().to_string(),
+            created: clock,
+            query: key,
+            watermark,
+            watermark_op,
+            ids: fresh.iter().map(|i| i.id.clone()).collect(),
+        };
+        store
+            .next_cache_put(
+                &snap,
+                snap.created - NEXT_CACHE_TTL_SECS,
+                NEXT_CACHE_MAX_PER_QUERY,
+                NEXT_CACHE_MAX_SNAPSHOTS,
+            )
+            .ok()
+            .map(|()| format!("{}.{n}", snap.id))
+    } else {
+        None
+    };
+    Ok(NextPage {
+        items: fresh.into_iter().take(n).collect(),
+        total,
+        start: 0,
+        next_token,
+        restarted,
+    })
+}
+
+/// A `next` page as its JSON envelope: `{"items", "total"}`, plus `next_token` and `restarted`
+/// when `paging`. `items` is the rendered array the caller built (the CLI adds its presentation
+/// labels and memory counts first). The one spelling of the envelope for the CLI and the Engine.
+pub fn next_page_envelope(items: Value, page: &NextPage, paging: bool) -> Value {
+    let mut v = json!({ "items": items, "total": page.total });
+    if paging {
+        v["next_token"] = json!(page.next_token);
+        v["restarted"] = json!(page.restarted);
+    }
+    v
 }
 
 // ---- next: finish-first tiers (docs/specs/next-finish-first-tiers.md) ------
@@ -931,12 +1374,13 @@ const CLUSTER_CHILD: u8 = 1;
 
 /// Order the `ready ∪ in_progress` candidates into the finish-first tiers (§4.3), in place.
 ///
-/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`rank_cmp`] as the
-/// tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
+/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`NextRank`] as
+/// the tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
 /// Clusters themselves are ordered by their **header's** rank, so a cluster is contiguous and a
 /// low-priority child never drags its epic up (nor a high-priority backlog item slice a cluster
-/// apart). `rank_cmp` ends in an id tiebreak, so the whole composed order is total and
-/// deterministic.
+/// apart). `NextRank` ends in an id tiebreak, so the whole composed order is total and
+/// deterministic. Per-type orders (6j6v.z9jk) live inside `NextRank`: they order WITHIN a
+/// tier and never move an item between tiers.
 fn order_next_tiered(
     cfg: &PluginConfig,
     candidates: &[derive::NextCandidate],
@@ -966,6 +1410,7 @@ fn order_next_tiered(
         "a promoted child is ready, never in_progress — the tiers would overlap"
     );
 
+    let rank = NextRank::new(cfg);
     let keys: HashMap<String, (u8, usize, u8)> = {
         let by_id: HashMap<&str, &ItemRow> = items.iter().map(|i| (i.id.as_str(), i)).collect();
         let mut headers: Vec<&str> = started
@@ -974,7 +1419,7 @@ fn order_next_tiered(
             .copied()
             .collect();
         headers.sort_by(|a, b| match (by_id.get(a), by_id.get(b)) {
-            (Some(x), Some(y)) => rank_cmp(cfg, x, y),
+            (Some(x), Some(y)) => rank.cmp(x, y),
             _ => a.cmp(b), // unreachable (a header is a candidate); stays deterministic anyway
         });
         let cluster_ord: HashMap<&str, usize> =
@@ -1011,7 +1456,7 @@ fn order_next_tiered(
             .get(&b.id)
             .copied()
             .unwrap_or((TIER_BACKLOG, 0, CLUSTER_HEADER));
-        ka.cmp(&kb).then_with(|| rank_cmp(cfg, a, b))
+        ka.cmp(&kb).then_with(|| rank.cmp(a, b))
     });
 }
 
@@ -1620,14 +2065,68 @@ pub fn list_to_value_with_custom(
 /// them. The status precedence that ranks `in_progress` ahead of `open` is no longer hardcoded here
 /// (sp6.5): it is the first `ranking.next` key both bundled plugins declare, so ranking is entirely
 /// plugin-driven — no command-code special-case undercuts the "all policy flows from the config" seam.
+///
+/// This is the DEFAULT order only. Per-type orders (6j6v.z9jk) apply to `next` alone, through
+/// [`NextRank`]; `list --sort rank` and `blocked` keep this one until `list` gets its own
+/// per-type orders (6j6v.n698).
 fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
-    for key in &cfg.ranking.next.order {
+    keys_cmp(a, b, &cfg.ranking.next.order)
+}
+
+/// `keys` in declared order, then the id tiebreak — the total order every rank ends in.
+fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
+    for key in keys {
         let c = cmp_rank_key(a, b, key);
         if c != std::cmp::Ordering::Equal {
             return c;
         }
     }
     a.id.cmp(&b.id)
+}
+
+/// The rank `next` orders by within a tier (6j6v.z9jk), built once per sort. A plugin without a
+/// per-type order ranks by [`rank_cmp`], exactly as before. Otherwise two items of different types
+/// compare by their type's position in the cross-type order
+/// ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by type name; two items
+/// of one type by that type's order ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)),
+/// then id. A lexicographic key, so the order is total — the tiers and the paging snapshot rely on
+/// that. Shared by the store path and the store-free path through [`order_next_tiered`].
+struct NextRank<'a> {
+    cfg: &'a PluginConfig,
+    /// `type → position` in the cross-type order, looked up once per comparison instead of a scan
+    /// of the list (review of #44, Integrity #5). `None` when the plugin does not split by type.
+    ordinals: Option<(HashMap<&'a str, usize>, usize)>,
+}
+
+impl<'a> NextRank<'a> {
+    fn new(cfg: &'a PluginConfig) -> NextRank<'a> {
+        let spec = &cfg.ranking.next;
+        let ordinals = spec.splits_by_type().then(|| {
+            let cross = spec.cross_type_order();
+            let mut map = HashMap::new();
+            for (n, t) in cross.iter().enumerate() {
+                // The first position wins, as `type_ordinal`'s `position` does.
+                map.entry(t.as_str()).or_insert(n);
+            }
+            (map, cross.len())
+        });
+        NextRank { cfg, ordinals }
+    }
+
+    fn cmp(&self, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
+        let Some((ordinals, unlisted)) = &self.ordinals else {
+            return rank_cmp(self.cfg, a, b);
+        };
+        let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
+        if ta != tb {
+            let ord = |t: Option<&str>| {
+                t.and_then(|t| ordinals.get(t).copied())
+                    .unwrap_or(*unlisted)
+            };
+            return ord(ta).cmp(&ord(tb)).then_with(|| ta.cmp(&tb));
+        }
+        keys_cmp(a, b, self.cfg.ranking.next.order_for(ta))
+    }
 }
 
 // ---- ordering axis (C2 #916.2) ---------------------------------------------
@@ -1779,9 +2278,14 @@ fn cmp_rank_key(a: &ItemRow, b: &ItemRow, key: &RankKey) -> std::cmp::Ordering {
             // priority ordinal (and any future numeric field) doesn't mis-sort "10" before "2".
             // Otherwise (ISO dates, ids, any non-numeric label) fall back to lexicographic, which
             // is already the correct order for those (lexicographic == chronological for dates).
+            // A numeric value sorts before a non-numeric one (review of #44, Integrity #2): mixing
+            // the two comparisons per pair is not transitive ("2" < "10" < "1a" < "2"), and a
+            // non-total comparator may make `sort_by` panic on free text.
             let c = match (x.parse::<i64>(), y.parse::<i64>()) {
                 (Ok(xi), Ok(yi)) => xi.cmp(&yi),
-                _ => x.cmp(&y),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => x.cmp(&y),
             };
             match key.dir {
                 Dir::Asc => c,
@@ -1832,6 +2336,11 @@ pub struct ActiveTicket {
     pub updated_at: Option<String>,
     pub conversations: usize,
     pub parent: Option<ParentRef>,
+    /// The present `contributes_to` targets of the ticket (6j6v.15ed), sorted and distinct — what
+    /// [`NextFilter`]'s container filter reads beside `item.belongs_to`. Carried on no record.
+    /// [`active_board`] fills it; a server fills it only when it filters by container
+    /// (`nxs_fold_ddb::records::with_contributes_to`), and leaves it empty otherwise.
+    pub contributes_to: Vec<String>,
 }
 
 impl ActiveTicket {
@@ -1845,6 +2354,7 @@ impl ActiveTicket {
             updated_at: None,
             conversations: 0,
             parent: None,
+            contributes_to: Vec::new(),
         }
     }
 
@@ -1941,6 +2451,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
     let mut custom = store.custom_fields_of_bulk(&ids)?;
     let mut ts = store.item_timestamps_of_bulk(&ids)?;
     let conversations = store.bearing_thread_counts(&ids)?;
+    let mut contributes = store.contributes_to_of_bulk(&ids)?;
     let mut tickets = Vec::with_capacity(items.len());
     for item in items {
         let id = item.id.clone();
@@ -1953,6 +2464,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
         t.updated_at = updated_at;
         t.conversations = conversations.get(&id).copied().unwrap_or(0);
         t.parent = parent;
+        t.contributes_to = contributes.remove(&id).unwrap_or_default();
         tickets.push(t);
     }
     Ok(ActiveBoard::new(board, tickets))
@@ -1968,6 +2480,42 @@ pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
     Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT))
+}
+
+/// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store
+/// holding the same board, through the same membership rule. The ticket's `labels` and
+/// `contributes_to` are the joins the filter reads. A malformed `now` is `validation`-rejected.
+///
+/// Server paging is not here: the store path's page cache is machine-local, and a server's paging
+/// is an open decision (6j6v.15ed). A server cuts this list itself.
+pub fn next_active_filtered(
+    cfg: &PluginConfig,
+    board: &ActiveBoard,
+    now: &str,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    let items = next_active(cfg, board, now)?;
+    if filter.is_empty() {
+        return Ok(items);
+    }
+    Ok(items
+        .into_iter()
+        .filter(|i| match board.tickets.get(&i.id) {
+            Some(t) => filter.keeps(i, &t.labels, &t.contributes_to),
+            None => filter.keeps(i, &[], &[]),
+        })
+        .collect())
+}
+
+/// [`next_active_filtered`] as the `next` JSON — [`next_active_value`] with the filter applied.
+pub fn next_active_filtered_value(
+    cfg: &PluginConfig,
+    board: &ActiveBoard,
+    now: &str,
+    filter: &NextFilter,
+) -> Result<Value> {
+    let items = next_active_filtered(cfg, board, now, filter)?;
+    Ok(board.records(&items, |i, j| next_record(Some(cfg), i, j)))
 }
 
 /// [`next_active`] as the `next` JSON: the value [`next_to_value_with_custom`] (and
@@ -3620,6 +4168,101 @@ mod tests {
     }
 
     #[test]
+    fn cmp_rank_key_is_transitive_over_mixed_numeric_and_text_values() {
+        // Review of #44, Integrity #2: comparing numerically only when BOTH parse made a cycle,
+        // "2" < "10" (numeric) < "1a" (lexical) < "2" (lexical). Numbers now sort before text.
+        let titled = |id: &str, t: &str| {
+            let mut i = item(id, None);
+            i.title = Some(t.into());
+            i
+        };
+        let key = RankKey {
+            field: "title".into(),
+            dir: Dir::Asc,
+            nulls: Nulls::Last,
+            precedence: Vec::new(),
+        };
+        let (two, ten, text) = (titled("a", "2"), titled("b", "10"), titled("c", "1a"));
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(cmp_rank_key(&two, &ten, &key), Less);
+        assert_eq!(cmp_rank_key(&ten, &text, &key), Less);
+        assert_eq!(
+            cmp_rank_key(&text, &two, &key),
+            Greater,
+            "a number sorts before text"
+        );
+    }
+
+    /// A per-type config for the comparator tests: `action` has its own order (due ascending) and
+    /// is the only listed type; `memo`, `note` and an untyped item take the default (priority).
+    fn per_type_cfg(action_order: &str) -> PluginConfig {
+        toml::from_str(&format!(
+            r#"
+            name = "nextrank-fixture"
+            [description]
+            en = "x"
+            de = "y"
+            [priority]
+            labels = ["P0", "P1"]
+            [types]
+            list = ["action", "memo", "note"]
+            [vocabulary.status]
+            open = "open"
+            in_progress = "in progress"
+            closed = "closed"
+            [ranking.next]
+            types = ["action"]
+            order = [ {{ field = "priority", dir = "asc" }} ]
+            [ranking.next.action]
+            order = {action_order}
+            [presentation.list]
+            columns = ["id"]
+            "#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn next_rank_orders_unlisted_types_by_name_and_ties_by_id() {
+        // Review of #44, Test #2: the listed type first; two unlisted types by name (an untyped
+        // item, `None`, before any name); within a type its order, then id on equal keys.
+        let cfg = per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#);
+        let typed = |id: &str, ty: Option<&str>, prio: &str, due: Option<&str>| {
+            let mut i = item(id, Some(prio));
+            i.item_type = ty.map(str::to_string);
+            i.due = due.map(str::to_string);
+            i
+        };
+        let mut items = [
+            typed("n1", Some("note"), "0", None),
+            typed("m2", Some("memo"), "0", None),
+            typed("m1", Some("memo"), "0", None),
+            typed("x1", None, "0", None),
+            typed("a2", Some("action"), "1", Some("2026-07-01")),
+            typed("a3", Some("action"), "0", Some("2026-07-01")),
+            typed("a1", Some("action"), "1", Some("2026-06-01")),
+        ];
+        let rank = NextRank::new(&cfg);
+        items.sort_by(|a, b| rank.cmp(a, b));
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["a1", "a2", "a3", "x1", "m1", "m2", "n1"]);
+    }
+
+    #[test]
+    fn the_paging_key_changes_with_the_ranking_and_only_with_it() {
+        // 6j6v.z9jk: the snapshot is bound to the plugin's ranking, so a token from one order is
+        // never resumed under another — even where the restricted-order check alone would let it.
+        let q = NextQuery::new(T_NOW);
+        let by_due = per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#);
+        let by_prio = per_type_cfg(r#"[ { field = "priority", dir = "asc" } ]"#);
+        assert_ne!(q.key(&by_due), q.key(&by_prio));
+        assert_eq!(
+            q.key(&by_due),
+            q.key(&per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#))
+        );
+    }
+
+    #[test]
     fn effective_lane_ready_masks_an_in_progress_child_of_an_open_parent() {
         // 07a.3 ready-mask (§1): an in_progress child under an open (non-gating, ready) parent has an
         // EFFECTIVE lane of `Ready` — surfacing it as in_progress would over-state progress at the
@@ -3871,5 +4514,80 @@ mod tests {
                 "settable field '{f}' is missing/not-settable in the schema report"
             );
         }
+    }
+
+    // ---- next --paginate: the cache's clock and the log's identity (6j6v.15ed, review of #43) ----
+
+    /// Five ready items and a paginating query over them, at page size 2.
+    fn paged_board() -> (Store, NextQuery) {
+        let mut s = Store::open_in_memory(1);
+        for n in 0..5 {
+            mk(&mut s, &format!("c1.000{n}"), "bug", &n.to_string());
+        }
+        (s, NextQuery::new(T_NOW).limit(2).paginate())
+    }
+
+    fn token_at(s: &Store, q: &NextQuery, clock: i64) -> String {
+        next_page_at(&it_cfg(), s, q, clock)
+            .unwrap()
+            .next_token
+            .expect("rows remain")
+    }
+
+    const T0: i64 = 1_000_000;
+
+    #[test]
+    fn a_token_answers_until_its_snapshot_is_older_than_the_ttl() {
+        // Test Quality #2: the expiry, on an injected clock.
+        let (s, q) = paged_board();
+        let t = token_at(&s, &q, T0);
+        let at = |clock: i64| {
+            next_page_at(&it_cfg(), &s, &q.clone().token(&t), clock)
+                .unwrap()
+                .restarted
+        };
+        assert!(!at(T0 + NEXT_CACHE_TTL_SECS), "at the TTL it still answers");
+        assert!(
+            at(T0 + NEXT_CACHE_TTL_SECS + 1),
+            "past it the token restarts"
+        );
+    }
+
+    #[test]
+    fn a_new_snapshot_evicts_only_snapshots_older_than_the_ttl() {
+        // The sign of the expiry bound: a younger snapshot survives the next insert; one older than
+        // the TTL does not.
+        let (s, q) = paged_board();
+        let young = token_at(&s, &q, T0);
+        token_at(&s, &q, T0 + 10);
+        let snapshot = |t: &str| s.next_cache_get(t.rsplit_once('.').unwrap().0).unwrap();
+        assert!(snapshot(&young).is_some(), "ten seconds younger: kept");
+        token_at(&s, &q, T0 + NEXT_CACHE_TTL_SECS + 1);
+        assert!(
+            snapshot(&young).is_none(),
+            "older than the TTL: dropped on insert"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_whose_watermark_op_is_not_the_logs_restarts() {
+        // Integrity #6: a log that holds another op at the snapshot's watermark is another log,
+        // even when it is no shorter.
+        let (s, q) = paged_board();
+        let t = token_at(&s, &q, T0);
+        let id = t.rsplit_once('.').unwrap().0;
+        let snap = s.next_cache_get(id).unwrap().unwrap();
+        assert_eq!(snap.watermark_op, s.op_at(snap.watermark).unwrap());
+        s.connection()
+            .execute(
+                "UPDATE next_page_cache SET watermark_op = 'another-log' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert!(
+            next_page_at(&it_cfg(), &s, &q.clone().token(&t), T0)
+                .unwrap()
+                .restarted
+        );
     }
 }

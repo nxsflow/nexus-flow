@@ -91,7 +91,24 @@ fn gen_board(seed: u64) -> nexus_flow_core::store::Store {
             _ => {}
         }
     }
+    // Contributes-to edges taken back (6j6v.15ed): their `.cadj#` entries say `removed`, and the
+    // container filter must not count them. Its own Lcg, so the board above is unchanged.
+    let mut q = Lcg(seed ^ 0xc0de);
+    for i in 0..14 {
+        if q.next(4) == 0 {
+            let to = id(q.next(14));
+            s.add_edge(&id(i), &to, EdgeKind::ContributesTo, "u");
+            s.remove_edge(&id(i), &to, EdgeKind::ContributesTo, "u");
+        }
+    }
     s
+}
+
+/// The served board with the one join read only on request, the contributes-to targets, filled in —
+/// what `read::active_board` builds from the store.
+fn served_board(t: &MemTable) -> read::ActiveBoard {
+    let plain = ready(records::active_board(t, ready(board::select(t)).unwrap())).unwrap();
+    ready(records::with_contributes_to(t, plain)).unwrap()
 }
 
 fn ids(items: &[ItemRow]) -> Vec<String> {
@@ -135,11 +152,21 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
 
         let selection = ready(board::select(&t)).unwrap();
         let lanes = selection.board.lanes(NOW);
-        let served = ready(records::active_board(&t, selection)).unwrap();
+        let plain = ready(records::active_board(&t, selection)).unwrap();
+        // The contributes-to targets are read only on request (6j6v.15ed).
+        assert!(
+            plain.tickets.values().all(|t| t.contributes_to.is_empty()),
+            "{ctx}"
+        );
+        let served = ready(records::with_contributes_to(&t, plain)).unwrap();
         // The input itself: every active ticket, with the same row and the same joins.
         let local = read::active_board(&s).unwrap();
         assert_eq!(served.tickets, local.tickets, "active tickets, {ctx}");
         for ticket in served.tickets.values() {
+            seen.add(
+                "tickets that contribute to another",
+                usize::from(!ticket.contributes_to.is_empty()),
+            );
             seen.add("labelled tickets", usize::from(!ticket.labels.is_empty()));
             seen.add(
                 "tickets with custom values",
@@ -226,6 +253,18 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
                 "no next record is closed-masked, {ctx}"
             );
             seen.add("next rows", want.len());
+
+            // The container filter (6j6v.15ed): every ticket as a container, through both paths.
+            for container in served.tickets.keys() {
+                let filter = read::NextFilter::new().with_container(container.as_str());
+                let want = read::next_filtered(cfg, &s, NOW, None, &filter).unwrap();
+                assert_eq!(
+                    ids(&read::next_active_filtered(cfg, &served, NOW, &filter).unwrap()),
+                    ids(&want),
+                    "next in {container}, {ctx}"
+                );
+                seen.add("rows in a container", want.len());
+            }
             // Neighbours equal on every ranking field: only the id tiebreak orders them.
             seen.add(
                 "next neighbours tied on priority and due",
@@ -292,6 +331,8 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
         "tickets whose parent is not active",
         "tickets whose parent is deleted or missing",
         "present contributes_to edges",
+        "tickets that contribute to another",
+        "rows in a container",
         "boards with a tier-1 and a tier-3 candidate",
         "open tickets whose parents are all inactive",
         "next neighbours tied on priority and due",
@@ -352,7 +393,7 @@ fn a_ticket_reads_only_its_own_labels_custom_values_and_links() {
         "u",
     );
     let t = serve(&s, 7, &folder);
-    let served = ready(records::active_board(&t, ready(board::select(&t)).unwrap())).unwrap();
+    let served = served_board(&t);
     let mine = &served.tickets["ab12.0001"];
     assert_eq!(mine.labels, ["mine"]);
     assert!(mine.custom.is_empty(), "an empty custom value is no value");
@@ -376,7 +417,7 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
         let ops = delivered(&s, seed);
         let t = serve(&s, seed, &folder);
         for (sk, _) in t.rows() {
-            if sk.starts_with(".ladj#") || sk.starts_with(".tadj#") {
+            if sk.starts_with(".ladj#") || sk.starts_with(".tadj#") || sk.starts_with(".cadj#") {
                 ready(t.delete(&sk)).unwrap();
             }
         }
@@ -404,7 +445,7 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
         assert!(folder.is_current(&mark), "seed {seed}");
 
-        let served = ready(records::active_board(&t, ready(board::select(&t)).unwrap())).unwrap();
+        let served = served_board(&t);
         assert_eq!(
             served.tickets,
             read::active_board(&s).unwrap().tickets,
@@ -451,6 +492,12 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
             s.set_field(&id, "status", Some("in_progress".into()), "u");
             s.add_edge(&id, "ab12.p000", EdgeKind::Parent, "u");
         }
+        for round in 0..5 {
+            s.add_edge(&id, "ab12.p000", EdgeKind::ContributesTo, "u");
+            if round < 4 {
+                s.remove_edge(&id, "ab12.p000", EdgeKind::ContributesTo, "u");
+            }
+        }
     }
     let t = serve(&s, 1, &folder);
     let selection = ready(board::select(&t)).unwrap();
@@ -466,6 +513,17 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
     assert_eq!(after.queries - before.queries, 3 * n);
     assert_eq!(after.index_queries, before.index_queries);
     assert_eq!(after.writes, before.writes);
+    // The contributes-to targets, on request: one Query per ticket, nothing else (6j6v.15ed).
+    let served = ready(records::with_contributes_to(&t, served)).unwrap();
+    let last = t.requests();
+    assert_eq!(last.queries - after.queries, n);
+    assert_eq!(last.gets, after.gets);
+    assert_eq!(last.index_queries, after.index_queries);
+    assert_eq!(last.writes, after.writes);
+    assert!(served
+        .tickets
+        .values()
+        .all(|t| t.contributes_to == ["ab12.p000"]));
     assert_eq!(served.tickets, read::active_board(&s).unwrap().tickets);
 }
 
@@ -544,4 +602,52 @@ fn the_parent_tiebreak_on_equal_coordinates_is_the_one_present_parent_picks() {
     assert_eq!(parents["c"], "p2");
     assert_eq!(parents["d"], "q2");
     assert_eq!(parents["e"], "r1");
+}
+
+#[test]
+fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_contributors() {
+    // A stream folded with the label and link entries but before the contributes-to entries
+    // (6j6v.15ed, index revision 2): its watermark names revision 1 and it has no `.cadj#` rows.
+    let folder = Folder::platform().unwrap();
+    let mut seen = 0;
+    for seed in [3, 11, 27] {
+        let s = gen_board(seed);
+        let ops = delivered(&s, seed);
+        let t = serve(&s, seed, &folder);
+        for (sk, _) in t.rows() {
+            if sk.starts_with(".cadj#") {
+                ready(t.delete(&sk)).unwrap();
+            }
+        }
+        ready(t.write(&Write {
+            sk: WATERMARK_KEY.into(),
+            set: vec![(format!("revision_{INDEX_DOMAIN}"), Cell::Int(1))],
+            remove: Vec::new(),
+            condition: Some(Cond::RowPresent),
+        }))
+        .unwrap();
+
+        let selection = ready(board::select(&t)).unwrap();
+        match ready(records::active_board(&t, selection)) {
+            Err(records::RecordsError::NotCurrent { found: Some(1) }) => {}
+            other => panic!("seed {seed}: a revision-1 stream must be refused, got {other:?}"),
+        }
+        let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+        assert!(!folder.is_current(&mark), "seed {seed}");
+        ready(Folder::clear(&t)).unwrap();
+        ready(folder.fold_batch(&t, &ops)).unwrap();
+
+        let served = served_board(&t);
+        assert_eq!(
+            served.tickets,
+            read::active_board(&s).unwrap().tickets,
+            "seed {seed}"
+        );
+        seen += served
+            .tickets
+            .values()
+            .filter(|t| !t.contributes_to.is_empty())
+            .count();
+    }
+    assert!(seen > 0, "the refolded streams have contributing tickets");
 }

@@ -44,6 +44,11 @@
 //! entry from the rows. The entries came with index revision 1 ([`crate::fold::INDEX_REVISION`]);
 //! a stream folded before has none and is refolded.
 //!
+//! Revision 2 (6j6v.15ed) files a ticket's outgoing `contributes_to` edges the same way,
+//! `.cadj#<ticket>#<tag>` under the edge's `from_id`, copying its `to_id`, for the container filter.
+//! Only `contributes_to` adds get one: folding another edge's add costs nothing more, and folding
+//! an edge remove one `GetItem` of its add, to learn its kind.
+//!
 //! # One writer per stream
 //!
 //! The rows a reducer describes converge whatever the order and however many folders write them.
@@ -53,8 +58,8 @@
 //! from the rows if that was ever broken.
 
 use crate::layout::{
-    adjacency_key, adjacency_prefix, label_adjacency_key, link_adjacency_key, row_key,
-    table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK,
+    adjacency_key, adjacency_prefix, contributes_adjacency_key, label_adjacency_key,
+    link_adjacency_key, row_key, table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK,
 };
 use crate::table::{text, Dated, Row, Table};
 use crate::write::{Cond, Write};
@@ -93,6 +98,10 @@ pub const REMOVED: &str = "removed";
 pub(crate) struct Owned {
     pub(crate) adds: &'static str,
     pub(crate) removes: &'static str,
+    /// The add's column that names the ticket the entry is filed under.
+    pub(crate) owner: &'static str,
+    /// Only adds whose cell `.0` is `.1` get an entry; `None`: every add.
+    pub(crate) only: Option<(&'static str, &'static str)>,
     /// The entry's key from the ticket and the tag.
     pub(crate) key: fn(&str, &str) -> String,
     /// The add's cells the entry copies, beside the tag.
@@ -102,6 +111,8 @@ pub(crate) struct Owned {
 pub(crate) const LABELS: Owned = Owned {
     adds: "label_adds",
     removes: "label_removes",
+    owner: "item_id",
+    only: None,
     key: label_adjacency_key,
     copies: &["label"],
 };
@@ -109,16 +120,40 @@ pub(crate) const LABELS: Owned = Owned {
 pub(crate) const LINKS: Owned = Owned {
     adds: "thread_link_adds",
     removes: "thread_link_removes",
+    owner: "item_id",
+    only: None,
     key: link_adjacency_key,
     copies: &["thread_id", "weight", "lamport", "site"],
 };
 
-const OWNED: [Owned; 2] = [LABELS, LINKS];
+/// A ticket's outgoing `contributes_to` edges (6j6v.15ed, index revision 2): filed under the edge's
+/// `from_id`, what the facade's container filter reads beside `belongs_to`.
+pub(crate) const CONTRIBUTES: Owned = Owned {
+    adds: "edge_adds",
+    removes: "edge_removes",
+    owner: "from_id",
+    only: Some(("kind", "contributes_to")),
+    key: contributes_adjacency_key,
+    copies: &["to_id"],
+};
+
+const OWNED: [Owned; 3] = [LABELS, LINKS, CONTRIBUTES];
+
+impl Owned {
+    /// Whether an add whose cells `cell` reads gets an entry.
+    fn files(&self, cell: impl Fn(&str) -> Option<String>) -> bool {
+        self.only
+            .is_none_or(|(column, value)| cell(column).as_deref() == Some(value))
+    }
+}
 
 /// The entry of add `tag` from the add row's cells and whether it is removed. `None` for an add
-/// without a ticket, which no entry can be filed under.
+/// without a ticket, which no entry can be filed under, and for an add the OR-set does not file.
 fn owned_write(owned: &Owned, add: &Row, tag: &str, removed: bool) -> Option<Write> {
-    let item = text(add, "item_id")?;
+    if !owned.files(|c| text(add, c).map(str::to_string)) {
+        return None;
+    }
+    let item = text(add, owned.owner)?;
     let mut set = vec![("tag".to_string(), Cell::Text(tag.to_string()))];
     for column in owned.copies {
         match add.get(*column) {
@@ -145,6 +180,10 @@ async fn refresh_owned_add<T: Table>(
     add: &Row,
     tag: &str,
 ) -> Result<(), T::Error> {
+    // An add the OR-set does not file (a `dep` edge) costs no read of its remove.
+    if !owned.files(|c| text(add, c).map(str::to_string)) {
+        return Ok(());
+    }
     let removed = table.get(&tag_key(owned.removes, tag)).await?.is_some();
     if let Some(write) = owned_write(owned, add, tag, removed) {
         table.write(&write).await?;
@@ -155,8 +194,11 @@ async fn refresh_owned_add<T: Table>(
 /// The key of the entry an add described by `change` files under its ticket, if it is an owned add.
 fn owned_entry_key(change: &Change) -> Option<String> {
     let owned = OWNED.iter().find(|o| o.adds == change.table)?;
+    if !owned.files(|c| effect_text(change, c).map(str::to_string)) {
+        return None;
+    }
     Some((owned.key)(
-        effect_text(change, "item_id")?,
+        effect_text(change, owned.owner)?,
         key_text(change, "tag")?,
     ))
 }
@@ -215,7 +257,13 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
             .iter()
             .position(|o| o.adds == change.table || o.removes == change.table)
         {
-            owned_tags.extend(key_text(change, "tag").map(|tag| (at, tag)));
+            // An add the OR-set does not file (a `dep` edge add) is known from the change alone.
+            let owned = &OWNED[at];
+            let filed = change.table != owned.adds
+                || owned.files(|c| effect_text(change, c).map(str::to_string));
+            if filed {
+                owned_tags.extend(key_text(change, "tag").map(|tag| (at, tag)));
+            }
         }
         match change.table {
             "items" => items.extend(key_text(change, "id")),

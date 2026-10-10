@@ -20,7 +20,11 @@
 //! | `parent`                   | one `GetItem` per distinct parent outside the selection     |
 //!
 //! So a board of `n` active tickets costs `1 + n` `GetItem`s and `3n` Queries, plus one `GetItem`
-//! per distinct parent that is not itself active — `4n + 1 + p` requests besides the selection. A
+//! per distinct parent that is not itself active — `4n + 1 + p` requests besides the selection.
+//!
+//! One join is read only when asked for: [`with_contributes_to`] fills each ticket's outgoing
+//! `contributes_to` targets, which only the facade's container filter (`next --in`) reads. It is one
+//! more Query per ticket, on `.cadj#<ticket>#` — `5n + 1 + p` with it — bounded the same way. A
 //! Query returns more than one page only past 1 MB, which one ticket's custom values, labels or
 //! links do not reach. The entries under a ticket carry their add's label or link and its presence
 //! (see [`board`](crate::board), "Who owns a label or a thread link"), so a label toggled many
@@ -42,7 +46,8 @@
 //!
 //! # A stream folded by older rules
 //!
-//! The entries under a ticket came with index revision 1. A stream whose watermark names an older
+//! The entries under a ticket came with index revision 1, the `.cadj#` entries with revision 2
+//! (6j6v.15ed). A stream whose watermark names an older
 //! one — or none, folded before revisions were recorded for the index — has no entries, and its
 //! records would come back without labels or conversations. [`active_board`] refuses such a stream
 //! ([`RecordsError::NotCurrent`]); the fold run refolds it ([`Folder::is_current`]), after which it
@@ -52,7 +57,9 @@
 
 use crate::board::{int, item_key, Selection, REMOVED};
 use crate::fold::{Folder, INDEX_DOMAIN, INDEX_REVISION};
-use crate::layout::{label_adjacency_prefix, link_adjacency_prefix, row_key};
+use crate::layout::{
+    contributes_adjacency_prefix, label_adjacency_prefix, link_adjacency_prefix, row_key,
+};
 use crate::table::{text, Row, Table};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use nexus_flow_core::model::{ItemRow, LinkWeight};
@@ -159,6 +166,44 @@ pub async fn active_board<T: Table>(
         .try_collect()
         .await?;
     Ok(ActiveBoard::new(board, tickets))
+}
+
+/// `board` with every ticket's outgoing `contributes_to` targets filled in, sorted and distinct —
+/// what `read::active_board` fills from a store, and what the facade's container filter
+/// (`read::next_active_filtered` with `NextFilter::with_container`) reads beside `belongs_to`
+/// (6j6v.15ed). One Query per ticket on its `.cadj#` entries, at most [`READ_CONCURRENCY`] tickets at
+/// a time; a server calls it only when a request filters by container, so `next`, `blocked` and
+/// `deferred` without one pay nothing for it. The stream must be current, as for [`active_board`].
+pub async fn with_contributes_to<T: Table>(
+    table: &T,
+    mut board: ActiveBoard,
+) -> Result<ActiveBoard, RecordsError<T::Error>> {
+    let ids: Vec<String> = board.tickets.keys().cloned().collect();
+    let targets: Vec<(String, Vec<String>)> = stream::iter(ids)
+        .map(|id| async move {
+            let targets = contributes_to(table, &id).await?;
+            Ok::<_, T::Error>((id, targets))
+        })
+        .buffered(READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+    for (id, targets) in targets {
+        if let Some(t) = board.tickets.get_mut(&id) {
+            t.contributes_to = targets;
+        }
+    }
+    Ok(board)
+}
+
+/// The ticket's present outgoing `contributes_to` targets, sorted and distinct —
+/// `Store::contributes_to_of` for one ticket.
+async fn contributes_to<T: Table>(table: &T, id: &str) -> Result<Vec<String>, T::Error> {
+    let targets: BTreeSet<String> = present_entries(table, &contributes_adjacency_prefix(id))
+        .await?
+        .iter()
+        .filter_map(|e| text(e, "to_id").map(str::to_string))
+        .collect();
+    Ok(targets.into_iter().collect())
 }
 
 /// An `items` row as the store reads it, with the ticket's `belongs_to` (the `present_parent` join).

@@ -369,3 +369,196 @@ fn next_emits_zero_escape_sequences_when_stdout_is_not_a_terminal() {
         );
     }
 }
+
+// ---- `--type`, `--in`, `--paginate` (6j6v.15ed) -----------------------------
+//
+// The flags over `read::next_page`, the function `Engine::next_query` answers from; the semantics
+// are pinned at the Engine seam (`crates/facade/tests/next_query.rs`). These pin the CLI's wiring
+// and its two output shapes.
+
+fn create_typed(dir: &Path, ty: &str, args: &[&str]) -> String {
+    let mut full = vec!["create", "--type", ty, "--description", "d"];
+    full.extend_from_slice(args);
+    full.push("--json");
+    let out = nxf()
+        .args(full)
+        .current_dir(dir)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+fn json_ids(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn next_type_and_in_narrow_the_ranked_list() {
+    let tmp = TempDir::new().unwrap();
+    init(tmp.path());
+    let e1 = create_typed(tmp.path(), "epic", &["--title", "E1", "--priority", "P2"]);
+    let e2 = create_typed(tmp.path(), "epic", &["--title", "E2", "--priority", "P2"]);
+    let child = create_typed(
+        tmp.path(),
+        "feature",
+        &["--title", "c", "--priority", "P1", "--parent", &e1],
+    );
+    let bug = create(tmp.path(), &["--title", "b", "--priority", "P0"]);
+    nxf()
+        .args(["contributes", "add", &child, &e2])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    // The item belongs to e1 and contributes to e2: it is in both.
+    assert_eq!(
+        json_ids(&next_json(tmp.path(), &["--in", &e1])),
+        std::slice::from_ref(&child)
+    );
+    assert_eq!(
+        json_ids(&next_json(tmp.path(), &["--in", &e2])),
+        std::slice::from_ref(&child)
+    );
+    assert_eq!(
+        json_ids(&next_json(tmp.path(), &["--type", "bug"])),
+        std::slice::from_ref(&bug)
+    );
+    let all = next_ids(tmp.path());
+    let bug_or_task: Vec<String> = all
+        .iter()
+        .filter(|i| **i == bug || **i == child)
+        .cloned()
+        .collect();
+    assert_eq!(
+        json_ids(&next_json(
+            tmp.path(),
+            &["--type", "feature", "--type", "bug"]
+        )),
+        bug_or_task,
+        "repeatable, and the ranked order is kept"
+    );
+}
+
+#[test]
+fn next_paginate_hands_out_a_token_and_the_token_walks_on() {
+    let tmp = TempDir::new().unwrap();
+    init(tmp.path());
+    let ids = five(tmp.path());
+
+    let p1 = next_json(tmp.path(), &["--limit", "2", "--paginate"]);
+    assert_eq!(json_ids(&p1["items"]), ids[0..2]);
+    assert_eq!(p1["total"], 5);
+    assert_eq!(p1["restarted"], false);
+    let token = p1["next_token"].as_str().expect("rows remain").to_string();
+
+    let p2 = next_json(
+        tmp.path(),
+        &["--limit", "2", "--paginate", "--token", &token],
+    );
+    assert_eq!(json_ids(&p2["items"]), ids[2..4]);
+    assert_eq!(p2["restarted"], false);
+
+    // The human view names the slice and closes with the token.
+    let human = next_human(
+        tmp.path(),
+        &["--limit", "2", "--paginate", "--token", &token],
+    );
+    assert!(human.contains("showing 3–4 of 5"), "{human}");
+    assert!(human.contains("next page: --paginate --token "), "{human}");
+
+    // A malformed token restarts at the first page, and says so.
+    let bad = next_json(
+        tmp.path(),
+        &["--limit", "2", "--paginate", "--token", "nope"],
+    );
+    assert_eq!(bad["restarted"], true);
+    assert_eq!(json_ids(&bad["items"]), ids[0..2]);
+    let human = next_human(
+        tmp.path(),
+        &["--limit", "2", "--paginate", "--token", "nope"],
+    );
+    assert!(human.contains("stale or invalid"), "{human}");
+
+    // `--limit` alone keeps its envelope: no paging keys.
+    let plain = next_json(tmp.path(), &["--limit", "2"]);
+    assert!(plain.get("next_token").is_none() && plain.get("restarted").is_none());
+}
+
+#[test]
+fn next_paginate_needs_limit_and_token_needs_paginate() {
+    let tmp = TempDir::new().unwrap();
+    init(tmp.path());
+    // Test Quality #10: the refusal names the missing flag, not just any failure.
+    for (args, needs) in [
+        (vec!["next", "--paginate"], "--limit"),
+        (vec!["next", "--limit", "2", "--token", "x"], "--paginate"),
+    ] {
+        let out = nxf()
+            .args(&args)
+            .current_dir(tmp.path())
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let err = String::from_utf8(out).unwrap();
+        assert!(
+            err.contains("required") && err.contains(needs),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn next_paginate_ends_with_a_null_token_and_takes_any_limit_and_sort() {
+    // Test Quality #10 and Integrity #1, at the CLI.
+    let tmp = TempDir::new().unwrap();
+    init(tmp.path());
+    let ids = five(tmp.path());
+    let p1 = next_json(tmp.path(), &["--limit", "3", "--paginate"]);
+    let token = p1["next_token"].as_str().unwrap().to_string();
+    let last = next_json(
+        tmp.path(),
+        &["--limit", "3", "--paginate", "--token", &token],
+    );
+    assert_eq!(json_ids(&last["items"]), ids[3..]);
+    assert!(last["next_token"].is_null(), "the last page: {last}");
+    assert_eq!(last["restarted"], false);
+    // A limit as large as clap takes, on a valid token: the rest, no panic.
+    let max = usize::MAX.to_string();
+    let rest = next_json(
+        tmp.path(),
+        &["--limit", &max, "--paginate", "--token", &token],
+    );
+    assert_eq!(json_ids(&rest["items"]), ids[3..]);
+    // `--sort id` pages its own flat order.
+    let mut by_id = ids.clone();
+    by_id.sort();
+    let s1 = next_json(tmp.path(), &["--sort", "id", "--limit", "2", "--paginate"]);
+    let t = s1["next_token"].as_str().unwrap().to_string();
+    let s2 = next_json(
+        tmp.path(),
+        &["--sort", "id", "--limit", "2", "--paginate", "--token", &t],
+    );
+    assert_eq!(json_ids(&s2["items"]), by_id[2..4]);
+}
+
+#[test]
+fn next_in_an_unknown_container_or_of_an_undeclared_type_is_empty_not_an_error() {
+    // Integrity #8 / Test Quality #10: a filter nothing matches is an empty list, as `list --type`.
+    let tmp = TempDir::new().unwrap();
+    init(tmp.path());
+    five(tmp.path());
+    for args in [vec!["--in", "zzzz.9999"], vec!["--type", "no-such-type"]] {
+        let v = next_json(tmp.path(), &args);
+        assert_eq!(v.as_array().unwrap().len(), 0, "{args:?}: {v}");
+    }
+}
