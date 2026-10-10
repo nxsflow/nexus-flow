@@ -29,12 +29,14 @@ use std::sync::{Arc, Mutex};
 use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
-use nexus_chat::error::Result as NxfResult;
+use nexus_chat::error::{ErrorKind, NxfError, Result as NxfResult};
 use nexus_chat::orchestration::{self, Caller, ConsequenceClass, TickReceipt, TickRequest};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::{DryTimer, Timer, TimerConfig, TimerHandle};
-use nexus_chat::worker::{TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig};
+use nexus_chat::worker::{
+    TriggerError, TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig,
+};
 use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
 use tempfile::TempDir;
 
@@ -51,6 +53,26 @@ const FRESH_WINDOW_ENDS: &str = "2026-10-10T07:01:30Z";
 /// A minute and a half after the start: the window that began then has run out.
 const PAST_THE_FRESH_WINDOW: &str = "2026-10-10T07:02:00Z";
 
+/// Forty-five seconds after [`RELEASED`]: past a thirty-second window that started then, and
+/// before the retry of a start that failed then (one minute later).
+const BEFORE_THE_RETRY: &str = "2026-10-10T07:01:15Z";
+/// Where a thirty-second window that started at [`RELEASED`] would end.
+const SHORT_WINDOW_FROM_RELEASED: &str = "2026-10-10T07:01:00Z";
+/// Just past the retry instant of a start that failed at [`RELEASED`].
+const AT_THE_RETRY: &str = "2026-10-10T07:01:31Z";
+/// Nineteen seconds into the thirty-second window of a step started at [`AT_THE_RETRY`].
+const INSIDE_THE_RETRIED_WINDOW: &str = "2026-10-10T07:01:50Z";
+/// Past that window.
+const PAST_THE_RETRIED_WINDOW: &str = "2026-10-10T07:02:10Z";
+
+/// The pre-1wep shape of #38's tests: the queued coder is answered and the verifier opened at this
+/// instant, with a one-minute window.
+const VERIFIER_OPENED: &str = "2026-10-10T01:05:00Z";
+/// The holder lets go inside its own two-hour lease, inside the verifier's window.
+const HANDED_ON: &str = "2026-10-10T01:05:30Z";
+/// Past the window the verifier was given when it was opened, while it waits behind the coder.
+const PAST_THE_VERIFIERS_WINDOW: &str = "2026-10-10T01:07:00Z";
+
 /// The reason a tick reports when it moved a flow on to its next step (`TICK_ADVANCED` in the crate).
 const ADVANCED: &str = "advanced";
 
@@ -61,11 +83,17 @@ const HOLDER: &str =
 /// The measured incident's shape: build, then verify, in one ordered run that needs the copy alone.
 const ORDERED: &str = "name: coding\nmembers: [coder, verifier]\nflow: sequential\nworking_tree: exclusive\ntimeout: 1m\n";
 
+/// The same run with a window shorter than the spacing of a failed start's first retry (one
+/// minute), so the window can pass while the retry is still due.
+const SHORT: &str = "name: coding\nmembers: [coder, verifier]\nflow: sequential\nworking_tree: exclusive\ntimeout: 30s\n";
+
 /// A worker that records every start it accepted and answers which sessions are still running.
 #[derive(Default)]
 struct RecordingWorker {
     seen: Mutex<Vec<TriggerRequest>>,
     running: Mutex<HashSet<String>>,
+    /// The error the next CODER start fails with, once.
+    failing_coder: Mutex<Option<ErrorKind>>,
 }
 
 impl RecordingWorker {
@@ -92,10 +120,22 @@ impl RecordingWorker {
     fn mark_gone(&self, session: &str) {
         self.running.lock().unwrap().remove(session);
     }
+
+    fn fail_the_next_coder_start(&self, kind: ErrorKind) {
+        *self.failing_coder.lock().unwrap() = Some(kind);
+    }
 }
 
 impl Worker for RecordingWorker {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        if req.role.handle == "coder" {
+            if let Some(kind) = self.failing_coder.lock().unwrap().take() {
+                return Err(TriggerError::Failed(NxfError::new(
+                    kind,
+                    "the coder could not be started",
+                )));
+            }
+        }
         // A started session is running until the test says otherwise, as a real process would be.
         self.running
             .lock()
@@ -122,9 +162,13 @@ fn role(handle: &str) -> RoleDecl {
 }
 
 fn team() -> (TempDir, Engine, Arc<RecordingWorker>) {
+    team_with(ORDERED)
+}
+
+fn team_with(coding: &str) -> (TempDir, Engine, Arc<RecordingWorker>) {
     let tmp = TempDir::new().unwrap();
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
-    let channels: Vec<ChannelDecl> = [HOLDER, ORDERED]
+    let channels: Vec<ChannelDecl> = [HOLDER, coding]
         .iter()
         .map(|y| serde_yaml::from_str(y).expect("channel parses"))
         .collect();
@@ -275,11 +319,26 @@ fn tick_with(
 }
 
 fn lapse_findings(receipt: &TickReceipt) -> usize {
+    findings(receipt, ConsequenceClass::StepUnanswered).len()
+}
+
+/// The threads of `receipt`'s findings of `class`.
+fn findings(receipt: &TickReceipt, class: ConsequenceClass) -> Vec<Option<String>> {
     receipt
         .warnings
         .iter()
-        .filter(|w| w.class == ConsequenceClass::StepUnanswered)
-        .count()
+        .filter(|w| w.class == class)
+        .map(|w| w.thread.clone())
+        .collect()
+}
+
+/// The queue row of `role`, if it has one.
+fn queue_row(tmp: &TempDir, role: &str) -> Option<nexus_chat::working_tree::QueuedTrigger> {
+    store(tmp)
+        .list_working_tree_queue()
+        .unwrap()
+        .into_iter()
+        .find(|q| q.role == role)
 }
 
 /// The first operation holds the working copy with its builder at work. Returns the builder's
@@ -458,9 +517,10 @@ fn the_lease_handed_on_after_a_long_wait_is_not_already_expired() {
         "the working copy is the waiting round's now: {holder}"
     );
     assert!(
-        expires.as_str() > RELEASED,
-        "the lease is bounded from the start, not by windows that ran out in the queue: it \
-         expires at {expires}, handed on at {RELEASED}"
+        expires.as_str() >= FRESH_WINDOW_ENDS,
+        "the lease is bounded from the start, not by windows that ran out in the queue: it runs at \
+         least to the end of the window the coder got when it started ({FRESH_WINDOW_ENDS}), and it \
+         expires at {expires}"
     );
     assert_eq!(
         store(&tmp)
@@ -469,5 +529,187 @@ fn the_lease_handed_on_after_a_long_wait_is_not_already_expired() {
             .as_deref(),
         Some(holder.as_str()),
         "the copy is held, not free for the next comer to take"
+    );
+}
+
+// ---- a start that failed and will be retried has not been asked either ---------------------------
+
+/// The coder's start fails on something waiting can fix, and the tick will retry it a minute
+/// later. Its thirty-second window passes before the retry is due. The step has still not been
+/// asked: the flow must not open the verifier, or the retry would start the coder beside it.
+#[test]
+fn a_failed_start_with_a_retry_due_does_not_lapse_and_its_retry_runs_alone() {
+    let (tmp, engine, worker) = team_with(SHORT);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let (round, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
+    tick(&tmp, &worker, SIX_HOURS_LATER, &channel_thread);
+    worker.fail_the_next_coder_start(ErrorKind::Io);
+
+    let armed = the_copy_is_handed_on(&tmp, &engine, &worker, (&builder, &builder_thread));
+    assert_eq!(worker.started("coder"), 0, "the premise: the start failed");
+    let failed = store(&tmp).failed_starts().unwrap();
+    assert!(
+        failed.len() == 1 && failed[0].retry_at.is_some(),
+        "the premise: the failed start is on record with a retry due: {failed:?}"
+    );
+    assert!(
+        !armed
+            .iter()
+            .any(|(thread, at)| thread == &channel_thread && at == SHORT_WINDOW_FROM_RELEASED),
+        "a start that did not happen arms no look at a window that is not running: {armed:?}"
+    );
+
+    let receipt = tick(&tmp, &worker, BEFORE_THE_RETRY, &channel_thread);
+    assert_ne!(
+        receipt.reason, ADVANCED,
+        "a start that failed and will be retried has not been asked: {receipt:?}"
+    );
+    assert_eq!(lapse_findings(&receipt), 0, "{receipt:?}");
+    assert_eq!(worker.started("verifier"), 0);
+    assert!(
+        queued_for(&tmp, &round).is_empty(),
+        "no verifier was opened"
+    );
+
+    tick(&tmp, &worker, AT_THE_RETRY, &channel_thread);
+    assert_eq!(worker.started("coder"), 1, "the retry started the coder");
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "and nothing of the run runs beside it"
+    );
+
+    // Its window runs from the retry that started it, and a started step that stays silent lapses.
+    let receipt = tick(&tmp, &worker, INSIDE_THE_RETRIED_WINDOW, &channel_thread);
+    assert_ne!(receipt.reason, ADVANCED, "{receipt:?}");
+    let receipt = tick(&tmp, &worker, PAST_THE_RETRIED_WINDOW, &channel_thread);
+    assert_eq!(receipt.reason, ADVANCED, "{receipt:?}");
+    assert_eq!(lapse_findings(&receipt), 1, "{receipt:?}");
+}
+
+/// A start that failed on something waiting cannot fix is not retried. Nothing will ever start
+/// it, so its window lapses as before and the flow moves on: holding it would stall the run with
+/// nothing able to end the wait but a withdraw.
+#[test]
+fn a_failed_start_that_will_not_be_retried_still_lapses() {
+    let (tmp, engine, worker) = team_with(SHORT);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let (_, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
+    tick(&tmp, &worker, SIX_HOURS_LATER, &channel_thread);
+    worker.fail_the_next_coder_start(ErrorKind::Validation);
+
+    the_copy_is_handed_on(&tmp, &engine, &worker, (&builder, &builder_thread));
+    let failed = store(&tmp).failed_starts().unwrap();
+    assert!(
+        failed.len() == 1 && failed[0].retry_at.is_none(),
+        "the premise: the failed start is on record and will not be retried: {failed:?}"
+    );
+
+    let receipt = tick(&tmp, &worker, BEFORE_THE_RETRY, &channel_thread);
+    assert_eq!(
+        receipt.reason, ADVANCED,
+        "a start nothing will retry lapses on its window: {receipt:?}"
+    );
+}
+
+// ---- a wait that outlasts the window is reported, not silent ------------------------------------
+
+/// The queued step does not lapse, and the tick says why the flow is not moving: the step's window
+/// has passed while its start still waits. Without it the receipt read `not_due` and nothing else,
+/// however long the wait.
+#[test]
+fn a_tick_reports_a_step_that_still_waits_past_its_window() {
+    let (tmp, engine, worker) = team();
+    let (_builder, _) = a_holder_at_work(&engine, &worker);
+    let (_, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
+    let coder_slot = queue_row(&tmp, "coder").and_then(|q| q.thread).unwrap();
+
+    let receipt = tick(&tmp, &worker, "2026-10-10T01:00:30Z", &channel_thread);
+    assert!(
+        findings(&receipt, ConsequenceClass::StepStillWaiting).is_empty(),
+        "inside its window, nothing to say: {receipt:?}"
+    );
+
+    let receipt = tick(&tmp, &worker, SIX_HOURS_LATER, &channel_thread);
+    assert_eq!(
+        findings(&receipt, ConsequenceClass::StepStillWaiting),
+        vec![Some(coder_slot)],
+        "past its window, the tick names the step that still waits: {receipt:?}"
+    );
+    assert_eq!(lapse_findings(&receipt), 0, "and does not call it silent");
+}
+
+// ---- a later step put back in line by the hand-off has not been asked either ---------------------
+
+/// #38's shape: both steps of the run in line, the hand-off starts the coder and puts the verifier
+/// back in line (`Promotions::deferred`) until the coder is over. The coder then falls silent past
+/// its own window with its process still in the copy, and the verifier's window passes while it
+/// waits. The coder's lapse would move the flow on to the verifier — which is already opened and
+/// waiting. The verifier has not been asked, so it must not count as lapsed too: with both counted
+/// as lapsed, the run would be consolidated past a step that never ran.
+#[test]
+fn a_later_step_put_back_in_line_does_not_lapse_while_it_waits() {
+    let (tmp, engine, worker) = team();
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let (round, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
+    // Both steps in line, as a build before 1wep left them: the coder's row is out of the queue
+    // while its window lapses, and goes back in its old place.
+    let coder = queue_row(&tmp, "coder").unwrap();
+    assert!(store(&tmp)
+        .remove_working_tree_queue_entry(coder.id)
+        .unwrap());
+    tick(&tmp, &worker, VERIFIER_OPENED, &channel_thread);
+    store(&tmp)
+        .enqueue_working_tree(&coder, VERIFIER_OPENED)
+        .unwrap();
+    assert_eq!(
+        queued_for(&tmp, &round),
+        vec!["coder".to_string(), "verifier".to_string()],
+        "the premise: both steps of the run are in line"
+    );
+    let verifier_slot = queue_row(&tmp, "verifier").and_then(|q| q.thread).unwrap();
+
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread, HANDED_ON);
+    assert_eq!(worker.started("coder"), 1, "the premise: the coder started");
+    assert_eq!(
+        queued_for(&tmp, &round),
+        vec!["verifier".to_string()],
+        "the premise: the verifier waits for it"
+    );
+
+    // Past the coder's window (restarted when it started) and the verifier's (from when it was
+    // opened). The coder's process is still in the copy, so the verifier keeps waiting.
+    let receipt = tick(&tmp, &worker, PAST_THE_VERIFIERS_WINDOW, &channel_thread);
+    // `not_due` is the tick's WAITING answer. Counting the verifier as lapsed too made the set
+    // settled with no step after it, and the tick went for the consolidation instead (here
+    // `no_return_address`, because the round was commissioned by hand).
+    assert_eq!(
+        receipt.reason, "not_due",
+        "the run is not consolidated past a step that never ran: {receipt:?}"
+    );
+    assert_eq!(
+        findings(&receipt, ConsequenceClass::StepStillWaiting),
+        vec![Some(verifier_slot.clone())],
+        "and the tick names the step that still waits: {receipt:?}"
+    );
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the coder is still in the copy"
+    );
+
+    // The coder's process ends: the verifier that waited starts, in its own slot.
+    let coder = worker.last_for("coder");
+    worker.mark_gone(&coder.internal_session);
+    engine
+        .session_ended(
+            caller("coder", PAST_THE_VERIFIERS_WINDOW),
+            &coder.internal_session,
+        )
+        .expect("the session end is accepted");
+    assert_eq!(worker.started("verifier"), 1, "the waiting verifier starts");
+    assert_eq!(
+        worker.last_for("verifier").reply_thread.as_deref(),
+        Some(verifier_slot.as_str())
     );
 }

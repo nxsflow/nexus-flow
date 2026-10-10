@@ -641,8 +641,20 @@ verstummt ist. **Ein absoluter Zeitpunkt bewaffnet keine Uhr**, und nichts versc
 
 **Ein Fenster beginnt, wenn die Sitzung des Mitglieds startet.** Ein Mitglied, das in der
 Warteschlange auf die Arbeitskopie wartet, wurde noch nicht gefragt. Sein Fenster kann deshalb
-nicht ablaufen, solange es wartet, wie lange das auch dauert. Startet es, läuft sein Fenster ab
-diesem Moment.
+nicht ablaufen, solange es wartet, wie lange das auch dauert. Dasselbe gilt für ein Mitglied, dessen
+Start fehlschlug und wiederholt wird. Startet es, läuft sein Fenster ab diesem Moment. Ein
+fehlgeschlagener Start, der nicht wiederholt wird, läuft wie bisher ab.
+
+Nichts außer dem Start beendet ein solches Warten, deshalb sagt es der Tick stattdessen: Ist das
+Fenster vorbei, meldet jeder Tick, der das Mitglied noch wartend findet, einen Befund
+`step_still_waiting`, der es nennt. `nxc status` zeigt, wer die Arbeitskopie hält;
+`nxc withdraw --thread <id>` holt den Vorgang zurück. Ein Board, das mit `nxc threads` gelesen wird,
+zeigt ein solches Mitglied weiter als über seiner Frist, denn diese Markierung gehört dem Thread
+selbst; der Ablauf handelt nicht danach, solange das Mitglied wartet. Die Warteschlange liegt auf
+diesem Rechner, ein synchronisiertes Replikat sieht also nicht, dass das Mitglied wartet.
+
+Das gilt für eine Dauer. Ein absoluter Zeitpunkt nennt einen Moment, was auch geschieht, und
+verschiebt sich deshalb nicht, wenn das Mitglied startet.
 
 Ein Wert, den die Grammatik nicht lesen kann, ist ein `validation`-Fehler, der Feld und Wert nennt,
 abgelehnt bevor irgendetwas persistiert wird — nie ein stilles „dann gibt es eben keine Kappe".
