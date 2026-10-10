@@ -15,11 +15,13 @@
 //! claim area off the queue and fired it, which is right for the members of a parallel fan-out and
 //! wrong for the steps of an ordered run.
 //!
-//! How two steps of one run come to be queued together at all is a different bug (nxf 6j6v.1wep):
-//! the first step's answer window runs while it waits for the copy, it lapses, and the flow moves
-//! on to the second step, which queues behind the same lease. These tests reproduce that shape on
-//! purpose, because it is the shape the field produced; what they pin is what the HAND-OFF does
-//! with it.
+//! How two steps of one run came to be queued together in the field is a different bug (nxf
+//! 6j6v.1wep): the first step's answer window ran while it waited for the copy, it lapsed, and the
+//! flow moved on to the second step, which queued behind the same lease. Since 1wep a queued step
+//! no longer lapses (`a_queued_step_is_not_asked_until_it_starts.rs`), so these tests make the same
+//! shape another way: an answer is posted under the queued coder's session before it ever started,
+//! which settles the step and opens the next. What they pin is what the HAND-OFF does with two
+//! steps of one run in line together, whichever way they got there.
 //!
 //! Driven through the LIBRARY HANDLE (`engine-seam-test-rule`), with a [`WorkerConfig::Custom`]
 //! worker that records every start and answers which of its sessions still run. The tick goes
@@ -43,10 +45,9 @@ use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
 use tempfile::TempDir;
 
 const NOW: &str = "2026-10-10T01:00:00Z";
-/// Past the one-minute window the waiting round's first step was given.
+/// The queued coder's step is answered, and the verifier is opened behind it.
 const LAPSED: &str = "2026-10-10T01:05:00Z";
-/// The holder lets go, inside the verifier's own window (opened at [`LAPSED`] with one minute), so
-/// the only lapse in play is the coder's.
+/// The holder lets go, inside the verifier's own window (opened at [`LAPSED`] with one minute).
 const LATER: &str = "2026-10-10T01:05:30Z";
 /// Still inside both windows: the verifier's, and the coder's, restarted when it started.
 const LATER_STILL: &str = "2026-10-10T01:05:50Z";
@@ -264,46 +265,50 @@ fn the_holder_lets_go(engine: &Engine, worker: &RecordingWorker, session: &str, 
 // ---- the incident: two steps of one ordered run queued together ---------------------------------
 
 /// The ordered round queued behind the holder with BOTH of its steps waiting — the field's shape.
-/// Returns the round's root.
+/// Returns the round's root and the coder's slot.
 fn an_ordered_round_queued_with_both_steps(
     tmp: &TempDir,
     engine: &Engine,
     worker: &RecordingWorker,
-) -> String {
+) -> (String, String) {
     let root = commission(engine, caller("pm2", NOW), "coding", "build T6");
     assert_eq!(
         queued_for(tmp, &root),
         vec!["coder".to_string()],
         "the premise: the round's first step waits for the working copy"
     );
-    // The coder's window lapses while it waits (nxf 6j6v.1wep), and the flow moves on to the
-    // verifier — which queues behind the same lease.
-    let coder_slot = store(tmp)
+    // The coder's step is settled while its trigger still waits, and the flow moves on to the
+    // verifier — which queues behind the same lease. In the field that was the coder's window
+    // lapsing in the queue (nxf 6j6v.1wep). A queued step no longer lapses, so the shape is made
+    // here by an answer posted under the queued coder's session before it ever started.
+    let coder = store(tmp)
         .list_working_tree_queue()
         .unwrap()
         .into_iter()
         .find(|q| q.role == "coder")
-        .and_then(|q| q.thread)
-        .expect("the queued coder names its slot");
-    let channel_thread = store(tmp)
-        .thread_parent(&coder_slot)
-        .unwrap()
-        .expect("the slot hangs under its channel thread");
-    tick(tmp, worker, LAPSED, &channel_thread);
+        .expect("the coder is queued");
+    let coder_slot = coder.thread.expect("the queued coder names its slot");
+    answer(
+        engine,
+        &coder.session,
+        &coder_slot,
+        LAPSED,
+        "built T6 by hand",
+    );
     assert_eq!(
         queued_for(tmp, &root),
         vec!["coder".to_string(), "verifier".to_string()],
         "the premise: both steps of the one run are waiting in the queue"
     );
     assert_eq!(worker.started("coder") + worker.started("verifier"), 0);
-    root
+    (root, coder_slot)
 }
 
 #[test]
 fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
-    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (round, _) = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
 
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
 
@@ -323,9 +328,9 @@ fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it
         vec!["verifier".to_string()],
         "the later step is still waiting, not dropped"
     );
-    // The lease ROW, not `working_tree_holder`: the bound this area derived is already past at this
-    // instant, because the verifier's window lapsed while it waited too (nxf 6j6v.1wep). What this
-    // test pins is WHO the copy was handed to.
+    // The lease ROW, not `working_tree_holder`: what this test pins is WHO the copy was handed to.
+    // That the bound it was handed with has not already passed is
+    // `a_queued_step_is_not_asked_until_it_starts.rs`'s to pin (nxf 6j6v.1wep).
     let (holder, _) = store(&tmp)
         .working_tree_lease_row()
         .unwrap()
@@ -340,10 +345,11 @@ fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it
 fn the_later_step_waits_while_the_earlier_one_is_still_writing_and_starts_when_it_ends() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
-    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (round, coder_slot) = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
     let coder = worker.last_for("coder");
-    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    // Its answer is already in its slot, so the start carries no obligation to reply.
+    let (cs, ct) = (coder.internal_session, coder_slot);
 
     // Something asks while the coder is still at work: the verifier must still wait.
     tick(&tmp, &worker, LATER_STILL, &ct);
@@ -373,10 +379,11 @@ fn the_later_step_waits_while_the_earlier_one_is_still_writing_and_starts_when_i
 fn a_tick_starts_the_later_step_when_the_earlier_one_died_without_announcing_its_end() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
-    an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (_, coder_slot) = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
     let coder = worker.last_for("coder");
-    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    // Its answer is already in its slot, so the start carries no obligation to reply.
+    let (cs, ct) = (coder.internal_session, coder_slot);
 
     // The coder's process dies hard: no `session ended`, only the tick can notice.
     worker.mark_gone(&cs);
@@ -389,18 +396,18 @@ fn a_tick_starts_the_later_step_when_the_earlier_one_died_without_announcing_its
     );
 }
 
-/// The coder answers, into the slot the flow had counted as lapsed, and then ends. The step that
-/// starts is the verifier that was waiting, once: the answer does not open a second verifier slot
-/// beside it.
+/// The coder answers again, into the slot the flow had already counted as settled, and then ends.
+/// The step that starts is the verifier that was waiting, once: the answer does not open a second
+/// verifier slot beside it.
 ///
-/// (Had the verifier's window ALSO lapsed in the queue, the flow would open the verifier step a
-/// second time on that answer. That is nxf 6j6v.1wep's to settle; this item only makes sure that
-/// the two never run side by side.)
+/// (In the field the verifier's window could ALSO lapse in the queue, and the flow would then open
+/// the verifier step a second time on that answer. Since nxf 6j6v.1wep a queued step does not
+/// lapse, so that second slot is no longer opened that way.)
 #[test]
 fn an_answered_earlier_step_starts_the_waiting_step_once() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
-    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (round, coder_slot) = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
     let waiting_slot = store(&tmp)
         .list_working_tree_queue()
         .unwrap()
@@ -410,7 +417,8 @@ fn an_answered_earlier_step_starts_the_waiting_step_once() {
         .expect("the queued verifier names its slot");
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
     let coder = worker.last_for("coder");
-    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    // Its answer is already in its slot, so the start carries no obligation to reply.
+    let (cs, ct) = (coder.internal_session, coder_slot);
 
     answer(&engine, &cs, &ct, LATER_STILL, "built T6");
     assert_eq!(

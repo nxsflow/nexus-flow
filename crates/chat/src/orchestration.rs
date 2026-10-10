@@ -2546,10 +2546,12 @@ struct InLine {
 ///
 /// **Why the check is made here and not when the step was opened.** The supervisor already refuses
 /// to open the next step while the previous one is unanswered or its session runs (nxf 6j6v.10yb).
-/// Two steps reach the queue together only when the first one's answer window lapsed while it
-/// waited for the working copy (nxf 6j6v.1wep): the flow counted the silent step as settled and
-/// opened the next. Whatever 6j6v.1wep decides about that lapse, the hand-off is the last place
-/// that sees both entries before anything runs, and it must not start them side by side.
+/// In the field, two steps reached the queue together when the first one's answer window lapsed
+/// while it waited for the working copy: the flow counted the silent step as settled and opened
+/// the next. Since nxf 6j6v.1wep a queued step does not lapse ([`supervised_member_threads`]), so
+/// that route is closed; a step settled while its trigger still waits (an answer posted for it by
+/// hand) still opens the next one. The hand-off is the last place that sees both entries before
+/// anything runs, and it must not start them side by side.
 fn one_step_per_ordered_run(ctx: &Ctx, store: &ChatStore, entries: Vec<QueuedTrigger>) -> InLine {
     let mut claimed: HashMap<String, String> = HashMap::new();
     let mut out = InLine {
@@ -5071,6 +5073,34 @@ fn fire_queued_trigger(
         &entry.role,
         ctx.now,
     )?;
+    // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
+    // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
+    // tree has not run a single instruction, and it produces no transcript to reset its own clock
+    // with. Restarting here is the same shape as the turn-two restart in
+    // `supervisor_hand_out_next_turn`: the member is being put to work, so its window runs from now.
+    // While it waited, the supervisor did not count it as lapsed ([`supervised_member_threads`],
+    // nxf 6j6v.1wep). A no-op for every trigger that is not a channel member.
+    //
+    // **BEFORE the trigger, since nxf 6j6v.1wep**, because the trigger's own acquire derives the
+    // lease bound from the area's windows ([`operation_lease_expiry`]). Restarted after it, the
+    // bound came from the window the member was given when it was queued — measured, a lease that
+    // was already expired the moment the hand-off granted it. Restarted here, the started member's
+    // window is the latest in its area, so the bound runs at least to the end of it.
+    //
+    // If the trigger then fails or is queued again, the restarted clock does no harm: a queued
+    // member is not counted as lapsed and is restarted again when it really starts, and a failed
+    // start was never asked either.
+    //
+    // **Best-effort.** A failure costs this member's restart, not the start: it breadcrumbs like
+    // its siblings (the transcript's own reset, both scheduling sites) and never returns early,
+    // which keeps every failure this function RETURNS ahead of the trigger.
+    if let Err(e) = store.reset_member_deadlines_of_session(&entry.session, ctx.now) {
+        eprintln!(
+            "warning: restarting the channel timeout of session {} before it starts failed: {e}; \
+             it may time out on the window it was given when it was queued",
+            entry.session
+        );
+    }
     let admission = trigger_role(
         ctx,
         store,
@@ -5095,27 +5125,19 @@ fn fire_queued_trigger(
             queued_since: entry.enqueued_at.as_deref(),
         },
     )?;
-    // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
-    // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
-    // tree has not run a single instruction, and it produces no transcript to reset its own clock
-    // with. If the queue outlasts the window the member reads `stale`, `member_set_is_settled` says
-    // the SET is settled, the channel consolidates WITHOUT it — and only then does this fire, so the
-    // member works for an answer nobody will collect. Restarting here is the same shape as the
-    // turn-two restart in `supervisor_hand_out_next_turn`: the member has just been put to work, so
-    // its window runs from now. A no-op for every trigger that is not a channel member.
-    //
-    // **Best-effort, and that is what keeps the caller's breadcrumb true.** Everything above this
-    // line fails BEFORE `trigger_role`, so the caller's "nothing is running for it" describes the
-    // situation exactly. Propagating from here would make it a lie: the trigger ran two lines ago
-    // and the member is working. So this breadcrumbs like its siblings (the transcript's own reset,
-    // both scheduling sites) and returns `Ok` — the cost of a failure is this member's restart, not
-    // the start it just got.
-    if let Err(e) = store.reset_member_deadlines_of_session(&entry.session, ctx.now) {
-        eprintln!(
-            "warning: the trigger for session {} started, but restarting its channel timeout \
-             failed: {e}; it may time out on the window it was given while it waited",
-            entry.session
-        );
+    // **And the clock that watches the restarted window** (nxf 6j6v.1wep). The tick armed at
+    // fan-out fired at the old instant, found the member still queued and declined, and a window
+    // that has passed is never re-armed. Without this, a member that starts and then falls silent
+    // is noticed only when something else happens to tick its channel. Best-effort, after the
+    // trigger: the function reports its own failure on stderr, and nothing here may fail the start.
+    if matches!(admission, TriggerAdmission::Spawned { .. }) {
+        if let Some(thread) = entry.thread.as_deref() {
+            if let Ok(Some(_)) = store.member_deadline(thread) {
+                if let Ok(Some(channel_thread)) = supervising_parent(store, thread) {
+                    let _ = rearm_after_the_members_moved(ctx, store, &channel_thread);
+                }
+            }
+        }
     }
     Ok(admission)
 }
@@ -8101,6 +8123,25 @@ struct SupervisorRun {
 /// thread of this channel, and nothing else can be (no declared role handle can name that identity).
 /// A child opened by anybody else — a member that started its own conversation out of its thread —
 /// is somebody's else's work hanging in the same tree and is not part of this quorum.
+///
+/// **A member whose trigger still waits in the working-copy queue is never `stale` here** (nxf
+/// 6j6v.1wep). It has not been asked: no session runs for it, so it cannot have been silent for
+/// its window. That covers a step queued behind another operation's lease and a later step of an
+/// ordered run put back in line at the hand-off (nxf 6j6v.9g8j's `Promotions::deferred`), because
+/// both are rows of the same queue. Its window starts when it starts:
+/// [`fire_queued_trigger`] restarts the member's clock at that moment.
+///
+/// Measured in the `agents` workspace on 2026-10-09/10: a build step queued for six hours behind
+/// another operation's lease reached its window, the tick read it as a lapse, and the flow opened
+/// the verify step for a build that never ran.
+///
+/// **This is the supervisor's reading of its set, not a second `stale` derivation.**
+/// [`ThreadQuorum::stale`] is still computed exactly as M2 §4.3 states, and every reader outside
+/// the supervisor (`nxc threads`, `nxc status`, the opener's wake) sees it unchanged. What changes
+/// is that the set the supervisor waits for does not count a member that was never started as
+/// settled — the same kind of question the liveness gate of nxf 6j6v.10yb asks beside it. A step
+/// whose session DID start and then fell silent is not in the queue, so it lapses on its declared
+/// `timeout:` exactly as before.
 fn supervised_member_threads(
     ctx: &Ctx,
     store: &ChatStore,
@@ -8119,7 +8160,20 @@ fn supervised_member_threads_at(
 ) -> Result<Vec<ThreadQuorum>> {
     let children = store.supervised_children(channel_thread)?;
     let ids: Vec<&str> = children.iter().map(String::as_str).collect();
-    store.thread_quorums(&ids, now)
+    let mut members = store.thread_quorums(&ids, now)?;
+    if members.iter().any(|m| m.stale) {
+        let waiting: HashSet<String> = store
+            .list_working_tree_queue()?
+            .into_iter()
+            .filter_map(|q| q.thread)
+            .collect();
+        for member in &mut members {
+            if waiting.contains(&member.thread_id) {
+                member.stale = false;
+            }
+        }
+    }
+    Ok(members)
 }
 
 /// The declared channel a thread belongs to, by the `decl:<name>` convention

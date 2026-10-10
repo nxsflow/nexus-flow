@@ -639,6 +639,11 @@ Mitglieds wird von jedem Schreiben in dessen eigenen Sitzungsverlauf neu gestart
 *arbeitet*, wird also nie dafür bestraft, dass es dauert. Wovor es schützt, ist ein Mitglied, das
 verstummt ist. **Ein absoluter Zeitpunkt bewaffnet keine Uhr**, und nichts verschiebt ihn.
 
+**Ein Fenster beginnt, wenn die Sitzung des Mitglieds startet.** Ein Mitglied, das in der
+Warteschlange auf die Arbeitskopie wartet, wurde noch nicht gefragt. Sein Fenster kann deshalb
+nicht ablaufen, solange es wartet, wie lange das auch dauert. Startet es, läuft sein Fenster ab
+diesem Moment.
+
 Ein Wert, den die Grammatik nicht lesen kann, ist ein `validation`-Fehler, der Feld und Wert nennt,
 abgelehnt bevor irgendetwas persistiert wird — nie ein stilles „dann gibt es eben keine Kappe".
 Einheiten sind `s`, `m`, `h`, `d`, `w`.

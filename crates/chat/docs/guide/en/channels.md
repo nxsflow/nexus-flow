@@ -595,6 +595,10 @@ write to its own session transcript, so a member that is *working* is never stru
 while. What it protects against is a member that went silent. **An absolute instant arms no clock**
 and nothing moves it.
 
+**A window starts when the member's session starts.** A member that waits in line for the working
+copy has not been asked yet, so its window cannot run out while it waits, however long that is.
+When it starts, its window runs from that moment.
+
 A value the grammar cannot read is a `validation` error naming the field and the value, refused
 before anything is persisted — never a silent "then there is no cap". Units are `s`, `m`, `h`, `d`,
 `w`.
