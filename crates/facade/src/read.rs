@@ -1148,15 +1148,33 @@ impl NextQuery {
         self
     }
 
-    /// The cache key a snapshot is bound to: sort and filter, never `now` or `limit` — a reader
-    /// may change the page size between pages, and `now` moves on its own.
-    fn key(&self) -> String {
+    /// The cache key a snapshot is bound to: sort, filter and the plugin's `next` ranking, never
+    /// `now` or `limit` — a reader may change the page size between pages, and `now` moves on its
+    /// own. The ranking is in the key (6j6v.z9jk) so a token handed out under one plugin order
+    /// restarts under another instead of paging through a list ranked differently. It is carried as
+    /// [`rank_fingerprint`], a fixed-size hash of the ranking's canonical JSON, not the ranking
+    /// itself (review of #44, Code #6 / Integrity #6).
+    fn key(&self, cfg: &PluginConfig) -> String {
         json!({
             "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
             "filter": self.filter.key(),
+            "rank": rank_fingerprint(cfg),
         })
         .to_string()
     }
+}
+
+/// A fixed-size fingerprint of the plugin's `next` ranking: FNV-1a (64 bit) over its canonical JSON
+/// (`serde_json` over the `Serialize` derive; the per-type orders are a `BTreeMap`, so the bytes
+/// are deterministic). FNV is spelled out here because it is stable across Rust releases, which
+/// `DefaultHasher` does not promise. A collision would only let a token survive a ranking change
+/// whose new order the snapshot check in `resume` still compares against.
+fn rank_fingerprint(cfg: &PluginConfig) -> String {
+    let canonical = serde_json::to_string(&cfg.ranking.next).unwrap_or_default();
+    let hash = canonical.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 /// Unix seconds now — the clock the snapshot expiry reads. Not `now`: that is the caller's
@@ -1271,7 +1289,7 @@ fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) ->
     let Some(n) = limit else {
         return Ok(truncate_next(fresh, q.limit));
     };
-    let key = q.key();
+    let key = q.key(cfg);
     if let Some(token) = &q.token {
         if let Some((snap, pos)) = resume(store, token, &key, &fresh, clock)? {
             // `pos < len` (resume checked it); a limit up to `usize::MAX` must not overflow.
@@ -1356,12 +1374,13 @@ const CLUSTER_CHILD: u8 = 1;
 
 /// Order the `ready ∪ in_progress` candidates into the finish-first tiers (§4.3), in place.
 ///
-/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`rank_cmp`] as the
-/// tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
+/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`NextRank`] as
+/// the tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
 /// Clusters themselves are ordered by their **header's** rank, so a cluster is contiguous and a
 /// low-priority child never drags its epic up (nor a high-priority backlog item slice a cluster
-/// apart). `rank_cmp` ends in an id tiebreak, so the whole composed order is total and
-/// deterministic.
+/// apart). `NextRank` ends in an id tiebreak, so the whole composed order is total and
+/// deterministic. Per-type orders (6j6v.z9jk) live inside `NextRank`: they order WITHIN a
+/// tier and never move an item between tiers.
 fn order_next_tiered(
     cfg: &PluginConfig,
     candidates: &[derive::NextCandidate],
@@ -1391,6 +1410,7 @@ fn order_next_tiered(
         "a promoted child is ready, never in_progress — the tiers would overlap"
     );
 
+    let rank = NextRank::new(cfg);
     let keys: HashMap<String, (u8, usize, u8)> = {
         let by_id: HashMap<&str, &ItemRow> = items.iter().map(|i| (i.id.as_str(), i)).collect();
         let mut headers: Vec<&str> = started
@@ -1399,7 +1419,7 @@ fn order_next_tiered(
             .copied()
             .collect();
         headers.sort_by(|a, b| match (by_id.get(a), by_id.get(b)) {
-            (Some(x), Some(y)) => rank_cmp(cfg, x, y),
+            (Some(x), Some(y)) => rank.cmp(x, y),
             _ => a.cmp(b), // unreachable (a header is a candidate); stays deterministic anyway
         });
         let cluster_ord: HashMap<&str, usize> =
@@ -1436,7 +1456,7 @@ fn order_next_tiered(
             .get(&b.id)
             .copied()
             .unwrap_or((TIER_BACKLOG, 0, CLUSTER_HEADER));
-        ka.cmp(&kb).then_with(|| rank_cmp(cfg, a, b))
+        ka.cmp(&kb).then_with(|| rank.cmp(a, b))
     });
 }
 
@@ -2045,14 +2065,68 @@ pub fn list_to_value_with_custom(
 /// them. The status precedence that ranks `in_progress` ahead of `open` is no longer hardcoded here
 /// (sp6.5): it is the first `ranking.next` key both bundled plugins declare, so ranking is entirely
 /// plugin-driven — no command-code special-case undercuts the "all policy flows from the config" seam.
+///
+/// This is the DEFAULT order only. Per-type orders (6j6v.z9jk) apply to `next` alone, through
+/// [`NextRank`]; `list --sort rank` and `blocked` keep this one until `list` gets its own
+/// per-type orders (6j6v.n698).
 fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
-    for key in &cfg.ranking.next.order {
+    keys_cmp(a, b, &cfg.ranking.next.order)
+}
+
+/// `keys` in declared order, then the id tiebreak — the total order every rank ends in.
+fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
+    for key in keys {
         let c = cmp_rank_key(a, b, key);
         if c != std::cmp::Ordering::Equal {
             return c;
         }
     }
     a.id.cmp(&b.id)
+}
+
+/// The rank `next` orders by within a tier (6j6v.z9jk), built once per sort. A plugin without a
+/// per-type order ranks by [`rank_cmp`], exactly as before. Otherwise two items of different types
+/// compare by their type's position in the cross-type order
+/// ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by type name; two items
+/// of one type by that type's order ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)),
+/// then id. A lexicographic key, so the order is total — the tiers and the paging snapshot rely on
+/// that. Shared by the store path and the store-free path through [`order_next_tiered`].
+struct NextRank<'a> {
+    cfg: &'a PluginConfig,
+    /// `type → position` in the cross-type order, looked up once per comparison instead of a scan
+    /// of the list (review of #44, Integrity #5). `None` when the plugin does not split by type.
+    ordinals: Option<(HashMap<&'a str, usize>, usize)>,
+}
+
+impl<'a> NextRank<'a> {
+    fn new(cfg: &'a PluginConfig) -> NextRank<'a> {
+        let spec = &cfg.ranking.next;
+        let ordinals = spec.splits_by_type().then(|| {
+            let cross = spec.cross_type_order();
+            let mut map = HashMap::new();
+            for (n, t) in cross.iter().enumerate() {
+                // The first position wins, as `type_ordinal`'s `position` does.
+                map.entry(t.as_str()).or_insert(n);
+            }
+            (map, cross.len())
+        });
+        NextRank { cfg, ordinals }
+    }
+
+    fn cmp(&self, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
+        let Some((ordinals, unlisted)) = &self.ordinals else {
+            return rank_cmp(self.cfg, a, b);
+        };
+        let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
+        if ta != tb {
+            let ord = |t: Option<&str>| {
+                t.and_then(|t| ordinals.get(t).copied())
+                    .unwrap_or(*unlisted)
+            };
+            return ord(ta).cmp(&ord(tb)).then_with(|| ta.cmp(&tb));
+        }
+        keys_cmp(a, b, self.cfg.ranking.next.order_for(ta))
+    }
 }
 
 // ---- ordering axis (C2 #916.2) ---------------------------------------------
@@ -2204,9 +2278,14 @@ fn cmp_rank_key(a: &ItemRow, b: &ItemRow, key: &RankKey) -> std::cmp::Ordering {
             // priority ordinal (and any future numeric field) doesn't mis-sort "10" before "2".
             // Otherwise (ISO dates, ids, any non-numeric label) fall back to lexicographic, which
             // is already the correct order for those (lexicographic == chronological for dates).
+            // A numeric value sorts before a non-numeric one (review of #44, Integrity #2): mixing
+            // the two comparisons per pair is not transitive ("2" < "10" < "1a" < "2"), and a
+            // non-total comparator may make `sort_by` panic on free text.
             let c = match (x.parse::<i64>(), y.parse::<i64>()) {
                 (Ok(xi), Ok(yi)) => xi.cmp(&yi),
-                _ => x.cmp(&y),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => x.cmp(&y),
             };
             match key.dir {
                 Dir::Asc => c,
@@ -4085,6 +4164,101 @@ mod tests {
             cmp_rank_key(&status("a", "in_progress"), &status("b", "open"), &key),
             std::cmp::Ordering::Less,
             "in_progress ranks ahead of open"
+        );
+    }
+
+    #[test]
+    fn cmp_rank_key_is_transitive_over_mixed_numeric_and_text_values() {
+        // Review of #44, Integrity #2: comparing numerically only when BOTH parse made a cycle,
+        // "2" < "10" (numeric) < "1a" (lexical) < "2" (lexical). Numbers now sort before text.
+        let titled = |id: &str, t: &str| {
+            let mut i = item(id, None);
+            i.title = Some(t.into());
+            i
+        };
+        let key = RankKey {
+            field: "title".into(),
+            dir: Dir::Asc,
+            nulls: Nulls::Last,
+            precedence: Vec::new(),
+        };
+        let (two, ten, text) = (titled("a", "2"), titled("b", "10"), titled("c", "1a"));
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(cmp_rank_key(&two, &ten, &key), Less);
+        assert_eq!(cmp_rank_key(&ten, &text, &key), Less);
+        assert_eq!(
+            cmp_rank_key(&text, &two, &key),
+            Greater,
+            "a number sorts before text"
+        );
+    }
+
+    /// A per-type config for the comparator tests: `action` has its own order (due ascending) and
+    /// is the only listed type; `memo`, `note` and an untyped item take the default (priority).
+    fn per_type_cfg(action_order: &str) -> PluginConfig {
+        toml::from_str(&format!(
+            r#"
+            name = "nextrank-fixture"
+            [description]
+            en = "x"
+            de = "y"
+            [priority]
+            labels = ["P0", "P1"]
+            [types]
+            list = ["action", "memo", "note"]
+            [vocabulary.status]
+            open = "open"
+            in_progress = "in progress"
+            closed = "closed"
+            [ranking.next]
+            types = ["action"]
+            order = [ {{ field = "priority", dir = "asc" }} ]
+            [ranking.next.action]
+            order = {action_order}
+            [presentation.list]
+            columns = ["id"]
+            "#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn next_rank_orders_unlisted_types_by_name_and_ties_by_id() {
+        // Review of #44, Test #2: the listed type first; two unlisted types by name (an untyped
+        // item, `None`, before any name); within a type its order, then id on equal keys.
+        let cfg = per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#);
+        let typed = |id: &str, ty: Option<&str>, prio: &str, due: Option<&str>| {
+            let mut i = item(id, Some(prio));
+            i.item_type = ty.map(str::to_string);
+            i.due = due.map(str::to_string);
+            i
+        };
+        let mut items = [
+            typed("n1", Some("note"), "0", None),
+            typed("m2", Some("memo"), "0", None),
+            typed("m1", Some("memo"), "0", None),
+            typed("x1", None, "0", None),
+            typed("a2", Some("action"), "1", Some("2026-07-01")),
+            typed("a3", Some("action"), "0", Some("2026-07-01")),
+            typed("a1", Some("action"), "1", Some("2026-06-01")),
+        ];
+        let rank = NextRank::new(&cfg);
+        items.sort_by(|a, b| rank.cmp(a, b));
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["a1", "a2", "a3", "x1", "m1", "m2", "n1"]);
+    }
+
+    #[test]
+    fn the_paging_key_changes_with_the_ranking_and_only_with_it() {
+        // 6j6v.z9jk: the snapshot is bound to the plugin's ranking, so a token from one order is
+        // never resumed under another — even where the restricted-order check alone would let it.
+        let q = NextQuery::new(T_NOW);
+        let by_due = per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#);
+        let by_prio = per_type_cfg(r#"[ { field = "priority", dir = "asc" } ]"#);
+        assert_ne!(q.key(&by_due), q.key(&by_prio));
+        assert_eq!(
+            q.key(&by_due),
+            q.key(&per_type_cfg(r#"[ { field = "due", dir = "asc" } ]"#))
         );
     }
 
