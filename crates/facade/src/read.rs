@@ -1025,14 +1025,15 @@ fn filter_next_store(
         Some(_) => store.labels_of_bulk(&ids)?,
         None => BTreeMap::new(),
     };
+    let mut contributes = match filter.within {
+        Some(_) => store.contributes_to_of_bulk(&ids)?,
+        None => BTreeMap::new(),
+    };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let contributes = match filter.within {
-            Some(_) => store.contributes_to_of(&item.id)?,
-            None => Vec::new(),
-        };
+        let item_contributes = contributes.remove(&item.id).unwrap_or_default();
         let item_labels = labels.remove(&item.id).unwrap_or_default();
-        if filter.keeps(&item, &item_labels, &contributes) {
+        if filter.keeps(&item, &item_labels, &item_contributes) {
             out.push(item);
         }
     }
@@ -2219,8 +2220,10 @@ pub struct ActiveTicket {
     pub updated_at: Option<String>,
     pub conversations: usize,
     pub parent: Option<ParentRef>,
-    /// The present `contributes_to` targets of the ticket (6j6v.15ed), any order — what
+    /// The present `contributes_to` targets of the ticket (6j6v.15ed), sorted and distinct — what
     /// [`NextFilter`]'s container filter reads beside `item.belongs_to`. Carried on no record.
+    /// [`active_board`] fills it; a server fills it only when it filters by container
+    /// (`nxs_fold_ddb::records::with_contributes_to`), and leaves it empty otherwise.
     pub contributes_to: Vec<String>,
 }
 
@@ -2290,6 +2293,15 @@ impl ActiveBoard {
             .collect()
     }
 
+    /// The joins of ticket `id`. Every row a lane hands out comes from `tickets`, so the empty
+    /// joins are for a caller-built board only, never reached from this module's lanes.
+    fn joins_of(&self, id: &str) -> RecordJoins<'_> {
+        self.tickets
+            .get(id)
+            .map(ActiveTicket::joins)
+            .unwrap_or_default()
+    }
+
     /// Compose a record per row with the row's own joins.
     fn records(
         &self,
@@ -2299,10 +2311,7 @@ impl ActiveBoard {
         Value::Array(
             items
                 .iter()
-                .map(|i| match self.tickets.get(&i.id) {
-                    Some(t) => record(i, &t.joins()),
-                    None => record(i, &RecordJoins::default()),
-                })
+                .map(|i| record(i, &self.joins_of(&i.id)))
                 .collect(),
         )
     }
@@ -2311,6 +2320,11 @@ impl ActiveBoard {
 /// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
 /// every active ticket, its row and joins, each read in bulk. What [`next_active`] and the other
 /// store-free lanes answer from it is what [`next`] and its siblings answer from the store.
+///
+/// Its job is to be the parity oracle: the reference a server's input
+/// (`nxs_fold_ddb::records::active_board`) is compared against, ticket by ticket, in the
+/// differential tests. A replica's own reads take [`next`] and its siblings, which read only the
+/// joins of the rows they hand out; this reads every active ticket's.
 ///
 /// [`graph::select`]: nexus_flow_core::graph::select
 pub fn active_board(store: &Store) -> Result<ActiveBoard> {
@@ -2321,6 +2335,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
     let mut custom = store.custom_fields_of_bulk(&ids)?;
     let mut ts = store.item_timestamps_of_bulk(&ids)?;
     let conversations = store.bearing_thread_counts(&ids)?;
+    let mut contributes = store.contributes_to_of_bulk(&ids)?;
     let mut tickets = Vec::with_capacity(items.len());
     for item in items {
         let id = item.id.clone();
@@ -2333,7 +2348,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
         t.updated_at = updated_at;
         t.conversations = conversations.get(&id).copied().unwrap_or(0);
         t.parent = parent;
-        t.contributes_to = store.contributes_to_of(&id)?;
+        t.contributes_to = contributes.remove(&id).unwrap_or_default();
         tickets.push(t);
     }
     Ok(ActiveBoard::new(board, tickets))
@@ -2415,10 +2430,7 @@ pub fn blocked_active_value(cfg: &PluginConfig, board: &ActiveBoard) -> Value {
     let rows = blocked_active(cfg, board);
     Value::Array(
         rows.iter()
-            .map(|r| match board.tickets.get(&r.item.id) {
-                Some(t) => blocked_record(Some(cfg), r, &t.joins()),
-                None => blocked_record(Some(cfg), r, &RecordJoins::default()),
-            })
+            .map(|r| blocked_record(Some(cfg), r, &board.joins_of(&r.item.id)))
             .collect(),
     )
 }

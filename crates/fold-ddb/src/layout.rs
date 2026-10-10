@@ -45,6 +45,7 @@ pub const WATERMARK_KEY: &str = ".meta#watermark";
 const ADJACENCY: &str = ".adj#";
 const LABEL_ADJACENCY: &str = ".ladj#";
 const LINK_ADJACENCY: &str = ".tadj#";
+const CONTRIBUTES_ADJACENCY: &str = ".cadj#";
 
 /// The sort key of a row of `table` with these key cells.
 pub fn row_key(table: &str, key: &[(String, Cell)]) -> Result<String, LayoutError> {
@@ -102,6 +103,17 @@ pub(crate) fn link_adjacency_key(item: &str, tag: &str) -> String {
 
 pub(crate) fn link_adjacency_prefix(item: &str) -> String {
     format!("{LINK_ADJACENCY}{}#", escape(item))
+}
+
+/// The entry that says `contributes_to` edge add `tag` leaves ticket `item`, and its prefix — what
+/// lets a reader of the item records find one ticket's contributes-to targets with one Query
+/// (6j6v.15ed).
+pub(crate) fn contributes_adjacency_key(item: &str, tag: &str) -> String {
+    format!("{}{}", contributes_adjacency_prefix(item), escape(tag))
+}
+
+pub(crate) fn contributes_adjacency_prefix(item: &str) -> String {
+    format!("{CONTRIBUTES_ADJACENCY}{}#", escape(item))
 }
 
 fn escape(v: &str) -> String {

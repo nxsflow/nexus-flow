@@ -1039,6 +1039,35 @@ impl Store {
         Ok(out)
     }
 
+    /// The present `contributes_to` targets of every id in `item_ids`, each list sorted and
+    /// distinct — the bulk sibling of [`contributes_to_of`](Self::contributes_to_of), in the
+    /// [`labels_of_bulk`](Self::labels_of_bulk) shape: one query per 500 ids, over the
+    /// `edge_adds_from` index. An id with no such edge is absent from the map (6j6v.15ed).
+    pub fn contributes_to_of_bulk(
+        &self,
+        item_ids: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, Vec<String>>> {
+        const CHUNK: usize = 500;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for chunk in item_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT from_id, to_id FROM present_edges \
+                 WHERE kind = 'contributes_to' AND from_id IN ({placeholders}) \
+                 ORDER BY from_id, to_id"
+            );
+            let mut stmt = self.conn().prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (from, to) = row?;
+                out.entry(from).or_default().push(to);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- plugin custom fields (6j6v.ekf5, T4): the read side of the folded `custom_fields` view --
 
     /// The set custom-field values of ONE item (plugin-custom-fields §2.3), as `field → value`
