@@ -1039,6 +1039,35 @@ impl Store {
         Ok(out)
     }
 
+    /// The present `contributes_to` targets of every id in `item_ids`, each list sorted and
+    /// distinct — the bulk sibling of [`contributes_to_of`](Self::contributes_to_of), in the
+    /// [`labels_of_bulk`](Self::labels_of_bulk) shape: one query per 500 ids, over the
+    /// `edge_adds_from` index. An id with no such edge is absent from the map (6j6v.15ed).
+    pub fn contributes_to_of_bulk(
+        &self,
+        item_ids: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, Vec<String>>> {
+        const CHUNK: usize = 500;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for chunk in item_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT from_id, to_id FROM present_edges \
+                 WHERE kind = 'contributes_to' AND from_id IN ({placeholders}) \
+                 ORDER BY from_id, to_id"
+            );
+            let mut stmt = self.conn().prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (from, to) = row?;
+                out.entry(from).or_default().push(to);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- plugin custom fields (6j6v.ekf5, T4): the read side of the folded `custom_fields` view --
 
     /// The set custom-field values of ONE item (plugin-custom-fields §2.3), as `field → value`
@@ -3284,6 +3313,50 @@ mod tests {
                 count(&s, t),
                 0,
                 "{t} still holds folded rows after clear_views — add it to TaskReducer::view_tables"
+            );
+        }
+    }
+
+    /// Every table a flow store keeps is the substrate's, one of `TaskReducer`'s views — which a
+    /// snapshot carries and `clear_views` empties — or declared here as this machine's own, which
+    /// must never reach another replica (6j6v.15ed, the chat store's rule). A table added to the
+    /// schema is red here until somebody decides which it is.
+    #[test]
+    fn every_table_in_a_flow_store_is_a_view_or_declared_machine_local() {
+        const MACHINE_LOCAL: &[&str] = &[
+            // `next --paginate`'s snapshots (crate::next_cache): this machine's page tokens.
+            "next_page_cache",
+        ];
+        let s = Store::open_in_memory(1);
+        let tables: Vec<String> = s
+            .connection()
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let views = TaskReducer.view_tables();
+        for t in &tables {
+            assert!(
+                nxs_foundation::schema::SUBSTRATE_TABLES.contains(&t.as_str())
+                    || views.contains(&t.as_str())
+                    || MACHINE_LOCAL.contains(&t.as_str()),
+                "{t} is neither a flow view nor declared machine-local — decide which it is"
+            );
+        }
+        for listed in views.iter().chain(MACHINE_LOCAL) {
+            assert!(
+                tables.iter().any(|t| t == listed),
+                "{listed} is classified but no longer exists"
+            );
+        }
+        for local in MACHINE_LOCAL {
+            assert!(
+                !views.contains(local),
+                "{local} is machine-local, never a view"
             );
         }
     }

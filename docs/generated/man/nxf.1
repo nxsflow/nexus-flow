@@ -68,7 +68,7 @@ nxf\-recap(1)
 Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `\-\-limit` caps the count (default 10); `\-\-since` keeps only later closes
 .TP
 nxf\-next(1)
-List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-type`, `\-\-in` and `\-\-label` narrow it without re\-ranking; `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .TP
 nxf\-dep(1)
 Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B blocks A — A cannot be ready until B closes

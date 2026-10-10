@@ -112,6 +112,21 @@ impl Board {
         self.tickets.contains_key(id)
     }
 
+    /// The active tickets, id-sorted — the ids whose records a reader of the lanes needs.
+    pub fn tickets(&self) -> impl Iterator<Item = &Ticket> + '_ {
+        self.tickets.values()
+    }
+
+    /// The blockers of `id`: the active tickets it depends on, id-sorted (6j6v.t1ym). A dependency
+    /// on a ticket that is not active is satisfied and not listed — the rule [`blocked`] decides by,
+    /// so a ticket in the blocked lane lists exactly what holds it (a member of a cycle lists its
+    /// successors on the cycle, a ticket depending on itself lists itself).
+    ///
+    /// [`blocked`]: Self::blocked
+    pub fn blockers(&self, id: &str) -> Vec<&Ticket> {
+        self.active_deps(id).map(|t| &self.tickets[t]).collect()
+    }
+
     /// Active tickets on a `dep` cycle of active tickets: the members of every strongly connected
     /// component of more than one ticket, and every ticket that depends on itself.
     ///
@@ -442,6 +457,32 @@ mod tests {
         assert_eq!(lanes.suppressed_by_blocked, ids(&["c"]));
         assert_eq!(lanes.suppressed_by_deferred_only, ids(&["e"]));
         assert_eq!(lanes.ready, ids(&["x"]));
+    }
+
+    #[test]
+    fn blockers_are_the_active_dependencies_in_id_order() {
+        // b depends on z, a and on a ticket that is not active (gone): it lists a and z, in id
+        // order. s depends on itself and lists itself; free depends on nothing.
+        let board = Board::new(
+            [t("b"), t("z"), started("a"), t("s"), t("free")],
+            [
+                e("b", "z", EdgeKind::Dep),
+                e("b", "gone", EdgeKind::Dep),
+                e("b", "a", EdgeKind::Dep),
+                e("b", "free", EdgeKind::Parent),
+                e("s", "s", EdgeKind::Dep),
+            ],
+        );
+        let ids = |v: Vec<&Ticket>| v.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(board.blockers("b")), ["a", "z"]);
+        assert!(board.blockers("b")[0].in_progress);
+        assert_eq!(ids(board.blockers("s")), ["s"]);
+        assert!(board.blockers("free").is_empty());
+        assert!(board.blockers("not-a-ticket").is_empty());
+        assert_eq!(
+            board.tickets().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "free", "s", "z"]
+        );
     }
 
     #[test]

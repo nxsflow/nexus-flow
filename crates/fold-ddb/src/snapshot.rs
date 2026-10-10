@@ -174,7 +174,13 @@ pub async fn import<T: Table>(
             table: table.stream().to_string(),
         });
     }
-    if snapshot.revisions != folder.revisions() {
+    // The rows must have been folded by this build's reducers. The index revision does not matter
+    // here: the import rebuilds every flag and entry from the rows (`board::reindex`) and stamps
+    // this build's revisions, so a snapshot taken before an index revision still starts a current
+    // stream.
+    let mut theirs = snapshot.revisions.clone();
+    theirs.remove(crate::fold::INDEX_DOMAIN);
+    if theirs != folder.reducer_revisions() {
         return Err(ImportError::OtherRevisions {
             snapshot: snapshot.revisions.clone(),
             folder: folder.revisions(),

@@ -278,6 +278,27 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
 - **GSI `dated`** (`nxf_dated` / `nxf_dated_at`): sparse — `<stream>#closed` by `closed_at`,
   `<stream>#archived` by `archived`, newest first; the sort key is `<instant>U+001F<id>`, so tickets
   of one instant keep one order and a `limit` cuts the lane at the same place every time.
+- **The active tickets' records** (added 2026-10-10, `6j6v.t1ym`). The LANES need only the
+  `active` Query above. The RECORDS a lane is shown with need more: a lane's JSON carries joins
+  kept in other tables — labels, custom values, timestamps, bearing thread links, the parent's
+  title and type. `records::active_board` reads them per active ticket, a fixed number of requests
+  whatever the ticket's history: one `GetItem` of `item_timestamps`, one Query each on
+  `custom_fields#<ticket>#`, `.ladj#<ticket>#` and `.tadj#<ticket>#`, plus one `GetItem` of the
+  watermark per board and one per parent outside the selection — `4n + 1 + p` requests, at most
+  16 tickets (`READ_CONCURRENCY`) in flight. `label_adds` and `thread_link_adds` key on the tag
+  alone, so the fold keeps one `.ladj#<ticket>#<tag>` / `.tadj#<ticket>#<tag>` entry per add,
+  carrying what the reader needs of the add and whether it is removed; folding an add or its
+  remove costs two `GetItem`s and at most one write more, and `board::reindex` rebuilds them. The
+  facade ranks and projects the result (`read::next_active_value`, `blocked_active_value`,
+  `deferred_active_value`) with the same code a replica's `Engine` runs. The records are read
+  after the index, so right after a fold a record can show the index's older status with newer
+  joins; the next read is consistent again.
+- **Rules beside the rows have a revision** (`6j6v.t1ym`). What the fold writes beside the
+  reducers' rows — flags, adjacency entries, entries under a ticket — is versioned in the watermark
+  as `revision_index` (1: the entries under a ticket). A stream folded before has no such revision,
+  so `Folder::is_current` is false and the fold run clears and refolds it from position 0, exactly
+  as for a release with other reducer revisions — no manual step. Until then `active_board`
+  refuses the stream (`RecordsError::NotCurrent`) rather than answer without its labels.
 - **Index reads are eventually consistent**; row reads are strong. The lanes right after a fold may
   be those of the state before it.
 - **An op the table cannot hold** (a sort key past 1,024 bytes, a row past 400 KB) is refused and

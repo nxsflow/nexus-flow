@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH next 1  "next " 
 .SH NAME
-next \- List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+next \- List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-type`, `\-\-in` and `\-\-label` narrow it without re\-ranking; `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH SYNOPSIS
-\fBnext\fR [\fB\-\-now\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBnext\fR [\fB\-\-now\fR] [\fB\-\-label\fR] [\fB\-\-type\fR] [\fB\-\-in\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-\-paginate\fR] [\fB\-\-token\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-limit` shows only the head of it, and says so
+List actionable work — ready plus already\-claimed, unblocked, not deferred — ranked by the active plugin\*(Aqs `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `\-\-sort id` gives the flat, untiered order; `\-\-type`, `\-\-in` and `\-\-label` narrow it without re\-ranking; `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH OPTIONS
 .TP
 \fB\-\-now\fR \fI<NOW>\fR
@@ -15,11 +15,23 @@ Reference time (ISO\-8601 / RFC3339); defaults to now
 \fB\-\-label\fR \fI<LABEL>\fR
 Filter to ready items carrying this label (user vocabulary, not the display type)
 .TP
+\fB\-\-type\fR \fI<TYPE>\fR
+Only items of this type (the stored type, as `list \-\-type` takes it). Repeatable: the types are alternatives
+.TP
+\fB\-\-in\fR \fI<ID>\fR
+Only items in this container: its children (whose parent it is) and the items that contribute to it
+.TP
 \fB\-\-sort\fR \fI<SORT>\fR
 Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error
 .TP
 \fB\-\-limit\fR \fI<LIMIT>\fR
-Max items to show (default: no limit). Applied last — after `\-\-sort` and `\-\-label` — and never silently: a truncated list is headed `showing <n> of <total>`, and under `\-\-json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer reads the untruncated total instead of inferring it from the array\*(Aqs length
+Max items to show (default: no limit). Applied last — after `\-\-sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `\-\-json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer reads the untruncated total instead of inferring it from the array\*(Aqs length
+.TP
+\fB\-\-paginate\fR
+Page through the list `\-\-limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `\-\-json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+.TP
+\fB\-\-token\fR \fI<TOKEN>\fR
+The token a previous `\-\-paginate` answer printed: show the page after that one
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

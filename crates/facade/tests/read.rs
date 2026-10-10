@@ -3,10 +3,10 @@
 //! the same records and JSON shapes at the library boundary an embedding app consumes — without
 //! a clap/CLI dependency in sight.
 
-use nexus_flow_core::model::EdgeKind;
+use nexus_flow_core::model::{EdgeKind, ItemRow};
 use nexus_flow_core::store::{ItemReadStats, Store};
 use nexus_flow_facade::error::ErrorKind;
-use nexus_flow_facade::{plugin, read};
+use nexus_flow_facade::{plugin, read, Board, Edge, Ticket};
 
 const NOW: &str = "2026-06-17T00:00:00Z";
 
@@ -2655,4 +2655,282 @@ fn timestamp_keys_are_omitted_when_no_wall_clock_was_stamped() {
         lv.as_array().unwrap()[0].get("created_at").is_none(),
         "un-stamped lane record omits the timestamp keys: {lv}"
     );
+}
+
+// ---- store-free lanes (6j6v.t1ym): next/blocked/deferred over an ActiveBoard ------------------
+//
+// The seam a server takes: no Store, only the active tickets' board, rows and joins. These tests
+// stand at that seam itself — a hand-built ActiveBoard with known answers, and the store path's
+// answer for the same board.
+
+fn row(id: &str, item_type: &str, status: &str, priority: Option<&str>) -> ItemRow {
+    ItemRow {
+        id: id.into(),
+        item_type: Some(item_type.into()),
+        title: Some(format!("title of {id}")),
+        completion_criterion: None,
+        description: None,
+        design: None,
+        status: Some(status.into()),
+        priority: priority.map(str::to_string),
+        due: None,
+        defer_until: None,
+        assignee: None,
+        belongs_to: None,
+        closing_comment: None,
+        deleted: None,
+        archived: None,
+        closed_at: None,
+    }
+}
+
+fn ticket_of(r: &ItemRow) -> Ticket {
+    Ticket {
+        id: r.id.clone(),
+        in_progress: r.status.as_deref() == Some("in_progress"),
+        defer_until: r.defer_until.clone(),
+    }
+}
+
+/// An epic in progress with an open child (a Tier-2 cluster), a started bug with no child (Tier 1),
+/// two open bugs ranked by priority (Tier 3), one open bug blocked by the P0 one, one deferred.
+fn hand_built_board() -> read::ActiveBoard {
+    let epic = row("ab12.0001", "epic", "in_progress", Some("4"));
+    let mut child = row("ab12.0002", "bug", "open", Some("4"));
+    child.belongs_to = Some(epic.id.clone());
+    let started = row("ab12.0003", "bug", "in_progress", Some("4"));
+    let p0 = row("ab12.0004", "bug", "open", Some("0"));
+    let p3 = row("ab12.0005", "bug", "open", Some("3"));
+    let held = row("ab12.0006", "bug", "open", Some("0"));
+    let mut later = row("ab12.0007", "bug", "open", Some("0"));
+    later.defer_until = Some("2027-01-01".into());
+    let rows = [epic, child, started, p0, p3, held, later];
+    let board = Board::new(
+        rows.iter().map(ticket_of),
+        [
+            Edge {
+                from: "ab12.0002".into(),
+                to: "ab12.0001".into(),
+                kind: EdgeKind::Parent,
+            },
+            Edge {
+                from: "ab12.0006".into(),
+                to: "ab12.0004".into(),
+                kind: EdgeKind::Dep,
+            },
+            // A dependency on a ticket that is not active is satisfied and not listed.
+            Edge {
+                from: "ab12.0006".into(),
+                to: "ab12.9999".into(),
+                kind: EdgeKind::Dep,
+            },
+        ],
+    );
+    let tickets = rows.into_iter().map(|r| {
+        let id = r.id.clone();
+        let mut t = read::ActiveTicket::new(r);
+        match id.as_str() {
+            "ab12.0002" => {
+                t.parent = Some(read::ParentRef {
+                    id: "ab12.0001".into(),
+                    title: Some("title of ab12.0001".into()),
+                    item_type: Some("epic".into()),
+                })
+            }
+            "ab12.0004" => {
+                t.labels = vec!["a".into(), "b".into()];
+                t.conversations = 2;
+                t.created_at = Some("2026-10-01T00:00:00Z".into());
+            }
+            "ab12.0006" | "ab12.0007" => {
+                t.custom = [("stage".to_string(), "active".to_string())].into();
+                t.updated_at = Some("2026-10-02T00:00:00Z".into());
+            }
+            _ => {}
+        }
+        t
+    });
+    read::ActiveBoard::new(board, tickets)
+}
+
+#[test]
+fn store_free_lanes_tier_rank_and_project_a_hand_built_board() {
+    let board = hand_built_board();
+    let c = cfg();
+
+    // Finishable first, then the started epic with its child, then the backlog by priority.
+    let next = read::next_active(&c, &board, NOW).unwrap();
+    let order: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(
+        order,
+        [
+            "ab12.0003",
+            "ab12.0001",
+            "ab12.0002",
+            "ab12.0004",
+            "ab12.0005"
+        ]
+    );
+    let v = read::next_active_value(&c, &board, NOW).unwrap();
+    let recs = v.as_array().unwrap();
+    assert_eq!(
+        recs.iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        order,
+        "the JSON keeps the ranked order"
+    );
+    assert_eq!(
+        recs[2]["parent"],
+        serde_json::json!({"id": "ab12.0001", "title": "title of ab12.0001", "type": "epic"})
+    );
+    assert_eq!(recs[2]["belongs_to"], serde_json::json!("ab12.0001"));
+    assert_eq!(recs[0]["parent"], serde_json::Value::Null);
+    assert_eq!(recs[3]["labels"], serde_json::json!(["a", "b"]));
+    assert_eq!(recs[3]["conversations"], serde_json::json!(2));
+    assert_eq!(
+        recs[3]["created_at"],
+        serde_json::json!("2026-10-01T00:00:00Z")
+    );
+    // Every join is sparse: an empty one adds no key.
+    for key in [
+        "labels",
+        "conversations",
+        "created_at",
+        "updated_at",
+        "custom",
+    ] {
+        assert!(recs[4].get(key).is_none(), "{key} on {}", recs[4]);
+    }
+    assert!(recs.iter().all(|r| r.get("parent_closed_reason").is_none()));
+
+    // Blocked carries its active blockers only; the plugin declares no fields, so no `custom`.
+    let blocked = read::blocked_active(&c, &board);
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].item.id, "ab12.0006");
+    assert_eq!(
+        blocked[0].blockers,
+        [("ab12.0004".to_string(), "open".to_string())]
+    );
+    let v = read::blocked_active_value(&c, &board);
+    assert_eq!(
+        v[0]["blockers"],
+        serde_json::json!([{"id": "ab12.0004", "status": "open"}])
+    );
+    assert_eq!(
+        v[0]["updated_at"],
+        serde_json::json!("2026-10-02T00:00:00Z")
+    );
+    assert!(v[0].get("custom").is_none(), "{v}");
+    assert!(
+        v[0].get("labels").is_none(),
+        "blocked carries no labels: {v}"
+    );
+
+    // Deferred until 2027: in the deferred lane now, back in `next` once the date has passed.
+    let deferred = read::deferred_active(&c, &board, NOW).unwrap();
+    assert_eq!(
+        deferred.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+        ["ab12.0007"]
+    );
+    let later = read::next_active(&c, &board, "2027-06-01").unwrap();
+    assert!(later.iter().any(|i| i.id == "ab12.0007"));
+    assert!(read::deferred_active(&c, &board, "2027-06-01")
+        .unwrap()
+        .is_empty());
+
+    // A plugin that declares `stage` surfaces it, narrowed to its declared fields.
+    let f = cfg_with_fields();
+    let v = read::deferred_active_value(&f, &board, NOW).unwrap();
+    assert_eq!(v[0]["custom"], serde_json::json!({"stage": "active"}));
+    assert_eq!(
+        read::blocked_active_value(&f, &board)[0]["custom"],
+        serde_json::json!({"stage": "active"})
+    );
+
+    // A malformed `now` is refused, as on the store path.
+    for bad in ["", "not-a-date", "2026-13-01"] {
+        let e = read::next_active(&c, &board, bad).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Validation, "{bad:?}");
+        let e = read::deferred_active_value(&c, &board, bad).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Validation, "{bad:?}");
+    }
+}
+
+#[test]
+fn store_free_lanes_answer_as_the_store_path_for_the_same_board() {
+    use nexus_flow_core::model::{LinkRelation, LinkWeight};
+    let mut s = Store::open_in_memory(1);
+    s.set_wall_clock("2026-10-01T00:00:00Z");
+    s.create_item("ab12.0001", "epic", "Epic", "t");
+    s.set_field("ab12.0001", "status", Some("in_progress".into()), "t");
+    open_task(&mut s, "ab12.0002", "Child", "2");
+    s.add_edge("ab12.0002", "ab12.0001", EdgeKind::Parent, "t");
+    open_task(&mut s, "ab12.0003", "Blocker", "0");
+    open_task(&mut s, "ab12.0004", "Held", "1");
+    s.add_edge("ab12.0004", "ab12.0003", EdgeKind::Dep, "t");
+    open_task(&mut s, "ab12.0005", "Later", "1");
+    s.set_field("ab12.0005", "defer_until", Some("2027-01-01".into()), "t");
+    // A started task under a CLOSED parent: the parent is outside the active tickets, and the join
+    // still names it.
+    s.create_item("ab12.0006", "epic", "Done", "t");
+    s.set_field("ab12.0006", "status", Some("closed".into()), "t");
+    open_task(&mut s, "ab12.0007", "Leftover", "3");
+    s.set_field("ab12.0007", "status", Some("in_progress".into()), "t");
+    s.add_edge("ab12.0007", "ab12.0006", EdgeKind::Parent, "t");
+    // An OPEN task under the same closed parent is closed-masked: it carries a
+    // `parent_closed_reason` on the store path and is kept out of `next` — the reason the
+    // store-free records never need that join.
+    open_task(&mut s, "ab12.0008", "Masked", "0");
+    s.add_edge("ab12.0008", "ab12.0006", EdgeKind::Parent, "t");
+    s.add_label("ab12.0003", "urgent", "t");
+    s.add_thread_link(
+        "m-t1",
+        "ab12.0003",
+        LinkRelation::Cited,
+        LinkWeight::Bearing,
+        "t",
+    );
+    set_custom(&mut s, "ab12.0004", "stage", "active");
+
+    let board = read::active_board(&s).unwrap();
+    assert_eq!(
+        board.tickets["ab12.0007"]
+            .parent
+            .as_ref()
+            .map(|p| p.id.as_str()),
+        Some("ab12.0006")
+    );
+    let masked = &board.tickets["ab12.0008"].item;
+    assert!(!read::parent_closed_reason(&s, masked).unwrap().is_empty());
+    for c in [cfg(), cfg_with_fields()] {
+        let want = read::next(&c, &s, NOW, None).unwrap();
+        assert_eq!(read::next_active(&c, &board, NOW).unwrap(), want);
+        assert!(
+            want.iter().any(|i| i.id == "ab12.0007"),
+            "started under a closed parent"
+        );
+        assert!(!want.iter().any(|i| i.id == "ab12.0008"), "closed-masked");
+        let value = read::next_active_value(&c, &board, NOW).unwrap();
+        assert!(value
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("parent_closed_reason").is_none()));
+        assert_eq!(
+            value,
+            read::next_to_value_with_custom(&c, &s, &want).unwrap()
+        );
+        let want = read::blocked(&c, &s, None).unwrap();
+        assert_eq!(
+            read::blocked_active_value(&c, &board),
+            read::blocked_to_value_with_custom(&c, &s, &want).unwrap()
+        );
+        let want = read::deferred(&c, &s, NOW, None).unwrap();
+        assert_eq!(read::deferred_active(&c, &board, NOW).unwrap(), want);
+        assert_eq!(
+            read::deferred_active_value(&c, &board, NOW).unwrap(),
+            read::items_in_order_value_with_custom(&c, &s, &want).unwrap()
+        );
+    }
 }
