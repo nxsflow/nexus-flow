@@ -19,12 +19,12 @@ use aws_sdk_dynamodb::Client;
 use common::{by_key, delivered, merged, NOW};
 use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
-use nxs_fold_ddb::board;
 use nxs_fold_ddb::ddb::{create_table, DynamoDbTable};
 use nxs_fold_ddb::fold::Folder;
 use nxs_fold_ddb::mem::MemTable;
 use nxs_fold_ddb::snapshot;
 use nxs_fold_ddb::table::{text, Dated, Table};
+use nxs_fold_ddb::{board, records};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -374,4 +374,67 @@ async fn a_board_larger_than_one_query_page_reads_back_whole() {
         "more than one page per read: {sent:?}"
     );
     assert!(!sent.contains_key("Scan"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_records_read_back_as_from_memory_with_four_requests_per_ticket_and_no_scan() {
+    // 6j6v.t1ym: `records::active_board` against DynamoDB — the key forms of the joins and the
+    // entries under a ticket, read through the SDK — gives what it gives over the memory table,
+    // and sends exactly the requests the crate doc counts.
+    let Some(url) = endpoint("records") else {
+        return;
+    };
+    let recorder = Recorder::default();
+    let client = client(&url, &recorder);
+    let name = fresh_table(&client, "records").await;
+    let folder = Folder::platform().unwrap();
+
+    for seed in [3, 19, 41] {
+        let s = merged(seed);
+        let ops = delivered(&s, seed);
+        let stream = format!("stream-records-{seed}");
+        let ddb = DynamoDbTable::new(client.clone(), &name, &stream);
+        let mem = MemTable::new(&stream);
+        folder.fold_batch(&ddb, &ops).await.unwrap();
+        folder.fold_batch(&mem, &ops).await.unwrap();
+
+        let want = records::active_board(&mem, board::select(&mem).await.unwrap())
+            .await
+            .unwrap();
+        // The index is eventually consistent: wait for it to show the fold, then read once more
+        // with the recorder clean.
+        let want_ids: Vec<String> = want.tickets.keys().cloned().collect();
+        let ddb_ref = &ddb;
+        eventually(&want_ids, || async move {
+            board::select(ddb_ref)
+                .await
+                .unwrap()
+                .items
+                .into_keys()
+                .collect()
+        })
+        .await;
+        let selection = board::select(&ddb).await.unwrap();
+        let n = selection.items.len() as u64;
+        let outside = selection
+            .parents
+            .values()
+            .filter(|p| !selection.items.contains_key(*p))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64;
+        recorder.take();
+        let got = records::active_board(&ddb, selection).await.unwrap();
+        let sent = recorder.take();
+        assert_eq!(got.tickets, want.tickets, "seed {seed}");
+
+        let count = |op: &str| sent.get(op).copied().unwrap_or(0);
+        assert_eq!(count("GetItem"), 1 + n + outside, "seed {seed}: {sent:?}");
+        assert_eq!(count("Query"), 3 * n, "seed {seed}: {sent:?}");
+        assert_eq!(count("Scan"), 0);
+        assert!(
+            sent.keys()
+                .all(|op| ["GetItem", "Query"].contains(&op.as_str())),
+            "a read sends only GetItem and Query: {sent:?}"
+        );
+    }
 }

@@ -203,7 +203,8 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          -- view, folded from nothing, never in `TaskReducer::view_tables`, so no snapshot image and
          -- no sync carries it and `clear_views` leaves it alone. One row per handed-out ordered
          -- result: `ids` the item ids in order, joined by U+001F (an id never holds it);
-         -- `watermark` the highest `ops.rowid` when the result was computed; `query` the filters
+         -- `watermark` the highest `ops.rowid` when the result was computed and `watermark_op`
+         -- the id of the op there (the log's identity at that point); `query` the filters
          -- and sort it was computed under; `created` unix seconds, which the expiry reads.
          -- Bounded by `crate::next_cache`. Additive + IF NOT EXISTS: no schema-version step.
          CREATE TABLE IF NOT EXISTS next_page_cache(
@@ -211,6 +212,7 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
              created INTEGER NOT NULL,
              query TEXT NOT NULL,
              watermark INTEGER NOT NULL,
+             watermark_op TEXT,
              ids TEXT NOT NULL
          );"
     ))?;

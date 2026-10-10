@@ -25,6 +25,9 @@ nexus-memory = { path = "../memory" }
 # neutral input, and the facade ranks and projects it — the one mechanism a replica runs. The facade
 # does not depend on this crate (it knows no DynamoDB); this edge points the other way.
 nexus-flow-facade = { path = "../facade" }
+# `records::active_board` reads its tickets' joins a bounded number at a time (`StreamExt::buffered`)
+# instead of one request after the other. Already in the build through the AWS SDK.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

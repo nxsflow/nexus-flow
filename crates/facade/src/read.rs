@@ -966,7 +966,9 @@ impl NextFilter {
         self
     }
 
-    /// Only items in the container `id` (its children and its contributors).
+    /// Only items in the container `id` (its children and its contributors). `id` is the full
+    /// item id, as every id the Engine takes (`Engine::show` and the rest): a caller holding a
+    /// short id resolves it first, as the CLI does with `resolve_id`.
     pub fn with_container(mut self, id: impl Into<String>) -> NextFilter {
         self.within = Some(id.into());
         self
@@ -1025,14 +1027,15 @@ fn filter_next_store(
         Some(_) => store.labels_of_bulk(&ids)?,
         None => BTreeMap::new(),
     };
+    let mut contributes = match filter.within {
+        Some(_) => store.contributes_to_of_bulk(&ids)?,
+        None => BTreeMap::new(),
+    };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let contributes = match filter.within {
-            Some(_) => store.contributes_to_of(&item.id)?,
-            None => Vec::new(),
-        };
+        let item_contributes = contributes.remove(&item.id).unwrap_or_default();
         let item_labels = labels.remove(&item.id).unwrap_or_default();
-        if filter.keeps(&item, &item_labels, &contributes) {
+        if filter.keeps(&item, &item_labels, &item_contributes) {
             out.push(item);
         }
     }
@@ -1058,9 +1061,19 @@ pub fn next_filtered(
 pub const NEXT_CACHE_TTL_SECS: i64 = 60 * 60;
 
 /// How many cached `next` snapshots a workspace keeps at most. Every new snapshot evicts the
-/// expired ones and then the oldest beyond this, so the table cannot grow without limit however
-/// many first pages are asked for. A token whose snapshot was evicted restarts.
-pub const NEXT_CACHE_MAX_SNAPSHOTS: usize = 32;
+/// expired ones, then the oldest of its own query beyond [`NEXT_CACHE_MAX_PER_QUERY`], then the
+/// oldest beyond this, so the table cannot grow without limit however many first pages are asked
+/// for. A token whose snapshot was evicted restarts.
+pub const NEXT_CACHE_MAX_SNAPSHOTS: usize = 64;
+
+/// How many cached snapshots one query — one sort and filter — keeps at most. A reader that keeps
+/// asking for first pages of one query (a UI polling `next`) evicts its own older snapshots, not
+/// another query's, so it cannot restart a pager reading another list (review of #43,
+/// Integrity #3). Readers asking the SAME query share these slots.
+pub const NEXT_CACHE_MAX_PER_QUERY: usize = 8;
+
+// A query's own slots are a share of the whole, or the per-query cap would never bite.
+const _: () = assert!(NEXT_CACHE_MAX_PER_QUERY < NEXT_CACHE_MAX_SNAPSHOTS);
 
 /// One `next` request with its filters and paging (6j6v.15ed) — the input of [`next_page`] and
 /// [`Engine::next_query`].
@@ -1178,12 +1191,19 @@ fn parse_token(token: &str) -> Option<(&str, usize)> {
 ///    left the list or moved against the others (a blocker reopened, a child closed so its epic
 ///    became finishable).
 ///
-/// An item outside the snapshot that now qualifies passes both: it appears on the next fresh query.
+/// Check 1 is the owner's rule as worded. Check 2 also restarts on an op whose TARGET is outside
+/// the snapshot, when it moves an item in it; that reading of "bears on the loaded list" is an
+/// open decision for the owner (6j6v.15ed, PR #43). Without it, a later page would show an item
+/// that has left the list (a now-blocked item), or skip one that moved back.
+///
+/// An item outside the snapshot that now qualifies passes check 1 and, as long as it moves no item
+/// of the snapshot, check 2: it appears on the next fresh query.
 fn resume(
     store: &Store,
     token: &str,
     key: &str,
     fresh: &[ItemRow],
+    clock: i64,
 ) -> Result<Option<(nexus_flow_core::next_cache::CachedResult, usize)>> {
     let Some((id, pos)) = parse_token(token) else {
         return Ok(None);
@@ -1192,11 +1212,13 @@ fn resume(
         return Ok(None);
     };
     if snap.query != key
-        || snap.created < unix_now() - NEXT_CACHE_TTL_SECS
+        || snap.created < clock - NEXT_CACHE_TTL_SECS
         || pos == 0
         || pos >= snap.ids.len()
-        // A log below the watermark is a different log (a reset workspace): nothing vouches.
+        // A log below the watermark, or another op at it, is a different log (a reset or
+        // restored workspace): nothing vouches for "since" (review of #43, Integrity #6).
         || store.ops_watermark()? < snap.watermark
+        || store.op_at(snap.watermark)? != snap.watermark_op
     {
         return Ok(None);
     }
@@ -1224,7 +1246,17 @@ fn resume(
 /// snapshot is checked against. The cache buys a list that does not move between pages, not a
 /// cheaper read. Rejected with `validation`: a malformed `now`, `paginate` without a non-zero
 /// `limit`, a `token` without `paginate`.
+///
+/// A first page whose snapshot cannot be written — a read-only workspace, a lock held past the
+/// busy timeout — is still answered, with `next_token: None`: the read does not fail on the cache
+/// (review of #43, Integrity #2). `total` still says how much was cut.
 pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<NextPage> {
+    next_page_at(cfg, store, q, unix_now())
+}
+
+/// [`next_page`] on the clock `clock` (unix seconds) — what the expiry reads, injected so it can be
+/// tested.
+fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) -> Result<NextPage> {
     crate::validate::iso_date(&q.now)?;
     if q.token.is_some() && !q.paginate {
         return Err(NxfError::validation("a page token needs paginate"));
@@ -1237,14 +1269,16 @@ pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<Nex
     // The watermark BEFORE the list: an op that lands while the list is computed is then above it
     // and counts as "since" — a spurious restart at worst, never a missed one.
     let watermark = store.ops_watermark()?;
+    let watermark_op = store.op_at(watermark)?;
     let fresh = next_filtered(cfg, store, &q.now, q.sort, &q.filter)?;
     let Some(n) = limit else {
         return Ok(truncate_next(fresh, q.limit));
     };
     let key = q.key(cfg);
     if let Some(token) = &q.token {
-        if let Some((snap, pos)) = resume(store, token, &key, &fresh)? {
-            let end = (pos + n).min(snap.ids.len());
+        if let Some((snap, pos)) = resume(store, token, &key, &fresh, clock)? {
+            // `pos < len` (resume checked it); a limit up to `usize::MAX` must not overflow.
+            let end = pos.saturating_add(n).min(snap.ids.len());
             let mut by_id: HashMap<&str, &ItemRow> =
                 fresh.iter().map(|i| (i.id.as_str(), i)).collect();
             let items = snap.ids[pos..end]
@@ -1265,17 +1299,21 @@ pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<Nex
     let next_token = if total > n {
         let snap = nexus_flow_core::next_cache::CachedResult {
             id: ulid::Ulid::new().to_string(),
-            created: unix_now(),
+            created: clock,
             query: key,
             watermark,
+            watermark_op,
             ids: fresh.iter().map(|i| i.id.clone()).collect(),
         };
-        store.next_cache_put(
-            &snap,
-            snap.created - NEXT_CACHE_TTL_SECS,
-            NEXT_CACHE_MAX_SNAPSHOTS,
-        )?;
-        Some(format!("{}.{n}", snap.id))
+        store
+            .next_cache_put(
+                &snap,
+                snap.created - NEXT_CACHE_TTL_SECS,
+                NEXT_CACHE_MAX_PER_QUERY,
+                NEXT_CACHE_MAX_SNAPSHOTS,
+            )
+            .ok()
+            .map(|()| format!("{}.{n}", snap.id))
     } else {
         None
     };
@@ -2254,8 +2292,10 @@ pub struct ActiveTicket {
     pub updated_at: Option<String>,
     pub conversations: usize,
     pub parent: Option<ParentRef>,
-    /// The present `contributes_to` targets of the ticket (6j6v.15ed), any order — what
+    /// The present `contributes_to` targets of the ticket (6j6v.15ed), sorted and distinct — what
     /// [`NextFilter`]'s container filter reads beside `item.belongs_to`. Carried on no record.
+    /// [`active_board`] fills it; a server fills it only when it filters by container
+    /// (`nxs_fold_ddb::records::with_contributes_to`), and leaves it empty otherwise.
     pub contributes_to: Vec<String>,
 }
 
@@ -2325,6 +2365,15 @@ impl ActiveBoard {
             .collect()
     }
 
+    /// The joins of ticket `id`. Every row a lane hands out comes from `tickets`, so the empty
+    /// joins are for a caller-built board only, never reached from this module's lanes.
+    fn joins_of(&self, id: &str) -> RecordJoins<'_> {
+        self.tickets
+            .get(id)
+            .map(ActiveTicket::joins)
+            .unwrap_or_default()
+    }
+
     /// Compose a record per row with the row's own joins.
     fn records(
         &self,
@@ -2334,10 +2383,7 @@ impl ActiveBoard {
         Value::Array(
             items
                 .iter()
-                .map(|i| match self.tickets.get(&i.id) {
-                    Some(t) => record(i, &t.joins()),
-                    None => record(i, &RecordJoins::default()),
-                })
+                .map(|i| record(i, &self.joins_of(&i.id)))
                 .collect(),
         )
     }
@@ -2346,6 +2392,11 @@ impl ActiveBoard {
 /// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
 /// every active ticket, its row and joins, each read in bulk. What [`next_active`] and the other
 /// store-free lanes answer from it is what [`next`] and its siblings answer from the store.
+///
+/// Its job is to be the parity oracle: the reference a server's input
+/// (`nxs_fold_ddb::records::active_board`) is compared against, ticket by ticket, in the
+/// differential tests. A replica's own reads take [`next`] and its siblings, which read only the
+/// joins of the rows they hand out; this reads every active ticket's.
 ///
 /// [`graph::select`]: nexus_flow_core::graph::select
 pub fn active_board(store: &Store) -> Result<ActiveBoard> {
@@ -2356,6 +2407,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
     let mut custom = store.custom_fields_of_bulk(&ids)?;
     let mut ts = store.item_timestamps_of_bulk(&ids)?;
     let conversations = store.bearing_thread_counts(&ids)?;
+    let mut contributes = store.contributes_to_of_bulk(&ids)?;
     let mut tickets = Vec::with_capacity(items.len());
     for item in items {
         let id = item.id.clone();
@@ -2368,7 +2420,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
         t.updated_at = updated_at;
         t.conversations = conversations.get(&id).copied().unwrap_or(0);
         t.parent = parent;
-        t.contributes_to = store.contributes_to_of(&id)?;
+        t.contributes_to = contributes.remove(&id).unwrap_or_default();
         tickets.push(t);
     }
     Ok(ActiveBoard::new(board, tickets))
@@ -2450,10 +2502,7 @@ pub fn blocked_active_value(cfg: &PluginConfig, board: &ActiveBoard) -> Value {
     let rows = blocked_active(cfg, board);
     Value::Array(
         rows.iter()
-            .map(|r| match board.tickets.get(&r.item.id) {
-                Some(t) => blocked_record(Some(cfg), r, &t.joins()),
-                None => blocked_record(Some(cfg), r, &RecordJoins::default()),
-            })
+            .map(|r| blocked_record(Some(cfg), r, &board.joins_of(&r.item.id)))
             .collect(),
     )
 }
@@ -4326,5 +4375,80 @@ mod tests {
                 "settable field '{f}' is missing/not-settable in the schema report"
             );
         }
+    }
+
+    // ---- next --paginate: the cache's clock and the log's identity (6j6v.15ed, review of #43) ----
+
+    /// Five ready items and a paginating query over them, at page size 2.
+    fn paged_board() -> (Store, NextQuery) {
+        let mut s = Store::open_in_memory(1);
+        for n in 0..5 {
+            mk(&mut s, &format!("c1.000{n}"), "bug", &n.to_string());
+        }
+        (s, NextQuery::new(T_NOW).limit(2).paginate())
+    }
+
+    fn token_at(s: &Store, q: &NextQuery, clock: i64) -> String {
+        next_page_at(&it_cfg(), s, q, clock)
+            .unwrap()
+            .next_token
+            .expect("rows remain")
+    }
+
+    const T0: i64 = 1_000_000;
+
+    #[test]
+    fn a_token_answers_until_its_snapshot_is_older_than_the_ttl() {
+        // Test Quality #2: the expiry, on an injected clock.
+        let (s, q) = paged_board();
+        let t = token_at(&s, &q, T0);
+        let at = |clock: i64| {
+            next_page_at(&it_cfg(), &s, &q.clone().token(&t), clock)
+                .unwrap()
+                .restarted
+        };
+        assert!(!at(T0 + NEXT_CACHE_TTL_SECS), "at the TTL it still answers");
+        assert!(
+            at(T0 + NEXT_CACHE_TTL_SECS + 1),
+            "past it the token restarts"
+        );
+    }
+
+    #[test]
+    fn a_new_snapshot_evicts_only_snapshots_older_than_the_ttl() {
+        // The sign of the expiry bound: a younger snapshot survives the next insert; one older than
+        // the TTL does not.
+        let (s, q) = paged_board();
+        let young = token_at(&s, &q, T0);
+        token_at(&s, &q, T0 + 10);
+        let snapshot = |t: &str| s.next_cache_get(t.rsplit_once('.').unwrap().0).unwrap();
+        assert!(snapshot(&young).is_some(), "ten seconds younger: kept");
+        token_at(&s, &q, T0 + NEXT_CACHE_TTL_SECS + 1);
+        assert!(
+            snapshot(&young).is_none(),
+            "older than the TTL: dropped on insert"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_whose_watermark_op_is_not_the_logs_restarts() {
+        // Integrity #6: a log that holds another op at the snapshot's watermark is another log,
+        // even when it is no shorter.
+        let (s, q) = paged_board();
+        let t = token_at(&s, &q, T0);
+        let id = t.rsplit_once('.').unwrap().0;
+        let snap = s.next_cache_get(id).unwrap().unwrap();
+        assert_eq!(snap.watermark_op, s.op_at(snap.watermark).unwrap());
+        s.connection()
+            .execute(
+                "UPDATE next_page_cache SET watermark_op = 'another-log' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert!(
+            next_page_at(&it_cfg(), &s, &q.clone().token(&t), T0)
+                .unwrap()
+                .restarted
+        );
     }
 }

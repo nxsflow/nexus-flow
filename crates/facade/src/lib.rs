@@ -27,6 +27,9 @@
 /// The board's graph types (6j6v.t1ym), owned by the core and re-exported for the reason the
 /// thread-link types below are: a [`read::ActiveBoard`] — the input of the store-free lanes —
 /// carries a [`Board`], and a caller that builds one names these types from this crate alone.
+///
+/// Their fields are all public, so they are part of this crate's contract: a field added to them in
+/// the core is a facade change like any other.
 pub use nexus_flow_core::graph::{Board, Edge, Ticket};
 /// The thread↔item link types (nxf 6j6v.8dbe), owned by the core and re-exported here.
 ///

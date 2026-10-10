@@ -87,6 +87,8 @@ fn the_container_filter_takes_children_and_contributors_and_an_item_can_be_in_tw
         ranked(&engine, &["ab12.0001", "ab12.0003"]),
         "e001: its child and its contributor"
     );
+    // The same, spelled out: priority 0 before priority 1 (review of #43, Test Quality #9).
+    assert_eq!(ids(&in_e1.items), ["ab12.0003", "ab12.0001"]);
     let in_e2 = page(
         &engine,
         NextQuery::new(NOW).filter(NextFilter::new().with_container("ab12.e002")),
@@ -96,6 +98,7 @@ fn the_container_filter_takes_children_and_contributors_and_an_item_can_be_in_tw
         ranked(&engine, &["ab12.0001", "ab12.0002"]),
         "e002: its child and the item that belongs to e001 but contributes here"
     );
+    assert_eq!(ids(&in_e2.items), ["ab12.0001", "ab12.0002"]);
     assert_eq!(in_e2.total, 2);
     assert!(in_e2.next_token.is_none() && !in_e2.restarted);
 }
@@ -114,6 +117,7 @@ fn the_type_filter_is_repeatable_and_keeps_the_ranked_order() {
         ids(&bugs.items),
         ranked(&engine, &["ab12.0003", "ab12.0004"])
     );
+    assert_eq!(ids(&bugs.items), ["ab12.0003", "ab12.0004"]);
     let work = page(
         &engine,
         NextQuery::new(NOW).filter(NextFilter::new().with_type("task").with_type("bug")),
@@ -124,6 +128,10 @@ fn the_type_filter_is_repeatable_and_keeps_the_ranked_order() {
             &engine,
             &["ab12.0001", "ab12.0002", "ab12.0003", "ab12.0004"]
         )
+    );
+    assert_eq!(
+        ids(&work.items),
+        ["ab12.0003", "ab12.0001", "ab12.0002", "ab12.0004"]
     );
     // Both filters at once: the bugs in e001.
     let both = page(
@@ -253,12 +261,35 @@ fn an_op_outside_the_snapshot_that_moves_an_item_in_it_restarts() {
 
     s.set_field("ab12.b001", "status", Some("open".into()), "t");
 
+    let token = p1.next_token.unwrap();
+    let p = page(&engine, NextQuery::new(NOW).limit(2).token(&token));
+    assert!(p.restarted, "an item of the list left it");
+    // The first page of the fresh list, cut at the limit, with a new token (Test Quality #8).
+    // Fresh: the blocked item gone, the reopened blocker (priority 4) in.
+    assert_eq!(
+        (ids(&p.items), p.start, p.total),
+        (vec![all[0].clone(), all[2].clone()], 0, 5)
+    );
+    let new_token = p.next_token.expect("a new token");
+    assert_ne!(new_token, token);
+}
+
+#[test]
+fn a_stale_token_restarts_even_when_the_fresh_list_fits_one_page() {
+    // The restart at what would be the last page: the fresh first page holds everything, so the
+    // restarted answer hands out no token.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let p1 = page(&engine, NextQuery::new(NOW).limit(4).paginate());
+    writer(tmp.path()).set_field(&all[4], "status", Some("closed".into()), "t");
     let p = page(
         &engine,
-        NextQuery::new(NOW).limit(2).token(p1.next_token.unwrap()),
+        NextQuery::new(NOW).limit(4).token(p1.next_token.unwrap()),
     );
-    assert!(p.restarted, "an item of the list left it");
-    assert!(!ids(&p.items).contains(&all[1]));
+    assert!(p.restarted);
+    assert_eq!((ids(&p.items), p.total), (all[0..4].to_vec(), 4));
+    assert_eq!(p.next_token, None);
 }
 
 #[test]
@@ -361,4 +392,155 @@ fn next_query_value_is_the_paging_envelope() {
     assert!(v["next_token"].is_string());
     assert_eq!(v["items"][0]["id"], all[0].as_str());
     assert_eq!(v["items"].as_array().unwrap().len(), 2);
+}
+
+// ---- review of #43 -----------------------------------------------------------
+
+#[test]
+fn a_huge_limit_with_a_valid_token_serves_the_rest_and_does_not_panic() {
+    // Integrity #1: `pos + limit` overflowed on a valid token.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let t = page(&engine, NextQuery::new(NOW).limit(2).paginate())
+        .next_token
+        .unwrap();
+    let p = page(&engine, NextQuery::new(NOW).limit(usize::MAX).token(&t));
+    assert!(!p.restarted);
+    assert_eq!((ids(&p.items), p.start), (all[2..].to_vec(), 2));
+    assert_eq!(p.next_token, None);
+}
+
+#[test]
+fn tampered_tokens_restart_or_serve_from_the_position_they_name() {
+    // Test Quality #5.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let t = page(&engine, NextQuery::new(NOW).limit(2).paginate())
+        .next_token
+        .unwrap();
+    let (id, _) = t.rsplit_once('.').unwrap();
+    // Another sort: the snapshot was computed under the default one.
+    let other_sort = NextQuery::new(NOW)
+        .sort(read::SortKey::Id)
+        .limit(2)
+        .token(&t);
+    assert!(page(&engine, other_sort).restarted, "another sort");
+    // Position 0 is the first page, which a token never names.
+    assert!(
+        page(
+            &engine,
+            NextQuery::new(NOW).limit(2).token(format!("{id}.0"))
+        )
+        .restarted
+    );
+    // A position no answer minted, but inside the list: a token is an offset into the snapshot.
+    let p = page(
+        &engine,
+        NextQuery::new(NOW).limit(2).token(format!("{id}.1")),
+    );
+    assert!(!p.restarted);
+    assert_eq!((ids(&p.items), p.start), (all[1..3].to_vec(), 1));
+    // A real token from another workspace names a snapshot this one does not hold.
+    let other = workspace();
+    five(other.path());
+    let elsewhere = Engine::open(None, other.path()).unwrap();
+    let foreign = page(&elsewhere, NextQuery::new(NOW).limit(2).paginate())
+        .next_token
+        .unwrap();
+    assert!(page(&engine, NextQuery::new(NOW).limit(2).token(&foreign)).restarted);
+}
+
+#[test]
+fn two_interleaved_pagers_each_walk_their_own_list() {
+    // Test Quality #4.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let by_id = |n: usize| NextQuery::new(NOW).sort(read::SortKey::Id).limit(n);
+    let a1 = page(&engine, NextQuery::new(NOW).limit(2).paginate());
+    let b1 = page(&engine, by_id(3).paginate());
+    let a2 = page(
+        &engine,
+        NextQuery::new(NOW).limit(2).token(a1.next_token.unwrap()),
+    );
+    let b2 = page(&engine, by_id(3).token(b1.next_token.unwrap()));
+    let a3 = page(
+        &engine,
+        NextQuery::new(NOW)
+            .limit(2)
+            .token(a2.next_token.clone().unwrap()),
+    );
+    assert!(!a2.restarted && !b2.restarted && !a3.restarted);
+    assert_eq!(ids(&a2.items), all[2..4]);
+    assert_eq!(ids(&a3.items), all[4..]);
+    assert_eq!(ids(&b2.items), all[3..]);
+}
+
+#[test]
+fn one_query_polled_past_its_cap_evicts_only_its_own_snapshots() {
+    // Integrity #3 and Test Quality #3: the caps are wired through `next_page`, and a reader that
+    // keeps asking for first pages of one query cannot restart another query's pager.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let other = page(
+        &engine,
+        NextQuery::new(NOW)
+            .sort(read::SortKey::Id)
+            .limit(2)
+            .paginate(),
+    )
+    .next_token
+    .unwrap();
+    let first = page(&engine, NextQuery::new(NOW).limit(2).paginate())
+        .next_token
+        .unwrap();
+    for _ in 0..read::NEXT_CACHE_MAX_PER_QUERY {
+        page(&engine, NextQuery::new(NOW).limit(2).paginate());
+    }
+    let p = page(&engine, NextQuery::new(NOW).limit(2).token(&first));
+    assert!(p.restarted, "the poller's oldest snapshot was evicted");
+    let q = page(
+        &engine,
+        NextQuery::new(NOW)
+            .sort(read::SortKey::Id)
+            .limit(2)
+            .token(&other),
+    );
+    assert!(!q.restarted, "the other query's snapshot is untouched");
+    assert_eq!(ids(&q.items), all[2..4]);
+}
+
+#[test]
+fn a_cache_that_cannot_be_written_degrades_to_a_page_without_a_token() {
+    // Integrity #2: a read must not fail because the cache cannot be written (a read-only db, a
+    // lock held past the busy timeout). Here the table is gone, which fails the write the same way.
+    let tmp = workspace();
+    let all = five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    writer(tmp.path())
+        .connection()
+        .execute_batch("DROP TABLE next_page_cache;")
+        .unwrap();
+    let p = page(&engine, NextQuery::new(NOW).limit(2).paginate());
+    assert_eq!((ids(&p.items), p.total), (all[0..2].to_vec(), 5));
+    assert_eq!(p.next_token, None);
+}
+
+#[test]
+fn next_query_value_carries_the_paging_keys_only_when_paginating() {
+    // Code Quality #5: the Engine's envelope follows the query, as the CLI's follows the flag.
+    let tmp = workspace();
+    five(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let v = engine
+        .next_query_value(&NextQuery::new(NOW).limit(2))
+        .unwrap();
+    assert_eq!(v["total"], 5);
+    assert!(
+        v.get("next_token").is_none() && v.get("restarted").is_none(),
+        "{v}"
+    );
 }

@@ -23,7 +23,9 @@
 //! | GSI `active`         | `nxf_active` / `sk`      | S/S  | sparse: active tickets and the present dep/parent edges touching one   |
 //! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by `<instant>␟<id>` |
 //!
-//! Both indexes project ALL attributes, so a lane is one Query and no follow-up reads. Billing mode
+//! Both indexes project ALL attributes, so a lane is one Query and no follow-up reads. The lanes
+//! need nothing else; the RECORDS a lane is shown with carry joins from other tables, which
+//! [`records`] reads with a fixed number of requests per active ticket. Billing mode
 //! is the deployment's call. No local secondary index: without one, DynamoDB sets no limit on the
 //! size of a stream's partition (the 10 GB item-collection limit applies only to tables with an LSI).
 //! What does bound a stream is the throughput of ONE partition key: a stream's `active` and `dated`
@@ -56,10 +58,19 @@
 //! A change is one `UpdateItem`. An item field op makes three changes (the cell and the ticket's
 //! two instants) plus one `GetItem` for the index, and one more write when the ticket's lanes move.
 //! A flip of a ticket's activity adds one Query and, per edge touching it, at most three reads and
-//! one write. A label or thread link add writes one more item, its entry under the ticket
-//! (`board`, "Who owns a label or a thread link"). Reading the active tickets' records costs a few
-//! requests per ticket ([`records`]). No request is a Scan: every read names its partition key, the board's through an
-//! index. The `dynamodb-local` CI job counts the requests of a fold and proves it.
+//! one write. A label or thread link add, or its remove, adds two `GetItem`s and at most one write
+//! for the entry under the ticket (`board`, "Who owns a label or a thread link"). Reading the
+//! active tickets' records costs `4n + 1` requests for `n` tickets, plus one per parent outside
+//! the selection, at most [`records::READ_CONCURRENCY`] tickets at a time ([`records`]). No request
+//! is a Scan: every read names its partition key, the board's through an index. The
+//! `dynamodb-local` CI job counts the requests of a fold and of a records read, and proves it.
+//!
+//! # Rules beside the rows
+//!
+//! What this crate writes beside the reducers' rows — index flags, adjacency entries, the entries
+//! under a ticket — has its own revision in the watermark ([`fold::INDEX_REVISION`]). A stream
+//! folded by an older one is not current ([`fold::Folder::is_current`]) and is refolded the way a
+//! stream of an older reducer revision is; [`records::active_board`] refuses it until then.
 
 pub mod board;
 pub mod chunks;

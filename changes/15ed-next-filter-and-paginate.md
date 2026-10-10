@@ -14,8 +14,10 @@ hour and never synced. If an item in that list changes, or the token is stale or
 the first page of a fresh list, with `restarted: true` and a new token. Items that qualify only
 after the first page appear on your next fresh query. For apps, `Engine::next_query` and
 `Engine::next_query_value` take a `read::NextQuery` with these filters and the paging settings.
-`read::next_active_filtered` applies the same filters on a server, and `nxs_fold_ddb` now reads each
-active ticket's contributes-to edges so that a server can use the container filter.
+`read::next_active_filtered` applies the same filters on a server. For the container filter, a
+server calls `nxs_fold_ddb::records::with_contributes_to`, which reads each active ticket's
+contributes-to edges with one query per ticket. A hosted stream is folded once more after the
+update so that it records these edges per ticket.
 [de]
 `nxf next` lässt sich jetzt eingrenzen und seitenweise lesen. `--type <typ>` behält nur Einträge
 dieses Typs und kann mehrfach angegeben werden. `--in <id>` behält nur die Einträge in einem
@@ -30,5 +32,7 @@ ist das Token veraltet oder ungültig, erhalten Sie die erste Seite einer frisch
 `restarted: true` und einem neuen Token. Einträge, die erst nach der ersten Seite dazukommen,
 erscheinen bei der nächsten frischen Abfrage. Für Apps nehmen `Engine::next_query` und
 `Engine::next_query_value` eine `read::NextQuery` mit diesen Filtern und den Seiteneinstellungen.
-`read::next_active_filtered` wendet dieselben Filter auf einem Server an, und `nxs_fold_ddb` liest
-jetzt die Beitragskanten jedes aktiven Tickets, damit ein Server den Container-Filter nutzen kann.
+`read::next_active_filtered` wendet dieselben Filter auf einem Server an. Für den Container-Filter
+ruft ein Server `nxs_fold_ddb::records::with_contributes_to` auf, das die Beitragskanten jedes
+aktiven Tickets mit einer Abfrage pro Ticket liest. Ein gehosteter Stream wird nach dem Update noch
+einmal gefaltet, damit er diese Kanten pro Ticket festhält.
