@@ -23,7 +23,7 @@
 //! defaults `now` to the clock. [`Caller`] is what is left over: who is calling, and nothing that
 //! can be derived from that.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -2406,40 +2406,59 @@ fn release_and_fire(
         // started at once, into one working copy. So a later step goes back in line here, in the
         // place it had, and [`start_the_steps_whose_turn_has_come`] starts it once the step before
         // it is over.
+        let room = match WaitingRoom::for_hand_off(store, &granted_key, &next) {
+            Ok(room) => room,
+            Err(e) => {
+                out.warnings.push(undecided_finding(
+                    next.first(),
+                    "the working copy was handed on",
+                    &e,
+                ));
+                WaitingRoom::of_entries(&next)
+            }
+        };
         let InLine {
             start,
             wait,
             undecided,
-        } = one_step_per_ordered_run(ctx, store, next);
+        } = one_step_per_ordered_run(ctx, store, &room, next);
         let mut start = start;
         // **Undecided starts, here and only here.** The entry is already off the queue, so the old
-        // behaviour (start it) is the one answer that cannot lose it.
-        start.extend(undecided);
-        for entry in wait {
-            match store.enqueue_working_tree(&entry, ctx.now) {
-                Ok(_) => out.deferred.push(PromotedTrigger::of(&entry)),
-                Err(e) => {
-                    eprintln!(
-                        "warning: {} on thread {} is a later step of an ordered run and was to \
-                         wait for the step before it, but it could not be put back in line ({e}); \
-                         it is started now instead",
-                        entry.role,
-                        entry.thread.as_deref().unwrap_or_default()
-                    );
-                    start.push(entry);
-                }
-            }
+        // behaviour (start it) is the one answer that cannot lose it. The receipt says so (review
+        // of PR #38, Code Quality #6).
+        for (entry, e) in undecided {
+            out.warnings.push(undecided_finding(
+                Some(&entry),
+                "the working copy was handed on, so it is started",
+                &e,
+            ));
+            start.push(entry);
         }
         if start.is_empty() {
-            // Every entry of the area waits for a step of its own run that is still RUNNING, so
-            // the area is using the copy it was just given. Holding it is correct, and handing it
-            // on below would take it from a live session.
+            // Every entry of the area waits for an earlier step of its own run that is running, or
+            // pending a retry of a failed start. The copy stays with the area: that step is what
+            // comes next in it, and freeing the copy would leave the waiting entries behind a
+            // newcomer.
+            put_back_in_line(
+                ctx,
+                store,
+                wait,
+                &format!("the working tree was released by {held_by}, but"),
+                &mut out,
+            );
             return Ok(out);
         }
         let what = format!("the working tree was released by {held_by}, but");
         for entry in &start {
             fire_promoted(ctx, store, entry, &what, &mut out);
         }
+        // **The waiting steps go back in line only now, after the earlier ones were fired** (review
+        // of PR #38, Integrity & Robustness #1). Back in line, they are visible to
+        // [`start_the_steps_whose_turn_has_come`] in every other process. Before the fire, the
+        // earlier step was neither in the queue nor running, and a reply or tick elsewhere could have
+        // started the later step first. After it, the earlier step owes its answer on a window that
+        // starts now, or has a failed start on record, and either one holds the later step.
+        put_back_in_line(ctx, store, wait, &what, &mut out);
         if out.started.len() > started_before || out.requeued.len() > requeued_before {
             return Ok(out);
         }
@@ -2472,7 +2491,7 @@ fn fire_promoted(
     out: &mut Promotions,
 ) {
     let promoted = PromotedTrigger::of(entry);
-    match fire_queued_trigger(ctx, store, entry) {
+    match fire_queued_trigger(ctx, store, entry, &mut out.warnings) {
         // EXHAUSTIVE, with no `_` arm: a third admission is a compile error right here, so
         // whoever adds one has to decide what it means for a receipt — the same
         // construction `working_tree::hands_the_task_back` uses, and for the same reason. A
@@ -2517,34 +2536,139 @@ fn fire_promoted(
     }
 }
 
+/// **Put the waiting steps back in line**, keeping the place each one had (its `enqueued_at`), and
+/// report them in [`Promotions::deferred`].
+///
+/// An entry that cannot be put back is NOT started instead (review of PR #38, Code Quality #6 and
+/// Integrity & Robustness #5). Starting it would be the very collision this rule exists to
+/// prevent. It is recorded as a failed start, so `nxc status` shows it, `withdraw` finds it, and
+/// the receipt names it. A failed start on record also holds every later step of its run.
+fn put_back_in_line(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    wait: Vec<QueuedTrigger>,
+    what: &str,
+    out: &mut Promotions,
+) {
+    for entry in wait {
+        match store.enqueue_working_tree(&entry, ctx.now) {
+            Ok(_) => out.deferred.push(PromotedTrigger::of(&entry)),
+            Err(e) => {
+                let what = format!(
+                    "{what} it is a later step of an ordered run that was to wait in line for the \
+                     step before it, and it could not be put back:"
+                );
+                out.warnings
+                    .push(note_the_failed_start(ctx, store, &entry, &what, &e));
+                out.failed.push(PromotedTrigger::of(&entry));
+            }
+        }
+    }
+}
+
+/// The finding for an entry whose place in its ordered run could not be decided (review of PR #38,
+/// Code Quality #6 and Integrity & Robustness #6). It goes on the receipt as well as on stderr,
+/// because under the background service stderr is a log file nobody reads.
+fn undecided_finding(entry: Option<&QueuedTrigger>, then: &str, e: &NxfError) -> FailedConsequence {
+    let (role, thread) = entry
+        .map(|q| (q.role.as_str(), q.thread.as_deref().unwrap_or_default()))
+        .unwrap_or(("a queued step", ""));
+    let finding = FailedConsequence::lease_undecided(
+        thread,
+        format!(
+            "could not tell whether {role} on thread {thread} waits for an earlier step of its \
+             ordered run ({e}); {then}"
+        ),
+    );
+    eprintln!("warning: {finding}");
+    finding
+}
+
 /// **Where a promoted area's entries go: started now, back in line, or undecided** (nxf
-/// 6j6v.9g8j) — [`one_step_per_ordered_run`]'s answer, each list in the queue's own order.
+/// 6j6v.9g8j) — [`one_step_per_ordered_run`]'s answer, each list in the order it was given.
 struct InLine {
     /// Nothing of its own ordered run stands before it: start it.
     start: Vec<QueuedTrigger>,
-    /// A step of its own ordered run is ahead of it, in the queue or running: it waits.
+    /// An earlier step of its own ordered run is still pending, or another step of it is running:
+    /// it waits.
     wait: Vec<QueuedTrigger>,
     /// The question could not be answered (a read failed). The caller decides, because the right
     /// default depends on whether the entry is still in the queue — see the two callers.
-    undecided: Vec<QueuedTrigger>,
+    undecided: Vec<(QueuedTrigger, NxfError)>,
+}
+
+/// **What is waiting to start in one operation**: the threads that have an entry in line, and the
+/// threads with a failed start on record. Read once per decision, not once per entry (review of
+/// PR #38, Code Quality #5).
+///
+/// A failed start counts as waiting (review of PR #38, Code Quality #2, Integrity & Robustness #2).
+/// It is retried by the tick, so it is as much in line as a queue row, and a later step that started
+/// meanwhile would run beside it once the retry comes due.
+struct WaitingRoom {
+    queued: HashSet<String>,
+    failed: HashSet<String>,
+}
+
+impl WaitingRoom {
+    /// The entries of `scope_key` still in the queue, plus `taken`, which a hand-off has just taken
+    /// off it. The siblings of a step are in the same operation, and so under the same key.
+    fn for_hand_off(store: &ChatStore, scope_key: &str, taken: &[QueuedTrigger]) -> Result<Self> {
+        let mut room = Self::of_entries(taken);
+        room.queued.extend(
+            store
+                .working_tree_queue_of(scope_key)?
+                .into_iter()
+                .filter_map(|q| q.thread),
+        );
+        room.failed = store
+            .failed_starts()?
+            .into_iter()
+            .filter_map(|f| f.thread)
+            .collect();
+        Ok(room)
+    }
+
+    /// Only `entries` — what a hand-off can still go by when the reads above failed.
+    fn of_entries(entries: &[QueuedTrigger]) -> Self {
+        WaitingRoom {
+            queued: entries.iter().filter_map(|q| q.thread.clone()).collect(),
+            failed: HashSet::new(),
+        }
+    }
+
+    fn holds_any_of(&self, threads: &[String]) -> bool {
+        threads
+            .iter()
+            .any(|t| self.queued.contains(t) || self.failed.contains(t))
+    }
 }
 
 /// **The rule of nxf 6j6v.9g8j: one step per ordered run, every member of a parallel round.**
 ///
 /// An entry is a step of an ordered run when its thread is a slot under a channel thread whose
-/// channel declares an order (`flow: sequential`, or `steps:`). It may start unless, for some such
-/// channel above it,
+/// channel declares an order (`flow: sequential`, or `steps:`). The steps of that run are the
+/// channel thread's slots, in the order the supervisor OPENED them, which is the declared order of
+/// the run (review of PR #38, Code Quality #4: the queue's order is not, because a priority or a
+/// re-queue can reorder it). The entry waits when, for some such channel thread above it:
 ///
-/// - an entry EARLIER in `entries` serves a different step of that same channel thread, or
-/// - a session is still running under a different step of that same channel thread.
+/// - an EARLIER step is still pending: it has an entry in line or a failed start on record
+///   ([`WaitingRoom`]), or it still owes its answer inside its window (outstanding and not stale);
+///   or
+/// - ANY other step, earlier or later, has a session in the working copy
+///   ([`a_session_is_in_the_copy`]). A later one counts too: two slots of the same step can exist
+///   when the flow reopened it (nxf 6j6v.1wep), and the older one must not run beside the newer.
+///   It still runs AFTER the newer one, as stale work for a round that has moved on. Withdrawing
+///   such a superseded slot instead is nxf 6j6v.55b1, and depends on what 6j6v.1wep decides about
+///   the lapse that creates it.
+///
+/// "Owes its answer inside its window" is the flow's own notion of an unsettled step
+/// (`member_set_is_settled`: complete or stale). A step whose session died without a word holds
+/// the next one until its window lapses, which is exactly when the flow itself would move past it.
 ///
 /// Everything else starts together: the members of a parallel round (their channel declares no
 /// order), entries of a thread that is no channel slot, entries with no thread. A parallel round
 /// nested as ONE step of an ordered channel counts as that one step, so its members start together
-/// and the ordered channel's other steps wait for all of them. "Earlier" is the queue's own
-/// `(priority, enqueued_at, id)` order, which `entries` is in. The first entry of a run therefore
-/// always starts unless something of the run is running. An entry already chosen to wait claims
-/// its step too, so a third step cannot overtake a second one that is waiting.
+/// and the ordered channel's other steps wait for all of them.
 ///
 /// **Why the check is made here and not when the step was opened.** The supervisor already refuses
 /// to open the next step while the previous one is unanswered or its session runs (nxf 6j6v.10yb).
@@ -2554,51 +2678,89 @@ struct InLine {
 /// that route is closed; a step settled while its trigger still waits (an answer posted for it by
 /// hand) still opens the next one. The hand-off is the last place that sees both entries before
 /// anything runs, and it must not start them side by side.
-fn one_step_per_ordered_run(ctx: &Ctx, store: &ChatStore, entries: Vec<QueuedTrigger>) -> InLine {
-    let mut claimed: HashMap<String, String> = HashMap::new();
+fn one_step_per_ordered_run(
+    ctx: &Ctx,
+    store: &ChatStore,
+    room: &WaitingRoom,
+    entries: Vec<QueuedTrigger>,
+) -> InLine {
     let mut out = InLine {
         start: Vec::new(),
         wait: Vec::new(),
         undecided: Vec::new(),
     };
     for entry in entries {
-        let decided = (|| -> Result<(Vec<(String, String)>, bool)> {
-            let Some(thread) = entry.thread.as_deref() else {
-                return Ok((Vec::new(), false));
-            };
-            let steps = ordered_steps_of(ctx, store, thread)?;
-            for (channel_thread, step) in &steps {
-                if claimed.get(channel_thread).is_some_and(|s| s != step)
-                    || another_step_is_running(ctx, store, channel_thread, step)?
-                {
-                    return Ok((steps, true));
-                }
-            }
-            Ok((steps, false))
-        })();
-        match decided {
-            Ok((steps, waits)) => {
-                for (channel_thread, step) in steps {
-                    claimed.entry(channel_thread).or_insert(step);
-                }
-                if waits {
-                    out.wait.push(entry);
-                } else {
-                    out.start.push(entry);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "warning: could not tell whether {} on thread {} waits for an earlier step of \
-                     its ordered run: {e}",
-                    entry.role,
-                    entry.thread.as_deref().unwrap_or_default()
-                );
-                out.undecided.push(entry);
-            }
+        match must_wait(ctx, store, room, entry.thread.as_deref()) {
+            Ok(true) => out.wait.push(entry),
+            Ok(false) => out.start.push(entry),
+            Err(e) => out.undecided.push((entry, e)),
         }
     }
     out
+}
+
+/// [`one_step_per_ordered_run`]'s question for one thread. `None` (an entry with no thread) never
+/// waits.
+fn must_wait(
+    ctx: &Ctx,
+    store: &ChatStore,
+    room: &WaitingRoom,
+    thread: Option<&str>,
+) -> Result<bool> {
+    let Some(thread) = thread else {
+        return Ok(false);
+    };
+    for (channel_thread, step) in ordered_steps_of(ctx, store, thread)? {
+        let slots = store.supervised_children(&channel_thread)?;
+        let mine = slots.iter().position(|s| *s == step);
+        for (i, sibling) in slots.iter().enumerate() {
+            if *sibling == step {
+                continue;
+            }
+            let below = store.thread_subtree(sibling)?;
+            if a_session_is_in_the_copy(ctx, store, &below)? {
+                return Ok(true);
+            }
+            let earlier = mine.is_some_and(|m| i < m);
+            if earlier && (room.holds_any_of(&below) || owes_inside_its_window(ctx, store, &below)?)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any of `threads` still owes an answer and its window has not lapsed — the flow's own
+/// "not settled" (`member_set_is_settled` reads `complete || stale`).
+fn owes_inside_its_window(ctx: &Ctx, store: &ChatStore, threads: &[String]) -> Result<bool> {
+    let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
+    Ok(store
+        .thread_quorums(&ids, ctx.now)?
+        .iter()
+        .any(|q| !q.outstanding.is_empty() && !q.stale))
+}
+
+/// **Whether a session still has its hands in the working copy under `threads`.**
+///
+/// With a worker that answers liveness, that is [`sessions_still_running`]. With one that does NOT
+/// (review of PR #38, Code Quality #1, Integrity & Robustness #3), its `false` means "I never
+/// looked", and `sessions_still_running`'s own doc calls that default the destructive one for a
+/// hand-off. So here every session that has not announced its end counts as present, the way
+/// `withdraw` already branches on [`Worker::answers_liveness`](crate::worker::Worker). The price:
+/// a session killed so hard that it never announced its end holds the next step until the lease's
+/// bound, or until `withdraw` takes the operation back. A wait that is visible in the queue is the
+/// failure this module prefers to a collision in the copy.
+fn a_session_is_in_the_copy(ctx: &Ctx, store: &ChatStore, threads: &[String]) -> Result<bool> {
+    if ctx.worker.answers_liveness() {
+        return Ok(!sessions_still_running(ctx, store, threads)?.is_empty());
+    }
+    for thread in threads {
+        if !store.unended_sessions_in_thread(thread)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// **Every ordered run `thread` is a step of**, innermost first: one `(channel thread, step slot)`
@@ -2633,30 +2795,6 @@ fn ordered_steps_of(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Vec<(S
     Ok(steps)
 }
 
-/// Whether a session is still running under any step of `channel_thread` other than `step` — in
-/// that step's slot or anywhere below it, so a nested round's members count for their step.
-///
-/// The liveness answer is [`sessions_still_running`]'s, with its documented fail-open default: a
-/// worker that never answers liveness reports nothing running, and the order then rests on the
-/// queue alone. A session that announced its end is not counted whatever the worker says.
-fn another_step_is_running(
-    ctx: &Ctx,
-    store: &ChatStore,
-    channel_thread: &str,
-    step: &str,
-) -> Result<bool> {
-    for sibling in store.supervised_children(channel_thread)? {
-        if sibling == step {
-            continue;
-        }
-        let below = store.thread_subtree(&sibling)?;
-        if !sessions_still_running(ctx, store, &below)?.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// **Start the waiting steps of the holder's own ordered runs whose turn has come** (nxf 6j6v.9g8j)
 /// — the other half of [`release_and_fire`] putting a later step back in line.
 ///
@@ -2667,9 +2805,16 @@ fn another_step_is_running(
 /// session that died without a word.
 ///
 /// The same rule decides as at the hand-off ([`one_step_per_ordered_run`]), over the holder's own
-/// entries in queue order. An entry is taken off the queue by its id before it is fired, so two
-/// processes asking at once start it once. An UNDECIDED entry stays where it is: it is still in
-/// line, and the next question will ask again.
+/// entries. Every decision is made before anything is started, so a step started here does not
+/// let a third step past the second in the same call. An entry is taken off the queue by its id
+/// before it is fired, so two processes asking at once start it once. An UNDECIDED entry stays
+/// where it is, still in line, and its finding is on the receipt; the next question asks again.
+///
+/// **A residual, named rather than closed.** Between taking an entry off the queue and its session
+/// starting, it is in neither place. A second process asking in that window about a THIRD step of
+/// the same run sees the second step as neither queued nor running. It still holds the third step
+/// when its own window is open, which is the ordinary case. Three steps of one run waiting at once
+/// needs the 6j6v.1wep lapse twice.
 ///
 /// Measured against the lease row, expired or not: an expired holder whose step ended may still
 /// start its next one, and that start renews the lease through the ordinary inherit.
@@ -2678,16 +2823,21 @@ fn start_the_steps_whose_turn_has_come(ctx: &Ctx, store: &mut ChatStore) -> Resu
     let Some((holder, _)) = store.working_tree_lease_row()? else {
         return Ok(out);
     };
-    let own: Vec<QueuedTrigger> = store
-        .list_working_tree_queue()?
-        .into_iter()
-        .filter(|q| q.scope_key == holder)
-        .collect();
+    let own = store.working_tree_queue_of(&holder)?;
     if own.is_empty() {
         return Ok(out);
     }
+    let room = WaitingRoom::for_hand_off(store, &holder, &[])?;
+    let decided = one_step_per_ordered_run(ctx, store, &room, own);
+    for (entry, e) in &decided.undecided {
+        out.warnings.push(undecided_finding(
+            Some(entry),
+            "it stays in line and the next reply, session end or tick asks again",
+            e,
+        ));
+    }
     let what = format!("the step before it in operation {holder} is over, but");
-    for entry in one_step_per_ordered_run(ctx, store, own).start {
+    for entry in decided.start {
         if store.remove_working_tree_queue_entry(entry.id)? {
             fire_promoted(ctx, store, &entry, &what, &mut out);
         }
@@ -2895,7 +3045,41 @@ fn retry_the_failed_starts(ctx: &Ctx, store: &mut ChatStore) -> Vec<FailedConseq
                 Err(_) => {}
             }
         }
-        match fire_queued_trigger(ctx, store, &entry) {
+        // **A retry keeps the order of its run** (nxf 6j6v.9g8j; review of PR #38, Code Quality #2).
+        // A later step whose start failed must not be retried while an earlier step of the same
+        // run is still pending or running. It goes back unattempted and is due again a little
+        // later. Not knowing is a reason to wait here, not to start: the entry stays on record,
+        // and the finding says so.
+        let blocked = WaitingRoom::for_hand_off(store, &entry.scope_key, &[])
+            .and_then(|room| must_wait(ctx, store, &room, entry.thread.as_deref()));
+        let blocked = match blocked {
+            Ok(b) => b,
+            Err(e) => {
+                warnings.push(undecided_finding(
+                    Some(&entry),
+                    "its retry waits and is asked again on a later tick",
+                    &e,
+                ));
+                true
+            }
+        };
+        if blocked {
+            let postponed = facade::instant_after(
+                ctx.now,
+                time::Duration::seconds(START_RETRY_SPACING_SECS),
+                "the retry of a failed start",
+            )
+            .and_then(|at| store.postpone_failed_start(&entry.session, &at));
+            if let Err(e) = postponed {
+                eprintln!(
+                    "warning: the retry of session {} waits for an earlier step of its run, and \
+                     postponing it failed ({e}); it is due again when its claim's hold ends",
+                    entry.session
+                );
+            }
+            continue;
+        }
+        match fire_queued_trigger(ctx, store, &entry, &mut warnings) {
             Ok(TriggerAdmission::Spawned {
                 declaration_changed,
             }) => {
@@ -5049,6 +5233,7 @@ fn fire_queued_trigger(
     ctx: &Ctx,
     store: &mut ChatStore,
     entry: &QueuedTrigger,
+    noticed: &mut Vec<FailedConsequence>,
 ) -> Result<TriggerAdmission> {
     // **Re-composed against the catalogue this entry's OWN operation is bound to** (nxf 6j6v.n92p).
     // The queue stores a trigger's INPUTS and never a composed prompt, precisely so the prompt is
@@ -5130,13 +5315,32 @@ fn fire_queued_trigger(
     // **And the clock that watches the restarted window** (nxf 6j6v.1wep). The tick armed at
     // fan-out fired at the old instant, found the member still queued and declined, and a window
     // that has passed is never re-armed. Without this, a member that starts and then falls silent
-    // is noticed only when something else happens to tick its channel. Best-effort, after the
-    // trigger: the function reports its own failure on stderr, and nothing here may fail the start.
+    // is noticed only when something else happens to tick its channel.
+    //
+    // Only for a start that HAPPENED: a member queued again or not started has no window running,
+    // and the start that does happen later arms it then. A slot under no channel thread has no
+    // clock to watch, and [`rearm_after_the_members_moved`] arms nothing for a channel whose
+    // members declare no window.
+    //
+    // **Best-effort, after the trigger, and reported** (review of PR #39, Code Quality #2): a
+    // failure is a [`ConsequenceClass::TickUnscheduled`] finding in `noticed`, which both callers
+    // carry onto a receipt. This runs under the unattended tick too, where stderr alone is read by
+    // nobody. Nothing here fails the start, which has already happened.
     if matches!(admission, TriggerAdmission::Spawned { .. }) {
         if let Some(thread) = entry.thread.as_deref() {
-            if let Ok(Some(_)) = store.member_deadline(thread) {
-                if let Ok(Some(channel_thread)) = supervising_parent(store, thread) {
-                    let _ = rearm_after_the_members_moved(ctx, store, &channel_thread);
+            match supervising_parent(store, thread) {
+                Ok(Some(channel_thread)) => {
+                    noticed.extend(rearm_after_the_members_moved(ctx, store, &channel_thread));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let detail = format!(
+                        "the trigger on thread {thread} started, but its channel could not be read \
+                         to schedule the timeout tick for its restarted window: {e} — run `nxc tick \
+                         --thread {thread}` to check it by hand"
+                    );
+                    eprintln!("warning: {detail}");
+                    noticed.push(FailedConsequence::tick_unscheduled(thread, detail));
                 }
             }
         }
@@ -8133,6 +8337,19 @@ struct SupervisorRun {
 /// both are rows of the same queue. Its window starts when it starts:
 /// [`fire_queued_trigger`] restarts the member's clock at that moment.
 ///
+/// **A failed start with a retry still due counts as waiting too** (review of PR #39, Code Quality
+/// #1). It is off the queue but not started, and the tick will start it: had its window lapsed in
+/// between, the flow would open the next step and the retry would then start the earlier step
+/// beside it. A failed start with NO retry due (the bound is reached, or waiting cannot fix the
+/// failure) will never start on its own, so it lapses as before. See
+/// [`members_and_the_ones_still_waiting`].
+///
+/// **What ends such a wait, now that the lapse does not.** The copy coming free (the holder ends,
+/// or its lease is reclaimed or parked), the retry running, or `nxc withdraw` on the operation. A
+/// queue row that never fires would hold the flow for as long as it stays; the tick says so on
+/// every receipt that declines because of it ([`ConsequenceClass::StepStillWaiting`]), and the
+/// queue itself is bounded by the holder's lease and the park and sweep occasions behind it.
+///
 /// Measured in the `agents` workspace on 2026-10-09/10: a build step queued for six hours behind
 /// another operation's lease reached its window, the tick read it as a lapse, and the flow opened
 /// the verify step for a build that never ran.
@@ -8160,22 +8377,54 @@ fn supervised_member_threads_at(
     store: &ChatStore,
     channel_thread: &str,
 ) -> Result<Vec<ThreadQuorum>> {
+    Ok(members_and_the_ones_still_waiting(now, store, channel_thread)?.0)
+}
+
+/// [`supervised_member_threads_at`], plus the members it did NOT count as lapsed although their
+/// window has passed, because their start still waits ([`ConsequenceClass::StepStillWaiting`]).
+/// The tick reports those; everybody else only needs the set.
+///
+/// **What "still waits" is**: a row in the working-copy queue, or a failed start on record whose
+/// retry is still due (`retry_at` set). A failed start with no retry due — the bound is reached, or
+/// the failure is not one waiting can fix — will never start on its own, so it lapses as before:
+/// holding it would stall the run with only a withdraw able to end the wait.
+fn members_and_the_ones_still_waiting(
+    now: &str,
+    store: &ChatStore,
+    channel_thread: &str,
+) -> Result<(Vec<ThreadQuorum>, Vec<String>)> {
     let children = store.supervised_children(channel_thread)?;
     let ids: Vec<&str> = children.iter().map(String::as_str).collect();
     let mut members = store.thread_quorums(&ids, now)?;
+    let mut still_waiting = Vec::new();
     if members.iter().any(|m| m.stale) {
-        let waiting: HashSet<String> = store
-            .list_working_tree_queue()?
-            .into_iter()
-            .filter_map(|q| q.thread)
-            .collect();
+        let waiting = threads_whose_start_still_waits(store)?;
         for member in &mut members {
-            if waiting.contains(&member.thread_id) {
+            if member.stale && waiting.contains(&member.thread_id) {
                 member.stale = false;
+                still_waiting.push(member.thread_id.clone());
             }
         }
     }
-    Ok(members)
+    Ok((members, still_waiting))
+}
+
+/// The threads whose start has not happened yet and still will: an entry in the working-copy
+/// queue, or a failed start with a retry due (nxf 6j6v.1wep).
+fn threads_whose_start_still_waits(store: &ChatStore) -> Result<HashSet<String>> {
+    let mut waiting: HashSet<String> = store
+        .list_working_tree_queue()?
+        .into_iter()
+        .filter_map(|q| q.thread)
+        .collect();
+    waiting.extend(
+        store
+            .failed_starts()?
+            .into_iter()
+            .filter(|f| f.retry_at.is_some())
+            .filter_map(|f| f.thread),
+    );
+    Ok(waiting)
 }
 
 /// The declared channel a thread belongs to, by the `decl:<name>` convention
@@ -11090,6 +11339,14 @@ pub enum ConsequenceClass {
     /// and `nxc status` shows it waiting — but a caller is told rather than left to assume it
     /// started. Fields as for [`StartFailed`](Self::StartFailed).
     StartRequeued,
+    /// **A step's declared window has passed while its start still waits** (nxf 6j6v.1wep) — in
+    /// the working-copy queue, or for the retry of a start that failed. The step has not been
+    /// asked, so it does not lapse and the flow waits for it ([`supervised_member_threads`]). This
+    /// says so on every tick that finds it, because the lapse used to be what ended such a wait
+    /// and nothing else does now: the wait ends when the copy comes free (`nxc status` shows who
+    /// holds it), when the retry runs, or when `nxc withdraw` takes the operation back.
+    /// [`FailedConsequence::thread`] is the step's slot; `session` and `reason` are `None`.
+    StepStillWaiting,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -11163,6 +11420,20 @@ impl FailedConsequence {
 
     /// The release question could not be answered (nxf 6j6v.r91p; since 6j6v.br25 on every path that
     /// asks it). `thread` is the thread the question was asked for.
+    /// A step whose window passed while its start still waits (nxf 6j6v.1wep) — see
+    /// [`ConsequenceClass::StepStillWaiting`].
+    pub(crate) fn step_still_waiting(thread: &str, detail: impl Into<String>) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::StepStillWaiting,
+            thread: Some(thread.to_string()),
+            session: None,
+            reason: None,
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
     pub(crate) fn lease_undecided(thread: &str, detail: impl Into<String>) -> Self {
         FailedConsequence {
             class: ConsequenceClass::LeaseUndecided,
@@ -16469,8 +16740,30 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // than merely intended: every receipt below reports it, `outstanding_for_report` derives from
     // it, and re-deriving it per branch is how the no-op arms and the acted arm would start
     // answering differently.
-    let members = supervised_member_threads(ctx, store, thread_id)?;
+    let (members, still_waiting) = members_and_the_ones_still_waiting(ctx.now, store, thread_id)?;
     let outstanding = outstanding_for_report(&q, &members);
+    // **A wait that outlasts the window is said, not silent** (nxf 6j6v.1wep, review of PR #39,
+    // Integrity & Robustness #1). A step whose start still waits does not lapse — but the lapse used
+    // to be what ended such a wait, and nothing ends it now except the copy coming free, the retry
+    // running or a withdraw. So a tick that declines because of one names it on its receipt (the
+    // `Waiting` branch below, the only one a member that is not settled can lead to), and on stderr
+    // for the reader with a terminal.
+    let still_waiting: Vec<FailedConsequence> = still_waiting
+        .iter()
+        .map(|slot| {
+            let finding = FailedConsequence::step_still_waiting(
+                slot,
+                format!(
+                    "the step on thread {slot} has not started: its start still waits for the \
+                     working copy or for a retry, so its declared window does not count and the \
+                     flow waits for it; `nxc status` shows what holds the copy, and `nxc withdraw \
+                     --thread {thread_id}` takes the operation back"
+                ),
+            );
+            eprintln!("warning: {finding}");
+            finding
+        })
+        .collect();
 
     // Step 1b: a HELD thread (nxf 6j6v.pzkb) — an op that shaped its obligation came from nobody this
     // replica can vouch for. It is never `complete` nor `stale`, so every branch below would decline
@@ -16594,6 +16887,7 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
         // exist. Nobody is watching this verb's stderr — it is what a scheduled timer runs
         // unattended and what an app calls through the handle — so it travels on the receipt.
         receipt.warnings.extend(unscheduled);
+        receipt.warnings.extend(still_waiting);
         return Ok(receipt);
     }
 
