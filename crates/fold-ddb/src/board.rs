@@ -77,9 +77,12 @@ fn effect_text<'a>(change: &'a Change, column: &str) -> Option<&'a str> {
     })
 }
 
+/// How an owned add's entry key is built from its ticket and its tag.
+type OwnedKey = fn(&str, &str) -> String;
+
 /// The tables whose adds get an entry under their ticket, and that entry's key (see the module doc,
 /// "Who owns a label or a thread link").
-const OWNED: [(&str, fn(&str, &str) -> String); 2] = [
+const OWNED: [(&str, OwnedKey); 2] = [
     ("label_adds", label_adjacency_key),
     ("thread_link_adds", link_adjacency_key),
 ];
@@ -92,7 +95,7 @@ fn owned_entry(change: &Change) -> Option<Write> {
     Some(owned_write(*key, item, tag))
 }
 
-fn owned_write(key: fn(&str, &str) -> String, item: &str, tag: &str) -> Write {
+fn owned_write(key: OwnedKey, item: &str, tag: &str) -> Write {
     Write::put(
         key(item, tag),
         vec![("tag".to_string(), Cell::Text(tag.to_string()))],
