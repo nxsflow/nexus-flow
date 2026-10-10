@@ -958,10 +958,13 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
         ),
         other => other.clone(),
     };
-    let note = alias_note(
+    let note = program_note(
         &resolved,
         &link,
-        hb.as_ref().and_then(|h| h.program.as_deref()),
+        hb.as_ref(),
+        service_state,
+        nxs_service::program::running_program().as_deref(),
+        env!("CARGO_PKG_VERSION"),
     );
     // **What launchd ACTUALLY holds** (nxf 6j6v.kvda). The heartbeat says what the service last
     // did; the alias says which binary the link names. Neither can say that launchd is holding a
@@ -1435,11 +1438,36 @@ fn alias_note(
     }
 }
 
+/// **Everything `status` has to say about the program**, as one pure value: the alias note first
+/// (the two PATHS differ), and only where it is silent the stale-process note (one path, two
+/// builds — nxf 6j6v.c92y). Extracted so the order and the liveness input are provable (review of
+/// PR #41, Test Quality #6).
+fn program_note(
+    resolved: &nxs_service::ProgramState,
+    link: &Path,
+    hb: Option<&nxs_service::Heartbeat>,
+    state: nxs_service::ServiceState,
+    this_program: Option<&Path>,
+    this_version: &str,
+) -> Option<String> {
+    alias_note(resolved, link, hb.and_then(|h| h.program.as_deref())).or_else(|| match resolved {
+        nxs_service::ProgramState::Present(target) => stale_process_note(
+            state,
+            hb.and_then(|h| h.version.as_deref()),
+            target,
+            this_program,
+            this_version,
+        ),
+        _ => None,
+    })
+}
+
 /// Render `t` as RFC3339 for a heartbeat timestamp — the SHARED formatter (6j6v.0wvp), not a copy.
 /// The liveness check now compares a recorded instant against the operating system's own answer, so
 /// two spellings of "the same instant" that drifted apart would make a live service look like
 /// somebody else's process.
 use nxs_service::heartbeat::rfc3339 as to_rfc3339;
+use nxs_service::program::stale_process_note;
 
 /// Resolve every registered entry into a live [`Workspace`], skipping — WITHOUT error — any whose
 /// path no longer holds a `.nxs/` (a stale or typo'd registry entry, or a workspace someone
@@ -2602,6 +2630,145 @@ mod tests {
             None
         );
         assert_eq!(alias_note(&ProgramState::Absent, link, None), None);
+    }
+
+    /// nxf 6j6v.c92y: one path, two builds — the service started from the file `self-update` has
+    /// since replaced in place.
+    #[test]
+    fn a_running_service_older_than_the_binary_its_alias_names_is_reported() {
+        let target = Path::new("/home/u/.local/bin/nxs");
+        let note = stale_process_note(
+            nxs_service::ServiceState::Running,
+            Some("0.205.1"),
+            target,
+            Some(target),
+            "0.206.1",
+        )
+        .expect("the measured case: same file, older process");
+        assert!(note.contains("0.205.1"), "{note}");
+        assert!(note.contains("0.206.1"), "{note}");
+        assert!(note.contains("nxs sync daemon install"), "{note}");
+    }
+
+    fn heartbeat_of(program: &str, version: &str) -> nxs_service::Heartbeat {
+        nxs_service::Heartbeat {
+            pid: 1,
+            started_at: "2026-10-07T22:07:00Z".into(),
+            last_pass_at: "2026-10-09T10:00:00Z".into(),
+            workspaces: Vec::new(),
+            program: Some(program.into()),
+            version: Some(version.into()),
+            instance: Some("nexus-flow".into()),
+            write_failures: None,
+        }
+    }
+
+    /// Review of PR #41, Test Quality #6: what `status` actually prints is the COMBINATION — the
+    /// alias note when the paths differ, the stale-process note only where it is silent, and the
+    /// latter only for a service that is running.
+    #[test]
+    fn status_names_a_stale_process_only_where_the_alias_note_is_silent_and_the_service_runs() {
+        let link = Path::new("/home/u/.nexusflow/bin/nexus-flow");
+        let target = PathBuf::from("/home/u/.local/bin/nxs");
+        let present = ProgramState::Present(target.clone());
+        let stale = heartbeat_of("/home/u/.local/bin/nxs", "0.205.1");
+        let note = program_note(
+            &present,
+            link,
+            Some(&stale),
+            nxs_service::ServiceState::Running,
+            Some(&target),
+            "0.206.1",
+        )
+        .expect("one path, two builds, service running");
+        assert!(
+            note.contains("0.205.1") && note.contains("0.206.1"),
+            "{note}"
+        );
+
+        // Straight after a restart the old process's heartbeat is still on disk, but its pid is
+        // gone or handed on — neither reads as Running, so nothing is claimed.
+        for state in [
+            nxs_service::ServiceState::NotRunning,
+            nxs_service::ServiceState::Unconfirmed,
+            nxs_service::ServiceState::Unknown,
+        ] {
+            assert_eq!(
+                program_note(
+                    &present,
+                    link,
+                    Some(&stale),
+                    state,
+                    Some(&target),
+                    "0.206.1"
+                ),
+                None,
+                "{state:?}"
+            );
+        }
+
+        // Two different PATHS: the alias note speaks, and it is the one printed.
+        let drifted = heartbeat_of("/repo/target/debug/nxs", "0.205.1");
+        let note = program_note(
+            &present,
+            link,
+            Some(&drifted),
+            nxs_service::ServiceState::Running,
+            Some(&target),
+            "0.206.1",
+        )
+        .unwrap();
+        assert!(note.contains("next restart"), "the alias note wins: {note}");
+    }
+
+    #[test]
+    fn a_stale_process_is_claimed_only_where_it_can_be_known() {
+        let target = Path::new("/home/u/.local/bin/nxs");
+        let build = Path::new("/repo/target/debug/nxs");
+        // Same version: nothing to say.
+        assert_eq!(
+            stale_process_note(
+                nxs_service::ServiceState::Running,
+                Some("0.206.1"),
+                target,
+                Some(target),
+                "0.206.1"
+            ),
+            None
+        );
+        // `status` is run by ANOTHER binary: its version says nothing about the file on disk.
+        assert_eq!(
+            stale_process_note(
+                nxs_service::ServiceState::Running,
+                Some("0.205.1"),
+                target,
+                Some(build),
+                "0.206.1"
+            ),
+            None
+        );
+        // Not running: it starts on the new file anyway.
+        assert_eq!(
+            stale_process_note(
+                nxs_service::ServiceState::NotRunning,
+                Some("0.205.1"),
+                target,
+                Some(target),
+                "0.206.1"
+            ),
+            None
+        );
+        // A heartbeat older than the `version` field cannot be compared.
+        assert_eq!(
+            stale_process_note(
+                nxs_service::ServiceState::Running,
+                None,
+                target,
+                Some(target),
+                "0.206.1"
+            ),
+            None
+        );
     }
 
     use super::*;

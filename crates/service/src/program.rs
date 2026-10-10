@@ -113,6 +113,43 @@ pub fn running_program() -> Option<PathBuf> {
     Some(std::fs::canonicalize(&exe).unwrap_or(exe))
 }
 
+/// **The running service is a different build of the very file its alias names** (nxf 6j6v.c92y)
+/// — `None` when that is not what is in front of us.
+///
+/// A PATH comparison cannot see this: `self-update` replaces `~/.local/bin/nxs` in place while
+/// launchd keeps executing the process it started from the old file. Measured on the owner's
+/// machine on 2026-10-09, after two updates since the service last started, with `status`
+/// reporting nothing wrong.
+///
+/// The version of the file on disk is known only to a process that IS that file, so this speaks
+/// only when `this_program` — the binary asking — is the alias's target, and only about a service
+/// that is [`ServiceState::Running`]. That last condition is also what keeps it quiet straight after
+/// a restart (review of PR #41, Code Quality #1): until the new process writes its first heartbeat,
+/// the one on disk is the OLD process's, whose pid is gone ([`ServiceState::NotRunning`]) or has
+/// been handed on ([`ServiceState::Unconfirmed`]) — neither speaks. "Different", not "older": a
+/// rollback is the same divergence. Pure over its inputs.
+pub fn stale_process_note(
+    state: crate::ServiceState,
+    running_version: Option<&str>,
+    alias_target: &Path,
+    this_program: Option<&Path>,
+    this_version: &str,
+) -> Option<String> {
+    let running_version = running_version?;
+    if state != crate::ServiceState::Running
+        || running_version == this_version
+        || this_program? != alias_target
+    {
+        return None;
+    }
+    Some(format!(
+        "the running service is nxs {running_version}, but {} is now nxs {this_version} — the \
+         binary was replaced under the running process, which keeps the build it started from \
+         until it restarts. Run `nxs sync daemon install` to restart it on the binary now on disk.",
+        alias_target.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
