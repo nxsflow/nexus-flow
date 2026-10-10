@@ -179,9 +179,11 @@ der sie greift:
   teilen sich einen Anspruch, und eines zu starten, während seine Geschwister geparkt bleiben,
   verklemmt die Tafel. **Die Schritte eines geordneten Ablaufs starten trotzdem einer nach dem
   anderen.** Warten zwei Schritte desselben Durchlaufs zusammen (`flow: sequential` oder `steps:`),
-  startet die Freigabe den früheren, und der spätere bleibt in der Warteschlange, bis die Session
-  des früheren Schritts vorbei ist. Zwei Schritte eines Durchlaufs starten nie nebeneinander in
-  einer Arbeitskopie.
+  startet die Freigabe den früheren, und der spätere bleibt in der Warteschlange, bis der frühere
+  geantwortet hat oder sein Zeitfenster abgelaufen ist und seine Session vorbei ist. Ein früherer
+  Schritt, dessen Start gescheitert ist und erneut versucht wird, hält den späteren ebenso. Kann
+  der Worker nicht sagen, ob eine Session noch läuft, zählt sie als laufend, bis sie ihr Ende
+  meldet. Zwei Schritte eines Durchlaufs starten nie nebeneinander in einer Arbeitskopie.
 - **Was ihn freigibt.** Eine Antwort innerhalb des Gebiets gibt den Anspruch frei, wenn nichts in
   diesem Gebiet noch eine Antwort schuldet *und* das letzte Wort keine Rückgabe war. Eine
   **Eskalation hält den Anspruch** — die Frage wandert noch nach oben, die Aufgabe ist noch in der
