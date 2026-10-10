@@ -881,7 +881,17 @@ pub struct NextPage {
     /// The rows to render — already ordered, already filtered, already cut.
     pub items: Vec<ItemRow>,
     /// How many candidates there were BEFORE the cut. Equals `items.len()` when nothing was cut.
+    /// Under `--paginate` it is the length of the whole cached list the page was cut from.
     pub total: usize,
+    /// The position of the first row in that whole list: `0` for every first page, and for every
+    /// answer that does not paginate (6j6v.15ed).
+    pub start: usize,
+    /// The token that asks for the page after this one ([`next_page`]). `None` without
+    /// `--paginate`, and on the last page.
+    pub next_token: Option<String>,
+    /// The caller passed a token that was stale or invalid, so this is the FIRST page of a fresh
+    /// list instead of the page it asked for (owner decision of 2026-10-09).
+    pub restarted: bool,
 }
 
 impl NextPage {
@@ -889,7 +899,7 @@ impl NextPage {
     ///
     /// [`total`]: NextPage::total
     pub fn truncated(&self) -> bool {
-        self.items.len() < self.total
+        self.start > 0 || self.items.len() < self.total
     }
 }
 
@@ -907,7 +917,384 @@ pub fn truncate_next(items: Vec<ItemRow>, limit: Option<usize>) -> NextPage {
         Some(n) => items.into_iter().take(n).collect(),
         None => items,
     };
-    NextPage { items, total }
+    NextPage {
+        items,
+        total,
+        start: 0,
+        next_token: None,
+        restarted: false,
+    }
+}
+
+// ---- next: filters and paging (6j6v.15ed) -----------------------------------
+
+/// What a `next` answer can be narrowed to (6j6v.15ed). Every filter keeps the ranked order: it
+/// removes rows, it never re-ranks the rest. The tiers are computed over the whole board first, so a
+/// filtered list is the unfiltered one with rows taken out — a child whose started epic is filtered
+/// away still sits where the epic's cluster put it.
+///
+/// THE one membership rule (`NextFilter::keeps`) behind the store path ([`next_filtered`],
+/// [`next_page`], [`Engine::next_query`]) and the store-free path ([`next_active_filtered`]), so a
+/// server and a replica filter alike.
+///
+/// `#[non_exhaustive]`: build it with [`NextFilter::new`] and the `with_*` methods.
+///
+/// [`Engine::next_query`]: crate::engine::Engine::next_query
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NextFilter {
+    /// Only items of these plugin types (the stored `type`, as `list --type` reads it). Empty: any
+    /// type.
+    pub types: Vec<String>,
+    /// Only items IN this container: items whose current parent (`belongs_to`, the parent edge) it
+    /// is, OR that contribute to it (a present `contributes_to` edge). An id nothing points at
+    /// yields an empty list, as an unknown label does.
+    pub within: Option<String>,
+    /// Only items carrying this user label.
+    pub label: Option<String>,
+}
+
+impl NextFilter {
+    /// No filter: every candidate.
+    pub fn new() -> NextFilter {
+        NextFilter::default()
+    }
+
+    /// Also admit items of type `ty` (repeatable: the types are alternatives).
+    pub fn with_type(mut self, ty: impl Into<String>) -> NextFilter {
+        self.types.push(ty.into());
+        self
+    }
+
+    /// Only items in the container `id` (its children and its contributors).
+    pub fn with_container(mut self, id: impl Into<String>) -> NextFilter {
+        self.within = Some(id.into());
+        self
+    }
+
+    /// Only items carrying `label`.
+    pub fn with_label(mut self, label: impl Into<String>) -> NextFilter {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Whether this filter keeps every row.
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.within.is_none() && self.label.is_none()
+    }
+
+    /// THE membership rule: whether `item`, with its `labels` and its `contributes_to` targets,
+    /// passes. The callers read the joins only for the filters that are set.
+    fn keeps(&self, item: &ItemRow, labels: &[String], contributes_to: &[String]) -> bool {
+        let ty = self.types.is_empty()
+            || item
+                .item_type
+                .as_deref()
+                .is_some_and(|t| self.types.iter().any(|f| f == t));
+        let within = self.within.as_deref().is_none_or(|c| {
+            item.belongs_to.as_deref() == Some(c) || contributes_to.iter().any(|t| t == c)
+        });
+        let label = self
+            .label
+            .as_deref()
+            .is_none_or(|l| labels.iter().any(|x| x == l));
+        ty && within && label
+    }
+
+    /// The filter's canonical spelling, part of a cached snapshot's query key: the same filter
+    /// spelled with its types in another order or repeated is the same key.
+    fn key(&self) -> Value {
+        let mut types = self.types.clone();
+        types.sort();
+        types.dedup();
+        json!({ "types": types, "in": self.within, "label": self.label })
+    }
+}
+
+/// Narrow an ordered store-path `next` result by `filter`, keeping its order.
+fn filter_next_store(
+    store: &Store,
+    items: Vec<ItemRow>,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    if filter.is_empty() {
+        return Ok(items);
+    }
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let mut labels = match filter.label {
+        Some(_) => store.labels_of_bulk(&ids)?,
+        None => BTreeMap::new(),
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let contributes = match filter.within {
+            Some(_) => store.contributes_to_of(&item.id)?,
+            None => Vec::new(),
+        };
+        let item_labels = labels.remove(&item.id).unwrap_or_default();
+        if filter.keeps(&item, &item_labels, &contributes) {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
+/// [`next`], narrowed by `filter` — the same ranked order with the rows the filter rejects taken
+/// out (6j6v.15ed).
+pub fn next_filtered(
+    cfg: &PluginConfig,
+    store: &Store,
+    now: &str,
+    sort: Option<SortKey>,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    let items = next(cfg, store, now, sort)?;
+    filter_next_store(store, items, filter)
+}
+
+/// How long a cached `next` snapshot answers its tokens: one hour from when it was computed. Long
+/// enough to read a list page by page with work in between; short enough that the table holds only
+/// what somebody might still be paging through.
+pub const NEXT_CACHE_TTL_SECS: i64 = 60 * 60;
+
+/// How many cached `next` snapshots a workspace keeps at most. Every new snapshot evicts the
+/// expired ones and then the oldest beyond this, so the table cannot grow without limit however
+/// many first pages are asked for. A token whose snapshot was evicted restarts.
+pub const NEXT_CACHE_MAX_SNAPSHOTS: usize = 32;
+
+/// One `next` request with its filters and paging (6j6v.15ed) — the input of [`next_page`] and
+/// [`Engine::next_query`].
+///
+/// - No `limit`: the whole list.
+/// - `limit` alone: the head of it, with the total disclosed and no token (as `--limit` has been).
+/// - `limit` + `paginate`: the head of it plus a `next_token` while rows remain. The list is cached
+///   machine-locally; a `token` asks for the page after the one that handed it out. A stale or
+///   invalid token answers the FIRST page of a fresh list with `restarted: true` — `limit` stays.
+///
+/// `#[non_exhaustive]`: build it with [`NextQuery::new`] and the builder methods.
+///
+/// [`Engine::next_query`]: crate::engine::Engine::next_query
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NextQuery {
+    /// The reference time (ISO-8601 / RFC3339).
+    pub now: String,
+    /// The order; `None` is the tiered default ([`DEFAULT_SORT_NEXT`]).
+    pub sort: Option<SortKey>,
+    /// The filters; empty keeps every candidate.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+}
+
+impl NextQuery {
+    /// The whole unfiltered list at `now`, in the default order.
+    pub fn new(now: impl Into<String>) -> NextQuery {
+        NextQuery {
+            now: now.into(),
+            sort: None,
+            filter: NextFilter::new(),
+            limit: None,
+            paginate: false,
+            token: None,
+        }
+    }
+
+    /// Order by `sort` instead of the tiered default.
+    pub fn sort(mut self, sort: SortKey) -> NextQuery {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> NextQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> NextQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> NextQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> NextQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: sort and filter, never `now` or `limit` — a reader
+    /// may change the page size between pages, and `now` moves on its own.
+    fn key(&self) -> String {
+        json!({
+            "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
+            "filter": self.filter.key(),
+        })
+        .to_string()
+    }
+}
+
+/// Unix seconds now — the clock the snapshot expiry reads. Not `now`: that is the caller's
+/// reference time for the defer boundary, and a test pins it far from the wall clock.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// A page token: `<snapshot id>.<position>`.
+fn parse_token(token: &str) -> Option<(&str, usize)> {
+    let (id, pos) = token.rsplit_once('.')?;
+    if id.is_empty() {
+        return None;
+    }
+    Some((id, pos.parse().ok()?))
+}
+
+/// The snapshot and position a token names, if it still answers: it exists here, is younger than
+/// [`NEXT_CACHE_TTL_SECS`], was computed under the same `key`, points inside its list, and nothing
+/// since bears on the list it holds. Owner decision of 2026-10-09: ONLY an op that bears on the
+/// already loaded list invalidates it, which is checked two ways:
+///
+/// 1. an op appended after the snapshot TARGETS one of its items — its cells, custom fields,
+///    labels, notes, chunks, thread links, or an edge with it at either end;
+/// 2. the fresh list, restricted to the snapshot's items, no longer is the snapshot — one of them
+///    left the list or moved against the others (a blocker reopened, a child closed so its epic
+///    became finishable).
+///
+/// An item outside the snapshot that now qualifies passes both: it appears on the next fresh query.
+fn resume(
+    store: &Store,
+    token: &str,
+    key: &str,
+    fresh: &[ItemRow],
+) -> Result<Option<(nexus_flow_core::next_cache::CachedResult, usize)>> {
+    let Some((id, pos)) = parse_token(token) else {
+        return Ok(None);
+    };
+    let Some(snap) = store.next_cache_get(id)? else {
+        return Ok(None);
+    };
+    if snap.query != key
+        || snap.created < unix_now() - NEXT_CACHE_TTL_SECS
+        || pos == 0
+        || pos >= snap.ids.len()
+        // A log below the watermark is a different log (a reset workspace): nothing vouches.
+        || store.ops_watermark()? < snap.watermark
+    {
+        return Ok(None);
+    }
+    let held: HashSet<&str> = snap.ids.iter().map(String::as_str).collect();
+    let touched = store.items_touched_since(snap.watermark)?;
+    if touched.iter().any(|t| held.contains(t.as_str())) {
+        return Ok(None);
+    }
+    let still: Vec<&str> = fresh
+        .iter()
+        .map(|i| i.id.as_str())
+        .filter(|i| held.contains(i))
+        .collect();
+    if still != snap.ids.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Ok(None);
+    }
+    Ok(Some((snap, pos)))
+}
+
+/// One `next` page (6j6v.15ed): the list `q` asks for, filtered, ordered, cut, and — under
+/// `paginate` — cached machine-locally so the next page comes from the same list. See
+/// [`NextQuery`] for the three shapes and the private `resume` for when a token still answers.
+///
+/// Every call computes the fresh list: it is what a first page is cut from, and what a token's
+/// snapshot is checked against. The cache buys a list that does not move between pages, not a
+/// cheaper read. Rejected with `validation`: a malformed `now`, `paginate` without a non-zero
+/// `limit`, a `token` without `paginate`.
+pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<NextPage> {
+    crate::validate::iso_date(&q.now)?;
+    if q.token.is_some() && !q.paginate {
+        return Err(NxfError::validation("a page token needs paginate"));
+    }
+    let limit = match (q.paginate, q.limit) {
+        (false, _) => None,
+        (true, Some(n)) if n > 0 => Some(n),
+        (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
+    };
+    // The watermark BEFORE the list: an op that lands while the list is computed is then above it
+    // and counts as "since" — a spurious restart at worst, never a missed one.
+    let watermark = store.ops_watermark()?;
+    let fresh = next_filtered(cfg, store, &q.now, q.sort, &q.filter)?;
+    let Some(n) = limit else {
+        return Ok(truncate_next(fresh, q.limit));
+    };
+    let key = q.key();
+    if let Some(token) = &q.token {
+        if let Some((snap, pos)) = resume(store, token, &key, &fresh)? {
+            let end = (pos + n).min(snap.ids.len());
+            let mut by_id: HashMap<&str, &ItemRow> =
+                fresh.iter().map(|i| (i.id.as_str(), i)).collect();
+            let items = snap.ids[pos..end]
+                .iter()
+                .filter_map(|id| by_id.remove(id.as_str()).cloned())
+                .collect();
+            return Ok(NextPage {
+                items,
+                total: snap.ids.len(),
+                start: pos,
+                next_token: (end < snap.ids.len()).then(|| format!("{}.{end}", snap.id)),
+                restarted: false,
+            });
+        }
+    }
+    let restarted = q.token.is_some();
+    let total = fresh.len();
+    let next_token = if total > n {
+        let snap = nexus_flow_core::next_cache::CachedResult {
+            id: ulid::Ulid::new().to_string(),
+            created: unix_now(),
+            query: key,
+            watermark,
+            ids: fresh.iter().map(|i| i.id.clone()).collect(),
+        };
+        store.next_cache_put(
+            &snap,
+            snap.created - NEXT_CACHE_TTL_SECS,
+            NEXT_CACHE_MAX_SNAPSHOTS,
+        )?;
+        Some(format!("{}.{n}", snap.id))
+    } else {
+        None
+    };
+    Ok(NextPage {
+        items: fresh.into_iter().take(n).collect(),
+        total,
+        start: 0,
+        next_token,
+        restarted,
+    })
+}
+
+/// A `next` page as its JSON envelope: `{"items", "total"}`, plus `next_token` and `restarted`
+/// when `paging`. `items` is the rendered array the caller built (the CLI adds its presentation
+/// labels and memory counts first). The one spelling of the envelope for the CLI and the Engine.
+pub fn next_page_envelope(items: Value, page: &NextPage, paging: bool) -> Value {
+    let mut v = json!({ "items": items, "total": page.total });
+    if paging {
+        v["next_token"] = json!(page.next_token);
+        v["restarted"] = json!(page.restarted);
+    }
+    v
 }
 
 // ---- next: finish-first tiers (docs/specs/next-finish-first-tiers.md) ------
@@ -1832,6 +2219,9 @@ pub struct ActiveTicket {
     pub updated_at: Option<String>,
     pub conversations: usize,
     pub parent: Option<ParentRef>,
+    /// The present `contributes_to` targets of the ticket (6j6v.15ed), any order — what
+    /// [`NextFilter`]'s container filter reads beside `item.belongs_to`. Carried on no record.
+    pub contributes_to: Vec<String>,
 }
 
 impl ActiveTicket {
@@ -1845,6 +2235,7 @@ impl ActiveTicket {
             updated_at: None,
             conversations: 0,
             parent: None,
+            contributes_to: Vec::new(),
         }
     }
 
@@ -1942,6 +2333,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
         t.updated_at = updated_at;
         t.conversations = conversations.get(&id).copied().unwrap_or(0);
         t.parent = parent;
+        t.contributes_to = store.contributes_to_of(&id)?;
         tickets.push(t);
     }
     Ok(ActiveBoard::new(board, tickets))
@@ -1957,6 +2349,42 @@ pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
     Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT))
+}
+
+/// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store
+/// holding the same board, through the same membership rule. The ticket's `labels` and
+/// `contributes_to` are the joins the filter reads. A malformed `now` is `validation`-rejected.
+///
+/// Server paging is not here: the store path's page cache is machine-local, and a server's paging
+/// is an open decision (6j6v.15ed). A server cuts this list itself.
+pub fn next_active_filtered(
+    cfg: &PluginConfig,
+    board: &ActiveBoard,
+    now: &str,
+    filter: &NextFilter,
+) -> Result<Vec<ItemRow>> {
+    let items = next_active(cfg, board, now)?;
+    if filter.is_empty() {
+        return Ok(items);
+    }
+    Ok(items
+        .into_iter()
+        .filter(|i| match board.tickets.get(&i.id) {
+            Some(t) => filter.keeps(i, &t.labels, &t.contributes_to),
+            None => filter.keeps(i, &[], &[]),
+        })
+        .collect())
+}
+
+/// [`next_active_filtered`] as the `next` JSON — [`next_active_value`] with the filter applied.
+pub fn next_active_filtered_value(
+    cfg: &PluginConfig,
+    board: &ActiveBoard,
+    now: &str,
+    filter: &NextFilter,
+) -> Result<Value> {
+    let items = next_active_filtered(cfg, board, now, filter)?;
+    Ok(board.records(&items, |i, j| next_record(Some(cfg), i, j)))
 }
 
 /// [`next_active`] as the `next` JSON: the value [`next_to_value_with_custom`] (and

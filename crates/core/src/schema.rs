@@ -197,7 +197,22 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          -- items. Both are per-item/per-thread lookups on the hot read path, so neither may be a
          -- full scan — same reasoning as `label_adds_item` above.
          CREATE INDEX IF NOT EXISTS thread_link_adds_item ON thread_link_adds(item_id);
-         CREATE INDEX IF NOT EXISTS thread_link_adds_thread ON thread_link_adds(thread_id);"
+         CREATE INDEX IF NOT EXISTS thread_link_adds_thread ON thread_link_adds(thread_id);
+
+         -- The snapshots `next --paginate` hands out pages from (6j6v.15ed). MACHINE-LOCAL: not a
+         -- view, folded from nothing, never in `TaskReducer::view_tables`, so no snapshot image and
+         -- no sync carries it and `clear_views` leaves it alone. One row per handed-out ordered
+         -- result: `ids` the item ids in order, joined by U+001F (an id never holds it);
+         -- `watermark` the highest `ops.rowid` when the result was computed; `query` the filters
+         -- and sort it was computed under; `created` unix seconds, which the expiry reads.
+         -- Bounded by `crate::next_cache`. Additive + IF NOT EXISTS: no schema-version step.
+         CREATE TABLE IF NOT EXISTS next_page_cache(
+             id TEXT PRIMARY KEY,
+             created INTEGER NOT NULL,
+             query TEXT NOT NULL,
+             watermark INTEGER NOT NULL,
+             ids TEXT NOT NULL
+         );"
     ))?;
     ensure_view(conn, "present_thread_links", PRESENT_THREAD_LINKS)?;
     ensure_view(conn, "present_parent", PRESENT_PARENT)?;

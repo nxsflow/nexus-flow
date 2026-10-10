@@ -11,7 +11,7 @@
 
 use crate::error::Result;
 use crate::plugin::{self, PluginConfig};
-use crate::read::{self, BlockedItem, PrimeReport, ShowRecord};
+use crate::read::{self, BlockedItem, NextPage, NextQuery, PrimeReport, ShowRecord};
 use crate::validate;
 use crate::workspace::{Workspace, WorkspaceExt};
 use crate::write::{self, NewItem};
@@ -465,6 +465,33 @@ impl Engine {
         self.handle.try_with_state(|s| {
             let items = read::next(&self.cfg, &s.store, now, None)?;
             read::next_to_value_with_custom(&self.cfg, &s.store, &items)
+        })
+    }
+
+    /// [`next`](Engine::next) narrowed and paged (6j6v.15ed): `--type`, `--in`, `--label`,
+    /// `--sort`, `--limit`, `--paginate` and the page token, as one [`NextQuery`]. Additive beside
+    /// [`next`](Engine::next), whose signature stays.
+    ///
+    /// The page says how many rows the whole list has (`total`), where it starts in it (`start`),
+    /// the token for the page after it (`next_token`, under `paginate` while rows remain), and
+    /// whether a stale or invalid token made it the first page of a fresh list (`restarted`). The
+    /// list a paginating query hands out is cached in this workspace's machine-local
+    /// `next_page_cache` table, which writes to the db: another handle's
+    /// [`subscribe`](Engine::subscribe) sees that write as a change. `validation` for a malformed
+    /// `now`, `paginate` without a non-zero `limit`, or a token without `paginate`.
+    pub fn next_query(&self, query: &NextQuery) -> Result<NextPage> {
+        self.handle
+            .try_with_state(|s| read::next_page(&self.cfg, &s.store, query))
+    }
+
+    /// [`next_query`](Engine::next_query) as JSON: `{"items", "total", "next_token", "restarted"}`,
+    /// `items` being the records [`next_value`](Engine::next_value) gives — the envelope the CLI's
+    /// `next --limit <n> --paginate --json` prints.
+    pub fn next_query_value(&self, query: &NextQuery) -> Result<Value> {
+        self.handle.try_with_state(|s| {
+            let page = read::next_page(&self.cfg, &s.store, query)?;
+            let items = read::next_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
+            Ok(read::next_page_envelope(items, &page, true))
         })
     }
 

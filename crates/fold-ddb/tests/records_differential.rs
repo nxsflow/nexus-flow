@@ -9,6 +9,7 @@
 //! `records::active_board` + `read::next_active_value`), and the two must agree: the same rows in the
 //! same order, and the same JSON, byte for byte. Likewise for `blocked` and `deferred`.
 
+use nexus_flow_core::model::EdgeKind;
 use nexus_flow_facade::plugin::{self, PluginConfig};
 use nexus_flow_facade::read;
 use nxs_fold_ddb::fold::Folder;
@@ -67,6 +68,17 @@ fn board(seed: u64) -> nexus_flow_core::store::Store {
             _ => {}
         }
     }
+    // Contributes-to edges (6j6v.15ed), some taken back: what the container filter reads beside
+    // the parent. The fold tests' generator makes none.
+    for i in 0..14 {
+        if r.next(3) == 0 {
+            let to = id(r.next(14));
+            s.add_edge(&id(i), &to, EdgeKind::ContributesTo, "u");
+            if r.next(4) == 0 {
+                s.remove_edge(&id(i), &to, EdgeKind::ContributesTo, "u");
+            }
+        }
+    }
     s
 }
 
@@ -81,7 +93,7 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
     // What the boards held, so the comparison is known to have compared something.
     let (mut next_seen, mut blocked_seen, mut deferred_seen) = (0, 0, 0);
     let (mut labels_seen, mut custom_seen, mut conversations_seen, mut parents_seen) = (0, 0, 0, 0);
-    let mut outside_parents_seen = 0;
+    let (mut outside_parents_seen, mut contributes_seen, mut filtered_seen) = (0, 0, 0);
     // Half the fold test's seeds: each board is read twice per plugin on top of the fold.
     for seed in 0..60 {
         let s = board(seed);
@@ -97,6 +109,7 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
             custom_seen += usize::from(!ticket.custom.is_empty());
             conversations_seen += usize::from(ticket.conversations > 0);
             parents_seen += usize::from(ticket.parent.is_some());
+            contributes_seen += usize::from(!ticket.contributes_to.is_empty());
             outside_parents_seen += usize::from(
                 ticket
                     .parent
@@ -120,6 +133,18 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
                 "next JSON, {ctx}"
             );
             next_seen += want.len();
+
+            // The container filter (6j6v.15ed): every ticket as a container, through both paths.
+            for container in served.tickets.keys() {
+                let filter = read::NextFilter::new().with_container(container.as_str());
+                let want = read::next_filtered(cfg, &s, NOW, None, &filter).unwrap();
+                assert_eq!(
+                    ids(&read::next_active_filtered(cfg, &served, NOW, &filter).unwrap()),
+                    ids(&want),
+                    "next in {container}, {ctx}"
+                );
+                filtered_seen += want.len();
+            }
 
             let want = read::blocked(cfg, &s, None).unwrap();
             let got = read::blocked_active(cfg, &served);
@@ -162,6 +187,8 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
         ("tickets with conversations", conversations_seen),
         ("tickets with a parent", parents_seen),
         ("tickets whose parent is not active", outside_parents_seen),
+        ("tickets that contribute to another", contributes_seen),
+        ("rows in a container", filtered_seen),
     ] {
         assert!(n > 0, "the generated boards have {what}");
     }

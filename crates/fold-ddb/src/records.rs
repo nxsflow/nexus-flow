@@ -16,15 +16,16 @@
 //! | `labels`        | one Query on `.ladj#<ticket>#`, then per label add one `GetItem` of the add and one of its remove |
 //! | `conversations` | one Query on `.tadj#<ticket>#`, then per thread link add one `GetItem` of the add and one of its remove |
 //! | `parent`        | one `GetItem` of the parent's row, once per parent outside the selection |
+//! | `contributes_to` | one Query on `.adj#<ticket>#`, then per edge add touching the ticket one `GetItem` of the add and one of its remove (6j6v.15ed) |
 //!
-//! So a board of `n` active tickets costs `4n` requests plus two per label or thread link add its
-//! tickets ever had, plus one per distinct parent that is not itself active. Every row read is
+//! So a board of `n` active tickets costs `5n` requests plus two per label, thread link or edge add
+//! its tickets ever had, plus one per distinct parent that is not itself active. Every row read is
 //! strongly consistent; only the selection is an index read (see the crate doc, "Freshness").
 
 use crate::board::{item_key, Selection};
-use crate::layout::{label_adjacency_prefix, link_adjacency_prefix, row_key};
+use crate::layout::{adjacency_prefix, label_adjacency_prefix, link_adjacency_prefix, row_key};
 use crate::table::{text, Row, Table};
-use nexus_flow_core::model::{ItemRow, LinkWeight};
+use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight};
 use nexus_flow_facade::read::{ActiveBoard, ActiveTicket, ParentRef};
 use nxs_foundation::change::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +76,7 @@ pub async fn active_board<T: Table>(
         t.updated_at = updated_at;
         t.conversations = conversations(table, id).await?;
         t.parent = parent;
+        t.contributes_to = contributes_to(table, id).await?;
         tickets.push(t);
     }
     Ok(ActiveBoard::new(board, tickets))
@@ -190,6 +192,21 @@ async fn labels<T: Table>(table: &T, id: &str) -> Result<Vec<String>, T::Error> 
         .filter_map(|r| text(r, "label").map(str::to_string))
         .collect();
     Ok(labels.into_iter().collect())
+}
+
+/// The ticket's present `contributes_to` targets, sorted and distinct — what
+/// `Store::contributes_to_of` reads locally, and what the facade's container filter reads beside
+/// `belongs_to` (6j6v.15ed). The adjacency entry is written for every edge at both its ends, so the
+/// edges the ticket only receives are read too and dropped here.
+async fn contributes_to<T: Table>(table: &T, id: &str) -> Result<Vec<String>, T::Error> {
+    let adds = present_adds(table, &adjacency_prefix(id), "edge_adds", "edge_removes").await?;
+    let targets: BTreeSet<String> = adds
+        .iter()
+        .filter(|r| text(r, "from_id") == Some(id))
+        .filter(|r| text(r, "kind") == Some(EdgeKind::ContributesTo.as_str()))
+        .filter_map(|r| text(r, "to_id").map(str::to_string))
+        .collect();
+    Ok(targets.into_iter().collect())
 }
 
 /// How many threads bear on the ticket — `present_thread_links` for one ticket, counted where the

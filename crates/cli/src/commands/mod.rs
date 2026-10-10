@@ -209,6 +209,9 @@ fn render_next(
             out.push_str(&next_parent_line(prefix, &p, theme));
         }
     }
+    if let Some(line) = next_token_line(page, theme) {
+        out.push_str(&line);
+    }
     Ok(out)
 }
 
@@ -233,10 +236,37 @@ fn next_parent_line(prefix: &str, parent: &read::ParentRef, theme: &nxs_ui::Them
 /// like 15 of 15 tells the reader they are through. Same disclosure, same wording as `prime`'s
 /// "showing 15 of 180" heading. Muted, because it is a note about the list and not part of it.
 fn next_truncation_notice(page: &read::NextPage, theme: &nxs_ui::Theme) -> Option<String> {
-    page.truncated().then(|| {
+    let mut out = String::new();
+    if page.restarted {
+        // 6j6v.15ed: the token asked for a later page of a list that has since changed (or was
+        // never this machine's) — say that this is the first page again, not the page asked for.
+        out.push_str(&format!(
+            "{}\n",
+            theme.muted("the page token was stale or invalid; starting again at the first page")
+        ));
+    }
+    if page.truncated() {
+        let shown = if page.start > 0 {
+            format!(
+                "showing {}–{} of {}",
+                page.start + 1,
+                page.start + page.items.len(),
+                page.total
+            )
+        } else {
+            format!("showing {} of {}", page.items.len(), page.total)
+        };
+        out.push_str(&format!("{}\n", theme.muted(&shown)));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The closing line of a paginated `next` page: the token for the page after it (6j6v.15ed).
+fn next_token_line(page: &read::NextPage, theme: &nxs_ui::Theme) -> Option<String> {
+    page.next_token.as_deref().map(|t| {
         format!(
             "{}\n",
-            theme.muted(&format!("showing {} of {}", page.items.len(), page.total))
+            theme.muted(&format!("next page: --paginate --token {t}"))
         )
     })
 }
@@ -1621,26 +1651,52 @@ fn render_blocked(cfg: &PluginConfig, prefix: &str, rows: &[read::BlockedItem]) 
 
 // ---- next ------------------------------------------------------------------
 
-pub fn next(
-    json: bool,
-    db: Option<&str>,
-    now: Option<&str>,
-    label: Option<&str>,
-    sort: Option<&str>,
-    limit: Option<usize>,
-) -> Result<()> {
+/// `nxf next`'s arguments, as clap parsed them.
+pub struct NextArgs<'a> {
+    pub now: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub types: &'a [String],
+    pub within: Option<&'a str>,
+    pub sort: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub paginate: bool,
+    pub token: Option<&'a str>,
+}
+
+pub fn next(json: bool, db: Option<&str>, args: NextArgs<'_>) -> Result<()> {
     let (ws, cfg) = open(db)?;
     let store = ws.open_store()?;
-    let now = resolve_now(now)?;
-    let sort = sort.map(read::parse_sort).transpose()?;
-    let mut items = read::next(&cfg, &store, &now, sort)?;
-    if let Some(label) = label {
-        items = read::with_label(&store, items, label)?;
+    let now = resolve_now(args.now)?;
+    // 6j6v.15ed: ONE query through the function `Engine::next_query` answers from
+    // (`read::next_page`), so the filters, the cut and the paging cannot drift apart between the two.
+    let mut filter = read::NextFilter::new();
+    for ty in args.types {
+        filter = filter.with_type(ty.as_str());
     }
-    // 6j6v.8pf2: the cut is LAST — after the ranking and after `--label` — and it goes through the
-    // shared mechanism `prime` uses, so the disclosure of the untruncated total cannot drift apart
-    // between the two callers.
-    let page = read::truncate_next(items, limit);
+    if let Some(c) = args.within {
+        filter = filter.with_container(ws.replica.resolve_id(c));
+    }
+    if let Some(label) = args.label {
+        filter = filter.with_label(label);
+    }
+    let mut query = read::NextQuery::new(now.as_str()).filter(filter);
+    if let Some(sort) = args.sort.map(read::parse_sort).transpose()? {
+        query = query.sort(sort);
+    }
+    if let Some(n) = args.limit {
+        query = query.limit(n);
+    }
+    if args.paginate {
+        query = query.paginate();
+    }
+    if let Some(token) = args.token {
+        query = query.token(token);
+    }
+    let limit = args.limit;
+    // 6j6v.8pf2: the cut is LAST — after the ranking and after the filters — and it goes through
+    // the shared mechanism `prime` uses (`read::truncate_next`, inside `next_page`), so the
+    // disclosure of the untruncated total cannot drift apart between the two callers.
+    let page = read::next_page(&cfg, &store, &query)?;
 
     // Emit in the chosen order (default rank) — do NOT re-sort by id. Each record/row carries its
     // resolved parent join (#916.7).
@@ -1660,10 +1716,7 @@ pub fn next(
         // shape follows the FLAG, not the data, so it does not change under a consumer's feet when
         // the board shrinks past the limit.
         if limit.is_some() {
-            println!(
-                "{}",
-                serde_json::json!({ "items": value, "total": page.total })
-            );
+            println!("{}", read::next_page_envelope(value, &page, args.paginate));
         } else {
             println!("{value}");
         }

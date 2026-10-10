@@ -3288,6 +3288,50 @@ mod tests {
         }
     }
 
+    /// Every table a flow store keeps is the substrate's, one of `TaskReducer`'s views — which a
+    /// snapshot carries and `clear_views` empties — or declared here as this machine's own, which
+    /// must never reach another replica (6j6v.15ed, the chat store's rule). A table added to the
+    /// schema is red here until somebody decides which it is.
+    #[test]
+    fn every_table_in_a_flow_store_is_a_view_or_declared_machine_local() {
+        const MACHINE_LOCAL: &[&str] = &[
+            // `next --paginate`'s snapshots (crate::next_cache): this machine's page tokens.
+            "next_page_cache",
+        ];
+        let s = Store::open_in_memory(1);
+        let tables: Vec<String> = s
+            .connection()
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let views = TaskReducer.view_tables();
+        for t in &tables {
+            assert!(
+                nxs_foundation::schema::SUBSTRATE_TABLES.contains(&t.as_str())
+                    || views.contains(&t.as_str())
+                    || MACHINE_LOCAL.contains(&t.as_str()),
+                "{t} is neither a flow view nor declared machine-local — decide which it is"
+            );
+        }
+        for listed in views.iter().chain(MACHINE_LOCAL) {
+            assert!(
+                tables.iter().any(|t| t == listed),
+                "{listed} is classified but no longer exists"
+            );
+        }
+        for local in MACHINE_LOCAL {
+            assert!(
+                !views.contains(local),
+                "{local} is machine-local, never a view"
+            );
+        }
+    }
+
     /// Every maintenance path the engine runs keeps the log whole (nxf 6j6v.hehx #3): no op is
     /// lost, and none changes what it IS — id, `(lamport, site)` coordinate, author. The substrate's
     /// trigger refuses a violation outright; this walks the paths that exist today and says, per
