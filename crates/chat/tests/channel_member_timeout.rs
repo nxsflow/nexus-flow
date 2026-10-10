@@ -761,10 +761,12 @@ fn a_tick_that_declines_re_arms_itself_so_a_one_member_channel_is_still_struck()
 #[test]
 fn a_member_that_waits_behind_the_working_tree_starts_its_window_when_it_actually_starts() {
     // The clock is armed at fan-out, when the requester starts waiting — but a trigger parked behind
-    // the working-tree lease has run nothing and produces no transcript to restart itself with. If
-    // the queue outlasts the window the member is `stale`, the SET reads settled, the channel
-    // consolidates WITHOUT it, and only then does the trigger fire: the member works for an answer
-    // nobody will collect.
+    // the working-tree lease has run nothing and produces no transcript to restart itself with.
+    // Before nxf 6j6v.nf38, a queue that outlasted the window left the member `stale`, the SET read
+    // settled, the channel consolidated WITHOUT it, and only then did the trigger fire: the member
+    // worked for an answer nobody would collect. nf38 restarts the window when the trigger fires,
+    // which this test pins; since nxf 6j6v.1wep the supervisor also does not count a member as
+    // lapsed while its trigger is still in the queue (`a_queued_step_is_not_asked_until_it_starts`).
     let tmp = workspace();
     let roles = tmp.path().join(".nxs-personas");
     std::fs::create_dir_all(&roles).unwrap();

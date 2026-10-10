@@ -2196,13 +2196,26 @@ impl ChatStore {
     ///
     /// A db error → `io`.
     pub fn last_reply_kind(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
+        Ok(self.last_reply_at(thread_id)?.map(|(kind, _, _)| kind))
+    }
+
+    /// [`last_reply_kind`](Self::last_reply_kind) with the reply's position: its kind and its
+    /// `(lamport, site)` (nxf 6j6v.ys54). The same one query, so the kind and the position always
+    /// describe the same row.
+    ///
+    /// The position is what [`declared_after`](Self::declared_after) is compared against: whether a
+    /// thread ABOVE this one was asked again after this reply was written.
+    pub(crate) fn last_reply_at(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Option<(String, i64, i64)>> {
         let since = answers("m");
         Ok(self
             .inner
             .connection()
             .query_row(
                 &format!(
-                    "SELECT m.kind FROM messages m
+                    "SELECT m.kind, m.lamport, m.site FROM messages m
                        JOIN threads t ON t.thread_id = m.thread_id
                        JOIN json_each(t.expects_reply_from) je ON je.value = m.sender
                       WHERE m.thread_id = ?1 AND {since}
@@ -2210,9 +2223,97 @@ impl ChatStore {
                       LIMIT 1"
                 ),
                 [thread_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?)
+    }
+
+    /// **Was `thread_id` asked again after the position `(lamport, site)`?** (nxf 6j6v.ys54) —
+    /// whether the thread's current declaration, its `expects_reply_from` register, was written
+    /// after that position and names somebody.
+    ///
+    /// It is the turn watermark ([`after_the_declaration`]) read the other way round: there a
+    /// message counts when it is newer than the declaration, here the declaration counts when it is
+    /// newer than a message. Only a declaration an action may follow counts (nxf 6j6v.pzkb), so a
+    /// planted register cannot answer a hand-back and let the working copy go.
+    ///
+    /// **This alone is not "somebody asked again".** The engine writes the register too: a channel
+    /// retargets its thread to its delivery marker when it concludes, a border cancel empties it, a
+    /// withdrawal discharges it. An empty register (`[]`) asks nobody and never counts here; the
+    /// engine's retargets are told apart by [`commissioner_wrote_after`](Self::commissioner_wrote_after),
+    /// which the one reader asks beside this.
+    ///
+    /// A db error → `io`.
+    pub(crate) fn declared_after(
+        &self,
+        thread_id: &str,
+        lamport: i64,
+        site: i64,
+    ) -> crate::error::Result<bool> {
+        let vouched = acts_at("t.expects_reply_from_v", "t.expects_reply_from_site");
+        Ok(self
+            .inner
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM threads t
+                      WHERE t.thread_id = ?1
+                        AND (t.expects_reply_from_v, t.expects_reply_from_site) > (?2, ?3)
+                        AND json_array_length(t.expects_reply_from) > 0
+                        AND {vouched}"
+                ),
+                rusqlite::params![thread_id, lamport, site],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// **Did the party that commissioned `thread_id` write in it after `(lamport, site)`?** (nxf
+    /// 6j6v.ys54, review of PR #40) — a message from the thread's OPENER, newer than the position,
+    /// that an action may follow (nxf 6j6v.pzkb).
+    ///
+    /// It is what separates an ANSWER from the engine moving a register: a re-declaration the
+    /// supervisor writes on its own (a channel concluding, a delivery marker, a withdrawal) comes
+    /// with no message from the commissioner, while a requester answering an escalation writes into
+    /// the thread it commissioned, and that write is what re-declares it.
+    ///
+    /// **An engine opener never counts.** A thread opened by a reserved handle
+    /// ([`crate::channel::RESERVED_HANDLE_PREFIX`] — the supervisor opens every member thread) has
+    /// no commissioner of its own here; its own requester sits one level higher, and the walk that
+    /// asks this goes on to that level.
+    ///
+    /// A db error → `io`.
+    pub(crate) fn commissioner_wrote_after(
+        &self,
+        thread_id: &str,
+        lamport: i64,
+        site: i64,
+    ) -> crate::error::Result<bool> {
+        let Some(opener) = self.thread_opener(thread_id)? else {
+            return Ok(false);
+        };
+        let handle = opener.rsplit('/').next().unwrap_or(opener.as_str());
+        if handle.starts_with(crate::channel::RESERVED_HANDLE_PREFIX) {
+            return Ok(false);
+        }
+        let vouched = acts("m");
+        Ok(self
+            .inner
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM messages m
+                      WHERE m.thread_id = ?1 AND m.sender = ?2
+                        AND (m.lamport, m.site) > (?3, ?4)
+                        AND {vouched}
+                      LIMIT 1"
+                ),
+                rusqlite::params![thread_id, opener, lamport, site],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// The shared body of the two reads above.
@@ -4787,6 +4888,87 @@ pub(crate) mod tests {
         assert!(
             q.held && !q.stale,
             "a planted past deadline does not end it: {q:?}"
+        );
+    }
+
+    /// **What may answer an escalation from above, at the two store reads it rests on** (nxf
+    /// 6j6v.ys54, review of PR #40). A re-declaration and a commissioner's message count only when
+    /// an action may follow them (nxf 6j6v.pzkb), an empty register asks nobody, and an engine
+    /// opener is nobody's commissioner.
+    #[test]
+    fn only_a_vouched_named_re_declaration_and_a_vouched_commissioner_message_count_from_above() {
+        let mut local = ChatStore::open_in_memory(1);
+        seed_thread(&mut local, "t-1", "c-1", "o/a", &["o/b"]);
+        post_in_thread_of_kind(
+            &mut local,
+            "c-1",
+            "t-1",
+            "o/b",
+            "I cannot",
+            MessageKind::Escalation,
+        );
+        let (kind, lamport, site) = local.last_reply_at("t-1").unwrap().unwrap();
+        assert_eq!(
+            kind, "escalation",
+            "the premise: the position is the escalation's"
+        );
+        assert!(!local.declared_after("t-1", lamport, site).unwrap());
+        assert!(!local
+            .commissioner_wrote_after("t-1", lamport, site)
+            .unwrap());
+
+        // A peer nobody here vouches for asks the thread again and writes in the commissioner's name.
+        let mut peer = peer_after(&local);
+        peer.set_expects_reply_from("t-1", &serde_json::to_string(&["o/b"]).unwrap(), "o/a");
+        post_in_thread(&mut peer, "c-1", "t-1", "o/a", "carry on");
+        local.apply(&written_by(&peer));
+        assert!(
+            !local.declared_after("t-1", lamport, site).unwrap(),
+            "an unvouched re-declaration answers nothing"
+        );
+        assert!(
+            !local
+                .commissioner_wrote_after("t-1", lamport, site)
+                .unwrap(),
+            "an unvouched message in the commissioner's name answers nothing"
+        );
+
+        local.trust_key(peer.key_id(), "peer", "").unwrap();
+        assert!(
+            local.declared_after("t-1", lamport, site).unwrap(),
+            "vouched for, the re-declaration counts"
+        );
+        assert!(
+            local
+                .commissioner_wrote_after("t-1", lamport, site)
+                .unwrap(),
+            "and so does the commissioner's message"
+        );
+
+        // An emptied register asks nobody, however new it is.
+        local.set_expects_reply_from("t-1", "[]", "o/a");
+        assert!(
+            !local.declared_after("t-1", lamport, site).unwrap(),
+            "an empty register is no re-declaration"
+        );
+
+        // A thread the supervisor opened has no commissioner of its own here.
+        seed_thread(&mut local, "t-2", "c-1", "o/__channel__", &["o/b"]);
+        post_in_thread_of_kind(
+            &mut local,
+            "c-1",
+            "t-2",
+            "o/b",
+            "I cannot",
+            MessageKind::Escalation,
+        );
+        let (_, lamport, site) = local.last_reply_at("t-2").unwrap().unwrap();
+        post_in_thread(&mut local, "c-1", "t-2", "o/__channel__", "next step");
+        assert!(
+            !local
+                .commissioner_wrote_after("t-2", lamport, site)
+                .unwrap(),
+            "an engine opener is nobody's commissioner"
         );
     }
 

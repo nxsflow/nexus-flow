@@ -15,6 +15,14 @@
 //! to — [`Folder::is_current`] says so, and the run starts over: [`Folder::clear`] the stream's
 //! rows, then fold from relay position 0.
 //!
+//! The rules this crate adds beside the reducers' rows — the board's index flags and the entries it
+//! keeps under a ticket — have a revision of their own, [`INDEX_REVISION`], recorded in the same
+//! watermark under [`INDEX_DOMAIN`]. A release that changes what the fold writes beside the rows
+//! bumps it, and every stream folded before is no longer current and is folded again the same way.
+//! Revision 1 (6j6v.t1ym) adds the `.ladj#`/`.tadj#` entries; a stream folded before it has none,
+//! so its watermark names no index revision at all and the next run refolds it. Revision 2
+//! (6j6v.15ed) adds the `.cadj#` entries, a ticket's outgoing `contributes_to` edges.
+//!
 //! # What the server cannot see
 //!
 //! A local replica refuses an op whose `(lamport, site)` another op already holds ("collided") and
@@ -31,6 +39,14 @@ use nxs_foundation::change::{Cell, Change, Wins};
 use nxs_foundation::model::Op;
 use nxs_foundation::reducer::{folder_for, Reducer};
 use std::collections::BTreeMap;
+
+/// The key, among a watermark's revisions, of the rules this crate keeps beside the reducers' rows
+/// (see the module doc). No reducer has this domain.
+pub const INDEX_DOMAIN: &str = "index";
+
+/// The revision of those rules. 1: the entries under a ticket for its label and thread link adds
+/// (6j6v.t1ym). 2: the entries under a ticket for its outgoing `contributes_to` edges (6j6v.15ed).
+pub const INDEX_REVISION: i64 = 2;
 
 /// The platform's reducers — the board's, the chat's and the memory's.
 pub fn platform_reducers() -> Vec<Box<dyn Reducer>> {
@@ -116,8 +132,16 @@ impl Folder {
         &self.layout
     }
 
-    /// Each reducer's fold revision, by domain.
+    /// Each reducer's fold revision, by domain, and this crate's own [`INDEX_REVISION`] under
+    /// [`INDEX_DOMAIN`].
     pub fn revisions(&self) -> BTreeMap<String, i64> {
+        let mut revisions = self.reducer_revisions();
+        revisions.insert(INDEX_DOMAIN.to_string(), INDEX_REVISION);
+        revisions
+    }
+
+    /// Each reducer's fold revision, by domain — what the rows themselves depend on.
+    pub fn reducer_revisions(&self) -> BTreeMap<String, i64> {
         self.reducers
             .iter()
             .map(|r| (r.domain().to_string(), r.fold_revision()))

@@ -71,7 +71,7 @@ nexus-flow agent CLI
 * `closed` — List closed items (excluding archived). Ordered by close-date descending (most recent first); override with `--sort`
 * `archived` — List archived items (any status). Ordered by archive-date descending (most recent first); override with `--sort`
 * `recap` — Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `--limit` caps the count (default 10); `--since` keeps only later closes
-* `next` — List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--limit` shows only the head of it, and says so
+* `next` — List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--type`, `--in` and `--label` narrow it without re-ranking; `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page
 * `dep` — Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B blocks A — A cannot be ready until B closes
 * `mention` — Add, remove, or list reference edges (free-text short-id citations)
 * `contributes` — Add, remove, or list contributes-to edges: `from` contributes to `to` (n:m). Like a mention it never blocks — it records a structural "feeds into" relation, not a dependency
@@ -298,7 +298,7 @@ Recap the most recently closed work — "what got finished lately" — newest cl
 
 ## `nxf next`
 
-List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--limit` shows only the head of it, and says so
+List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--type`, `--in` and `--label` narrow it without re-ranking; `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page
 
 **Usage:** `nxf next [OPTIONS]`
 
@@ -306,8 +306,12 @@ List actionable work — ready plus already-claimed, unblocked, not deferred —
 
 * `--now <NOW>` — Reference time (ISO-8601 / RFC3339); defaults to now
 * `--label <LABEL>` — Filter to ready items carrying this label (user vocabulary, not the display type)
+* `--type <TYPE>` — Only items of this type (the stored type, as `list --type` takes it). Repeatable: the types are alternatives
+* `--in <ID>` — Only items in this container: its children (whose parent it is) and the items that contribute to it
 * `--sort <SORT>` — Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error
-* `--limit <LIMIT>` — Max items to show (default: no limit). Applied last — after `--sort` and `--label` — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer reads the untruncated total instead of inferring it from the array's length
+* `--limit <LIMIT>` — Max items to show (default: no limit). Applied last — after `--sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer reads the untruncated total instead of inferring it from the array's length
+* `--paginate` — Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+* `--token <TOKEN>` — The token a previous `--paginate` answer printed: show the page after that one
 
 
 

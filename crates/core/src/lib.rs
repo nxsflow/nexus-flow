@@ -8,6 +8,7 @@ pub mod history;
 pub mod id;
 pub mod invariant;
 pub mod model;
+pub mod next_cache;
 pub mod reducer;
 pub mod rewrite;
 pub mod schema;

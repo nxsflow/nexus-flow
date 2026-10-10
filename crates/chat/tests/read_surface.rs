@@ -672,7 +672,9 @@ const SURFACE: &[Member] = &[
             starts: "the round queued behind the working copy, when what it takes back held the \
                      copy or was a failed start that still owed an answer: it asks the release \
                      question once the threads are discharged, and a release starts what was \
-                     queued behind the copy (nxf 6j6v.br25)",
+                     queued behind the copy (nxf 6j6v.br25); the same question first starts a \
+                     later step of the holder's own ordered run that waited in line for the step \
+                     before it, once that step is over (nxf 6j6v.9g8j)",
             commissioned_by: "send_to",
         },
         why: "THE THIRD WRITE, added by nxf 6j6v.0djn, and since nxf 6j6v.12nn it is here BY THE \
@@ -798,7 +800,9 @@ const SURFACE: &[Member] = &[
         causes: Causes::OnlyWhatWasCommissioned {
             starts: "the next step of the round this session stood in: announcing the end opens \
                      the advance gate a declared channel was waiting on, and the step it opens is \
-                     a session started inside this call",
+                     a session started inside this call; or a later step of that round that \
+                     already waited in the working-copy queue for this one and starts now that \
+                     it is over (nxf 6j6v.9g8j)",
             commissioned_by: "send_to",
         },
         why: "A session reports that its OWN process is over (nxf 6j6v.10yb) — \
