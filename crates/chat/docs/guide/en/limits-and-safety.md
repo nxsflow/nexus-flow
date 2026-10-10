@@ -184,6 +184,13 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   when it comes from a handle the thread expects, and on an escalated thread the expected handle is
   the one that escalated — so an answer from anyone else, the opener included, posts and moves
   nothing. Measured, twice: `posted: true`, `woke: null`, and the lease still `holding` afterwards.
+  **An escalation can also be answered from above.** When the commissioner of a thread above it
+  writes in that thread and asks it again — the requester replying on a channel thread, which
+  restarts an ordered run in new step threads — the escalation counts as answered, even though
+  nothing is ever written in the escalating step's own thread again. Both are needed: the engine
+  moving a register on its own, with no word from the commissioner, answers nothing. This holds for
+  an escalation only. A question is answered in its own thread, never from above. While a copy is
+  held for a hand-back with no thread open, `nxc status` names it.
 - **An unanswered escalation does not hold the queue for ever.** If — and only if — **another
   operation is waiting**, a 30-minute clock starts. When it runs out, that operation's work is
   committed to a branch (untracked files included; anything your `.gitignore` excludes is left in the

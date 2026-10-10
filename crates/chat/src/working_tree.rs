@@ -2084,8 +2084,9 @@ impl ChatStore {
     /// thread's last reply hands the task back ([`hands_the_task_back`]), and its own turn was not
     /// declared again after that reply. The thread's own re-declaration was always the door
     /// ([`ChatStore::last_reply_kind`] reads only the current turn). An ESCALATION has a second
-    /// door, and before 6j6v.ys54 this missed it: the turn of a thread ABOVE it in the claim area,
-    /// declared again after it.
+    /// door, and before 6j6v.ys54 this missed it: a thread ABOVE it in the claim area whose
+    /// COMMISSIONER wrote in it after the escalation, and whose turn was declared again after it
+    /// ([`Self::escalation_is_answered_above`]).
     ///
     /// **Only an escalation, because only an escalation is answered from above.** The guide says
     /// so in as many words: `--escalate` goes UP, to whoever commissioned the sender, and the
@@ -2108,8 +2109,8 @@ impl ChatStore {
     /// early, in the shape `working_tree_claim_scope.rs::
     /// a_question_two_levels_down_holds_the_claim_although_every_thread_above_it_consolidated`
     /// pins: the levels above a hand-back can CONSOLIDATE, so new replies travel UP past it while
-    /// nobody answered it. Those replies discharge turns; they declare none. A declaration only
-    /// comes DOWN — somebody asked the thread again — so it cannot be mistaken for a reply going up.
+    /// nobody answered it. Those replies discharge turns; they declare none, and none of them is
+    /// written by the commissioner of the thread it lands in.
     /// The park asks the looser question on purpose (see its own doc); each is the safe direction
     /// for its own mechanism, so the two stay two.
     ///
@@ -2133,7 +2134,7 @@ impl ChatStore {
                 continue;
             }
             if kind == crate::model::KIND_ESCALATION
-                && self.asked_again_above(thread_id, lamport, site, &area)?
+                && self.answered_from_above(thread_id, lamport, site, &area)?
             {
                 continue;
             }
@@ -2145,11 +2146,44 @@ impl ChatStore {
         Ok(None)
     }
 
-    /// Whether any thread above `thread_id`, inside `area`, was declared again after the position
-    /// `(lamport, site)` — [`Self::unanswered_hand_back`]'s second door. The walk stops at the edge
-    /// of the area, and at a thread it has already seen, so a cycle in the parent edges cannot hang
-    /// it.
-    fn asked_again_above(
+    /// **Was the escalation that is `thread_id`'s last reply answered from above?** (nxf 6j6v.ys54)
+    /// — `false` when the thread's last reply is no escalation at all, or when nothing above it
+    /// inside `area` answered it. The second door of [`Self::unanswered_hand_back`], and the rule
+    /// `nxc status` reads for `needs_decision`, so the two cannot disagree about one escalation.
+    pub(crate) fn escalation_is_answered_above(
+        &self,
+        thread_id: &str,
+        area: &[String],
+    ) -> Result<bool> {
+        let Some((kind, lamport, site)) = self.last_reply_at(thread_id)? else {
+            return Ok(false);
+        };
+        if kind != crate::model::KIND_ESCALATION {
+            return Ok(false);
+        }
+        let area: BTreeSet<&str> = area.iter().map(String::as_str).collect();
+        self.answered_from_above(thread_id, lamport, site, &area)
+    }
+
+    /// Whether a thread above `thread_id`, inside `area`, answered the reply at `(lamport, site)`:
+    /// its commissioner wrote in it after that reply ([`ChatStore::commissioner_wrote_after`]) AND
+    /// its turn was declared again after it ([`ChatStore::declared_after`]).
+    ///
+    /// **Both, because either alone is not an answer** (review of PR #40, Integrity #1). The engine
+    /// writes the register on its own — a channel concluding retargets its thread, a withdrawal
+    /// discharges it — and a supervisor re-declaration with no word from the commissioner answered
+    /// nobody. A commissioner's note that asks nobody again set no work going. The requester
+    /// answering an escalation does both in one reply.
+    ///
+    /// **Any such answer counts, whatever it says.** The engine cannot read the reply, so a
+    /// commissioner who asks the level above again about something else has answered the
+    /// escalation too. That is the guide's direction rule taken at its word — an escalation goes up
+    /// to the commissioner, and the commissioner carrying on is the answer — and it is pinned by
+    /// `working_tree::tests::a_commissioner_who_asks_again_above_answers_the_escalation_whatever_it_says`.
+    ///
+    /// The walk stops at the edge of the area, and at a thread it has already seen, so a cycle in
+    /// the parent edges cannot hang it.
+    fn answered_from_above(
         &self,
         thread_id: &str,
         lamport: i64,
@@ -2162,7 +2196,9 @@ impl ChatStore {
             if !area.contains(parent.as_str()) || !seen.insert(parent.clone()) {
                 break;
             }
-            if self.declared_after(&parent, lamport, site)? {
+            if self.declared_after(&parent, lamport, site)?
+                && self.commissioner_wrote_after(&parent, lamport, site)?
+            {
                 return Ok(true);
             }
             above = self.thread_parent(&parent)?;
@@ -2175,9 +2211,9 @@ impl ChatStore {
     /// [`Self::threads_handed_back`] next door.
     ///
     /// That one asks *what did the last REPLY say*, and its answer stays `true` until the escalating
-    /// party replies again or, for an escalation, a thread above it is asked again (nxf
-    /// 6j6v.ys54) — which is correct
-    /// for the LEASE, whose rule is that a hand-back does not release. It is wrong for a PARK. A human who answers an escalation puts the
+    /// party replies again or, for an escalation, its commissioner answers above it (nxf
+    /// 6j6v.ys54) — which is correct for the LEASE, whose rule is that a hand-back does not
+    /// release. It is wrong for a PARK. A human who answers an escalation puts the
     /// operation back to work without becoming an expected replier, so the escalation goes on being
     /// the last reply while somebody is once again writing in the working copy — and parking there
     /// would commit an operation's work out from under the session that is doing it.
@@ -4888,6 +4924,190 @@ mod tests {
         assert!(!store
             .work_scope_handed_back(&WorkScope::Session("s-1".to_string()))
             .unwrap());
+    }
+
+    // ---- an escalation answered from above (nxf 6j6v.ys54, review of PR #40) ------------------
+
+    /// A board opened by `local/pm`, a DM under it, and an escalation on the DM — the shape the
+    /// review of PR #40 named: whatever happens on the board afterwards decides whether the DM's
+    /// escalation was answered.
+    fn an_escalation_on_a_dm_under_a_board(store: &mut ChatStore) {
+        open_under(store, "th-board", "local/pm", None);
+        open_under(store, "th-dm", "local/coder", Some("th-board"));
+        expect_reply(store, "th-board", &["local/coder"]);
+        expect_reply(store, "th-dm", &["local/helper"]);
+        answer_of_kind(
+            store,
+            "th-dm",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+    }
+
+    fn board_area() -> WorkScope {
+        WorkScope::Thread("th-board".to_string())
+    }
+
+    #[test]
+    fn a_supervisor_re_declaration_above_an_escalation_answers_nothing() {
+        // THE DECISION the review asked for (Integrity #1): the engine moving the register above an
+        // escalation — a channel retargeting its thread as it concludes, a supervisor asking a
+        // member again — is not the commissioner answering it. Nobody wrote a word to the one who
+        // escalated; the copy stays.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        assert!(
+            store.work_scope_handed_back(&board_area()).unwrap(),
+            "a re-declaration with no word from the board's commissioner answered nobody"
+        );
+    }
+
+    #[test]
+    fn a_commissioner_note_that_asks_nobody_again_answers_nothing() {
+        // The other half of "both": the commissioner wrote on the board, but asked nobody again,
+        // so no work was set going and the escalation still stands.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        assert!(store.work_scope_handed_back(&board_area()).unwrap());
+    }
+
+    #[test]
+    fn a_commissioner_who_asks_again_above_answers_the_escalation_whatever_it_says() {
+        // THE OPEN DECISION, pinned (review of PR #40, Test Quality #3): the engine cannot read
+        // the reply, so a commissioner who writes on the board and asks it again has answered the
+        // escalation below it — even if the reply was about something else. That is the guide's
+        // direction rule taken at its word: an escalation goes up, and the commissioner carrying on
+        // is the answer.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        assert!(
+            !store.work_scope_handed_back(&board_area()).unwrap(),
+            "the commissioner wrote and asked again: the escalation is answered"
+        );
+    }
+
+    #[test]
+    fn a_question_is_not_answered_from_above_even_by_its_commissioner() {
+        // The question branch at the derivation: the same answer from above that clears an
+        // escalation leaves a question standing — it waits in its own thread.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-board", "local/pm", None);
+        open_under(&mut store, "th-dm", "local/coder", Some("th-board"));
+        expect_reply(&mut store, "th-dm", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-dm",
+            "local/helper",
+            crate::model::MessageKind::Question,
+        );
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        let held = store
+            .unanswered_hand_back(&store.work_scope_threads(&board_area()).unwrap())
+            .unwrap();
+        assert_eq!(
+            held,
+            Some(HandBack {
+                thread: "th-dm".to_string(),
+                kind: "question".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_answer_two_levels_up_counts_and_one_outside_the_claim_area_does_not() {
+        // th-top → th-mid → th-low, the escalation on th-low, the answer on th-top.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-top", "local/pm", None);
+        open_under(&mut store, "th-mid", "local/lead", Some("th-top"));
+        open_under(&mut store, "th-low", "local/coder", Some("th-mid"));
+        expect_reply(&mut store, "th-low", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-low",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+        answer_of_kind(
+            &mut store,
+            "th-top",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-top", &["local/lead"]);
+
+        assert!(
+            !store
+                .work_scope_handed_back(&WorkScope::Thread("th-top".to_string()))
+                .unwrap(),
+            "two levels up, inside the area, the answer counts"
+        );
+        assert!(
+            store
+                .work_scope_handed_back(&WorkScope::Thread("th-mid".to_string()))
+                .unwrap(),
+            "but an area that starts at th-mid does not reach th-top, so nothing in it answered"
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_the_parent_edges_ends_the_walk_instead_of_hanging_it() {
+        // Two threads that name each other as parent. The walk meets th-a again and stops.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-a", "local/pm", Some("th-b"));
+        open_under(&mut store, "th-b", "local/pm", Some("th-a"));
+        expect_reply(&mut store, "th-a", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-a",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+        let threads = vec!["th-a".to_string(), "th-b".to_string()];
+        assert_eq!(
+            store.unanswered_hand_back(&threads).unwrap(),
+            Some(HandBack {
+                thread: "th-a".to_string(),
+                kind: "escalation".to_string(),
+            })
+        );
     }
 
     #[test]

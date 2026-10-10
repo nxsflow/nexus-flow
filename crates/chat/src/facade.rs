@@ -855,19 +855,20 @@ pub struct StatusOperation {
     /// for. The per-thread field is unchanged and still says WHICH thread; this says whether to go
     /// looking at all.
     pub holds_working_tree: bool,
-    /// **The thread whose unanswered hand-back keeps this operation's working copy** (nxf
-    /// 6j6v.ys54) — set only when the operation [holds the copy](Self::holds_working_tree) with no
-    /// thread [open](Self::open), and a thread in it handed the task back that nothing above it
-    /// has asked again since. The same rule the release asks, so this is the reason it says no.
+    /// **The unanswered hand-back that keeps this operation's working copy** (nxf 6j6v.ys54) —
+    /// set only when the operation [holds the copy](Self::holds_working_tree) with no thread
+    /// [open](Self::open), and a thread of the claim area handed the task back and was not answered.
+    /// The same rule, over the same threads, the release asks, so this is the reason it says no.
     ///
     /// Before this field the "no" was silent: an operation that had delivered kept the copy until
-    /// the lease's bound and nothing said why. An answer in that thread, or a reply into a thread
-    /// above it, lets the copy go.
+    /// the lease's bound and nothing said why. What answers it depends on its
+    /// [kind](HandBackStatus::kind): an escalation is answered by its commissioner replying in that
+    /// thread or a thread above it; a question only by a reply that asks its own thread again.
     ///
     /// `None` otherwise, and omitted from `--json` then — a new optional field on this
     /// `#[non_exhaustive]` struct.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub held_by_hand_back: Option<String>,
+    pub held_by_hand_back: Option<HandBackStatus>,
     /// **Somewhere under this root a session is on hold at an availability boundary** (nxf
     /// 6j6v.npy3) — any thread in the tree carrying [`StatusThread::interrupted`].
     ///
@@ -953,6 +954,18 @@ pub struct StatusOperation {
     /// Empty for every operation where no start failed, and omitted from `--json` then.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub start_failed: Vec<crate::working_tree::FailedStart>,
+}
+
+/// **An unanswered hand-back that holds the working copy, as `nxc status` shows it** (nxf
+/// 6j6v.ys54) — [`StatusOperation::held_by_hand_back`]. `#[non_exhaustive]` like its neighbours.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HandBackStatus {
+    /// The thread the hand-back stands in.
+    pub thread: String,
+    /// Its kind label: `escalation` or `question`. It decides where the answer goes — an escalation
+    /// up to its commissioner, a question into its own thread.
+    pub kind: String,
 }
 
 /// **The `withdrawn_holders` marker, as `nxc status` shows it** (nxf 6j6v.b9nf, Integrity #2 of this
@@ -3865,9 +3878,23 @@ pub fn status(
         // who has to answer is its commissioner in the other workspace — never the owner here, who
         // would otherwise be told NEEDS DECISION about somebody else's conversation. The thread
         // still keeps the operation live while the other side has it (`border_live` below).
-        let needs_decision = threads
-            .iter()
-            .any(|t| t.escalated && !t.border.as_ref().is_some_and(BorderStatus::is_inbound));
+        //
+        // **An escalation its commissioner answered from above needs no decision** (nxf
+        // 6j6v.ys54): the release rule's own second door, asked only of threads that show an
+        // escalation, so an operation without one costs nothing here. Without it an ordered run
+        // answered on its channel thread and redone in new step threads went on showing NEEDS
+        // DECISION for the step that escalated, long after it delivered.
+        let tree: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let mut needs_decision = false;
+        for t in &threads {
+            if t.escalated
+                && !t.border.as_ref().is_some_and(BorderStatus::is_inbound)
+                && !store.escalation_is_answered_above(&t.thread_id, &tree)?
+            {
+                needs_decision = true;
+                break;
+            }
+        }
         let border_live = threads
             .iter()
             .any(|t| t.border.as_ref().is_some_and(BorderStatus::is_in_progress));
@@ -3919,11 +3946,11 @@ pub fn status(
         // not; the two plain LISTING forms show only what is still going on.
         if matches!(scope, StatusScope::Threads(_) | StatusScope::All(_)) || live {
             // **Why a copy with nothing open is still held** (nxf 6j6v.ys54): the release rule's
-            // own hand-back question, asked only of the one operation that holds the copy with no
+            // own hand-back question, over the release's own input — the holder's claim area, not
+            // this operation's tree — asked only of the one operation that holds the copy with no
             // thread open, so every other operation costs nothing here.
             let held_by_hand_back = if holds_working_tree && open == 0 {
-                let tree: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-                store.unanswered_hand_back(&tree)?.map(|h| h.thread)
+                held_by_hand_back_of(store, now, &ids)?
             } else {
                 None
             };
@@ -3954,6 +3981,31 @@ pub fn status(
         worker_answers_liveness: worker.answers_liveness(),
         worker_names_a_working_copy: worker.working_copy().is_some(),
     })
+}
+
+/// [`StatusOperation::held_by_hand_back`] for the operation whose threads are `ids`: the release
+/// rule's hand-back question asked of the LEASE HOLDER's claim area, exactly the list
+/// `release_working_tree_if_scope_is_done` resolves, and only when the holder stands in this
+/// operation. `None` when nothing holds the copy, the holder is elsewhere, or no hand-back holds it.
+fn held_by_hand_back_of(
+    store: &ChatStore,
+    now: &str,
+    ids: &[&str],
+) -> Result<Option<HandBackStatus>> {
+    let Some(holder) = store.working_tree_holder(now)? else {
+        return Ok(None);
+    };
+    let Some(scope) = crate::working_tree::WorkScope::parse(&holder) else {
+        return Ok(None);
+    };
+    let area = store.work_scope_threads(&scope)?;
+    if !area.iter().any(|t| ids.contains(&t.as_str())) {
+        return Ok(None);
+    }
+    Ok(store.unanswered_hand_back(&area)?.map(|h| HandBackStatus {
+        thread: h.thread,
+        kind: h.kind,
+    }))
 }
 
 /// **The bulk reads one status report is assembled from**, gathered once for the whole selection

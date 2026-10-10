@@ -646,14 +646,18 @@ rows can only answer by being read one at a time:
   different urgency. A finished operation waiting to be read is the normal end; one whose root looks
   exactly the same while an unanswered escalation sits under it is a chain that has *stopped* — and
   an escalation holds the working copy, so it stops the machine too. It clears itself: re-commission
-  the round and the flag goes.
+  the round and the flag goes. That includes answering from above — the commissioner replying in a
+  thread above the escalation and asking it again, which starts an ordered run again in new step
+  threads. The escalating thread itself then still shows `escalated`, as the fact it is, but the
+  operation no longer needs a decision.
 - **`holds_working_tree`** — somewhere under this root the working copy is held. It tells you
   whether to go looking; the per-thread `working_tree` field still says *which* thread.
-- **`held_by_hand_back`** — present only when the working copy is held with no thread open: the
-  thread whose escalation nobody has answered yet, which is why the copy stays. The human output
-  prints it as a line `working copy held: thread <id> handed the task back …` under the operation.
-  A reply into that thread's round, or into a thread above it, answers it, and the copy goes once
-  the new turn is done.
+- **`held_by_hand_back`** — present only when the working copy is held with no thread open:
+  `{"thread": <id>, "kind": "escalation" | "question"}`, the hand-back nobody has answered yet,
+  which is why the copy stays. The human output prints a line `working copy held: thread <id> …`
+  under the operation that says where the answer goes. An escalation is answered by its
+  commissioner replying in that thread or a thread above it; a question only by a reply that asks
+  its own thread again. The copy goes once the new turn is done.
 
 ### `nxc search <QUERY>`
 

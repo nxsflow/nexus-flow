@@ -29,7 +29,8 @@ use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
 use nexus_chat::facade::{StatusOperation, StatusScope};
-use nexus_chat::orchestration::Caller;
+use nexus_chat::model::{Disposition, MessageKind, Priority, Refs};
+use nexus_chat::orchestration::{self, Caller};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::TimerConfig;
@@ -272,6 +273,70 @@ fn the_verifier_escalates(engine: &Engine, worker: &RecordingWorker) -> String {
     )
 }
 
+/// The latest step of `handle` answers with an open QUESTION at `at`, and its session ends.
+///
+/// `question` has no entrance on the surface any more (`--kind` left with nxf 6j6v.ckeq), while
+/// `working_tree::hands_the_task_back` still holds the copy for one, so this drives the same
+/// `orchestration::reply` the surface drives, in process, with this file's worker behind it — as
+/// `working_tree_claim_scope.rs::reply_with_a_question` does. Returns the thread it asked on.
+fn the_step_asks_a_question(
+    tmp: &TempDir,
+    engine: &Engine,
+    worker: &RecordingWorker,
+    handle: &str,
+    at: &str,
+    body: &str,
+) -> String {
+    let step = worker.last_for(handle);
+    let thread = step.reply_thread.expect("the step answers on a thread");
+    {
+        let ws = Workspace::resolve(None, tmp.path()).expect("resolve workspace");
+        let db_path = ws.db_path_str().expect("db path");
+        let origin = nexus_chat::workspace::origin_of(&ws).to_string();
+        let mut store = ws.open_chat_store().expect("open chat store");
+        let defs = Definitions::resolve(tmp.path()).expect("declarations");
+        let ctx = orchestration::Ctx {
+            now: at,
+            origin: &origin,
+            actor: handle,
+            session: Some(&step.internal_session),
+            hop: 0,
+            defs: &defs,
+            worker,
+            timer: &nexus_chat::timer::DryTimer,
+            namer: &nexus_chat::naming::DryNamer,
+            db_path: &db_path,
+            project_claude_md: None,
+            module_primes: None,
+            machines: None,
+            peers: None,
+        };
+        orchestration::reply(
+            &ctx,
+            &mut store,
+            orchestration::ReplyRequest {
+                target: &thread,
+                body,
+                kind: MessageKind::Question,
+                priority: Priority::Normal,
+                disposition: Disposition::InTurn,
+                refs: Refs {
+                    session_id: Some(step.internal_session.clone()),
+                    ..Default::default()
+                },
+                model: None,
+                if_unanswered: false,
+            },
+        )
+        .expect("the question is posted and routed");
+    }
+    worker.mark_gone(&step.internal_session);
+    engine
+        .session_ended(caller(handle, at), &step.internal_session)
+        .expect("the session end is accepted");
+    thread
+}
+
 // ---- the incident ----------------------------------------------------------------------------
 
 #[test]
@@ -290,6 +355,11 @@ fn an_escalation_answered_on_the_thread_above_it_lets_the_copy_go_once_the_redo_
     post(&engine, caller("pm", ANSWERED), &root, "redo it", false);
     assert_eq!(worker.started("coder"), 2, "the run started again");
     the_step_ends(&engine, &worker, "coder", REBUILT, "built again", false);
+    assert_eq!(
+        worker.started("builder"),
+        0,
+        "mid-redo the copy stays with the run: the verify step still owes its answer"
+    );
     let redone = the_step_ends(&engine, &worker, "verifier", DELIVERED, "verified", false);
     assert_ne!(
         redone, escalating,
@@ -314,7 +384,17 @@ fn an_escalation_answered_on_the_thread_above_it_lets_the_copy_go_once_the_redo_
     );
     let op = operation(&engine, &root, DELIVERED);
     assert!(!op.holds_working_tree, "{op:?}");
-    assert_eq!(op.held_by_hand_back, None, "{op:?}");
+    assert!(
+        op.threads
+            .iter()
+            .any(|t| t.thread_id == escalating && t.escalated),
+        "the premise: the step's thread still shows its escalation as a fact: {op:?}"
+    );
+    assert!(
+        !op.needs_decision,
+        "but the escalation was answered above and the run delivered, so it needs no decision: \
+         {op:?}"
+    );
 }
 
 // ---- what must NOT change: an escalation nobody answered -----------------------------------------
@@ -335,6 +415,88 @@ fn an_escalation_with_nothing_after_it_still_holds_the_copy() {
         "the escalating operation holds the copy: {:?}",
         holder(&tmp)
     );
+    assert!(
+        operation(&engine, &root, ESCALATED).needs_decision,
+        "and it needs a decision"
+    );
+}
+
+// ---- a question is answered in its own thread, not from above -----------------------------------
+
+#[test]
+fn a_question_is_not_answered_by_the_commissioner_carrying_on_above_it() {
+    let (tmp, engine, worker) = team();
+    let root = a_run_with_a_round_waiting_behind_it(&engine, &worker);
+
+    // First run: the verifier escalates, and the requester answers it above, as in the incident.
+    let escalating = the_verifier_escalates(&engine, &worker);
+    post(&engine, caller("pm", ANSWERED), &root, "redo it", false);
+
+    // Second run: the verifier hands the task back with an open QUESTION.
+    the_step_ends(&engine, &worker, "coder", REBUILT, "built again", false);
+    let asking = the_step_asks_a_question(
+        &tmp,
+        &engine,
+        &worker,
+        "verifier",
+        DELIVERED,
+        "which of the two release branches do I verify?",
+    );
+    assert_ne!(asking, escalating, "the premise: a new step thread");
+    assert_eq!(
+        worker.started("builder"),
+        0,
+        "an unanswered question holds the copy"
+    );
+    let op = operation(&engine, &root, DELIVERED);
+    assert!(op.holds_working_tree, "{op:?}");
+    assert_eq!(op.open, 0, "the premise: nothing is open: {op:?}");
+    let held = op.held_by_hand_back.clone().expect("the hold is named");
+    assert_eq!(
+        (held.thread.as_str(), held.kind.as_str()),
+        (asking.as_str(), "question"),
+        "the copy is held, nothing is open, and the escalation answered above is NOT the reason: \
+         the question is: {op:?}"
+    );
+
+    // The requester carries on above the question, as it did above the escalation, and the third
+    // run delivers. That answered the escalation; it does not answer a question.
+    post(
+        &engine,
+        caller("pm", "2026-10-10T01:30:00Z"),
+        &root,
+        "carry on",
+        false,
+    );
+    assert_eq!(worker.started("coder"), 3, "the run started again");
+    the_step_ends(
+        &engine,
+        &worker,
+        "coder",
+        "2026-10-10T01:35:00Z",
+        "built",
+        false,
+    );
+    the_step_ends(
+        &engine,
+        &worker,
+        "verifier",
+        "2026-10-10T01:40:00Z",
+        "verified",
+        false,
+    );
+    assert_eq!(
+        worker.started("builder"),
+        0,
+        "a question waits in its own thread: carrying on above it does not let the copy go"
+    );
+    let op = operation(&engine, &root, "2026-10-10T01:40:00Z");
+    let held = op.held_by_hand_back.clone().expect("the hold is named");
+    assert_eq!(
+        (held.thread.as_str(), held.kind.as_str()),
+        (asking.as_str(), "question"),
+        "{op:?}"
+    );
 }
 
 // ---- the reason for the no ----------------------------------------------------------------------
@@ -349,41 +511,36 @@ fn status_names_the_hand_back_that_keeps_the_copy() {
     assert!(op.holds_working_tree, "{op:?}");
     assert_eq!(op.held_by_hand_back, None, "{op:?}");
 
-    // The escalation stands in the step's thread and, passed through, on the root above it. Either
-    // is the reason; the read names the first it meets in the tree's order, which is the root.
-    let escalating = the_verifier_escalates(&engine, &worker);
+    // The escalation stands in the step's thread and, passed through, on the root above it. The
+    // read names the first it meets in the claim area's order, which is the root: the thread the
+    // human reads and answers in.
+    the_verifier_escalates(&engine, &worker);
     let op = operation(&engine, &root, ESCALATED);
     assert!(op.holds_working_tree, "{op:?}");
     assert_eq!(
         op.open, 0,
         "the premise: nothing in the operation is open: {op:?}"
     );
-    let named = op
+    let held = op
         .held_by_hand_back
         .clone()
         .expect("a copy held with nothing open says which hand-back holds it");
-    assert!(
-        [root.as_str(), escalating.as_str()].contains(&named.as_str()),
-        "it names a thread the escalation stands in: {named} ({op:?})"
-    );
-    assert!(
-        op.threads
-            .iter()
-            .any(|t| t.thread_id == named && t.escalated),
-        "and that thread shows the escalation: {op:?}"
+    assert_eq!(
+        (held.thread.as_str(), held.kind.as_str()),
+        (root.as_str(), "escalation"),
+        "{op:?}"
     );
     let json = serde_json::to_value(&op).unwrap();
     assert_eq!(
-        json["held_by_hand_back"].as_str(),
-        Some(named.as_str()),
+        json["held_by_hand_back"],
+        serde_json::json!({"thread": root, "kind": "escalation"}),
         "and `--json` carries it: {json}"
     );
 
-    // Answered, redone and delivered: the copy goes, and nothing is named any more.
+    // Answered: a new turn is running, so the copy is held for THAT, which status already shows as
+    // an open thread. The field is only ever set with nothing open.
     post(&engine, caller("pm", ANSWERED), &root, "redo it", false);
     let op = operation(&engine, &root, ANSWERED);
-    assert_eq!(
-        op.held_by_hand_back, None,
-        "a new turn is running; the copy is held for it, not for the hand-back: {op:?}"
-    );
+    assert!(op.open > 0, "the premise: the redo is open: {op:?}");
+    assert_eq!(op.held_by_hand_back, None, "{op:?}");
 }

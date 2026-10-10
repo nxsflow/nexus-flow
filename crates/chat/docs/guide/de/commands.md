@@ -696,16 +696,21 @@ die Faden-Zeilen sonst nur einzeln nacheinander beantworten:
   Lagen von völlig verschiedener Dringlichkeit. Ein fertiger Vorgang, der gelesen werden will, ist
   das normale Ende; einer, dessen Wurzel genauso aussieht, während darunter eine unbeantwortete
   Eskalation liegt, ist eine Kette, die *steht* — und eine Eskalation hält die Arbeitskopie, hält
-  also auch die Maschine an. Es räumt sich selbst ab: Runde neu beauftragen, Kennzeichen weg.
+  also auch die Maschine an. Es räumt sich selbst ab: Runde neu beauftragen, Kennzeichen weg. Das
+  gilt auch für eine Antwort von oben — der Auftraggeber antwortet in einem Faden über der
+  Eskalation und fragt ihn erneut, was einen geordneten Durchlauf in neuen Schritt-Fäden neu
+  startet. Der eskalierende Faden selbst zeigt dann weiter `escalated`, als die Tatsache, die es
+  ist, aber der Vorgang braucht keine Entscheidung mehr.
 - **`holds_working_tree`** — irgendwo unter dieser Wurzel wird die Arbeitskopie gehalten. Es sagt
   Ihnen, ob Sie überhaupt nachsehen müssen; das Feld `working_tree` am Faden sagt weiterhin, *welcher*
   Faden.
 - **`held_by_hand_back`** — nur vorhanden, wenn die Arbeitskopie gehalten wird, ohne dass ein Faden
-  offen ist: der Faden, dessen Eskalation noch niemand beantwortet hat, und damit der Grund, warum
-  die Kopie bleibt. Die menschenlesbare Ausgabe zeigt ihn als Zeile
-  `working copy held: thread <id> handed the task back …` unter dem Vorgang. Eine Antwort in die
-  Runde dieses Fadens oder in einen Faden darüber beantwortet ihn, und die Kopie geht, sobald der
-  neue Durchgang erledigt ist.
+  offen ist: `{"thread": <id>, "kind": "escalation" | "question"}`, die Rückgabe, die noch niemand
+  beantwortet hat, und damit der Grund, warum die Kopie bleibt. Die menschenlesbare Ausgabe zeigt
+  unter dem Vorgang eine Zeile `working copy held: thread <id> …`, die sagt, wohin die Antwort
+  gehört. Eine Eskalation beantwortet ihr Auftraggeber mit einer Antwort in diesem Faden oder einem
+  Faden darüber; eine Frage nur eine Antwort, die ihren eigenen Faden erneut fragt. Die Kopie geht,
+  sobald der neue Durchgang erledigt ist.
 
 ### `nxc search <SUCHTEXT>`
 

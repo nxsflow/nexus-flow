@@ -195,6 +195,14 @@ der sie greift:
   Faden ist das erwartete Handle der Eskalierende selbst. Eine Antwort von jemand anderem, auch vom
   Eröffner, wird gepostet und bewegt nichts. Zweimal gemessen: `posted: true`, `woke: null`, und der
   Anspruch danach unverändert `holding`.
+  **Eine Eskalation kann auch von oben beantwortet werden.** Schreibt der Auftraggeber eines Fadens
+  darüber in diesen Faden und fragt ihn erneut — der Auftraggeber antwortet auf einem Kanal-Faden,
+  was einen geordneten Durchlauf in neuen Schritt-Fäden neu startet —, gilt die Eskalation als
+  beantwortet, auch wenn im Faden des eskalierenden Schritts nie wieder etwas geschrieben wird.
+  Beides ist nötig: Bewegt die Maschine ein Register von sich aus, ohne ein Wort des Auftraggebers,
+  beantwortet das nichts. Das gilt nur für eine Eskalation. Eine Frage wird in ihrem eigenen Faden
+  beantwortet, nie von oben. Solange eine Kopie für eine Rückgabe gehalten wird und kein Faden offen
+  ist, nennt `nxc status` sie.
 - **Eine unbeantwortete Eskalation hält die Warteschlange nicht ewig.** Wenn — und erst wenn — **ein
   anderer Vorgang wartet**, läuft eine Frist von 30 Minuten. Verstreicht sie, wird die Arbeit dieses
   Vorgangs auf einen Zweig committet (unversionierte Dateien eingeschlossen; was Ihre `.gitignore`

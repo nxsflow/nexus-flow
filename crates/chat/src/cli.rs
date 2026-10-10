@@ -3559,13 +3559,7 @@ fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
     op.withdrawn
         .iter()
         .map(withdrawn_line)
-        .chain(op.held_by_hand_back.iter().map(|thread| {
-            // Why a copy with nothing open is still held (nxf 6j6v.ys54).
-            format!(
-                "  working copy held: thread {thread} handed the task back and nothing has asked \
-                 it again since; an answer there or above it lets the copy go"
-            )
-        }))
+        .chain(op.held_by_hand_back.iter().map(held_by_hand_back_line))
         .chain(op.park_refused.iter().map(park_refused_line))
         .chain(op.parked.iter().map(parked_line))
         .chain(
@@ -3574,6 +3568,26 @@ fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
                 .map(|f| start_failed_line(f, &op.root)),
         )
         .collect()
+}
+
+/// Why a copy with nothing open is still held (nxf 6j6v.ys54): which thread, and where the answer
+/// that lets it go has to be written. The two kinds differ there — an escalation goes UP and is
+/// answered by its commissioner in that thread or a thread above it; a question waits in its own
+/// thread, and answering above it does not release.
+fn held_by_hand_back_line(h: &crate::facade::HandBackStatus) -> String {
+    let thread = &h.thread;
+    if h.kind == crate::model::KIND_ESCALATION {
+        format!(
+            "  working copy held: thread {thread} escalated and its commissioner has not answered; \
+             a reply from the commissioner in that thread or a thread above it lets the copy go"
+        )
+    } else {
+        format!(
+            "  working copy held: thread {thread} handed the task back ({}) and nothing has asked \
+             it again; only a reply that asks that thread again lets the copy go",
+            h.kind
+        )
+    }
 }
 
 /// One commission a release could not start (nxf 6j6v.br25): who, how often, what the last attempt
@@ -4838,4 +4852,36 @@ mod tests {
     // ticket earlier (nxf 6j6v.1gm9); what stands in their place is a golden,
     // `tests/prime_golden.rs`, asserting that a completed board adds not one byte to the session
     // start.
+
+    // ---- why a copy with nothing open is held (nxf 6j6v.ys54) -------------------------------
+
+    /// The status line says where the answer goes, and the two hand-back kinds differ there: an
+    /// escalation is answered by its commissioner, there or above; a question only in its own
+    /// thread. Telling a question's reader to answer above would leave the copy held to its bound.
+    #[test]
+    fn the_held_copy_line_sends_an_escalation_up_and_a_question_to_its_own_thread() {
+        let escalation = super::held_by_hand_back_line(&crate::facade::HandBackStatus {
+            thread: "m-esc".into(),
+            kind: "escalation".into(),
+        });
+        assert!(
+            escalation.contains("thread m-esc escalated"),
+            "{escalation}"
+        );
+        assert!(
+            escalation.contains("in that thread or a thread above it"),
+            "{escalation}"
+        );
+
+        let question = super::held_by_hand_back_line(&crate::facade::HandBackStatus {
+            thread: "m-q".into(),
+            kind: "question".into(),
+        });
+        assert!(
+            question.contains("thread m-q handed the task back (question)"),
+            "{question}"
+        );
+        assert!(question.contains("asks that thread again"), "{question}");
+        assert!(!question.contains("above"), "{question}");
+    }
 }
