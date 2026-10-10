@@ -11,7 +11,9 @@
 
 use crate::error::Result;
 use crate::plugin::{self, PluginConfig};
-use crate::read::{self, BlockedItem, NextPage, NextQuery, PrimeReport, ShowRecord};
+use crate::read::{
+    self, BlockedItem, MentionedByQuery, NextPage, NextQuery, PrimeReport, ShowRecord,
+};
 use crate::validate;
 use crate::workspace::{Workspace, WorkspaceExt};
 use crate::write::{self, NewItem};
@@ -263,6 +265,37 @@ impl Engine {
     pub fn mention_remove(&self, now: &str, actor: &str, from: &str, to: &str) -> Result<()> {
         self.handle
             .with_state_mut(|s| write::mention_remove(&mut s.store, now, actor, from, to))
+    }
+
+    /// The ids `id` mentions — its outgoing reference edges, sorted (6j6v.q29p): the read
+    /// [`mention_add`](Engine::mention_add) writes, and what the CLI's `mention list` prints.
+    /// `not_found` if the item is missing/deleted, `io` on a db fault.
+    pub fn mentions(&self, id: &str) -> Result<Vec<String>> {
+        self.handle.try_with_state(|s| read::mentions(&s.store, id))
+    }
+
+    /// The items that mention `id` (6j6v.q29p): the live mentioners — closed and archived included,
+    /// deleted ones not — in id order, narrowed by `query`'s filter (type, container, label, as for
+    /// [`next_query`](Engine::next_query)) and cut or paged exactly as `next_query` pages: the
+    /// same `total`/`start`/`next_token`/`restarted`, the same machine-local `next_page_cache`
+    /// (so the same db write another handle's [`subscribe`](Engine::subscribe) sees), the same
+    /// expiry and invalidation. The CLI's `mention by`. `not_found` if `id` is missing/deleted;
+    /// `validation` for `paginate` without a non-zero `limit`, or a token without `paginate`.
+    pub fn mentioned_by(&self, id: &str, query: &MentionedByQuery) -> Result<NextPage> {
+        self.handle
+            .try_with_state(|s| read::mentioned_by_page(&s.store, id, query))
+    }
+
+    /// [`mentioned_by`](Engine::mentioned_by) as JSON: `{"items", "total"}`, plus `next_token`
+    /// and `restarted` when the query paginates — `items` being the records
+    /// [`list_value`](Engine::list_value) gives. The envelope the CLI's
+    /// `mention by --limit <n> --json` prints.
+    pub fn mentioned_by_value(&self, id: &str, query: &MentionedByQuery) -> Result<Value> {
+        self.handle.try_with_state(|s| {
+            let page = read::mentioned_by_page(&s.store, id, query)?;
+            let items = read::list_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
+            Ok(read::next_page_envelope(items, &page, query.paginate))
+        })
     }
 
     /// Record a `from -> to` contributes-to edge (n:m; never blocks).

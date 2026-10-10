@@ -155,7 +155,7 @@ $ nxf dep remove ab12.0002 ab12.0003 --json
 ```
 
 `mention add` / `mention list` / `mention remove` record free-text short-id references — a
-citation that never blocks:
+citation that never blocks. `mention by` reads them the other way round:
 
 ```console
 $ nxf mention add ab12.0002 ab12.0001 --json
@@ -166,6 +166,24 @@ $ nxf mention add ab12.0002 ab12.0001 --json
 ```console
 $ nxf mention list ab12.0002 --json
 ["ab12.0001"]
+
+```
+
+`mention by <id>` lists the items that mention `<id>`, in id order, as `list --json` records
+(closed and archived mentioners included). `--type`, `--in` and `--label` narrow it as they narrow
+`next`. Without `--limit` the answer is a plain array; with `--limit` it is `{"items": [...],
+"total": <n>}`, and `--paginate` adds `next_token` (null on the last page) and `restarted` (true
+when a stale token answered with the first page again), exactly as `next --limit --json`:
+
+```console
+$ nxf mention by ab12.0001 --json
+[{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}]
+
+```
+
+```console
+$ nxf mention by ab12.0001 --type feature --limit 1 --paginate --json
+{"items":[{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}],"next_token":null,"restarted":false,"total":1}
 
 ```
 

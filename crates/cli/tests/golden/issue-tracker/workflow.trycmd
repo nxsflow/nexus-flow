@@ -125,6 +125,20 @@ $ nxf mention list ab12.0002 --json
 
 ```
 
+The reverse read: the items that mention the epic — `list` records, narrowed and paged like `next`:
+
+```console
+$ nxf mention by ab12.0001 --json
+[{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}]
+
+```
+
+```console
+$ nxf mention by ab12.0001 --type feature --limit 1 --paginate --json
+{"items":[{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}],"next_token":null,"restarted":false,"total":1}
+
+```
+
 ```console
 $ nxf mention remove ab12.0002 ab12.0001 --json
 {"msg":"removed mention ab12.0002 -> ab12.0001","ok":true}

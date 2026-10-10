@@ -27,7 +27,7 @@ use nexus_flow_core::graph::Board;
 use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // ---- schema (plugin-aware field + type-system introspection, 8qv.5 / y5j8) --------------------
 //
@@ -865,7 +865,8 @@ fn next_lane(
     items
 }
 
-/// One page of a `next` result: the rows to show, plus how many there were before the cut.
+/// One page of a `next` result — or of any read paged like it (`mentioned_by`, 6j6v.q29p): the
+/// rows to show, plus how many there were before the cut.
 ///
 /// The type exists so the total cannot be dropped on the way to a renderer. A limit that cuts
 /// silently is worse than no limit at all — a list that shows 15 of 180 and looks like 15 of 15
@@ -1273,24 +1274,74 @@ pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<Nex
 /// tested.
 fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) -> Result<NextPage> {
     crate::validate::iso_date(&q.now)?;
-    if q.token.is_some() && !q.paginate {
-        return Err(NxfError::validation("a page token needs paginate"));
-    }
-    let limit = match (q.paginate, q.limit) {
-        (false, _) => None,
-        (true, Some(n)) if n > 0 => Some(n),
-        (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
-    };
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
     // The watermark BEFORE the list: an op that lands while the list is computed is then above it
     // and counts as "since" — a spurious restart at worst, never a missed one.
-    let watermark = store.ops_watermark()?;
-    let watermark_op = store.op_at(watermark)?;
+    let mark = Watermark::read(store)?;
     let fresh = next_filtered(cfg, store, &q.now, q.sort, &q.filter)?;
-    let Some(n) = limit else {
-        return Ok(truncate_next(fresh, q.limit));
+    page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
+}
+
+/// The paging half of a request, checked: what [`page_through`] cuts and caches by. Shared by
+/// every paged read (`next`, `mentioned_by`), so their rules cannot drift apart (6j6v.q29p).
+struct Paging<'a> {
+    /// The cut: `None` is the whole list.
+    limit: Option<usize>,
+    /// `Some(n)` when the read hands out tokens, `n` its page size (never 0).
+    page: Option<usize>,
+    /// The token of a previous page.
+    token: Option<&'a str>,
+}
+
+impl<'a> Paging<'a> {
+    /// `validation` for a `token` without `paginate`, and for `paginate` without a non-zero
+    /// `limit`.
+    fn check(limit: Option<usize>, paginate: bool, token: Option<&'a str>) -> Result<Paging<'a>> {
+        if token.is_some() && !paginate {
+            return Err(NxfError::validation("a page token needs paginate"));
+        }
+        let page = match (paginate, limit) {
+            (false, _) => None,
+            (true, Some(n)) if n > 0 => Some(n),
+            (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
+        };
+        Ok(Paging { limit, page, token })
+    }
+}
+
+/// The log's position and identity when a list was computed — what a snapshot is checked against.
+struct Watermark {
+    rowid: i64,
+    op: Option<String>,
+}
+
+impl Watermark {
+    fn read(store: &Store) -> Result<Watermark> {
+        let rowid = store.ops_watermark()?;
+        let op = store.op_at(rowid)?;
+        Ok(Watermark { rowid, op })
+    }
+}
+
+/// Cut the freshly computed, ordered `fresh` list into one page per `paging` — and, when it pages,
+/// serve a token's page from its cached snapshot (if [`resume`] says it still answers) or cache
+/// `fresh` under `key` for the next one. THE paging mechanism behind [`next_page`] and
+/// [`mentioned_by_page`] (6j6v.15ed, generalised by 6j6v.q29p): one snapshot table, one expiry,
+/// one pair of caps, one invalidation rule. `key` must name the read as well as its filters, so a
+/// token of one read restarts under another; it is built only when the read pages.
+fn page_through(
+    store: &Store,
+    fresh: Vec<ItemRow>,
+    key: impl FnOnce() -> String,
+    paging: &Paging<'_>,
+    mark: Watermark,
+    clock: i64,
+) -> Result<NextPage> {
+    let Some(n) = paging.page else {
+        return Ok(truncate_next(fresh, paging.limit));
     };
-    let key = q.key(cfg);
-    if let Some(token) = &q.token {
+    let key = key();
+    if let Some(token) = paging.token {
         if let Some((snap, pos)) = resume(store, token, &key, &fresh, clock)? {
             // `pos < len` (resume checked it); a limit up to `usize::MAX` must not overflow.
             let end = pos.saturating_add(n).min(snap.ids.len());
@@ -1309,15 +1360,15 @@ fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) ->
             });
         }
     }
-    let restarted = q.token.is_some();
+    let restarted = paging.token.is_some();
     let total = fresh.len();
     let next_token = if total > n {
         let snap = nexus_flow_core::next_cache::CachedResult {
             id: ulid::Ulid::new().to_string(),
             created: clock,
             query: key,
-            watermark,
-            watermark_op,
+            watermark: mark.rowid,
+            watermark_op: mark.op,
             ids: fresh.iter().map(|i| i.id.clone()).collect(),
         };
         store
@@ -3051,6 +3102,140 @@ pub fn mentions_to_value(mentions: &[String]) -> Value {
     json!(mentions)
 }
 
+// ---- mentioned by: the reverse of `mentions` (6j6v.q29p) --------------------
+
+/// THE reverse mention lookup: for every id in `targets`, the live items with a present `mentions`
+/// edge to it, id-sorted and distinct. A target nothing live mentions — or that is no item at all —
+/// is absent from the map; this is a bulk read over ids the caller already holds, so a miss is not
+/// `not_found`.
+///
+/// "Live" is the one rule here: a deleted mentioner is dropped, every other one is kept — closed
+/// and archived included, because a reference is not work. A caller narrows the rows itself:
+/// [`mentioned_by_page`] by a [`NextFilter`], and the derived ranking key
+/// `count = "mentioned_by"` (docs/specs/derived-ranking-keys.md §3.2, 6j6v.x0wf) by counting the
+/// rows that pass its `type`/`status`/`label` parts per candidate. Spec §11 requires the two to
+/// share one implementation; this is it. One edge query per 500 targets
+/// ([`Store::mentioned_by_bulk`]) and one item read for the distinct mentioners, so a whole
+/// candidate set costs O(E + N), as spec §5 budgets.
+pub fn mentioners_of(store: &Store, targets: &[&str]) -> Result<BTreeMap<String, Vec<ItemRow>>> {
+    let edges = store.mentioned_by_bulk(targets)?;
+    let sources: BTreeSet<&str> = edges.values().flatten().map(String::as_str).collect();
+    let sources: Vec<&str> = sources.into_iter().collect();
+    let live: HashMap<String, ItemRow> = store
+        .get_items(&sources)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (target, froms) in edges {
+        // `froms` is id-sorted and distinct (the store's ORDER BY over a DISTINCT view).
+        let rows: Vec<ItemRow> = froms.iter().filter_map(|f| live.get(f).cloned()).collect();
+        if !rows.is_empty() {
+            out.insert(target, rows);
+        }
+    }
+    Ok(out)
+}
+
+/// One `mentioned_by` request (6j6v.q29p): which mentioners to keep, and how to page them — the
+/// paging exactly as [`NextQuery`]'s (the same three shapes, the same snapshot cache, expiry, caps
+/// and invalidation), because it is the same mechanism.
+///
+/// - No `limit`: every mentioner.
+/// - `limit` alone: the head, with the total disclosed and no token.
+/// - `limit` + `paginate`: the head plus a `next_token` while rows remain; a stale or invalid
+///   token answers the FIRST page of a fresh list with `restarted: true`.
+///
+/// The filter is a [`NextFilter`] and means what it means for `next`: the types are alternatives,
+/// the container keeps an item whose parent it is OR that contributes to it, the label keeps an
+/// item carrying it. There is no sort: mentioners come in id order.
+///
+/// `#[non_exhaustive]`: build it with [`MentionedByQuery::new`] and the builder methods.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MentionedByQuery {
+    /// The filters; empty keeps every mentioner.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+}
+
+impl MentionedByQuery {
+    /// Every mentioner, unpaged.
+    pub fn new() -> MentionedByQuery {
+        MentionedByQuery::default()
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> MentionedByQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> MentionedByQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> MentionedByQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> MentionedByQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: the read, the target and the filter — never `limit`,
+    /// so a reader may change the page size between pages. Naming the read keeps a
+    /// `mentioned_by` token from answering a `next` query, and the other way round.
+    fn key(&self, target: &str) -> String {
+        json!({
+            "read": "mentioned_by",
+            "target": target,
+            "filter": self.filter.key(),
+        })
+        .to_string()
+    }
+}
+
+/// One `mentioned_by` page (6j6v.q29p): the live items that mention `target` ([`mentioners_of`]),
+/// narrowed by `q.filter`, in id order, cut and — under `paginate` — cached machine-locally like a
+/// `next` page, so the following pages come from the same list. A token's snapshot restarts when
+/// an op after it touches one of its items (a removed mention names the mentioner) or an item in it
+/// left the fresh list. `not_found` if `target` is missing or deleted (as [`mentions`]);
+/// `validation` for `paginate` without a non-zero `limit` or a token without `paginate`.
+pub fn mentioned_by_page(store: &Store, target: &str, q: &MentionedByQuery) -> Result<NextPage> {
+    mentioned_by_page_at(store, target, q, unix_now())
+}
+
+/// [`mentioned_by_page`] on the clock `clock` (unix seconds).
+fn mentioned_by_page_at(
+    store: &Store,
+    target: &str,
+    q: &MentionedByQuery,
+    clock: i64,
+) -> Result<NextPage> {
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
+    require_item(store, target)?;
+    let mark = Watermark::read(store)?;
+    let rows = mentioners_of(store, &[target])?
+        .remove(target)
+        .unwrap_or_default();
+    let fresh = filter_next_store(store, rows, &q.filter)?;
+    page_through(store, fresh, || q.key(target), &paging, mark, clock)
+}
+
 // ---- thread links (nxf 6j6v.8dbe) ------------------------------------------
 
 /// The chat threads presently linked to `id`, sorted by thread id. `not_found` if the item is
@@ -4543,6 +4728,34 @@ mod tests {
         let t = token_at(&s, &q, T0);
         let at = |clock: i64| {
             next_page_at(&it_cfg(), &s, &q.clone().token(&t), clock)
+                .unwrap()
+                .restarted
+        };
+        assert!(!at(T0 + NEXT_CACHE_TTL_SECS), "at the TTL it still answers");
+        assert!(
+            at(T0 + NEXT_CACHE_TTL_SECS + 1),
+            "past it the token restarts"
+        );
+    }
+
+    #[test]
+    fn a_mentioned_by_token_expires_on_the_same_clock() {
+        // 6j6v.q29p: `mentioned_by` pages through the same mechanism, expiry included.
+        let (mut s, _) = paged_board();
+        for n in 0..4 {
+            s.add_edge(
+                &format!("c1.000{n}"),
+                "c1.0004",
+                nexus_flow_core::model::EdgeKind::Mentions,
+                "x",
+            );
+        }
+        let q = MentionedByQuery::new().limit(2).paginate();
+        let first = mentioned_by_page_at(&s, "c1.0004", &q, T0).unwrap();
+        assert_eq!(first.total, 4);
+        let t = first.next_token.expect("rows remain");
+        let at = |clock: i64| {
+            mentioned_by_page_at(&s, "c1.0004", &q.clone().token(&t), clock)
                 .unwrap()
                 .restarted
         };

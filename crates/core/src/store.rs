@@ -1068,6 +1068,37 @@ impl Store {
         Ok(out)
     }
 
+    /// The present `mentions` SOURCES of every id in `targets`: for each target, the items that
+    /// mention it, sorted and distinct — the reverse of [`mentions_of`](Self::mentions_of), in the
+    /// [`contributes_to_of_bulk`](Self::contributes_to_of_bulk) shape (one query per 500 ids, over
+    /// the `edge_adds_to` index). A target nothing mentions is absent from the map. The sources are
+    /// edge endpoints, not checked against the items: the facade's `read::mentioners_of` resolves
+    /// them and drops the deleted ones (6j6v.q29p).
+    pub fn mentioned_by_bulk(
+        &self,
+        targets: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, Vec<String>>> {
+        const CHUNK: usize = 500;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for chunk in targets.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT to_id, from_id FROM present_edges \
+                 WHERE kind = 'mentions' AND to_id IN ({placeholders}) \
+                 ORDER BY to_id, from_id"
+            );
+            let mut stmt = self.conn().prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (to, from) = row?;
+                out.entry(to).or_default().push(from);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- plugin custom fields (6j6v.ekf5, T4): the read side of the folded `custom_fields` view --
 
     /// The set custom-field values of ONE item (plugin-custom-fields §2.3), as `field → value`
@@ -3759,6 +3790,27 @@ mod tests {
         let ready = crate::derive::ready(s.connection(), "2026-06-08T00:00:00Z").unwrap();
         assert!(ready.contains(&"c1.A".to_string()) && ready.contains(&"c1.B".to_string()));
         assert!(crate::derive::blocked(s.connection()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mentioned_by_bulk_inverts_the_present_mentions_edges_per_target() {
+        // 6j6v.q29p: the reverse of `mentions_of`, for many targets in one read.
+        let mut s = Store::open_in_memory(1);
+        for id in ["c1.A", "c1.B", "c1.C", "c1.D", "c1.T", "c1.U"] {
+            s.create_item(id, "task", id, "x");
+        }
+        s.add_edge("c1.C", "c1.T", EdgeKind::Mentions, "x");
+        s.add_edge("c1.A", "c1.T", EdgeKind::Mentions, "x");
+        s.add_edge("c1.A", "c1.T", EdgeKind::Mentions, "x"); // a second add: still one mentioner
+        s.add_edge("c1.B", "c1.U", EdgeKind::Mentions, "x");
+        s.add_edge("c1.D", "c1.T", EdgeKind::Mentions, "x");
+        s.remove_edge("c1.D", "c1.T", EdgeKind::Mentions, "x"); // removed: no longer a mentioner
+        s.add_edge("c1.B", "c1.T", EdgeKind::Dep, "x"); // another kind: not a mention
+        let m = s.mentioned_by_bulk(&["c1.T", "c1.U", "c1.A"]).unwrap();
+        assert_eq!(m["c1.T"], ["c1.A", "c1.C"], "sorted and distinct");
+        assert_eq!(m["c1.U"], ["c1.B"]);
+        assert!(!m.contains_key("c1.A"), "nothing mentions it: absent");
+        assert!(s.mentioned_by_bulk(&[]).unwrap().is_empty());
     }
 
     #[test]

@@ -74,6 +74,13 @@ const WAIVERS: &[Waiver] = &[
         reason: "`read::mentions` is what the verb body calls; the CLI only renders it.",
     },
     Waiver::Alias {
+        verb: "mention by",
+        seam: "mentioned_by",
+        reason: "`Engine::mentioned_by` (over `read::mentioned_by_page`, which the verb body \
+                 calls) — the seam names the relation, the CLI the direction beside `mention \
+                 list` (6j6v.q29p).",
+    },
+    Waiver::Alias {
         verb: "note list",
         seam: "notes",
         reason: "`read::notes` / `read::notes_with_created` — the verb body calls the latter, and \

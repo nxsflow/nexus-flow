@@ -1,6 +1,8 @@
-//! The snapshot cache behind `next --paginate` (6j6v.15ed): the ordered result a first page was
-//! cut from, kept so the following pages come from the SAME list instead of a list that moved
-//! underneath the reader.
+//! The snapshot cache behind `next --paginate` (6j6v.15ed) and `mention by --paginate`
+//! (6j6v.q29p): the ordered result a first page was cut from, kept so the following pages come from
+//! the SAME list instead of a list that moved underneath the reader. The table keeps its first
+//! reader's name; every paged read shares it, its expiry and its caps, and tells its snapshots
+//! apart by the `query` key, which names the read.
 //!
 //! **Machine-local.** It lives in the `next_page_cache` table of the workspace db. The table is not
 //! a view and is folded from nothing: no op writes it, no snapshot image carries it, no sync moves

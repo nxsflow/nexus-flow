@@ -1999,6 +1999,69 @@ pub fn mention_list(json: bool, db: Option<&str>, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `nxf mention by`'s arguments, as clap parsed them.
+pub struct MentionByArgs<'a> {
+    pub types: &'a [String],
+    pub within: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub paginate: bool,
+    pub token: Option<&'a str>,
+}
+
+/// List the items that mention `id` (6j6v.q29p) — through the function `Engine::mentioned_by`
+/// answers from (`read::mentioned_by_page`), so the filters and the paging cannot drift apart
+/// between the two, nor from `next`'s.
+pub fn mention_by(json: bool, db: Option<&str>, id: &str, args: MentionByArgs<'_>) -> Result<()> {
+    let (ws, cfg) = open(db)?;
+    let store = ws.open_store()?;
+    let id = ws.replica.resolve_id(id);
+    let mut filter = read::NextFilter::new();
+    for ty in args.types {
+        filter = filter.with_type(ty.as_str());
+    }
+    if let Some(c) = args.within {
+        filter = filter.with_container(ws.replica.resolve_id(c));
+    }
+    if let Some(label) = args.label {
+        filter = filter.with_label(label);
+    }
+    let mut query = read::MentionedByQuery::new().filter(filter);
+    if let Some(n) = args.limit {
+        query = query.limit(n);
+    }
+    if args.paginate {
+        query = query.paginate();
+    }
+    if let Some(token) = args.token {
+        query = query.token(token);
+    }
+    let page = read::mentioned_by_page(&store, &id, &query)?;
+    if json {
+        let value = with_presentation_labels(
+            &cfg,
+            read::list_to_value_with_custom(&cfg, &store, &page.items)?,
+        );
+        // The shape follows the FLAG, as for `next`: a plain array without `--limit`, the envelope
+        // with it.
+        if args.limit.is_some() {
+            println!("{}", read::next_page_envelope(value, &page, args.paginate));
+        } else {
+            println!("{value}");
+        }
+    } else {
+        let theme = nxs_ui::Theme::plain();
+        if let Some(notice) = next_truncation_notice(&page, &theme) {
+            print!("{notice}");
+        }
+        print!("{}", render_list(&cfg, &ws.replica.prefix, &page.items));
+        if let Some(line) = next_token_line(&page, &theme) {
+            print!("{line}");
+        }
+    }
+    Ok(())
+}
+
 // ---- thread links (nxf 6j6v.8dbe) ------------------------------------------
 
 /// Parse a `--relation` value, or a `validation` error listing the accepted tokens — the same loud
