@@ -179,7 +179,17 @@ The plugin is refused with an error that names the key, as `RankSpec::validate` 
 
 ## 8. The requester's orders, declared
 
+How items of DIFFERENT types compare is the per-type ordering's own rule (`z9jk`, PR #44): an
+optional `types = [...]` under `[ranking.next]` (and, with `n698`, `[ranking.list]`) gives the order
+of the types; items of different types compare by that position first, then each by its own type's
+order, then id. A type with its own table must be listed; an unlisted type sorts after the listed
+ones. Derived keys only ever compare items of the SAME type, so they need nothing more (owner,
+2026-10-10).
+
 ```toml
+[ranking.next]
+types = ["project", "action"]
+
 [ranking.next.project]
 order = [
   { related = "contributes_to", type = "goal", of = { field = "order", dir = "asc" }, pick = "min", nulls = "last" },
