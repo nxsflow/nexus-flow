@@ -484,14 +484,15 @@ impl Engine {
             .try_with_state(|s| read::next_page(&self.cfg, &s.store, query))
     }
 
-    /// [`next_query`](Engine::next_query) as JSON: `{"items", "total", "next_token", "restarted"}`,
-    /// `items` being the records [`next_value`](Engine::next_value) gives — the envelope the CLI's
-    /// `next --limit <n> --paginate --json` prints.
+    /// [`next_query`](Engine::next_query) as JSON: `{"items", "total"}`, plus `next_token` and
+    /// `restarted` when the query paginates — `items` being the records
+    /// [`next_value`](Engine::next_value) gives. The envelope the CLI's `next --limit <n> --json`
+    /// prints, and with `--paginate` (review of #43, Code Quality #5).
     pub fn next_query_value(&self, query: &NextQuery) -> Result<Value> {
         self.handle.try_with_state(|s| {
             let page = read::next_page(&self.cfg, &s.store, query)?;
             let items = read::next_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
-            Ok(read::next_page_envelope(items, &page, true))
+            Ok(read::next_page_envelope(items, &page, query.paginate))
         })
     }
 
