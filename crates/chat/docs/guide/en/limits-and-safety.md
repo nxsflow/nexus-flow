@@ -168,7 +168,12 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   because what it was waiting for is the trigger it had just parked. The queue is first-in
   first-out, and a release promotes the whole claim area at the head, never one entry: several
   members of one fan-out share a claim, and firing one while its siblings stay parked deadlocks the
-  board.
+  board. **The steps of one ordered flow still start one at a time.** If two steps of the same run
+  are waiting together (`flow: sequential` or `steps:`), the release starts the earlier one, and
+  the later one stays in line until the earlier step has answered or its window has lapsed, and its
+  session is over. An earlier step whose start failed and is to be retried holds the later one
+  too. If the worker cannot tell whether a session still runs, the session counts as running until
+  it announces its end. Two steps of one run are never started side by side in one working copy.
 - **What releases it.** A reply inside the area releases the lease when nothing in that area still
   owes an answer *and* the last word was not a hand-back. An **escalation holds the lease** — the
   question is still travelling upward, the task is still mid-flight, and releasing the copy to a
@@ -179,6 +184,13 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   when it comes from a handle the thread expects, and on an escalated thread the expected handle is
   the one that escalated — so an answer from anyone else, the opener included, posts and moves
   nothing. Measured, twice: `posted: true`, `woke: null`, and the lease still `holding` afterwards.
+  **An escalation can also be answered from above.** When the commissioner of a thread above it
+  writes in that thread and asks it again — the requester replying on a channel thread, which
+  restarts an ordered run in new step threads — the escalation counts as answered, even though
+  nothing is ever written in the escalating step's own thread again. Both are needed: the engine
+  moving a register on its own, with no word from the commissioner, answers nothing. This holds for
+  an escalation only. A question is answered in its own thread, never from above. While a copy is
+  held for a hand-back with no thread open, `nxc status` names it.
 - **An unanswered escalation does not hold the queue for ever.** If — and only if — **another
   operation is waiting**, a 30-minute clock starts. When it runs out, that operation's work is
   committed to a branch (untracked files included; anything your `.gitignore` excludes is left in the

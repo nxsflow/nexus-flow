@@ -594,6 +594,20 @@ fn take_queue_head(conn: &Connection) -> Result<Option<QueuedTrigger>> {
 /// head, exactly as before, and scope-awareness applies only afterwards. No claim area can jump the
 /// queue by having more members on it.
 ///
+/// **One exception to that order: the OUTGOING holder's own entries go last** (nxf 6j6v.9g8j).
+/// Since that item the queue can hold entries of the area that holds the copy: a later step of an
+/// ordered run that waits for the step before it, which `orchestration::release_and_fire` puts back
+/// in line instead of starting it beside that step. Such an entry has usually waited longer than
+/// any rival, because it queued behind the PREVIOUS holder. By plain order it would then win the
+/// copy back for the very operation that is giving it up, and a reclaim that exists to hand the
+/// copy to a rival would hand it straight back. So the head is the first entry of ANOTHER area. The
+/// outgoing area's own entries are taken only when nobody else is waiting. All of this is the
+/// `scope_key = ?1` term at the front of the `ORDER BY`.
+///
+/// **The whole area is still taken, steps of one ordered run included.** Which of them may START
+/// is decided in `orchestration::release_and_fire`, because that needs the declared channel and
+/// the worker's liveness answer, and this module has neither.
+///
 /// **Two statements, so this is for callers that already hold a write transaction** — today
 /// [`hand_the_working_tree_on`], which both hand-off entrances run inside their own `BEGIN
 /// IMMEDIATE`. Reading
@@ -601,11 +615,12 @@ fn take_queue_head(conn: &Connection) -> Result<Option<QueuedTrigger>> {
 /// which is the whole hazard [`ChatStore::take_working_tree_queue`]'s single statement exists to
 /// avoid. `DELETE ... RETURNING` makes no promise about the ORDER it yields rows in, so the result
 /// is sorted back into the queue's own order rather than trusting it.
-fn take_queue_scope(conn: &Connection) -> Result<Vec<QueuedTrigger>> {
+fn take_queue_scope(conn: &Connection, outgoing: &str) -> Result<Vec<QueuedTrigger>> {
     let head: Option<String> = conn
         .query_row(
-            "SELECT scope_key FROM working_tree_queue ORDER BY priority, enqueued_at, id LIMIT 1",
-            [],
+            "SELECT scope_key FROM working_tree_queue
+             ORDER BY (scope_key = ?1), priority, enqueued_at, id LIMIT 1",
+            params![outgoing],
             |r| r.get(0),
         )
         .optional()?;
@@ -677,12 +692,16 @@ enum WhyTheLeaseIsForfeit {
 ///
 /// An empty queue writes nothing at all: the lease row stays deleted and the working copy is free,
 /// which is the whole of what a release with nobody waiting means.
+///
+/// `outgoing` is the key whose row the caller has just deleted; its own queued entries go last
+/// ([`take_queue_scope`] says why).
 fn hand_the_working_tree_on(
     tx: &Connection,
+    outgoing: &str,
     now: &str,
     granted_expires: &str,
 ) -> Result<Vec<QueuedTrigger>> {
-    let taken = take_queue_scope(tx)?;
+    let taken = take_queue_scope(tx, outgoing)?;
     if let Some(head) = taken.first() {
         // A plain INSERT rather than an upsert: both callers have just deleted the row in this same
         // transaction, so a conflict here would mean the delete did not do what its own return
@@ -694,6 +713,17 @@ fn hand_the_working_tree_on(
         )?;
     }
     Ok(taken)
+}
+
+/// **A hand-back that holds the working copy** (nxf 6j6v.ys54) — what
+/// [`ChatStore::unanswered_hand_back`] found: the thread whose last reply handed the task back, and
+/// that reply's kind label. Crate-private; the release path names it when it keeps the copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandBack {
+    /// The thread the hand-back was written in.
+    pub(crate) thread: String,
+    /// The raw kind label of its last reply — `escalation` or `question`.
+    pub(crate) kind: String,
 }
 
 /// Whether a reply of this KIND hands the task back instead of concluding it (nxf 6j6v.1xw1) —
@@ -1109,7 +1139,7 @@ impl ChatStore {
         // nothing left for the tick's withdrawn occasion to park — and a marker left standing would
         // park this key's NEXT claim the moment it took the copy.
         forget_withdrawn_holder(&tx, &scope_key)?;
-        let next = hand_the_working_tree_on(&tx, &now, &granted_expires)?;
+        let next = hand_the_working_tree_on(&tx, &scope_key, &now, &granted_expires)?;
         tx.commit()?;
         Ok(next)
     }
@@ -1229,7 +1259,7 @@ impl ChatStore {
         // marker with it (nxf 6j6v.b9nf), for the release's reason too.
         crate::park::forget_park_refusal(&tx, holder_key)?;
         forget_withdrawn_holder(&tx, holder_key)?;
-        let next = hand_the_working_tree_on(&tx, &now, &granted_expires)?;
+        let next = hand_the_working_tree_on(&tx, holder_key, &now, &granted_expires)?;
         tx.commit()?;
         Ok(next)
     }
@@ -1468,8 +1498,44 @@ impl ChatStore {
         Ok(self.connection().last_insert_rowid())
     }
 
+    /// **The first entry that is waiting for the working copy**: the queue's head among the
+    /// entries of every area EXCEPT the one that holds the lease row (nxf 6j6v.9g8j). `None` when
+    /// nobody else is waiting.
+    ///
+    /// Every question of the form "is somebody waiting for this copy?" asks this, not
+    /// [`Self::peek_working_tree_queue`]: the contention memo, the park and sweep occasions, and
+    /// the fairness gate of a newcomer's acquire. Until 6j6v.9g8j the two were the same read,
+    /// because the queue only held entries of areas that did NOT hold the copy. Now the holder can
+    /// have entries of its own in line: a later step of an ordered run that waits for the step
+    /// before it (`orchestration::release_and_fire`). That entry waits for its PREDECESSOR, not for
+    /// the copy, because its area already has the copy. Counting it as a rival would let an
+    /// operation contend with itself and park its own work to hand the copy to its own next step.
+    ///
+    /// Measured against the lease ROW, expired or not, for the same reason: an expired holder's own
+    /// later step is still not somebody else who wants the copy.
+    pub fn first_waiting_for_the_working_tree(&self) -> Result<Option<QueuedTrigger>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {QUEUE_COLS} FROM working_tree_queue
+                     WHERE scope_key NOT IN (
+                         SELECT scope_key FROM working_tree_lease WHERE tree = 'default'
+                     )
+                     ORDER BY priority, enqueued_at, id
+                     LIMIT 1"
+                ),
+                [],
+                queued_trigger_from_row,
+            )
+            .optional()?)
+    }
+
     /// The queue's current head — the entry [`Self::take_working_tree_queue`] would return — without
     /// consuming it. `None` when the queue is empty.
+    ///
+    /// It counts the holder's own waiting entries too. To ask whether somebody ELSE is waiting for
+    /// the copy, use [`Self::first_waiting_for_the_working_tree`].
     pub fn peek_working_tree_queue(&self) -> Result<Option<QueuedTrigger>> {
         Ok(self
             .connection()
@@ -1500,6 +1566,22 @@ impl ChatStore {
         let mut st = conn.prepare(&sql)?;
         let rows = st
             .query_map([], queued_trigger_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The queued triggers of ONE claim area, in take order (nxf 6j6v.9g8j) — what
+    /// `orchestration::start_the_steps_whose_turn_has_come` asks on every reply, session end and
+    /// tick, filtered in SQL rather than by reading the whole queue.
+    pub fn working_tree_queue_of(&self, scope_key: &str) -> Result<Vec<QueuedTrigger>> {
+        let sql = format!(
+            "SELECT {QUEUE_COLS} FROM working_tree_queue WHERE scope_key = ?1
+             ORDER BY priority, enqueued_at, id"
+        );
+        let conn = self.connection();
+        let mut st = conn.prepare(&sql)?;
+        let rows = st
+            .query_map(params![scope_key], queued_trigger_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -1620,6 +1702,19 @@ impl ChatStore {
         let retry_at = to_utc_whole_seconds(retry_at)?;
         self.connection().execute(
             "UPDATE failed_starts SET retry_at = ?2 WHERE session = ?1",
+            params![session, retry_at],
+        )?;
+        Ok(())
+    }
+
+    /// **Hand a claimed retry back unattempted**, due again at `retry_at` (nxf 6j6v.9g8j). The tick
+    /// claimed it, then found an earlier step of its ordered run still pending, so it was not
+    /// started. Its attempts are not counted, and the in-flight mark goes, so it is due at
+    /// `retry_at` rather than at the claim's hold.
+    pub fn postpone_failed_start(&mut self, session: &str, retry_at: &str) -> Result<()> {
+        let retry_at = to_utc_whole_seconds(retry_at)?;
+        self.connection().execute(
+            "UPDATE failed_starts SET retry_at = ?2, in_flight_until = NULL WHERE session = ?1",
             params![session, retry_at],
         )?;
         Ok(())
@@ -1936,6 +2031,13 @@ impl ChatStore {
     /// `…::an_answered_escalation_releases_the_claim_before_the_two_hour_bound` and
     /// `…::an_answered_question_deep_in_the_subtree_clears_the_hold_before_the_bound`.
     ///
+    /// **The re-declaration may land ABOVE the hand-back rather than on it** (nxf 6j6v.ys54). An
+    /// ordered run answered on its channel thread starts again in NEW step threads, so the
+    /// escalating step's own watermark never moves. A declaration on any thread above an
+    /// ESCALATION, after it, answers it too (a question waits in its own thread) — see
+    /// [`Self::unanswered_hand_back`], and
+    /// `an_escalation_answered_above_lets_the_copy_go.rs` for the measured case.
+    ///
     /// **That door is the channel one, and it is not the only thread in an area** (branch re-review
     /// of this item). A hand-back written on an ad-hoc DM — a thread a session opened out of its own
     /// conversation rather than a supervisor-opened member thread — has no supervisor to re-declare
@@ -1970,12 +2072,136 @@ impl ChatStore {
     /// reply of a chain, not every reply in it. Its width is the claim area, which is bounded by how
     /// many threads one chain opened.
     pub(crate) fn threads_handed_back(&self, threads: &[String]) -> Result<bool> {
+        Ok(self.unanswered_hand_back(threads)?.is_some())
+    }
+
+    /// **WHICH hand-back in `threads` holds the working copy**, or `None` — the one derivation
+    /// behind [`Self::threads_handed_back`], with the thread and the kind its answer is about (nxf
+    /// 6j6v.ys54). The release path names it when it says no, so a delivered operation that keeps
+    /// the copy says why.
+    ///
+    /// **A hand-back is unanswered until it is asked again where its answer comes from.** A
+    /// thread's last reply hands the task back ([`hands_the_task_back`]), and its own turn was not
+    /// declared again after that reply. The thread's own re-declaration was always the door
+    /// ([`ChatStore::last_reply_kind`] reads only the current turn). An ESCALATION has a second
+    /// door, and before 6j6v.ys54 this missed it: a thread ABOVE it in the claim area whose
+    /// COMMISSIONER wrote in it after the escalation, and whose turn was declared again after it
+    /// ([`Self::escalation_is_answered_above`]).
+    ///
+    /// **Only an escalation, because only an escalation is answered from above.** The guide says
+    /// so in as many words: `--escalate` goes UP, to whoever commissioned the sender, and the
+    /// commissioner continuing above it is the answer. A QUESTION is not handed upward; it waits
+    /// in its own thread, and a level above that is asked again about something else has not
+    /// answered it. `an_escalating_board_is_handed_back_and_a_session_scope_has_nothing_to_ask`
+    /// pins that: a question on a DM under a board still holds after the board is asked again and
+    /// reports.
+    ///
+    /// **Measured in the `agents` workspace on 2026-10-10 (0.206.1).** A verify step of an ordered
+    /// run escalated. The requester answered on the channel thread above it, which is how an
+    /// escalation is answered: the reply re-declared the channel thread and the run started again
+    /// in NEW sibling step threads, which delivered. Nothing was ever written again in the
+    /// escalating step's thread, so its escalation stayed its last reply, and the copy was held to
+    /// the lease's bound behind a finished operation. A re-declaration above the hand-back, after
+    /// it, is that answer.
+    ///
+    /// **Why not "anything newer in the area"**, which is what
+    /// [`Self::threads_await_an_unanswered_hand_back`] asks for the park. Here it would release
+    /// early, in the shape `working_tree_claim_scope.rs::
+    /// a_question_two_levels_down_holds_the_claim_although_every_thread_above_it_consolidated`
+    /// pins: the levels above a hand-back can CONSOLIDATE, so new replies travel UP past it while
+    /// nobody answered it. Those replies discharge turns; they declare none, and none of them is
+    /// written by the commissioner of the thread it lands in.
+    /// The park asks the looser question on purpose (see its own doc); each is the safe direction
+    /// for its own mechanism, so the two stay two.
+    ///
+    /// **What it still holds, and what it may now release.** A hand-back nobody answered holds the
+    /// copy exactly as before, and so does one answered on an ad-hoc DM without a re-declaration
+    /// (see [`Self::work_scope_handed_back`]), and so does every question until its own thread is
+    /// asked again. What it releases is an escalation above which the commissioner asked again,
+    /// once that new turn has been answered too — the outstanding rule still holds the copy while
+    /// it has not.
+    ///
+    /// Only threads INSIDE `threads` are walked, so a declaration outside the claim area answers
+    /// nothing in it. Only a declaration an action may follow counts
+    /// ([`ChatStore::declared_after`]).
+    pub(crate) fn unanswered_hand_back(&self, threads: &[String]) -> Result<Option<HandBack>> {
+        let area: BTreeSet<&str> = threads.iter().map(String::as_str).collect();
         for thread_id in threads {
-            if let Some(kind) = self.last_reply_kind(thread_id)? {
-                if hands_the_task_back(&kind) {
-                    return Ok(true);
-                }
+            let Some((kind, lamport, site)) = self.last_reply_at(thread_id)? else {
+                continue;
+            };
+            if !hands_the_task_back(&kind) {
+                continue;
             }
+            if kind == crate::model::KIND_ESCALATION
+                && self.answered_from_above(thread_id, lamport, site, &area)?
+            {
+                continue;
+            }
+            return Ok(Some(HandBack {
+                thread: thread_id.clone(),
+                kind,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// **Was the escalation that is `thread_id`'s last reply answered from above?** (nxf 6j6v.ys54)
+    /// — `false` when the thread's last reply is no escalation at all, or when nothing above it
+    /// inside `area` answered it. The second door of [`Self::unanswered_hand_back`], and the rule
+    /// `nxc status` reads for `needs_decision`, so the two cannot disagree about one escalation.
+    pub(crate) fn escalation_is_answered_above(
+        &self,
+        thread_id: &str,
+        area: &[String],
+    ) -> Result<bool> {
+        let Some((kind, lamport, site)) = self.last_reply_at(thread_id)? else {
+            return Ok(false);
+        };
+        if kind != crate::model::KIND_ESCALATION {
+            return Ok(false);
+        }
+        let area: BTreeSet<&str> = area.iter().map(String::as_str).collect();
+        self.answered_from_above(thread_id, lamport, site, &area)
+    }
+
+    /// Whether a thread above `thread_id`, inside `area`, answered the reply at `(lamport, site)`:
+    /// its commissioner wrote in it after that reply ([`ChatStore::commissioner_wrote_after`]) AND
+    /// its turn was declared again after it ([`ChatStore::declared_after`]).
+    ///
+    /// **Both, because either alone is not an answer** (review of PR #40, Integrity #1). The engine
+    /// writes the register on its own — a channel concluding retargets its thread, a withdrawal
+    /// discharges it — and a supervisor re-declaration with no word from the commissioner answered
+    /// nobody. A commissioner's note that asks nobody again set no work going. The requester
+    /// answering an escalation does both in one reply.
+    ///
+    /// **Any such answer counts, whatever it says.** The engine cannot read the reply, so a
+    /// commissioner who asks the level above again about something else has answered the
+    /// escalation too. That is the guide's direction rule taken at its word — an escalation goes up
+    /// to the commissioner, and the commissioner carrying on is the answer — and it is pinned by
+    /// `working_tree::tests::a_commissioner_who_asks_again_above_answers_the_escalation_whatever_it_says`.
+    ///
+    /// The walk stops at the edge of the area, and at a thread it has already seen, so a cycle in
+    /// the parent edges cannot hang it.
+    fn answered_from_above(
+        &self,
+        thread_id: &str,
+        lamport: i64,
+        site: i64,
+        area: &BTreeSet<&str>,
+    ) -> Result<bool> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut above = self.thread_parent(thread_id)?;
+        while let Some(parent) = above {
+            if !area.contains(parent.as_str()) || !seen.insert(parent.clone()) {
+                break;
+            }
+            if self.declared_after(&parent, lamport, site)?
+                && self.commissioner_wrote_after(&parent, lamport, site)?
+            {
+                return Ok(true);
+            }
+            above = self.thread_parent(&parent)?;
         }
         Ok(false)
     }
@@ -1984,9 +2210,10 @@ impl ChatStore {
     /// the predicate the park's contention clock is derived from, and one question finer than
     /// [`Self::threads_handed_back`] next door.
     ///
-    /// That one asks *what did the last REPLY say*, and its answer stays `true` for as long as the
-    /// escalating party has not replied again — which is correct for the LEASE, whose rule is that a
-    /// hand-back does not release. It is wrong for a PARK. A human who answers an escalation puts the
+    /// That one asks *what did the last REPLY say*, and its answer stays `true` until the escalating
+    /// party replies again or, for an escalation, its commissioner answers above it (nxf
+    /// 6j6v.ys54) — which is correct for the LEASE, whose rule is that a hand-back does not
+    /// release. It is wrong for a PARK. A human who answers an escalation puts the
     /// operation back to work without becoming an expected replier, so the escalation goes on being
     /// the last reply while somebody is once again writing in the working copy — and parking there
     /// would commit an operation's work out from under the session that is doing it.
@@ -3337,6 +3564,107 @@ mod tests {
     }
 
     #[test]
+    fn the_outgoing_holders_own_waiting_step_goes_after_every_rival() {
+        // nxf 6j6v.9g8j. A later step of the holder's own ordered run waits in line under the
+        // holder's key, and it queued before the rival did. A hand-off away from that holder must
+        // not hand the copy straight back to it.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-rival", "rival"), LATER)
+            .unwrap();
+
+        let promoted = store
+            .release_working_tree_and_take_next(&holder, NOW, EXPIRES)
+            .unwrap();
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["rival"],
+            "the rival gets the copy, although the holder's own step waited longer"
+        );
+
+        // When nobody else is waiting, the holder's own entries ARE the queue, and they go next.
+        let rival = WorkScope::Thread("th-rival".to_string());
+        let promoted = store
+            .release_working_tree_and_take_next(&rival, NOW, EXPIRES)
+            .unwrap();
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["verifier"]
+        );
+    }
+
+    #[test]
+    fn a_reclaim_hands_the_copy_to_the_first_of_two_rivals_and_not_back_to_the_expired_holder() {
+        // Review of PR #38, Test Quality #3: the outgoing-last order on the RECLAIM path, with two
+        // rivals in line behind the expired holder's own waiting step.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-first", "first"), EXPIRES)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-second", "second"), LATER)
+            .unwrap();
+
+        let promoted = store
+            .reclaim_expired_working_tree_and_take_next("thread:th-holder", EXPIRES, LATER, LATER)
+            .unwrap();
+
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["first"],
+            "the first rival in line gets the copy, not the expired holder's own step"
+        );
+        assert_eq!(
+            store
+                .list_working_tree_queue()
+                .unwrap()
+                .into_iter()
+                .map(|q| q.role)
+                .collect::<Vec<_>>(),
+            vec!["verifier".to_string(), "second".to_string()],
+            "and both others keep their places"
+        );
+    }
+
+    #[test]
+    fn the_holders_own_waiting_step_is_nobody_waiting_for_the_copy() {
+        // nxf 6j6v.9g8j. The contention memo, the park and the sweep all ask "is somebody waiting
+        // for this copy?". The holder's own later step waits for its predecessor, not for the copy.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        assert_eq!(store.first_waiting_for_the_working_tree().unwrap(), None);
+        assert!(
+            store.peek_working_tree_queue().unwrap().is_some(),
+            "the plain head still counts it"
+        );
+
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-rival", "rival"), LATER)
+            .unwrap();
+        assert_eq!(
+            store
+                .first_waiting_for_the_working_tree()
+                .unwrap()
+                .map(|q| q.role),
+            Some("rival".to_string())
+        );
+    }
+
+    #[test]
     fn a_second_release_of_the_same_scope_takes_nothing() {
         // **nxf 6j6v.jzaj, the mechanism its probe came back with.** Two `nxc reply` processes can
         // both decide that the same claim area is finished — each persists its own message, and if
@@ -4596,6 +4924,190 @@ mod tests {
         assert!(!store
             .work_scope_handed_back(&WorkScope::Session("s-1".to_string()))
             .unwrap());
+    }
+
+    // ---- an escalation answered from above (nxf 6j6v.ys54, review of PR #40) ------------------
+
+    /// A board opened by `local/pm`, a DM under it, and an escalation on the DM — the shape the
+    /// review of PR #40 named: whatever happens on the board afterwards decides whether the DM's
+    /// escalation was answered.
+    fn an_escalation_on_a_dm_under_a_board(store: &mut ChatStore) {
+        open_under(store, "th-board", "local/pm", None);
+        open_under(store, "th-dm", "local/coder", Some("th-board"));
+        expect_reply(store, "th-board", &["local/coder"]);
+        expect_reply(store, "th-dm", &["local/helper"]);
+        answer_of_kind(
+            store,
+            "th-dm",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+    }
+
+    fn board_area() -> WorkScope {
+        WorkScope::Thread("th-board".to_string())
+    }
+
+    #[test]
+    fn a_supervisor_re_declaration_above_an_escalation_answers_nothing() {
+        // THE DECISION the review asked for (Integrity #1): the engine moving the register above an
+        // escalation — a channel retargeting its thread as it concludes, a supervisor asking a
+        // member again — is not the commissioner answering it. Nobody wrote a word to the one who
+        // escalated; the copy stays.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        assert!(
+            store.work_scope_handed_back(&board_area()).unwrap(),
+            "a re-declaration with no word from the board's commissioner answered nobody"
+        );
+    }
+
+    #[test]
+    fn a_commissioner_note_that_asks_nobody_again_answers_nothing() {
+        // The other half of "both": the commissioner wrote on the board, but asked nobody again,
+        // so no work was set going and the escalation still stands.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        assert!(store.work_scope_handed_back(&board_area()).unwrap());
+    }
+
+    #[test]
+    fn a_commissioner_who_asks_again_above_answers_the_escalation_whatever_it_says() {
+        // THE OPEN DECISION, pinned (review of PR #40, Test Quality #3): the engine cannot read
+        // the reply, so a commissioner who writes on the board and asks it again has answered the
+        // escalation below it — even if the reply was about something else. That is the guide's
+        // direction rule taken at its word: an escalation goes up, and the commissioner carrying on
+        // is the answer.
+        let mut store = ChatStore::open_in_memory(1);
+        an_escalation_on_a_dm_under_a_board(&mut store);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        assert!(
+            !store.work_scope_handed_back(&board_area()).unwrap(),
+            "the commissioner wrote and asked again: the escalation is answered"
+        );
+    }
+
+    #[test]
+    fn a_question_is_not_answered_from_above_even_by_its_commissioner() {
+        // The question branch at the derivation: the same answer from above that clears an
+        // escalation leaves a question standing — it waits in its own thread.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-board", "local/pm", None);
+        open_under(&mut store, "th-dm", "local/coder", Some("th-board"));
+        expect_reply(&mut store, "th-dm", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-dm",
+            "local/helper",
+            crate::model::MessageKind::Question,
+        );
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-board", &["local/coder"]);
+        answer_of_kind(
+            &mut store,
+            "th-board",
+            "local/coder",
+            crate::model::MessageKind::Report,
+        );
+        let held = store
+            .unanswered_hand_back(&store.work_scope_threads(&board_area()).unwrap())
+            .unwrap();
+        assert_eq!(
+            held,
+            Some(HandBack {
+                thread: "th-dm".to_string(),
+                kind: "question".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_answer_two_levels_up_counts_and_one_outside_the_claim_area_does_not() {
+        // th-top → th-mid → th-low, the escalation on th-low, the answer on th-top.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-top", "local/pm", None);
+        open_under(&mut store, "th-mid", "local/lead", Some("th-top"));
+        open_under(&mut store, "th-low", "local/coder", Some("th-mid"));
+        expect_reply(&mut store, "th-low", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-low",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+        answer_of_kind(
+            &mut store,
+            "th-top",
+            "local/pm",
+            crate::model::MessageKind::Info,
+        );
+        expect_reply(&mut store, "th-top", &["local/lead"]);
+
+        assert!(
+            !store
+                .work_scope_handed_back(&WorkScope::Thread("th-top".to_string()))
+                .unwrap(),
+            "two levels up, inside the area, the answer counts"
+        );
+        assert!(
+            store
+                .work_scope_handed_back(&WorkScope::Thread("th-mid".to_string()))
+                .unwrap(),
+            "but an area that starts at th-mid does not reach th-top, so nothing in it answered"
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_the_parent_edges_ends_the_walk_instead_of_hanging_it() {
+        // Two threads that name each other as parent. The walk meets th-a again and stops.
+        let mut store = ChatStore::open_in_memory(1);
+        open_under(&mut store, "th-a", "local/pm", Some("th-b"));
+        open_under(&mut store, "th-b", "local/pm", Some("th-a"));
+        expect_reply(&mut store, "th-a", &["local/helper"]);
+        answer_of_kind(
+            &mut store,
+            "th-a",
+            "local/helper",
+            crate::model::MessageKind::Escalation,
+        );
+        let threads = vec!["th-a".to_string(), "th-b".to_string()];
+        assert_eq!(
+            store.unanswered_hand_back(&threads).unwrap(),
+            Some(HandBack {
+                thread: "th-a".to_string(),
+                kind: "escalation".to_string(),
+            })
+        );
     }
 
     #[test]

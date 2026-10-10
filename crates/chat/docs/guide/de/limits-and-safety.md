@@ -177,7 +177,13 @@ der sie greift:
   geparkt hat. Die Warteschlange ist Wer-zuerst-kommt, und eine Freigabe befördert das ganze
   Anspruchsgebiet an der Spitze, nie einen einzelnen Eintrag: mehrere Mitglieder einer Auffächerung
   teilen sich einen Anspruch, und eines zu starten, während seine Geschwister geparkt bleiben,
-  verklemmt die Tafel.
+  verklemmt die Tafel. **Die Schritte eines geordneten Ablaufs starten trotzdem einer nach dem
+  anderen.** Warten zwei Schritte desselben Durchlaufs zusammen (`flow: sequential` oder `steps:`),
+  startet die Freigabe den früheren, und der spätere bleibt in der Warteschlange, bis der frühere
+  geantwortet hat oder sein Zeitfenster abgelaufen ist und seine Session vorbei ist. Ein früherer
+  Schritt, dessen Start gescheitert ist und erneut versucht wird, hält den späteren ebenso. Kann
+  der Worker nicht sagen, ob eine Session noch läuft, zählt sie als laufend, bis sie ihr Ende
+  meldet. Zwei Schritte eines Durchlaufs starten nie nebeneinander in einer Arbeitskopie.
 - **Was ihn freigibt.** Eine Antwort innerhalb des Gebiets gibt den Anspruch frei, wenn nichts in
   diesem Gebiet noch eine Antwort schuldet *und* das letzte Wort keine Rückgabe war. Eine
   **Eskalation hält den Anspruch** — die Frage wandert noch nach oben, die Aufgabe ist noch in der
@@ -189,6 +195,14 @@ der sie greift:
   Faden ist das erwartete Handle der Eskalierende selbst. Eine Antwort von jemand anderem, auch vom
   Eröffner, wird gepostet und bewegt nichts. Zweimal gemessen: `posted: true`, `woke: null`, und der
   Anspruch danach unverändert `holding`.
+  **Eine Eskalation kann auch von oben beantwortet werden.** Schreibt der Auftraggeber eines Fadens
+  darüber in diesen Faden und fragt ihn erneut — der Auftraggeber antwortet auf einem Kanal-Faden,
+  was einen geordneten Durchlauf in neuen Schritt-Fäden neu startet —, gilt die Eskalation als
+  beantwortet, auch wenn im Faden des eskalierenden Schritts nie wieder etwas geschrieben wird.
+  Beides ist nötig: Bewegt die Maschine ein Register von sich aus, ohne ein Wort des Auftraggebers,
+  beantwortet das nichts. Das gilt nur für eine Eskalation. Eine Frage wird in ihrem eigenen Faden
+  beantwortet, nie von oben. Solange eine Kopie für eine Rückgabe gehalten wird und kein Faden offen
+  ist, nennt `nxc status` sie.
 - **Eine unbeantwortete Eskalation hält die Warteschlange nicht ewig.** Wenn — und erst wenn — **ein
   anderer Vorgang wartet**, läuft eine Frist von 30 Minuten. Verstreicht sie, wird die Arbeit dieses
   Vorgangs auf einen Zweig committet (unversionierte Dateien eingeschlossen; was Ihre `.gitignore`
