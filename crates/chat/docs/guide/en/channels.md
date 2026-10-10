@@ -595,6 +595,21 @@ write to its own session transcript, so a member that is *working* is never stru
 while. What it protects against is a member that went silent. **An absolute instant arms no clock**
 and nothing moves it.
 
+**A window starts when the member's session starts.** A member that waits in line for the working
+copy has not been asked yet, so its window cannot run out while it waits, however long that is.
+The same holds for a member whose start failed and will be retried. When it starts, its window
+runs from that moment. A start that failed and will not be retried lapses as before.
+
+Nothing but the start ends such a wait, so the tick says so instead: once the window has passed,
+every tick that finds the member still waiting reports a `step_still_waiting` finding naming it.
+`nxc status` shows who holds the working copy; `nxc withdraw --thread <id>` takes the operation
+back. A board read with `nxc threads` still shows such a member as past its deadline, because that
+flag is the thread's own; the flow does not act on it while the member waits. The queue lives on
+this machine, so a synced replica cannot see that the member waits.
+
+This applies to a duration. An absolute instant names a moment whatever happens, so it does not
+move when the member starts.
+
 A value the grammar cannot read is a `validation` error naming the field and the value, refused
 before anything is persisted — never a silent "then there is no cap". Units are `s`, `m`, `h`, `d`,
 `w`.

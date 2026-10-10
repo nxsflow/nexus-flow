@@ -1978,7 +1978,10 @@ fn expired_but_still_writing(
 ///    between "the coder finished" and "the review is commissioned", and it is why the holder is a
 ///    chain rather than a session.
 /// 3. **Was the claim HANDED BACK rather than closed?** `ChatStore::threads_handed_back` (nxf
-///    6j6v.1xw1). Nothing outstanding is not the same as finished — see below.
+///    6j6v.1xw1). Nothing outstanding is not the same as finished — see below. An escalation whose
+///    commissioner wrote in a thread above it and asked it again counts as answered (nxf
+///    6j6v.ys54); `nxc status` names the one that holds the copy
+///    (`StatusOperation::held_by_hand_back`).
 ///
 /// **Questions 1-3 are asked of an already-resolved thread list, not of the scope**, which is why
 /// they name the `pub(crate)` predicates rather than the `pub`
@@ -2489,7 +2492,7 @@ fn fire_promoted(
     out: &mut Promotions,
 ) {
     let promoted = PromotedTrigger::of(entry);
-    match fire_queued_trigger(ctx, store, entry) {
+    match fire_queued_trigger(ctx, store, entry, &mut out.warnings) {
         // EXHAUSTIVE, with no `_` arm: a third admission is a compile error right here, so
         // whoever adds one has to decide what it means for a receipt — the same
         // construction `working_tree::hands_the_task_back` uses, and for the same reason. A
@@ -2670,10 +2673,12 @@ impl WaitingRoom {
 ///
 /// **Why the check is made here and not when the step was opened.** The supervisor already refuses
 /// to open the next step while the previous one is unanswered or its session runs (nxf 6j6v.10yb).
-/// Two steps reach the queue together only when the first one's answer window lapsed while it
-/// waited for the working copy (nxf 6j6v.1wep): the flow counted the silent step as settled and
-/// opened the next. Whatever 6j6v.1wep decides about that lapse, the hand-off is the last place
-/// that sees both entries before anything runs, and it must not start them side by side.
+/// In the field, two steps reached the queue together when the first one's answer window lapsed
+/// while it waited for the working copy: the flow counted the silent step as settled and opened
+/// the next. Since nxf 6j6v.1wep a queued step does not lapse ([`supervised_member_threads`]), so
+/// that route is closed; a step settled while its trigger still waits (an answer posted for it by
+/// hand) still opens the next one. The hand-off is the last place that sees both entries before
+/// anything runs, and it must not start them side by side.
 fn one_step_per_ordered_run(
     ctx: &Ctx,
     store: &ChatStore,
@@ -3075,7 +3080,7 @@ fn retry_the_failed_starts(ctx: &Ctx, store: &mut ChatStore) -> Vec<FailedConseq
             }
             continue;
         }
-        match fire_queued_trigger(ctx, store, &entry) {
+        match fire_queued_trigger(ctx, store, &entry, &mut warnings) {
             Ok(TriggerAdmission::Spawned {
                 declaration_changed,
             }) => {
@@ -5229,6 +5234,7 @@ fn fire_queued_trigger(
     ctx: &Ctx,
     store: &mut ChatStore,
     entry: &QueuedTrigger,
+    noticed: &mut Vec<FailedConsequence>,
 ) -> Result<TriggerAdmission> {
     // **Re-composed against the catalogue this entry's OWN operation is bound to** (nxf 6j6v.n92p).
     // The queue stores a trigger's INPUTS and never a composed prompt, precisely so the prompt is
@@ -5255,6 +5261,34 @@ fn fire_queued_trigger(
         &entry.role,
         ctx.now,
     )?;
+    // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
+    // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
+    // tree has not run a single instruction, and it produces no transcript to reset its own clock
+    // with. Restarting here is the same shape as the turn-two restart in
+    // `supervisor_hand_out_next_turn`: the member is being put to work, so its window runs from now.
+    // While it waited, the supervisor did not count it as lapsed ([`supervised_member_threads`],
+    // nxf 6j6v.1wep). A no-op for every trigger that is not a channel member.
+    //
+    // **BEFORE the trigger, since nxf 6j6v.1wep**, because the trigger's own acquire derives the
+    // lease bound from the area's windows ([`operation_lease_expiry`]). Restarted after it, the
+    // bound came from the window the member was given when it was queued — measured, a lease that
+    // was already expired the moment the hand-off granted it. Restarted here, the started member's
+    // window is the latest in its area, so the bound runs at least to the end of it.
+    //
+    // If the trigger then fails or is queued again, the restarted clock does no harm: a queued
+    // member is not counted as lapsed and is restarted again when it really starts, and a failed
+    // start was never asked either.
+    //
+    // **Best-effort.** A failure costs this member's restart, not the start: it breadcrumbs like
+    // its siblings (the transcript's own reset, both scheduling sites) and never returns early,
+    // which keeps every failure this function RETURNS ahead of the trigger.
+    if let Err(e) = store.reset_member_deadlines_of_session(&entry.session, ctx.now) {
+        eprintln!(
+            "warning: restarting the channel timeout of session {} before it starts failed: {e}; \
+             it may time out on the window it was given when it was queued",
+            entry.session
+        );
+    }
     let admission = trigger_role(
         ctx,
         store,
@@ -5279,27 +5313,38 @@ fn fire_queued_trigger(
             queued_since: entry.enqueued_at.as_deref(),
         },
     )?;
-    // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
-    // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
-    // tree has not run a single instruction, and it produces no transcript to reset its own clock
-    // with. If the queue outlasts the window the member reads `stale`, `member_set_is_settled` says
-    // the SET is settled, the channel consolidates WITHOUT it — and only then does this fire, so the
-    // member works for an answer nobody will collect. Restarting here is the same shape as the
-    // turn-two restart in `supervisor_hand_out_next_turn`: the member has just been put to work, so
-    // its window runs from now. A no-op for every trigger that is not a channel member.
+    // **And the clock that watches the restarted window** (nxf 6j6v.1wep). The tick armed at
+    // fan-out fired at the old instant, found the member still queued and declined, and a window
+    // that has passed is never re-armed. Without this, a member that starts and then falls silent
+    // is noticed only when something else happens to tick its channel.
     //
-    // **Best-effort, and that is what keeps the caller's breadcrumb true.** Everything above this
-    // line fails BEFORE `trigger_role`, so the caller's "nothing is running for it" describes the
-    // situation exactly. Propagating from here would make it a lie: the trigger ran two lines ago
-    // and the member is working. So this breadcrumbs like its siblings (the transcript's own reset,
-    // both scheduling sites) and returns `Ok` — the cost of a failure is this member's restart, not
-    // the start it just got.
-    if let Err(e) = store.reset_member_deadlines_of_session(&entry.session, ctx.now) {
-        eprintln!(
-            "warning: the trigger for session {} started, but restarting its channel timeout \
-             failed: {e}; it may time out on the window it was given while it waited",
-            entry.session
-        );
+    // Only for a start that HAPPENED: a member queued again or not started has no window running,
+    // and the start that does happen later arms it then. A slot under no channel thread has no
+    // clock to watch, and [`rearm_after_the_members_moved`] arms nothing for a channel whose
+    // members declare no window.
+    //
+    // **Best-effort, after the trigger, and reported** (review of PR #39, Code Quality #2): a
+    // failure is a [`ConsequenceClass::TickUnscheduled`] finding in `noticed`, which both callers
+    // carry onto a receipt. This runs under the unattended tick too, where stderr alone is read by
+    // nobody. Nothing here fails the start, which has already happened.
+    if matches!(admission, TriggerAdmission::Spawned { .. }) {
+        if let Some(thread) = entry.thread.as_deref() {
+            match supervising_parent(store, thread) {
+                Ok(Some(channel_thread)) => {
+                    noticed.extend(rearm_after_the_members_moved(ctx, store, &channel_thread));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let detail = format!(
+                        "the trigger on thread {thread} started, but its channel could not be read \
+                         to schedule the timeout tick for its restarted window: {e} — run `nxc tick \
+                         --thread {thread}` to check it by hand"
+                    );
+                    eprintln!("warning: {detail}");
+                    noticed.push(FailedConsequence::tick_unscheduled(thread, detail));
+                }
+            }
+        }
     }
     Ok(admission)
 }
@@ -8285,6 +8330,38 @@ struct SupervisorRun {
 /// thread of this channel, and nothing else can be (no declared role handle can name that identity).
 /// A child opened by anybody else — a member that started its own conversation out of its thread —
 /// is somebody's else's work hanging in the same tree and is not part of this quorum.
+///
+/// **A member whose trigger still waits in the working-copy queue is never `stale` here** (nxf
+/// 6j6v.1wep). It has not been asked: no session runs for it, so it cannot have been silent for
+/// its window. That covers a step queued behind another operation's lease and a later step of an
+/// ordered run put back in line at the hand-off (nxf 6j6v.9g8j's `Promotions::deferred`), because
+/// both are rows of the same queue. Its window starts when it starts:
+/// [`fire_queued_trigger`] restarts the member's clock at that moment.
+///
+/// **A failed start with a retry still due counts as waiting too** (review of PR #39, Code Quality
+/// #1). It is off the queue but not started, and the tick will start it: had its window lapsed in
+/// between, the flow would open the next step and the retry would then start the earlier step
+/// beside it. A failed start with NO retry due (the bound is reached, or waiting cannot fix the
+/// failure) will never start on its own, so it lapses as before. See
+/// [`members_and_the_ones_still_waiting`].
+///
+/// **What ends such a wait, now that the lapse does not.** The copy coming free (the holder ends,
+/// or its lease is reclaimed or parked), the retry running, or `nxc withdraw` on the operation. A
+/// queue row that never fires would hold the flow for as long as it stays; the tick says so on
+/// every receipt that declines because of it ([`ConsequenceClass::StepStillWaiting`]), and the
+/// queue itself is bounded by the holder's lease and the park and sweep occasions behind it.
+///
+/// Measured in the `agents` workspace on 2026-10-09/10: a build step queued for six hours behind
+/// another operation's lease reached its window, the tick read it as a lapse, and the flow opened
+/// the verify step for a build that never ran.
+///
+/// **This is the supervisor's reading of its set, not a second `stale` derivation.**
+/// [`ThreadQuorum::stale`] is still computed exactly as M2 §4.3 states, and every reader outside
+/// the supervisor (`nxc threads`, `nxc status`, the opener's wake) sees it unchanged. What changes
+/// is that the set the supervisor waits for does not count a member that was never started as
+/// settled — the same kind of question the liveness gate of nxf 6j6v.10yb asks beside it. A step
+/// whose session DID start and then fell silent is not in the queue, so it lapses on its declared
+/// `timeout:` exactly as before.
 fn supervised_member_threads(
     ctx: &Ctx,
     store: &ChatStore,
@@ -8301,9 +8378,54 @@ fn supervised_member_threads_at(
     store: &ChatStore,
     channel_thread: &str,
 ) -> Result<Vec<ThreadQuorum>> {
+    Ok(members_and_the_ones_still_waiting(now, store, channel_thread)?.0)
+}
+
+/// [`supervised_member_threads_at`], plus the members it did NOT count as lapsed although their
+/// window has passed, because their start still waits ([`ConsequenceClass::StepStillWaiting`]).
+/// The tick reports those; everybody else only needs the set.
+///
+/// **What "still waits" is**: a row in the working-copy queue, or a failed start on record whose
+/// retry is still due (`retry_at` set). A failed start with no retry due — the bound is reached, or
+/// the failure is not one waiting can fix — will never start on its own, so it lapses as before:
+/// holding it would stall the run with only a withdraw able to end the wait.
+fn members_and_the_ones_still_waiting(
+    now: &str,
+    store: &ChatStore,
+    channel_thread: &str,
+) -> Result<(Vec<ThreadQuorum>, Vec<String>)> {
     let children = store.supervised_children(channel_thread)?;
     let ids: Vec<&str> = children.iter().map(String::as_str).collect();
-    store.thread_quorums(&ids, now)
+    let mut members = store.thread_quorums(&ids, now)?;
+    let mut still_waiting = Vec::new();
+    if members.iter().any(|m| m.stale) {
+        let waiting = threads_whose_start_still_waits(store)?;
+        for member in &mut members {
+            if member.stale && waiting.contains(&member.thread_id) {
+                member.stale = false;
+                still_waiting.push(member.thread_id.clone());
+            }
+        }
+    }
+    Ok((members, still_waiting))
+}
+
+/// The threads whose start has not happened yet and still will: an entry in the working-copy
+/// queue, or a failed start with a retry due (nxf 6j6v.1wep).
+fn threads_whose_start_still_waits(store: &ChatStore) -> Result<HashSet<String>> {
+    let mut waiting: HashSet<String> = store
+        .list_working_tree_queue()?
+        .into_iter()
+        .filter_map(|q| q.thread)
+        .collect();
+    waiting.extend(
+        store
+            .failed_starts()?
+            .into_iter()
+            .filter(|f| f.retry_at.is_some())
+            .filter_map(|f| f.thread),
+    );
+    Ok(waiting)
 }
 
 /// The declared channel a thread belongs to, by the `decl:<name>` convention
@@ -11218,6 +11340,14 @@ pub enum ConsequenceClass {
     /// and `nxc status` shows it waiting — but a caller is told rather than left to assume it
     /// started. Fields as for [`StartFailed`](Self::StartFailed).
     StartRequeued,
+    /// **A step's declared window has passed while its start still waits** (nxf 6j6v.1wep) — in
+    /// the working-copy queue, or for the retry of a start that failed. The step has not been
+    /// asked, so it does not lapse and the flow waits for it ([`supervised_member_threads`]). This
+    /// says so on every tick that finds it, because the lapse used to be what ended such a wait
+    /// and nothing else does now: the wait ends when the copy comes free (`nxc status` shows who
+    /// holds it), when the retry runs, or when `nxc withdraw` takes the operation back.
+    /// [`FailedConsequence::thread`] is the step's slot; `session` and `reason` are `None`.
+    StepStillWaiting,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -11291,6 +11421,20 @@ impl FailedConsequence {
 
     /// The release question could not be answered (nxf 6j6v.r91p; since 6j6v.br25 on every path that
     /// asks it). `thread` is the thread the question was asked for.
+    /// A step whose window passed while its start still waits (nxf 6j6v.1wep) — see
+    /// [`ConsequenceClass::StepStillWaiting`].
+    pub(crate) fn step_still_waiting(thread: &str, detail: impl Into<String>) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::StepStillWaiting,
+            thread: Some(thread.to_string()),
+            session: None,
+            reason: None,
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
     pub(crate) fn lease_undecided(thread: &str, detail: impl Into<String>) -> Self {
         FailedConsequence {
             class: ConsequenceClass::LeaseUndecided,
@@ -16597,8 +16741,30 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // than merely intended: every receipt below reports it, `outstanding_for_report` derives from
     // it, and re-deriving it per branch is how the no-op arms and the acted arm would start
     // answering differently.
-    let members = supervised_member_threads(ctx, store, thread_id)?;
+    let (members, still_waiting) = members_and_the_ones_still_waiting(ctx.now, store, thread_id)?;
     let outstanding = outstanding_for_report(&q, &members);
+    // **A wait that outlasts the window is said, not silent** (nxf 6j6v.1wep, review of PR #39,
+    // Integrity & Robustness #1). A step whose start still waits does not lapse — but the lapse used
+    // to be what ended such a wait, and nothing ends it now except the copy coming free, the retry
+    // running or a withdraw. So a tick that declines because of one names it on its receipt (the
+    // `Waiting` branch below, the only one a member that is not settled can lead to), and on stderr
+    // for the reader with a terminal.
+    let still_waiting: Vec<FailedConsequence> = still_waiting
+        .iter()
+        .map(|slot| {
+            let finding = FailedConsequence::step_still_waiting(
+                slot,
+                format!(
+                    "the step on thread {slot} has not started: its start still waits for the \
+                     working copy or for a retry, so its declared window does not count and the \
+                     flow waits for it; `nxc status` shows what holds the copy, and `nxc withdraw \
+                     --thread {thread_id}` takes the operation back"
+                ),
+            );
+            eprintln!("warning: {finding}");
+            finding
+        })
+        .collect();
 
     // Step 1b: a HELD thread (nxf 6j6v.pzkb) — an op that shaped its obligation came from nobody this
     // replica can vouch for. It is never `complete` nor `stale`, so every branch below would decline
@@ -16722,6 +16888,7 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
         // exist. Nobody is watching this verb's stderr — it is what a scheduled timer runs
         // unattended and what an app calls through the handle — so it travels on the receipt.
         receipt.warnings.extend(unscheduled);
+        receipt.warnings.extend(still_waiting);
         return Ok(receipt);
     }
 

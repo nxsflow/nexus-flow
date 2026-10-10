@@ -15,11 +15,14 @@
 //! claim area off the queue and fired it, which is right for the members of a parallel fan-out and
 //! wrong for the steps of an ordered run.
 //!
-//! How two steps of one run come to be queued together at all is a different bug (nxf 6j6v.1wep):
-//! the first step's answer window runs while it waits for the copy, it lapses, and the flow moves
-//! on to the second step, which queues behind the same lease. These tests reproduce that shape on
-//! purpose, because it is the shape the field produced; what they pin is what the HAND-OFF does
-//! with it.
+//! How two steps of one run came to be queued together in the field is a different bug (nxf
+//! 6j6v.1wep): the first step's answer window ran while it waited for the copy, it lapsed, and the
+//! flow moved on to the second step, which queued behind the same lease. Since 1wep a queued step
+//! no longer lapses (`a_queued_step_is_not_asked_until_it_starts.rs`). The shape still exists in a
+//! workspace that an earlier build left that way, as the measured one was, so the hand-off must
+//! still handle it. These tests rebuild it the way such a build produced it: the coder's row is
+//! out of the queue while its window lapses, and goes back in its old place afterwards. What they
+//! pin is what the HAND-OFF does with it.
 //!
 //! Driven through the LIBRARY HANDLE (`engine-seam-test-rule`), with a [`WorkerConfig::Custom`]
 //! worker that records every start, answers which of its sessions still run (or, for one test,
@@ -367,14 +370,29 @@ fn a_round_queued_past_its_lapsed_first_step(
         vec!["coder".to_string()],
         "the premise: the round's first step waits for the working copy"
     );
-    // The coder's window lapses while it waits (nxf 6j6v.1wep), and the flow moves on to the next
-    // step, which queues behind the same lease.
-    let (coder_slot, _) = queued_row(tmp, "coder");
+    // The coder's window lapses while it waits, and the flow moves on to the next step, which
+    // queues behind the same lease — what a build before nxf 6j6v.1wep did. Since 1wep a step in
+    // the queue cannot lapse, so the coder's row is taken out for the tick that lapses it and put
+    // back afterwards, in the place it had (its `enqueued_at` is kept).
+    let coder = store(tmp)
+        .list_working_tree_queue()
+        .unwrap()
+        .into_iter()
+        .find(|q| q.role == "coder")
+        .expect("the coder is queued");
+    let coder_slot = coder
+        .thread
+        .clone()
+        .expect("the queued coder names its slot");
     let channel_thread = store(tmp)
         .thread_parent(&coder_slot)
         .unwrap()
         .expect("the slot hangs under its channel thread");
+    assert!(store(tmp)
+        .remove_working_tree_queue_entry(coder.id)
+        .unwrap());
     tick(tmp, worker, LAPSED, &channel_thread);
+    store(tmp).enqueue_working_tree(&coder, LAPSED).unwrap();
     assert_eq!(
         queued_for(tmp, &root),
         waiting.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -422,9 +440,9 @@ fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it
         waited_since,
         "and it keeps the place in line it had, rather than starting over at the back"
     );
-    // The lease ROW, not `working_tree_holder`: the bound this area derived may already be past,
-    // because the windows of its steps ran while they waited (nxf 6j6v.1wep). What this test pins
-    // is WHO the copy was handed to.
+    // The lease ROW, not `working_tree_holder`: what this test pins is WHO the copy was handed to.
+    // That the bound it was handed with has not already passed is
+    // `a_queued_step_is_not_asked_until_it_starts.rs`'s to pin (nxf 6j6v.1wep).
     let (holder, _) = store(&tmp)
         .working_tree_lease_row()
         .unwrap()
@@ -498,9 +516,10 @@ fn a_step_whose_session_died_without_a_word_holds_the_next_one_until_its_window_
 /// starts is the verifier that was waiting, once: the answer does not open a second verifier slot
 /// beside it, and nothing starts it again later.
 ///
-/// (Had the verifier's window ALSO lapsed in the queue, the flow would open the verifier step a
-/// second time on that answer. That is nxf 6j6v.1wep's to settle; this item only makes sure that
-/// the two never run side by side.)
+/// (Before nxf 6j6v.1wep the verifier's window could ALSO lapse in the queue, and the flow would
+/// then open the verifier step a second time on that answer. A queued step no longer lapses, so
+/// that second slot is no longer opened that way; this item makes sure the two never run side by
+/// side whichever way they got there.)
 #[test]
 fn an_answered_earlier_step_starts_the_waiting_step_once() {
     let (tmp, engine, worker) = team(ORDERED);
