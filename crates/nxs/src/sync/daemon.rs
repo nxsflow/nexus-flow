@@ -962,7 +962,20 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
         &resolved,
         &link,
         hb.as_ref().and_then(|h| h.program.as_deref()),
-    );
+    )
+    // Same alias, same path — and still another BUILD (nxf 6j6v.c92y): a binary swapped in place
+    // by `self-update` leaves the process launchd started from the old file running. Disjoint from
+    // the note above, which speaks only when the two PATHS differ.
+    .or_else(|| match &resolved {
+        nxs_service::ProgramState::Present(target) => stale_process_note(
+            service_state == nxs_service::ServiceState::Running,
+            hb.as_ref().and_then(|h| h.version.as_deref()),
+            target,
+            nxs_service::program::running_program().as_deref(),
+            env!("CARGO_PKG_VERSION"),
+        ),
+        _ => None,
+    });
     // **What launchd ACTUALLY holds** (nxf 6j6v.kvda). The heartbeat says what the service last
     // did; the alias says which binary the link names. Neither can say that launchd is holding a
     // registration for this label that came from somewhere else entirely — which is what it was
@@ -1433,6 +1446,36 @@ fn alias_note(
             })
         }
     }
+}
+
+/// **The running service is an older build of the very file its alias names** (nxf 6j6v.c92y) —
+/// `None` when that is not what is in front of us.
+///
+/// `alias_note` compares PATHS, and an in-place swap leaves the path untouched: `self-update`
+/// replaces `~/.local/bin/nxs` while launchd keeps executing the process it started from the old
+/// file. Measured on the owner's machine on 2026-10-09, after two updates since the service last
+/// started, with `status` reporting nothing wrong.
+///
+/// The version of the file on disk is known only to a process that IS that file, so this speaks
+/// only when `this_program` — the binary running `status` — is the alias's target, and only about a
+/// service that is actually up: a stopped one starts on the new file anyway. Pure over its inputs.
+fn stale_process_note(
+    alive: bool,
+    running_version: Option<&str>,
+    alias_target: &Path,
+    this_program: Option<&Path>,
+    this_version: &str,
+) -> Option<String> {
+    let running_version = running_version?;
+    if !alive || running_version == this_version || this_program? != alias_target {
+        return None;
+    }
+    Some(format!(
+        "the running service is nxs {running_version}, but {} is now nxs {this_version} — the \
+         binary was replaced under the running process, which keeps the old build until it \
+         restarts. Run `nxs sync daemon install` to restart it on the binary now on disk.",
+        alias_target.display()
+    ))
 }
 
 /// Render `t` as RFC3339 for a heartbeat timestamp — the SHARED formatter (6j6v.0wvp), not a copy.
@@ -2602,6 +2645,44 @@ mod tests {
             None
         );
         assert_eq!(alias_note(&ProgramState::Absent, link, None), None);
+    }
+
+    /// nxf 6j6v.c92y: one path, two builds — the service started from the file `self-update` has
+    /// since replaced in place.
+    #[test]
+    fn a_running_service_older_than_the_binary_its_alias_names_is_reported() {
+        let target = Path::new("/home/u/.local/bin/nxs");
+        let note = stale_process_note(true, Some("0.205.1"), target, Some(target), "0.206.1")
+            .expect("the measured case: same file, older process");
+        assert!(note.contains("0.205.1"), "{note}");
+        assert!(note.contains("0.206.1"), "{note}");
+        assert!(note.contains("nxs sync daemon install"), "{note}");
+    }
+
+    #[test]
+    fn a_stale_process_is_claimed_only_where_it_can_be_known() {
+        let target = Path::new("/home/u/.local/bin/nxs");
+        let build = Path::new("/repo/target/debug/nxs");
+        // Same version: nothing to say.
+        assert_eq!(
+            stale_process_note(true, Some("0.206.1"), target, Some(target), "0.206.1"),
+            None
+        );
+        // `status` is run by ANOTHER binary: its version says nothing about the file on disk.
+        assert_eq!(
+            stale_process_note(true, Some("0.205.1"), target, Some(build), "0.206.1"),
+            None
+        );
+        // Not running: it starts on the new file anyway.
+        assert_eq!(
+            stale_process_note(false, Some("0.205.1"), target, Some(target), "0.206.1"),
+            None
+        );
+        // A heartbeat older than the `version` field cannot be compared.
+        assert_eq!(
+            stale_process_note(true, None, target, Some(target), "0.206.1"),
+            None
+        );
     }
 
     use super::*;

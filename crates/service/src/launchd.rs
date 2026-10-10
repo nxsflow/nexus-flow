@@ -56,7 +56,6 @@ use std::path::{Path, PathBuf};
 
 use nxs_foundation::error::{NxfError, Result};
 
-#[cfg(any(unix, test))]
 use crate::home::ServiceHome;
 use crate::instance::Instance;
 
@@ -781,6 +780,34 @@ pub fn install_with(
     }
     let _ = ctl.run(&["bootout", &format!("{domain}/{label}")]);
     bootstrap_and_verify(&label, &domain, plist_path, program, log_dir, ctl)
+}
+
+/// **Restart `home`'s installed service on whatever its alias names NOW** (nxf 6j6v.c92y).
+///
+/// `nxs self-update` swaps the file the alias resolves to, but launchd keeps executing the process
+/// it started from the old one until something restarts it — measured on the owner's machine on
+/// 2026-10-09, where the service had run since the 7th through two updates and the fixes of both
+/// were inactive in the one process they were for.
+///
+/// This is [`install_with`] and nothing beside it — the same `bootout` + `bootstrap` + read-back
+/// `nxs sync daemon install` runs (owner decision, 2026-10-09) — with ONE deliberate difference:
+/// the alias is NOT re-pointed. The caller has already established that it resolves to the binary
+/// it wants run; re-linking it to `current_exe()` the way [`install_for`] does would be a second,
+/// unasked decision about which build keeps this machine's time (nxf 6j6v.7gz6).
+pub fn restart_with(
+    home: &ServiceHome,
+    plist_path: &Path,
+    path_env: &str,
+    ctl: &dyn LaunchCtl,
+) -> Result<Bootstrapped> {
+    install_with(
+        home.instance(),
+        plist_path,
+        &home.program(),
+        &home.logs(),
+        path_env,
+        ctl,
+    )
 }
 
 /// How many times `bootstrap` is attempted before the install gives up.

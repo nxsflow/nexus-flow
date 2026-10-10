@@ -112,10 +112,25 @@ pub fn run(
 
     // `--check` never mutates anything: report the version decision and stop.
     if check {
+        // Whether applying this update would restart the background service (nxf 6j6v.c92y). Only
+        // an update that would swap anything can; looked up without touching launchd, and a lookup
+        // that fails says nothing rather than failing a read-only command.
+        let restart = match &status {
+            UpdateStatus::Available(_) => install_dir_of_running_exe()
+                .ok()
+                .and_then(|dir| service_would_restart(&dir)),
+            UpdateStatus::UpToDate => None,
+        };
         if json {
-            println!("{}", status_json(current, &channel, &status));
+            println!(
+                "{}",
+                with_service_restart(status_json(current, &channel, &status), restart.as_ref())
+            );
         } else {
             println!("{}", status_human(brand, current, &channel, &status));
+            if let Some(restart) = &restart {
+                println!("{}", service_restart_line(restart).1);
+            }
         }
         return Ok(());
     }
@@ -185,15 +200,24 @@ pub fn run(
     let dir = install_dir_of_running_exe()?;
     install_from(&agent, resp, pubkey, &dir, &base_url).map_err(to_nxf)?;
 
+    // The binary moved; the PROCESS launchd started from it did not (nxf 6j6v.c92y). A service
+    // whose alias resolves to the file just swapped is restarted onto it, through the same path
+    // `nxs sync daemon install` takes. Never an error: the swap above already succeeded.
+    let restart = restart_service(&dir);
     // The binary moved; the service's alias did not (nxf 6j6v.dcpk (b)). Asked AFTER the swap, so
-    // what it compares is the binary that is now on disk.
+    // what it compares is the binary that is now on disk. Disjoint from the restart above: that one
+    // acts only where the alias resolves to the swapped binary, this one speaks only where it does
+    // not.
     let service = service_alias_divergence(&dir);
     if json {
         println!(
             "{}",
-            with_service_alias(
-                updated_json(current, &resp.version, &channel),
-                service.as_deref()
+            with_service_restart(
+                with_service_alias(
+                    updated_json(current, &resp.version, &channel),
+                    service.as_deref()
+                ),
+                restart.as_ref()
             )
         );
     } else {
@@ -201,9 +225,15 @@ pub fn run(
             "updated {brand} {current} -> {} (channel {channel})",
             resp.version
         );
+        if let Some((false, line)) = restart.as_ref().map(service_restart_line) {
+            println!("{line}");
+        }
         // The threshold this update may have just crossed — one extra line beside the result line
         // that was printed anyway, and never again.
         maybe_emit_migration_hint(&cfg_dir, &resp.version);
+    }
+    if let Some((true, line)) = restart.as_ref().map(service_restart_line) {
+        eprintln!("note: {line}");
     }
     if let Some(note) = &service {
         eprintln!("note: {note}");
@@ -263,9 +293,6 @@ fn service_alias_note(
 /// through whatever path `current_exe()` gave, the alias through `read_link`, and two spellings of
 /// one file would otherwise read as a divergence on every single update.
 fn service_alias_divergence(install_dir: &Path) -> Option<String> {
-    fn resolved(p: &Path) -> PathBuf {
-        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-    }
     let home = nxs_service::ServiceHome::resolve().ok()?;
     let state = match home.program_state() {
         nxs_service::ProgramState::Present(t) => nxs_service::ProgramState::Present(resolved(&t)),
@@ -289,6 +316,222 @@ fn with_service_alias(mut body: serde_json::Value, note: Option<&str>) -> serde_
         );
     }
     body
+}
+
+/// The command that restarts this machine's service by hand — what a restart that could not be done
+/// tells the user to run. It is the same path the automatic restart takes (owner decision,
+/// 2026-10-09), so the advice and the attempt cannot describe two different things.
+const SERVICE_RESTART_COMMAND: &str = "nxs sync daemon install";
+
+/// **What `self-update` did, or would do, to the background service beside the binary** (nxf
+/// 6j6v.c92y).
+///
+/// Swapping the file the service's alias resolves to does not change the PROCESS launchd started
+/// from it: on 2026-10-09 the owner's service had been running since the 7th through two updates,
+/// and the fixes both carried were inactive in the one process they were written for. So an update
+/// that swapped the binary an installed service runs restarts that service, and says so.
+///
+/// Only ever about a service whose alias resolves to the binary this update swaps. One that points
+/// anywhere else — a development build, nxf 6j6v.7gz6 — is [`service_alias_note`]'s business and is
+/// NOT moved; a machine with no installed service gets nothing at all.
+// Constructed only where there is a launchd (and in the tests); everywhere else nothing restarts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServiceRestart {
+    /// `--check`: an update is available, and the installed service runs the binary it would swap.
+    WouldRestart { instance: String },
+    /// The service was restarted on the binary now on disk. `confirmed` is whether launchd was read
+    /// back to hold the job afterwards — the same distinction `nxs sync daemon install` reports.
+    Restarted { instance: String, confirmed: bool },
+    /// The restart could not be done. The update itself has ALREADY happened and is not undone or
+    /// failed by this — the binary on disk is the new one; only the running process is not.
+    Failed { instance: String, error: String },
+}
+
+/// `realpath`, or the path itself when it does not resolve: `<dir>/nxs` is reached through whatever
+/// path `current_exe()` gave and the alias through `read_link`, and two spellings of one file must
+/// not read as two.
+fn resolved(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Whether `home`'s service is INSTALLED (its plist is there) and its alias resolves to `binary`.
+///
+/// Both halves are needed. An alias alone is not an installed service: `nxs sync daemon uninstall`
+/// removes the plist and deliberately leaves the home — alias included — behind, and restarting
+/// what somebody uninstalled would be re-installing it under their feet.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn runs_binary(home: &nxs_service::ServiceHome, plist: &Path, binary: &Path) -> bool {
+    plist.exists()
+        && matches!(home.program_state(),
+            nxs_service::ProgramState::Present(t) if resolved(&t) == resolved(binary))
+}
+
+/// `--check`'s half: would applying the update restart `home`'s service? Touches no launchd.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn service_restart_on_check(
+    home: &nxs_service::ServiceHome,
+    plist: &Path,
+    binary: &Path,
+) -> Option<ServiceRestart> {
+    runs_binary(home, plist, binary).then(|| ServiceRestart::WouldRestart {
+        instance: home.instance().name(),
+    })
+}
+
+/// **Restart `home`'s service after the swap, if it runs the swapped binary** — through
+/// `nxs_service::launchd::restart_with`, which is `install_with`: the very `bootout` + `bootstrap` +
+/// read-back `nxs sync daemon install` performs. No `launchctl` verb is spelled here.
+///
+/// `ctl` is asked for ONLY when there is something to restart, so a machine with no service, or one
+/// whose service runs another build, never so much as constructs a launchd handle — and a refused
+/// one (`RealCtl::for_login_session`'s home check) becomes a [`ServiceRestart::Failed`] like any
+/// other, never an error: by now the update has succeeded, and a courtesy beside it must not be able
+/// to fail it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn restart_service_after_swap(
+    home: &nxs_service::ServiceHome,
+    plist: &Path,
+    binary: &Path,
+    path_env: &str,
+    ctl: impl FnOnce() -> std::result::Result<Box<dyn nxs_service::launchd::LaunchCtl>, String>,
+) -> Option<ServiceRestart> {
+    if !runs_binary(home, plist, binary) {
+        return None;
+    }
+    let instance = home.instance().name();
+    let outcome = ctl().and_then(|ctl| {
+        nxs_service::launchd::restart_with(home, plist, path_env, ctl.as_ref()).map_err(|e| e.msg)
+    });
+    Some(match outcome {
+        Ok(nxs_service::launchd::Bootstrapped::Confirmed { .. }) => ServiceRestart::Restarted {
+            instance,
+            confirmed: true,
+        },
+        Ok(nxs_service::launchd::Bootstrapped::Unconfirmed(_)) => ServiceRestart::Restarted {
+            instance,
+            confirmed: false,
+        },
+        Err(error) => ServiceRestart::Failed { instance, error },
+    })
+}
+
+/// [`service_restart_on_check`] against THIS machine's service — `None` wherever there is no
+/// launchd, and on any resolution failure.
+#[cfg(target_os = "macos")]
+fn service_would_restart(install_dir: &Path) -> Option<ServiceRestart> {
+    let home = nxs_service::ServiceHome::resolve().ok()?;
+    let plist = nxs_service::launchd::plist_path_for(home.instance()).ok()?;
+    service_restart_on_check(&home, &plist, &install_dir.join(REAL_BINARY))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn service_would_restart(_install_dir: &Path) -> Option<ServiceRestart> {
+    None
+}
+
+/// [`restart_service_after_swap`] against THIS machine's service and the real launchd, reached only
+/// through `RealCtl::for_login_session` — the one door the installer uses too, home check included.
+///
+/// The instance is the ambient one: the instance `nxs sync daemon install` from this binary
+/// addresses, which for an installed binary is always production (nxf 6j6v.cvpy).
+#[cfg(target_os = "macos")]
+fn restart_service(install_dir: &Path) -> Option<ServiceRestart> {
+    let home = nxs_service::ServiceHome::resolve().ok()?;
+    let plist = nxs_service::launchd::plist_path_for(home.instance()).ok()?;
+    let path_env = nxs_service::launchd::service_path(std::env::var("PATH").ok().as_deref());
+    restart_service_after_swap(
+        &home,
+        &plist,
+        &install_dir.join(REAL_BINARY),
+        &path_env,
+        || {
+            nxs_service::launchd::RealCtl::for_login_session(
+                nxs_service::launchd::HomeRule::MustBeTheLoginSessions,
+            )
+            .map(|c| Box::new(c) as Box<dyn nxs_service::launchd::LaunchCtl>)
+            .map_err(|e| e.msg)
+        },
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restart_service(_install_dir: &Path) -> Option<ServiceRestart> {
+    None
+}
+
+/// Add the `service_restart` object to a `--json` receipt — absent when there is no installed
+/// service running the swapped binary, exactly like `service_alias`, so an update on a machine
+/// without one keeps its byte contract.
+fn with_service_restart(
+    mut body: serde_json::Value,
+    restart: Option<&ServiceRestart>,
+) -> serde_json::Value {
+    let (Some(restart), Some(map)) = (restart, body.as_object_mut()) else {
+        return body;
+    };
+    let value = match restart {
+        ServiceRestart::WouldRestart { instance } => serde_json::json!({
+            "instance": instance,
+            "status": "would-restart",
+        }),
+        ServiceRestart::Restarted {
+            instance,
+            confirmed,
+        } => serde_json::json!({
+            "instance": instance,
+            "status": "restarted",
+            "confirmed": confirmed,
+        }),
+        ServiceRestart::Failed { instance, error } => serde_json::json!({
+            "instance": instance,
+            "status": "failed",
+            "error": error,
+            "command": SERVICE_RESTART_COMMAND,
+        }),
+    };
+    map.insert("service_restart".into(), value);
+    body
+}
+
+/// The human line for a [`ServiceRestart`], and whether it is a NOTE (stderr) rather than part of
+/// the result (stdout). A failure is a note on BOTH renderings, like the alias note: a message only
+/// the `--json` receipt carries is one a person at a terminal never meets.
+fn service_restart_line(restart: &ServiceRestart) -> (bool, String) {
+    match restart {
+        ServiceRestart::WouldRestart { instance } => (
+            false,
+            format!(
+                "the {instance} background service runs this binary; updating restarts it on the \
+                 new one"
+            ),
+        ),
+        ServiceRestart::Restarted {
+            instance,
+            confirmed: true,
+        } => (
+            false,
+            format!("restarted the {instance} background service on the updated binary"),
+        ),
+        ServiceRestart::Restarted {
+            instance,
+            confirmed: false,
+        } => (
+            false,
+            format!(
+                "restarted the {instance} background service on the updated binary (launchd could \
+                 not be read back to confirm it — `nxs sync daemon status` says what it holds)"
+            ),
+        ),
+        ServiceRestart::Failed { instance, error } => (
+            true,
+            format!(
+                "the update succeeded, but the {instance} background service could not be \
+                 restarted ({error}) and keeps running the previous build until it is. Run \
+                 `{SERVICE_RESTART_COMMAND}` to restart it on the updated binary."
+            ),
+        ),
+    }
 }
 
 /// The install directory: the parent of the running executable. Under multicall the running exe
@@ -1260,6 +1503,354 @@ mod tests {
             noted["new_version"], "0.72.0",
             "the receipt is otherwise untouched"
         );
+    }
+
+    // ---- The restart after the swap (nxf 6j6v.c92y) ------------------------------------------
+    //
+    // Everything below runs against a spy behind the `LaunchCtl` seam and a service home in a
+    // `TempDir`. Nothing here constructs `RealCtl`, so nothing here can reach the login session of
+    // whoever runs it (memory `launchd-install-is-not-home-isolated`).
+
+    /// A launchd small enough for these tests: `bootstrap` loads the plist it is handed, `bootout`
+    /// unloads it, and `print` answers from what is loaded — so the install path's read-back
+    /// confirms exactly what was bootstrapped, and nothing else.
+    #[derive(Default)]
+    struct SpyCtl {
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        loaded: std::sync::Mutex<Vec<(String, String)>>,
+        fail_bootstrap: bool,
+    }
+
+    impl SpyCtl {
+        fn verbs(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.join(" "))
+                .collect()
+        }
+        fn bootstraps(&self) -> Vec<String> {
+            self.verbs()
+                .into_iter()
+                .filter(|v| v.starts_with("bootstrap "))
+                .collect()
+        }
+        fn label_of(target: &str) -> String {
+            target.rsplit('/').next().unwrap_or(target).to_string()
+        }
+    }
+
+    /// What the code under test is handed: a shared view of the spy, so the test can read it after.
+    struct Handle(std::sync::Arc<SpyCtl>);
+
+    impl std::ops::Deref for Handle {
+        type Target = SpyCtl;
+        fn deref(&self) -> &SpyCtl {
+            &self.0
+        }
+    }
+
+    impl nxs_service::launchd::LaunchCtl for Handle {
+        fn run(&self, args: &[&str]) -> crate::error::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            match args {
+                ["bootstrap", _, plist] => {
+                    if self.fail_bootstrap {
+                        return Err(NxfError::io(
+                            "Bootstrap failed: 5: Input/output error (stub)",
+                        ));
+                    }
+                    let label = Path::new(plist)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.loaded.lock().unwrap().push((label, plist.to_string()));
+                    Ok(())
+                }
+                ["bootout", target] => {
+                    let label = SpyCtl::label_of(target);
+                    let mut loaded = self.loaded.lock().unwrap();
+                    let before = loaded.len();
+                    loaded.retain(|(l, _)| *l != label);
+                    if loaded.len() == before {
+                        return Err(NxfError::io("Boot-out failed: 3: No such process"));
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+
+        fn output(&self, args: &[&str]) -> crate::error::Result<nxs_service::launchd::CtlOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            let not_found = nxs_service::launchd::CtlOutput {
+                code: Some(113),
+                stdout: String::new(),
+                stderr: "Could not find service in domain for user".into(),
+            };
+            let ["print", target] = args else {
+                return Ok(not_found);
+            };
+            let label = SpyCtl::label_of(target);
+            let loaded = self.loaded.lock().unwrap();
+            Ok(match loaded.iter().find(|(l, _)| *l == label) {
+                Some((_, plist)) => nxs_service::launchd::CtlOutput {
+                    code: Some(0),
+                    stdout: format!("{target} = {{\n\tpath = {plist}\n\tstate = running\n}}\n"),
+                    stderr: String::new(),
+                },
+                None => not_found,
+            })
+        }
+
+        fn nap(&self, _d: std::time::Duration) {}
+    }
+
+    /// A machine in a `TempDir`: the binary the update swaps, a service home, and the plist an
+    /// installed service has. The alias is left to each test, because where it points IS the case.
+    struct Machine {
+        _tmp: tempfile::TempDir,
+        home: nxs_service::ServiceHome,
+        binary: PathBuf,
+        plist: PathBuf,
+    }
+
+    impl Machine {
+        fn new() -> Machine {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let bin = tmp.path().join("local-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let binary = bin.join(REAL_BINARY);
+            std::fs::write(&binary, b"the updated nxs").unwrap();
+            let home = nxs_service::ServiceHome::at(tmp.path().join(".nexusflow"));
+            let agents = tmp.path().join("LaunchAgents");
+            std::fs::create_dir_all(&agents).unwrap();
+            let plist = agents.join(format!("{}.plist", home.instance().label()));
+            Machine {
+                _tmp: tmp,
+                home,
+                binary,
+                plist,
+            }
+        }
+        /// An installed service: its plist is there.
+        fn installed(self) -> Machine {
+            std::fs::write(&self.plist, b"<plist/>").unwrap();
+            self
+        }
+        /// Point the service's alias at `target`, the way `nxs sync daemon install` leaves it.
+        fn alias_to(self, target: &Path) -> Machine {
+            nxs_service::launchd::link_program(&self.home, target).unwrap();
+            self
+        }
+        /// Run the after-swap step against `spy`, counting how often a launchd handle was asked for.
+        fn restart(&self, spy: &std::sync::Arc<SpyCtl>) -> (Option<ServiceRestart>, usize) {
+            let asked = std::cell::Cell::new(0);
+            let outcome = restart_service_after_swap(
+                &self.home,
+                &self.plist,
+                &self.binary,
+                "/usr/bin:/bin",
+                || {
+                    asked.set(asked.get() + 1);
+                    Ok(Box::new(Handle(spy.clone())) as Box<dyn nxs_service::launchd::LaunchCtl>)
+                },
+            );
+            (outcome, asked.get())
+        }
+    }
+
+    /// The measured case: the service's alias names the very binary the update just swapped, and
+    /// the process launchd started from it is the old one. One restart, through the install path.
+    #[test]
+    fn an_update_whose_service_runs_the_swapped_binary_restarts_it_once_through_the_install_path() {
+        let m = Machine::new().installed();
+        let binary = m.binary.clone();
+        let m = m.alias_to(&binary);
+        let spy = std::sync::Arc::new(SpyCtl::default());
+        // The running service, loaded from this plist before the update.
+        spy.loaded
+            .lock()
+            .unwrap()
+            .push((m.home.instance().label(), m.plist.display().to_string()));
+
+        let (outcome, asked) = m.restart(&spy);
+
+        assert_eq!(
+            outcome,
+            Some(ServiceRestart::Restarted {
+                instance: "nexus-flow".into(),
+                confirmed: true,
+            })
+        );
+        assert_eq!(asked, 1, "one launchd handle, for one restart");
+        let label = m.home.instance().label();
+        let verbs = spy.verbs();
+        let bootstraps = spy.bootstraps();
+        assert_eq!(
+            bootstraps.len(),
+            1,
+            "exactly one restart, not a retry loop over a healthy launchd: {verbs:?}"
+        );
+        assert!(
+            bootstraps[0].ends_with(&m.plist.display().to_string()),
+            "{bootstraps:?}"
+        );
+        let bootout = verbs
+            .iter()
+            .position(|v| v.starts_with("bootout ") && v.ends_with(&format!("/{label}")))
+            .expect("the install path boots the running job out first");
+        let bootstrap = verbs
+            .iter()
+            .position(|v| v.starts_with("bootstrap "))
+            .unwrap();
+        assert!(
+            bootout < bootstrap,
+            "bootout THEN bootstrap — that order is the restart: {verbs:?}"
+        );
+        assert!(
+            verbs.iter().all(|v| !v.starts_with("kickstart")),
+            "no launchctl verb of self-update's own — the install path only: {verbs:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(m.home.program()).unwrap(),
+            std::fs::canonicalize(&m.binary).unwrap(),
+            "the alias is left naming the binary it already named"
+        );
+    }
+
+    /// A service on a development build is NOT moved (nxf 6j6v.7gz6): no restart, no launchd
+    /// handle, and the existing note still names both paths.
+    #[test]
+    fn an_update_whose_service_runs_another_build_restarts_nothing_and_keeps_the_note() {
+        let m = Machine::new().installed();
+        let build = m._tmp.path().join("checkout/target/debug/nxs");
+        std::fs::create_dir_all(build.parent().unwrap()).unwrap();
+        std::fs::write(&build, b"a development nxs").unwrap();
+        let m = m.alias_to(&build);
+        let spy = std::sync::Arc::new(SpyCtl::default());
+
+        let (outcome, asked) = m.restart(&spy);
+
+        assert_eq!(outcome, None);
+        assert_eq!(asked, 0, "not even a launchd handle is constructed");
+        assert!(spy.verbs().is_empty(), "{:?}", spy.verbs());
+        let note = service_alias_note(
+            &nxs_service::ProgramState::Present(resolved(&build)),
+            &m.home.program(),
+            &resolved(&m.binary),
+        )
+        .expect("the divergence is still named");
+        assert!(note.contains("nxs sync daemon install"), "{note}");
+    }
+
+    /// No installed service: nothing at all — neither with no alias, nor with an alias an
+    /// `uninstall` left behind beside a removed plist.
+    #[test]
+    fn a_machine_with_no_installed_service_gets_no_restart() {
+        let spy = std::sync::Arc::new(SpyCtl::default());
+
+        let bare = Machine::new();
+        assert_eq!(bare.restart(&spy), (None, 0));
+
+        let uninstalled = Machine::new();
+        let binary = uninstalled.binary.clone();
+        let uninstalled = uninstalled.alias_to(&binary);
+        assert_eq!(
+            uninstalled.restart(&spy),
+            (None, 0),
+            "an alias without a plist is an uninstalled service, and restarting it would \
+             re-install it"
+        );
+        assert!(spy.verbs().is_empty(), "{:?}", spy.verbs());
+    }
+
+    /// A restart that fails is reported with the command to run — and the update stays a success:
+    /// the receipt still says `updated`, and the failure is a value, never an `Err`.
+    #[test]
+    fn a_failed_restart_names_the_command_and_does_not_fail_the_update() {
+        let m = Machine::new().installed();
+        let binary = m.binary.clone();
+        let m = m.alias_to(&binary);
+        let spy = std::sync::Arc::new(SpyCtl {
+            fail_bootstrap: true,
+            ..SpyCtl::default()
+        });
+
+        let (outcome, _) = m.restart(&spy);
+        let Some(failed @ ServiceRestart::Failed { .. }) = &outcome else {
+            panic!("a refused bootstrap is a failed restart: {outcome:?}");
+        };
+
+        let receipt =
+            with_service_restart(updated_json("0.206.1", "0.207.0", "beta"), outcome.as_ref());
+        assert_eq!(receipt["status"], "updated", "{receipt}");
+        assert_eq!(receipt["new_version"], "0.207.0", "{receipt}");
+        assert_eq!(receipt["service_restart"]["status"], "failed", "{receipt}");
+        assert_eq!(
+            receipt["service_restart"]["command"], "nxs sync daemon install",
+            "{receipt}"
+        );
+        let (is_note, line) = service_restart_line(failed);
+        assert!(is_note, "a failure goes to stderr on both renderings");
+        assert!(line.contains("`nxs sync daemon install`"), "{line}");
+        assert!(line.contains("the update succeeded"), "{line}");
+
+        // A launchd handle that is refused (the login-session home check) is the same outcome.
+        let refused = restart_service_after_swap(&m.home, &m.plist, &m.binary, "/bin", || {
+            Err("refusing to talk to launchd (stub)".into())
+        });
+        assert!(
+            matches!(&refused, Some(ServiceRestart::Failed { error, .. }) if error.contains("refusing")),
+            "{refused:?}"
+        );
+    }
+
+    /// `--check` says whether the update WOULD restart the service, and touches no launchd; the
+    /// receipts of a machine with nothing to restart are byte-for-byte what they were.
+    #[test]
+    fn check_reports_a_restart_it_would_do_and_receipts_without_one_are_unchanged() {
+        let m = Machine::new().installed();
+        let binary = m.binary.clone();
+        let m = m.alias_to(&binary);
+        let would = service_restart_on_check(&m.home, &m.plist, &m.binary);
+        assert_eq!(
+            would,
+            Some(ServiceRestart::WouldRestart {
+                instance: "nexus-flow".into()
+            })
+        );
+        let body = with_service_restart(
+            status_json(
+                "0.206.1",
+                "beta",
+                &UpdateStatus::Available(sample_response("0.207.0")),
+            ),
+            would.as_ref(),
+        );
+        assert_eq!(body["service_restart"]["status"], "would-restart", "{body}");
+        assert_eq!(body["status"], "update-available", "{body}");
+
+        let plain = with_service_restart(updated_json("0.206.1", "0.207.0", "beta"), None);
+        assert!(plain.get("service_restart").is_none(), "{plain}");
+
+        let restarted = with_service_restart(
+            updated_json("0.206.1", "0.207.0", "beta"),
+            Some(&ServiceRestart::Restarted {
+                instance: "nexus-flow".into(),
+                confirmed: true,
+            }),
+        );
+        assert_eq!(restarted["service_restart"]["status"], "restarted");
+        assert_eq!(restarted["service_restart"]["confirmed"], true);
     }
 
     use super::*;
