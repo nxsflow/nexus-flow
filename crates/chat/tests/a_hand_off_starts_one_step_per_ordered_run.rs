@@ -22,23 +22,27 @@
 //! with it.
 //!
 //! Driven through the LIBRARY HANDLE (`engine-seam-test-rule`), with a [`WorkerConfig::Custom`]
-//! worker that records every start and answers which of its sessions still run. The tick goes
-//! through the compute layer, because it is the background service's verb rather than one on the
-//! handle.
+//! worker that records every start, answers which of its sessions still run (or, for one test,
+//! declines to), and can be told to fail a coder's starts. The tick goes through the compute
+//! layer, because it is the background service's verb rather than one on the handle.
 
 mod common;
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
-use nexus_chat::orchestration::{self, Caller, TickReceipt, TickRequest};
+use nexus_chat::error::{ErrorKind, NxfError};
+use nexus_chat::orchestration::{self, Caller, Promotions, TickReceipt, TickRequest};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::{DryTimer, TimerConfig};
-use nexus_chat::worker::{TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig};
+use nexus_chat::worker::{
+    TriggerError, TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig,
+};
 use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
 use tempfile::TempDir;
 
@@ -50,6 +54,13 @@ const LAPSED: &str = "2026-10-10T01:05:00Z";
 const LATER: &str = "2026-10-10T01:05:30Z";
 /// Still inside both windows: the verifier's, and the coder's, restarted when it started.
 const LATER_STILL: &str = "2026-10-10T01:05:50Z";
+/// Past the coder's restarted window (it started at [`LATER`] with one minute), and past the retry
+/// instant of a start that failed at [`LATER`].
+const CODER_LAPSED: &str = "2026-10-10T01:06:31Z";
+/// Past the holder's own two-hour bound: it declares no window, so its lease runs to the fallback.
+const HOLDER_EXPIRED: &str = "2026-10-10T03:01:00Z";
+/// Past the window the coder was given when the sweep started it at [`HOLDER_EXPIRED`].
+const AFTER_THE_SWEPT_CODER: &str = "2026-10-10T03:03:00Z";
 
 /// The operation that holds the working copy: one step, no window of its own.
 const HOLDER: &str =
@@ -58,18 +69,44 @@ const HOLDER: &str =
 /// The measured incident's shape: build, then verify, in one ordered run that needs the copy alone.
 const ORDERED: &str = "name: coding\nmembers: [coder, verifier]\nflow: sequential\nworking_tree: exclusive\ntimeout: 1m\n";
 
+/// The same order, declared as a state machine (`steps:`) rather than as `flow: sequential`.
+const STEPPED: &str = "name: coding\nmembers: [coder, verifier]\nworking_tree: exclusive\ntimeout: 1m\nsteps:\n  - id: build\n    target: coder\n    next: verify\n  - id: verify\n    target: verifier\n";
+
+/// An ordered run whose second step is a whole parallel round.
+const ORDERED_WITH_A_ROUND: &str = "name: coding\nmembers: [coder, review]\nflow: sequential\nworking_tree: exclusive\ntimeout: 1m\n";
+const ROUND: &str = "name: review\nmembers: [r1, r2]\nworking_tree: exclusive\n";
+
 /// The same two roles asked at once — a declared parallel round, still claiming the copy.
 const PARALLEL: &str =
     "name: coding\nmembers: [coder, verifier]\nflow: parallel\nworking_tree: exclusive\n";
 
 /// A worker that records every start it accepted and answers which sessions are still running.
-#[derive(Default)]
 struct RecordingWorker {
     seen: Mutex<Vec<TriggerRequest>>,
     running: Mutex<HashSet<String>>,
+    /// Whether it answers the liveness question at all. One that does not says "not running" for
+    /// everything, which is the trait's default.
+    answers: bool,
+    /// How many more starts of a CODER fail with a transient (`io`) error.
+    failing_coders: Mutex<u32>,
+    /// Run once while a coder's start is IN PROGRESS: after the engine asked for it and before its
+    /// process exists — the window in which another process can act on the same workspace.
+    meanwhile: Mutex<Option<Meanwhile>>,
 }
 
+type Meanwhile = Box<dyn FnOnce(&RecordingWorker) + Send>;
+
 impl RecordingWorker {
+    fn new(answers: bool) -> Self {
+        RecordingWorker {
+            seen: Mutex::new(Vec::new()),
+            running: Mutex::new(HashSet::new()),
+            answers,
+            failing_coders: Mutex::new(0),
+            meanwhile: Mutex::new(None),
+        }
+    }
+
     fn started(&self, handle: &str) -> usize {
         self.seen
             .lock()
@@ -93,10 +130,29 @@ impl RecordingWorker {
     fn mark_gone(&self, session: &str) {
         self.running.lock().unwrap().remove(session);
     }
+
+    fn fail_the_next_coder_start(&self) {
+        *self.failing_coders.lock().unwrap() = 1;
+    }
 }
 
 impl Worker for RecordingWorker {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        let mut failing = self.failing_coders.lock().unwrap();
+        if *failing > 0 && req.role.handle == "coder" {
+            *failing -= 1;
+            return Err(TriggerError::Failed(NxfError::new(
+                ErrorKind::Io,
+                "`nxf prime` exceeded the 30s wall-clock timeout",
+            )));
+        }
+        drop(failing);
+        if req.role.handle == "coder" {
+            let meanwhile = self.meanwhile.lock().unwrap().take();
+            if let Some(meanwhile) = meanwhile {
+                meanwhile(self);
+            }
+        }
         // A started session is running until the test says otherwise, as a real process would be.
         self.running
             .lock()
@@ -107,11 +163,11 @@ impl Worker for RecordingWorker {
     }
 
     fn session_is_running(&self, internal_session: &str) -> bool {
-        self.running.lock().unwrap().contains(internal_session)
+        self.answers && self.running.lock().unwrap().contains(internal_session)
     }
 
     fn answers_liveness(&self) -> bool {
-        true
+        self.answers
     }
 }
 
@@ -123,19 +179,23 @@ fn role(handle: &str) -> RoleDecl {
 }
 
 fn team(coding: &str) -> (TempDir, Engine, Arc<RecordingWorker>) {
+    team_with(&[coding], true)
+}
+
+fn team_with(channels: &[&str], answers: bool) -> (TempDir, Engine, Arc<RecordingWorker>) {
     let tmp = TempDir::new().unwrap();
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
-    let channels: Vec<ChannelDecl> = [HOLDER, coding]
-        .iter()
+    let channels: Vec<ChannelDecl> = std::iter::once(&HOLDER)
+        .chain(channels)
         .map(|y| serde_yaml::from_str(y).expect("channel parses"))
         .collect();
-    let defs = Definitions::new(
-        vec![role("builder"), role("coder"), role("verifier")],
-        channels,
-    )
-    .expect("catalogue");
+    let roles = ["builder", "coder", "verifier", "r1", "r2"]
+        .into_iter()
+        .map(role)
+        .collect();
+    let defs = Definitions::new(roles, channels).expect("catalogue");
     common::write_declarations(tmp.path(), &defs);
-    let worker = Arc::new(RecordingWorker::default());
+    let worker = Arc::new(RecordingWorker::new(answers));
     let engine = Engine::open_with(
         None,
         tmp.path(),
@@ -196,6 +256,13 @@ fn answer(engine: &Engine, session: &str, thread: &str, now: &str, body: &str) {
         .expect("the reply is posted");
 }
 
+fn end(engine: &Engine, worker: &RecordingWorker, actor: &str, session: &str, now: &str) {
+    worker.mark_gone(session);
+    engine
+        .session_ended(caller(actor, now), session)
+        .expect("the session end is accepted");
+}
+
 fn store(tmp: &TempDir) -> nexus_chat::store::ChatStore {
     Workspace::resolve(None, tmp.path())
         .expect("resolve workspace")
@@ -218,13 +285,29 @@ fn queued_for(tmp: &TempDir, root: &str) -> Vec<String> {
         .collect()
 }
 
+/// The queue row of `role`: its slot and the instant it first joined the queue.
+fn queued_row(tmp: &TempDir, role: &str) -> (String, String) {
+    store(tmp)
+        .list_working_tree_queue()
+        .unwrap()
+        .into_iter()
+        .find(|q| q.role == role)
+        .map(|q| (q.thread.unwrap(), q.enqueued_at.unwrap()))
+        .unwrap_or_else(|| panic!("{role} is queued"))
+}
+
 /// The tick the background service runs, through the compute layer.
 fn tick(tmp: &TempDir, worker: &RecordingWorker, now: &str, thread_id: &str) -> TickReceipt {
-    let ws = Workspace::resolve(None, tmp.path()).expect("resolve workspace");
+    tick_in(tmp.path(), worker, now, thread_id)
+}
+
+/// [`tick`] by the workspace's path, for a tick run from inside the worker (a second process).
+fn tick_in(root: &Path, worker: &RecordingWorker, now: &str, thread_id: &str) -> TickReceipt {
+    let ws = Workspace::resolve(None, root).expect("resolve workspace");
     let db_path = ws.db_path_str().expect("db path");
     let origin = nexus_chat::workspace::origin_of(&ws).to_string();
     let mut store = ws.open_chat_store().expect("open chat store");
-    let defs = Definitions::resolve(tmp.path()).expect("declarations");
+    let defs = Definitions::resolve(root).expect("declarations");
     let ctx = orchestration::Ctx {
         now,
         origin: &origin,
@@ -244,6 +327,15 @@ fn tick(tmp: &TempDir, worker: &RecordingWorker, now: &str, thread_id: &str) -> 
     orchestration::tick(&ctx, &mut store, TickRequest { thread_id }).expect("tick")
 }
 
+/// What a tick's hand-off of the working copy promoted, whichever movement carried it.
+fn tick_promotions(receipt: &TickReceipt) -> Option<&Promotions> {
+    receipt
+        .working_tree
+        .as_ref()
+        .map(|s| &s.promotions)
+        .or(receipt.handed_on.as_ref().map(|h| &h.promotions))
+}
+
 /// The first operation holds the working copy with its builder at work. Returns the builder's
 /// session and the thread it answers on.
 fn a_holder_at_work(engine: &Engine, worker: &RecordingWorker) -> (String, String) {
@@ -255,20 +347,19 @@ fn a_holder_at_work(engine: &Engine, worker: &RecordingWorker) -> (String, Strin
 /// The holder finishes: the builder answers and its session ends, which is what lets the copy go.
 fn the_holder_lets_go(engine: &Engine, worker: &RecordingWorker, session: &str, thread: &str) {
     answer(engine, session, thread, LATER, "built");
-    worker.mark_gone(session);
-    engine
-        .session_ended(caller("builder", LATER), session)
-        .expect("the session end is accepted");
+    end(engine, worker, "builder", session, LATER);
 }
 
 // ---- the incident: two steps of one ordered run queued together ---------------------------------
 
 /// The ordered round queued behind the holder with BOTH of its steps waiting — the field's shape.
-/// Returns the round's root.
-fn an_ordered_round_queued_with_both_steps(
+/// `waiting` is what the queue holds for the round once the flow has moved past its lapsed first
+/// step. Returns the round's root.
+fn a_round_queued_past_its_lapsed_first_step(
     tmp: &TempDir,
-    engine: &Engine,
     worker: &RecordingWorker,
+    engine: &Engine,
+    waiting: &[&str],
 ) -> String {
     let root = commission(engine, caller("pm2", NOW), "coding", "build T6");
     assert_eq!(
@@ -276,15 +367,9 @@ fn an_ordered_round_queued_with_both_steps(
         vec!["coder".to_string()],
         "the premise: the round's first step waits for the working copy"
     );
-    // The coder's window lapses while it waits (nxf 6j6v.1wep), and the flow moves on to the
-    // verifier — which queues behind the same lease.
-    let coder_slot = store(tmp)
-        .list_working_tree_queue()
-        .unwrap()
-        .into_iter()
-        .find(|q| q.role == "coder")
-        .and_then(|q| q.thread)
-        .expect("the queued coder names its slot");
+    // The coder's window lapses while it waits (nxf 6j6v.1wep), and the flow moves on to the next
+    // step, which queues behind the same lease.
+    let (coder_slot, _) = queued_row(tmp, "coder");
     let channel_thread = store(tmp)
         .thread_parent(&coder_slot)
         .unwrap()
@@ -292,11 +377,19 @@ fn an_ordered_round_queued_with_both_steps(
     tick(tmp, worker, LAPSED, &channel_thread);
     assert_eq!(
         queued_for(tmp, &root),
-        vec!["coder".to_string(), "verifier".to_string()],
-        "the premise: both steps of the one run are waiting in the queue"
+        waiting.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        "the premise: every step that has been opened is waiting in the queue"
     );
-    assert_eq!(worker.started("coder") + worker.started("verifier"), 0);
+    assert_eq!(worker.seen.lock().unwrap().len(), 1, "only the holder runs");
     root
+}
+
+fn an_ordered_round_queued_with_both_steps(
+    tmp: &TempDir,
+    engine: &Engine,
+    worker: &RecordingWorker,
+) -> String {
+    a_round_queued_past_its_lapsed_first_step(tmp, worker, engine, &["coder", "verifier"])
 }
 
 #[test]
@@ -304,6 +397,7 @@ fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
     let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (_, waited_since) = queued_row(&tmp, "verifier");
 
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
 
@@ -323,9 +417,14 @@ fn the_hand_off_starts_the_first_step_of_an_ordered_run_and_not_the_one_after_it
         vec!["verifier".to_string()],
         "the later step is still waiting, not dropped"
     );
-    // The lease ROW, not `working_tree_holder`: the bound this area derived is already past at this
-    // instant, because the verifier's window lapsed while it waited too (nxf 6j6v.1wep). What this
-    // test pins is WHO the copy was handed to.
+    assert_eq!(
+        queued_row(&tmp, "verifier").1,
+        waited_since,
+        "and it keeps the place in line it had, rather than starting over at the back"
+    );
+    // The lease ROW, not `working_tree_holder`: the bound this area derived may already be past,
+    // because the windows of its steps ran while they waited (nxf 6j6v.1wep). What this test pins
+    // is WHO the copy was handed to.
     let (holder, _) = store(&tmp)
         .working_tree_lease_row()
         .unwrap()
@@ -347,16 +446,15 @@ fn the_later_step_waits_while_the_earlier_one_is_still_writing_and_starts_when_i
 
     // Something asks while the coder is still at work: the verifier must still wait.
     tick(&tmp, &worker, LATER_STILL, &ct);
+    assert_eq!(worker.started("verifier"), 0, "the coder is at work");
+    answer(&engine, &cs, &ct, LATER_STILL, "built T6");
     assert_eq!(
         worker.started("verifier"),
         0,
-        "the coder's process is still in the working copy"
+        "an answer is a message; the coder's process is still in the working copy"
     );
 
-    worker.mark_gone(&cs);
-    engine
-        .session_ended(caller("coder", LATER_STILL), &cs)
-        .expect("the session end is accepted");
+    end(&engine, &worker, "coder", &cs, LATER_STILL);
 
     assert_eq!(
         worker.started("verifier"),
@@ -369,8 +467,10 @@ fn the_later_step_waits_while_the_earlier_one_is_still_writing_and_starts_when_i
     );
 }
 
+/// A coder whose process died without a word, and without an answer. The flow itself does not move
+/// past such a step until its window lapses, and neither does the waiting step.
 #[test]
-fn a_tick_starts_the_later_step_when_the_earlier_one_died_without_announcing_its_end() {
+fn a_step_whose_session_died_without_a_word_holds_the_next_one_until_its_window_lapses() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
     an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
@@ -378,20 +478,25 @@ fn a_tick_starts_the_later_step_when_the_earlier_one_died_without_announcing_its
     let coder = worker.last_for("coder");
     let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
 
-    // The coder's process dies hard: no `session ended`, only the tick can notice.
     worker.mark_gone(&cs);
     tick(&tmp, &worker, LATER_STILL, &ct);
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the coder still owes its answer inside its window"
+    );
 
+    tick(&tmp, &worker, CODER_LAPSED, &ct);
     assert_eq!(
         worker.started("verifier"),
         1,
-        "the tick asks what the session end would have asked"
+        "once its window lapsed, the tick starts the step after it"
     );
 }
 
 /// The coder answers, into the slot the flow had counted as lapsed, and then ends. The step that
 /// starts is the verifier that was waiting, once: the answer does not open a second verifier slot
-/// beside it.
+/// beside it, and nothing starts it again later.
 ///
 /// (Had the verifier's window ALSO lapsed in the queue, the flow would open the verifier step a
 /// second time on that answer. That is nxf 6j6v.1wep's to settle; this item only makes sure that
@@ -401,27 +506,13 @@ fn an_answered_earlier_step_starts_the_waiting_step_once() {
     let (tmp, engine, worker) = team(ORDERED);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
     let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
-    let waiting_slot = store(&tmp)
-        .list_working_tree_queue()
-        .unwrap()
-        .into_iter()
-        .find(|q| q.role == "verifier")
-        .and_then(|q| q.thread)
-        .expect("the queued verifier names its slot");
+    let (waiting_slot, _) = queued_row(&tmp, "verifier");
     the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
     let coder = worker.last_for("coder");
     let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
 
     answer(&engine, &cs, &ct, LATER_STILL, "built T6");
-    assert_eq!(
-        worker.started("verifier"),
-        0,
-        "an answer is a message; the coder's process is still in the working copy"
-    );
-    worker.mark_gone(&cs);
-    engine
-        .session_ended(caller("coder", LATER_STILL), &cs)
-        .expect("the session end is accepted");
+    end(&engine, &worker, "coder", &cs, LATER_STILL);
 
     assert_eq!(
         worker.started("verifier"),
@@ -434,6 +525,229 @@ fn an_answered_earlier_step_starts_the_waiting_step_once() {
         "and it is the step that was waiting in line"
     );
     assert!(queued_for(&tmp, &round).is_empty());
+
+    tick(&tmp, &worker, LATER_STILL, &waiting_slot);
+    assert_eq!(
+        worker.started("verifier"),
+        1,
+        "and a later question starts nothing a second time"
+    );
+}
+
+// ---- review of PR #38: the holes in "queued or running" ----------------------------------------
+
+/// **The race inside the hand-off** (review of PR #38, Integrity & Robustness #1). While the coder's
+/// start is in progress (its prompt composed, its process not yet there), another process runs a
+/// tick on the same workspace. If the verifier were already back in line at that moment, the
+/// coder would be neither queued nor running, and that tick would start the verifier first.
+#[test]
+fn a_tick_from_another_process_during_the_earlier_steps_start_does_not_start_the_later_step() {
+    let (tmp, engine, worker) = team(ORDERED);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    let (verifier_slot, _) = queued_row(&tmp, "verifier");
+    let root = tmp.path().to_path_buf();
+    *worker.meanwhile.lock().unwrap() = Some(Box::new(move |w: &RecordingWorker| {
+        tick_in(&root, w, LATER, &verifier_slot);
+    }));
+
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+
+    assert!(
+        worker.meanwhile.lock().unwrap().is_none(),
+        "the premise: the other process's tick ran during the coder's start"
+    );
+    assert_eq!(worker.started("coder"), 1);
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the tick that ran during the coder's start did not start the step after it"
+    );
+}
+
+/// The coder's start fails on a transient error at the hand-off. It is on record for a retry, which
+/// is as much "in line" as a queue row: the verifier must not start before it (review of PR #38,
+/// Code Quality #2, Integrity & Robustness #2).
+#[test]
+fn a_failed_start_of_the_earlier_step_holds_the_later_one_until_its_retry_has_run() {
+    let (tmp, engine, worker) = team(ORDERED);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    worker.fail_the_next_coder_start();
+
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+    assert_eq!(
+        worker.started("coder"),
+        0,
+        "the premise: the coder's start failed"
+    );
+    assert_eq!(
+        queued_for(&tmp, &round),
+        vec!["verifier".to_string()],
+        "the verifier waits in line"
+    );
+
+    let (verifier_slot, _) = queued_row(&tmp, "verifier");
+    tick(&tmp, &worker, LATER_STILL, &verifier_slot);
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the coder's retry is still pending, so the verifier still waits"
+    );
+
+    tick(&tmp, &worker, CODER_LAPSED, &verifier_slot);
+    assert_eq!(worker.started("coder"), 1, "the retry started the coder");
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "and the verifier does not start beside it"
+    );
+}
+
+/// A worker that does not answer liveness says "not running" for a coder that is still writing.
+/// Its `false` means "I never looked", so every session that has not announced its end counts as
+/// present (review of PR #38, Code Quality #1, Integrity & Robustness #3).
+#[test]
+fn with_a_worker_that_does_not_answer_liveness_an_unended_session_holds_the_next_step() {
+    let (tmp, engine, worker) = team_with(&[ORDERED], false);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+    let coder = worker.last_for("coder");
+    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+
+    answer(&engine, &cs, &ct, LATER_STILL, "built T6");
+    tick(&tmp, &worker, LATER_STILL, &ct);
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the coder never announced its end, and nothing could look whether it is still writing"
+    );
+
+    end(&engine, &worker, "coder", &cs, LATER_STILL);
+    assert_eq!(
+        worker.started("verifier"),
+        1,
+        "its announced end starts the step after it"
+    );
+}
+
+/// The same order, declared as `steps:` rather than as `flow: sequential` (review of PR #38, Test
+/// Quality #1).
+#[test]
+fn a_stepped_channel_is_an_ordered_run_too() {
+    let (tmp, engine, worker) = team(STEPPED);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+
+    assert_eq!(
+        (worker.started("coder"), worker.started("verifier")),
+        (1, 0),
+        "the stepped flow's first step starts alone"
+    );
+    assert_eq!(queued_for(&tmp, &round), vec!["verifier".to_string()]);
+}
+
+/// A parallel round that is ONE step of an ordered run: its members wait for the step before them,
+/// and then start together (review of PR #38, Test Quality #1).
+#[test]
+fn a_parallel_round_nested_as_one_step_waits_as_one_and_starts_together() {
+    let (tmp, engine, worker) = team_with(&[ORDERED_WITH_A_ROUND, ROUND], true);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    let round =
+        a_round_queued_past_its_lapsed_first_step(&tmp, &worker, &engine, &["coder", "r1", "r2"]);
+
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+    assert_eq!(
+        (
+            worker.started("coder"),
+            worker.started("r1"),
+            worker.started("r2")
+        ),
+        (1, 0, 0),
+        "the round's members wait for the step before them"
+    );
+    assert_eq!(
+        queued_for(&tmp, &round),
+        vec!["r1".to_string(), "r2".to_string()]
+    );
+
+    let coder = worker.last_for("coder");
+    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    answer(&engine, &cs, &ct, LATER_STILL, "built T6");
+    end(&engine, &worker, "coder", &cs, LATER_STILL);
+
+    assert_eq!(
+        (worker.started("r1"), worker.started("r2")),
+        (1, 1),
+        "and then the whole round starts together, as it was declared"
+    );
+}
+
+/// The sweep hands the expired holder's copy to the waiting round, and its receipt says where the
+/// round's later step went (review of PR #38, Test Quality #6).
+#[test]
+fn the_sweeps_receipt_names_the_step_that_was_put_back_in_line() {
+    let (tmp, engine, worker) = team(ORDERED);
+    let (builder, _) = a_holder_at_work(&engine, &worker);
+    let round = an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    // The holder dies hard and its bound runs out: only the sweep will move the copy.
+    worker.mark_gone(&builder);
+    let (verifier_slot, _) = queued_row(&tmp, "verifier");
+
+    let receipt = tick(&tmp, &worker, HOLDER_EXPIRED, &verifier_slot);
+
+    let promotions = tick_promotions(&receipt).expect("the tick handed the copy on");
+    assert_eq!(
+        promotions
+            .started
+            .iter()
+            .map(|p| p.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["coder"]
+    );
+    assert_eq!(
+        promotions
+            .deferred
+            .iter()
+            .map(|p| p.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["verifier"],
+        "the receipt names the step that waits for the one before it"
+    );
+    assert_eq!(queued_for(&tmp, &round), vec!["verifier".to_string()]);
+}
+
+/// The holder's own waiting step is not somebody waiting for the copy. A sweep past the holder's
+/// bound, with nothing but that step in line, must not take the copy from the operation to hand it
+/// straight back to the same operation (review of PR #38, Test Quality #4).
+#[test]
+fn an_operation_is_not_swept_for_its_own_next_step() {
+    let (tmp, engine, worker) = team(ORDERED);
+    let (builder, _) = a_holder_at_work(&engine, &worker);
+    an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    worker.mark_gone(&builder);
+    let (verifier_slot, _) = queued_row(&tmp, "verifier");
+    tick(&tmp, &worker, HOLDER_EXPIRED, &verifier_slot);
+    let coder = worker.last_for("coder");
+    // The swept-in coder dies hard as well; its operation's own lease runs out behind it.
+    worker.mark_gone(&coder.internal_session);
+
+    let receipt = tick(&tmp, &worker, AFTER_THE_SWEPT_CODER, &verifier_slot);
+
+    assert!(
+        receipt.working_tree.is_none() && receipt.handed_on.is_none(),
+        "nobody else is waiting, so nothing reclaims the copy: {:?} {:?}",
+        receipt.working_tree,
+        receipt.handed_on
+    );
+    assert_eq!(
+        worker.started("verifier"),
+        1,
+        "the operation's next step starts in the copy it already holds"
+    );
 }
 
 // ---- what must NOT change: a declared parallel round starts together ----------------------------

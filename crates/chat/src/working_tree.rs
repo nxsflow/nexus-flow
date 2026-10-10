@@ -1559,6 +1559,22 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// The queued triggers of ONE claim area, in take order (nxf 6j6v.9g8j) — what
+    /// `orchestration::start_the_steps_whose_turn_has_come` asks on every reply, session end and
+    /// tick, filtered in SQL rather than by reading the whole queue.
+    pub fn working_tree_queue_of(&self, scope_key: &str) -> Result<Vec<QueuedTrigger>> {
+        let sql = format!(
+            "SELECT {QUEUE_COLS} FROM working_tree_queue WHERE scope_key = ?1
+             ORDER BY priority, enqueued_at, id"
+        );
+        let conn = self.connection();
+        let mut st = conn.prepare(&sql)?;
+        let rows = st
+            .query_map(params![scope_key], queued_trigger_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Read AND remove the queue's head in one statement, so a second process racing this one
     /// cannot pull the same head — the same single-statement requirement
     /// [`Self::acquire_working_tree`]'s doc explains for the lease CAS, here satisfied by SQLite's
@@ -1675,6 +1691,19 @@ impl ChatStore {
         let retry_at = to_utc_whole_seconds(retry_at)?;
         self.connection().execute(
             "UPDATE failed_starts SET retry_at = ?2 WHERE session = ?1",
+            params![session, retry_at],
+        )?;
+        Ok(())
+    }
+
+    /// **Hand a claimed retry back unattempted**, due again at `retry_at` (nxf 6j6v.9g8j). The tick
+    /// claimed it, then found an earlier step of its ordered run still pending, so it was not
+    /// started. Its attempts are not counted, and the in-flight mark goes, so it is due at
+    /// `retry_at` rather than at the claim's hold.
+    pub fn postpone_failed_start(&mut self, session: &str, retry_at: &str) -> Result<()> {
+        let retry_at = to_utc_whole_seconds(retry_at)?;
+        self.connection().execute(
+            "UPDATE failed_starts SET retry_at = ?2, in_flight_until = NULL WHERE session = ?1",
             params![session, retry_at],
         )?;
         Ok(())
@@ -3423,6 +3452,44 @@ mod tests {
         assert_eq!(
             promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
             vec!["verifier"]
+        );
+    }
+
+    #[test]
+    fn a_reclaim_hands_the_copy_to_the_first_of_two_rivals_and_not_back_to_the_expired_holder() {
+        // Review of PR #38, Test Quality #3: the outgoing-last order on the RECLAIM path, with two
+        // rivals in line behind the expired holder's own waiting step.
+        let mut store = ChatStore::open_in_memory(1);
+        let holder = WorkScope::Thread("th-holder".to_string());
+        assert!(store.acquire_working_tree(&holder, NOW, EXPIRES).unwrap());
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-holder", "verifier"), NOW)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-first", "first"), EXPIRES)
+            .unwrap();
+        store
+            .enqueue_working_tree(&queue_trigger_under("thread:th-second", "second"), LATER)
+            .unwrap();
+
+        let promoted = store
+            .reclaim_expired_working_tree_and_take_next("thread:th-holder", EXPIRES, LATER, LATER)
+            .unwrap();
+
+        assert_eq!(
+            promoted.iter().map(|q| q.role.as_str()).collect::<Vec<_>>(),
+            vec!["first"],
+            "the first rival in line gets the copy, not the expired holder's own step"
+        );
+        assert_eq!(
+            store
+                .list_working_tree_queue()
+                .unwrap()
+                .into_iter()
+                .map(|q| q.role)
+                .collect::<Vec<_>>(),
+            vec!["verifier".to_string(), "second".to_string()],
+            "and both others keep their places"
         );
     }
 

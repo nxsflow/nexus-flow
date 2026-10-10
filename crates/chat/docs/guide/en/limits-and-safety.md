@@ -170,8 +170,10 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   members of one fan-out share a claim, and firing one while its siblings stay parked deadlocks the
   board. **The steps of one ordered flow still start one at a time.** If two steps of the same run
   are waiting together (`flow: sequential` or `steps:`), the release starts the earlier one, and
-  the later one stays in line until the earlier step's session is over. Two steps of one run are
-  never started side by side in one working copy.
+  the later one stays in line until the earlier step has answered or its window has lapsed, and its
+  session is over. An earlier step whose start failed and is to be retried holds the later one
+  too. If the worker cannot tell whether a session still runs, the session counts as running until
+  it announces its end. Two steps of one run are never started side by side in one working copy.
 - **What releases it.** A reply inside the area releases the lease when nothing in that area still
   owes an answer *and* the last word was not a hand-back. An **escalation holds the lease** — the
   question is still travelling upward, the task is still mid-flight, and releasing the copy to a
