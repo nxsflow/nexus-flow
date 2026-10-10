@@ -75,6 +75,26 @@ pub fn items_value(items: &[ItemRow]) -> serde_json::Value {
     serde_json::Value::Array(sorted.into_iter().map(item_value).collect())
 }
 
+/// Every field name [`raw_field`] reads — so every field a ranking key can sort on. A plugin's
+/// ranking key naming anything else is refused at load (6j6v.z9jk): `raw_field` would return
+/// `None` for every item and the key would never decide. Custom fields are not rankable yet (x0wf).
+pub const RANKABLE_FIELDS: &[&str] = &[
+    "id",
+    "type",
+    "title",
+    "completion_criterion",
+    "status",
+    "priority",
+    "due",
+    "defer_until",
+    "defer",
+    "assignee",
+    "belongs_to",
+    "closing_comment",
+    "archived",
+    "closed_at",
+];
+
 /// Raw (unmapped) value of a presentable field — pure canonical-field access over an
 /// [`ItemRow`], independent of any plugin vocabulary. Shared by the read compute layer (the
 /// `next` ranking sorts on it) and the CLI's human renderer (which then maps it through the
@@ -123,6 +143,28 @@ mod tests {
             archived: None,
             closed_at: None,
         }
+    }
+
+    #[test]
+    fn rankable_fields_are_exactly_the_fields_raw_field_reads() {
+        // 6j6v.z9jk: the load-time check of ranking keys trusts this list, so each name must be
+        // one `raw_field` reads (a populated row answers `Some`), and an unknown name `None`.
+        let full = ItemRow {
+            completion_criterion: Some("c".into()),
+            due: Some("2026-01-01".into()),
+            defer_until: Some("2026-01-02".into()),
+            assignee: Some("a".into()),
+            belongs_to: Some("p".into()),
+            closing_comment: Some("x".into()),
+            archived: Some("2026-01-03".into()),
+            closed_at: Some("2026-01-04".into()),
+            ..row("c1.A")
+        };
+        for f in RANKABLE_FIELDS {
+            assert!(raw_field(&full, f).is_some(), "{f} is read by raw_field");
+        }
+        assert_eq!(raw_field(&full, "dua"), None);
+        assert_eq!(raw_field(&full, "description"), None, "not rankable");
     }
 
     #[test]

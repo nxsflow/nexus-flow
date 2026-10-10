@@ -2441,14 +2441,17 @@ name = "nxs-fold-ddb"
 version = "0.206.1"
 dependencies = [
  "aws-sdk-dynamodb",
+ "futures-util",
  "nexus-chat",
  "nexus-flow-core",
+ "nexus-flow-facade",
  "nexus-memory",
  "nxs-foundation",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

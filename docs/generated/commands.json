@@ -652,7 +652,7 @@
       },
       {
         "name": "next",
-        "about": "List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--limit` shows only the head of it, and says so",
+        "about": "List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--type`, `--in` and `--label` narrow it without re-ranking; `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page",
         "args": [
           {
             "name": "now",
@@ -671,6 +671,22 @@
             "help": "Filter to ready items carrying this label (user vocabulary, not the display type)"
           },
           {
+            "name": "ty",
+            "long": "type",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Only items of this type (the stored type, as `list --type` takes it). Repeatable: the types are alternatives"
+          },
+          {
+            "name": "within",
+            "long": "in",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Only items in this container: its children (whose parent it is) and the items that contribute to it"
+          },
+          {
             "name": "sort",
             "long": "sort",
             "short": null,
@@ -684,7 +700,23 @@
             "short": null,
             "required": false,
             "takes_value": true,
-            "help": "Max items to show (default: no limit). Applied last — after `--sort` and `--label` — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{\"items\": [...], \"total\": <n>}` so a consumer reads the untruncated total instead of inferring it from the array's length"
+            "help": "Max items to show (default: no limit). Applied last — after `--sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{\"items\": [...], \"total\": <n>}` so a consumer reads the untruncated total instead of inferring it from the array's length"
+          },
+          {
+            "name": "paginate",
+            "long": "paginate",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page"
+          },
+          {
+            "name": "token",
+            "long": "token",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "The token a previous `--paginate` answer printed: show the page after that one"
           }
         ],
         "subcommands": []

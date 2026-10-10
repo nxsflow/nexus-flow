@@ -287,7 +287,8 @@ enum Command {
     /// List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the
     /// active plugin's `next` policy and tiered to finish before starting: work you can close now,
     /// then each started epic with its open children, then the backlog. `--sort id` gives the flat,
-    /// untiered order; `--limit` shows only the head of it, and says so.
+    /// untiered order; `--type`, `--in` and `--label` narrow it without re-ranking; `--limit` shows
+    /// only the head of it, and says so; `--paginate` adds a token for the next page.
     Next {
         /// Reference time (ISO-8601 / RFC3339); defaults to now.
         #[arg(long)]
@@ -295,15 +296,32 @@ enum Command {
         /// Filter to ready items carrying this label (user vocabulary, not the display type).
         #[arg(long)]
         label: Option<String>,
+        /// Only items of this type (the stored type, as `list --type` takes it). Repeatable: the
+        /// types are alternatives.
+        #[arg(long = "type", value_name = "TYPE")]
+        ty: Vec<String>,
+        /// Only items in this container: its children (whose parent it is) and the items that
+        /// contribute to it.
+        #[arg(long = "in", value_name = "ID")]
+        within: Option<String>,
         /// Sort order: `rank` | `id` (default `rank`). An unknown key is a loud error.
         #[arg(long)]
         sort: Option<String>,
-        /// Max items to show (default: no limit). Applied last — after `--sort` and `--label` —
+        /// Max items to show (default: no limit). Applied last — after `--sort` and the filters —
         /// and never silently: a truncated list is headed `showing <n> of <total>`, and under
         /// `--json` the flag wraps the records as `{"items": [...], "total": <n>}` so a consumer
         /// reads the untruncated total instead of inferring it from the array's length.
         #[arg(long)]
         limit: Option<usize>,
+        /// Page through the list `--limit` rows at a time: the answer ends with a token for the
+        /// next page (`next_token` and `restarted` under `--json`). The list is cached on this
+        /// machine for an hour; a change to an item in it, or a stale or invalid token, restarts
+        /// at the first page.
+        #[arg(long, requires = "limit")]
+        paginate: bool,
+        /// The token a previous `--paginate` answer printed: show the page after that one.
+        #[arg(long, value_name = "TOKEN", requires = "paginate")]
+        token: Option<String>,
     },
     /// Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B
     /// blocks A — A cannot be ready until B closes.
@@ -661,15 +679,25 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Command::Next {
             now,
             label,
+            ty,
+            within,
             sort,
             limit,
+            paginate,
+            token,
         } => commands::next(
             cli.json,
             db,
-            now.as_deref(),
-            label.as_deref(),
-            sort.as_deref(),
-            *limit,
+            commands::NextArgs {
+                now: now.as_deref(),
+                label: label.as_deref(),
+                types: ty,
+                within: within.as_deref(),
+                sort: sort.as_deref(),
+                limit: *limit,
+                paginate: *paginate,
+                token: token.as_deref(),
+            },
         ),
         Command::Dep { action } => match action {
             DepAction::Add { from, to } => commands::dep_add(cli.json, db, from, to),
