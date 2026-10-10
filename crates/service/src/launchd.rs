@@ -794,20 +794,50 @@ pub fn install_with(
 /// the alias is NOT re-pointed. The caller has already established that it resolves to the binary
 /// it wants run; re-linking it to `current_exe()` the way [`install_for`] does would be a second,
 /// unasked decision about which build keeps this machine's time (nxf 6j6v.7gz6).
+///
+/// **And the `PATH` is the INSTALLED one, not the caller's** (review of PR #41, Integrity #2).
+/// [`service_path`] freezes the installing shell's `PATH` into the plist so the service can find
+/// `node` and `claude`; a restart triggered from `self-update` run by cron, a non-login ssh shell or
+/// a script would otherwise re-render the plist with that caller's thin `PATH`, and the restarted
+/// service would load, be reported as restarted, and then be unable to start an agent. So the
+/// `PATH` already in `plist_path` is carried over verbatim; `fallback_path_env` is used only when
+/// the installed plist carries none that can be read.
 pub fn restart_with(
     home: &ServiceHome,
     plist_path: &Path,
-    path_env: &str,
+    fallback_path_env: &str,
     ctl: &dyn LaunchCtl,
 ) -> Result<Bootstrapped> {
+    let path_env = installed_path_env(plist_path).unwrap_or_else(|| fallback_path_env.to_string());
     install_with(
         home.instance(),
         plist_path,
         &home.program(),
         &home.logs(),
-        path_env,
+        &path_env,
         ctl,
     )
+}
+
+/// The `PATH` an installed plist hands its service — the `<string>` after `<key>PATH</key>` in the
+/// shape [`render_plist`] writes, unescaped. `None` when the file cannot be read or carries none.
+pub fn installed_path_env(plist_path: &Path) -> Option<String> {
+    let xml = std::fs::read_to_string(plist_path).ok()?;
+    let after_key = &xml[xml.find("<key>PATH</key>")? + "<key>PATH</key>".len()..];
+    let open = after_key.trim_start();
+    let value = open.strip_prefix("<string>")?;
+    let value = &value[..value.find("</string>")?];
+    Some(xml_unescape(value))
+}
+
+/// The inverse of [`xml_escape`], plus the two entities a hand-edited plist may carry. `&amp;` goes
+/// LAST, so an escaped `&lt;` (`&amp;lt;`) comes back as `&lt;` and not as `<`.
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// How many times `bootstrap` is attempted before the install gives up.
@@ -1589,6 +1619,60 @@ mod tests {
         assert!(plist.contains("/l&lt;og&gt;/service.log"));
         assert!(plist.contains("/opt/a&amp;b/bin"));
         assert!(!plist.contains("<string>/opt/a&b/bin</string>"));
+    }
+
+    /// Review of PR #41, Integrity #2: a restart from `self-update` must not swap the `PATH` the
+    /// service was installed with for whatever the updater's own environment carried.
+    #[test]
+    fn a_restart_keeps_the_path_the_service_was_installed_with() {
+        let tmp = TempDir::new().unwrap();
+        let home = ServiceHome::at(tmp.path().join(".nexusflow"));
+        let plist = tmp
+            .path()
+            .join("agents")
+            .join("com.nxsflow.nexus-flow.plist");
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(
+            &plist,
+            render_plist(
+                "com.nxsflow.nexus-flow",
+                &home.program(),
+                &home.logs(),
+                "/opt/homebrew/bin:/Users/u/.nvm/bin:/opt/a&b/bin:/usr/bin:/bin",
+            ),
+        )
+        .unwrap();
+        let ctl = SpyCtl::default();
+
+        restart_with(&home, &plist, "/usr/bin:/bin", &ctl).unwrap();
+
+        assert_eq!(
+            installed_path_env(&plist).as_deref(),
+            Some("/opt/homebrew/bin:/Users/u/.nvm/bin:/opt/a&b/bin:/usr/bin:/bin"),
+            "the cron/ssh caller's thin PATH must not replace the installed one"
+        );
+        assert_eq!(
+            ctl.verbs()
+                .iter()
+                .filter(|v| v.starts_with("bootstrap"))
+                .count(),
+            1
+        );
+    }
+
+    /// The fallback is for a plist that carries no readable `PATH` — and only for that.
+    #[test]
+    fn a_restart_without_an_installed_path_takes_the_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let home = ServiceHome::at(tmp.path().join(".nexusflow"));
+        let plist = tmp.path().join("com.nxsflow.nexus-flow.plist");
+        std::fs::write(&plist, "<plist><dict></dict></plist>").unwrap();
+        assert_eq!(installed_path_env(&plist), None);
+        restart_with(&home, &plist, "/usr/local/bin:/usr/bin", &SpyCtl::default()).unwrap();
+        assert_eq!(
+            installed_path_env(&plist).as_deref(),
+            Some("/usr/local/bin:/usr/bin")
+        );
     }
 
     #[test]
