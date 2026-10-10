@@ -4233,7 +4233,7 @@ mod tests {
             i.due = due.map(str::to_string);
             i
         };
-        let mut items = vec![
+        let mut items = [
             typed("n1", Some("note"), "0", None),
             typed("m2", Some("memo"), "0", None),
             typed("m1", Some("memo"), "0", None),
