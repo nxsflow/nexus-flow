@@ -5,11 +5,11 @@
 //! `read::next_page`. Its own test binary, so the fixture plugins do not pollute the facade lib
 //! tests' "exactly two OSS plugins" assertion (mirrors `external_plugin_registration.rs`).
 
-use nexus_flow_core::model::ItemRow;
+use nexus_flow_core::model::{EdgeKind, ItemRow};
 use nexus_flow_core::store::Store;
 use nexus_flow_facade::engine::Engine;
 use nexus_flow_facade::plugin::{self, PluginRegistration};
-use nexus_flow_facade::read::{self, NextQuery};
+use nexus_flow_facade::read::{self, NextFilter, NextQuery};
 use nexus_flow_facade::workspace::{self, WorkspaceExt};
 use std::path::Path;
 use tempfile::TempDir;
@@ -271,5 +271,167 @@ fn the_bundled_plugins_rank_next_exactly_as_before() {
     assert_eq!(
         ids(&Engine::open(None, tmp.path()).unwrap().next(NOW).unwrap()),
         ["pt12.0002", "pt12.0001", "pt12.0003"]
+    );
+}
+
+// ---- review of #44 ---------------------------------------------------------------------------
+
+// The cross-type order from the default order's precedence key on `type`, with no `types`.
+inventory::submit!(PluginRegistration {
+    name: "type-key-rank-fixture",
+    toml: r#"
+name = "type-key-rank-fixture"
+[description]
+en = "x"
+de = "y"
+[priority]
+labels = ["P0", "P1", "P2", "P3"]
+[types]
+list = ["project", "action", "note"]
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+[ranking.next]
+order = [
+    { field = "type", precedence = ["project", "action"] },
+    { field = "priority", dir = "asc" },
+]
+[ranking.next.action]
+order = [ { field = "due", dir = "asc", nulls = "last" } ]
+[presentation.list]
+columns = ["id"]
+"#,
+    order: 112,
+});
+
+#[test]
+fn list_sort_rank_and_blocked_keep_the_default_order() {
+    // Per-type orders are `next`'s alone until `list` gets its own (n698): `list --sort rank` and
+    // `blocked` still rank by the default order (priority ascending, then id).
+    let tmp = workspace("per-type-rank-fixture");
+    board(tmp.path());
+    let cfg = plugin::load("per-type-rank-fixture").unwrap();
+    let mut s = writer(tmp.path());
+    assert_eq!(
+        ids(&read::list(&cfg, &s, None, None, Some(read::SortKey::Rank)).unwrap()),
+        [
+            "zz12.a001",
+            "zz12.p001",
+            "zz12.n002",
+            "zz12.n001",
+            "zz12.a002",
+            "zz12.p002"
+        ]
+    );
+
+    item(&mut s, "zz12.b001", "note", "0", None);
+    for blocked in ["zz12.a001", "zz12.a002", "zz12.p002"] {
+        s.add_edge(blocked, "zz12.b001", EdgeKind::Dep, "t");
+    }
+    let rows: Vec<String> = read::blocked(&cfg, &s, None)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.item.id)
+        .collect();
+    assert_eq!(rows, ["zz12.a001", "zz12.a002", "zz12.p002"]);
+}
+
+#[test]
+fn the_cross_type_order_falls_back_to_the_type_precedence_key_through_next() {
+    // Projects (listed first) by the default order, then actions by their own order, then the
+    // unlisted notes by the default order.
+    let tmp = workspace("type-key-rank-fixture");
+    board(tmp.path());
+    assert_eq!(
+        ids(&Engine::open(None, tmp.path()).unwrap().next(NOW).unwrap()),
+        [
+            "zz12.p001",
+            "zz12.p002",
+            "zz12.a002",
+            "zz12.a001",
+            "zz12.n002",
+            "zz12.n001"
+        ]
+    );
+}
+
+#[test]
+fn a_type_filter_and_paging_walk_the_per_type_order() {
+    let tmp = workspace("per-type-rank-fixture");
+    board(tmp.path());
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let q = || {
+        NextQuery::new(NOW)
+            .filter(NextFilter::new().with_type("action").with_type("project"))
+            .limit(2)
+    };
+    let p1 = engine.next_query(&q().paginate()).unwrap();
+    assert_eq!(ids(&p1.items), ["zz12.a002", "zz12.a001"]);
+    assert_eq!(p1.total, 4);
+    let token = p1.next_token.expect("rows remain");
+    let p2 = engine.next_query(&q().token(&token)).unwrap();
+    assert!(!p2.restarted);
+    assert_eq!(ids(&p2.items), ["zz12.p002", "zz12.p001"]);
+
+    // An op that re-ranks the actions under their own order (a001 now due first) restarts the
+    // walk, and the fresh first page is in the new per-type order.
+    writer(tmp.path()).set_field("zz12.a001", "due", Some("2026-06-20".into()), "t");
+    let again = engine.next_query(&q().token(&token)).unwrap();
+    assert!(again.restarted);
+    assert_eq!(ids(&again.items), ["zz12.a001", "zz12.a002"]);
+}
+
+#[test]
+fn clusters_and_their_children_of_several_types_follow_the_per_type_order() {
+    // Two started containers of different types, each with open children: the project cluster
+    // leads (project is listed, note is not), although the note header has the higher priority;
+    // inside the project's cluster the children rank actions first, each type by its own order.
+    let tmp = workspace("per-type-rank-fixture");
+    board(tmp.path());
+    let mut s = writer(tmp.path());
+    for header in ["zz12.p002", "zz12.n001"] {
+        s.set_field(header, "status", Some("in_progress".into()), "t");
+    }
+    for child in ["zz12.a001", "zz12.a002", "zz12.n002"] {
+        s.set_parent(child, "zz12.p002", "t").unwrap();
+    }
+    s.set_parent("zz12.p001", "zz12.n001", "t").unwrap();
+    assert_eq!(
+        ids(&Engine::open(None, tmp.path()).unwrap().next(NOW).unwrap()),
+        [
+            "zz12.p002",
+            "zz12.a002",
+            "zz12.a001",
+            "zz12.n002",
+            "zz12.n001",
+            "zz12.p001"
+        ]
+    );
+}
+
+#[test]
+fn the_store_free_path_filters_and_ranks_like_the_store_path() {
+    let tmp = workspace("per-type-rank-fixture");
+    board(tmp.path());
+    let s = writer(tmp.path());
+    let cfg = plugin::load("per-type-rank-fixture").unwrap();
+    let board = read::active_board(&s).unwrap();
+    for filter in [
+        NextFilter::new().with_type("action"),
+        NextFilter::new().with_type("project").with_type("note"),
+    ] {
+        assert_eq!(
+            ids(&read::next_active_filtered(&cfg, &board, NOW, &filter).unwrap()),
+            ids(&read::next_filtered(&cfg, &s, NOW, None, &filter).unwrap()),
+            "{filter:?}"
+        );
+    }
+    assert_eq!(
+        ids(
+            &read::next_active_filtered(&cfg, &board, NOW, &NextFilter::new().with_type("action"))
+                .unwrap()
+        ),
+        ["zz12.a002", "zz12.a001"]
     );
 }
