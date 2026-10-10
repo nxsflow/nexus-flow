@@ -410,6 +410,12 @@ fn service_ancestor(
 type CtlFactory =
     Box<dyn Fn() -> std::result::Result<Box<dyn nxs_service::launchd::LaunchCtl>, String>>;
 
+/// Where an instance's plist lives, or `None` where there is no launchd.
+type PlistOf = Box<dyn Fn(&nxs_service::Instance) -> Option<PathBuf>>;
+
+/// The service's pid when it is an ancestor of this process.
+type AncestorOf = Box<dyn Fn(&nxs_service::ServiceHome) -> Option<u32>>;
+
 /// **Everything `self-update` asks of the background service, against one service home** (nxf
 /// 6j6v.c92y). The real one is [`ServiceAt::ambient`]; a test builds one over a `TempDir` with a
 /// spy behind `ctl`, so the whole glue — which home, which plist, `<dir>/nxs`, the guard, the
@@ -418,12 +424,12 @@ struct ServiceAt {
     home: nxs_service::ServiceHome,
     /// Where an instance's plist lives. `None` where there is no launchd — then nothing is ever
     /// installed, and nothing restarts.
-    plist_of: Box<dyn Fn(&nxs_service::Instance) -> Option<PathBuf>>,
+    plist_of: PlistOf,
     /// The `PATH` to write only when the installed plist carries none (see
     /// `nxs_service::launchd::restart_with`).
     fallback_path_env: String,
     /// The service's pid when it is an ancestor of this process (see [`service_ancestor`]).
-    service_ancestor: Box<dyn Fn(&nxs_service::ServiceHome) -> Option<u32>>,
+    service_ancestor: AncestorOf,
     ctl: CtlFactory,
     /// The binary asking — for the stale-process note, which only that binary can judge.
     this_program: Option<PathBuf>,
