@@ -2878,6 +2878,11 @@ fn store_free_lanes_answer_as_the_store_path_for_the_same_board() {
     open_task(&mut s, "ab12.0007", "Leftover", "3");
     s.set_field("ab12.0007", "status", Some("in_progress".into()), "t");
     s.add_edge("ab12.0007", "ab12.0006", EdgeKind::Parent, "t");
+    // An OPEN task under the same closed parent is closed-masked: it carries a
+    // `parent_closed_reason` on the store path and is kept out of `next` — the reason the
+    // store-free records never need that join.
+    open_task(&mut s, "ab12.0008", "Masked", "0");
+    s.add_edge("ab12.0008", "ab12.0006", EdgeKind::Parent, "t");
     s.add_label("ab12.0003", "urgent", "t");
     s.add_thread_link(
         "m-t1",
@@ -2896,11 +2901,24 @@ fn store_free_lanes_answer_as_the_store_path_for_the_same_board() {
             .map(|p| p.id.as_str()),
         Some("ab12.0006")
     );
+    let masked = &board.tickets["ab12.0008"].item;
+    assert!(!read::parent_closed_reason(&s, masked).unwrap().is_empty());
     for c in [cfg(), cfg_with_fields()] {
         let want = read::next(&c, &s, NOW, None).unwrap();
         assert_eq!(read::next_active(&c, &board, NOW).unwrap(), want);
+        assert!(
+            want.iter().any(|i| i.id == "ab12.0007"),
+            "started under a closed parent"
+        );
+        assert!(!want.iter().any(|i| i.id == "ab12.0008"), "closed-masked");
+        let value = read::next_active_value(&c, &board, NOW).unwrap();
+        assert!(value
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("parent_closed_reason").is_none()));
         assert_eq!(
-            read::next_active_value(&c, &board, NOW).unwrap(),
+            value,
             read::next_to_value_with_custom(&c, &s, &want).unwrap()
         );
         let want = read::blocked(&c, &s, None).unwrap();

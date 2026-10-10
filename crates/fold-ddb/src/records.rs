@@ -5,83 +5,164 @@
 //!
 //! # What is read, and what it costs
 //!
-//! The rows and the board come from [`board::select`](crate::board::select), one Query on the
-//! `active` index. Each record then carries joins that live in other tables, and [`active_board`]
-//! reads them per active ticket — never a Scan, never a ticket outside the selection:
+//! The lanes need nothing but the rows and the board, which [`board::select`](crate::board::select)
+//! reads with one Query on the `active` index. The records also carry joins that live in other
+//! tables, and [`active_board`] reads them per active ticket — never a Scan, never a ticket outside
+//! the selection, and a fixed number of requests per ticket, whatever its history:
 //!
-//! | join            | read                                                                  |
-//! |-----------------|-----------------------------------------------------------------------|
-//! | `created_at`, `updated_at` | one `GetItem` of `item_timestamps#<ticket>`               |
-//! | `custom`        | one Query on `custom_fields#<ticket>#`                                |
-//! | `labels`        | one Query on `.ladj#<ticket>#`, then per label add one `GetItem` of the add and one of its remove |
-//! | `conversations` | one Query on `.tadj#<ticket>#`, then per thread link add one `GetItem` of the add and one of its remove |
-//! | `parent`        | one `GetItem` of the parent's row, once per parent outside the selection |
+//! | join                       | read                                                        |
+//! |----------------------------|-------------------------------------------------------------|
+//! | (the stream's rules)       | one `GetItem` of `.meta#watermark`, per board               |
+//! | `created_at`, `updated_at` | one `GetItem` of `item_timestamps#<ticket>`                 |
+//! | `custom`                   | one Query on `custom_fields#<ticket>#`                      |
+//! | `labels`                   | one Query on `.ladj#<ticket>#`                              |
+//! | `conversations`            | one Query on `.tadj#<ticket>#`                              |
+//! | `parent`                   | one `GetItem` per distinct parent outside the selection     |
 //!
-//! So a board of `n` active tickets costs `4n` requests plus two per label or thread link add its
-//! tickets ever had, plus one per distinct parent that is not itself active. Every row read is
-//! strongly consistent; only the selection is an index read (see the crate doc, "Freshness").
+//! So a board of `n` active tickets costs `1 + n` `GetItem`s and `3n` Queries, plus one `GetItem`
+//! per distinct parent that is not itself active — `4n + 1 + p` requests besides the selection. A
+//! Query returns more than one page only past 1 MB, which one ticket's custom values, labels or
+//! links do not reach. The entries under a ticket carry their add's label or link and its presence
+//! (see [`board`](crate::board), "Who owns a label or a thread link"), so a label toggled many
+//! times costs nothing more to read.
+//!
+//! The requests are not sent one after the other: at most [`READ_CONCURRENCY`] tickets are read at
+//! a time, so a board's latency is about `n / READ_CONCURRENCY` round trips, and no board sends more
+//! than that many requests at once.
+//!
+//! # Two points in time
+//!
+//! The selection is an index read, eventually consistent; every join is a row read, strongly
+//! consistent, made after it. Right after a fold a record can therefore pair the state the index
+//! still shows — a ticket's status, its lane — with joins that already show the fold: a label
+//! added a moment ago on a ticket the index still lists as open. Both halves are states the stream
+//! really had, and the next read answers the newer one throughout. Re-reading every row strongly
+//! would not close the gap: the lanes come from the index, and a row newer than its lane would
+//! disagree with the lane instead.
+//!
+//! # A stream folded by older rules
+//!
+//! The entries under a ticket came with index revision 1. A stream whose watermark names an older
+//! one — or none, folded before revisions were recorded for the index — has no entries, and its
+//! records would come back without labels or conversations. [`active_board`] refuses such a stream
+//! ([`RecordsError::NotCurrent`]); the fold run refolds it ([`Folder::is_current`]), after which it
+//! reads normally.
+//!
+//! [`Folder::is_current`]: crate::fold::Folder::is_current
 
-use crate::board::{item_key, Selection};
+use crate::board::{int, item_key, Selection, REMOVED};
+use crate::fold::{Folder, INDEX_DOMAIN, INDEX_REVISION};
 use crate::layout::{label_adjacency_prefix, link_adjacency_prefix, row_key};
 use crate::table::{text, Row, Table};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use nexus_flow_core::model::{ItemRow, LinkWeight};
 use nexus_flow_facade::read::{ActiveBoard, ActiveTicket, ParentRef};
 use nxs_foundation::change::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// How many tickets [`active_board`] reads at a time. Each ticket is four requests, so at most four
+/// times this many requests are in flight for one board.
+pub const READ_CONCURRENCY: usize = 16;
+
+/// Why the records of a stream could not be read.
+#[derive(Debug)]
+pub enum RecordsError<E> {
+    /// The table refused a request.
+    Table(E),
+    /// The stream was folded by older index rules than this build reads (`found`: the revision its
+    /// watermark names, `None` when it names none). Its records would lack joins; the fold run
+    /// refolds it.
+    NotCurrent { found: Option<i64> },
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for RecordsError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordsError::Table(e) => write!(f, "the views table refused a request: {e}"),
+            RecordsError::NotCurrent { found } => write!(
+                f,
+                "the stream was folded by index revision {found:?}, this build reads revision \
+                 {INDEX_REVISION}; it has to be folded again"
+            ),
+        }
+    }
+}
+
+impl<E: std::error::Error> std::error::Error for RecordsError<E> {}
+
+impl<E> From<E> for RecordsError<E> {
+    fn from(e: E) -> Self {
+        RecordsError::Table(e)
+    }
+}
+
 /// The selection's tickets with every join their records carry, ready for the facade's store-free
-/// lanes. See the module doc for what is read.
+/// lanes. See the module doc for what is read, in what order, and what a stream folded by older
+/// rules gets.
 pub async fn active_board<T: Table>(
     table: &T,
     selection: Selection,
-) -> Result<ActiveBoard, T::Error> {
+) -> Result<ActiveBoard, RecordsError<T::Error>> {
+    if let Some(mark) = Folder::watermark(table).await? {
+        let found = mark.revisions.get(INDEX_DOMAIN).copied();
+        if found != Some(INDEX_REVISION) {
+            return Err(RecordsError::NotCurrent { found });
+        }
+    }
     let Selection {
         items,
         board,
         parents,
     } = selection;
+
     // A parent outside the selection is read once, however many children it has.
-    let mut outside: BTreeMap<String, Option<Row>> = BTreeMap::new();
-    let mut tickets = Vec::with_capacity(items.len());
-    for (id, row) in &items {
-        let belongs_to = parents.get(id).cloned();
-        let parent = match belongs_to.as_deref() {
-            None => None,
-            Some(pid) => {
-                let prow = match items.get(pid) {
-                    Some(r) => Some(r.clone()),
-                    None => match outside.get(pid) {
-                        Some(r) => r.clone(),
-                        None => {
-                            let r = table.get(&item_key(pid)).await?;
-                            outside.insert(pid.to_string(), r.clone());
-                            r
-                        }
-                    },
-                };
-                prow.filter(|r| text(r, "deleted") != Some("1"))
-                    .map(|r| ParentRef {
-                        id: text(&r, "id").unwrap_or(pid).to_string(),
-                        title: text(&r, "title").map(str::to_string),
-                        item_type: text(&r, "type").map(str::to_string),
-                    })
+    let outside: BTreeSet<&str> = parents
+        .values()
+        .map(String::as_str)
+        .filter(|p| !items.contains_key(*p))
+        .collect();
+    let outside: BTreeMap<&str, Option<Row>> = stream::iter(outside)
+        .map(|pid| async move { Ok::<_, T::Error>((pid, table.get(&item_key(pid)).await?)) })
+        .buffered(READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+
+    let tickets: Vec<ActiveTicket> = stream::iter(&items)
+        .map(|(id, row)| {
+            let belongs_to: Option<&str> = parents.get(id).map(String::as_str);
+            let parent_row = belongs_to.and_then(|pid| {
+                items
+                    .get(pid)
+                    .or_else(|| outside.get(pid).and_then(Option::as_ref))
+                    .map(|r| (pid, r))
+            });
+            async move {
+                let (created_at, updated_at) = timestamps(table, id).await?;
+                let mut t = ActiveTicket::new(item_row(row, belongs_to.map(str::to_string)));
+                t.custom = custom(table, id).await?;
+                t.labels = labels(table, id).await?;
+                t.conversations = conversations(table, id).await?;
+                t.created_at = created_at;
+                t.updated_at = updated_at;
+                // As the store's `parent_of`: a deleted or missing parent is no parent.
+                t.parent = parent_row
+                    .filter(|(_, r)| text(r, "deleted") != Some("1"))
+                    .map(|(pid, r)| ParentRef {
+                        id: text(r, "id").unwrap_or(pid).to_string(),
+                        title: text(r, "title").map(str::to_string),
+                        item_type: text(r, "type").map(str::to_string),
+                    });
+                Ok::<_, T::Error>(t)
             }
-        };
-        let (created_at, updated_at) = timestamps(table, id).await?;
-        let mut t = ActiveTicket::new(item_row(row, belongs_to));
-        t.labels = labels(table, id).await?;
-        t.custom = custom(table, id).await?;
-        t.created_at = created_at;
-        t.updated_at = updated_at;
-        t.conversations = conversations(table, id).await?;
-        t.parent = parent;
-        tickets.push(t);
-    }
+        })
+        .buffered(READ_CONCURRENCY)
+        .try_collect()
+        .await?;
     Ok(ActiveBoard::new(board, tickets))
 }
 
 /// An `items` row as the store reads it, with the ticket's `belongs_to` (the `present_parent` join).
-pub fn item_row(row: &Row, belongs_to: Option<String>) -> ItemRow {
+pub(crate) fn item_row(row: &Row, belongs_to: Option<String>) -> ItemRow {
     let cell = |c: &str| text(row, c).map(str::to_string);
     ItemRow {
         id: cell("id").unwrap_or_default(),
@@ -110,13 +191,6 @@ fn key(table: &str, cells: &[(&str, &str)]) -> String {
         .collect();
     // Text key cells always form a row key.
     row_key(table, &cells).expect("a text key")
-}
-
-fn int(row: &Row, column: &str) -> Option<i64> {
-    match row.get(column) {
-        Some(Cell::Int(v)) => Some(*v),
-        _ => None,
-    }
 }
 
 /// The ticket's creation and last change; an unstamped `''` reads as none, as the store reads it.
@@ -152,42 +226,22 @@ async fn custom<T: Table>(table: &T, id: &str) -> Result<BTreeMap<String, String
         .collect())
 }
 
-/// The present adds of an owned table under the ticket: each entry's add row, unless its tag has a
-/// remove.
-async fn present_adds<T: Table>(
-    table: &T,
-    prefix: &str,
-    adds: &str,
-    removes: &str,
-) -> Result<Vec<Row>, T::Error> {
-    let mut out = Vec::new();
-    for entry in table.query_prefix(prefix).await? {
-        let Some(tag) = text(&entry, "tag") else {
-            continue;
-        };
-        let Some(add) = table.get(&key(adds, &[("tag", tag)])).await? else {
-            continue;
-        };
-        if table.get(&key(removes, &[("tag", tag)])).await?.is_none() {
-            out.push(add);
-        }
-    }
-    Ok(out)
+/// The entries under the ticket at `prefix` whose add is present.
+async fn present_entries<T: Table>(table: &T, prefix: &str) -> Result<Vec<Row>, T::Error> {
+    Ok(table
+        .query_prefix(prefix)
+        .await?
+        .into_iter()
+        .filter(|e| int(e, REMOVED) == Some(0))
+        .collect())
 }
 
 /// The ticket's present labels, sorted and distinct — `present_labels` for one ticket.
 async fn labels<T: Table>(table: &T, id: &str) -> Result<Vec<String>, T::Error> {
-    let adds = present_adds(
-        table,
-        &label_adjacency_prefix(id),
-        "label_adds",
-        "label_removes",
-    )
-    .await?;
-    let labels: BTreeSet<String> = adds
+    let labels: BTreeSet<String> = present_entries(table, &label_adjacency_prefix(id))
+        .await?
         .iter()
-        .filter(|r| text(r, "item_id") == Some(id))
-        .filter_map(|r| text(r, "label").map(str::to_string))
+        .filter_map(|e| text(e, "label").map(str::to_string))
         .collect();
     Ok(labels.into_iter().collect())
 }
@@ -196,24 +250,17 @@ async fn labels<T: Table>(table: &T, id: &str) -> Result<Vec<String>, T::Error> 
 /// link is bearing. Of a thread's present adds the one with the highest `(lamport, site, tag)` is
 /// the link, as the view picks it.
 async fn conversations<T: Table>(table: &T, id: &str) -> Result<usize, T::Error> {
-    let adds = present_adds(
-        table,
-        &link_adjacency_prefix(id),
-        "thread_link_adds",
-        "thread_link_removes",
-    )
-    .await?;
     let mut links: BTreeMap<String, ((i64, i64, String), bool)> = BTreeMap::new();
-    for r in adds.iter().filter(|r| text(r, "item_id") == Some(id)) {
-        let (Some(thread), Some(tag)) = (text(r, "thread_id"), text(r, "tag")) else {
+    for e in present_entries(table, &link_adjacency_prefix(id)).await? {
+        let (Some(thread), Some(tag)) = (text(&e, "thread_id"), text(&e, "tag")) else {
             continue;
         };
         let coordinate = (
-            int(r, "lamport").unwrap_or(-1),
-            int(r, "site").unwrap_or(-1),
+            int(&e, "lamport").unwrap_or(-1),
+            int(&e, "site").unwrap_or(-1),
             tag.to_string(),
         );
-        let bearing = text(r, "weight") == Some(LinkWeight::Bearing.as_str());
+        let bearing = text(&e, "weight") == Some(LinkWeight::Bearing.as_str());
         match links.get(thread) {
             Some((best, _)) if *best >= coordinate => {}
             _ => {

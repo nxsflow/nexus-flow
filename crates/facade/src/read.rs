@@ -1899,6 +1899,15 @@ impl ActiveBoard {
             .collect()
     }
 
+    /// The joins of ticket `id`. Every row a lane hands out comes from `tickets`, so the empty
+    /// joins are for a caller-built board only, never reached from this module's lanes.
+    fn joins_of(&self, id: &str) -> RecordJoins<'_> {
+        self.tickets
+            .get(id)
+            .map(ActiveTicket::joins)
+            .unwrap_or_default()
+    }
+
     /// Compose a record per row with the row's own joins.
     fn records(
         &self,
@@ -1908,10 +1917,7 @@ impl ActiveBoard {
         Value::Array(
             items
                 .iter()
-                .map(|i| match self.tickets.get(&i.id) {
-                    Some(t) => record(i, &t.joins()),
-                    None => record(i, &RecordJoins::default()),
-                })
+                .map(|i| record(i, &self.joins_of(&i.id)))
                 .collect(),
         )
     }
@@ -1920,6 +1926,11 @@ impl ActiveBoard {
 /// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
 /// every active ticket, its row and joins, each read in bulk. What [`next_active`] and the other
 /// store-free lanes answer from it is what [`next`] and its siblings answer from the store.
+///
+/// Its job is to be the parity oracle: the reference a server's input
+/// (`nxs_fold_ddb::records::active_board`) is compared against, ticket by ticket, in the
+/// differential tests. A replica's own reads take [`next`] and its siblings, which read only the
+/// joins of the rows they hand out; this reads every active ticket's.
 ///
 /// [`graph::select`]: nexus_flow_core::graph::select
 pub fn active_board(store: &Store) -> Result<ActiveBoard> {
@@ -1987,10 +1998,7 @@ pub fn blocked_active_value(cfg: &PluginConfig, board: &ActiveBoard) -> Value {
     let rows = blocked_active(cfg, board);
     Value::Array(
         rows.iter()
-            .map(|r| match board.tickets.get(&r.item.id) {
-                Some(t) => blocked_record(Some(cfg), r, &t.joins()),
-                None => blocked_record(Some(cfg), r, &RecordJoins::default()),
-            })
+            .map(|r| blocked_record(Some(cfg), r, &board.joins_of(&r.item.id)))
             .collect(),
     )
 }

@@ -30,11 +30,19 @@
 //! # Who owns a label or a thread link
 //!
 //! `label_adds` and `thread_link_adds` key on the add's tag alone, so nothing in them is found by
-//! ticket. Beside each add the fold writes one entry under the ticket — `.ladj#<ticket>#<tag>` for a
+//! ticket. Beside each add the fold keeps one entry under the ticket — `.ladj#<ticket>#<tag>` for a
 //! label, `.tadj#<ticket>#<tag>` for a thread link — and a reader of the item records
-//! ([`crate::records`]) finds one ticket's adds with one Query on that prefix. The entry is written
-//! when the add is folded and never changes: an add's ticket is fixed. Whether the add is still
-//! present is asked of its remove when it is read, so the order the ops arrive in does not decide.
+//! ([`crate::records`]) reads one ticket's labels or links with ONE Query on that prefix and no
+//! further read: the entry copies what the reader needs of the add (the label; the thread, weight
+//! and coordinate of a link) and says whether the add is removed ([`REMOVED`]).
+//!
+//! Presence is derived like the index flags: when an add or its remove is folded, the fold reads
+//! both rows and writes the entry from them, so the order the two arrive in does not decide — an
+//! add folded after its remove finds the remove, a remove folded after its add rewrites the entry.
+//! A remove whose add has not arrived writes nothing; the add writes the entry when it comes. That
+//! costs two `GetItem`s and at most one write per add or remove, and [`reindex`] rebuilds every
+//! entry from the rows. The entries came with index revision 1 ([`crate::fold::INDEX_REVISION`]);
+//! a stream folded before has none and is refolded.
 //!
 //! # One writer per stream
 //!
@@ -77,29 +85,80 @@ fn effect_text<'a>(change: &'a Change, column: &str) -> Option<&'a str> {
     })
 }
 
-/// How an owned add's entry key is built from its ticket and its tag.
-type OwnedKey = fn(&str, &str) -> String;
+/// The attribute of an entry under a ticket that says whether its add is removed: `1` or `0`.
+pub const REMOVED: &str = "removed";
 
-/// The tables whose adds get an entry under their ticket, and that entry's key (see the module doc,
-/// "Who owns a label or a thread link").
-const OWNED: [(&str, OwnedKey); 2] = [
-    ("label_adds", label_adjacency_key),
-    ("thread_link_adds", link_adjacency_key),
-];
-
-/// The entry under its ticket for an add of `table` described by `change`, if `table` is owned.
-fn owned_entry(change: &Change) -> Option<Write> {
-    let (_, key) = OWNED.iter().find(|(t, _)| *t == change.table)?;
-    let tag = key_text(change, "tag")?;
-    let item = effect_text(change, "item_id")?;
-    Some(owned_write(*key, item, tag))
+/// One OR-set whose adds get an entry under their ticket (see the module doc, "Who owns a label or
+/// a thread link").
+pub(crate) struct Owned {
+    pub(crate) adds: &'static str,
+    pub(crate) removes: &'static str,
+    /// The entry's key from the ticket and the tag.
+    pub(crate) key: fn(&str, &str) -> String,
+    /// The add's cells the entry copies, beside the tag.
+    pub(crate) copies: &'static [&'static str],
 }
 
-fn owned_write(key: OwnedKey, item: &str, tag: &str) -> Write {
-    Write::put(
-        key(item, tag),
-        vec![("tag".to_string(), Cell::Text(tag.to_string()))],
-    )
+pub(crate) const LABELS: Owned = Owned {
+    adds: "label_adds",
+    removes: "label_removes",
+    key: label_adjacency_key,
+    copies: &["label"],
+};
+
+pub(crate) const LINKS: Owned = Owned {
+    adds: "thread_link_adds",
+    removes: "thread_link_removes",
+    key: link_adjacency_key,
+    copies: &["thread_id", "weight", "lamport", "site"],
+};
+
+const OWNED: [Owned; 2] = [LABELS, LINKS];
+
+/// The entry of add `tag` from the add row's cells and whether it is removed. `None` for an add
+/// without a ticket, which no entry can be filed under.
+fn owned_write(owned: &Owned, add: &Row, tag: &str, removed: bool) -> Option<Write> {
+    let item = text(add, "item_id")?;
+    let mut set = vec![("tag".to_string(), Cell::Text(tag.to_string()))];
+    for column in owned.copies {
+        match add.get(*column) {
+            None | Some(Cell::Null) => {}
+            Some(cell) => set.push((column.to_string(), cell.clone())),
+        }
+    }
+    set.push((REMOVED.to_string(), Cell::Int(i64::from(removed))));
+    Some(Write::put((owned.key)(item, tag), set))
+}
+
+/// Write the entry of add `tag` from the stored add and its remove. Nothing while the add has not
+/// been folded.
+async fn refresh_owned<T: Table>(table: &T, owned: &Owned, tag: &str) -> Result<(), T::Error> {
+    let Some(add) = table.get(&tag_key(owned.adds, tag)).await? else {
+        return Ok(());
+    };
+    refresh_owned_add(table, owned, &add, tag).await
+}
+
+async fn refresh_owned_add<T: Table>(
+    table: &T,
+    owned: &Owned,
+    add: &Row,
+    tag: &str,
+) -> Result<(), T::Error> {
+    let removed = table.get(&tag_key(owned.removes, tag)).await?.is_some();
+    if let Some(write) = owned_write(owned, add, tag, removed) {
+        table.write(&write).await?;
+    }
+    Ok(())
+}
+
+/// The key of the entry an add described by `change` files under its ticket, if it is an owned add.
+fn owned_entry_key(change: &Change) -> Option<String> {
+    let owned = OWNED.iter().find(|o| o.adds == change.table)?;
+    Some((owned.key)(
+        effect_text(change, "item_id")?,
+        key_text(change, "tag")?,
+    ))
 }
 
 pub(crate) fn item_key(id: &str) -> String {
@@ -150,9 +209,13 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
     let mut items = BTreeSet::new();
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
+    let mut owned_tags: BTreeSet<(usize, &str)> = BTreeSet::new();
     for change in changes {
-        if let Some(entry) = owned_entry(change) {
-            table.write(&entry).await?;
+        if let Some(at) = OWNED
+            .iter()
+            .position(|o| o.adds == change.table || o.removes == change.table)
+        {
+            owned_tags.extend(key_text(change, "tag").map(|tag| (at, tag)));
         }
         match change.table {
             "items" => items.extend(key_text(change, "id")),
@@ -169,6 +232,9 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
     }
     for tag in removed {
         refresh_edge(table, tag).await?;
+    }
+    for (at, tag) in owned_tags {
+        refresh_owned(table, &OWNED[at], tag).await?;
     }
     Ok(())
 }
@@ -330,10 +396,10 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
             link_edge(table, tag).await?;
         }
     }
-    for (owned, key) in OWNED {
-        for row in table.query_prefix(&table_prefix(owned)).await? {
-            if let (Some(tag), Some(item)) = (text(&row, "tag"), text(&row, "item_id")) {
-                table.write(&owned_write(key, item, tag)).await?;
+    for owned in &OWNED {
+        for row in table.query_prefix(&table_prefix(owned.adds)).await? {
+            if let Some(tag) = text(&row, "tag") {
+                refresh_owned_add(table, owned, &row, tag).await?;
             }
         }
     }
@@ -341,7 +407,10 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
 }
 
 /// The active tickets — their whole rows — and the board the library derives the lanes from.
+///
+/// `#[non_exhaustive]`: only [`select`] builds one, so a later field stays an additive change.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Selection {
     pub items: BTreeMap<String, Row>,
     pub board: Board,
@@ -417,7 +486,7 @@ pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
     })
 }
 
-fn int(row: &Row, column: &str) -> Option<i64> {
+pub(crate) fn int(row: &Row, column: &str) -> Option<i64> {
     match row.get(column) {
         Some(Cell::Int(v)) => Some(*v),
         _ => None,
@@ -452,6 +521,6 @@ pub(crate) fn derived_keys(changes: &[Change]) -> Vec<String> {
             keys.push(adjacency_key(&end, tag));
         }
     }
-    keys.extend(changes.iter().filter_map(owned_entry).map(|w| w.sk));
+    keys.extend(changes.iter().filter_map(owned_entry_key));
     keys
 }

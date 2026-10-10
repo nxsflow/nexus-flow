@@ -2441,6 +2441,7 @@ name = "nxs-fold-ddb"
 version = "0.206.1"
 dependencies = [
  "aws-sdk-dynamodb",
+ "futures-util",
  "nexus-chat",
  "nexus-flow-core",
  "nexus-flow-facade",
