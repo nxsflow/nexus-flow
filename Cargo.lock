@@ -2443,12 +2443,14 @@ dependencies = [
  "aws-sdk-dynamodb",
  "nexus-chat",
  "nexus-flow-core",
+ "nexus-flow-facade",
  "nexus-memory",
  "nxs-foundation",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

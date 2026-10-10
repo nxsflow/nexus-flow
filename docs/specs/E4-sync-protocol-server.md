@@ -278,6 +278,16 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
 - **GSI `dated`** (`nxf_dated` / `nxf_dated_at`): sparse — `<stream>#closed` by `closed_at`,
   `<stream>#archived` by `archived`, newest first; the sort key is `<instant>U+001F<id>`, so tickets
   of one instant keep one order and a `limit` cuts the lane at the same place every time.
+- **The active tickets' records** (added 2026-10-10, `6j6v.t1ym`). The lanes need only the
+  `active` Query, but a lane's JSON also carries joins kept in other tables: labels, custom values,
+  timestamps, bearing thread links, the parent's title and type. `records::active_board` reads them
+  per active ticket with bounded requests — one `GetItem` of `item_timestamps`, one Query each on
+  `custom_fields#<ticket>#`, `.ladj#<ticket>#` and `.tadj#<ticket>#`, two `GetItem`s per label or
+  thread link add found there (the add and its remove), one `GetItem` per parent outside the
+  selection. `label_adds` and `thread_link_adds` key on the tag alone, so the fold writes one
+  `.ladj#<ticket>#<tag>` / `.tadj#<ticket>#<tag>` entry per add, and `board::reindex` rebuilds them.
+  The facade ranks and projects the result (`read::next_active_value`, `blocked_active_value`,
+  `deferred_active_value`) with the same code a replica's `Engine` runs.
 - **Index reads are eventually consistent**; row reads are strong. The lanes right after a fold may
   be those of the state before it.
 - **An op the table cannot hold** (a sort key past 1,024 bytes, a row past 400 KB) is refused and

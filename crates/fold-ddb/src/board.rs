@@ -27,6 +27,15 @@
 //! one instant keep one order. A ticket without the instant sits under `"0"`, which sorts after
 //! every date — last, as the local lanes put it. [`dated`] reads one lane newest first.
 //!
+//! # Who owns a label or a thread link
+//!
+//! `label_adds` and `thread_link_adds` key on the add's tag alone, so nothing in them is found by
+//! ticket. Beside each add the fold writes one entry under the ticket — `.ladj#<ticket>#<tag>` for a
+//! label, `.tadj#<ticket>#<tag>` for a thread link — and a reader of the item records
+//! ([`crate::records`]) finds one ticket's adds with one Query on that prefix. The entry is written
+//! when the add is folded and never changes: an add's ticket is fixed. Whether the add is still
+//! present is asked of its remove when it is read, so the order the ops arrive in does not decide.
+//!
 //! # One writer per stream
 //!
 //! The rows a reducer describes converge whatever the order and however many folders write them.
@@ -36,8 +45,8 @@
 //! from the rows if that was ever broken.
 
 use crate::layout::{
-    adjacency_key, adjacency_prefix, row_key, table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES,
-    SK,
+    adjacency_key, adjacency_prefix, label_adjacency_key, link_adjacency_key, row_key,
+    table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK,
 };
 use crate::table::{text, Dated, Row, Table};
 use crate::write::{Cond, Write};
@@ -60,7 +69,37 @@ fn key_text<'a>(change: &'a Change, column: &str) -> Option<&'a str> {
     })
 }
 
-fn item_key(id: &str) -> String {
+/// A text cell of the effect of a `Change`.
+fn effect_text<'a>(change: &'a Change, column: &str) -> Option<&'a str> {
+    effect_cells(change).iter().find_map(|(c, v)| match v {
+        Cell::Text(t) if c == column => Some(t.as_str()),
+        _ => None,
+    })
+}
+
+/// The tables whose adds get an entry under their ticket, and that entry's key (see the module doc,
+/// "Who owns a label or a thread link").
+const OWNED: [(&str, fn(&str, &str) -> String); 2] = [
+    ("label_adds", label_adjacency_key),
+    ("thread_link_adds", link_adjacency_key),
+];
+
+/// The entry under its ticket for an add of `table` described by `change`, if `table` is owned.
+fn owned_entry(change: &Change) -> Option<Write> {
+    let (_, key) = OWNED.iter().find(|(t, _)| *t == change.table)?;
+    let tag = key_text(change, "tag")?;
+    let item = effect_text(change, "item_id")?;
+    Some(owned_write(*key, item, tag))
+}
+
+fn owned_write(key: fn(&str, &str) -> String, item: &str, tag: &str) -> Write {
+    Write::put(
+        key(item, tag),
+        vec![("tag".to_string(), Cell::Text(tag.to_string()))],
+    )
+}
+
+pub(crate) fn item_key(id: &str) -> String {
     row_key("items", &[("id".into(), Cell::Text(id.into()))]).expect("a text key")
 }
 
@@ -109,6 +148,9 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
     for change in changes {
+        if let Some(entry) = owned_entry(change) {
+            table.write(&entry).await?;
+        }
         match change.table {
             "items" => items.extend(key_text(change, "id")),
             "edge_adds" => added.extend(key_text(change, "tag")),
@@ -285,6 +327,13 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
             link_edge(table, tag).await?;
         }
     }
+    for (owned, key) in OWNED {
+        for row in table.query_prefix(&table_prefix(owned)).await? {
+            if let (Some(tag), Some(item)) = (text(&row, "tag"), text(&row, "item_id")) {
+                table.write(&owned_write(key, item, tag)).await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -293,6 +342,11 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
 pub struct Selection {
     pub items: BTreeMap<String, Row>,
     pub board: Board,
+    /// Each active ticket's current parent, by ticket id — its `belongs_to`, as the local
+    /// `present_parent` view picks it: among the ticket's present `parent` edges, the one whose add
+    /// has the highest `(lamport, site, to_id)`. Every such edge has an active end, the ticket
+    /// itself, so the same Query already returned it (6j6v.t1ym).
+    pub parents: BTreeMap<String, String>,
 }
 
 /// The selection for a hosted board: one Query on the `active` index (6j6v.vvw6 point 4).
@@ -304,6 +358,9 @@ pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
     let mut items = BTreeMap::new();
     let mut tickets = Vec::new();
     let mut edges = Vec::new();
+    // child → the highest (lamport, site, to_id) of its parent edges; NULL coordinates sort as -1,
+    // as `present_parent`'s COALESCE does.
+    let mut parents: BTreeMap<String, (i64, i64, String)> = BTreeMap::new();
     for row in table.query_active().await? {
         let sk = text(&row, SK).unwrap_or_default();
         if sk.starts_with(&table_prefix("items")) {
@@ -325,6 +382,19 @@ pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
             ) else {
                 continue;
             };
+            if kind == EdgeKind::Parent {
+                let coordinate = (
+                    int(&row, "lamport").unwrap_or(-1),
+                    int(&row, "site").unwrap_or(-1),
+                    to.to_string(),
+                );
+                let best = parents
+                    .entry(from.to_string())
+                    .or_insert(coordinate.clone());
+                if coordinate > *best {
+                    *best = coordinate;
+                }
+            }
             edges.push(Edge {
                 from: from.to_string(),
                 to: to.to_string(),
@@ -332,10 +402,23 @@ pub async fn select<T: Table>(table: &T) -> Result<Selection, T::Error> {
             });
         }
     }
+    let parents = parents
+        .into_iter()
+        .filter(|(child, _)| items.contains_key(child))
+        .map(|(child, (_, _, parent))| (child, parent))
+        .collect();
     Ok(Selection {
         items,
         board: Board::new(tickets, edges),
+        parents,
     })
+}
+
+fn int(row: &Row, column: &str) -> Option<i64> {
+    match row.get(column) {
+        Some(Cell::Int(v)) => Some(*v),
+        _ => None,
+    }
 }
 
 /// One `dated` lane, newest first — the closed or the archived tickets' rows, at most `limit`.
@@ -349,8 +432,8 @@ pub async fn dated<T: Table>(
     table.query_dated(lane, limit).await
 }
 
-/// Edge-touching keys the board would write for these changes, beside the rows the changes name:
-/// one adjacency entry per end of every edge add. What [`Folder`](crate::fold::Folder) checks
+/// Keys the board would write for these changes, beside the rows the changes name: one adjacency
+/// entry per end of every edge add, and one entry under its ticket per label or thread link add. What [`Folder`](crate::fold::Folder) checks
 /// against the key limit before an op writes anything.
 pub(crate) fn derived_keys(changes: &[Change]) -> Vec<String> {
     let mut keys = Vec::new();
@@ -366,5 +449,6 @@ pub(crate) fn derived_keys(changes: &[Change]) -> Vec<String> {
             keys.push(adjacency_key(&end, tag));
         }
     }
+    keys.extend(changes.iter().filter_map(owned_entry).map(|w| w.sk));
     keys
 }

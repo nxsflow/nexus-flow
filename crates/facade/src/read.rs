@@ -23,6 +23,7 @@ use crate::error::{NxfError, Result};
 use crate::plugin::{Dir, Nulls, PluginConfig, RankKey};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
+use nexus_flow_core::graph::Board;
 use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
@@ -578,16 +579,50 @@ pub fn blocked(
     store: &Store,
     sort: Option<SortKey>,
 ) -> Result<Vec<BlockedItem>> {
-    let mut rows: Vec<BlockedItem> = Vec::new();
-    for id in blocked_ids(store)? {
-        let Some(item) = store.get_item(&id)? else {
-            continue;
-        };
-        let blockers = open_blockers(store, &item.id)?;
-        rows.push(BlockedItem { item, blockers });
+    // One selection for the lane and its blockers, the same library a server runs over its
+    // `active` index ([`blocked_active`]); the store only supplies the rows.
+    let board = nexus_flow_core::graph::select(store.connection())?;
+    let items = resolve_items(store, &board.blocked())?;
+    Ok(blocked_lane(
+        cfg,
+        &board,
+        items,
+        sort.unwrap_or(DEFAULT_SORT_BLOCKED),
+    ))
+}
+
+/// The blocked lane from its board and the rows of [`Board::blocked`]'s ids: each row with its
+/// blockers ([`Board::blockers`]), ordered by `sort`. THE one mechanism behind [`blocked`] (rows
+/// from a store) and [`blocked_active`] (rows a server read) — neither path lists or orders on its
+/// own (6j6v.t1ym).
+fn blocked_lane(
+    cfg: &PluginConfig,
+    board: &Board,
+    items: Vec<ItemRow>,
+    sort: SortKey,
+) -> Vec<BlockedItem> {
+    let mut rows: Vec<BlockedItem> = items
+        .into_iter()
+        .map(|item| {
+            let blockers = board
+                .blockers(&item.id)
+                .into_iter()
+                .map(|t| (t.id.clone(), ticket_status(t).to_string()))
+                .collect();
+            BlockedItem { item, blockers }
+        })
+        .collect();
+    order_blocked(cfg, &mut rows, sort);
+    rows
+}
+
+/// The core status of an active ticket — it has no other than these two.
+fn ticket_status(t: &nexus_flow_core::graph::Ticket) -> &'static str {
+    if t.in_progress {
+        "in_progress"
+    } else {
+        "open"
     }
-    order_blocked(cfg, &mut rows, sort.unwrap_or(DEFAULT_SORT_BLOCKED));
-    Ok(rows)
 }
 
 /// The `--json` array for `blocked`: each canonical record with its `blockers` list appended
@@ -595,16 +630,7 @@ pub fn blocked(
 pub fn blocked_to_value(rows: &[BlockedItem]) -> Value {
     Value::Array(
         rows.iter()
-            .map(|row| {
-                let mut rec = item_value(&row.item);
-                rec["blockers"] = Value::Array(
-                    row.blockers
-                        .iter()
-                        .map(|(b, st)| json!({ "id": b, "status": st }))
-                        .collect(),
-                );
-                rec
-            })
+            .map(|row| blocked_record(None, row, &RecordJoins::default()))
             .collect(),
     )
 }
@@ -641,9 +667,19 @@ pub fn deferred(
     sort: Option<SortKey>,
 ) -> Result<Vec<ItemRow>> {
     let ids = lanes(store, now)?.deferred;
-    let mut items = resolve_items(store, &ids)?;
-    order_by(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_DEFERRED));
-    Ok(items)
+    let items = resolve_items(store, &ids)?;
+    Ok(deferred_lane(
+        cfg,
+        items,
+        sort.unwrap_or(DEFAULT_SORT_DEFERRED),
+    ))
+}
+
+/// The deferred lane from the rows of [`Lanes::deferred`](nexus_flow_core::graph::Lanes)'s ids,
+/// ordered by `sort` — shared by [`deferred`] and [`deferred_active`] (6j6v.t1ym).
+fn deferred_lane(cfg: &PluginConfig, mut items: Vec<ItemRow>, sort: SortKey) -> Vec<ItemRow> {
+    order_by(cfg, &mut items, sort);
+    items
 }
 
 /// The `closed` lane: closed items that are NOT archived (an archived item belongs to the
@@ -789,25 +825,44 @@ pub fn next(
     // signals separately would run that walk four times over (the xn8s ratio guard below catches
     // precisely that). `next_candidates` IS `ready ∪ in_progress` by construction — same CTE, same
     // actionability — so the set is identical to the two-call form, at a quarter of the cost.
-    let candidates: Vec<derive::NextCandidate> = lanes(store, now)?
-        .candidates
-        .into_iter()
-        .map(|c| derive::NextCandidate {
-            status: if c.in_progress { "in_progress" } else { "open" }.to_string(),
-            id: c.id,
-            finishable: c.finishable,
-            promoter: c.promoter,
-        })
-        .collect();
+    let candidates = lanes(store, now)?.candidates;
     let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
-    let mut items = resolve_items(store, &ids)?;
-    match sort.unwrap_or(DEFAULT_SORT_NEXT) {
+    let items = resolve_items(store, &ids)?;
+    Ok(next_lane(
+        cfg,
+        candidates,
+        items,
+        sort.unwrap_or(DEFAULT_SORT_NEXT),
+    ))
+}
+
+/// The `next` order over the library's candidates and their rows: the finish-first tiers under
+/// `rank`, the flat order under any other key. THE one mechanism behind [`next`] (rows from a
+/// store) and [`next_active`] (rows a server read), so the two cannot rank apart (6j6v.t1ym).
+fn next_lane(
+    cfg: &PluginConfig,
+    candidates: Vec<nexus_flow_core::graph::Candidate>,
+    mut items: Vec<ItemRow>,
+    sort: SortKey,
+) -> Vec<ItemRow> {
+    match sort {
         // The default: finishing beats starting.
-        SortKey::Rank => order_next_tiered(cfg, &candidates, &mut items),
+        SortKey::Rank => {
+            let candidates: Vec<derive::NextCandidate> = candidates
+                .into_iter()
+                .map(|c| derive::NextCandidate {
+                    status: if c.in_progress { "in_progress" } else { "open" }.to_string(),
+                    id: c.id,
+                    finishable: c.finishable,
+                    promoter: c.promoter,
+                })
+                .collect();
+            order_next_tiered(cfg, &candidates, &mut items)
+        }
         // An explicit `--sort` is the escape hatch — the flat, untiered order (§4.2).
         key => order_by(cfg, &mut items, key),
     }
-    Ok(items)
+    items
 }
 
 /// One page of a `next` result: the rows to show, plus how many there were before the cut.
@@ -1176,6 +1231,13 @@ fn parent_value(parent: Option<&ParentRef>) -> Value {
 /// `parent` join appended (#916.7) and a sparse `parent_closed_reason` join (07a.3 §5) for a
 /// closed-masked child — both read-layer joins, never core fields. The store resolves the parents.
 pub fn next_to_value(store: &Store, items: &[ItemRow]) -> Result<Value> {
+    next_records(None, store, items)
+}
+
+/// The `next` records over a store, with the sparse `custom` join when `cfg` is given. Every join
+/// is read in bulk for the whole lane, then each record is composed by [`next_record`] — the one
+/// composition [`next_active_value`] uses too.
+fn next_records(cfg: Option<&PluginConfig>, store: &Store, items: &[ItemRow]) -> Result<Value> {
     // One bulk label read for the whole lane instead of a `labels_of` per row (1w5v): `labels_by_id`
     // omits label-less items, so the sparse `labels` key appears iff an item has ≥1 label — the same
     // JSON as the old per-item `if !labels.is_empty()`, so `list`/`next --json` stays byte-identical
@@ -1186,24 +1248,128 @@ pub fn next_to_value(store: &Store, items: &[ItemRow]) -> Result<Value> {
     // above. BEARING links only — a `passing` link must not make an item advertise "there are
     // conversations about this" in the work list; it is visible on the item itself (`show`).
     let conversations_by_id = store.bearing_thread_counts(&ids)?;
+    let maps = lane_joins(cfg, store, &ids)?;
     let mut out = Vec::with_capacity(items.len());
     for i in items {
-        let mut rec = item_value(i);
-        rec["parent"] = parent_value(parent_of(store, i)?.as_ref());
-        if let Some(labels) = labels_by_id.get(&i.id) {
-            rec["labels"] = json!(labels);
-        }
-        if let Some(n) = conversations_by_id.get(&i.id) {
-            rec["conversations"] = json!(n);
-        }
-        if let Some(reasons) = parent_closed_reason_value(&parent_closed_reason(store, i)?) {
-            rec["parent_closed_reason"] = reasons;
-        }
-        out.push(rec);
+        let parent = parent_of(store, i)?;
+        let closed = parent_closed_reason(store, i)?;
+        let joins = RecordJoins {
+            labels: labels_by_id.get(&i.id).map(Vec::as_slice).unwrap_or(&[]),
+            conversations: conversations_by_id.get(&i.id).copied().unwrap_or(0),
+            parent: parent.as_ref(),
+            parent_closed: &closed,
+            ..RecordJoins::lane(&i.id, &maps)
+        };
+        out.push(next_record(cfg, i, &joins));
     }
-    let mut v = Value::Array(out);
-    attach_timestamps_lane(store, &ids, &mut v)?; // 2kjy: sparse created_at/updated_at per record
-    Ok(v)
+    Ok(Value::Array(out))
+}
+
+/// The timestamps of a lane's items, and their custom values — what [`lane_joins`] reads in bulk.
+type LaneJoinMaps = (
+    BTreeMap<String, nexus_flow_core::store::ItemTimestamps>,
+    BTreeMap<String, BTreeMap<String, String>>,
+);
+
+/// The bulk reads every lane record carries beside its own joins: the timestamps (2kjy, always)
+/// and the custom values (only when `cfg` is given — no declared fields, no read, ky26).
+fn lane_joins(cfg: Option<&PluginConfig>, store: &Store, ids: &[&str]) -> Result<LaneJoinMaps> {
+    let ts = store.item_timestamps_of_bulk(ids)?;
+    let custom = match cfg {
+        Some(_) => store.custom_fields_of_bulk(ids)?,
+        None => BTreeMap::new(),
+    };
+    Ok((ts, custom))
+}
+
+/// The read-layer joins of ONE lane record, however they were read — in bulk from a store, or per
+/// ticket by a server ([`ActiveTicket`]). The record composers ([`next_record`],
+/// [`blocked_record`], [`lane_record`]) take only this, so which joins a lane carries and how each
+/// is spelled is decided once (6j6v.t1ym). Every join is sparse: an empty one adds no key.
+#[derive(Default)]
+struct RecordJoins<'a> {
+    labels: &'a [String],
+    /// Bearing thread links (8dbe).
+    conversations: usize,
+    parent: Option<&'a ParentRef>,
+    parent_closed: &'a [(String, Option<String>)],
+    created_at: Option<&'a str>,
+    updated_at: Option<&'a str>,
+    /// Every non-empty custom value; [`declared_custom_value`] narrows it to the plugin's fields.
+    custom: Option<&'a BTreeMap<String, String>>,
+}
+
+impl<'a> RecordJoins<'a> {
+    /// The timestamps and custom values of `id` out of the bulk maps [`lane_joins`] read.
+    fn lane(id: &str, maps: &'a LaneJoinMaps) -> RecordJoins<'a> {
+        let (ts, custom) = maps;
+        let (created_at, updated_at) = ts
+            .get(id)
+            .map(|(c, u)| (c.as_deref(), u.as_deref()))
+            .unwrap_or_default();
+        RecordJoins {
+            created_at,
+            updated_at,
+            custom: custom.get(id),
+            ..RecordJoins::default()
+        }
+    }
+}
+
+/// The joins every lane record carries: the sparse `created_at`/`updated_at` (2kjy) and, when `cfg`
+/// is given, the sparse declared `custom` map (ekf5).
+fn put_lane_joins(cfg: Option<&PluginConfig>, rec: &mut Value, j: &RecordJoins) {
+    if let Some(c) = j.created_at {
+        rec["created_at"] = json!(c);
+    }
+    if let Some(u) = j.updated_at {
+        rec["updated_at"] = json!(u);
+    }
+    if let (Some(cfg), Some(fields)) = (cfg, j.custom) {
+        if let Some(custom) = declared_custom_value(cfg, fields) {
+            rec["custom"] = custom;
+        }
+    }
+}
+
+/// One `next` record: the canonical item, its `parent` join (#916.7), the sparse `labels`,
+/// `conversations` and `parent_closed_reason` (07a.3 §5) joins, and the lane joins.
+fn next_record(cfg: Option<&PluginConfig>, item: &ItemRow, j: &RecordJoins) -> Value {
+    let mut rec = item_value(item);
+    rec["parent"] = parent_value(j.parent);
+    if !j.labels.is_empty() {
+        rec["labels"] = json!(j.labels);
+    }
+    if j.conversations > 0 {
+        rec["conversations"] = json!(j.conversations);
+    }
+    if let Some(reasons) = parent_closed_reason_value(j.parent_closed) {
+        rec["parent_closed_reason"] = reasons;
+    }
+    put_lane_joins(cfg, &mut rec, j);
+    rec
+}
+
+/// One `blocked` record: the canonical item with its `blockers` list (nexus-flow-97b), and the
+/// lane joins.
+fn blocked_record(cfg: Option<&PluginConfig>, row: &BlockedItem, j: &RecordJoins) -> Value {
+    let mut rec = item_value(&row.item);
+    rec["blockers"] = Value::Array(
+        row.blockers
+            .iter()
+            .map(|(b, st)| json!({ "id": b, "status": st }))
+            .collect(),
+    );
+    put_lane_joins(cfg, &mut rec, j);
+    rec
+}
+
+/// One record of a bare lane (`deferred`/`closed`/`archived`/`search`): the canonical item and the
+/// lane joins.
+fn lane_record(cfg: Option<&PluginConfig>, item: &ItemRow, j: &RecordJoins) -> Value {
+    let mut rec = item_value(item);
+    put_lane_joins(cfg, &mut rec, j);
+    rec
 }
 
 /// The `--json` array for `list` (07a.3 §5): each record in the given order with a sparse
@@ -1363,15 +1529,17 @@ pub fn items_in_order_value_with_custom(
     store: &Store,
     items: &[ItemRow],
 ) -> Result<Value> {
-    let mut v = items_in_order_value(items);
     let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-    // Timestamps are plugin-independent, so they attach unconditionally (2kjy).
-    attach_timestamps_lane(store, &ids, &mut v)?;
-    // No declared fields ⇒ the custom read + attach can never add a key (ky26/ekf5): skip it.
-    if !cfg.fields.is_empty() {
-        attach_declared_custom(cfg, store, &ids, &mut v)?;
-    }
-    Ok(v)
+    // Timestamps are plugin-independent, so they attach unconditionally (2kjy). No declared fields
+    // ⇒ the custom read + attach can never add a key (ky26/ekf5): skip it.
+    let cfg = (!cfg.fields.is_empty()).then_some(cfg);
+    let maps = lane_joins(cfg, store, &ids)?;
+    Ok(Value::Array(
+        items
+            .iter()
+            .map(|i| lane_record(cfg, i, &RecordJoins::lane(&i.id, &maps)))
+            .collect(),
+    ))
 }
 
 /// [`blocked_to_value`] with the sparse declared `custom` map attached per record (6j6v.bbq6): the
@@ -1382,14 +1550,15 @@ pub fn blocked_to_value_with_custom(
     store: &Store,
     rows: &[BlockedItem],
 ) -> Result<Value> {
-    let mut v = blocked_to_value(rows);
     let ids: Vec<&str> = rows.iter().map(|r| r.item.id.as_str()).collect();
     // Timestamps are plugin-independent, so they attach unconditionally (2kjy).
-    attach_timestamps_lane(store, &ids, &mut v)?;
-    if !cfg.fields.is_empty() {
-        attach_declared_custom(cfg, store, &ids, &mut v)?;
-    }
-    Ok(v)
+    let cfg = (!cfg.fields.is_empty()).then_some(cfg);
+    let maps = lane_joins(cfg, store, &ids)?;
+    Ok(Value::Array(
+        rows.iter()
+            .map(|r| blocked_record(cfg, r, &RecordJoins::lane(&r.item.id, &maps)))
+            .collect(),
+    ))
 }
 
 /// The sparse declared `custom` object per id (6j6v.bbq6): `id → {field: value, …}` for each id that
@@ -1423,15 +1592,11 @@ pub fn next_to_value_with_custom(
     store: &Store,
     items: &[ItemRow],
 ) -> Result<Value> {
-    let mut v = next_to_value(store, items)?;
     // T4-review efficiency (ky26): a plugin with NO declared `[fields]` (issue-tracker/personal-todo)
     // can never surface a `custom` map, so skip the `custom_fields_of_bulk` read + attach entirely —
-    // no guaranteed-empty query on every lane read. Behavior-preserving: `attach_custom_lane` already
-    // adds no `custom` key when nothing declared is set, so the output is unchanged either way.
-    if !cfg.fields.is_empty() {
-        attach_custom_lane(cfg, store, items, &mut v)?;
-    }
-    Ok(v)
+    // no guaranteed-empty query on every lane read. Behavior-preserving: `declared_custom_value`
+    // already adds no `custom` key when nothing declared is set, so the output is unchanged either way.
+    next_records((!cfg.fields.is_empty()).then_some(cfg), store, items)
 }
 
 /// [`list_to_value`] with the sparse declared `custom` map attached per record (§6).
@@ -1633,6 +1798,221 @@ fn cmp_rank_key(a: &ItemRow, b: &ItemRow, key: &RankKey) -> std::cmp::Ordering {
             Nulls::Last => Ordering::Less,
         },
     }
+}
+
+// ---- store-free lanes (6j6v.t1ym) -----------------------------------------
+//
+// A server that folds a stream into DynamoDB (`nxs-fold-ddb`) has no `Store`: it has the active
+// tickets' rows and a `graph::Board` from one Query on its `active` index, plus a few bounded reads
+// per ticket for the joins a record carries. It must still answer `next`/`blocked`/`deferred`
+// exactly as a replica does — the same order, the same JSON — without re-implementing the ranking
+// (one mechanism, computed once in Rust). So the lanes are composed from neutral input here, by the
+// SAME code the store path runs: `next_lane`/`blocked_lane`/`deferred_lane` order, and
+// `next_record`/`blocked_record`/`lane_record` project. The store path builds its input from SQL;
+// a server builds an `ActiveBoard`; neither ranks or projects on its own.
+
+/// One active ticket and the read-layer joins its lane records carry — the per-ticket input of the
+/// store-free lanes ([`next_active`], [`blocked_active`], [`deferred_active`]).
+///
+/// Every field holds what the store path reads for the same ticket, unfiltered: `labels` as
+/// `present_labels` (id-sorted, distinct), `custom` every non-empty custom value (declared or not —
+/// the projection narrows it to the plugin's fields), the timestamps as `item_timestamps` with an
+/// unstamped `''` read as `None`, `conversations` the count of present BEARING thread links, and
+/// `parent` the live parent [`parent_of`] resolves from `item.belongs_to`.
+///
+/// `#[non_exhaustive]`, so a later join stays an additive change: build it with
+/// [`ActiveTicket::new`] and set the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ActiveTicket {
+    pub item: ItemRow,
+    pub labels: Vec<String>,
+    pub custom: BTreeMap<String, String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub conversations: usize,
+    pub parent: Option<ParentRef>,
+}
+
+impl ActiveTicket {
+    /// A ticket with no joins yet.
+    pub fn new(item: ItemRow) -> ActiveTicket {
+        ActiveTicket {
+            item,
+            labels: Vec::new(),
+            custom: BTreeMap::new(),
+            created_at: None,
+            updated_at: None,
+            conversations: 0,
+            parent: None,
+        }
+    }
+
+    fn joins(&self) -> RecordJoins<'_> {
+        RecordJoins {
+            labels: &self.labels,
+            conversations: self.conversations,
+            parent: self.parent.as_ref(),
+            // Never set, and never needed: `parent_closed_reason` is non-empty only for an OPEN
+            // ticket none of whose parents is active — exactly the ticket the library's closed-mask
+            // keeps out of `next` (`graph::Board::lanes`), and `blocked`/`deferred` carry no such
+            // join. The differential test against the store path holds this.
+            parent_closed: &[],
+            created_at: self.created_at.as_deref(),
+            updated_at: self.updated_at.as_deref(),
+            custom: Some(&self.custom),
+        }
+    }
+}
+
+/// The input of the store-free lanes: the active tickets' [`Board`] and, per active ticket, its row
+/// and joins. A server builds it from its folded tables (`nxs_fold_ddb::records::active_board`); a
+/// replica can build the same value from its store with [`active_board`].
+///
+/// A ticket the board names but `tickets` lacks is left out of every lane, as the store path skips
+/// an id with no row.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ActiveBoard {
+    pub board: Board,
+    /// By id.
+    pub tickets: BTreeMap<String, ActiveTicket>,
+}
+
+impl ActiveBoard {
+    /// The board and its tickets, keyed by their ids.
+    pub fn new(board: Board, tickets: impl IntoIterator<Item = ActiveTicket>) -> ActiveBoard {
+        ActiveBoard {
+            board,
+            tickets: tickets
+                .into_iter()
+                .map(|t| (t.item.id.clone(), t))
+                .collect(),
+        }
+    }
+
+    /// The rows of `ids`, in that order, skipping an id without a ticket.
+    fn items<'a>(&self, ids: impl IntoIterator<Item = &'a String>) -> Vec<ItemRow> {
+        ids.into_iter()
+            .filter_map(|id| self.tickets.get(id))
+            .map(|t| t.item.clone())
+            .collect()
+    }
+
+    /// Compose a record per row with the row's own joins.
+    fn records(
+        &self,
+        items: &[ItemRow],
+        record: impl Fn(&ItemRow, &RecordJoins) -> Value,
+    ) -> Value {
+        Value::Array(
+            items
+                .iter()
+                .map(|i| match self.tickets.get(&i.id) {
+                    Some(t) => record(i, &t.joins()),
+                    None => record(i, &RecordJoins::default()),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
+/// every active ticket, its row and joins, each read in bulk. What [`next_active`] and the other
+/// store-free lanes answer from it is what [`next`] and its siblings answer from the store.
+///
+/// [`graph::select`]: nexus_flow_core::graph::select
+pub fn active_board(store: &Store) -> Result<ActiveBoard> {
+    let board = nexus_flow_core::graph::select(store.connection())?;
+    let ids: Vec<&str> = board.tickets().map(|t| t.id.as_str()).collect();
+    let items = store.get_items(&ids)?;
+    let mut labels = store.labels_of_bulk(&ids)?;
+    let mut custom = store.custom_fields_of_bulk(&ids)?;
+    let mut ts = store.item_timestamps_of_bulk(&ids)?;
+    let conversations = store.bearing_thread_counts(&ids)?;
+    let mut tickets = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item.id.clone();
+        let parent = parent_of(store, &item)?;
+        let (created_at, updated_at) = ts.remove(&id).unwrap_or_default();
+        let mut t = ActiveTicket::new(item);
+        t.labels = labels.remove(&id).unwrap_or_default();
+        t.custom = custom.remove(&id).unwrap_or_default();
+        t.created_at = created_at;
+        t.updated_at = updated_at;
+        t.conversations = conversations.get(&id).copied().unwrap_or(0);
+        t.parent = parent;
+        tickets.push(t);
+    }
+    Ok(ActiveBoard::new(board, tickets))
+}
+
+/// [`next`] without a store: the actionable candidates of `board` at `now` in the finish-first
+/// tiered default order — the same rows in the same order as [`next`] (and [`Engine::next`]) over a
+/// store holding the same board. A malformed `now` is `validation`-rejected, as there.
+///
+/// [`Engine::next`]: crate::engine::Engine::next
+pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
+    crate::validate::iso_date(now)?;
+    let candidates = board.board.lanes(now).candidates;
+    let items = board.items(candidates.iter().map(|c| &c.id));
+    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT))
+}
+
+/// [`next_active`] as the `next` JSON: the value [`next_to_value_with_custom`] (and
+/// [`Engine::next_value`]) gives for the same board — `parent`, `labels`, `conversations`,
+/// timestamps and the declared `custom` map, every join from the ticket's [`ActiveTicket`].
+///
+/// [`Engine::next_value`]: crate::engine::Engine::next_value
+pub fn next_active_value(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Value> {
+    let items = next_active(cfg, board, now)?;
+    Ok(board.records(&items, |i, j| next_record(Some(cfg), i, j)))
+}
+
+/// [`blocked`] without a store: the blocked tickets of `board`, each with its blockers in id order,
+/// in the default rank order — what [`blocked`] (and [`Engine::blocked`]) gives over a store holding
+/// the same board. Blocked depends on no instant, so no `now` is asked for.
+///
+/// [`Engine::blocked`]: crate::engine::Engine::blocked
+pub fn blocked_active(cfg: &PluginConfig, board: &ActiveBoard) -> Vec<BlockedItem> {
+    let items = board.items(&board.board.blocked());
+    blocked_lane(cfg, &board.board, items, DEFAULT_SORT_BLOCKED)
+}
+
+/// [`blocked_active`] as the `blocked` JSON: the value [`blocked_to_value_with_custom`] (and
+/// [`Engine::blocked_value`]) gives for the same board.
+///
+/// [`Engine::blocked_value`]: crate::engine::Engine::blocked_value
+pub fn blocked_active_value(cfg: &PluginConfig, board: &ActiveBoard) -> Value {
+    let rows = blocked_active(cfg, board);
+    Value::Array(
+        rows.iter()
+            .map(|r| match board.tickets.get(&r.item.id) {
+                Some(t) => blocked_record(Some(cfg), r, &t.joins()),
+                None => blocked_record(Some(cfg), r, &RecordJoins::default()),
+            })
+            .collect(),
+    )
+}
+
+/// [`deferred`] without a store: the deferred tickets of `board` at `now`, soonest `defer_until`
+/// first — what [`deferred`] (and [`Engine::deferred`]) gives over a store holding the same board.
+/// A malformed `now` is `validation`-rejected, as there.
+///
+/// [`Engine::deferred`]: crate::engine::Engine::deferred
+pub fn deferred_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
+    crate::validate::iso_date(now)?;
+    let items = board.items(&board.board.lanes(now).deferred);
+    Ok(deferred_lane(cfg, items, DEFAULT_SORT_DEFERRED))
+}
+
+/// [`deferred_active`] as the `deferred` JSON: the value [`items_in_order_value_with_custom`] (and
+/// [`Engine::deferred_value`]) gives for the same board.
+///
+/// [`Engine::deferred_value`]: crate::engine::Engine::deferred_value
+pub fn deferred_active_value(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Value> {
+    let items = deferred_active(cfg, board, now)?;
+    Ok(board.records(&items, |i, j| lane_record(Some(cfg), i, j)))
 }
 
 // ---- lane-ranked search (C6 #916.6) ----------------------------------------

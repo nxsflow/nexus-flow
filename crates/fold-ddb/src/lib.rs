@@ -5,7 +5,8 @@
 //!
 //! The pieces, in the order a fold run uses them: [`fold::Folder`] maps each op through the
 //! platform's reducers and [`write::plan`] turns every change into a [`write::Write`];
-//! [`board`] keeps the indexes and reads the lanes; [`chunks`] reads an item's live chunks;
+//! [`board`] keeps the indexes and reads the lanes; [`records`] reads the active tickets' records
+//! for the facade's store-free `next`/`blocked`/`deferred`; [`chunks`] reads an item's live chunks;
 //! [`snapshot`] starts a stream without folding its whole history. [`table::Table`] is the seam
 //! to storage: [`mem::MemTable`] in memory, and with the `dynamodb` feature `ddb::DynamoDbTable`.
 //!
@@ -18,7 +19,7 @@
 //! | what                 | name                     | type | role                                                                   |
 //! |----------------------|--------------------------|------|------------------------------------------------------------------------|
 //! | partition key        | `stream_id`              | S    | one partition per stream                                               |
-//! | sort key             | `sk`                     | S    | `<view table>#<key cells>`, `.adj#<ticket>#<tag>`, `.meta#watermark`   |
+//! | sort key             | `sk`                     | S    | `<view table>#<key cells>`, `.adj#`/`.ladj#`/`.tadj#<ticket>#<tag>`, `.meta#watermark` |
 //! | GSI `active`         | `nxf_active` / `sk`      | S/S  | sparse: active tickets and the present dep/parent edges touching one   |
 //! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by `<instant>␟<id>` |
 //!
@@ -55,7 +56,9 @@
 //! A change is one `UpdateItem`. An item field op makes three changes (the cell and the ticket's
 //! two instants) plus one `GetItem` for the index, and one more write when the ticket's lanes move.
 //! A flip of a ticket's activity adds one Query and, per edge touching it, at most three reads and
-//! one write. No request is a Scan: every read names its partition key, the board's through an
+//! one write. A label or thread link add writes one more item, its entry under the ticket
+//! (`board`, "Who owns a label or a thread link"). Reading the active tickets' records costs a few
+//! requests per ticket ([`records`]). No request is a Scan: every read names its partition key, the board's through an
 //! index. The `dynamodb-local` CI job counts the requests of a fold and proves it.
 
 pub mod board;
@@ -63,6 +66,7 @@ pub mod chunks;
 pub mod fold;
 pub mod layout;
 pub mod mem;
+pub mod records;
 pub mod snapshot;
 pub mod table;
 pub mod write;
