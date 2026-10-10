@@ -489,7 +489,15 @@ fn the_parent_tiebreak_on_equal_coordinates_is_the_one_present_parent_picks() {
             vec![("id", txt(id)), ("status", txt("open"))],
         );
     }
-    let edges: [(&str, &str, &str, Option<i64>, Option<i64>); 6] = [
+    // (tag, child, parent, lamport, site)
+    type ParentEdge = (
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<i64>,
+        Option<i64>,
+    );
+    let edges: [ParentEdge; 6] = [
         ("t1", "c", "p2", Some(5), Some(1)),
         ("t2", "c", "p1", Some(5), Some(1)),
         ("t3", "d", "q1", None, None),
