@@ -649,6 +649,11 @@ rows can only answer by being read one at a time:
   the round and the flag goes.
 - **`holds_working_tree`** — somewhere under this root the working copy is held. It tells you
   whether to go looking; the per-thread `working_tree` field still says *which* thread.
+- **`held_by_hand_back`** — present only when the working copy is held with no thread open: the
+  thread whose escalation nobody has answered yet, which is why the copy stays. The human output
+  prints it as a line `working copy held: thread <id> handed the task back …` under the operation.
+  A reply into that thread's round, or into a thread above it, answers it, and the copy goes once
+  the new turn is done.
 
 ### `nxc search <QUERY>`
 

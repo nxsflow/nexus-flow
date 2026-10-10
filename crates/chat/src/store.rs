@@ -2196,13 +2196,26 @@ impl ChatStore {
     ///
     /// A db error → `io`.
     pub fn last_reply_kind(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
+        Ok(self.last_reply_at(thread_id)?.map(|(kind, _, _)| kind))
+    }
+
+    /// [`last_reply_kind`](Self::last_reply_kind) with the reply's position: its kind and its
+    /// `(lamport, site)` (nxf 6j6v.ys54). The same one query, so the kind and the position always
+    /// describe the same row.
+    ///
+    /// The position is what [`declared_after`](Self::declared_after) is compared against: whether a
+    /// thread ABOVE this one was asked again after this reply was written.
+    pub(crate) fn last_reply_at(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Option<(String, i64, i64)>> {
         let since = answers("m");
         Ok(self
             .inner
             .connection()
             .query_row(
                 &format!(
-                    "SELECT m.kind FROM messages m
+                    "SELECT m.kind, m.lamport, m.site FROM messages m
                        JOIN threads t ON t.thread_id = m.thread_id
                        JOIN json_each(t.expects_reply_from) je ON je.value = m.sender
                       WHERE m.thread_id = ?1 AND {since}
@@ -2210,9 +2223,43 @@ impl ChatStore {
                       LIMIT 1"
                 ),
                 [thread_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?)
+    }
+
+    /// **Was `thread_id` asked again after the position `(lamport, site)`?** (nxf 6j6v.ys54) —
+    /// whether the thread's current declaration, its `expects_reply_from` register, was written
+    /// after that position.
+    ///
+    /// It is the turn watermark ([`after_the_declaration`]) read the other way round: there a
+    /// message counts when it is newer than the declaration, here the declaration counts when it is
+    /// newer than a message. Only a declaration an action may follow counts (nxf 6j6v.pzkb), so a
+    /// planted register cannot answer a hand-back and let the working copy go.
+    ///
+    /// A db error → `io`.
+    pub(crate) fn declared_after(
+        &self,
+        thread_id: &str,
+        lamport: i64,
+        site: i64,
+    ) -> crate::error::Result<bool> {
+        let vouched = acts_at("t.expects_reply_from_v", "t.expects_reply_from_site");
+        Ok(self
+            .inner
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM threads t
+                      WHERE t.thread_id = ?1
+                        AND (t.expects_reply_from_v, t.expects_reply_from_site) > (?2, ?3)
+                        AND {vouched}"
+                ),
+                rusqlite::params![thread_id, lamport, site],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// The shared body of the two reads above.

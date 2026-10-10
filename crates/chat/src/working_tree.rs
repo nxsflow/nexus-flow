@@ -715,6 +715,17 @@ fn hand_the_working_tree_on(
     Ok(taken)
 }
 
+/// **A hand-back that holds the working copy** (nxf 6j6v.ys54) — what
+/// [`ChatStore::unanswered_hand_back`] found: the thread whose last reply handed the task back, and
+/// that reply's kind label. Crate-private; the release path names it when it keeps the copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandBack {
+    /// The thread the hand-back was written in.
+    pub(crate) thread: String,
+    /// The raw kind label of its last reply — `escalation` or `question`.
+    pub(crate) kind: String,
+}
+
 /// Whether a reply of this KIND hands the task back instead of concluding it (nxf 6j6v.1xw1) —
 /// the one place the two hand-back kinds are named, read by [`ChatStore::work_scope_handed_back`].
 ///
@@ -1991,6 +2002,12 @@ impl ChatStore {
     /// `…::an_answered_escalation_releases_the_claim_before_the_two_hour_bound` and
     /// `…::an_answered_question_deep_in_the_subtree_clears_the_hold_before_the_bound`.
     ///
+    /// **The re-declaration may land ABOVE the hand-back rather than on it** (nxf 6j6v.ys54). An
+    /// ordered run answered on its channel thread starts again in NEW step threads, so the
+    /// escalating step's own watermark never moves. A declaration on any thread above it, after it,
+    /// answers it too — see [`Self::unanswered_hand_back`], and
+    /// `an_escalation_answered_above_lets_the_copy_go.rs` for the measured case.
+    ///
     /// **That door is the channel one, and it is not the only thread in an area** (branch re-review
     /// of this item). A hand-back written on an ad-hoc DM — a thread a session opened out of its own
     /// conversation rather than a supervisor-opened member thread — has no supervisor to re-declare
@@ -2025,12 +2042,89 @@ impl ChatStore {
     /// reply of a chain, not every reply in it. Its width is the claim area, which is bounded by how
     /// many threads one chain opened.
     pub(crate) fn threads_handed_back(&self, threads: &[String]) -> Result<bool> {
+        Ok(self.unanswered_hand_back(threads)?.is_some())
+    }
+
+    /// **WHICH hand-back in `threads` holds the working copy**, or `None` — the one derivation
+    /// behind [`Self::threads_handed_back`], with the thread and the kind its answer is about (nxf
+    /// 6j6v.ys54). The release path names it when it says no, so a delivered operation that keeps
+    /// the copy says why.
+    ///
+    /// **A hand-back is unanswered while nothing above it was asked again.** A thread's last reply
+    /// hands the task back ([`hands_the_task_back`]), and neither its own turn nor the turn of any
+    /// thread above it in the claim area was declared again after that reply. The thread's own
+    /// re-declaration was always the door ([`ChatStore::last_reply_kind`] reads only the current
+    /// turn); the threads above it are the other door, and before 6j6v.ys54 this missed it.
+    ///
+    /// **Measured in the `agents` workspace on 2026-10-10 (0.206.1).** A verify step of an ordered
+    /// run escalated. The requester answered on the channel thread above it, which is how an
+    /// escalation is answered: the reply re-declared the channel thread and the run started again
+    /// in NEW sibling step threads, which delivered. Nothing was ever written again in the
+    /// escalating step's thread, so its escalation stayed its last reply, and the copy was held to
+    /// the lease's bound behind a finished operation. A re-declaration above the hand-back, after
+    /// it, is that answer.
+    ///
+    /// **Why not "anything newer in the area"**, which is what
+    /// [`Self::threads_await_an_unanswered_hand_back`] asks for the park. Here it would release
+    /// early, in the shape `working_tree_claim_scope.rs::
+    /// a_question_two_levels_down_holds_the_claim_although_every_thread_above_it_consolidated`
+    /// pins: the levels above a hand-back can CONSOLIDATE, so new replies travel UP past it while
+    /// nobody answered it. Those replies discharge turns; they declare none. A declaration only
+    /// comes DOWN — somebody asked the thread again — so it cannot be mistaken for a reply going up.
+    /// The park asks the looser question on purpose (see its own doc); each is the safe direction
+    /// for its own mechanism, so the two stay two.
+    ///
+    /// **What it still holds, and what it may now release.** A hand-back nobody answered holds the
+    /// copy exactly as before, and so does one answered on an ad-hoc DM without a re-declaration
+    /// (see [`Self::work_scope_handed_back`]). What it releases is a hand-back above which somebody
+    /// asked again, once that new turn has been answered too — the outstanding rule still holds the
+    /// copy while it has not. That includes a requester who asks the level above again without
+    /// meaning the hand-back below; the operation then ends on that level's answer.
+    ///
+    /// Only threads INSIDE `threads` are walked, so a declaration outside the claim area answers
+    /// nothing in it. Only a declaration an action may follow counts
+    /// ([`ChatStore::declared_after`]).
+    pub(crate) fn unanswered_hand_back(&self, threads: &[String]) -> Result<Option<HandBack>> {
+        let area: BTreeSet<&str> = threads.iter().map(String::as_str).collect();
         for thread_id in threads {
-            if let Some(kind) = self.last_reply_kind(thread_id)? {
-                if hands_the_task_back(&kind) {
-                    return Ok(true);
-                }
+            let Some((kind, lamport, site)) = self.last_reply_at(thread_id)? else {
+                continue;
+            };
+            if !hands_the_task_back(&kind) {
+                continue;
             }
+            if self.asked_again_above(thread_id, lamport, site, &area)? {
+                continue;
+            }
+            return Ok(Some(HandBack {
+                thread: thread_id.clone(),
+                kind,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Whether any thread above `thread_id`, inside `area`, was declared again after the position
+    /// `(lamport, site)` — [`Self::unanswered_hand_back`]'s second door. The walk stops at the edge
+    /// of the area, and at a thread it has already seen, so a cycle in the parent edges cannot hang
+    /// it.
+    fn asked_again_above(
+        &self,
+        thread_id: &str,
+        lamport: i64,
+        site: i64,
+        area: &BTreeSet<&str>,
+    ) -> Result<bool> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut above = self.thread_parent(thread_id)?;
+        while let Some(parent) = above {
+            if !area.contains(parent.as_str()) || !seen.insert(parent.clone()) {
+                break;
+            }
+            if self.declared_after(&parent, lamport, site)? {
+                return Ok(true);
+            }
+            above = self.thread_parent(&parent)?;
         }
         Ok(false)
     }
@@ -2039,9 +2133,9 @@ impl ChatStore {
     /// the predicate the park's contention clock is derived from, and one question finer than
     /// [`Self::threads_handed_back`] next door.
     ///
-    /// That one asks *what did the last REPLY say*, and its answer stays `true` for as long as the
-    /// escalating party has not replied again — which is correct for the LEASE, whose rule is that a
-    /// hand-back does not release. It is wrong for a PARK. A human who answers an escalation puts the
+    /// That one asks *what did the last REPLY say*, and its answer stays `true` until the escalating
+    /// party replies again or a thread above it is asked again (nxf 6j6v.ys54) — which is correct
+    /// for the LEASE, whose rule is that a hand-back does not release. It is wrong for a PARK. A human who answers an escalation puts the
     /// operation back to work without becoming an expected replier, so the escalation goes on being
     /// the last reply while somebody is once again writing in the working copy — and parking there
     /// would commit an operation's work out from under the session that is doing it.

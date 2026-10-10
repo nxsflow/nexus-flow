@@ -3559,6 +3559,13 @@ fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
     op.withdrawn
         .iter()
         .map(withdrawn_line)
+        .chain(op.held_by_hand_back.iter().map(|thread| {
+            // Why a copy with nothing open is still held (nxf 6j6v.ys54).
+            format!(
+                "  working copy held: thread {thread} handed the task back and nothing has asked \
+                 it again since; an answer there or above it lets the copy go"
+            )
+        }))
         .chain(op.park_refused.iter().map(park_refused_line))
         .chain(op.parked.iter().map(parked_line))
         .chain(

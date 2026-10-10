@@ -1978,7 +1978,9 @@ fn expired_but_still_writing(
 ///    between "the coder finished" and "the review is commissioned", and it is why the holder is a
 ///    chain rather than a session.
 /// 3. **Was the claim HANDED BACK rather than closed?** `ChatStore::threads_handed_back` (nxf
-///    6j6v.1xw1). Nothing outstanding is not the same as finished — see below.
+///    6j6v.1xw1). Nothing outstanding is not the same as finished — see below. A hand-back above
+///    which a thread was asked again counts as answered (nxf 6j6v.ys54); `nxc status` names the
+///    one that holds the copy (`StatusOperation::held_by_hand_back`).
 ///
 /// **Questions 1-3 are asked of an already-resolved thread list, not of the scope**, which is why
 /// they name the `pub(crate)` predicates rather than the `pub`

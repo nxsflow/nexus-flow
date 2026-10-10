@@ -700,6 +700,12 @@ die Faden-Zeilen sonst nur einzeln nacheinander beantworten:
 - **`holds_working_tree`** — irgendwo unter dieser Wurzel wird die Arbeitskopie gehalten. Es sagt
   Ihnen, ob Sie überhaupt nachsehen müssen; das Feld `working_tree` am Faden sagt weiterhin, *welcher*
   Faden.
+- **`held_by_hand_back`** — nur vorhanden, wenn die Arbeitskopie gehalten wird, ohne dass ein Faden
+  offen ist: der Faden, dessen Eskalation noch niemand beantwortet hat, und damit der Grund, warum
+  die Kopie bleibt. Die menschenlesbare Ausgabe zeigt ihn als Zeile
+  `working copy held: thread <id> handed the task back …` unter dem Vorgang. Eine Antwort in die
+  Runde dieses Fadens oder in einen Faden darüber beantwortet ihn, und die Kopie geht, sobald der
+  neue Durchgang erledigt ist.
 
 ### `nxc search <SUCHTEXT>`
 

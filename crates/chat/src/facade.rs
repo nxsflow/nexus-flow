@@ -855,6 +855,19 @@ pub struct StatusOperation {
     /// for. The per-thread field is unchanged and still says WHICH thread; this says whether to go
     /// looking at all.
     pub holds_working_tree: bool,
+    /// **The thread whose unanswered hand-back keeps this operation's working copy** (nxf
+    /// 6j6v.ys54) — set only when the operation [holds the copy](Self::holds_working_tree) with no
+    /// thread [open](Self::open), and a thread in it handed the task back that nothing above it
+    /// has asked again since. The same rule the release asks, so this is the reason it says no.
+    ///
+    /// Before this field the "no" was silent: an operation that had delivered kept the copy until
+    /// the lease's bound and nothing said why. An answer in that thread, or a reply into a thread
+    /// above it, lets the copy go.
+    ///
+    /// `None` otherwise, and omitted from `--json` then — a new optional field on this
+    /// `#[non_exhaustive]` struct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_by_hand_back: Option<String>,
     /// **Somewhere under this root a session is on hold at an availability boundary** (nxf
     /// 6j6v.npy3) — any thread in the tree carrying [`StatusThread::interrupted`].
     ///
@@ -3905,6 +3918,15 @@ pub fn status(
         // `--thread` shows the tree it was asked about and `--all` shows every tree, finished or
         // not; the two plain LISTING forms show only what is still going on.
         if matches!(scope, StatusScope::Threads(_) | StatusScope::All(_)) || live {
+            // **Why a copy with nothing open is still held** (nxf 6j6v.ys54): the release rule's
+            // own hand-back question, asked only of the one operation that holds the copy with no
+            // thread open, so every other operation costs nothing here.
+            let held_by_hand_back = if holds_working_tree && open == 0 {
+                let tree: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+                store.unanswered_hand_back(&tree)?.map(|h| h.thread)
+            } else {
+                None
+            };
             operations.push(StatusOperation {
                 root: root.to_string(),
                 channel_id: forest
@@ -3917,6 +3939,7 @@ pub fn status(
                 open,
                 needs_decision,
                 holds_working_tree,
+                held_by_hand_back,
                 interrupted,
                 threads,
                 parked: parked_here,
