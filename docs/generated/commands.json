@@ -1,5 +1,5 @@
 {
-  "version": "0.207.0",
+  "version": "0.208.0",
   "command": {
     "name": "nxf",
     "about": "nexus-flow agent CLI",
