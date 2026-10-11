@@ -35,8 +35,8 @@
 //! may read one too ([`compute_active`]). What a `list` reads is [`reads_for_list`].
 
 use super::{
-    lanes, mentioners_of, resolve_items, ActiveBoard, ListBoard, ListQuery, ListReads,
-    RankingGraph, RankingReads, SortKey,
+    lanes, mentioners_of, resolve_items, ActiveBoard, ListBoard, ListQuery, ListReads, ListSelect,
+    RankingGraph, RankingReads, SortKey, DEFAULT_SORT_LIST,
 };
 use crate::error::{NxfError, Result};
 use crate::plugin::{Dir, Nulls, Pick, PluginConfig, RankKey, RankOf, RankSpec, Verb};
@@ -382,9 +382,9 @@ pub(super) fn compute(
 /// the graph's listed items (6j6v.xkr7). `None` when the policy has no derived key.
 ///
 /// The same [`Context`] evaluates the keys as on the store path; only where its edges, rows,
-/// labels and custom values come from differs ([`Context::read_graph`]). `validation` when the graph
-/// was read for less than the plan needs — a `[ranking.list]` type of the chain missing from
-/// [`RankingReads::list_types`] among it.
+/// labels and custom values come from differs ([`Context::read_graph`]). The caller,
+/// [`next_active`](super::next_active), has refused a graph read for less than
+/// [`next_ranking_reads`](super::next_ranking_reads) names, which covers every plan of the section.
 pub(super) fn compute_active(
     cfg: &PluginConfig,
     board: &ActiveBoard,
@@ -394,13 +394,9 @@ pub(super) fn compute_active(
     let Some(plan) = plan(cfg, Verb::Next, candidates) else {
         return Ok(None);
     };
-    let needed = plan.reads(|_| false);
-    let graph = graph_for(
-        Some(graph),
-        &needed,
-        graph,
-        &format!("plugin '{}' (`next`)", cfg.name),
-    )?;
+    // `next_active` admitted the graph only when it covers `next_ranking_reads`, which gathers the
+    // reads of every order of the section and of its chain — so of this plan's too.
+    debug_assert!(graph.reads.covers(&plan.reads(|_| false)));
     let rows = |id: &str| active_joined(board, graph, id);
     let listed = listed_rows(graph, rows);
     let node_rows = plan.node_rows(candidates, &listed);
@@ -504,9 +500,22 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
         types: types.clone(),
         next: false,
         ranking: None,
+        select: None,
     };
+    // Any order but `rank` reads the item rows alone: the reader may keep and cut before it reads
+    // an item's joins (review of PR #55, Integrity #1).
+    let sort = q.sort.unwrap_or(DEFAULT_SORT_LIST);
+    if sort != SortKey::Rank {
+        reads.select = Some(ListSelect {
+            status: q.status.clone(),
+            filter: q.filter.clone(),
+            sort,
+            limit: q.limit,
+        });
+        return reads;
+    }
     let spec = cfg.ranking.spec(Verb::List);
-    if q.sort != Some(SortKey::Rank) || !spec.has_derived() {
+    if !spec.has_derived() {
         return reads;
     }
     let orders: Vec<&[RankKey]> = match &types {

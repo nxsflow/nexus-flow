@@ -2,7 +2,7 @@
 name = "nxs-fold-ddb"
 version.workspace = true
 edition = "2021"
-description = "Folding on a server (6j6v.vvw6): the reducers' described changes carried out against DynamoDB, the board's active and dated indexes, next/blocked over them, snapshots as tables plus watermark"
+description = "Folding on a server (6j6v.vvw6): the reducers' described changes carried out against DynamoDB, the board's active, dated and typed indexes, next/blocked and a ranked list over them, snapshots as tables plus watermark"
 publish = false
 
 [features]

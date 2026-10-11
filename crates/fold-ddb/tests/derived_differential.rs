@@ -26,7 +26,7 @@ use nexus_flow_core::model::{EdgeKind, ItemRow, MergeStrategy};
 use nexus_flow_core::store::Store;
 use nexus_flow_facade::plugin::{self, PluginConfig, PluginRegistration};
 use nexus_flow_facade::read;
-use nxs_fold_ddb::fold::{Folder, INDEX_DOMAIN};
+use nxs_fold_ddb::fold::{Folder, INDEX_DOMAIN, INDEX_REVISION};
 use nxs_fold_ddb::layout::WATERMARK_KEY;
 use nxs_fold_ddb::mem::{ready, MemTable};
 use nxs_fold_ddb::table::Table;
@@ -36,7 +36,7 @@ use nxs_foundation::change::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod common;
-use common::{delivered, Lcg, NOW};
+use common::{delivered, head, Lcg, NOW};
 
 /// Every derived key kind, each able to read a neighbour that is not active: a goal's order and
 /// rank from a closed or archived goal, counts without a status filter, a `dep` blocker's status
@@ -213,6 +213,10 @@ fn ids(items: &[ItemRow]) -> Vec<String> {
     items.iter().map(|i| i.id.clone()).collect()
 }
 
+/// An active ticket, as the SQL `items` row `a` says: live, unarchived, open or in progress.
+const ACTIVE_SQL: &str = "COALESCE(a.deleted, '') != '1' AND a.archived IS NULL
+     AND a.status IN ('open', 'in_progress')";
+
 fn count(s: &Store, sql: &str) -> usize {
     s.connection()
         .query_row(sql, [], |r| r.get::<_, i64>(0))
@@ -326,12 +330,18 @@ fn the_server_ranks_next_by_derived_keys_as_the_replica_does() {
                 ),
             );
         }
+        // Counted where they matter (review of PR #55, Test #4): at an active ticket, whose edges
+        // the graph reads — not anywhere on the board.
         seen.add(
             "edges dropped for a deleted end",
             count(
                 &s,
-                "SELECT COUNT(*) FROM present_edges e JOIN items i
-                 ON i.id IN (e.from_id, e.to_id) WHERE i.deleted = '1'",
+                &format!(
+                    "SELECT COUNT(*) FROM present_edges e
+                     JOIN items d ON d.id IN (e.from_id, e.to_id) AND d.deleted = '1'
+                     JOIN items a ON a.id IN (e.from_id, e.to_id) AND a.id != d.id
+                     WHERE {ACTIVE_SQL}"
+                ),
             ),
         );
         // A child with two present parent edges: only `present_parent`'s pick may count.
@@ -344,8 +354,14 @@ fn the_server_ranks_next_by_derived_keys_as_the_replica_does() {
             ),
         );
         seen.add(
-            "removed edges",
-            count(&s, "SELECT COUNT(*) FROM edge_removes"),
+            "removed edges at an active ticket",
+            count(
+                &s,
+                &format!(
+                    "SELECT COUNT(*) FROM edge_removes r JOIN edge_adds e ON e.tag = r.tag
+                     JOIN items a ON a.id IN (e.from_id, e.to_id) WHERE {ACTIVE_SQL}"
+                ),
+            ),
         );
         // A derived key decides: a project ranked ahead of one with a better priority.
         let projects: Vec<&ItemRow> = want
@@ -369,6 +385,7 @@ fn the_server_ranks_next_by_derived_keys_as_the_replica_does() {
         "inactive children of a candidate",
         "dep edges from a candidate to an inactive blocker",
         "edges dropped for a deleted end",
+        "removed edges at an active ticket",
         "children parented twice",
         "projects ordered against their priority",
     ] {
@@ -409,8 +426,10 @@ fn reading_the_ranking_graph_costs_one_query_per_ticket_and_per_live_neighbour()
     let after = t.requests();
     // One adjacency Query per active ticket; the live neighbour's parent, labels and custom values.
     assert_eq!(after.queries - before.queries, n + 3);
-    // One row per inactive neighbour: the closed goal and the deleted one.
-    assert_eq!(after.gets - before.gets, 2);
+    // The watermark, asked again (review of PR #55, Integrity #3); the rows of the inactive
+    // neighbours — the closed goal and the deleted one — in one `BatchGetItem`.
+    assert_eq!(after.gets - before.gets, 1);
+    assert_eq!(after.batch_gets - before.batch_gets, 1);
     assert_eq!(after.index_queries, before.index_queries);
     assert_eq!(after.writes, before.writes);
     let local = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
@@ -440,6 +459,8 @@ fn a_stream_folded_by_index_revision_2_is_refused_then_refolded_and_ranks() {
         let s = gen_board(seed);
         let ops = delivered(&s, seed);
         let t = fold(&folder, &ops);
+        // A board read while the stream was current — a server that holds one across the refold.
+        let plain = ready(records::active_board(&t, ready(board::select(&t)).unwrap())).unwrap();
         for (sk, row) in t.rows() {
             if let Some(Cell::Text(tag)) = row.get("tag").filter(|_| sk.starts_with(".adj#")) {
                 ready(
@@ -468,9 +489,33 @@ fn a_stream_folded_by_index_revision_2_is_refused_then_refolded_and_ranks() {
             Err(records::RecordsError::NotCurrent { found: Some(2) }) => {}
             other => panic!("seed {seed}: a revision-2 stream must be refused, got {other:?}"),
         }
+        // The graph read refuses it itself (review of PR #55, Integrity #3)…
+        match ready(records::with_ranking(&t, plain.clone(), &reads)) {
+            Err(records::RecordsError::NotCurrent { found: Some(2) }) => {}
+            other => panic!(
+                "seed {seed}: the graph of a revision-2 stream must be refused, got {other:?}"
+            ),
+        }
+        // …because the stripped entries would read as no edge at all: under a watermark that
+        // claims revision 3, the same read answers an empty graph where the store has edges.
+        let local = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+        let claim = |revision: i64| {
+            ready(t.write(&Write {
+                sk: WATERMARK_KEY.into(),
+                set: vec![(format!("revision_{INDEX_DOMAIN}"), Cell::Int(revision))],
+                remove: Vec::new(),
+                condition: Some(Cond::RowPresent),
+            }))
+            .unwrap();
+        };
+        claim(INDEX_REVISION);
+        let stripped = ready(records::with_ranking(&t, plain.clone(), &reads)).unwrap();
+        assert!(stripped.ranking.unwrap().edges.is_empty(), "seed {seed}");
+        assert!(!local.ranking.unwrap().edges.is_empty(), "seed {seed}");
+        claim(2);
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
         assert!(!folder.is_current(&mark), "seed {seed}");
-        ready(Folder::clear(&t)).unwrap();
+        ready(Folder::clear(&t, head(&ops))).unwrap();
         ready(folder.fold_batch(&t, &ops)).unwrap();
 
         let server = served(&t, &reads);

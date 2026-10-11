@@ -1,7 +1,8 @@
 //! [`DynamoDbTable`]: one stream's partition of the views table in DynamoDB, and [`create_table`],
 //! the table the contract in the crate doc describes.
 //!
-//! Every request names the stream's partition key; the board's three index reads name an index. There is
+//! Every request names the stream's partition key — a `BatchGetItem` names it in every key; the
+//! board's three index reads name an index. There is
 //! no Scan anywhere in this file, and the `dynamodb-local` CI job records every request a fold
 //! makes to prove it stays that way.
 //!
@@ -11,17 +12,23 @@
 use crate::layout::{
     typed_partition, ACTIVE, ACTIVE_INDEX, DATED, DATED_AT, DATED_INDEX, PK, SK, TYPED, TYPED_INDEX,
 };
-use crate::table::{Dated, Outcome, Row, Table};
+use crate::table::{Dated, Outcome, Row, Table, BATCH_GET_KEYS};
 use crate::write::Write;
+use aws_sdk_dynamodb::config::AsyncSleep;
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata};
 use aws_sdk_dynamodb::operation::create_table::builders::CreateTableFluentBuilder;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, GlobalSecondaryIndex, KeySchemaElement,
-    KeyType, Projection, ProjectionType, ScalarAttributeType,
+    KeyType, KeysAndAttributes, Projection, ProjectionType, ScalarAttributeType,
 };
 use aws_sdk_dynamodb::Client;
 use nxs_foundation::change::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// How often [`Table::get_many`] sends the keys a `BatchGetItem` left unprocessed again before it
+/// gives up, waiting twice as long each time from [`UNPROCESSED_BACKOFF_MS`].
+const UNPROCESSED_RETRIES: u32 = 8;
+const UNPROCESSED_BACKOFF_MS: u64 = 25;
 
 /// A request DynamoDB refused, or an item this crate cannot read.
 #[derive(Debug)]
@@ -208,6 +215,66 @@ impl Table for DynamoDbTable {
             .await
             .map_err(err)?;
         out.item().map(from_item).transpose()
+    }
+
+    async fn get_many(&self, sks: &[String]) -> Result<BTreeMap<String, Row>, DdbError> {
+        let keys: Vec<&String> = sks.iter().collect::<BTreeSet<_>>().into_iter().collect();
+        let mut rows = BTreeMap::new();
+        for chunk in keys.chunks(BATCH_GET_KEYS) {
+            let mut pending: Vec<HashMap<String, AttributeValue>> =
+                chunk.iter().map(|sk| self.key(sk)).collect();
+            let mut retries = 0;
+            while !pending.is_empty() {
+                let request = KeysAndAttributes::builder()
+                    .set_keys(Some(pending))
+                    .consistent_read(true)
+                    .build()
+                    .map_err(err)?;
+                let out = self
+                    .client
+                    .batch_get_item()
+                    .request_items(&self.table, request)
+                    .send()
+                    .await
+                    .map_err(err)?;
+                for item in out
+                    .responses()
+                    .and_then(|r| r.get(&self.table))
+                    .into_iter()
+                    .flatten()
+                {
+                    let row = from_item(item)?;
+                    if let Some(Cell::Text(sk)) = row.get(SK) {
+                        rows.insert(sk.clone(), row.clone());
+                    }
+                }
+                pending = out
+                    .unprocessed_keys()
+                    .and_then(|u| u.get(&self.table))
+                    .map(|k| k.keys().to_vec())
+                    .unwrap_or_default();
+                if !pending.is_empty() {
+                    // Throttled, or past the 16 MB a response carries: the rest again, after a
+                    // pause that doubles, as DynamoDB asks of a caller.
+                    if retries == UNPROCESSED_RETRIES {
+                        return Err(DdbError(format!(
+                            "BatchGetItem left {} keys unprocessed after {UNPROCESSED_RETRIES} \
+                             retries",
+                            pending.len()
+                        )));
+                    }
+                    if let Some(sleep) = self.client.config().sleep_impl() {
+                        sleep
+                            .sleep(std::time::Duration::from_millis(
+                                UNPROCESSED_BACKOFF_MS << retries,
+                            ))
+                            .await;
+                    }
+                    retries += 1;
+                }
+            }
+        }
+        Ok(rows)
     }
 
     async fn write(&self, write: &Write) -> Result<Outcome, DdbError> {

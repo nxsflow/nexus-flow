@@ -86,8 +86,8 @@ use crate::layout::{
     link_adjacency_key, row_key, table_prefix, typed_partition, ACTIVE, DATED, DATED_AT,
     MAX_KEY_BYTES, SK, TYPED,
 };
-use crate::table::{text, Dated, Row, Table};
-use crate::write::{Cond, Write};
+use crate::table::{text, Dated, Outcome, Row, Table};
+use crate::write::{attribute_bytes, Cond, Write};
 use nexus_flow_core::graph::{Board, Edge, Ticket};
 use nexus_flow_core::model::EdgeKind;
 use nxs_foundation::change::{Cell, Change, Effect};
@@ -294,8 +294,47 @@ pub fn dated_key(at: &str, id: &str) -> String {
     }
 }
 
-/// Keep the indexes after one op's changes were carried out.
-pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(), T::Error> {
+/// The index attributes a stored `items` row of ticket `id` carries by the rules above — what
+/// [`refresh_item`] leaves on it: `active`, `typed` and the `dated` pair, each only where it
+/// applies.
+pub(crate) fn index_attributes(stream: &str, id: &str, row: &Row) -> Vec<(String, Cell)> {
+    let mut cells = Vec::new();
+    if is_active(row) {
+        cells.push((ACTIVE.to_string(), Cell::Text(stream.to_string())));
+    }
+    if let Some(ty) = typed(row) {
+        cells.push((TYPED.to_string(), Cell::Text(typed_partition(stream, ty))));
+    }
+    if let Some((l, at)) = lane(row) {
+        cells.push((DATED.to_string(), Cell::Text(l.partition(stream))));
+        cells.push((DATED_AT.to_string(), Cell::Text(dated_key(&at, id))));
+    }
+    cells
+}
+
+/// What an `items` row weighs toward `MAX_ITEM_BYTES` once it carries the index attributes its
+/// cells call for ([`index_attributes`]) instead of the ones it has — what
+/// [`Folder::fold`](crate::fold::Folder::fold) checks before an op writes anything, so a row with
+/// no room left for them is refused rather than left off an index (review of PR #55, Integrity
+/// #4).
+pub(crate) fn indexed_bytes(stream: &str, id: &str, row: &Row) -> usize {
+    let own: usize = row
+        .iter()
+        .filter(|(n, _)| ![ACTIVE, TYPED, DATED, DATED_AT].contains(&n.as_str()))
+        .map(|(n, c)| attribute_bytes(n, c))
+        .sum();
+    own + index_attributes(stream, id, row)
+        .iter()
+        .map(|(n, c)| attribute_bytes(n, c))
+        .sum::<usize>()
+}
+
+/// Keep the indexes after one op's changes were carried out. Returns the items whose row could not
+/// take its index attributes ([`Outcome::TooLarge`]) — none, when the fold's size check ran first.
+pub(crate) async fn after<T: Table>(
+    table: &T,
+    changes: &[Change],
+) -> Result<Vec<String>, T::Error> {
     let mut items = BTreeSet::new();
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
@@ -320,8 +359,11 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
             _ => {}
         }
     }
+    let mut unindexed = Vec::new();
     for id in items {
-        refresh_item(table, id).await?;
+        if refresh_item(table, id).await? == Some(Outcome::TooLarge) {
+            unindexed.push(id.to_string());
+        }
     }
     for tag in added {
         link_edge(table, tag).await?;
@@ -332,7 +374,7 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
     for (at, tag) in owned_tags {
         refresh_owned(table, &OWNED[at], tag).await?;
     }
-    Ok(())
+    Ok(unindexed)
 }
 
 /// Set ticket `id`'s index attributes from its row; when its activity flipped, refresh every edge
@@ -341,10 +383,17 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
 /// The edges go FIRST, told the ticket's new activity, and the ticket's own flag after: the flag is
 /// what says whether the activity flipped, so a run that dies in between still sees the flip when
 /// it folds the op again, and redoes the fan-out (review of PR #24, Integrity #2).
-pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T::Error> {
+///
+/// Returns the outcome of the write of its index attributes, `None` when nothing changed — a
+/// [`Outcome::TooLarge`] means the row is left with the attributes it had, which the caller must
+/// report rather than drop (review of PR #55, Integrity #4).
+pub(crate) async fn refresh_item<T: Table>(
+    table: &T,
+    id: &str,
+) -> Result<Option<Outcome>, T::Error> {
     let sk = item_key(id);
     let Some(row) = table.get(&sk).await? else {
-        return Ok(());
+        return Ok(None);
     };
     let active = is_active(&row);
     let was_active = row.contains_key(ACTIVE);
@@ -392,9 +441,9 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
         }
     }
     if set.is_empty() && remove.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    table
+    let outcome = table
         .write(&Write {
             sk,
             set,
@@ -402,7 +451,7 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             condition: Some(Cond::RowPresent),
         })
         .await?;
-    Ok(())
+    Ok(Some(outcome))
 }
 
 /// The cells of edge add `edge` an adjacency entry copies beside its tag and [`REMOVED`] (index
@@ -510,11 +559,15 @@ async fn flag_edge<T: Table>(
 }
 
 /// Recompute every index attribute and adjacency entry from the rows — after a snapshot was
-/// loaded, or to repair a stream two folders wrote at once.
-pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
+/// loaded, or to repair a stream two folders wrote at once. Returns the items whose row could not
+/// take its index attributes (past `MAX_ITEM_BYTES` with them), which keep the ones they had.
+pub async fn reindex<T: Table>(table: &T) -> Result<Vec<String>, T::Error> {
+    let mut unindexed = Vec::new();
     for row in table.query_prefix(&table_prefix("items")).await? {
         if let Some(id) = text(&row, "id") {
-            refresh_item(table, id).await?;
+            if refresh_item(table, id).await? == Some(Outcome::TooLarge) {
+                unindexed.push(id.to_string());
+            }
         }
     }
     for row in table.query_prefix(&table_prefix("edge_adds")).await? {
@@ -529,7 +582,7 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
             }
         }
     }
-    Ok(())
+    Ok(unindexed)
 }
 
 /// The active tickets — their whole rows — and the board the library derives the lanes from.

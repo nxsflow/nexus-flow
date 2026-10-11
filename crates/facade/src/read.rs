@@ -2592,7 +2592,15 @@ fn date_cmp(a: &ItemRow, b: &ItemRow, field: &str, dir: Dir) -> std::cmp::Orderi
 fn sort_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow, key: SortKey) -> std::cmp::Ordering {
     match key {
         SortKey::Rank => rank_cmp(cfg, a, b),
-        SortKey::Id => a.id.cmp(&b.id),
+        _ => row_cmp(a, b, key),
+    }
+}
+
+/// [`sort_cmp`] for every key but `rank`: the orders that read the row alone, and no plugin.
+fn row_cmp(a: &ItemRow, b: &ItemRow, key: SortKey) -> std::cmp::Ordering {
+    match key {
+        // Never asked: `sort_cmp` ranks, and a `ListSelect` never orders by rank.
+        SortKey::Rank | SortKey::Id => a.id.cmp(&b.id),
         SortKey::Defer => date_cmp(a, b, "defer_until", Dir::Asc),
         SortKey::Closed => date_cmp(a, b, "closed_at", Dir::Desc),
         SortKey::Archived => date_cmp(a, b, "archived", Dir::Desc),
@@ -3202,6 +3210,109 @@ pub struct ListReads {
     /// the active tickets when `next` is set, and its own listed items
     /// ([`RankingReads::list_types`]).
     pub ranking: Option<RankingReads>,
+    /// What a `list` that is NOT ranked keeps and where it cuts (review of PR #55): its order and
+    /// its row predicates read the item rows alone, so a reader keeps and cuts BEFORE it reads the
+    /// joins a record carries, and reads them for the kept page only ([`list_select`]). `None` for
+    /// `sort = rank`: a rank is computed over the whole `list` scope of a type — every live,
+    /// unarchived item of it, whatever the query's status, filter or limit
+    /// (docs/specs/derived-ranking-keys.md §12, decision 2) — so a ranked list reads the scope
+    /// whole.
+    pub select: Option<ListSelect>,
+}
+
+/// The query of a `list` that is not ranked, as a reader applies it before the joins
+/// ([`ListReads::select`], [`list_select`]).
+///
+/// `#[non_exhaustive]`: only [`list_reads`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListSelect {
+    /// Only items with this core status.
+    pub status: Option<String>,
+    /// The query's filter: its types read the row, its label the item's labels, its container the
+    /// item's current parent and `contributes_to` targets.
+    pub filter: NextFilter,
+    /// The order — any key but `rank` ([`ListSelect::sort`]); it reads the row alone.
+    pub(crate) sort: SortKey,
+    /// The cut; `None`: every kept item.
+    pub limit: Option<usize>,
+}
+
+impl ListSelect {
+    /// The order: any key but `rank`, which reads the row alone.
+    pub fn sort(&self) -> SortKey {
+        self.sort
+    }
+
+    /// Whether an item passes what its row alone decides: live, unarchived, of the status and of a
+    /// type the filter names. A reader asks it first, and reads no join of an item it refuses.
+    pub fn keeps_row(&self, item: &ItemRow) -> bool {
+        item.deleted.as_deref() != Some("1")
+            && item.archived.is_none()
+            && self
+                .status
+                .as_deref()
+                .is_none_or(|s| item.status.as_deref() == Some(s))
+            && (self.filter.types.is_empty()
+                || item
+                    .item_type
+                    .as_deref()
+                    .is_some_and(|t| self.filter.types.iter().any(|f| f == t)))
+    }
+
+    /// Whether the filter reads an item's labels: a reader reads them before [`list_select`].
+    pub fn reads_labels(&self) -> bool {
+        self.filter.label.is_some()
+    }
+
+    /// Whether the filter reads an item's current parent (`belongs_to`) and `contributes_to`
+    /// targets: a reader reads them before [`list_select`].
+    pub fn reads_edges(&self) -> bool {
+        self.filter.within.is_some()
+    }
+}
+
+/// Where a reader cut a [`ListBoard`] ([`list_select`]): the query it kept and cut for, and how many
+/// items it kept before the cut — the total the page discloses.
+///
+/// `#[non_exhaustive]`: only [`list_select`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListCut {
+    pub select: ListSelect,
+    pub total: usize,
+}
+
+/// The items of `items` that `select` keeps — [`ListSelect::keeps_row`] and the filter's one
+/// membership rule ([`NextFilter`]) — in `select.sort` order, cut to `select.limit`, with the
+/// [`ListCut`] to put on the board ([`ListBoard::cut`]). What [`list_board_page`] keeps, orders and
+/// cuts, so a reader that reads the joins of the kept items only answers the same page.
+///
+/// Every item must carry its labels when [`ListSelect::reads_labels`], and its `belongs_to` and
+/// `contributes_to` when [`ListSelect::reads_edges`]; no other join is read here.
+pub fn list_select(select: &ListSelect, items: Vec<ListItem>) -> (Vec<ListItem>, ListCut) {
+    let mut kept: Vec<ListItem> = items
+        .into_iter()
+        .filter(|i| {
+            select.keeps_row(&i.item) && select.filter.keeps(&i.item, &i.labels, &i.contributes_to)
+        })
+        .collect();
+    // Ties by id: `list_board_page` sorts the board's items stably from id order, so ties are cut
+    // alike.
+    kept.sort_by(|a, b| {
+        row_cmp(&a.item, &b.item, select.sort).then_with(|| a.item.id.cmp(&b.item.id))
+    });
+    let total = kept.len();
+    if let Some(n) = select.limit {
+        kept.truncate(n);
+    }
+    (
+        kept,
+        ListCut {
+            select: select.clone(),
+            total,
+        },
+    )
 }
 
 /// One listed item and the joins its `list` record and the filters read (6j6v.xkr7) — the
@@ -3266,6 +3377,10 @@ pub struct ListBoard {
     pub active: Option<ActiveBoard>,
     /// The graph the derived keys read ([`ListReads::ranking`]).
     pub ranking: Option<RankingGraph>,
+    /// Set when the reader kept and cut `items` for a [`ListReads::select`] ([`list_select`]):
+    /// `items` then holds the kept page only, and the cut the total before it. `None`: `items`
+    /// holds every listed item.
+    pub cut: Option<ListCut>,
 }
 
 impl ListBoard {
@@ -3279,6 +3394,7 @@ impl ListBoard {
             items: items.into_iter().map(|i| (i.item.id.clone(), i)).collect(),
             active: None,
             ranking: None,
+            cut: None,
         }
     }
 }
@@ -3312,7 +3428,6 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
     let mut listed = Vec::with_capacity(items.len());
     for item in items {
         let id = item.id.clone();
-        let parent_closed = parent_closed_reason(store, &item)?;
         let (created_at, updated_at) = ts.remove(&id).unwrap_or_default();
         let mut i = ListItem::new(item);
         i.labels = labels.remove(&id).unwrap_or_default();
@@ -3320,10 +3435,22 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
         i.created_at = created_at;
         i.updated_at = updated_at;
         i.contributes_to = contributes.remove(&id).unwrap_or_default();
-        i.parent_closed = parent_closed;
         listed.push(i);
     }
+    // Kept and cut as a server keeps and cuts it (`list_select`), so the two boards compare whole.
+    let cut = match &reads.select {
+        Some(select) => {
+            let (kept, cut) = list_select(select, listed);
+            listed = kept;
+            Some(cut)
+        }
+        None => None,
+    };
+    for i in &mut listed {
+        i.parent_closed = parent_closed_reason(store, &i.item)?;
+    }
     let mut board = ListBoard::new(reads.types.clone(), listed);
+    board.cut = cut;
     let graph_reads = reads.ranking.clone().unwrap_or_default();
     if reads.next {
         let selection = nexus_flow_core::graph::select(store.connection())?;
@@ -3367,7 +3494,9 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
 /// Not paged: the store path's page cache is machine-local, and a server's paging is an open
 /// decision (6j6v.15ed) — as for [`next_active_filtered`], a server cuts this list itself. So
 /// `validation` for `q.paginate` or a token; and for a malformed `q.now`, a type filter (or none)
-/// the board does not list every item for, and a board read for less than the ranking needs.
+/// the board does not list every item for, a board read for less than the ranking needs, and a
+/// board kept and cut ([`ListBoard::cut`]) for another query than `q`. A cut board answers the
+/// total its reader counted before the cut.
 pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> Result<NextPage> {
     if q.paginate || q.token.is_some() {
         return Err(NxfError::validation(
@@ -3390,6 +3519,14 @@ pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> 
              `list_reads` for this query",
         ));
     }
+    if let Some(cut) = &board.cut {
+        if list_reads(cfg, q).select.as_ref() != Some(&cut.select) {
+            return Err(NxfError::validation(
+                "the list board was kept and cut for another query — read it with `list_reads` \
+                 for this query",
+            ));
+        }
+    }
     let mut items: Vec<ItemRow> = board
         .items
         .values()
@@ -3411,7 +3548,12 @@ pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> 
     } else {
         order_by(cfg, &mut items, key);
     }
-    Ok(truncate_next(items, q.limit))
+    let mut page = truncate_next(items, q.limit);
+    if let Some(cut) = &board.cut {
+        // The reader kept the page only: the total is the one it counted before its cut.
+        page.total = cut.total;
+    }
+    Ok(page)
 }
 
 /// [`list_board_page`] as the `list` JSON envelope `{"items", "total"}` — the value

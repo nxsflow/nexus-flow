@@ -1,6 +1,8 @@
 //! The DynamoDB adapter against a real DynamoDB Local (6j6v.k7w7): the same fold written into
 //! DynamoDB and into a [`MemTable`] leaves the same items, the board reads back through the indexes
-//! with the same lanes and the same `typed` listings (6j6v.xkr7), and every request the client sends is recorded — none is a Scan.
+//! with the same lanes and the same `typed` listings (6j6v.xkr7), the ranked list and the ranking
+//! graph read back as from memory — a hub whose adjacency spans Query pages among them (review of
+//! PR #55) — and every request the client sends is recorded — none is a Scan.
 //!
 //! Gated like `nxs-server`'s suite: on the `dynamodb` feature and `NXF_RELAY_DDB_ENDPOINT`, skipped
 //! locally without one and a hard failure under CI. Each test creates its own table from
@@ -181,6 +183,11 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
             counted.queries + counted.index_queries,
             "{sent:?}"
         );
+        assert_eq!(
+            sent.get("BatchGetItem").copied().unwrap_or(0),
+            counted.batch_gets,
+            "{sent:?}"
+        );
 
         let want = board::select(&mem).await.unwrap().board.lanes(NOW);
         let ddb_ref = &ddb;
@@ -271,11 +278,12 @@ async fn closing_a_ticket_with_many_dependents_costs_one_query_and_a_few_request
     let sent = recorder.take();
     eprintln!("closing a ticket with {n} dependents sent {sent:?}");
     let count = |op: &str| sent.get(op).copied().unwrap_or(0);
-    // The close: three changes and the watermark. The ticket's refresh: one read, one write. The
-    // flip: one adjacency Query, and per edge three reads — the edge, its remove, its first end,
-    // a dependent that is still active — and no write, since that keeps the edge on the index.
+    // The close: three changes and the watermark, one read to weigh the ticket's row first. The
+    // ticket's refresh: one read, one write. The flip: one adjacency Query, and per edge three
+    // reads — the edge, its remove, its first end, a dependent that is still active — and no
+    // write, since that keeps the edge on the index.
     assert_eq!(count("Query"), 1, "{sent:?}");
-    assert_eq!(count("GetItem"), 1 + 3 * n, "{sent:?}");
+    assert_eq!(count("GetItem"), 2 + 3 * n, "{sent:?}");
     assert_eq!(count("UpdateItem"), 3 + 1 + 1, "{sent:?}");
     assert_eq!(count("Scan"), 0);
 
@@ -451,4 +459,163 @@ async fn the_records_read_back_as_from_memory_with_four_requests_per_ticket_and_
             "a read sends only GetItem and Query: {sent:?}"
         );
     }
+}
+
+/// The reads of a ranked list of `types` (`None`: every type) whose keys follow every edge kind,
+/// read labels and custom values, the `next` board and the `list` scope of `list_types`.
+fn ranked_reads(types: Option<&[&str]>, list_types: &[&str]) -> nexus_flow_facade::read::ListReads {
+    let mut graph = nexus_flow_facade::read::RankingReads::default();
+    graph.kinds = [
+        EdgeKind::Parent,
+        EdgeKind::ContributesTo,
+        EdgeKind::Mentions,
+        EdgeKind::Dep,
+    ]
+    .into_iter()
+    .collect();
+    graph.labels = true;
+    graph.custom = true;
+    graph.list_types = list_types.iter().map(|t| t.to_string()).collect();
+    let mut reads = nexus_flow_facade::read::ListReads::default();
+    reads.types = types.map(|t| t.iter().map(|t| t.to_string()).collect());
+    reads.next = true;
+    reads.ranking = Some(graph);
+    reads
+}
+
+/// What a list board holds, comparably.
+type ListView = (
+    BTreeMap<String, nexus_flow_facade::read::ListItem>,
+    Option<nexus_flow_facade::read::RankingGraph>,
+    Option<BTreeMap<String, nexus_flow_facade::read::ActiveTicket>>,
+);
+
+async fn list_view<T: Table>(t: &T, reads: &nexus_flow_facade::read::ListReads) -> ListView
+where
+    T::Error: std::fmt::Debug,
+{
+    let board = records::list_board(t, reads).await.unwrap();
+    (board.items, board.ranking, board.active.map(|a| a.tickets))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ranked_list_and_the_ranking_graph_read_back_as_from_memory() {
+    // Review of PR #55, Integrity #7: `records::list_board` and `records::with_ranking` through the
+    // SDK — the `typed` Query joined with base-table reads, `BatchGetItem` — give what they give
+    // over the memory table, and send no Scan.
+    let Some(url) = endpoint("ranked") else {
+        return;
+    };
+    let recorder = Recorder::default();
+    let client = client(&url, &recorder);
+    let name = fresh_table(&client, "ranked").await;
+    let folder = Folder::platform().unwrap();
+    for seed in [3, 19, 41] {
+        let s = merged(seed);
+        let ops = delivered(&s, seed);
+        let stream = format!("stream-ranked-{seed}");
+        let ddb = DynamoDbTable::new(client.clone(), &name, &stream);
+        let mem = MemTable::new(&stream);
+        folder.fold_batch(&ddb, &ops).await.unwrap();
+        folder.fold_batch(&mem, &ops).await.unwrap();
+        let mut all = vec![ranked_reads(None, &[])];
+        for ty in TYPES {
+            let others: Vec<&str> = TYPES.into_iter().filter(|t| *t != ty).collect();
+            all.push(ranked_reads(Some(&[ty]), &others));
+        }
+        for reads in &all {
+            let want = list_view(&mem, reads).await;
+            let ddb_ref = &ddb;
+            let got = eventually(&want, || async move { list_view(ddb_ref, reads).await }).await;
+            assert_eq!(got, want, "seed {seed}, {:?}", reads.types);
+        }
+        let graph = ranked_reads(None, &["epic"]).ranking.unwrap();
+        let plain = records::active_board(&mem, board::select(&mem).await.unwrap())
+            .await
+            .unwrap();
+        let want = records::with_ranking(&mem, plain.clone(), &graph)
+            .await
+            .unwrap()
+            .ranking;
+        let ddb_ref = &ddb;
+        let (plain_ref, graph_ref) = (&plain, &graph);
+        let got = eventually(&want, || async move {
+            records::with_ranking(ddb_ref, plain_ref.clone(), graph_ref)
+                .await
+                .unwrap()
+                .ranking
+        })
+        .await;
+        assert_eq!(got, want, "seed {seed}: the ranking graph");
+        let sent = recorder.take();
+        assert!(sent.contains_key("BatchGetItem"), "{sent:?}");
+        assert!(!sent.contains_key("Scan"), "{sent:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hub_whose_adjacency_spans_query_pages_reads_every_edge() {
+    // Review of PR #55, Integrity #7: an item with more adjacency entries than one Query page holds
+    // (1 MB) — 450 contributors with ids near the key limit, some 2.9 KB an entry — reads every edge
+    // through the SDK, as from memory.
+    let Some(url) = endpoint("hub") else { return };
+    let recorder = Recorder::default();
+    let client = client(&url, &recorder);
+    let name = fresh_table(&client, "hub").await;
+    let folder = Folder::platform().unwrap();
+    let hub = format!("ab12.h{}", "h".repeat(890));
+    let mut s = Store::open_in_memory(1);
+    s.create_item(&hub, "epic", "Hub", "u");
+    let n = 450;
+    for i in 0..n {
+        let id = format!("ab12.{i:04}{}", "n".repeat(890));
+        s.create_item(&id, "task", "Contributor", "u");
+        s.add_edge(&id, &hub, EdgeKind::ContributesTo, "u");
+    }
+    let ops: Vec<(i64, _)> = s
+        .export()
+        .into_iter()
+        .enumerate()
+        .map(|(i, op)| (i as i64 + 1, op))
+        .collect();
+    let ddb = DynamoDbTable::new(client.clone(), &name, "stream-hub");
+    let mem = MemTable::new("stream-hub");
+    assert!(folder.fold_batch(&ddb, &ops).await.unwrap().is_empty());
+    folder.fold_batch(&mem, &ops).await.unwrap();
+
+    recorder.take();
+    let entries = ddb.query_prefix(&format!(".adj#{hub}#")).await.unwrap();
+    let sent = recorder.take();
+    assert_eq!(entries.len(), n);
+    assert!(
+        sent.get("Query").copied().unwrap_or(0) >= 2,
+        "the hub's entries span pages: {sent:?}"
+    );
+
+    let mut graph = nexus_flow_facade::read::RankingReads::default();
+    graph.kinds.insert(EdgeKind::ContributesTo);
+    let plain = records::active_board(&mem, board::select(&mem).await.unwrap())
+        .await
+        .unwrap();
+    let want = records::with_ranking(&mem, plain.clone(), &graph)
+        .await
+        .unwrap()
+        .ranking
+        .unwrap();
+    assert_eq!(want.edges.len(), n);
+    let got = records::with_ranking(&ddb, plain, &graph)
+        .await
+        .unwrap()
+        .ranking
+        .unwrap();
+    assert_eq!(got, want);
+
+    // The hub listed by its type: its edges come from the same paged entries.
+    let reads = ranked_reads(Some(&["epic"]), &[]);
+    let want = list_view(&mem, &reads).await;
+    let ddb_ref = &ddb;
+    let reads_ref = &reads;
+    let got = eventually(&want, || async move { list_view(ddb_ref, reads_ref).await }).await;
+    assert_eq!(got, want);
+    assert_eq!(got.1.unwrap().edges.len(), n);
 }

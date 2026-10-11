@@ -304,14 +304,43 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
   reducers' rows — flags, adjacency entries, entries under a ticket — is versioned in the watermark
   as `revision_index` (1: the entries under a ticket). A stream folded before has no such revision,
   so `Folder::is_current` is false and the fold run clears and refolds it from position 0, exactly
-  as for a release with other reducer revisions — no manual step. Until then `active_board`
-  refuses the stream (`RecordsError::NotCurrent`) rather than answer without its labels.
+  as for a release with other reducer revisions — no manual step. Until then every records read
+  (`active_board`, `with_ranking`, `list_board`) refuses the stream (`RecordsError::NotCurrent`)
+  rather than answer without its labels — and goes on refusing it through the refold (review of PR
+  #55): `Folder::clear(table, until)` rewrites the watermark FIRST as a sentinel that names no
+  revision, `folded_through` 0 and `refold_until` = `until`, the relay head the refold must reach;
+  the refold's first batch writes the revisions, and the reads answer `RecordsError::Refolding`
+  until `folded_through` reaches `until`. Nothing has to be written for that, so a refold that
+  dies and resumes, or folds a batch twice, ends served the same. A snapshot import writes the same
+  sentinel before its first row. **No mixed fold versions:** `is_current` is equality, so a build
+  with older rules also clears a stream folded by newer ones — roll a revision bump out to every
+  fold run at once, and roll back the same way.
+- **What a hosted read costs, per call** (review of PR #55, Integrity #1). One `GetItem` of the
+  watermark per read. `active_board`: `4n + p` more for `n` active tickets and `p` parents
+  outside them. `with_ranking`: one Query per active ticket, the neighbours' rows by `BatchGetItem`
+  (100 keys a request, unprocessed keys sent again), and per live neighbour up to three Queries;
+  a `next` key that reads a `[ranking.list]` rank adds one `typed` Query per such type and up to
+  three Queries per live, unarchived item of it. `list_board`: one `typed` Query per listed type
+  (or one `items#` Query, paged at 1 MB, without a type filter); a list that is NOT ranked keeps
+  and cuts on the rows first (`ListReads::select`), so beyond the rows it costs three Queries per
+  page row, one per kept row for a container or label filter, and one `BatchGetItem` per 100
+  timestamps and outside parents — `list --limit 10` about 33 requests, whatever the stream
+  holds. A RANKED list reads three Queries per live, unarchived item of its types plus the batched
+  point reads, and `next`'s board and the graph when its keys read them: a rank is computed over
+  the type's whole `list` scope (`docs/specs/derived-ranking-keys.md` §12), so that cost is the
+  scope's, not the answer's. No read caps its requests; a hard per-call budget that answers with an
+  explicit error is filed as `6j6v.wq9e`. At most 16 items are read at a time
+  (`READ_CONCURRENCY`).
 - **Index reads are eventually consistent**; row reads are strong. The lanes right after a fold may
   be those of the state before it.
 - **An op the table cannot hold** (a sort key past 1,024 bytes, a row past 400 KB) is refused and
   reported, not retried for ever; the relay keeps it. A row that only outgrows the limit through
   several ops keeps its state at the write that would break it — the one result that depends on
-  arrival order, and only for rows a local replica can hold but DynamoDB cannot.
+  arrival order, and only for rows a local replica can hold but DynamoDB cannot. An item row is
+  weighed BEFORE the op writes anything — stored row, the op's writes and the index attributes it
+  would then carry (`nxf_active`, `nxf_typed`, `nxf_dated`/`nxf_dated_at`), one `GetItem` — so an
+  item never takes a change its index attributes do not fit beside and drops off an index in
+  silence (review of PR #55, Integrity #4).
 - **Edge flags are rewritten before the ticket's own flag**, so a run that dies between the two
   still sees the flip when it folds the op again.
 - **No Scan.** Every read names its partition. The `dynamodb-local` CI job records every request a
@@ -323,7 +352,9 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
 **The watermark** (`.meta#watermark`) is `folded_through` — a relay position, per decision 4 above —
 plus each reducer's fold revision. A batch folds, then moves the mark forward; a run that dies in
 between folds part of a batch again, which changes nothing. A release whose revisions differ clears
-the stream — the watermark last, so a clear that dies is done again — and folds it from position 0.
+the stream — the watermark first, rewritten as a sentinel without revisions, so a clear that dies
+is done again and no reader serves the stream until its refold reaches the head the clear named —
+and folds it from position 0.
 
 **A snapshot is tables plus watermark, without the log** — only to start a fold run. It is taken
 without a lock, the watermark first and the tables after, so the tables may hold ops past the mark

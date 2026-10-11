@@ -14,6 +14,7 @@ use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
 use nexus_flow_core::task_reducer::TaskReducer;
 use nxs_fold_ddb::fold::Folder;
+use nxs_fold_ddb::layout::WATERMARK_KEY;
 use nxs_fold_ddb::mem::{ready, MemTable};
 use nxs_fold_ddb::table::{text, Dated, Table};
 use nxs_fold_ddb::{board, chunks};
@@ -273,8 +274,14 @@ fn the_watermark_only_moves_forward() {
     );
     let rows: BTreeMap<_, _> = t.rows();
     assert_eq!(rows.len(), 1);
-    ready(Folder::clear(&t)).unwrap();
-    assert!(t.rows().is_empty());
+    // A clear leaves the watermark only, as a sentinel: no revision, so no reader serves the
+    // stream, and the position its refold has to reach.
+    ready(Folder::clear(&t, 10)).unwrap();
+    assert_eq!(t.rows().keys().collect::<Vec<_>>(), [WATERMARK_KEY]);
+    let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+    assert!(mark.revisions.is_empty());
+    assert_eq!((mark.folded_through, mark.refold_until), (0, Some(10)));
+    assert!(!folder.is_current(&mark));
 }
 
 #[test]
@@ -303,10 +310,12 @@ fn a_flip_costs_one_query_and_three_reads_per_edge_and_no_more() {
     let before = t.requests();
     ready(folder.fold_batch(&t, &all(&s, seen))).unwrap();
     let after = t.requests();
-    // Three changes, the ticket's index write, the watermark; one read for the ticket and three
-    // per edge; one adjacency Query. Nothing grows with the board beyond the closed ticket's edges.
+    // Three changes, the ticket's index write, the watermark; two reads for the ticket — one to
+    // weigh its row before the op writes (review of PR #55, Integrity #4), one for its index — and
+    // three per edge; one adjacency Query. Nothing grows with the board beyond the closed ticket's
+    // edges.
     assert_eq!(after.writes - before.writes, 5);
-    assert_eq!(after.gets - before.gets, 1 + 3 * n);
+    assert_eq!(after.gets - before.gets, 2 + 3 * n);
     assert_eq!(after.queries - before.queries, 1);
     assert_eq!(
         ready(board::select(&t))

@@ -10,6 +10,9 @@ use std::future::Future;
 /// A stored row: its attributes by name, the sort key and index attributes among them.
 pub type Row = BTreeMap<String, Cell>;
 
+/// The most keys one `BatchGetItem` names — DynamoDB's own limit ([`Table::get_many`]).
+pub const BATCH_GET_KEYS: usize = 100;
+
 /// What a write did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -48,6 +51,16 @@ pub trait Table: Sync {
 
     /// One row, read strongly consistent.
     fn get(&self, sk: &str) -> impl Future<Output = Result<Option<Row>, Self::Error>> + Send;
+
+    /// Several rows, read strongly consistent, by sort key — a key without a row is absent from the
+    /// answer, and a key named twice is read once. DynamoDB answers it with `BatchGetItem`, at most
+    /// [`BATCH_GET_KEYS`] keys a request, sending the keys a request left unprocessed again; so it
+    /// costs `⌈keys / 100⌉` requests, more only when DynamoDB throttles or a response passes 16 MB.
+    /// No keys, no request.
+    fn get_many(
+        &self,
+        sks: &[String],
+    ) -> impl Future<Output = Result<BTreeMap<String, Row>, Self::Error>> + Send;
 
     /// One conditional write.
     fn write(&self, write: &Write) -> impl Future<Output = Result<Outcome, Self::Error>> + Send;

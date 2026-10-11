@@ -38,7 +38,8 @@
 //! [`with_ranking`] fills the board's [`RankingGraph`] — the edges around the active tickets and
 //! their live neighbours — from the adjacency entries (index revision 3, 6j6v.1c5s), and the live
 //! items of a type whose `[ranking.list]` rank a key reads from the `typed` index (6j6v.xkr7). Its
-//! cost is in its own doc.
+//! cost is in its own doc. Where it reads many rows by key it sends `BatchGetItem`s
+//! ([`Table::get_many`], 100 keys a request) instead of one `GetItem` each.
 //!
 //! # A hosted `list`
 //!
@@ -64,11 +65,18 @@
 //! (6j6v.15ed), the self-describing `.adj#` entries and the `typed` index attribute with revision 3
 //! (6j6v.1c5s, 6j6v.xkr7). A stream whose watermark names an older one — or none, folded before
 //! revisions were recorded for the index — lacks them, and its records would come back without
-//! labels or conversations, its list empty. [`active_board`] and [`list_board`] refuse such a
-//! stream ([`RecordsError::NotCurrent`]); the fold run refolds it ([`Folder::is_current`]), after
-//! which it reads normally.
+//! labels or conversations, its list empty. [`active_board`], [`with_ranking`] and [`list_board`]
+//! refuse such a stream ([`RecordsError::NotCurrent`]); the fold run refolds it
+//! ([`Folder::is_current`]), after which it reads normally.
+//!
+//! A refold is refused for its whole length, not only until it starts: [`Folder::clear`] leaves a
+//! sentinel watermark that names no revision (`NotCurrent`), and once the refold has written this
+//! build's revisions the readers answer [`RecordsError::Refolding`] until it reaches the relay
+//! position the clear named. A stream with no watermark at all was never folded, and reads as the
+//! empty board it is.
 //!
 //! [`Folder::is_current`]: crate::fold::Folder::is_current
+//! [`Folder::clear`]: crate::fold::Folder::clear
 
 use crate::board::{int, is_active, item_key, select, Selection, REMOVED};
 use crate::fold::{Folder, INDEX_DOMAIN, INDEX_REVISION};
@@ -81,8 +89,8 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 use nexus_flow_core::graph::Edge;
 use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight};
 use nexus_flow_facade::read::{
-    ActiveBoard, ActiveTicket, ListBoard, ListItem, ListReads, Neighbour, ParentRef, RankingGraph,
-    RankingReads,
+    self, ActiveBoard, ActiveTicket, ListBoard, ListItem, ListReads, ListSelect, Neighbour,
+    ParentRef, RankingGraph, RankingReads,
 };
 use nxs_foundation::change::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,6 +108,10 @@ pub enum RecordsError<E> {
     /// watermark names, `None` when it names none). Its records would lack joins; the fold run
     /// refolds it.
     NotCurrent { found: Option<i64> },
+    /// The stream is being folded again from position 0 ([`Folder::clear`]) and has not yet
+    /// reached `until`, the relay position the refold has to reach before it is served: its
+    /// tables hold part of its history only.
+    Refolding { folded_through: i64, until: i64 },
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for RecordsError<E> {
@@ -110,6 +122,14 @@ impl<E: std::fmt::Display> std::fmt::Display for RecordsError<E> {
                 f,
                 "the stream was folded by index revision {found:?}, this build reads revision \
                  {INDEX_REVISION}; it has to be folded again"
+            ),
+            RecordsError::Refolding {
+                folded_through,
+                until,
+            } => write!(
+                f,
+                "the stream is being folded again, through relay position {folded_through} of \
+                 {until}; it is served once the refold reaches {until}"
             ),
         }
     }
@@ -232,7 +252,8 @@ struct EdgeEntry {
     site: i64,
 }
 
-/// The present edges touching ticket `id`, by tag: one Query on its `.adj#` prefix.
+/// The present edges touching ticket `id`, by tag: one Query on its `.adj#` prefix. Only entries
+/// that name `id` as an end count.
 async fn present_edges<T: Table>(
     table: &T,
     id: &str,
@@ -250,6 +271,10 @@ async fn present_edges<T: Table>(
             };
             Some((text(e, "tag")?.to_string(), entry))
         })
+        // An entry filed under `id` names it as an end. One that does not — an add whose tag was
+        // reused with other ends, leaving the entry under its old end behind — is not an edge of
+        // `id`, whatever its copy says (review of PR #55, Integrity #5).
+        .filter(|(_, e)| e.from == id || e.to == id)
         .collect())
 }
 
@@ -267,25 +292,32 @@ fn current_parent(id: &str, edges: &BTreeMap<String, EdgeEntry>) -> Option<Strin
 /// `[ranking.next]` read, from the folded tables — what [`read::with_ranking`] reads from a store,
 /// edge for edge and neighbour for neighbour. A server calls it when
 /// [`read::next_ranking_reads`] names reads for its plugin, so a plugin without derived `next` keys
-/// pays nothing for it. The stream must be current, as for [`active_board`]: the entries read here
-/// came with index revision 3.
+/// pays nothing for it. The stream must be current, as for [`active_board`] — the entries read here
+/// came with index revision 3 — and it is asked again here ([`RecordsError::NotCurrent`],
+/// [`RecordsError::Refolding`]): a revision-2 entry says nothing of its edge, and would read as no
+/// edge at all.
 ///
 /// | read                                          | per                                       |
 /// |-----------------------------------------------|-------------------------------------------|
+/// | one `GetItem` of `.meta#watermark`            | board                                     |
 /// | one Query on `.adj#<ticket>#`                 | active ticket                             |
 /// | one Query on the `typed` index                | type in `reads.list_types` (6j6v.xkr7)    |
 /// | one Query on `.adj#<item>#`                   | live, unarchived item of such a type that is not active |
-/// | one `GetItem` of its row                      | other end of such an edge that is not a subject |
+/// | its row, by `BatchGetItem`                    | other end of such an edge that is not a subject — `⌈p / 100⌉` requests |
 /// | one Query on `.adj#<item>#` (its parent)      | such end that is live                     |
 /// | one Query on `.ladj#<item>#`, `custom_fields#<item>#` | such end and listed item, when `reads` asks for labels, custom values |
 ///
 /// So `n` active tickets with `p` distinct inactive neighbours, `q` of them live, cost `n + q`
-/// Queries and `p` `GetItem`s — `n + 3q` Queries with labels and custom values — at most
+/// Queries, one `GetItem` and `⌈p / 100⌉` `BatchGetItem`s — `n + 3q` Queries with labels and
+/// custom values — at most
 /// [`READ_CONCURRENCY`] items at a time, and nothing grows with an item's history: an entry says
 /// whether its add is removed. Every edge touching a subject is read once, from one end's entries,
 /// whatever the plugin's keys — the edge pass the store path runs once per query. A `next` key
 /// that reads the rank of a type only `[ranking.list]` orders adds, per such type, one index Query
-/// and its live items as subjects ([`RankingReads::list_types`]).
+/// and its live items as subjects ([`RankingReads::list_types`]) — one Query on `.adj#`, and one each
+/// on `.ladj#` / `custom_fields#` when the keys read them, per live, unarchived item of the type,
+/// however few the answer ranks: the rank is computed over the type's whole `list` scope
+/// (docs/specs/derived-ranking-keys.md §12, decision 2).
 ///
 /// [`read::with_ranking`]: nexus_flow_facade::read::with_ranking
 /// [`read::next_ranking_reads`]: nexus_flow_facade::read::next_ranking_reads
@@ -294,6 +326,9 @@ pub async fn with_ranking<T: Table>(
     mut board: ActiveBoard,
     reads: &RankingReads,
 ) -> Result<ActiveBoard, RecordsError<T::Error>> {
+    // The board may have been read before a refold began, and an older stream's entries say
+    // nothing of their edge: asked here again, one `GetItem` (review of PR #55, Integrity #3).
+    check_current(table).await?;
     let ids: Vec<String> = board.tickets.keys().cloned().collect();
     let held: BTreeMap<String, Held> = stream::iter(ids)
         .map(|id| async move {
@@ -323,8 +358,15 @@ struct Held {
     edges: BTreeMap<String, EdgeEntry>,
 }
 
-/// The live, unarchived items of `item_type` on the `typed` index — the type's `list` scope —
-/// asked of the row again, since the index may lag it. In id order.
+/// The live, unarchived items of `item_type` on the `typed` index — the type's `list` scope — in
+/// id order.
+///
+/// What the index hands back is its copy of each row, and the copy's own cells are asked again:
+/// the fold writes the `typed` attribute AFTER the row ([`board`](crate::board), "`typed`"), so a
+/// copy taken between the two writes — or left by a run that died between them — can be retyped or
+/// deleted while its attribute still names `item_type`; it is dropped. The base row itself is not
+/// read again: the index's lag behind it is the one the module doc's "Two points in time"
+/// describes, a state the stream really had, and is not hidden here.
 async fn typed_items<T: Table>(table: &T, item_type: &str) -> Result<Vec<Row>, T::Error> {
     Ok(table
         .query_typed(item_type)
@@ -410,18 +452,13 @@ async fn ranking_graph<T: Table>(
         .filter(|id| !subject(id))
         .cloned()
         .collect();
-    let rows: Vec<(String, Option<Row>)> = stream::iter(others)
-        .map(|id| async move {
-            let row = table.get(&item_key(&id)).await?;
-            Ok::<_, T::Error>((id, row))
-        })
-        .buffered(READ_CONCURRENCY)
-        .try_collect()
-        .await?;
-    let live = rows
+    let keys: Vec<String> = others.iter().map(|id| item_key(id)).collect();
+    let mut rows = table.get_many(&keys).await?;
+    let live: Vec<(String, Row)> = others
         .into_iter()
-        .filter_map(|(id, row)| row.map(|r| (id, r)))
-        .filter(|(_, r)| text(r, "deleted") != Some("1"));
+        .filter_map(|id| rows.remove(&item_key(&id)).map(|r| (id, r)))
+        .filter(|(_, r)| text(r, "deleted") != Some("1"))
+        .collect();
     let ends: BTreeMap<String, Neighbour> = stream::iter(live)
         .map(|(id, row)| async move {
             let (n, _) = neighbour(table, &id, &row, reads).await?;
@@ -477,36 +514,55 @@ async fn ranking_graph<T: Table>(
 /// [`read::list_reads`] for its query. The stream must be current, as for [`active_board`]: the
 /// `typed` index and the self-describing `.adj#` entries came with index revision 3.
 ///
-/// | read                                                    | per                              |
-/// |---------------------------------------------------------|----------------------------------|
-/// | one `GetItem` of `.meta#watermark`                      | board                            |
-/// | one Query on the `typed` index                          | listed type                      |
-/// | one Query on the partition's `items#` rows              | board without a type filter      |
-/// | one Query each on `.adj#`, `.ladj#`, `custom_fields#`; one `GetItem` of `item_timestamps` | listed item |
-/// | one `GetItem`                                           | parent of an open listed item outside the list |
-/// | one Query on the `active` index, and per active ticket one Query each on `.ladj#` / `custom_fields#` when the graph reads them | board whose keys read a `next` rank |
-/// | [`with_ranking`]'s reads around the listed items and active tickets | board with derived keys |
+/// # What a list costs
 ///
-/// So `n` listed items cost `4n + 1 + p` requests and one Query per listed type, as
-/// [`active_board`] costs per active ticket; the `.adj#` Query gives each item's parent, its
-/// `contributes_to` targets and its parents for `parent_closed_reason` at once, and the graph reuses
-/// it. Archived and deleted items are dropped before any join: `list` returns neither (archived
-/// ones are on the index, live as they are, and filtered here as `list` filters them locally).
+/// The listed types' rows come first: one Query on the `typed` index per listed type, or — for a
+/// query without a type filter — one Query on the partition's `items#` rows (every item row of the
+/// stream, deleted ones included, strongly consistent; DynamoDB pages it at 1 MB, so it is one
+/// request per MB of item rows). Archived and deleted items are dropped there: `list` returns
+/// neither. One `GetItem` of `.meta#watermark` per board. What follows depends on the order.
 ///
-/// A query without a type filter lists every live item, so it reads the partition's `items#` rows
-/// — strongly consistent, every item row of the stream, deleted ones included — instead of an
-/// index. The index lists one type; a query that names its types reads only those.
+/// **Any order but `rank`** ([`ListReads::select`]) reads the item rows alone, so the rows are
+/// kept and cut BEFORE the joins a record carries are read ([`read::list_select`]): the status and
+/// the type are asked of the row; a container filter reads one Query on `.adj#`, a label filter one
+/// on `.ladj#`, per item the row kept; then only the `k` items of the page (at most `limit`) read
+/// the rest:
+///
+/// | read                                                         | per                       |
+/// |--------------------------------------------------------------|---------------------------|
+/// | one Query each on `.adj#`, `.ladj#`, `custom_fields#` (less what the filter read) | page item |
+/// | `item_timestamps` rows, by `BatchGetItem`                    | page — `⌈k / 100⌉` requests |
+/// | parents of open page items outside the page, by `BatchGetItem` | page — `⌈p / 100⌉` requests |
+///
+/// So `list --limit 10` costs `1 + 30 + 2` requests beside the rows' Query, at most, however many
+/// items the stream holds and however many the status refuses — plus one Query per item the row
+/// kept when the query filters by container or label.
+///
+/// **`sort = rank`** reads every live, unarchived item of the listed types in full — one Query
+/// each on `.adj#`, `.ladj#`, `custom_fields#` per item, and the timestamps and outside parents by
+/// `BatchGetItem` — whatever its status, filter or limit: a rank is computed over the type's whole
+/// `list` scope (docs/specs/derived-ranking-keys.md §12, decision 2), and a derived key reads the
+/// labels and custom values of every item in it. When a key reads a rank `next` gives, one Query on
+/// the `active` index and per active ticket one Query each on `.ladj#` / `custom_fields#` when the
+/// graph reads them; with derived keys, [`with_ranking`]'s reads around the listed items and the
+/// active tickets. The `.adj#` Query gives each item's parent, its `contributes_to` targets and its
+/// parents for `parent_closed_reason` at once, and the graph reuses it.
+///
+/// Nothing here caps the requests of one call: a ranked list of a type with `n` live items costs
+/// about `3n` Queries, the number its rank is computed over. A server that must bound one request
+/// sets its own budget around the table it hands in (`6j6v.wq9e`, E4 spec §5.1).
 ///
 /// [`read::list_board`]: nexus_flow_facade::read::list_board
 /// [`read::list_board_page`]: nexus_flow_facade::read::list_board_page
 /// [`read::list_board_value`]: nexus_flow_facade::read::list_board_value
 /// [`read::list_reads`]: nexus_flow_facade::read::list_reads
+/// [`read::list_select`]: nexus_flow_facade::read::list_select
 pub async fn list_board<T: Table>(
     table: &T,
     reads: &ListReads,
 ) -> Result<ListBoard, RecordsError<T::Error>> {
     check_current(table).await?;
-    let rows: Vec<Row> = match &reads.types {
+    let mut rows: Vec<Row> = match &reads.types {
         Some(types) => {
             let mut rows = Vec::new();
             for ty in types {
@@ -525,27 +581,88 @@ pub async fn list_board<T: Table>(
             })
             .collect(),
     };
-    let read: Vec<(Row, BTreeMap<String, EdgeEntry>, ListItem)> = stream::iter(rows)
+    let keep = reads.select.as_ref();
+    // A list that is not ranked keeps what its row decides — status, type — before any join.
+    if let Some(select) = keep {
+        rows.retain(|r| select.keeps_row(&item_row(r, None)));
+    }
+
+    // What keeping an item reads: for a ranked list every join below, for any other only what its
+    // filter reads — a container's edges, a label's labels.
+    let edges_first = keep.is_none_or(ListSelect::reads_edges);
+    let labels_first = keep.is_none_or(ListSelect::reads_labels);
+    type Read = (Row, Option<BTreeMap<String, EdgeEntry>>, ListItem);
+    let first: Vec<Read> = stream::iter(rows)
         .map(|row| async move {
             let id = text(&row, "id").unwrap_or_default().to_string();
-            let edges = present_edges(table, &id).await?;
-            let (created_at, updated_at) = timestamps(table, &id).await?;
-            let mut i = ListItem::new(item_row(&row, current_parent(&id, &edges)));
-            i.labels = labels(table, &id).await?;
-            i.custom = custom(table, &id).await?;
-            i.created_at = created_at;
-            i.updated_at = updated_at;
-            let targets: BTreeSet<String> = edges
-                .values()
-                .filter(|e| e.kind == EdgeKind::ContributesTo && e.from == id)
-                .map(|e| e.to.clone())
-                .collect();
-            i.contributes_to = targets.into_iter().collect();
+            let edges = if edges_first {
+                Some(present_edges(table, &id).await?)
+            } else {
+                None
+            };
+            let mut i = list_item(&row, &id, edges.as_ref());
+            if labels_first {
+                i.labels = labels(table, &id).await?;
+            }
             Ok::<_, T::Error>((row, edges, i))
         })
         .buffered(READ_CONCURRENCY)
         .try_collect()
         .await?;
+
+    // Kept and cut as `list_board_page` keeps and cuts, so the joins below are read for the page.
+    let (first, cut) = match keep {
+        None => (first, None),
+        Some(select) => {
+            let mut held: BTreeMap<String, (Row, Option<BTreeMap<String, EdgeEntry>>)> =
+                BTreeMap::new();
+            let items: Vec<ListItem> = first
+                .into_iter()
+                .map(|(row, edges, i)| {
+                    held.insert(i.item.id.clone(), (row, edges));
+                    i
+                })
+                .collect();
+            let (kept, cut) = read::list_select(select, items);
+            let kept = kept
+                .into_iter()
+                .filter_map(|i| held.remove(&i.item.id).map(|(row, edges)| (row, edges, i)))
+                .collect();
+            (kept, Some(cut))
+        }
+    };
+
+    // The rest of each kept item's joins.
+    let mut read: Vec<(Row, BTreeMap<String, EdgeEntry>, ListItem)> = stream::iter(first)
+        .map(|(row, edges, mut i)| async move {
+            let id = i.item.id.clone();
+            let edges = match edges {
+                Some(edges) => edges,
+                None => {
+                    let edges = present_edges(table, &id).await?;
+                    let full = list_item(&row, &id, Some(&edges));
+                    i.item = full.item;
+                    i.contributes_to = full.contributes_to;
+                    edges
+                }
+            };
+            if !labels_first {
+                i.labels = labels(table, &id).await?;
+            }
+            i.custom = custom(table, &id).await?;
+            Ok::<_, T::Error>((row, edges, i))
+        })
+        .buffered(READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+    let keys: Vec<String> = read
+        .iter()
+        .map(|(_, _, i)| timestamps_key(&i.item.id))
+        .collect();
+    let stamped = table.get_many(&keys).await?;
+    for (_, _, i) in &mut read {
+        (i.created_at, i.updated_at) = stamps(stamped.get(&timestamps_key(&i.item.id)));
+    }
 
     // `parent_closed_reason`: an OPEN item with parents, none of them active, lists them all. A
     // parent outside the list is read once, however many children it has.
@@ -560,25 +677,19 @@ pub async fn list_board<T: Table>(
         .iter()
         .map(|(row, _, i)| (i.item.id.as_str(), row))
         .collect();
-    let outside: BTreeSet<String> = read
+    let outside: Vec<String> = read
         .iter()
         .filter(|(_, _, i)| i.item.status.as_deref() == Some("open"))
         .flat_map(|(_, edges, i)| parents_of(&i.item.id, edges))
         .filter(|p| !listed_rows.contains_key(p.as_str()))
+        .map(|p| item_key(&p))
         .collect();
-    let outside: BTreeMap<String, Option<Row>> = stream::iter(outside)
-        .map(|pid| async move {
-            let row = table.get(&item_key(&pid)).await?;
-            Ok::<_, T::Error>((pid, row))
-        })
-        .buffered(READ_CONCURRENCY)
-        .try_collect()
-        .await?;
+    let outside = table.get_many(&outside).await?;
     let parent_row = |pid: &str| -> Option<&Row> {
         listed_rows
             .get(pid)
             .copied()
-            .or_else(|| outside.get(pid).and_then(Option::as_ref))
+            .or_else(|| outside.get(&item_key(pid)))
     };
     let parent_closed: Vec<Vec<(String, Option<String>)>> = read
         .iter()
@@ -615,6 +726,7 @@ pub async fn list_board<T: Table>(
         items.push(i);
     }
     let mut board = ListBoard::new(reads.types.clone(), items);
+    board.cut = cut;
 
     let graph_reads = reads.ranking.clone().unwrap_or_default();
     if reads.next {
@@ -666,12 +778,37 @@ pub async fn list_board<T: Table>(
     Ok(board)
 }
 
-/// Refuse a stream folded by older index rules than this build reads.
+/// A listed item from its row and, when they were read, its present edges: its `belongs_to` and its
+/// `contributes_to` targets come from them, and stay empty without them.
+fn list_item(row: &Row, id: &str, edges: Option<&BTreeMap<String, EdgeEntry>>) -> ListItem {
+    let mut i = ListItem::new(item_row(row, edges.and_then(|e| current_parent(id, e))));
+    if let Some(edges) = edges {
+        let targets: BTreeSet<String> = edges
+            .values()
+            .filter(|e| e.kind == EdgeKind::ContributesTo && e.from == id)
+            .map(|e| e.to.clone())
+            .collect();
+        i.contributes_to = targets.into_iter().collect();
+    }
+    i
+}
+
+/// Refuse a stream folded by older index rules than this build reads, and one being folded again
+/// that has not caught up yet. A cleared stream's watermark names no revision
+/// ([`Folder::clear`]), so it is refused from the clear on; once the refold has written this
+/// build's revisions it is still refused until it reaches the position the clear named. A stream
+/// with no watermark at all has never been folded: it reads as the empty board it is.
 async fn check_current<T: Table>(table: &T) -> Result<(), RecordsError<T::Error>> {
     if let Some(mark) = Folder::watermark(table).await? {
         let found = mark.revisions.get(INDEX_DOMAIN).copied();
         if found != Some(INDEX_REVISION) {
             return Err(RecordsError::NotCurrent { found });
+        }
+        if let Some(until) = mark.refold_until.filter(|u| mark.folded_through < *u) {
+            return Err(RecordsError::Refolding {
+                folded_through: mark.folded_through,
+                until,
+            });
         }
     }
     Ok(())
@@ -714,16 +851,23 @@ async fn timestamps<T: Table>(
     table: &T,
     id: &str,
 ) -> Result<(Option<String>, Option<String>), T::Error> {
-    let row = table
-        .get(&key("item_timestamps", &[("item_id", id)]))
-        .await?;
+    let row = table.get(&timestamps_key(id)).await?;
+    Ok(stamps(row.as_ref()))
+}
+
+/// The sort key of the ticket's `item_timestamps` row.
+fn timestamps_key(id: &str) -> String {
+    key("item_timestamps", &[("item_id", id)])
+}
+
+/// The creation and last change an `item_timestamps` row holds, `''` read as none.
+fn stamps(row: Option<&Row>) -> (Option<String>, Option<String>) {
     let stamp = |c: &str| {
-        row.as_ref()
-            .and_then(|r| text(r, c))
+        row.and_then(|r| text(r, c))
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     };
-    Ok((stamp("created_at"), stamp("updated_at")))
+    (stamp("created_at"), stamp("updated_at"))
 }
 
 /// Every non-empty custom value of the ticket, by field.

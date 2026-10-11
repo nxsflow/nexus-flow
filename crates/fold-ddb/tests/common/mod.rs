@@ -185,6 +185,12 @@ pub fn delivered(s: &Store, seed: u64) -> Vec<(i64, Op)> {
         .collect()
 }
 
+/// The highest relay position among `ops` — the head a refold of them has to reach
+/// (`Folder::clear`).
+pub fn head(ops: &[(i64, Op)]) -> i64 {
+    ops.iter().map(|(at, _)| *at).max().unwrap_or(0)
+}
+
 /// Every row of `table`, every column filled — as SQLite holds it.
 pub fn sqlite_rows(s: &Store, table: &str) -> Vec<Vec<(String, String)>> {
     let conn = s.connection();

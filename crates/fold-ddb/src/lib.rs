@@ -76,7 +76,9 @@
 //! # Cost
 //!
 //! A change is one `UpdateItem`. An item field op makes three changes (the cell and the ticket's
-//! two instants) plus one `GetItem` for the index, and one more write when the ticket's lanes move.
+//! two instants) plus two `GetItem`s — one before, to weigh the row with the index attributes it
+//! would then carry against the 400 KB limit, one after, for the index — and one more write when
+//! the ticket's lanes move.
 //! A flip of a ticket's activity adds one Query and, per edge touching it, at most three reads and
 //! one write. A label or thread link add, or its remove, adds two `GetItem`s and at most one write
 //! for the entry under the ticket (`board`, "Who owns a label or a thread link"). Reading the
@@ -84,9 +86,13 @@
 //! the selection, at most [`records::READ_CONCURRENCY`] tickets at a time ([`records`]). Folding an
 //! edge remove reads the add and the remove and rewrites the entry under each end. The graph the
 //! derived ranking keys read ([`records::with_ranking`]) costs one Query per active ticket and, per
-//! inactive neighbour, one `GetItem` plus up to three Queries. A hosted `list`
-//! ([`records::list_board`]) costs one `typed` Query per listed type and `4n + 1 + p` requests for
-//! `n` listed items, as the records read. The `typed` index costs a fold at most one write per item
+//! inactive neighbour, up to three Queries, their rows read by `BatchGetItem` (100 keys a request).
+//! A hosted `list` ([`records::list_board`]) costs one `typed` Query per listed type; one that is
+//! not ranked keeps and cuts its rows first and reads three Queries per row of its page plus one
+//! `BatchGetItem` for their timestamps, however many items the stream holds; a ranked one reads
+//! three Queries per live item of its types — the scope its rank is computed over — and its point
+//! reads by `BatchGetItem`. No read caps its own requests: a server bounds one request by the
+//! table it hands in (E4 spec §5.1). The `typed` index costs a fold at most one write per item
 //! op, and only when the op gains, changes or loses the item's partition — a create, a retype, a
 //! delete — in the same write as the item's other index attributes when they move too. No request
 //! is a Scan: every read names its partition key, the board's through an index. The
@@ -97,7 +103,10 @@
 //! What this crate writes beside the reducers' rows — index flags, adjacency entries, the entries
 //! under a ticket — has its own revision in the watermark ([`fold::INDEX_REVISION`]). A stream
 //! folded by an older one is not current ([`fold::Folder::is_current`]) and is refolded the way a
-//! stream of an older reducer revision is; [`records::active_board`] refuses it until then.
+//! stream of an older reducer revision is. Every reader in [`records`] refuses it from the moment
+//! the clear begins until the refold reaches the head the clear named ([`fold::Folder::clear`]):
+//! `NotCurrent` while the watermark names no revision, `Refolding` after. Fold versions are not
+//! mixed: a build with older rules meets a newer stream as not current, too (see [`fold`]).
 
 pub mod board;
 pub mod chunks;

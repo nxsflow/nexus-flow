@@ -159,12 +159,17 @@ derived key pays nothing.
   removed, kept up to date when the remove is folded. So one Query on an item's prefix reads every
   edge touching it, in and out, with its presence: inbound `contributes_to`, `mentions` both ways,
   and the `parent` edges a child's current parent is picked from. No new index, no new key
-  attribute: the TABLE CONTRACT IS UNCHANGED. Revision 3 makes every stream folded before it not
-  current; it answers `NotCurrent` until the fold run has folded it again.
-- **What the server reads** (`records::with_ranking`): one Query per active ticket on its
-  adjacency; per neighbour that is not active one `GetItem` of its row and, when it is live, one
-  Query on its own adjacency for its current parent, plus one Query each for its labels and custom
-  values when a key reads them.
+  attribute: 1c5s alone leaves the table contract unchanged — the release that ships it changes it
+  all the same, with xkr7's GSI `typed` below. Revision 3 makes every stream folded before it not
+  current; it answers `NotCurrent` from the moment the fold run clears it, and `Refolding` until
+  the refold reaches the relay position the clear named (review of PR #55: `Folder::clear` leaves
+  a sentinel watermark without revisions and that position, so a half-refolded stream is never
+  served).
+- **What the server reads** (`records::with_ranking`): one `GetItem` of the watermark (the read
+  refuses a stream that is not current or still refolding itself); one Query per active ticket on
+  its adjacency; the rows of the neighbours that are not active by `BatchGetItem` (100 keys a
+  request) and, per live one, one Query on its own adjacency for its current parent, plus one Query
+  each for its labels and custom values when a key reads them.
 - **A `[ranking.list]` rank in a `next` key** (refused on the server in 1c5s, ranked since xkr7): a
   `[ranking.next]` order that reads — directly or down its type chain — the rank of a type only
   `[ranking.list]` orders (§12, first point). That rank is computed over the type's live,
@@ -178,10 +183,10 @@ derived key pays nothing.
   follows or counts). What xkr7 adds is the `typed` index (the `list` scope of a type), the read
   that ranks a type's live items from it, and lifting the refusal above.
 
-**`list` needs a second index (decided §10.4).** Objects that `list` ranks, such as a person, are
+**`list` needs another index (decided §10.4).** Objects that `list` ranks, such as a person, are
 long-lived and have no "active" status. If they did, they would rank through `next`, and `list`
 would not be needed for them. So the server cannot rank them from the `active` index. The table
-gains a second sparse index, keyed by type:
+gains a third sparse index — after `active` and `dated` —, keyed by type:
 
 | what | name | type | role |
 |---|---|---|---|
@@ -221,7 +226,18 @@ gains a second sparse index, keyed by type:
   by the code `list_page` runs, and `read::list_board` reads the same board from a store, the
   parity oracle.
 - **Without a type filter** the server lists every live item: it reads the partition's `items#`
-  rows (strongly consistent, one Query, no index), since the index lists one type at a time.
+  rows (strongly consistent, one Query — paged by DynamoDB at 1 MB —, no index), since the index
+  lists one type at a time.
+- **What a list costs** (review of PR #55, Integrity #1). A `list` that is not ranked orders and
+  filters by the item rows alone, so `ListReads::select` lets the server keep and cut BEFORE the
+  joins: status and type are asked of the row, a container or label filter reads the one join it
+  needs per kept row, and only the page (at most `limit` rows) reads the rest — three Queries a
+  row, the timestamps and outside parents by `BatchGetItem`. `list --limit 10` costs the rows'
+  Query and about 33 requests, however many items the stream holds. A RANKED `list` reads every
+  live, unarchived item of its types in full — three Queries each — because a rank is computed
+  over the type's whole `list` scope (§12, "The scope of a `list` rank": every live, unarchived item of the type,
+  whatever the query's status, filter or limit). That cost is the scope's, not the answer's, and it
+  is not capped: a hard per-call budget is filed as `6j6v.wq9e` (E4 spec §5.1).
 - **Paging.** As for the hosted `next`: the store path's page cache is machine-local and a
   server's paging is an open decision (15ed), so the store-free `list` is not paged — `limit` cuts
   it with the total disclosed, `paginate` and a token are refused with `validation`, and a server
@@ -310,7 +326,8 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
 3. **Persons rank by `sum`** (§3.3), equal weights, `weight` left out until data asks for it.
    Strictly sequential keys were declined: one more mention would always beat any number of open
    waiting-fors.
-4. **A hosted `list` with derived keys uses a second index** (§6, GSI `typed`). Ranking only active
+4. **A hosted `list` with derived keys uses a second index** (§6, GSI `typed`; the table's third,
+   counting `dated`, which this decision did not count). Ranking only active
    items was declined: the objects `list` ranks have no active status by design. If they had one,
    they would rank through `next`, and `list` would not be needed. Leaving `list` unranked on the
    server was declined because the product reads through the hosted path.

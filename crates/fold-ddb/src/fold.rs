@@ -13,7 +13,15 @@
 //!
 //! When the recorded revisions differ from the reducers' — a release changed what the same ops fold
 //! to — [`Folder::is_current`] says so, and the run starts over: [`Folder::clear`] the stream's
-//! rows, then fold from relay position 0.
+//! rows, then fold from relay position 0. The clear leaves a sentinel watermark naming the position
+//! the refold has to reach, and readers answer `NotCurrent` / `Refolding` until it has.
+//!
+//! **No mixed fold versions.** `is_current` is equality, not order: a build with OLDER rules that
+//! meets a stream folded by newer ones also finds it not current, and clears and refolds it back.
+//! Two builds with different revisions folding the same streams — a rolling deploy, a rollback with
+//! a newer build still running — would refold every stream back and forth. Roll a revision bump
+//! out to every fold run at once, and roll back the same way (a fold run that builds anew beside
+//! the served build, as one that keeps a namespace per build, ping-pongs builds instead).
 //!
 //! The rules this crate adds beside the reducers' rows — the board's index flags and the entries it
 //! keeps under a ticket — have a revision of their own, [`INDEX_REVISION`], recorded in the same
@@ -37,9 +45,10 @@
 
 use crate::board;
 use crate::layout::{
-    Layout, LayoutError, MAX_ITEM_BYTES, MAX_KEY_BYTES, MAX_PARTITION_BYTES, WATERMARK_KEY,
+    table_prefix, Layout, LayoutError, MAX_ITEM_BYTES, MAX_KEY_BYTES, MAX_PARTITION_BYTES, PK, SK,
+    WATERMARK_KEY,
 };
-use crate::table::{Outcome, Table};
+use crate::table::{text, Outcome, Table};
 use crate::write::{plan, Cond, Write};
 use nxs_foundation::change::{Cell, Change, Wins};
 use nxs_foundation::model::Op;
@@ -49,6 +58,9 @@ use std::collections::BTreeMap;
 /// The key, among a watermark's revisions, of the rules this crate keeps beside the reducers' rows
 /// (see the module doc). No reducer has this domain.
 pub const INDEX_DOMAIN: &str = "index";
+
+/// The watermark attribute [`Folder::clear`] sets: [`Watermark::refold_until`].
+pub const REFOLD_UNTIL: &str = "refold_until";
 
 /// The revision of those rules. 1: the entries under a ticket for its label and thread link adds
 /// (6j6v.t1ym). 2: the entries under a ticket for its outgoing `contributes_to` edges (6j6v.15ed).
@@ -80,6 +92,10 @@ pub struct Watermark {
     pub folded_through: i64,
     /// Each reducer's fold revision, by domain.
     pub revisions: BTreeMap<String, i64>,
+    /// Set by [`Folder::clear`]: the relay position a refold has to reach before the stream is
+    /// served again — readers answer `RecordsError::Refolding` while `folded_through` is below it
+    /// (review of PR #55, Integrity #2). `None` on a stream never cleared.
+    pub refold_until: Option<i64>,
 }
 
 /// What [`Folder::fold`] did with an op.
@@ -167,11 +183,14 @@ impl Folder {
     /// Fold one op: carry out its changes, then keep the board's indexes.
     ///
     /// An op the table cannot hold — a key past `MAX_KEY_BYTES`, a type whose `typed` index
-    /// partition is past `MAX_PARTITION_BYTES`, a row past `MAX_ITEM_BYTES` — is
+    /// partition is past `MAX_PARTITION_BYTES`, a row past `MAX_ITEM_BYTES`, an item row that would
+    /// pass it once it carries its index attributes (`active`, `typed`, `dated`; one `GetItem` per
+    /// item row the op writes, to weigh it) — is
     /// [`Folded::Refused`] before it writes anything, rather than failing the batch for ever: the
-    /// relay keeps it, as it keeps any op a server does not fold. A row that only outgrows the limit
-    /// through earlier ops refuses the one write that would break it ([`Outcome::TooLarge`]); the
-    /// op's other writes stand. That last case is the one place the result depends on the order ops
+    /// relay keeps it, as it keeps any op a server does not fold. An item row that only outgrows
+    /// the limit through earlier ops is caught by that weighing too, so the whole op is refused;
+    /// any other row refuses the one write that would break it ([`Outcome::TooLarge`]), and the
+    /// op's other writes stand. Those cases are the one place the result depends on the order ops
     /// arrive in — which op's cell made the row too large — and a local replica, which has no item
     /// limit, holds all of it.
     pub async fn fold<T: Table>(&self, table: &T, op: &Op) -> Result<Folded, FoldError<T::Error>> {
@@ -218,15 +237,34 @@ impl Folder {
                 w.bytes()
             )));
         }
+        // An item row takes its index attributes in a write of their own, after the row
+        // (`board::refresh_item`): one the row has no room for would leave the item off an index
+        // in silence. So the item rows this op writes are weighed first — stored row, this op's
+        // writes, and the index attributes it would then carry — and the op is refused before it
+        // writes anything (review of PR #55, Integrity #4).
+        for (id, bytes) in self.item_bytes(table, &writes).await? {
+            if bytes > MAX_ITEM_BYTES {
+                return Ok(refuse(format!(
+                    "item {id} would weigh {bytes} bytes with its index attributes, past the \
+                     {MAX_ITEM_BYTES} an item may have"
+                )));
+            }
+        }
         let mut too_large = Vec::new();
         for write in &writes {
             if table.write(write).await.map_err(FoldError::Table)? == Outcome::TooLarge {
                 too_large.push(write.sk.clone());
             }
         }
-        board::after(table, &changes)
-            .await
-            .map_err(FoldError::Table)?;
+        // Past the check above only where DynamoDB counts a few bytes more than `attribute_bytes`:
+        // reported, never dropped.
+        too_large.extend(
+            board::after(table, &changes)
+                .await
+                .map_err(FoldError::Table)?
+                .into_iter()
+                .map(|id| format!("the index attributes of item {id}")),
+        );
         if too_large.is_empty() {
             Ok(Folded::Folded)
         } else {
@@ -235,6 +273,50 @@ impl Folder {
                 too_large.join(", ")
             )))
         }
+    }
+
+    /// What each item row `writes` touch would weigh after them, with the index attributes it
+    /// would then carry ([`board::indexed_bytes`]): one `GetItem` per such row. Every write is
+    /// counted as applied, its condition aside — so a write that would be kept can only make the
+    /// estimate larger, never let a row past the limit.
+    async fn item_bytes<T: Table>(
+        &self,
+        table: &T,
+        writes: &[Write],
+    ) -> Result<Vec<(String, usize)>, FoldError<T::Error>> {
+        let prefix = table_prefix("items");
+        let mut rows: BTreeMap<&str, crate::table::Row> = BTreeMap::new();
+        for write in writes.iter().filter(|w| w.sk.starts_with(&prefix)) {
+            if !rows.contains_key(write.sk.as_str()) {
+                let stored = table
+                    .get(&write.sk)
+                    .await
+                    .map_err(FoldError::Table)?
+                    .unwrap_or_else(|| {
+                        crate::table::Row::from([
+                            (PK.to_string(), Cell::Text(table.stream().to_string())),
+                            (SK.to_string(), Cell::Text(write.sk.clone())),
+                        ])
+                    });
+                rows.insert(write.sk.as_str(), stored);
+            }
+            if let Some(row) = rows.get_mut(write.sk.as_str()) {
+                for (a, c) in &write.set {
+                    row.insert(a.clone(), c.clone());
+                }
+                for a in &write.remove {
+                    row.remove(a);
+                }
+            }
+        }
+        Ok(rows
+            .values()
+            .map(|row| {
+                let id = text(row, "id").unwrap_or_default().to_string();
+                let bytes = board::indexed_bytes(table.stream(), &id, row);
+                (id, bytes)
+            })
+            .collect())
     }
 
     /// Fold a batch of ops pulled from the relay — each with its relay position — and move the
@@ -287,6 +369,36 @@ impl Folder {
             .map_err(FoldError::Table)
     }
 
+    /// A watermark that names no revision — so no reader serves the stream ([`Folder::clear`],
+    /// `snapshot::import`) — at `folded_through`, with the position a refold must reach.
+    pub(crate) fn sentinel(folded_through: i64, until: Option<i64>) -> Write {
+        let mut set = vec![("folded_through".to_string(), Cell::Int(folded_through))];
+        set.extend(until.map(|u| (REFOLD_UNTIL.to_string(), Cell::Int(u))));
+        Write {
+            sk: WATERMARK_KEY.to_string(),
+            set,
+            remove: Vec::new(),
+            condition: None,
+        }
+    }
+
+    /// This folder's watermark at `through`, written whatever the stored one says, and without a
+    /// refold position — what `snapshot::import` ends with.
+    pub(crate) fn stamp(&self, through: i64) -> Write {
+        let mut set = vec![("folded_through".to_string(), Cell::Int(through))];
+        set.extend(
+            self.revisions()
+                .into_iter()
+                .map(|(domain, rev)| (format!("revision_{domain}"), Cell::Int(rev))),
+        );
+        Write {
+            sk: WATERMARK_KEY.to_string(),
+            set,
+            remove: vec![REFOLD_UNTIL.to_string()],
+            condition: None,
+        }
+    }
+
     /// The stream's watermark, `None` before its first batch.
     pub async fn watermark<T: Table>(table: &T) -> Result<Option<Watermark>, T::Error> {
         Ok(table.get(WATERMARK_KEY).await?.map(|row| {
@@ -294,6 +406,7 @@ impl Folder {
             for (attr, cell) in row {
                 match (attr.as_str(), cell) {
                     ("folded_through", Cell::Int(v)) => mark.folded_through = v,
+                    (REFOLD_UNTIL, Cell::Int(v)) => mark.refold_until = Some(v),
                     (a, Cell::Int(v)) if a.starts_with("revision_") => {
                         mark.revisions.insert(a["revision_".len()..].to_string(), v);
                     }
@@ -310,18 +423,42 @@ impl Folder {
         mark.revisions == self.revisions()
     }
 
-    /// Delete every row of the stream — the views, the adjacency entries and the watermark, the
-    /// watermark LAST: a clear that dies half way leaves a stream whose watermark still names the old
-    /// revisions, so the next run clears it again instead of taking the leftovers for a fresh stream
-    /// (review of PR #24, Integrity #3).
-    pub async fn clear<T: Table>(table: &T) -> Result<(), T::Error> {
-        for row in table.query_prefix("").await? {
-            if let Some(Cell::Text(sk)) = row.get(crate::layout::SK) {
+    /// Delete every row of the stream — the views and the adjacency entries — for a refold from
+    /// position 0 that has to reach relay position `until` (the stream's head when the refold
+    /// begins) before the stream is served again.
+    ///
+    /// The watermark is not deleted: it is rewritten FIRST, as a sentinel that names no revision,
+    /// `folded_through` 0 and `refold_until` = `until`. So readers answer `NotCurrent` from the
+    /// moment the clear begins (review of PR #55, Integrity #2) — a cleared, half-cleared or
+    /// half-refolded stream is never served as if whole — and a clear that dies half way leaves a
+    /// watermark that is not current, so the next run clears it again instead of taking the
+    /// leftovers for a fresh stream (review of PR #24, Integrity #3). The refold's first batch
+    /// writes this build's revisions ([`Folder::advance`]), and from then on the readers answer
+    /// `Refolding` until `folded_through` reaches `until`; nothing has to be written for that, so a
+    /// refold that dies and is resumed, or folds a batch twice, ends served all the same. `until`
+    /// 0 serves the stream from its first refolded batch on, as before revisions were gated.
+    pub async fn clear<T: Table>(table: &T, until: i64) -> Result<(), T::Error> {
+        let rows = table.query_prefix("").await?;
+        let stale: Vec<String> = rows
+            .iter()
+            .find(|r| text(r, crate::layout::SK) == Some(WATERMARK_KEY))
+            .map(|mark| {
+                mark.keys()
+                    .filter(|a| a.starts_with("revision_"))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut sentinel = Folder::sentinel(0, Some(until));
+        sentinel.remove = stale;
+        table.write(&sentinel).await?;
+        for row in rows {
+            if let Some(sk) = text(&row, crate::layout::SK) {
                 if sk != WATERMARK_KEY {
                     table.delete(sk).await?;
                 }
             }
         }
-        table.delete(WATERMARK_KEY).await
+        Ok(())
     }
 }

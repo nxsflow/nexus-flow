@@ -8,7 +8,7 @@
 //! all — is measured on the same code path the DynamoDB table runs.
 
 use crate::layout::{typed_partition, ACTIVE, DATED, DATED_AT, MAX_ITEM_BYTES, PK, SK, TYPED};
-use crate::table::{Dated, Outcome, Row, Table};
+use crate::table::{Dated, Outcome, Row, Table, BATCH_GET_KEYS};
 use crate::write::{attribute_bytes, beats, Cond, Write};
 use nxs_foundation::change::Cell;
 use std::collections::BTreeMap;
@@ -19,6 +19,9 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Requests {
     pub gets: u64,
+    /// `BatchGetItem` requests: one per [`BATCH_GET_KEYS`] distinct keys of a
+    /// [`get_many`](Table::get_many).
+    pub batch_gets: u64,
     pub writes: u64,
     pub deletes: u64,
     pub queries: u64,
@@ -92,6 +95,16 @@ impl Table for MemTable {
     async fn get(&self, sk: &str) -> Result<Option<Row>, Infallible> {
         self.count(|r| r.gets += 1);
         Ok(self.rows.lock().unwrap().get(sk).cloned())
+    }
+
+    async fn get_many(&self, sks: &[String]) -> Result<BTreeMap<String, Row>, Infallible> {
+        let keys: std::collections::BTreeSet<&String> = sks.iter().collect();
+        self.count(|r| r.batch_gets += keys.len().div_ceil(BATCH_GET_KEYS) as u64);
+        let rows = self.rows.lock().unwrap();
+        Ok(keys
+            .into_iter()
+            .filter_map(|sk| rows.get(sk).map(|r| (sk.clone(), r.clone())))
+            .collect())
     }
 
     async fn write(&self, write: &Write) -> Result<Outcome, Infallible> {

@@ -730,6 +730,20 @@ fn the_store_free_list_refuses_what_its_board_was_not_read_for() {
     short.next = false;
     let msg = refused(&persons, &read::list_board(&s, &short).unwrap());
     assert!(msg.contains("active board"), "{msg}");
+    // A list that is not ranked is kept and cut before its joins: its board holds the page of ONE
+    // query, and answers no other — not another status, not another limit (review of PR #55).
+    let closed = ListQuery::new().status("closed").limit(1);
+    let cut = read::list_board(&s, &read::list_reads(&cfg, &closed)).unwrap();
+    assert!(cut.cut.is_some() && cut.items.len() <= 1);
+    read::list_board_page(&cfg, &cut, &closed).unwrap();
+    for other in [
+        ListQuery::new().status("open").limit(1),
+        ListQuery::new().status("closed").limit(2),
+        ListQuery::new().status("closed"),
+    ] {
+        let msg = refused(&other, &cut);
+        assert!(msg.contains("kept and cut for another query"), "{msg}");
+    }
 }
 
 // ---- each kind over hand-built boards (§9 "per kind") -------------------------------------

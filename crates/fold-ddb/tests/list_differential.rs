@@ -228,6 +228,15 @@ fn queries(container: &str) -> Vec<ListQuery> {
         ranked().status("closed").filter(types(&["person"])),
         ListQuery::new().filter(types(&["person"])),
         ranked().filter(types(&["person"])).limit(3),
+        // Not ranked: kept and cut before the joins (review of PR #55, Integrity #1).
+        ListQuery::new().status("open").limit(4),
+        ListQuery::new()
+            .sort(SortKey::Closed)
+            .filter(NextFilter::new().with_label("waiting"))
+            .limit(2),
+        ListQuery::new()
+            .filter(types(&["action", "project"]).with_container(container))
+            .limit(1),
     ]
 }
 
@@ -295,10 +304,57 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
             if let Some(graph) = &server.ranking {
                 seen.add("graph listed items", graph.listed.len());
                 seen.add("graph edges", graph.edges.len());
+                // What a list graph must hold and the lanes would not (review of PR #55, Test #5):
+                // closed and archived neighbours, inbound `contributes_to` into a listed item, and
+                // archived items of a graph list type, which its scope leaves out.
+                for n in graph.neighbours.values() {
+                    let archived = n.item.archived.is_some();
+                    seen.add(
+                        "closed neighbours in a list graph",
+                        usize::from(!archived && n.item.status.as_deref() == Some("closed")),
+                    );
+                    seen.add("archived neighbours in a list graph", usize::from(archived));
+                }
+                seen.add(
+                    "inbound contributes_to into a listed item",
+                    graph
+                        .edges
+                        .iter()
+                        .filter(|e| {
+                            e.kind == EdgeKind::ContributesTo && server.items.contains_key(&e.to)
+                        })
+                        .count(),
+                );
+                let archived_in_scope: Vec<String> = s
+                    .list_items()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|i| i.archived.is_some() && i.deleted.as_deref() != Some("1"))
+                    .filter(|i| {
+                        i.item_type
+                            .as_deref()
+                            .is_some_and(|t| graph.reads.list_types.contains(t))
+                    })
+                    .map(|i| i.id)
+                    .collect();
+                assert!(
+                    archived_in_scope
+                        .iter()
+                        .all(|id| !graph.listed.contains(id)),
+                    "an archived item is out of the list scope, {ctx}"
+                );
+                seen.add(
+                    "archived items of a graph list type",
+                    archived_in_scope.len(),
+                );
             }
             seen.add(
                 "boards with next's board",
                 usize::from(server.active.is_some()),
+            );
+            seen.add(
+                "boards kept and cut before their joins",
+                usize::from(server.cut.is_some()),
             );
             seen.add(
                 "listed items with a closed-parent reason",
@@ -360,6 +416,11 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         "closed persons listed",
         "next rows",
         "archived items",
+        "closed neighbours in a list graph",
+        "archived neighbours in a list graph",
+        "inbound contributes_to into a listed item",
+        "archived items of a graph list type",
+        "boards kept and cut before their joins",
     ] {
         assert!(
             seen.0.get(what).copied().unwrap_or(0) > 0,
@@ -398,10 +459,11 @@ fn a_stream_not_folded_by_this_index_revision_is_refused_for_a_list() {
 }
 
 #[test]
-fn reading_a_typed_list_costs_one_index_query_and_four_requests_per_item() {
+fn reading_a_typed_list_costs_one_index_query_three_per_item_and_one_batch() {
     // §9 "bounded cost": the persons of a board are one Query on the `typed` index, and each costs
-    // its adjacency, labels, custom values and timestamps — whatever else the board holds, which
-    // this list reads nothing of. A type filter reads only its own type.
+    // its adjacency, labels and custom values, the timestamps of all of them one `BatchGetItem` —
+    // whatever else the board holds, which this list reads nothing of. A type filter reads only its
+    // own type.
     let folder = Folder::platform().unwrap();
     let cfg = cfg();
     let mut s = Store::open_in_memory(1);
@@ -425,8 +487,9 @@ fn reading_a_typed_list_costs_one_index_query_and_four_requests_per_item() {
     let after = t.requests();
     assert_eq!(after.index_queries - before.index_queries, 1);
     assert_eq!(after.queries - before.queries, 3 * n);
-    // The watermark, and each person's timestamps; no parents.
-    assert_eq!(after.gets - before.gets, 1 + n);
+    // The watermark; the persons' timestamps in one batch; no parents.
+    assert_eq!(after.gets - before.gets, 1);
+    assert_eq!(after.batch_gets - before.batch_gets, 1);
     assert_eq!(after.writes, before.writes);
     assert_eq!(
         server.items.len(),
@@ -437,5 +500,190 @@ fn reading_a_typed_list_costs_one_index_query_and_four_requests_per_item() {
     assert_eq!(
         ids(&page.items),
         ids(&read::list_page(&cfg, &s, &q).unwrap().items)
+    );
+}
+
+#[test]
+fn an_unranked_list_costs_its_page_not_the_stream() {
+    // Review of PR #55, Integrity #1: `list --status open --limit 5` over a stream of many closed
+    // items reads the joins of its five rows, not of every item. The rows' own Query is the one
+    // read that grows with the stream; every other request is the same with 0 closed items or 300.
+    let folder = Folder::platform().unwrap();
+    let cfg = cfg();
+    let cost = |closed: usize| {
+        let mut s = Store::open_in_memory(1);
+        for i in 0..12 {
+            let id = format!("ab12.a{i:03}");
+            s.create_item(&id, "action", "Open", "u");
+            if i % 3 == 0 {
+                s.add_label(&id, "waiting", "u");
+            }
+        }
+        for i in 0..closed {
+            let id = format!("ab12.c{i:03}");
+            s.create_item(&id, "action", "Closed", "u");
+            s.set_field(&id, "status", Some("closed".into()), "u");
+        }
+        let t = MemTable::new("stream-1");
+        ready(folder.fold_batch(&t, &delivered(&s, 7))).unwrap();
+        let mut costs = Vec::new();
+        for q in [
+            ListQuery::new().status("open").limit(5),
+            ListQuery::new()
+                .status("open")
+                .filter(NextFilter::new().with_label("waiting"))
+                .limit(2),
+        ] {
+            let reads = read::list_reads(&cfg, &q);
+            assert!(reads.select.is_some() && reads.ranking.is_none() && !reads.next);
+            let before = t.requests();
+            let server = ready(records::list_board(&t, &reads)).unwrap();
+            let after = t.requests();
+            let page = read::list_board_page(&cfg, &server, &q).unwrap();
+            let want = read::list_page(&cfg, &s, &q).unwrap();
+            assert_eq!(ids(&page.items), ids(&want.items));
+            assert_eq!(page.total, want.total, "the total counts every kept item");
+            assert_eq!(
+                server.items.len(),
+                page.items.len(),
+                "only the page is held"
+            );
+            costs.push((
+                after.gets - before.gets,
+                after.batch_gets - before.batch_gets,
+                after.queries - before.queries,
+                after.index_queries - before.index_queries,
+            ));
+        }
+        costs
+    };
+    let small = cost(0);
+    // The watermark; one `items#` Query; per page row `.adj#`, `.ladj#`, `custom_fields#`; its
+    // timestamps in one batch. With a label filter, each open row's labels first (12), then the
+    // page's adjacency and custom values.
+    assert_eq!(small, [(1, 1, 1 + 3 * 5, 0), (1, 1, 1 + 12 + 2 * 2, 0)]);
+    assert_eq!(cost(300), small, "300 closed items cost nothing more");
+}
+
+#[test]
+fn a_ranked_list_with_next_and_a_graph_costs_what_its_scope_holds() {
+    // Review of PR #55, Test #7: a ranked list of persons whose keys read the `next` rank of
+    // projects and the `list` rank of goals reads next's board, the goals' scope and the graph.
+    // Its cost follows what those hold — items of no listed type, not active, on no edge, cost
+    // nothing.
+    let folder = Folder::platform().unwrap();
+    let cfg = cfg();
+    let q = ListQuery::new()
+        .sort(SortKey::Rank)
+        .now(NOW)
+        .filter(NextFilter::new().with_type("person"));
+    let reads = read::list_reads(&cfg, &q);
+    assert!(reads.next, "{reads:?}");
+    let graph_reads = reads.ranking.clone().expect("a graph");
+    assert!(!graph_reads.list_types.is_empty(), "{reads:?}");
+    let cost = |unrelated: usize| {
+        let mut s = Store::open_in_memory(1);
+        for i in 0..4 {
+            s.create_item(&format!("ab12.u{i:03}"), "person", "P", "u");
+            s.create_item(&format!("ab12.a{i:03}"), "action", "A", "u");
+            s.add_edge(
+                &format!("ab12.a{i:03}"),
+                &format!("ab12.u{i:03}"),
+                EdgeKind::Mentions,
+                "u",
+            );
+        }
+        s.create_item("ab12.g000", "goal", "G", "u");
+        s.create_item("ab12.p000", "project", "P", "u");
+        s.add_edge("ab12.p000", "ab12.g000", EdgeKind::ContributesTo, "u");
+        s.add_edge("ab12.u000", "ab12.g000", EdgeKind::ContributesTo, "u");
+        s.add_edge("ab12.u001", "ab12.p000", EdgeKind::ContributesTo, "u");
+        s.add_label("ab12.a000", "waiting", "u");
+        for i in 0..unrelated {
+            let id = format!("ab12.x{i:03}");
+            s.create_item(&id, "action", "Done", "u");
+            s.set_field(&id, "status", Some("closed".into()), "u");
+        }
+        let t = MemTable::new("stream-1");
+        ready(folder.fold_batch(&t, &delivered(&s, 3))).unwrap();
+        let before = t.requests();
+        let server = ready(records::list_board(&t, &reads)).unwrap();
+        let after = t.requests();
+        let page = read::list_board_page(&cfg, &server, &q).unwrap();
+        assert_eq!(
+            ids(&page.items),
+            ids(&read::list_page(&cfg, &s, &q).unwrap().items)
+        );
+        let graph = server.ranking.as_ref().unwrap();
+        assert!(!graph.edges.is_empty() && !graph.listed.is_empty());
+        let spent = (
+            after.gets - before.gets,
+            after.batch_gets - before.batch_gets,
+            after.queries - before.queries,
+            after.index_queries - before.index_queries,
+        );
+        // Every point read is the watermark or a batch; one index Query per listed type, the
+        // `active` index and one per graph list type.
+        assert_eq!(spent.0, 1);
+        assert!(spent.1 <= 3, "{spent:?}");
+        assert_eq!(spent.3, 1 + 1 + graph_reads.list_types.len() as u64);
+        spent
+    };
+    let small = cost(0);
+    assert_eq!(
+        cost(200),
+        small,
+        "200 unrelated closed actions cost nothing more"
+    );
+}
+
+#[test]
+fn an_item_whose_typed_attribute_lags_its_row_is_not_listed_under_its_old_type() {
+    // Review of PR #55, Code #2 / Test #3: the fold writes `nxf_typed` after the row, so a run that
+    // died between the two leaves a row retyped or deleted whose attribute still names its old
+    // type. The list asks the index's copy of the row, not the attribute alone.
+    use nxs_fold_ddb::table::{text, Table};
+    use nxs_fold_ddb::write::{Cond, Write};
+    use nxs_foundation::change::Cell;
+    let folder = Folder::platform().unwrap();
+    let cfg = cfg();
+    let mut s = Store::open_in_memory(1);
+    for i in 0..3 {
+        s.create_item(&format!("ab12.u{i:03}"), "person", "P", "u");
+    }
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &delivered(&s, 1))).unwrap();
+    for (id, column, value) in [("ab12.u001", "type", "goal"), ("ab12.u002", "deleted", "1")] {
+        ready(t.write(&Write {
+            sk: format!("items#{id}"),
+            set: vec![(column.into(), Cell::Text(value.into()))],
+            remove: Vec::new(),
+            condition: Some(Cond::RowPresent),
+        }))
+        .unwrap();
+    }
+    let on_index = |ty: &str| -> Vec<String> {
+        ready(t.query_typed(ty))
+            .unwrap()
+            .iter()
+            .map(|r| text(r, "id").unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        on_index("person").len(),
+        3,
+        "the attributes still name `person`"
+    );
+    let listed = |ty: &str| -> Vec<String> {
+        let q = ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_type(ty));
+        let board = ready(records::list_board(&t, &read::list_reads(&cfg, &q))).unwrap();
+        board.items.into_keys().collect()
+    };
+    assert_eq!(listed("person"), ["ab12.u000"]);
+    assert!(
+        listed("goal").is_empty(),
+        "nor under its new type, until the attribute moves"
     );
 }
