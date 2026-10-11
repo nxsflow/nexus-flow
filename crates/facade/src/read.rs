@@ -24,7 +24,7 @@ use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec, Verb};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
-use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
+use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2734,6 +2734,11 @@ pub struct ActiveBoard {
     pub board: Board,
     /// By id.
     pub tickets: BTreeMap<String, ActiveTicket>,
+    /// The graph the derived ranking keys of `[ranking.next]` read (6j6v.1c5s): `None` until a
+    /// reader fills it — [`with_ranking`] from a store, `nxs_fold_ddb::records::with_ranking` from
+    /// the folded tables — for what [`next_ranking_reads`] names. A plugin without derived `next`
+    /// keys never needs it; [`next_active`] refuses one with such keys while it is missing.
+    pub ranking: Option<RankingGraph>,
 }
 
 impl ActiveBoard {
@@ -2745,6 +2750,7 @@ impl ActiveBoard {
                 .into_iter()
                 .map(|t| (t.item.id.clone(), t))
                 .collect(),
+            ranking: None,
         }
     }
 
@@ -2778,6 +2784,163 @@ impl ActiveBoard {
                 .collect(),
         )
     }
+}
+
+/// What the derived ranking keys of a `[ranking.next]` read beyond the active tickets' records
+/// (6j6v.1c5s) — what a reader of an [`ActiveBoard`] puts in its [`RankingGraph`].
+/// [`next_ranking_reads`] gives it for a plugin.
+///
+/// `#[non_exhaustive]`: start from `RankingReads::default()` and set the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RankingReads {
+    /// The edge kinds the keys follow or count; `mentions` too when a key counts `mentioned_by`.
+    pub kinds: BTreeSet<EdgeKind>,
+    /// A count filters on a label: the neighbours' labels.
+    pub labels: bool,
+    /// An `of` reads a custom field: the neighbours' custom values.
+    pub custom: bool,
+}
+
+impl RankingReads {
+    /// Whether a graph read for `self` holds everything a graph read for `needed` holds.
+    pub fn covers(&self, needed: &RankingReads) -> bool {
+        needed.kinds.is_subset(&self.kinds)
+            && (self.labels || !needed.labels)
+            && (self.custom || !needed.custom)
+    }
+}
+
+/// The graph around a board's active tickets that the derived ranking keys read (6j6v.1c5s,
+/// docs/specs/derived-ranking-keys.md §6): the input [`next_active`] ranks a `[ranking.next]` with
+/// `related` / `count` / `sum` keys from, so a server ranks exactly as [`next`] does over a store.
+///
+/// - `edges`: every present edge of a kind in `reads.kinds` with at least one ACTIVE end (an
+///   [`ActiveBoard::tickets`] entry) and both ends LIVE (not deleted, not missing). A `parent` edge
+///   is the `present_parent` projection — a child's one current parent, the one `belongs_to` reads —
+///   so a child re-parented concurrently is under one parent only. Distinct, ordered.
+/// - `neighbours`: the other ends of `edges` that are not active tickets — closed and archived
+///   items included, since a key reads every LIVE neighbour (owner, 2026-10-11) — each with its row
+///   (`belongs_to` filled as the store fills it), its labels when `reads.labels` and its non-empty
+///   custom values when `reads.custom`, else empty.
+///
+/// `#[non_exhaustive]`: build it with [`RankingGraph::new`] and set the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RankingGraph {
+    /// What the graph was read for.
+    pub reads: RankingReads,
+    pub edges: BTreeSet<nexus_flow_core::graph::Edge>,
+    /// By id.
+    pub neighbours: BTreeMap<String, Neighbour>,
+}
+
+impl RankingGraph {
+    /// An empty graph read for `reads`.
+    pub fn new(reads: RankingReads) -> RankingGraph {
+        RankingGraph {
+            reads,
+            ..RankingGraph::default()
+        }
+    }
+}
+
+/// A live item next to an active ticket that is not itself active: what a derived ranking key reads
+/// of it ([`RankingGraph::neighbours`]).
+///
+/// `#[non_exhaustive]`: build it with [`Neighbour::new`] and set the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Neighbour {
+    pub item: ItemRow,
+    /// Present labels, sorted and distinct, as `present_labels`.
+    pub labels: Vec<String>,
+    /// Every non-empty custom value, as the store reads them in bulk.
+    pub custom: BTreeMap<String, String>,
+}
+
+impl Neighbour {
+    /// A neighbour with no labels or custom values read.
+    pub fn new(item: ItemRow) -> Neighbour {
+        Neighbour {
+            item,
+            labels: Vec::new(),
+            custom: BTreeMap::new(),
+        }
+    }
+}
+
+/// What the store-free `next` of `cfg` reads beyond the active tickets' records — the
+/// [`RankingReads`] a reader fills [`ActiveBoard::ranking`] for — or `None` when `[ranking.next]`
+/// declares no derived ranking key (6j6v.1c5s). It does not depend on the board.
+///
+/// `validation` for a `[ranking.next]` that reads, directly or down its type chain, the rank of a
+/// type only `[ranking.list]` orders (docs/specs/derived-ranking-keys.md §6): that rank is computed
+/// over the type's live items, and a board of active tickets does not hold them. The store path
+/// ([`next`]) ranks such a plugin.
+pub fn next_ranking_reads(cfg: &PluginConfig) -> Result<Option<RankingReads>> {
+    derived::reads_for_next(cfg)
+}
+
+/// `board` with its [`RankingGraph`] for `reads` read from `store` (6j6v.1c5s) — the parity oracle
+/// for `nxs_fold_ddb::records::with_ranking`, as [`active_board`] is for the records. One edge pass
+/// ([`Store::present_edges_of_kinds`]), one bulk read of the neighbours' rows, and one of their
+/// labels and of their custom values when `reads` asks for them.
+pub fn with_ranking(
+    store: &Store,
+    mut board: ActiveBoard,
+    reads: &RankingReads,
+) -> Result<ActiveBoard> {
+    let kinds: Vec<EdgeKind> = reads.kinds.iter().copied().collect();
+    let active = |id: &str| board.tickets.contains_key(id);
+    let touching: Vec<(String, String, EdgeKind)> = store
+        .present_edges_of_kinds(&kinds)?
+        .into_iter()
+        .filter(|(from, to, _)| active(from) || active(to))
+        .collect();
+    let others: BTreeSet<&str> = touching
+        .iter()
+        .flat_map(|(from, to, _)| [from.as_str(), to.as_str()])
+        .filter(|id| !active(id))
+        .collect();
+    let others: Vec<&str> = others.into_iter().collect();
+    let live: BTreeMap<String, ItemRow> = store
+        .get_items(&others)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    let edges: BTreeSet<nexus_flow_core::graph::Edge> = touching
+        .into_iter()
+        .filter(|(from, to, _)| {
+            (active(from) || live.contains_key(from)) && (active(to) || live.contains_key(to))
+        })
+        .map(|(from, to, kind)| nexus_flow_core::graph::Edge { from, to, kind })
+        .collect();
+    let ids: Vec<&str> = live.keys().map(String::as_str).collect();
+    let mut labels = if reads.labels {
+        store.labels_of_bulk(&ids)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut custom = if reads.custom {
+        store.custom_fields_of_bulk(&ids)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut graph = RankingGraph::new(reads.clone());
+    graph.edges = edges;
+    graph.neighbours = live
+        .into_iter()
+        .map(|(id, item)| {
+            let mut n = Neighbour::new(item);
+            n.labels = labels.remove(&id).unwrap_or_default();
+            n.custom = custom.remove(&id).unwrap_or_default();
+            (id, n)
+        })
+        .collect();
+    board.ranking = Some(graph);
+    Ok(board)
 }
 
 /// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
@@ -2823,21 +2986,44 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
 ///
 /// [`Engine::next`]: crate::engine::Engine::next
 ///
-/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is refused with `validation`: an
-/// [`ActiveBoard`] holds neither the edges nor the scopes those keys read, and ranking without them
-/// would order apart from the store path in silence. The server path is its own cut (6j6v.1c5s).
+/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is ranked from the board's
+/// [`RankingGraph`] (6j6v.1c5s), by the same evaluation the store path runs. It is refused with
+/// `validation` when the board carries no graph, or one read for less than
+/// [`next_ranking_reads`] names — ranking without those edges would order apart from the store path
+/// in silence — and when [`next_ranking_reads`] refuses the plugin.
 pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
     crate::validate::iso_date(now)?;
-    if cfg.ranking.has_derived(Verb::Next) {
-        return Err(NxfError::validation(format!(
-            "plugin '{}' ranks `next` by derived ranking keys, which the store-free lanes do not \
-             compute yet — answer `next` from a store",
-            cfg.name
-        )));
-    }
+    let graph = match next_ranking_reads(cfg)? {
+        None => None,
+        Some(needed) => Some(
+            board
+                .ranking
+                .as_ref()
+                .filter(|g| g.reads.covers(&needed))
+                .ok_or_else(|| {
+                    NxfError::validation(format!(
+                        "plugin '{}' ranks `next` by derived ranking keys, and the board was read \
+                         without the graph they read — fill `ActiveBoard::ranking` for \
+                         `next_ranking_reads` (`read::with_ranking` from a store, \
+                         `records::with_ranking` from the folded tables)",
+                        cfg.name
+                    ))
+                })?,
+        ),
+    };
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
-    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT, None))
+    let derived = match graph {
+        Some(graph) => derived::compute_active(cfg, board, graph, &items)?,
+        None => None,
+    };
+    Ok(next_lane(
+        cfg,
+        candidates,
+        items,
+        DEFAULT_SORT_NEXT,
+        derived.as_ref(),
+    ))
 }
 
 /// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store

@@ -49,6 +49,19 @@
 //! Only `contributes_to` adds get one: folding another edge's add costs nothing more, and folding
 //! an edge remove one `GetItem` of its add, to learn its kind.
 //!
+//! # What an adjacency entry says
+//!
+//! Revision 3 (6j6v.1c5s) makes the `.adj#<ticket>#<tag>` entries self-describing, as the entries
+//! under a ticket are: each copies the edge add's `from_id`, `to_id`, `kind`, `lamport` and `site`
+//! and says whether the add is removed ([`REMOVED`]). Every edge add has one under each end,
+//! whatever its kind and whatever the ends' activity, so ONE Query on a ticket's `.adj#` prefix
+//! reads every edge touching it, in and out, with its presence — what the derived ranking keys read
+//! ([`crate::records::with_ranking`]): inbound `contributes_to`, `mentions` both ways, the
+//! `parent` edges a child's current parent is picked from. The entries keep their place and key;
+//! only their attributes grow. Folding an edge add reads its remove (a `dep` or `parent` add read it
+//! already, for its flag); folding an edge remove now reads the add and the remove and rewrites
+//! both entries — two `GetItem`s and two writes, one when the edge is a loop.
+//!
 //! # One writer per stream
 //!
 //! The rows a reducer describes converge whatever the order and however many folders write them.
@@ -279,7 +292,7 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
         link_edge(table, tag).await?;
     }
     for tag in removed {
-        refresh_edge(table, tag).await?;
+        link_edge(table, tag).await?;
     }
     for (at, tag) in owned_tags {
         refresh_owned(table, &OWNED[at], tag).await?;
@@ -304,7 +317,7 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
         for entry in table.query_prefix(&adjacency_prefix(id)).await? {
             if let Some(tag) = text(&entry, "tag") {
                 if let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? {
-                    flag_edge(table, tag, edge, Some((id, active))).await?;
+                    flag_edge(table, tag, edge, None, Some((id, active))).await?;
                 }
             }
         }
@@ -349,46 +362,68 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
     Ok(())
 }
 
-/// Record that edge `tag` touches its ends, then set its flag.
-pub(crate) async fn link_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
-    let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? else {
-        return Ok(());
-    };
-    let ends: BTreeSet<&str> = [text(&edge, "from_id"), text(&edge, "to_id")]
+/// The cells of edge add `edge` an adjacency entry copies beside its tag and [`REMOVED`] (index
+/// revision 3, 6j6v.1c5s): its ends, its kind and its coordinate.
+const EDGE_COPIES: [&str; 5] = ["from_id", "to_id", "kind", "lamport", "site"];
+
+/// The adjacency entries of edge add `tag` — one under each end, the same entry twice for an edge
+/// from a ticket to itself — from the add's row and whether it is removed.
+async fn write_adjacency<T: Table>(
+    table: &T,
+    tag: &str,
+    edge: &Row,
+    removed: bool,
+) -> Result<(), T::Error> {
+    let mut set = vec![("tag".to_string(), Cell::Text(tag.to_string()))];
+    for column in EDGE_COPIES {
+        match edge.get(column) {
+            None | Some(Cell::Null) => {}
+            Some(cell) => set.push((column.to_string(), cell.clone())),
+        }
+    }
+    set.push((REMOVED.to_string(), Cell::Int(i64::from(removed))));
+    let ends: BTreeSet<&str> = [text(edge, "from_id"), text(edge, "to_id")]
         .into_iter()
         .flatten()
         .collect();
     for end in ends {
         table
-            .write(&Write::put(
-                adjacency_key(end, tag),
-                vec![("tag".to_string(), Cell::Text(tag.to_string()))],
-            ))
+            .write(&Write::put(adjacency_key(end, tag), set.clone()))
             .await?;
     }
-    flag_edge(table, tag, edge, None).await
+    Ok(())
 }
 
-/// Set edge `tag`'s flag from its row, its remove and its ends.
-pub(crate) async fn refresh_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
-    match table.get(&tag_key("edge_adds", tag)).await? {
-        Some(edge) => flag_edge(table, tag, edge, None).await,
-        None => Ok(()),
-    }
+/// Record that edge `tag` touches its ends — the entry under each end says what the edge is and
+/// whether it is removed — then set its flag. Run when the add is folded and again when its remove
+/// is; nothing while the add has not been folded, since the add writes both.
+pub(crate) async fn link_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
+    let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? else {
+        return Ok(());
+    };
+    let removed = table.get(&tag_key("edge_removes", tag)).await?.is_some();
+    write_adjacency(table, tag, &edge, removed).await?;
+    flag_edge(table, tag, edge, Some(removed), None).await
 }
 
-/// `known` is a ticket whose activity the caller knows ahead of its stored flag.
+/// `removed` is whether the edge's remove is folded, when the caller has read it already; `known`
+/// a ticket whose activity the caller knows ahead of its stored flag.
 async fn flag_edge<T: Table>(
     table: &T,
     tag: &str,
     edge: Row,
+    removed: Option<bool>,
     known: Option<(&str, bool)>,
 ) -> Result<(), T::Error> {
     let indexed = matches!(
         text(&edge, "kind").and_then(EdgeKind::parse),
         Some(EdgeKind::Dep | EdgeKind::Parent)
     );
-    let mut flag = indexed && table.get(&tag_key("edge_removes", tag)).await?.is_none();
+    let mut flag = indexed
+        && match removed {
+            Some(removed) => !removed,
+            None => table.get(&tag_key("edge_removes", tag)).await?.is_none(),
+        };
     if flag {
         let mut any_active = false;
         for end in [text(&edge, "from_id"), text(&edge, "to_id")]

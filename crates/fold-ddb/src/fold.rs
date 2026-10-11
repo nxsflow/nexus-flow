@@ -21,7 +21,9 @@
 //! bumps it, and every stream folded before is no longer current and is folded again the same way.
 //! Revision 1 (6j6v.t1ym) adds the `.ladj#`/`.tadj#` entries; a stream folded before it has none,
 //! so its watermark names no index revision at all and the next run refolds it. Revision 2
-//! (6j6v.15ed) adds the `.cadj#` entries, a ticket's outgoing `contributes_to` edges.
+//! (6j6v.15ed) adds the `.cadj#` entries, a ticket's outgoing `contributes_to` edges. Revision 3
+//! (6j6v.1c5s) makes the `.adj#` entries self-describing — ends, kind, coordinate, presence — for
+//! the derived ranking keys ([`crate::records::with_ranking`]).
 //!
 //! # What the server cannot see
 //!
@@ -46,7 +48,9 @@ pub const INDEX_DOMAIN: &str = "index";
 
 /// The revision of those rules. 1: the entries under a ticket for its label and thread link adds
 /// (6j6v.t1ym). 2: the entries under a ticket for its outgoing `contributes_to` edges (6j6v.15ed).
-pub const INDEX_REVISION: i64 = 2;
+/// 3: the adjacency entries copy their edge's ends, kind and coordinate and say whether it is
+/// removed (6j6v.1c5s).
+pub const INDEX_REVISION: i64 = 3;
 
 /// The platform's reducers — the board's, the chat's and the memory's.
 pub fn platform_reducers() -> Vec<Box<dyn Reducer>> {

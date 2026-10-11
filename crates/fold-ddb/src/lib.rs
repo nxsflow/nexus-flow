@@ -23,6 +23,10 @@
 //! | GSI `active`         | `nxf_active` / `sk`      | S/S  | sparse: active tickets and the present dep/parent edges touching one   |
 //! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by `<instant>␟<id>` |
 //!
+//! The `.adj#<ticket>#<tag>` entries are plain rows in the stream's partition, on no index. Since
+//! index revision 3 (6j6v.1c5s) each also carries its edge's `from_id`, `to_id`, `kind`, `lamport`,
+//! `site` and a `removed` flag — attributes, not keys: the contract above is unchanged.
+//!
 //! Both indexes project ALL attributes, so a lane is one Query and no follow-up reads. The lanes
 //! need nothing else; the RECORDS a lane is shown with carry joins from other tables, which
 //! [`records`] reads with a fixed number of requests per active ticket. Billing mode
@@ -61,7 +65,10 @@
 //! one write. A label or thread link add, or its remove, adds two `GetItem`s and at most one write
 //! for the entry under the ticket (`board`, "Who owns a label or a thread link"). Reading the
 //! active tickets' records costs `4n + 1` requests for `n` tickets, plus one per parent outside
-//! the selection, at most [`records::READ_CONCURRENCY`] tickets at a time ([`records`]). No request
+//! the selection, at most [`records::READ_CONCURRENCY`] tickets at a time ([`records`]). Folding an
+//! edge remove reads the add and the remove and rewrites the entry under each end. The graph the
+//! derived ranking keys read ([`records::with_ranking`]) costs one Query per active ticket and, per
+//! inactive neighbour, one `GetItem` plus up to three Queries. No request
 //! is a Scan: every read names its partition key, the board's through an index. The
 //! `dynamodb-local` CI job counts the requests of a fold and of a records read, and proves it.
 //!

@@ -2442,6 +2442,7 @@ version = "0.209.0"
 dependencies = [
  "aws-sdk-dynamodb",
  "futures-util",
+ "inventory",
  "nexus-chat",
  "nexus-flow-core",
  "nexus-flow-facade",

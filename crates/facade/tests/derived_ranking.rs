@@ -359,8 +359,37 @@ fn the_rank_follows_the_board_on_the_next_query() {
 }
 
 #[test]
-fn the_store_free_lanes_refuse_a_plugin_with_derived_next_keys() {
-    // The server path is its own cut (1c5s); ranking without the edges would differ in silence.
+fn the_store_free_next_ranks_from_the_ranking_graph_as_the_store_does() {
+    // 6j6v.1c5s: the board a server reads carries the graph the keys read, and the store-free
+    // `next` ranks from it exactly as the store path does — the spec's three-type chain.
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let cfg = plugin::load("derived-rank-fixture").unwrap();
+    let s = writer(tmp.path());
+    let reads = read::next_ranking_reads(&cfg)
+        .unwrap()
+        .expect("derived next keys");
+    assert_eq!(
+        reads.kinds.iter().copied().collect::<Vec<_>>(),
+        [EdgeKind::ContributesTo, EdgeKind::Parent],
+        "the edges the next orders follow or count"
+    );
+    assert!(reads.custom && !reads.labels, "{reads:?}");
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let got = read::next_active(&cfg, &board, NOW).unwrap();
+    assert_eq!(ids(&got), ids(&read::next(&cfg, &s, NOW, None).unwrap()));
+    assert_eq!(of_type(&got, "project"), PROJECTS);
+    assert_eq!(of_type(&got, "action"), ACTIONS);
+    assert_eq!(
+        read::next_active_value(&cfg, &board, NOW).unwrap(),
+        read::next_to_value_with_custom(&cfg, &s, &read::next(&cfg, &s, NOW, None).unwrap())
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_store_free_next_refuses_a_board_read_without_the_graph_its_keys_read() {
+    // Ranking without the edges would order apart from the store path in silence.
     let tmp = workspace("derived-rank-fixture");
     spec_board(tmp.path());
     let cfg = plugin::load("derived-rank-fixture").unwrap();
@@ -369,6 +398,180 @@ fn the_store_free_lanes_refuse_a_plugin_with_derived_next_keys() {
     let err = read::next_active(&cfg, &board, NOW).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Validation);
     assert!(err.msg.contains("derived ranking keys"), "{}", err.msg);
+    // A graph read for less than the keys need is refused too: here without the custom values
+    // the goals' `order` lives in.
+    let mut reads = read::next_ranking_reads(&cfg).unwrap().unwrap();
+    reads.custom = false;
+    let short = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let err = read::next_active(&cfg, &short, NOW).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    // `blocked` and `deferred` rank by no derived key and need no graph.
+    read::blocked_active(&cfg, &board);
+    read::deferred_active(&cfg, &board, NOW).unwrap();
+}
+
+/// A plugin ranking `next` by its neighbours with no status filter, so closed, archived and
+/// deleted neighbours each decide something (owner, 2026-10-11: a key reads every LIVE neighbour).
+const LIVE_ORDERS: &str = r#"
+name = "live-neighbours-fixture"
+[description]
+en = "x"
+de = "y"
+[priority]
+labels = ["P0", "P1", "P2", "P3"]
+[types]
+list = ["goal", "project", "action"]
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+[ranking.next]
+types = ["project", "action"]
+order = [ { field = "priority", dir = "asc" } ]
+[ranking.next.project]
+order = [
+  { related = "contributes_to", type = "goal", of = { field = "order" }, pick = "min", nulls = "last" },
+  { count = "children", dir = "desc" },
+  { count = "mentioned_by", dir = "desc" },
+]
+[ranking.next.action]
+order = [ { related = "parent", type = "project", of = "rank", nulls = "last" } ]
+[presentation.list]
+columns = ["id"]
+[fields.order]
+type = "text"
+on = ["goal"]
+"#;
+
+#[test]
+fn a_closed_archived_or_deleted_neighbour_reads_alike_with_and_without_a_store() {
+    // Goals: `gc` closed (order 1), `ga` archived (order 2), `go` open (order 3), `gd` deleted
+    // (order 0). Projects `pa`..`pd` contribute to one each: a closed or archived goal still gives
+    // its order, a deleted one gives none (null, last). Projects `q1`..`q4` have no goal: `q1` has
+    // three children — two closed, one archived — `q2` one open child, `q3` is mentioned by a
+    // closed project and `q4` by nothing. Every child and mentioner but `q2`'s is out of `next`.
+    let cfg: plugin::PluginConfig = toml::from_str(LIVE_ORDERS).unwrap();
+    let mut s = Store::open_in_memory(1);
+    for (g, order) in [
+        ("zz12.gc", "1"),
+        ("zz12.ga", "2"),
+        ("zz12.go", "3"),
+        ("zz12.gd", "0"),
+    ] {
+        item(&mut s, g, "goal", "1");
+        custom(&mut s, g, "order", order);
+    }
+    close(&mut s, "zz12.gc");
+    s.set_field("zz12.ga", "archived", Some("2026-06-01".into()), "t");
+    for (p, g) in [
+        ("zz12.pa", "zz12.gc"),
+        ("zz12.pb", "zz12.ga"),
+        ("zz12.pc", "zz12.gd"),
+        ("zz12.pd", "zz12.go"),
+    ] {
+        item(&mut s, p, "project", "1");
+        edge(&mut s, p, g, EdgeKind::ContributesTo);
+    }
+    s.delete_item("zz12.gd", "t");
+    for q in ["zz12.q1", "zz12.q2", "zz12.q3", "zz12.q4"] {
+        item(&mut s, q, "project", "1");
+    }
+    for (a, parent) in [
+        ("zz12.a1", "zz12.q1"),
+        ("zz12.a2", "zz12.q1"),
+        ("zz12.a3", "zz12.q1"),
+        ("zz12.a4", "zz12.q2"),
+    ] {
+        item(&mut s, a, "action", "1");
+        s.set_parent(a, parent, "t").unwrap();
+    }
+    close(&mut s, "zz12.a1");
+    close(&mut s, "zz12.a2");
+    s.set_field("zz12.a3", "archived", Some("2026-06-01".into()), "t");
+    item(&mut s, "zz12.px", "project", "1");
+    edge(&mut s, "zz12.px", "zz12.q3", EdgeKind::Mentions);
+    close(&mut s, "zz12.px");
+
+    let want = [
+        "zz12.pa", "zz12.pb", "zz12.pd", "zz12.q1", "zz12.q2", "zz12.q3", "zz12.pc", "zz12.q4",
+    ];
+    let store = read::next(&cfg, &s, NOW, None).unwrap();
+    assert_eq!(of_type(&store, "project"), want, "the store path");
+    let reads = read::next_ranking_reads(&cfg).unwrap().unwrap();
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let graph = board.ranking.as_ref().unwrap();
+    for id in ["zz12.gc", "zz12.ga", "zz12.a1", "zz12.a3", "zz12.px"] {
+        assert!(
+            graph.neighbours.contains_key(id),
+            "{id} is a live neighbour"
+        );
+    }
+    assert!(
+        !graph.neighbours.contains_key("zz12.gd"),
+        "a deleted one is not"
+    );
+    assert!(
+        graph.edges.iter().all(|e| e.to != "zz12.gd"),
+        "nor an edge to it"
+    );
+    assert_eq!(
+        ids(&read::next_active(&cfg, &board, NOW).unwrap()),
+        ids(&store)
+    );
+}
+
+#[test]
+fn a_next_order_reading_the_rank_of_a_type_only_list_orders_is_refused_without_a_store() {
+    // Spec §12 point 1 lets a `next` key read the rank `[ranking.list]` gives a type. That rank is
+    // computed over the type's live items, which a board of active tickets does not hold: the
+    // store-free `next` refuses the plugin (owner, 2026-10-11), the store path ranks it. Any other
+    // derived `next` key ranks without a store.
+    let cfg: plugin::PluginConfig = toml::from_str(
+        r#"
+        name = "list-rank-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P0", "P1"]
+        [types]
+        list = ["action", "person"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "priority" } ]
+        [ranking.next.action]
+        order = [ { related = "mentions", type = "person", of = "rank", nulls = "last" } ]
+        [ranking.list.person]
+        order = [ { field = "priority", dir = "asc" } ]
+        [presentation.list]
+        columns = ["id"]
+        "#,
+    )
+    .unwrap();
+    let mut s = Store::open_in_memory(1);
+    item(&mut s, "zz12.a1", "action", "1");
+    item(&mut s, "zz12.u1", "person", "0");
+    edge(&mut s, "zz12.a1", "zz12.u1", EdgeKind::Mentions);
+    let err = read::next_ranking_reads(&cfg).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(
+        err.msg
+            .contains("[ranking.next.action] reads the rank of 'person'"),
+        "{}",
+        err.msg
+    );
+    let board = read::active_board(&s).unwrap();
+    assert_eq!(
+        read::next_active(&cfg, &board, NOW).unwrap_err().kind,
+        ErrorKind::Validation
+    );
+    assert!(
+        read::next(&cfg, &s, NOW, None).is_ok(),
+        "the store path ranks it"
+    );
 }
 
 // ---- each kind over hand-built boards (§9 "per kind") -------------------------------------

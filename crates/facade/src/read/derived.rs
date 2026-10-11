@@ -19,10 +19,17 @@
 //!
 //! So a query costs O(E + N log N) in the relevant edges and the items in scope, and a plugin
 //! that declares no derived key pays nothing: [`compute`] returns `None` before any read.
+//!
+//! **Without a store** (6j6v.1c5s). The store-free `next` ([`super::next_active`]) ranks a board a
+//! server read: [`compute_active`] takes steps 1 and 2 from the board's [`RankingGraph`] — the
+//! edges, already projected and filtered to live ends, and the live neighbours' rows, labels and
+//! custom values — and runs steps 3 and 4 on the same [`Context`], so the two paths cannot evaluate
+//! a key apart. A neighbour counts when it is LIVE, closed and archived ones included, on both
+//! paths (spec §6, owner 2026-10-11). What the graph must hold is [`reads_for_next`].
 
-use super::{lanes, mentioners_of, resolve_items};
+use super::{lanes, mentioners_of, resolve_items, ActiveBoard, RankingGraph, RankingReads};
 use crate::error::{NxfError, Result};
-use crate::plugin::{Dir, Nulls, Pick, PluginConfig, RankKey, RankOf, Verb};
+use crate::plugin::{Dir, Nulls, Pick, PluginConfig, RankKey, RankOf, RankSpec, Verb};
 use crate::record::{raw_field, RANKABLE_FIELDS};
 use nexus_flow_core::model::{EdgeKind, ItemRow};
 use nexus_flow_core::store::Store;
@@ -131,20 +138,20 @@ pub(super) fn list_scope(store: &Store) -> Result<Vec<ItemRow>> {
         .collect())
 }
 
-/// The values the derived keys of `verb`'s policy rank `ranked` by — `None`, before any read,
-/// when the policy has no derived key. `validation` when a `list` key reads the rank of a type
-/// `next` ranks and the caller passed neither `next`'s candidates nor a reference time.
-pub(super) fn compute(
-    cfg: &PluginConfig,
-    store: &Store,
-    verb: Verb,
-    ranked: &[ItemRow],
-    scopes: Scopes<'_>,
-) -> Result<Option<Derived>> {
+/// The derived side of one query, decided before any read: the type chain the ranked rows' orders
+/// read the rank of (leaves first), and what the derived keys in play read.
+struct Plan<'c> {
+    spec: &'c RankSpec,
+    chain: Vec<Node>,
+    needs: Needs,
+}
+
+/// The [`Plan`] for ranking `ranked` under `verb` — `None` when the policy has no derived key.
+fn plan<'c>(cfg: &'c PluginConfig, verb: Verb, ranked: &[ItemRow]) -> Option<Plan<'c>> {
     let ranking = &cfg.ranking;
     let spec = ranking.spec(verb);
     if !spec.has_derived() {
-        return Ok(None);
+        return None;
     }
 
     // The chain, leaves first: the orders the ranked rows' orders read the rank of, transitively.
@@ -158,10 +165,77 @@ pub(super) fn compute(
         }
     }
 
+    // Every derived key in play.
+    let mut keys: Vec<&RankKey> = Vec::new();
+    for ty in &ranked_types {
+        keys.extend(spec.order_for(*ty).iter().filter(|k| k.is_derived()));
+    }
+    for (v, ty) in &chain {
+        keys.extend(
+            ranking.spec(*v).by_type[ty]
+                .order
+                .iter()
+                .filter(|k| k.is_derived()),
+        );
+    }
+    let needs = Needs::of(&keys);
+    Some(Plan { spec, chain, needs })
+}
+
+impl Plan<'_> {
+    /// The rows each order of the chain ranks: its type's rows in the scope of its verb.
+    fn node_rows<'r>(&self, next: &'r [ItemRow], list: &'r [ItemRow]) -> Vec<Vec<&'r ItemRow>> {
+        self.chain
+            .iter()
+            .map(|(v, ty)| {
+                let scope = match v {
+                    Verb::Next => next,
+                    Verb::List => list,
+                };
+                scope
+                    .iter()
+                    .filter(|i| i.item_type.as_deref() == Some(ty.as_str()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Whether some order of the chain is a `[ranking.list]` order.
+    fn reads_list(&self) -> bool {
+        self.chain.iter().any(|(v, _)| *v == Verb::List)
+    }
+}
+
+/// Every row a key is evaluated on: the ranked rows and the rows of the chain's scopes.
+fn subjects<'a>(
+    ranked: &'a [ItemRow],
+    node_rows: &[Vec<&'a ItemRow>],
+) -> HashMap<&'a str, &'a ItemRow> {
+    let mut subjects: HashMap<&str, &ItemRow> = HashMap::new();
+    for row in ranked.iter().chain(node_rows.iter().flatten().copied()) {
+        subjects.insert(row.id.as_str(), row);
+    }
+    subjects
+}
+
+/// The values the derived keys of `verb`'s policy rank `ranked` by — `None`, before any read,
+/// when the policy has no derived key. `validation` when a `list` key reads the rank of a type
+/// `next` ranks and the caller passed neither `next`'s candidates nor a reference time.
+pub(super) fn compute(
+    cfg: &PluginConfig,
+    store: &Store,
+    verb: Verb,
+    ranked: &[ItemRow],
+    scopes: Scopes<'_>,
+) -> Result<Option<Derived>> {
+    let Some(plan) = plan(cfg, verb, ranked) else {
+        return Ok(None);
+    };
+
     // The scopes the chain ranks over, read only when the caller does not hold them.
     let next_owned;
     let next_rows: &[ItemRow] = match scopes.next {
-        _ if !chain.iter().any(|(v, _)| *v == Verb::Next) => &[],
+        _ if !plan.chain.iter().any(|(v, _)| *v == Verb::Next) => &[],
         Some(rows) => rows,
         None => {
             let now = scopes.now.ok_or_else(|| {
@@ -178,89 +252,115 @@ pub(super) fn compute(
     };
     let list_owned;
     let list_rows: &[ItemRow] = match scopes.list {
-        _ if !chain.iter().any(|(v, _)| *v == Verb::List) => &[],
+        _ if !plan.reads_list() => &[],
         Some(rows) => rows,
         None => {
             list_owned = list_scope(store)?;
             &list_owned
         }
     };
-    let node_rows: Vec<Vec<&ItemRow>> = chain
-        .iter()
-        .map(|(v, ty)| {
-            let scope = match v {
-                Verb::Next => next_rows,
-                Verb::List => list_rows,
-            };
-            scope
-                .iter()
-                .filter(|i| i.item_type.as_deref() == Some(ty.as_str()))
-                .collect()
-        })
-        .collect();
+    let node_rows = plan.node_rows(next_rows, list_rows);
+    let mut ctx = Context::new(cfg, subjects(ranked, &node_rows));
+    ctx.read_edges(store, &plan.needs)?;
+    Ok(Some(ctx.finish(&plan, verb, ranked, &node_rows)))
+}
 
-    // Every row a key is evaluated on, and every derived key in play.
-    let mut subjects: HashMap<&str, &ItemRow> = HashMap::new();
-    for row in ranked.iter().chain(node_rows.iter().flatten().copied()) {
-        subjects.insert(row.id.as_str(), row);
-    }
-    let mut keys: Vec<&RankKey> = Vec::new();
-    for ty in &ranked_types {
-        keys.extend(spec.order_for(*ty).iter().filter(|k| k.is_derived()));
-    }
-    for (v, ty) in &chain {
-        keys.extend(
-            ranking.spec(*v).by_type[ty]
-                .order
-                .iter()
-                .filter(|k| k.is_derived()),
-        );
-    }
-
-    let needs = Needs::of(&keys);
-    let mut ctx = Context {
-        cfg,
-        subjects,
-        out: Adjacency::new(),
-        inb: Adjacency::new(),
-        mentioners: BTreeMap::new(),
-        neighbours: HashMap::new(),
-        labels: BTreeMap::new(),
-        custom: BTreeMap::new(),
-        ranks: HashMap::new(),
+/// [`compute`] for the store-free `next` (6j6v.1c5s): the values the derived keys of
+/// `[ranking.next]` rank `candidates` — every candidate of the board — by, read from the
+/// [`RankingGraph`] a reader filled instead of from a store. The candidates are `next`'s scope for
+/// "rank", as on the store path. `None` when the policy has no derived key.
+///
+/// The same [`Context`] evaluates the keys as on the store path; only where its edges, rows,
+/// labels and custom values come from differs ([`Context::read_graph`]). A chain that reaches a
+/// `[ranking.list]` order is refused before this is called ([`reads_for_next`]); it answers
+/// `validation` here too rather than rank without that scope.
+pub(super) fn compute_active(
+    cfg: &PluginConfig,
+    board: &ActiveBoard,
+    graph: &RankingGraph,
+    candidates: &[ItemRow],
+) -> Result<Option<Derived>> {
+    let Some(plan) = plan(cfg, Verb::Next, candidates) else {
+        return Ok(None);
     };
-    ctx.read_edges(store, &needs)?;
-
-    // Bottom-up: each order of the chain ranks its scope once; its dependents look the rank up.
-    for (node, rows) in chain.iter().zip(&node_rows) {
-        let keys = &ranking.spec(node.0).by_type[&node.1].order;
-        let values: Vec<Vec<DVal>> = rows.iter().map(|r| ctx.values(keys, node.0, r)).collect();
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        let cmp = |a: usize, b: usize| {
-            super::keys_cmp_values(rows[a], rows[b], keys, Some(&values[a]), Some(&values[b]))
-        };
-        order.sort_by(|a, b| cmp(*a, *b).then_with(|| rows[*a].id.cmp(&rows[*b].id)));
-        // A DENSE rank over the declared keys (spec §4): rows equal on every key share a rank, and
-        // the next distinct row takes the next integer. The id orders the sort, never the rank.
-        let mut ranks: HashMap<String, i64> = HashMap::with_capacity(rows.len());
-        let mut rank = 0_i64;
-        for (n, &i) in order.iter().enumerate() {
-            if n > 0 && cmp(order[n - 1], i) != Ordering::Equal {
-                rank += 1;
-            }
-            ranks.insert(rows[i].id.clone(), rank);
-        }
-        ctx.ranks.insert(node.clone(), ranks);
+    if plan.reads_list() {
+        return Err(list_scope_refusal(cfg));
     }
+    let node_rows = plan.node_rows(candidates, &[]);
+    let mut ctx = Context::new(cfg, subjects(candidates, &node_rows));
+    ctx.read_graph(board, graph, &plan.needs);
+    Ok(Some(ctx.finish(&plan, Verb::Next, candidates, &node_rows)))
+}
 
-    let values = ranked
+/// What the store-free `next` of `cfg` reads beyond the active tickets' records (6j6v.1c5s):
+/// `None` when `[ranking.next]` declares no derived key. Gathered over every order of the section,
+/// so it does not depend on which types a board holds.
+///
+/// `validation` when an order of `[ranking.next]` reads — directly or down its type chain — the
+/// rank of a type only `[ranking.list]` orders (spec §12, first point): that rank is computed over
+/// the live items of the type, and a server reads only the active ones (owner, 2026-10-11).
+pub(super) fn reads_for_next(cfg: &PluginConfig) -> Result<Option<RankingReads>> {
+    let ranking = &cfg.ranking;
+    let spec = ranking.spec(Verb::Next);
+    if !spec.has_derived() {
+        return Ok(None);
+    }
+    let mut chain: Vec<Node> = Vec::new();
+    let mut seen: BTreeSet<Node> = BTreeSet::new();
+    for ty in spec.by_type.keys() {
+        post_order(cfg, (Verb::Next, ty.clone()), &mut seen, &mut chain);
+    }
+    if chain.iter().any(|(v, _)| *v == Verb::List) {
+        return Err(list_scope_refusal(cfg));
+    }
+    let keys: Vec<&RankKey> = spec
+        .order
         .iter()
-        .map(|r| {
-            let keys = spec.order_for(r.item_type.as_deref());
-            (r.id.clone(), ctx.values(keys, verb, r))
+        .chain(spec.by_type.values().flat_map(|o| o.order.iter()))
+        .filter(|k| k.is_derived())
+        .collect();
+    let needs = Needs::of(&keys);
+    let mut reads = RankingReads::default();
+    reads.kinds.extend(needs.kinds.iter().copied());
+    if needs.mentioned_by {
+        reads.kinds.insert(EdgeKind::Mentions);
+    }
+    reads.labels = needs.labels;
+    reads.custom = needs.custom;
+    Ok(Some(reads))
+}
+
+/// The refusal of a `[ranking.next]` whose type chain reaches a `[ranking.list]` order, on the
+/// store-free path.
+fn list_scope_refusal(cfg: &PluginConfig) -> NxfError {
+    let ranking = &cfg.ranking;
+    let reached: Vec<String> = ranking
+        .spec(Verb::Next)
+        .by_type
+        .keys()
+        .flat_map(|ty| {
+            let mut chain = Vec::new();
+            post_order(
+                cfg,
+                (Verb::Next, ty.clone()),
+                &mut BTreeSet::new(),
+                &mut chain,
+            );
+            chain
+                .into_iter()
+                .filter(|(v, _)| *v == Verb::List)
+                .map(move |(_, list_ty)| {
+                    format!("[ranking.next.{ty}] reads the rank of '{list_ty}'")
+                })
         })
         .collect();
-    Ok(Some(Derived { values }))
+    NxfError::validation(format!(
+        "plugin '{}' ranks `next` by the rank of a type only [ranking.list] orders ({}): that rank \
+         is computed over the type's live items, which the store-free lanes do not hold — answer \
+         `next` from a store",
+        cfg.name,
+        reached.join("; ")
+    ))
 }
 
 /// Depth-first post-order over the type chain: every order a node reads the rank of lands before
@@ -381,7 +481,146 @@ struct Context<'a> {
     ranks: HashMap<Node, HashMap<String, i64>>,
 }
 
-impl Context<'_> {
+impl<'a> Context<'a> {
+    /// A context over `subjects`, nothing read yet.
+    fn new(cfg: &'a PluginConfig, subjects: HashMap<&'a str, &'a ItemRow>) -> Context<'a> {
+        Context {
+            cfg,
+            subjects,
+            out: Adjacency::new(),
+            inb: Adjacency::new(),
+            mentioners: BTreeMap::new(),
+            neighbours: HashMap::new(),
+            labels: BTreeMap::new(),
+            custom: BTreeMap::new(),
+            ranks: HashMap::new(),
+        }
+    }
+
+    /// Rank the chain bottom-up — each order its scope once, its dependents look the rank up — and
+    /// then the ranked rows' values.
+    fn finish(
+        mut self,
+        plan: &Plan<'_>,
+        verb: Verb,
+        ranked: &[ItemRow],
+        node_rows: &[Vec<&ItemRow>],
+    ) -> Derived {
+        let ranking = &self.cfg.ranking;
+        for (node, rows) in plan.chain.iter().zip(node_rows) {
+            let keys = &ranking.spec(node.0).by_type[&node.1].order;
+            let values: Vec<Vec<DVal>> =
+                rows.iter().map(|r| self.values(keys, node.0, r)).collect();
+            let mut order: Vec<usize> = (0..rows.len()).collect();
+            let cmp = |a: usize, b: usize| {
+                super::keys_cmp_values(rows[a], rows[b], keys, Some(&values[a]), Some(&values[b]))
+            };
+            order.sort_by(|a, b| cmp(*a, *b).then_with(|| rows[*a].id.cmp(&rows[*b].id)));
+            // A DENSE rank over the declared keys (spec §4): rows equal on every key share a rank,
+            // and the next distinct row takes the next integer. The id orders the sort, never the
+            // rank.
+            let mut ranks: HashMap<String, i64> = HashMap::with_capacity(rows.len());
+            let mut rank = 0_i64;
+            for (n, &i) in order.iter().enumerate() {
+                if n > 0 && cmp(order[n - 1], i) != Ordering::Equal {
+                    rank += 1;
+                }
+                ranks.insert(rows[i].id.clone(), rank);
+            }
+            self.ranks.insert(node.clone(), ranks);
+        }
+        let values = ranked
+            .iter()
+            .map(|r| {
+                let keys = plan.spec.order_for(r.item_type.as_deref());
+                (r.id.clone(), self.values(keys, verb, r))
+            })
+            .collect();
+        Derived { values }
+    }
+
+    /// The reads from a [`RankingGraph`] instead of a store (6j6v.1c5s): the same adjacency, reverse
+    /// mentions, neighbour rows, labels and custom values [`read_edges`](Self::read_edges) reads,
+    /// taken from the graph's edges and from the board's tickets and the graph's neighbours. The
+    /// graph holds every edge of the kinds read that touches an active ticket with both ends live,
+    /// `parent` as the `present_parent` projection — the edges the store's pass yields for subjects
+    /// that are all active tickets, as `next`'s candidates are.
+    fn read_graph(&mut self, board: &ActiveBoard, graph: &RankingGraph, needs: &Needs) {
+        let mut mention_sources: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        for e in &graph.edges {
+            if needs.kinds.contains(&e.kind) {
+                if self.subjects.contains_key(e.to.as_str()) {
+                    self.inb
+                        .entry((e.kind, e.to.clone()))
+                        .or_default()
+                        .push(e.from.clone());
+                }
+                if self.subjects.contains_key(e.from.as_str()) {
+                    self.out
+                        .entry((e.kind, e.from.clone()))
+                        .or_default()
+                        .push(e.to.clone());
+                }
+            }
+            if needs.mentioned_by
+                && e.kind == EdgeKind::Mentions
+                && self.subjects.contains_key(e.to.as_str())
+            {
+                mention_sources
+                    .entry(e.to.clone())
+                    .or_default()
+                    .insert(e.from.as_str());
+            }
+        }
+        // A row of the board: an active ticket's, or a live neighbour's.
+        let board_row = |id: &str| -> Option<&ItemRow> {
+            board
+                .tickets
+                .get(id)
+                .map(|t| &t.item)
+                .or_else(|| graph.neighbours.get(id).map(|n| &n.item))
+        };
+        for (target, froms) in mention_sources {
+            let rows: Vec<ItemRow> = froms
+                .into_iter()
+                .filter_map(|f| board_row(f).cloned())
+                .collect();
+            if !rows.is_empty() {
+                self.mentioners.insert(target, rows);
+            }
+        }
+        let missing: BTreeSet<&str> = self
+            .out
+            .values()
+            .chain(self.inb.values())
+            .flatten()
+            .map(String::as_str)
+            .filter(|id| !self.subjects.contains_key(id))
+            .collect();
+        self.neighbours = missing
+            .into_iter()
+            .filter_map(|id| board_row(id).map(|r| (id.to_string(), r.clone())))
+            .collect();
+        if needs.labels || needs.custom {
+            let mut ids: BTreeSet<&str> = self.neighbours.keys().map(String::as_str).collect();
+            ids.extend(self.subjects.keys().copied());
+            ids.extend(self.mentioners.values().flatten().map(|i| i.id.as_str()));
+            for id in ids {
+                let (labels, custom) = match (board.tickets.get(id), graph.neighbours.get(id)) {
+                    (Some(t), _) => (&t.labels, &t.custom),
+                    (None, Some(n)) => (&n.labels, &n.custom),
+                    (None, None) => continue,
+                };
+                if needs.labels && !labels.is_empty() {
+                    self.labels.insert(id.to_string(), labels.clone());
+                }
+                if needs.custom && !custom.is_empty() {
+                    self.custom.insert(id.to_string(), custom.clone());
+                }
+            }
+        }
+    }
+
     /// The reads: the edge pass, the reverse mentions, the neighbours' rows, labels and custom
     /// fields — each ONE bulk read (per 500 ids where the store chunks), whatever the row count.
     fn read_edges(&mut self, store: &Store, needs: &Needs) -> Result<()> {

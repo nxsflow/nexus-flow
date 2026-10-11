@@ -2,7 +2,9 @@
 
 **Status: decided by the owner on 2026-10-09** (§10). The cuts that build it are listed in §11.
 **Built locally (x0wf, §12):** the three key kinds, their load-time rules and the type chain over
-the SQL path, in `next` and `list`. The server cuts (1c5s, xkr7) are open.
+the SQL path, in `next` and `list`. **Built on the server for `next` (1c5s, §6):** the same keys
+over the hosted board, with the rule the owner decided on 2026-10-11 (§10.5). The `typed` index and
+a ranked hosted `list` (xkr7) are open.
 Fourth cut of `6j6v.kfs7` (cut with the owner on 2026-10-09). The three cuts before it add the
 plumbing this one ranks with:
 
@@ -135,11 +137,41 @@ derived key pays nothing.
 `nxs-fold-ddb` answers `next` from a sparse index of ACTIVE tickets through `graph::Board`
 (6j6v.k7w7). Derived keys must give the same order there.
 
-**`next`.**
-- `Board` gains the edge kinds the keys need (`contributes_to`, `mentions`), and each ticket's
-  type, status, labels and the fields the keys read.
-- The rule that makes this possible is the one `Board` already has: a counterpart that is not an
-  active ticket counts as absent, which is exactly §4's scope for `next`.
+**`next`** (built in 1c5s; decided by the owner on 2026-10-11, §10.5).
+- **A key reads every LIVE neighbour, on the server as locally** (§12, "Live neighbours"): a
+  deleted neighbour is gone, a closed or archived one counts. This replaces the first reading of
+  this section, that a counterpart which is not an active ticket counts as absent. That rule stays
+  the rule of the LANES (`graph::Board`); it is not the rule of the keys. Only the scope of
+  `of = "rank"` is the active set: a neighbour outside `next`'s candidates has no rank (§4), on
+  both paths.
+- **Where it lives.** The facade's `ActiveBoard` — the store-free lanes' input, `graph::Board`
+  plus each active ticket's row and joins — gains a `RankingGraph`: every present edge of the kinds
+  the keys name (`contributes_to`, `mentions`, `dep`, `parent` as the `present_parent` projection)
+  with an active end and both ends live, and each live neighbour that is not active with its row,
+  labels and custom values. `graph::Board` itself is unchanged: it holds no rows, and the lanes read
+  no neighbour that is not active. `read::next_ranking_reads(cfg)` names what the graph must hold
+  for a plugin; `read::next_active` refuses a plugin with derived keys while its board lacks it, and
+  ranks by the same evaluation the store path runs once it is there.
+- **What the fold writes.** Every edge add already had an adjacency entry under each end
+  (`.adj#<item>#<tag>`), whatever its kind and its ends' activity. Since index revision 3 each entry
+  also copies the add's `from_id`, `to_id`, `kind`, `lamport` and `site` and says whether the add is
+  removed, kept up to date when the remove is folded. So one Query on an item's prefix reads every
+  edge touching it, in and out, with its presence: inbound `contributes_to`, `mentions` both ways,
+  and the `parent` edges a child's current parent is picked from. No new index, no new key
+  attribute: the TABLE CONTRACT IS UNCHANGED. Revision 3 makes every stream folded before it not
+  current; it answers `NotCurrent` until the fold run has folded it again.
+- **What the server reads** (`records::with_ranking`): one Query per active ticket on its
+  adjacency; per neighbour that is not active one `GetItem` of its row and, when it is live, one
+  Query on its own adjacency for its current parent, plus one Query each for its labels and custom
+  values when a key reads them.
+- **Refused on the server until xkr7:** a `[ranking.next]` order that reads — directly or down its
+  type chain — the rank of a type only `[ranking.list]` orders (§12, first point). That rank is
+  computed over the type's live items, which the active board does not hold. The store path ranks
+  such a plugin. Every other derived `next` key ranks on the server.
+- **What xkr7 builds on.** The self-describing adjacency entries are written for EVERY edge between
+  ANY items, so xkr7's "widened adjacency" needs no new entries for the edges: a `list`-ranked item
+  reads its edges with the same Query. What xkr7 adds is the `typed` index (the `list` scope of a
+  type), the read that ranks a type's live items from it, and lifting the refusal above.
 
 **`list` needs a second index (decided §10.4).** Objects that `list` ranks, such as a person, are
 long-lived and have no "active" status. If they did, they would rank through `next`, and `list`
@@ -155,10 +187,12 @@ gains a second sparse index, keyed by type:
 - **Generic.** The fold indexes every live item by its type, so it needs no plugin knowledge of
   which types `list` ranks. The price is one index write per item, not only for the ranked types.
 - **Edges.** A derived key on a `list`-ranked type reads that item's `contributes_to` and `mentions`
-  neighbours, and the counts read their inbound edges. Today the adjacency entries (`.adj#`) are
-  kept only for `dep`/`parent` edges that touch an active ticket. They are widened to every present
-  edge of a kind some key names, between live items. That widening is the open design work of the
-  server cut (§11), together with what it costs per edge write.
+  neighbours, and the counts read their inbound edges. Corrected in 1c5s: the adjacency entries
+  (`.adj#`) were always written for every edge add, under both ends; only the `active` INDEX flag is
+  limited to `dep`/`parent` edges with an active end. Since index revision 3 the entries say what
+  their edge is and whether it is removed (`next` above), so a `list`-ranked item reads its edges
+  with one Query on its own prefix, at no extra cost per edge write. What stays open for xkr7 is
+  the read of a type's live items through `typed` and their neighbours' rows.
 - **Archived items.** They are in the index, because they are live. `list` filters them at read,
   as it does locally.
 - **It changes the table contract.** The deploying stack (the web package's CDK) must add the GSI
@@ -222,8 +256,10 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
 - **Per kind:** unit tests over hand-built boards: a value from one neighbour, from several
   (`min`/`max`), from none (null placement); counts with each filter.
 - **Chains:** actions by project rank by goal order across three types, and a refused cycle.
-- **Differential:** SQL path against `graph::Board` on generated boards with derived keys, as
-  `fold_differential` does for the lanes.
+- **Differential:** SQL path against the server path on generated boards with derived keys, as
+  `fold_differential` does for the lanes. Built for `next` in 1c5s
+  (`crates/fold-ddb/tests/derived_differential.rs`): the SQL path, the store-free path over the
+  store's own board and graph, and the same over the folded tables give one order.
 - **Determinism:** shuffled edge order gives the same result, and ties fall to the id.
 - **Bounded cost:** a ratio guard in the style of `xn8s`. A query with derived keys runs the edge
   pass once, not once per candidate.
@@ -245,13 +281,24 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
    items was declined: the objects `list` ranks have no active status by design. If they had one,
    they would rank through `next`, and `list` would not be needed. Leaving `list` unranked on the
    server was declined because the product reads through the hosted path.
+5. **On the server a key reads every live neighbour** (owner, 2026-10-11, during 1c5s). The first
+   text of §6 said a counterpart that is not an active ticket counts as absent; the local build
+   (§12) reads every live neighbour, closed and archived ones included. The owner chose the local
+   rule for both paths, so a server and a replica rank alike: the fold keeps self-describing
+   adjacency entries (index revision 3) and the server reads the neighbours that are not active.
+   Narrowing the local rule to active neighbours was declined, as was refusing on the server every
+   key whose value can depend on a neighbour that is not active (it would refuse §8's first order).
+   A `[ranking.next]` order that reads the rank of a type only `[ranking.list]` orders is refused on
+   the server until the `typed` index (xkr7) gives it that type's scope.
 
 ## 11. Cuts
 
 - **Derived keys, local.** The three key kinds, load-time validation and the type chain over the
   SQL path. Usable in `next` (after `z9jk`) and `list` (after `n698`).
-- **Derived keys on the server, `next`.** `graph::Board` with the extra edges and fields; the
-  differential test.
+- **Derived keys on the server, `next`** (1c5s, built). The `RankingGraph` on the store-free
+  lanes' board, the self-describing adjacency entries (index revision 3), and the differential test
+  (SQL path = Board path = fold-ddb path on generated boards with closed, archived and deleted
+  neighbours, mentions and inbound `contributes_to`).
 - **The `typed` index and a ranked hosted `list`.** The GSI, the widened adjacency, the read, and
   the table-contract note for the deploying stack, coordinated with app-foundations.
 - **Shared with `6j6v.q29p`.** The reverse mention lookup and `count = "mentioned_by"` use one
@@ -286,7 +333,8 @@ reading of the text, so a later decision can loosen it without breaking a declar
   `blocked` and the lanes' `--sort rank`, which compute none. The `[ranking.list]` default order
   takes them.
 - **`nulls` on a `count` or `sum`** is refused: a count is never null (§3.2).
-- **The store-free lanes** (`read::next_active`) refuse a `[ranking.next]` with derived keys until
-  the server cut (1c5s) gives them the edges.
+- **The store-free lanes** (`read::next_active`) rank a `[ranking.next]` with derived keys from
+  the board's `RankingGraph` since 1c5s (§6), with the live-neighbour rule above; they refuse only
+  an order that reads the rank of a type only `[ranking.list]` orders, until xkr7.
 - **TOML.** An inline table may not span lines outside its arrays (TOML 1.0), so a `sum`'s `dir`
   stands on the line its array closes on. §8 above breaks that line for reading only.
