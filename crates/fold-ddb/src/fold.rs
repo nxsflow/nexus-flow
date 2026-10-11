@@ -23,7 +23,9 @@
 //! so its watermark names no index revision at all and the next run refolds it. Revision 2
 //! (6j6v.15ed) adds the `.cadj#` entries, a ticket's outgoing `contributes_to` edges. Revision 3
 //! (6j6v.1c5s) makes the `.adj#` entries self-describing — ends, kind, coordinate, presence — for
-//! the derived ranking keys ([`crate::records::with_ranking`]).
+//! the derived ranking keys ([`crate::records::with_ranking`]), and sets the `typed` index
+//! attribute on every live item row (6j6v.xkr7, [`crate::records::list_board`]). Both ship in one
+//! release: no stream was ever folded by revision 3 without the attribute.
 //!
 //! # What the server cannot see
 //!
@@ -34,7 +36,9 @@
 //! coordinate.
 
 use crate::board;
-use crate::layout::{Layout, LayoutError, MAX_ITEM_BYTES, MAX_KEY_BYTES, WATERMARK_KEY};
+use crate::layout::{
+    Layout, LayoutError, MAX_ITEM_BYTES, MAX_KEY_BYTES, MAX_PARTITION_BYTES, WATERMARK_KEY,
+};
 use crate::table::{Outcome, Table};
 use crate::write::{plan, Cond, Write};
 use nxs_foundation::change::{Cell, Change, Wins};
@@ -49,7 +53,7 @@ pub const INDEX_DOMAIN: &str = "index";
 /// The revision of those rules. 1: the entries under a ticket for its label and thread link adds
 /// (6j6v.t1ym). 2: the entries under a ticket for its outgoing `contributes_to` edges (6j6v.15ed).
 /// 3: the adjacency entries copy their edge's ends, kind and coordinate and say whether it is
-/// removed (6j6v.1c5s).
+/// removed (6j6v.1c5s), and every live item row carries its `typed` index partition (6j6v.xkr7).
 pub const INDEX_REVISION: i64 = 3;
 
 /// The platform's reducers — the board's, the chat's and the memory's.
@@ -162,7 +166,8 @@ impl Folder {
 
     /// Fold one op: carry out its changes, then keep the board's indexes.
     ///
-    /// An op the table cannot hold — a key past `MAX_KEY_BYTES`, a row past `MAX_ITEM_BYTES` — is
+    /// An op the table cannot hold — a key past `MAX_KEY_BYTES`, a type whose `typed` index
+    /// partition is past `MAX_PARTITION_BYTES`, a row past `MAX_ITEM_BYTES` — is
     /// [`Folded::Refused`] before it writes anything, rather than failing the batch for ever: the
     /// relay keeps it, as it keeps any op a server does not fold. A row that only outgrows the limit
     /// through earlier ops refuses the one write that would break it ([`Outcome::TooLarge`]); the
@@ -196,6 +201,16 @@ impl Folder {
                     key.len()
                 )));
             }
+        }
+        if let Some(p) = board::typed_partitions(table.stream(), &changes)
+            .into_iter()
+            .find(|p| p.len() > MAX_PARTITION_BYTES)
+        {
+            return Ok(refuse(format!(
+                "a type whose `typed` index partition has {} bytes, past the {MAX_PARTITION_BYTES} \
+                 a partition key may have",
+                p.len()
+            )));
         }
         if let Some(w) = writes.iter().find(|w| w.bytes() > MAX_ITEM_BYTES) {
             return Ok(refuse(format!(

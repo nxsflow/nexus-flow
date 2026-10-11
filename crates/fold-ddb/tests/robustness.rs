@@ -1,6 +1,7 @@
 //! What a server fold does when things go wrong (review of PR #24): a run that dies at any write
 //! and folds its batch again, an op the table cannot hold, a clear that dies half way, a release
-//! with other fold revisions, a lane cut by a limit, and a snapshot that does not fit.
+//! with other fold revisions, a lane cut by a limit, a snapshot that does not fit — and the `typed`
+//! index kept through retypes, archives and deletes (6j6v.xkr7).
 
 mod common;
 
@@ -93,6 +94,10 @@ impl Table for Failing<'_> {
 
     async fn query_dated(&self, lane: Dated, limit: Option<usize>) -> Result<Vec<Row>, Injected> {
         Ok(ok(self.inner.query_dated(lane, limit).await))
+    }
+
+    async fn query_typed(&self, item_type: &str) -> Result<Vec<Row>, Injected> {
+        Ok(ok(self.inner.query_typed(item_type).await))
     }
 }
 
@@ -212,6 +217,107 @@ fn an_op_the_table_cannot_hold_is_refused_and_the_stream_folds_on() {
     assert!(grows.get("design").is_none());
     let lanes = ready(board::select(&t)).unwrap().board.lanes(NOW);
     assert_eq!(lanes.ready, vec!["ab12.0001", "ab12.0002"]);
+}
+
+#[test]
+fn a_type_too_long_for_the_typed_index_is_refused_and_the_item_folds_on_without_it() {
+    // 6j6v.xkr7: the `typed` index partition carries the type; DynamoDB refuses an index key past
+    // 2,048 bytes, and a refused write would fail every run at the same op. So the op that sets
+    // such a type is refused before it writes, as an op with a key too long is, and the item keeps
+    // the type it had.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", "task", "T", "u");
+    s.set_field("ab12.0001", "type", Some("t".repeat(2100)), "u");
+    s.create_item("ab12.0002", &"n".repeat(2030), "Just fits", "u");
+    let t = MemTable::new("stream-1");
+    let refused = ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let reasons: Vec<&str> = refused.iter().map(|r| r.reason.as_str()).collect();
+    assert_eq!(refused.len(), 1, "{reasons:#?}");
+    assert!(
+        reasons[0].contains("`typed` index partition"),
+        "{reasons:#?}"
+    );
+    let ids = |ty: &str| -> Vec<String> {
+        ready(t.query_typed(ty))
+            .unwrap()
+            .iter()
+            .map(|r| text(r, "id").unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids("task"), ["ab12.0001"]);
+    assert_eq!(ids(&"n".repeat(2030)), ["ab12.0002"]);
+}
+
+#[test]
+fn retyping_archiving_and_deleting_move_an_item_on_the_typed_index() {
+    // 6j6v.xkr7: an item is listed under its type while it is live — archived or not — moves with a
+    // retype, and leaves when it is deleted. A type with `#` in it gets its own partition.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", "person", "Ada", "u");
+    s.create_item("ab12.0002", "person", "Bob", "u");
+    s.create_item("ab12.0003", "a#b", "Odd", "u");
+    let t = MemTable::new("stream-1");
+    let mut seen = 0;
+    let mut step = |s: &Store| {
+        let ops = numbered(s, seen);
+        seen += ops.len();
+        ready(folder.fold_batch(&t, &ops)).unwrap();
+        ["person", "project", "a#b", "a"].map(|ty| {
+            ready(t.query_typed(ty))
+                .unwrap()
+                .iter()
+                .map(|r| text(r, "id").unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let v = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let none = v(&[]);
+
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0001", "ab12.0002"]),
+            none.clone(),
+            v(&["ab12.0003"]),
+            none.clone()
+        ]
+    );
+    s.set_field("ab12.0002", "archived", Some("2026-10-08".into()), "u");
+    s.set_field("ab12.0001", "status", Some("closed".into()), "u");
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0001", "ab12.0002"]),
+            none.clone(),
+            v(&["ab12.0003"]),
+            none.clone()
+        ],
+        "closed and archived items stay listed"
+    );
+    s.set_field("ab12.0001", "type", Some("project".into()), "u");
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0002"]),
+            v(&["ab12.0001"]),
+            v(&["ab12.0003"]),
+            none.clone()
+        ]
+    );
+    s.delete_item("ab12.0002", "u");
+    s.delete_item("ab12.0003", "u");
+    assert_eq!(
+        step(&s),
+        [none.clone(), v(&["ab12.0001"]), none.clone(), none.clone()]
+    );
+    // The attribute is on the item rows only, never on an adjacency entry or another row.
+    assert!(t
+        .rows()
+        .iter()
+        .filter(|(_, r)| r.contains_key("nxf_typed"))
+        .all(|(sk, _)| sk.starts_with("items#")));
 }
 
 #[test]

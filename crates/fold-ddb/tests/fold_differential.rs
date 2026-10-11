@@ -6,8 +6,8 @@
 //! through the SQLite applier, in the order the replica took it in; and through this crate into a
 //! [`MemTable`], in a SHUFFLED order with ops delivered twice, as a relay without deduplication
 //! hands them over. Every row of every view table, every lane of the library and both dated lanes
-//! must come out the same, and the incrementally kept indexes must be exactly what a full reindex
-//! computes.
+//! must come out the same, the `typed` index must list each type's live items (6j6v.xkr7), and the
+//! incrementally kept indexes must be exactly what a full reindex computes.
 
 use nexus_flow_core::graph;
 use nexus_flow_core::model::EdgeKind;
@@ -15,13 +15,13 @@ use nexus_flow_core::store::Store;
 use nexus_flow_core::task_reducer::TaskReducer;
 use nxs_fold_ddb::fold::Folder;
 use nxs_fold_ddb::mem::{ready, MemTable};
-use nxs_fold_ddb::table::{text, Dated};
+use nxs_fold_ddb::table::{text, Dated, Table};
 use nxs_fold_ddb::{board, chunks};
 use nxs_foundation::reducer::Reducer;
 use std::collections::BTreeMap;
 
 mod common;
-use common::{merged, serve, served_rows, sqlite_rows, NOW};
+use common::{merged, serve, served_rows, sqlite_rows, NOW, TYPES};
 
 fn dated_ids(t: &MemTable, lane: Dated) -> Vec<String> {
     ready(board::dated(t, lane, None))
@@ -45,6 +45,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
     let folder = Folder::platform().unwrap();
     let mut active_seen = 0;
     let mut chunks_seen = 0;
+    let mut typed_seen = 0;
     for seed in 0..120 {
         let s = merged(seed);
         let t = serve(&s, seed, &folder);
@@ -95,6 +96,24 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
             "archived lane, {ctx}"
         );
 
+        // The `typed` index (6j6v.xkr7): under each type exactly its live items, archived ones
+        // included, in id order.
+        for ty in TYPES {
+            let typed: Vec<String> = ready(t.query_typed(ty))
+                .unwrap()
+                .iter()
+                .map(|r| text(r, "id").unwrap().to_string())
+                .collect();
+            let want = sql_ids(
+                &s,
+                &format!(
+                    "SELECT id FROM items WHERE COALESCE(deleted,'0')<>'1' AND type='{ty}' ORDER BY id"
+                ),
+            );
+            typed_seen += want.len();
+            assert_eq!(typed, want, "typed {ty}, {ctx}");
+        }
+
         // The flags kept op by op are exactly what recomputing them from the rows gives.
         let kept = t.rows();
         ready(board::reindex(&t)).unwrap();
@@ -112,6 +131,7 @@ fn the_server_fold_in_any_order_answers_as_the_local_fold() {
     }
     assert!(active_seen > 0, "the generated boards have active tickets");
     assert!(chunks_seen > 0, "the generated boards supersede chunks");
+    assert!(typed_seen > 0, "the generated boards have typed items");
 }
 
 #[test]

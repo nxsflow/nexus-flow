@@ -1,6 +1,6 @@
-//! The five requests a server fold makes of its table, as a trait: [`MemTable`](crate::mem::MemTable)
+//! The requests a server fold makes of its table, as a trait: [`MemTable`](crate::mem::MemTable)
 //! answers them in memory for the tests, `ddb::DynamoDbTable` (feature `dynamodb`) answers them with DynamoDB.
-//! None of them is a Scan — every read names its partition, and the two board reads name an index.
+//! None of them is a Scan — every read names its partition, and the three index reads name an index.
 
 use crate::write::Write;
 use nxs_foundation::change::Cell;
@@ -70,6 +70,13 @@ pub trait Table: Sync {
         &self,
         lane: Dated,
         limit: Option<usize>,
+    ) -> impl Future<Output = Result<Vec<Row>, Self::Error>> + Send;
+
+    /// Every row on the `typed` index under `item_type` (6j6v.xkr7): the live items of that type,
+    /// archived ones included, in sort-key (id) order. Eventually consistent, as every index read.
+    fn query_typed(
+        &self,
+        item_type: &str,
     ) -> impl Future<Output = Result<Vec<Row>, Self::Error>> + Send;
 }
 

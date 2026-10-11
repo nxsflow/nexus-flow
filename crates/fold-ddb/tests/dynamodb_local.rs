@@ -1,6 +1,6 @@
 //! The DynamoDB adapter against a real DynamoDB Local (6j6v.k7w7): the same fold written into
 //! DynamoDB and into a [`MemTable`] leaves the same items, the board reads back through the indexes
-//! with the same lanes, and every request the client sends is recorded — none is a Scan.
+//! with the same lanes and the same `typed` listings (6j6v.xkr7), and every request the client sends is recorded — none is a Scan.
 //!
 //! Gated like `nxs-server`'s suite: on the `dynamodb` feature and `NXF_RELAY_DDB_ENDPOINT`, skipped
 //! locally without one and a hard failure under CI. Each test creates its own table from
@@ -16,7 +16,7 @@ use aws_sdk_dynamodb::config::{
 use aws_sdk_dynamodb::error::BoxError;
 use aws_sdk_dynamodb::types::TableStatus;
 use aws_sdk_dynamodb::Client;
-use common::{by_key, delivered, merged, NOW};
+use common::{by_key, delivered, merged, NOW, TYPES};
 use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
 use nxs_fold_ddb::ddb::{create_table, DynamoDbTable};
@@ -204,6 +204,20 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
                 assert_eq!(got, want, "{lane:?} limit {limit:?}, seed {seed}");
             }
         }
+        // The `typed` index (6j6v.xkr7): each type's live items, in id order, through the SDK.
+        for ty in TYPES {
+            let ids = |rows: Vec<nxs_fold_ddb::table::Row>| -> Vec<String> {
+                rows.iter()
+                    .map(|r| text(r, "id").unwrap().to_string())
+                    .collect()
+            };
+            let want = ids(mem.query_typed(ty).await.unwrap());
+            let got = eventually(&want, || async move {
+                ids(ddb_ref.query_typed(ty).await.unwrap())
+            })
+            .await;
+            assert_eq!(got, want, "typed {ty}, seed {seed}");
+        }
         // Two streams share the table without seeing each other: the second fold's partition
         // holds only its own rows (checked above), and its reads named its partition.
         let read = recorder.take();
@@ -309,7 +323,7 @@ async fn a_snapshot_taken_from_dynamodb_starts_another_stream_with_the_same_item
                 // The partition and the index attributes name their stream; everything else is the
                 // same across the two.
                 r.remove("stream_id");
-                for attr in ["nxf_active", "nxf_dated"] {
+                for attr in ["nxf_active", "nxf_dated", "nxf_typed"] {
                     if let Some(nxs_foundation::change::Cell::Text(v)) = r.get_mut(attr) {
                         *v = v
                             .replacen("stream-a", "<stream>", 1)

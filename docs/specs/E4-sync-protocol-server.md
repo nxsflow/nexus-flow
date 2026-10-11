@@ -278,6 +278,13 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
 - **GSI `dated`** (`nxf_dated` / `nxf_dated_at`): sparse — `<stream>#closed` by `closed_at`,
   `<stream>#archived` by `archived`, newest first; the sort key is `<instant>U+001F<id>`, so tickets
   of one instant keep one order and a `limit` cuts the lane at the same place every time.
+- **GSI `typed`** (`nxf_typed` / `sk`, both S, projecting all; added 2026-10-11, `6j6v.xkr7`):
+  sparse — `<stream>#<type>` (the type escaped as a key value: `%` → `%25`, `#` → `%23`) on every
+  live item row, closed and archived ones included, removed on a delete. One Query lists a type's
+  live items, the `list` scope a ranked hosted `list` and the derived ranking keys rank over
+  (`records::list_board`, `docs/specs/derived-ranking-keys.md` §6). The deploying stack adds the
+  GSI first: a fold against a table without it still writes the attribute harmlessly, and only
+  the read needs the index.
 - **The active tickets' records** (added 2026-10-10, `6j6v.t1ym`). The LANES need only the
   `active` Query above. The RECORDS a lane is shown with need more: a lane's JSON carries joins
   kept in other tables — labels, custom values, timestamps, bearing thread links, the parent's

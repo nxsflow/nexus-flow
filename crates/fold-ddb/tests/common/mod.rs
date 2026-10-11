@@ -25,6 +25,10 @@ impl Lcg {
     }
 }
 
+/// The item types of a generated board: items are created as one of the first two and retyped
+/// among all three, so the `typed` index sees a type gained, lost and changed (6j6v.xkr7).
+pub const TYPES: [&str; 3] = ["task", "epic", "note"];
+
 pub fn id(i: u64) -> String {
     format!("ab12.{i:04}")
 }
@@ -38,6 +42,11 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
             step % 24
         ));
         let (a, b) = (id(r.next(n)), id(r.next(n + 1)));
+        // Now and then a retype (6j6v.xkr7), on the step alone so the random stream — and with it
+        // every other op of a seed — stays as it was.
+        if step % 9 == 4 {
+            s.set_field(&a, "type", Some(TYPES[step % TYPES.len()].into()), "u");
+        }
         match r.next(16) {
             0 => s.create_item(&a, "task", "T", "u"),
             1 => s.set_field(&a, "status", Some("in_progress".into()), "u"),
@@ -149,7 +158,7 @@ pub fn merged(seed: u64) -> Store {
     let mut a = Store::open_in_memory(1);
     let mut b = Store::open_in_memory(2);
     for i in 0..n {
-        a.create_item(&id(i), "task", "T", "u");
+        a.create_item(&id(i), TYPES[(i % 2) as usize], "T", "u");
     }
     b.apply(&a.export());
     let steps = 10 + r.next(40) as usize;

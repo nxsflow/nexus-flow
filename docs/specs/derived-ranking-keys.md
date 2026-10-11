@@ -3,8 +3,9 @@
 **Status: decided by the owner on 2026-10-09** (§10). The cuts that build it are listed in §11.
 **Built locally (x0wf, §12):** the three key kinds, their load-time rules and the type chain over
 the SQL path, in `next` and `list`. **Built on the server for `next` (1c5s, §6):** the same keys
-over the hosted board, with the rule the owner decided on 2026-10-11 (§10.5). The `typed` index and
-a ranked hosted `list` (xkr7) are open.
+over the hosted board, with the rule the owner decided on 2026-10-11 (§10.5). **Built on the server
+for `list` (xkr7, §6):** the `typed` index, a ranked hosted `list`, and a hosted `next` whose keys
+read a `[ranking.list]` rank.
 Fourth cut of `6j6v.kfs7` (cut with the owner on 2026-10-09). The three cuts before it add the
 plumbing this one ranks with:
 
@@ -164,14 +165,18 @@ derived key pays nothing.
   adjacency; per neighbour that is not active one `GetItem` of its row and, when it is live, one
   Query on its own adjacency for its current parent, plus one Query each for its labels and custom
   values when a key reads them.
-- **Refused on the server until xkr7:** a `[ranking.next]` order that reads — directly or down its
-  type chain — the rank of a type only `[ranking.list]` orders (§12, first point). That rank is
-  computed over the type's live items, which the active board does not hold. The store path ranks
-  such a plugin. Every other derived `next` key ranks on the server.
+- **A `[ranking.list]` rank in a `next` key** (refused on the server in 1c5s, ranked since xkr7): a
+  `[ranking.next]` order that reads — directly or down its type chain — the rank of a type only
+  `[ranking.list]` orders (§12, first point). That rank is computed over the type's live,
+  unarchived items, which the active board does not hold; `read::next_ranking_reads` names such a
+  type in `RankingReads::list_types`, and the server reads its items off the `typed` index into the
+  graph (`RankingGraph::listed`), with the edges around them.
 - **What xkr7 builds on.** The self-describing adjacency entries are written for EVERY edge between
-  ANY items, so xkr7's "widened adjacency" needs no new entries for the edges: a `list`-ranked item
-  reads its edges with the same Query. What xkr7 adds is the `typed` index (the `list` scope of a
-  type), the read that ranks a type's live items from it, and lifting the refusal above.
+  ANY items, so xkr7's "widened adjacency" needed no new entries for the edges: a `list`-ranked item
+  reads its edges with the same Query (verified in xkr7: its `.adj#` entries give its current
+  parent, its `contributes_to` targets, its parents for `parent_closed_reason` and every edge a key
+  follows or counts). What xkr7 adds is the `typed` index (the `list` scope of a type), the read
+  that ranks a type's live items from it, and lifting the refusal above.
 
 **`list` needs a second index (decided §10.4).** Objects that `list` ranks, such as a person, are
 long-lived and have no "active" status. If they did, they would rank through `next`, and `list`
@@ -191,14 +196,39 @@ gains a second sparse index, keyed by type:
   (`.adj#`) were always written for every edge add, under both ends; only the `active` INDEX flag is
   limited to `dep`/`parent` edges with an active end. Since index revision 3 the entries say what
   their edge is and whether it is removed (`next` above), so a `list`-ranked item reads its edges
-  with one Query on its own prefix, at no extra cost per edge write. What stays open for xkr7 is
-  the read of a type's live items through `typed` and their neighbours' rows.
+  with one Query on its own prefix, at no extra cost per edge write.
 - **Archived items.** They are in the index, because they are live. `list` filters them at read,
   as it does locally.
 - **It changes the table contract.** The deploying stack (the web package's CDK) must add the GSI
   before a fold that writes `nxf_typed` runs against it. A fold against a table without the index
   still writes the attribute, which costs nothing. Only the `list` read needs the index. The
   rollout order is therefore: the stack first, then the read.
+
+**`list` as built (xkr7).**
+- **The key.** `nxf_typed` is `<stream>#<type>` with the type escaped as a key value is (`%` →
+  `%25`, `#` → `%23`), so `a` + `b#c` and `a#b` + `c` cannot share a partition; the sort key is the
+  table's `sk`, so a Query lists a type's items in id order. An item without a type is on no
+  partition. A type whose partition would pass the 2,048 bytes DynamoDB allows an index key is
+  refused at fold time, as an op with a sort key too long is.
+- **Index revision.** The attribute ships in revision 3 with the self-describing adjacency entries
+  (1c5s and xkr7 reach the same beta), so revision 3 still makes every older stream not current
+  and one refold sets both; no revision 4.
+- **Where it lives.** The facade's `read::list_reads(cfg, query)` names what a hosted `list` reads
+  (`ListReads`: the listed types — the query's type filter, else every type —, whether `next`'s
+  board is needed, and the graph); `nxs_fold_ddb::records::list_board` reads it into a `ListBoard`
+  (the listed items with the joins a `list` record and its filters carry, `next`'s board, the
+  `RankingGraph`); `read::list_board_page` and `read::list_board_value` filter, rank and project it
+  by the code `list_page` runs, and `read::list_board` reads the same board from a store, the
+  parity oracle.
+- **Without a type filter** the server lists every live item: it reads the partition's `items#`
+  rows (strongly consistent, one Query, no index), since the index lists one type at a time.
+- **Paging.** As for the hosted `next`: the store path's page cache is machine-local and a
+  server's paging is an open decision (15ed), so the store-free `list` is not paged — `limit` cuts
+  it with the total disclosed, `paginate` and a token are refused with `validation`, and a server
+  cuts the list itself.
+- **`now`.** A `list` key that reads a rank `next` gives takes `next`'s candidates at the query's
+  `now`, as locally (§12); without one the read answers `validation` where a ranked row needs it,
+  and `next`'s board is not read for it.
 
 A differential test holds the SQL path and the server path to the same order on generated boards,
 for `next` and for `list`, as for the lanes today.
@@ -259,7 +289,10 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
 - **Differential:** SQL path against the server path on generated boards with derived keys, as
   `fold_differential` does for the lanes. Built for `next` in 1c5s
   (`crates/fold-ddb/tests/derived_differential.rs`): the SQL path, the store-free path over the
-  store's own board and graph, and the same over the folded tables give one order.
+  store's own board and graph, and the same over the folded tables give one order. Built for
+  `list` in xkr7 (`crates/fold-ddb/tests/list_differential.rs`): the same three paths on
+  generated boards of four types with retypes, every key kind and cross-section ranks both ways,
+  over a set of queries (types, none, container, label, status, sort, limit), and the JSON.
 - **Determinism:** shuffled edge order gives the same result, and ties fall to the id.
 - **Bounded cost:** a ratio guard in the style of `xn8s`. A query with derived keys runs the edge
   pass once, not once per candidate.
@@ -288,8 +321,8 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
    adjacency entries (index revision 3) and the server reads the neighbours that are not active.
    Narrowing the local rule to active neighbours was declined, as was refusing on the server every
    key whose value can depend on a neighbour that is not active (it would refuse §8's first order).
-   A `[ranking.next]` order that reads the rank of a type only `[ranking.list]` orders is refused on
-   the server until the `typed` index (xkr7) gives it that type's scope.
+   A `[ranking.next]` order that reads the rank of a type only `[ranking.list]` orders was refused on
+   the server until the `typed` index (xkr7) gave it that type's scope; it ranks there since.
 
 ## 11. Cuts
 
@@ -299,8 +332,11 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
   lanes' board, the self-describing adjacency entries (index revision 3), and the differential test
   (SQL path = Board path = fold-ddb path on generated boards with closed, archived and deleted
   neighbours, mentions and inbound `contributes_to`).
-- **The `typed` index and a ranked hosted `list`.** The GSI, the widened adjacency, the read, and
-  the table-contract note for the deploying stack, coordinated with app-foundations.
+- **The `typed` index and a ranked hosted `list`** (xkr7, built). The GSI, the read
+  (`ListBoard`, `records::list_board`, `read::list_board_page`), the `[ranking.list]` rank in a
+  hosted `next`, the differential test, and the table-contract note for the deploying stack
+  (`nxs-fold-ddb` crate doc, E4 §5.1), coordinated with app-foundations. The widened adjacency
+  turned out to be 1c5s's self-describing entries; nothing more was needed.
 - **Shared with `6j6v.q29p`.** The reverse mention lookup and `count = "mentioned_by"` use one
   implementation.
 
@@ -334,7 +370,9 @@ reading of the text, so a later decision can loosen it without breaking a declar
   takes them.
 - **`nulls` on a `count` or `sum`** is refused: a count is never null (§3.2).
 - **The store-free lanes** (`read::next_active`) rank a `[ranking.next]` with derived keys from
-  the board's `RankingGraph` since 1c5s (§6), with the live-neighbour rule above; they refuse only
-  an order that reads the rank of a type only `[ranking.list]` orders, until xkr7.
+  the board's `RankingGraph` since 1c5s (§6), with the live-neighbour rule above; since xkr7 an
+  order that reads the rank of a type only `[ranking.list]` orders too, from the graph's listed
+  items. The store-free `list` (`read::list_board_page`, xkr7) ranks a `[ranking.list]` the same
+  way.
 - **TOML.** An inline table may not span lines outside its arrays (TOML 1.0), so a `sum`'s `dir`
   stands on the line its array closes on. §8 above breaks that line for reading only.

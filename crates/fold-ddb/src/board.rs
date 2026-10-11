@@ -1,5 +1,5 @@
-//! The board's two indexes, kept beside the folded rows, and the reads that use them
-//! (6j6v.vvw6 points 4 and 5).
+//! The board's indexes, kept beside the folded rows, and the reads that use them
+//! (6j6v.vvw6 points 4 and 5; `typed`, 6j6v.xkr7).
 //!
 //! # `active`
 //!
@@ -26,6 +26,17 @@
 //! `<stream>#archived` under its `archived` instant, the id appended ([`dated_key`]) so tickets of
 //! one instant keep one order. A ticket without the instant sits under `"0"`, which sorts after
 //! every date — last, as the local lanes put it. [`dated`] reads one lane newest first.
+//!
+//! # `typed`
+//!
+//! Sparse as well (6j6v.xkr7): a live item — not deleted, archived or not — with a type sits in
+//! partition `<stream>#<type>` ([`typed_partition`]) under its own sort key, so ONE Query lists the
+//! live items of a type in id order: the `list` scope of a type the derived ranking keys rank by
+//! (docs/specs/derived-ranking-keys.md §6). Like the `active` flag of a ticket it is a function of
+//! the row alone, set whenever an op touches the row ([`refresh_item`]) — after the row, so a run
+//! that dies in between sets it when it folds the op again. Generic: every typed item is listed,
+//! whatever the plugin ranks, at one attribute per item row. A row's `typed` attribute never
+//! names another row, so a retype or a delete moves nothing else.
 //!
 //! # Who owns a label or a thread link
 //!
@@ -72,7 +83,8 @@
 
 use crate::layout::{
     adjacency_key, adjacency_prefix, contributes_adjacency_key, label_adjacency_key,
-    link_adjacency_key, row_key, table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK,
+    link_adjacency_key, row_key, table_prefix, typed_partition, ACTIVE, DATED, DATED_AT,
+    MAX_KEY_BYTES, SK, TYPED,
 };
 use crate::table::{text, Dated, Row, Table};
 use crate::write::{Cond, Write};
@@ -233,6 +245,29 @@ pub fn is_active(row: &Row) -> bool {
     )
 }
 
+/// The type a stored `items` row is listed under on the `typed` index (6j6v.xkr7): its type, when
+/// it has one and is live — not deleted; archived or not. A type too long for an index partition
+/// ([`MAX_PARTITION_BYTES`](crate::layout::MAX_PARTITION_BYTES)) is never folded: [`typed_partitions`] refuses its op first.
+pub fn typed(row: &Row) -> Option<&str> {
+    if text(row, "deleted") == Some("1") {
+        return None;
+    }
+    text(row, "type")
+}
+
+/// The `typed` partitions the item rows these changes write would be listed under — what
+/// [`Folder`](crate::fold::Folder) checks against
+/// [`MAX_PARTITION_BYTES`](crate::layout::MAX_PARTITION_BYTES) before an op writes
+/// anything.
+pub(crate) fn typed_partitions(stream: &str, changes: &[Change]) -> Vec<String> {
+    changes
+        .iter()
+        .filter(|c| c.table == "items")
+        .filter_map(|c| effect_text(c, "type"))
+        .map(|ty| typed_partition(stream, ty))
+        .collect()
+}
+
 /// The `dated` lane of a stored `items` row, and the instant it sorts by.
 pub fn lane(row: &Row) -> Option<(Dated, String)> {
     if text(row, "deleted") == Some("1") {
@@ -329,6 +364,14 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             set.push((ACTIVE.to_string(), Cell::Text(table.stream().to_string())));
         } else {
             remove.push(ACTIVE.to_string());
+        }
+    }
+    let typed_now = typed(&row).map(|ty| typed_partition(table.stream(), ty));
+    let typed_was = text(&row, TYPED).map(str::to_string);
+    if typed_now != typed_was {
+        match typed_now {
+            Some(p) => set.push((TYPED.to_string(), Cell::Text(p))),
+            None => remove.push(TYPED.to_string()),
         }
     }
     let dated_now = lane(&row).map(|(l, at)| (l.partition(table.stream()), dated_key(&at, id)));

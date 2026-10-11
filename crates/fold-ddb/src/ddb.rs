@@ -1,14 +1,16 @@
 //! [`DynamoDbTable`]: one stream's partition of the views table in DynamoDB, and [`create_table`],
 //! the table the contract in the crate doc describes.
 //!
-//! Every request names the stream's partition key; the board's two reads name an index. There is
+//! Every request names the stream's partition key; the board's three index reads name an index. There is
 //! no Scan anywhere in this file, and the `dynamodb-local` CI job records every request a fold
 //! makes to prove it stays that way.
 //!
 //! The adapter is async and runs on the caller's runtime — a fold run in a Lambda awaits it
 //! directly, unlike the relay's op store, which bridges the SDK into its synchronous traits.
 
-use crate::layout::{ACTIVE, ACTIVE_INDEX, DATED, DATED_AT, DATED_INDEX, PK, SK};
+use crate::layout::{
+    typed_partition, ACTIVE, ACTIVE_INDEX, DATED, DATED_AT, DATED_INDEX, PK, SK, TYPED, TYPED_INDEX,
+};
 use crate::table::{Dated, Outcome, Row, Table};
 use crate::write::Write;
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata};
@@ -37,8 +39,8 @@ fn err<E: std::error::Error + 'static>(e: E) -> DdbError {
     DdbError(DisplayErrorContext(e).to_string())
 }
 
-/// The views table of `name`, as the deploying stack must provision it: keys, both sparse
-/// indexes projecting every attribute, on-demand billing. Production code never sends it; the
+/// The views table of `name`, as the deploying stack must provision it: keys, the three sparse
+/// indexes (`active`, `dated`, `typed`) projecting every attribute, on-demand billing. Production code never sends it; the
 /// integration tests do, and a stack is checked against it.
 pub fn create_table(client: &Client, name: &str) -> CreateTableFluentBuilder {
     let s = |n: &str| {
@@ -77,10 +79,12 @@ pub fn create_table(client: &Client, name: &str) -> CreateTableFluentBuilder {
         .attribute_definitions(s(ACTIVE))
         .attribute_definitions(s(DATED))
         .attribute_definitions(s(DATED_AT))
+        .attribute_definitions(s(TYPED))
         .key_schema(key(PK, KeyType::Hash))
         .key_schema(key(SK, KeyType::Range))
         .global_secondary_indexes(index(ACTIVE_INDEX, ACTIVE, SK))
         .global_secondary_indexes(index(DATED_INDEX, DATED, DATED_AT))
+        .global_secondary_indexes(index(TYPED_INDEX, TYPED, SK))
 }
 
 /// One stream's partition of the views table `table`.
@@ -300,6 +304,21 @@ impl Table for DynamoDbTable {
             &[(":d", AttributeValue::S(lane.partition(&self.stream)))],
             true,
             limit,
+        )
+        .await
+    }
+
+    async fn query_typed(&self, item_type: &str) -> Result<Vec<Row>, DdbError> {
+        self.query_all(
+            Some(TYPED_INDEX),
+            "#t = :t",
+            &[("#t", TYPED)],
+            &[(
+                ":t",
+                AttributeValue::S(typed_partition(&self.stream, item_type)),
+            )],
+            false,
+            None,
         )
         .await
     }

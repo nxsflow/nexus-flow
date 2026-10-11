@@ -26,18 +26,26 @@ pub const ACTIVE: &str = "nxf_active";
 pub const DATED: &str = "nxf_dated";
 /// The sort key of the `dated` index: the instant the ticket entered its lane.
 pub const DATED_AT: &str = "nxf_dated_at";
+/// The partition key of the `typed` index (6j6v.xkr7): `<stream>#<type>` ([`typed_partition`]),
+/// present only on a live item row — not deleted, archived or not — that has a type.
+pub const TYPED: &str = "nxf_typed";
 /// The `active` index.
 pub const ACTIVE_INDEX: &str = "active";
 /// The `dated` index.
 pub const DATED_INDEX: &str = "dated";
+/// The `typed` index (6j6v.xkr7).
+pub const TYPED_INDEX: &str = "typed";
 
 /// The longest sort key — and `dated` index sort key — DynamoDB stores, in bytes.
 pub const MAX_KEY_BYTES: usize = 1024;
+/// The longest partition key value DynamoDB stores — on the table or on an index — in bytes. Only
+/// the `typed` index's can come near it: it carries an item's type ([`typed_partition`]).
+pub const MAX_PARTITION_BYTES: usize = 2048;
 /// The largest item DynamoDB stores, in bytes, counting attribute names and values.
 pub const MAX_ITEM_BYTES: usize = 400 * 1024;
 
 /// Attribute names no view column may take: the table's own keys and the index attributes.
-pub const RESERVED: [&str; 5] = [PK, SK, ACTIVE, DATED, DATED_AT];
+pub const RESERVED: [&str; 6] = [PK, SK, ACTIVE, DATED, DATED_AT, TYPED];
 
 /// The fold's own bookkeeping, outside every view table: a view table's name is an identifier and
 /// cannot start with `.`.
@@ -67,6 +75,13 @@ pub fn row_key(table: &str, key: &[(String, Cell)]) -> Result<String, LayoutErro
         }
     }
     Ok(sk)
+}
+
+/// The `typed` index partition of the items of type `item_type` in `stream`: `<stream>#<type>`, the
+/// type with `%` and `#` escaped as a key value is, so two streams' types can never share a
+/// partition (`a` + `b#c` and `a#b` + `c`).
+pub fn typed_partition(stream: &str, item_type: &str) -> String {
+    format!("{stream}#{}", escape(item_type))
 }
 
 /// The prefix every row of `table` starts with.

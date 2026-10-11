@@ -7,7 +7,7 @@
 //! It counts the requests it answers ([`Requests`]), so the cost of a fold — the flag fan-out above
 //! all — is measured on the same code path the DynamoDB table runs.
 
-use crate::layout::{ACTIVE, DATED, DATED_AT, MAX_ITEM_BYTES, PK, SK};
+use crate::layout::{typed_partition, ACTIVE, DATED, DATED_AT, MAX_ITEM_BYTES, PK, SK, TYPED};
 use crate::table::{Dated, Outcome, Row, Table};
 use crate::write::{attribute_bytes, beats, Cond, Write};
 use nxs_foundation::change::Cell;
@@ -175,6 +175,20 @@ impl Table for MemTable {
         rows.sort_by_key(|r| std::cmp::Reverse(at(r)));
         rows.truncate(limit.unwrap_or(usize::MAX));
         Ok(rows)
+    }
+
+    async fn query_typed(&self, item_type: &str) -> Result<Vec<Row>, Infallible> {
+        self.count(|r| r.index_queries += 1);
+        let partition = Cell::Text(typed_partition(&self.stream, item_type));
+        // The rows are kept by sort key: the index's own order.
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.get(TYPED) == Some(&partition))
+            .cloned()
+            .collect())
     }
 }
 
