@@ -80,12 +80,12 @@ impl Store {
         tx.execute(
             "DELETE FROM next_page_cache WHERE query = ?1 AND id NOT IN (
                  SELECT id FROM next_page_cache WHERE query = ?1
-                 ORDER BY created DESC, id DESC LIMIT ?2)",
+                 ORDER BY created DESC, rowid DESC LIMIT ?2)",
             params![snapshot.query, keep(max_per_query)],
         )?;
         tx.execute(
             "DELETE FROM next_page_cache WHERE id NOT IN (
-                 SELECT id FROM next_page_cache ORDER BY created DESC, id DESC LIMIT ?1)",
+                 SELECT id FROM next_page_cache ORDER BY created DESC, rowid DESC LIMIT ?1)",
             [keep(max_total)],
         )?;
         let ids = snapshot.ids.join(&SEP.to_string());
@@ -234,6 +234,19 @@ mod tests {
             assert!(s.next_cache_get(id).unwrap().is_some(), "{id} kept");
         }
         assert_eq!(rows(&s), 3);
+    }
+
+    #[test]
+    fn snapshots_of_one_second_are_evicted_in_insertion_order_not_id_order() {
+        // `created` is in seconds and a ULID is random within its millisecond, so ties must fall
+        // to insertion order: here the ids sort against it, and the first one stored still goes.
+        let s = Store::open_in_memory(1);
+        for id in ["z", "y", "x"] {
+            s.next_cache_put(&snap(id, 100), 0, 2, 10).unwrap();
+        }
+        assert_eq!(s.next_cache_get("z").unwrap(), None, "the oldest goes");
+        assert!(s.next_cache_get("y").unwrap().is_some());
+        assert!(s.next_cache_get("x").unwrap().is_some());
     }
 
     #[test]
