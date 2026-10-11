@@ -502,6 +502,13 @@ impl Engine {
     /// machine-local `next_page_cache` (so the same db write another handle's
     /// [`subscribe`](Engine::subscribe) sees), the same expiry and invalidation. `validation` for
     /// `paginate` without a non-zero `limit`, or a token without `paginate`.
+    ///
+    /// **`now` (6j6v.x0wf).** When the rows a ranked query keeps rank by a derived key of
+    /// `[ranking.list]` that reads the rank of a type `next` ranks, that rank is computed over
+    /// `next`'s candidates at a reference time: set it with [`ListQuery::now`], or the query
+    /// answers `validation` ("pass `now`"). The filters narrow the rows before they are ranked, so
+    /// a type filter whose order reads no such rank needs no `now`; the id order never does. A
+    /// malformed `now` answers `validation` too.
     pub fn list_query(&self, query: &ListQuery) -> Result<NextPage> {
         self.handle
             .try_with_state(|s| read::list_page(&self.cfg, &s.store, query))
@@ -510,7 +517,7 @@ impl Engine {
     /// [`list_query`](Engine::list_query) as JSON: `{"items", "total"}`, plus `next_token` and
     /// `restarted` when the query paginates — `items` being the records
     /// [`list_value`](Engine::list_value) gives. The envelope the CLI's `list --limit <n> --json`
-    /// prints.
+    /// prints. `now` is needed exactly as for [`list_query`](Engine::list_query).
     pub fn list_query_value(&self, query: &ListQuery) -> Result<Value> {
         self.handle.try_with_state(|s| {
             let page = read::list_page(&self.cfg, &s.store, query)?;

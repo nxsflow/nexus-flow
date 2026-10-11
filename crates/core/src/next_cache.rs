@@ -1,5 +1,5 @@
-//! The snapshot cache behind `next --paginate` (6j6v.15ed) and `mention by --paginate`
-//! (6j6v.q29p): the ordered result a first page was cut from, kept so the following pages come from
+//! The snapshot cache behind `next --paginate` (6j6v.15ed), `mention by --paginate` (6j6v.q29p)
+//! and `list --paginate` (6j6v.n698): the ordered result a first page was cut from, kept so the following pages come from
 //! the SAME list instead of a list that moved underneath the reader. The table keeps its first
 //! reader's name; every paged read shares it, its expiry and its caps, and tells its snapshots
 //! apart by the `query` key, which names the read.

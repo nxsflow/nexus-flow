@@ -570,17 +570,41 @@ pub fn list_at(
     sort: Option<SortKey>,
     now: Option<&str>,
 ) -> Result<Vec<ItemRow>> {
+    list_selected(cfg, store, status, sort, now, |rows| {
+        Ok(rows
+            .into_iter()
+            .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
+            .collect())
+    })
+}
+
+/// The live items with the core status `status` that `select` keeps, ordered by `sort` — the body
+/// of [`list_at`] and [`list_page`]. `select` narrows the rows BEFORE they are ranked (review of
+/// PR #48, Code Quality #1), so the derived keys' type chain covers only the orders the kept rows
+/// rank by: a type filter whose order reads no `next` rank needs no `now`, and a filtered query
+/// does no work for the rows it drops. The rank SCOPE stays every live item of a type, whatever
+/// `status` or `select` keep (spec §12, decision 2) — filters select, keys order. A row's derived
+/// values depend on that scope only, never on the other ranked rows, so narrowing first orders
+/// the kept rows exactly as narrowing after would.
+fn list_selected(
+    cfg: &PluginConfig,
+    store: &Store,
+    status: Option<&str>,
+    sort: Option<SortKey>,
+    now: Option<&str>,
+    select: impl FnOnce(Vec<ItemRow>) -> Result<Vec<ItemRow>>,
+) -> Result<Vec<ItemRow>> {
     if let Some(now) = now {
         crate::validate::iso_date(now)?;
     }
     let live = derived::list_scope(store)?;
     let key = sort.unwrap_or(DEFAULT_SORT_LIST);
-    let mut items: Vec<ItemRow> = live
-        .iter()
-        .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
-        .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
-        .cloned()
-        .collect();
+    let mut items: Vec<ItemRow> = select(
+        live.iter()
+            .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
+            .cloned()
+            .collect(),
+    )?;
     if key == SortKey::Rank {
         // The derived keys of `[ranking.list]` (6j6v.x0wf), computed once for these rows; the
         // unfiltered live items are `list`'s scope for "rank" — filters select, keys order.
@@ -710,7 +734,8 @@ impl ListQuery {
 }
 
 /// One `list` page (6j6v.n698): [`list`] under `q.status` and `q.sort`, narrowed by `q.filter`
-/// (keeping the order), cut and — under `paginate` — cached machine-locally like a `next` page, so
+/// before it is ranked (the rank scope stays every live item, see the private `list_selected`),
+/// cut and — under `paginate` — cached machine-locally like a `next` page, so
 /// the following pages come from the same list. A token's snapshot restarts when an op after it
 /// touches one of its items, or an item in it left or moved in the fresh list. `validation` for
 /// `paginate` without a non-zero `limit`, or a token without `paginate`.
@@ -725,15 +750,14 @@ pub fn list_page(cfg: &PluginConfig, store: &Store, q: &ListQuery) -> Result<Nex
 fn list_page_at(cfg: &PluginConfig, store: &Store, q: &ListQuery, clock: i64) -> Result<NextPage> {
     let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
     let mark = Watermark::read(store)?;
-    let items = list_at(
+    let fresh = list_selected(
         cfg,
         store,
         q.status.as_deref(),
-        None,
         q.sort,
         q.now.as_deref(),
+        |rows| filter_next_store(store, rows, &q.filter),
     )?;
-    let fresh = filter_next_store(store, items, &q.filter)?;
     page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
 }
 
@@ -1063,8 +1087,8 @@ fn next_lane(
     items
 }
 
-/// One page of a `next` result — or of any read paged like it (`mentioned_by`, 6j6v.q29p): the
-/// rows to show, plus how many there were before the cut.
+/// One page of a `next` result — or of any read paged like it (`mentioned_by`, 6j6v.q29p; `list`,
+/// 6j6v.n698): the rows to show, plus how many there were before the cut.
 ///
 /// The type exists so the total cannot be dropped on the way to a renderer. A limit that cuts
 /// silently is worse than no limit at all — a list that shows 15 of 180 and looks like 15 of 15
@@ -1498,7 +1522,8 @@ fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) ->
 }
 
 /// The paging half of a request, checked: what [`page_through`] cuts and caches by. Shared by
-/// every paged read (`next`, `mentioned_by`), so their rules cannot drift apart (6j6v.q29p).
+/// every paged read (`next`, `mentioned_by`, `list`), so their rules cannot drift apart
+/// (6j6v.q29p, 6j6v.n698).
 struct Paging<'a> {
     /// The cut: `None` is the whole list.
     limit: Option<usize>,
@@ -1540,8 +1565,9 @@ impl Watermark {
 
 /// Cut the freshly computed, ordered `fresh` list into one page per `paging` — and, when it pages,
 /// serve a token's page from its cached snapshot (if [`resume`] says it still answers) or cache
-/// `fresh` under `key` for the next one. THE paging mechanism behind [`next_page`] and
-/// [`mentioned_by_page`] (6j6v.15ed, generalised by 6j6v.q29p): one snapshot table, one expiry,
+/// `fresh` under `key` for the next one. THE paging mechanism behind [`next_page`],
+/// [`mentioned_by_page`] and [`list_page`] (6j6v.15ed, generalised by 6j6v.q29p and n698): one
+/// snapshot table, one expiry,
 /// one pair of caps, one invalidation rule. `key` must name the read as well as its filters, so a
 /// token of one read restarts under another; it is built only when the read pages.
 fn page_through(

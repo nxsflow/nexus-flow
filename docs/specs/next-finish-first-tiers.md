@@ -177,17 +177,19 @@ The whole order is total and deterministic (id is always the last tiebreak).
 `[ranking.next.<type>]`. Its cross-type order is `types = [...]` under `[ranking.next]`, or else the
 precedence list of the default order's first key on `type`; every type with its own order must be
 listed, and `types` without a per-type order is refused. Within a tier (and for cluster ordering),
-`next` then compares two items with `NextRank`: by their type's position in the cross-type order,
+`next` then compares two items with `TypeRank`: by their type's position in the cross-type order,
 then by type name, then by their type's order (its own, or the default `order`), then id. A plugin
 without a per-type order ranks by `rank_cmp`, as above. The tiers themselves are unchanged:
-per-type orders never move an item between tiers. `list --sort rank` and `blocked` keep the default
-order (`rank_cmp`) until `list` gets its own per-type orders (6j6v.n698).
+per-type orders never move an item between tiers. `blocked` keeps the default order (`rank_cmp`).
+`list --sort rank` ranks by its own policy, `[ranking.list]` (6j6v.n698): the same per-type
+tables, the same cross-type `types` and the same `TypeRank` comparator.
 
 `types` is this cut's own addition; `derived-ranking-keys.md` §8 relates types only through derived
 keys (`related … of = "rank"`, built locally by x0wf: derived keys order within a tier, inside
-`NextRank`, and never move an item between tiers). Under type-first ordering, an `action` order ranks actions
-only among actions: an action never sits next to its project in one feed. x0wf decides whether a
-derived key may relax that (pending the spec owner's confirmation of `types`, PR #44).
+`TypeRank`, and never move an item between tiers). Under type-first ordering, an `action` order
+ranks actions only among actions: an action never sits next to its project in one feed. As built
+(`derived-ranking-keys.md` §12), a derived key does not relax that: it orders the items of its
+own type, and `types` stays the cross-type order.
 
 ### 4.4 The `parent` join is retained
 

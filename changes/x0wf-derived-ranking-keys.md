@@ -21,7 +21,10 @@ computed bottom-up through the chain of types, once per query, with one pass ove
 `count = "mentioned_by"` reads the same reverse mention lookup as `nxf mention by`. A plugin is
 refused at load when a key mixes kinds, names an unknown edge, type, status or field, carries a
 part its kind does not take, reads the rank of a type without an order, or when the types rank by
-each other in a cycle. Derived keys are not allowed in the `[ranking.next]` default order, which
+each other in a cycle. An untyped `related ... of = "rank"` key is refused in the `[ranking.list]`
+default order as well, and a table under `[ranking]` other than `next` and `list` is refused rather
+than ignored. A `parent` neighbour is the item's one current parent, the one `show` and `--in`
+read. Derived keys are not allowed in the `[ranking.next]` default order, which
 also ranks `blocked` and the lanes. A plugin without derived keys ranks exactly as before. For an
 embedding app: `RankKey` gains the derived parts and is now `#[non_exhaustive]` and refuses
 unknown parts (build one with `RankKey::field_key`); `ListQuery::now` and `read::list_at` take
@@ -49,7 +52,11 @@ pro Abfrage, mit einem Durchgang über die Kanten. `count = "mentioned_by"` lies
 Rückwärtssuche der Erwähnungen wie `nxf mention by`. Ein Plugin wird beim Laden abgelehnt, wenn
 ein Schlüssel Arten mischt, eine unbekannte Kante, einen unbekannten Typ, Status oder ein
 unbekanntes Feld nennt, einen Teil trägt, den seine Art nicht nimmt, den Rang eines Typs ohne
-Reihenfolge liest, oder wenn die Typen sich im Kreis gegenseitig ranken. Abgeleitete Schlüssel sind
+Reihenfolge liest, oder wenn die Typen sich im Kreis gegenseitig ranken. Ein Schlüssel
+`related ... of = "rank"` ohne `type` wird auch in der Standardreihenfolge von `[ranking.list]`
+abgelehnt, und eine Tabelle unter `[ranking]` außer `next` und `list` wird abgelehnt statt
+ignoriert. Ein `parent`-Nachbar ist der eine aktuelle Parent des Items, den `show` und `--in`
+lesen. Abgeleitete Schlüssel sind
 in der Standardreihenfolge von `[ranking.next]` nicht erlaubt, die auch `blocked` und die Lanes
 rankt. Ein Plugin ohne abgeleitete Schlüssel rankt genau wie bisher. Für eine einbettende App:
 `RankKey` bekommt die abgeleiteten Teile, ist jetzt `#[non_exhaustive]` und lehnt unbekannte Teile

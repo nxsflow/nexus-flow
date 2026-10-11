@@ -265,8 +265,9 @@ reading of the text, so a later decision can loosen it without breaking a declar
 - **Which order `of = "rank"` reads.** The asking section's own `[ranking.<verb>.<type>]`, else
   the other section's. That is how §8's persons, ranked by `list`, read the rank of the projects
   that `next` ranks. A `list` query that needs `next`'s candidates takes them at a reference time:
-  `ListQuery::now`, which the CLI and MCP fill from the clock (`NXF_NOW` pins it). Without one,
-  such a query answers `validation`.
+  `ListQuery::now`, which the CLI and MCP fill from the clock for a ranked list (`NXF_NOW` pins
+  it). Without one, such a query answers `validation`. The query's filters narrow the rows before
+  they are ranked, so only the orders the kept rows rank by are computed.
 - **The scope of a `list` rank** is the live, unarchived items of the type, whatever `--status`,
   `--type`, `--in` or `--label` the query filters by. Filters select, keys order. `next`'s scope
   is its candidates over the whole board, before its filters.
@@ -278,7 +279,9 @@ reading of the text, so a later decision can loosen it without breaking a declar
 - **`of = { field, dir, nulls }`.** `dir` and `nulls` belong to the `related` key. Inside `of`
   they are accepted at their defaults only, so §8's `dir = "asc"` loads, and refused otherwise.
 - **An untyped `related ... of = "rank"`** reads the rank of every type with an order, its own
-  included, so in a per-type order it is a cycle and refused. Name the neighbour's `type`.
+  included, so in a per-type order it is a cycle and refused. Name the neighbour's `type`. The
+  `[ranking.list]` default order refuses it too: there it would read nothing without per-type
+  orders, and every ranked type with them (review of PR #48).
 - **The `[ranking.next]` default `order` refuses derived keys**, because that order also ranks
   `blocked` and the lanes' `--sort rank`, which compute none. The `[ranking.list]` default order
   takes them.

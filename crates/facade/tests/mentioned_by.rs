@@ -4,7 +4,7 @@
 //! (6j6v.15ed). Tested at the seam the products take.
 
 use nexus_flow_core::model::EdgeKind;
-use nexus_flow_core::store::Store;
+use nexus_flow_core::store::{EdgeReadStats, Store};
 use nexus_flow_facade::engine::Engine;
 use nexus_flow_facade::error::ErrorKind;
 use nexus_flow_facade::read::{self, MentionedByQuery, NextFilter, NextQuery};
@@ -127,6 +127,20 @@ fn mentioned_by_lists_the_live_mentioners_in_id_order() {
         .unwrap();
     assert!(none.items.is_empty());
     assert_eq!(none.total, 0);
+}
+
+#[test]
+fn an_archived_mentioner_still_counts_at_the_seam() {
+    // Live is the one rule (spec §11): archived is not deleted, so `Engine::mentioned_by` keeps
+    // it, as `mentioners_of` and `count = "mentioned_by"` do (review of PR #48, Test Quality #9).
+    let tmp = workspace();
+    board(tmp.path());
+    {
+        let mut s = writer(tmp.path());
+        s.set_field("ab12.0002", "archived", Some(NOW.into()), "t");
+    }
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    assert_eq!(ids(&by(&engine, MentionedByQuery::new()).items), LIVE);
 }
 
 #[test]
@@ -344,7 +358,16 @@ fn mentioners_of_answers_many_targets_in_one_read() {
     let tmp = workspace();
     board(tmp.path());
     let s = writer(tmp.path());
+    let before = s.edge_read_stats();
     let m = read::mentioners_of(&s, &[TARGET, "ab12.e001", "ab12.e002", "ab12.zzzz"]).unwrap();
+    assert_eq!(
+        s.edge_read_stats().since(before),
+        EdgeReadStats {
+            mention_lookups: 1,
+            ..EdgeReadStats::default()
+        },
+        "one reverse lookup for all four targets, and no per-item edge read"
+    );
     assert_eq!(ids(&m[TARGET]), LIVE);
     assert_eq!(ids(&m["ab12.e001"]), ["ab12.0006"]);
     assert!(!m.contains_key("ab12.e002"), "nothing mentions it");

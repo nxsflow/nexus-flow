@@ -158,8 +158,9 @@ A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort r
 - `types = [...]` says how the types stand against each other once some have their own order.
 
 A key is a **field key**, such as `{ field = "priority", dir = "asc" }`. With a `precedence` list,
-a field key ranks by the value's position in that list instead. In a per-type order, a key can
-also be a **derived key**, which ranks an item by its neighbours in the graph:
+a field key ranks by the value's position in that list instead. In a per-type order, or in the
+`[ranking.list]` default `order`, a key can also be a **derived key**, which ranks an item by its
+neighbours in the graph:
 
 ```toml
 [ranking.next]
@@ -199,7 +200,8 @@ A rank is computed over the type's candidates under the verb that ranks it, and 
 every key share a rank. For `next` these candidates are its actionable items; for `list` they are
 the live, unarchived items. A neighbour outside that set, such as a closed project under `next`,
 has no rank and reads as null. A `list` key may read the rank of a type that only `next` ranks;
-`next`'s candidates are then taken at the current time (`NXF_NOW` pins it).
+`next`'s candidates are then taken at the current time (`NXF_NOW` pins it). Only `list --sort rank`
+reads that time.
 
 The plugin is refused at load, with the key named, when:
 
@@ -211,6 +213,7 @@ The plugin is refused at load, with the key named, when:
 - the types rank by each other in a cycle.
 
 A `related ... of = "rank"` key without `type` reads the rank of every type with an order, its own
-included. That is a cycle, so name the neighbour's `type`. Derived keys are not allowed in the
+included. That is a cycle, so name the neighbour's `type`; the `[ranking.list]` default `order`
+refuses such a key too. Derived keys are not allowed in the
 `[ranking.next]` default `order`, because that order also ranks `blocked` and the lanes'
 `--sort rank`.

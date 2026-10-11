@@ -164,8 +164,9 @@ Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[rank
 
 Ein Schlüssel ist ein **Feldschlüssel**, etwa `{ field = "priority", dir = "asc" }`. Mit einer
 `precedence`-Liste rankt ein Feldschlüssel stattdessen nach der Position des Werts in dieser
-Liste. In einer Reihenfolge pro Typ kann ein Schlüssel auch ein **abgeleiteter Schlüssel** sein,
-der ein Item nach seinen Nachbarn im Graphen rankt:
+Liste. In einer Reihenfolge pro Typ, oder in der Standard-`order` von `[ranking.list]`, kann ein
+Schlüssel auch ein **abgeleiteter Schlüssel** sein, der ein Item nach seinen Nachbarn im Graphen
+rankt:
 
 ```toml
 [ranking.next]
@@ -207,7 +208,8 @@ ihn rankt, und Items, die in jedem Schlüssel gleich sind, teilen sich einen Ran
 diese Kandidaten seine umsetzbaren Items, für `list` die lebenden, nicht archivierten Items. Ein
 Nachbar außerhalb dieser Menge, etwa ein geschlossenes Projekt unter `next`, hat keinen Rang und
 liest sich als null. Ein `list`-Schlüssel darf den Rang eines Typs lesen, den nur `next` rankt;
-die Kandidaten von `next` werden dann zur aktuellen Zeit genommen (`NXF_NOW` legt sie fest).
+die Kandidaten von `next` werden dann zur aktuellen Zeit genommen (`NXF_NOW` legt sie fest). Nur
+`list --sort rank` liest diese Zeit.
 
 Das Plugin wird beim Laden abgelehnt, mit dem Schlüssel benannt, wenn:
 
@@ -220,6 +222,6 @@ Das Plugin wird beim Laden abgelehnt, mit dem Schlüssel benannt, wenn:
 - die Typen sich im Kreis gegenseitig ranken.
 
 Ein Schlüssel `related ... of = "rank"` ohne `type` liest den Rang jedes Typs mit einer
-Reihenfolge, auch des eigenen. Das ist ein Kreis, also nennen Sie den `type` des Nachbarn.
-Abgeleitete Schlüssel sind in der Standard-`order` von `[ranking.next]` nicht erlaubt, weil diese
+Reihenfolge, auch des eigenen. Das ist ein Kreis, also nennen Sie den `type` des Nachbarn; die
+Standard-`order` von `[ranking.list]` lehnt einen solchen Schlüssel ebenfalls ab. Abgeleitete Schlüssel sind in der Standard-`order` von `[ranking.next]` nicht erlaubt, weil diese
 Reihenfolge auch `blocked` und `--sort rank` der Lanes rankt.

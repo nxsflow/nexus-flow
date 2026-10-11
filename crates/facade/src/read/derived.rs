@@ -6,9 +6,11 @@
 //! acyclic at load); those may name others in turn. [`compute`] walks the chain from the leaves:
 //!
 //! 1. one EDGE PASS ([`Store::present_edges_of_kinds`]) over every present edge of the kinds the
-//!    keys name, for the ranked rows and every row in the chain's scopes at once; the reverse
-//!    mentions come from [`mentioners_of`], the one implementation `mention by` reads too
-//!    (spec §11);
+//!    keys name, for the ranked rows and every row in the chain's scopes at once. A `parent` edge
+//!    is the `present_parent` projection — each child's one current parent, the one `belongs_to`,
+//!    `--in` and `show` read — so a child re-parented concurrently counts under one parent only.
+//!    The reverse mentions come from [`mentioners_of`], the one implementation `mention by` reads
+//!    too (spec §11);
 //! 2. one bulk read of the neighbours' rows, and of their labels / custom fields when a key needs
 //!    them;
 //! 3. per type in the chain, leaves first: its rows' values, ONE sort, and a dense rank. A

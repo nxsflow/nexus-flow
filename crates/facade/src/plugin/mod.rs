@@ -561,7 +561,10 @@ pub struct Ranking {
 }
 
 /// `[ranking]` as written: the list policy's `order` is optional until [`Ranking`] resolves it.
+/// Only `next` and `list` stand under it: a misspelt `[ranking.lsit]` is refused at load rather
+/// than ignored in silence (review of PR #48, Integrity #2).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RankingToml {
     next: RankSpec,
     #[serde(default)]
@@ -2225,6 +2228,16 @@ mod tests {
         assert!(msg.contains("inside `of`"), "{msg}");
         let msg = unparsable_key(r#"{ related = "parent", of = "position" }"#);
         assert!(msg.contains("\"rank\""), "{msg}");
+        // Neither a string nor a table (review of PR #48, Test Quality #9).
+        let msg = unparsable_key(r#"{ related = "parent", of = 3 }"#);
+        assert!(
+            msg.contains("expected \"rank\" or `{ field = \"...\" }`"),
+            "{msg}"
+        );
+        // `of = { ... }` takes only its own parts.
+        let msg =
+            unparsable_key(r#"{ related = "parent", of = { field = "priority", pick = "max" } }"#);
+        assert!(msg.contains("of:") && msg.contains("pick"), "{msg}");
     }
 
     #[test]
@@ -2410,6 +2423,68 @@ mod tests {
         .expect("the list default order takes derived keys");
         assert!(cfg.ranking.list.has_derived());
         assert!(!cfg.ranking.next.has_derived());
+    }
+
+    #[test]
+    fn an_untyped_rank_key_in_the_list_default_order_is_refused() {
+        // Review of PR #48, Integrity #3: without per-type tables the key would read nothing, and
+        // with them it would pull every ranked type into the chain. Typed, it loads.
+        for tables in [
+            "",
+            r#"
+            [ranking.next.project]
+            order = [ { field = "priority" } ]
+            "#,
+        ] {
+            let next_types = if tables.is_empty() {
+                ""
+            } else {
+                r#"types = ["project"]"#
+            };
+            let err = refused(&format!(
+                r#"
+                [ranking.next]
+                {next_types}
+                order = [ {{ field = "priority" }} ]
+                {tables}
+                [ranking.list]
+                order = [ {{ related = "parent", of = "rank" }} ]
+                "#
+            ));
+            assert_eq!(err.kind, crate::error::ErrorKind::Validation);
+            assert!(
+                err.msg.contains("[ranking.list] default `order`")
+                    && err.msg.contains("name the neighbour's `type`"),
+                "{}",
+                err.msg
+            );
+        }
+        load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["project"]
+            order = [ { field = "priority" } ]
+            [ranking.next.project]
+            order = [ { field = "priority" } ]
+            [ranking.list]
+            order = [ { related = "parent", type = "project", of = "rank" } ]
+            "#,
+        )
+        .expect("typed, it reads one order");
+    }
+
+    #[test]
+    fn a_misspelt_ranking_section_is_refused() {
+        // Review of PR #48, Integrity #2: `[ranking.lsit]` would otherwise be ignored in silence.
+        let err = refused(
+            r#"
+            [ranking.next]
+            order = [ { field = "priority" } ]
+            [ranking.lsit]
+            order = [ { field = "priority" } ]
+            "#,
+        );
+        assert!(err.msg.contains("lsit"), "{}", err.msg);
     }
 
     #[test]

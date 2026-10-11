@@ -1760,16 +1760,18 @@ pub fn list(json: bool, db: Option<&str>, args: ListArgs<'_>) -> Result<()> {
         filter = filter.with_label(label);
     }
     let mut query = read::ListQuery::new().filter(filter);
+    let sort = args.sort.map(read::parse_sort).transpose()?;
     // The reference time a derived ranking key of `[ranking.list]` takes `next`'s candidates at
     // when it reads the rank of a type `next` ranks (6j6v.x0wf); `NXF_NOW` pins it, as for `next`.
-    // Read only for such a plugin, so `list` under any other never trips on the clock.
-    if cfg.ranking.list.has_derived() {
+    // Read only for a RANKED list under such a plugin, so any other `list` never trips on the
+    // clock — a malformed `NXF_NOW` included (review of PR #48, Code Quality #6).
+    if sort == Some(read::SortKey::Rank) && cfg.ranking.list.has_derived() {
         query = query.now(resolve_now(None)?);
     }
     if let Some(status) = args.status {
         query = query.status(status);
     }
-    if let Some(sort) = args.sort.map(read::parse_sort).transpose()? {
+    if let Some(sort) = sort {
         query = query.sort(sort);
     }
     if let Some(n) = args.limit {

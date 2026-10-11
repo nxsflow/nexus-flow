@@ -276,6 +276,72 @@ fn a_list_order_reading_a_next_rank_needs_now() {
 }
 
 #[test]
+fn a_type_filter_whose_order_reads_no_next_rank_needs_no_now() {
+    // Review of PR #48, Code Quality #1: the filters narrow the rows before they are ranked, so
+    // the chain covers only the orders the kept rows rank by. Goals and projects rank by the
+    // `[ranking.list]` default order (field keys only) and need no `now`; persons read the rank
+    // of projects, which `next` ranks, and still do.
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let engine = engine(&tmp);
+    let ranked = |ty: &str| {
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_type(ty))
+    };
+    let goals = engine.list_query(&ranked("goal")).unwrap();
+    assert_eq!(ids(&goals.items), ["zz12.g1", "zz12.g2", "zz12.g3"]);
+    let projects = engine.list_query(&ranked("project")).unwrap();
+    assert_eq!(
+        projects.total, 6,
+        "every live project: all seven but the deleted px"
+    );
+    let err = engine.list_query(&ranked("person")).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(err.msg.contains("pass `now`"), "{}", err.msg);
+    // The rank scope stays every live item: a filter does not change the ranks persons read.
+    let persons = engine.list_query(&ranked("person").now(NOW)).unwrap();
+    assert_eq!(ids(&persons.items), PERSONS);
+}
+
+#[test]
+fn a_malformed_now_is_refused() {
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    for q in [ListQuery::new(), ListQuery::new().sort(SortKey::Rank)] {
+        let err = engine(&tmp).list_query(&q.now("yesterday")).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation, "{}", err.msg);
+    }
+}
+
+#[test]
+fn a_page_restarts_when_an_op_outside_the_snapshot_reorders_it() {
+    // Review of PR #48, Test Quality #4 — resume check 2. The snapshot holds actions only; the op
+    // sets a GOAL's declared order, so it targets no item of the snapshot (check 1 passes), but it
+    // reorders the projects and with them the actions. g2 → 9: p5 (g1, two open children), p1,
+    // p3 (now min 2), p2, p4 — so a5, a6, a1, a3, a2, a4.
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let engine = engine(&tmp);
+    let q = || {
+        NextQuery::new(NOW)
+            .filter(NextFilter::new().with_type("action"))
+            .limit(2)
+    };
+    let p1 = engine.next_query(&q().paginate()).unwrap();
+    assert_eq!(ids(&p1.items), ACTIONS[..2]);
+    let token = p1.next_token.expect("rows remain");
+    {
+        let mut s = writer(tmp.path());
+        custom(&mut s, "zz12.g2", "order", "9");
+    }
+    let p2 = engine.next_query(&q().token(token)).unwrap();
+    assert!(p2.restarted, "an outside op moved the snapshot's items");
+    assert_eq!(ids(&p2.items), ["zz12.a5", "zz12.a6"]);
+    assert_eq!(p2.start, 0);
+}
+
+#[test]
 fn the_rank_follows_the_board_on_the_next_query() {
     // Moving a3 to the bottom-ranked project moves it; nothing is cached across queries.
     let tmp = workspace("derived-rank-fixture");
@@ -529,20 +595,23 @@ fn count_reads_every_direction_and_kind() {
     edge(&mut s, "zz12.i2", "zz12.b2", EdgeKind::Dep);
     edge(&mut s, "zz12.i2", "zz12.n1", EdgeKind::Mentions);
     edge(&mut s, "zz12.i1", "zz12.b3", EdgeKind::ContributesTo);
-    let first = |kind: &str| {
+    let first = |s: &Store, kind: &str| {
         ranked_items(
             &kinds_cfg(&format!(r#"[ {{ count = "{kind}", dir = "desc" }} ]"#)),
-            &s,
+            s,
         )[0]
         .clone()
     };
-    assert_eq!(first("contributors"), "zz12.i3");
-    assert_eq!(first("dependents"), "zz12.i3");
-    assert_eq!(first("mentioned_by"), "zz12.i4");
-    assert_eq!(first("dep"), "zz12.i2");
-    assert_eq!(first("mentions"), "zz12.i2");
-    assert_eq!(first("contributes_to"), "zz12.i1");
-    assert_eq!(first("parent"), "zz12.i1", "all zero: the id decides");
+    assert_eq!(first(&s, "contributors"), "zz12.i3");
+    assert_eq!(first(&s, "dependents"), "zz12.i3");
+    assert_eq!(first(&s, "mentioned_by"), "zz12.i4");
+    assert_eq!(first(&s, "dep"), "zz12.i2");
+    assert_eq!(first(&s, "mentions"), "zz12.i2");
+    assert_eq!(first(&s, "contributes_to"), "zz12.i1");
+    assert_eq!(first(&s, "parent"), "zz12.i1", "all zero: the id decides");
+    // One item with a parent: an outbound `parent` counts it (review of PR #48, Test Quality #7).
+    s.set_parent("zz12.i4", "zz12.b1", "t").unwrap();
+    assert_eq!(first(&s, "parent"), "zz12.i4");
 }
 
 #[test]
@@ -595,6 +664,184 @@ fn sum_adds_its_counts_with_equal_weight() {
 }
 
 #[test]
+fn a_concurrently_reparented_child_counts_under_its_projected_parent_only() {
+    // Review of PR #48, Integrity #1: two replicas re-point one child at once. The OR-set then
+    // holds both `parent` edges, but the derived keys read the `present_parent` projection — the
+    // one parent `belongs_to`, `--in` and `show` read (site 2 wins at equal lamport).
+    let mut a = kinds_board();
+    let mut b = Store::open_in_memory(2);
+    b.apply(&a.export());
+    // The note n1 under i2 (site 1) and under i3 (site 2); the item i1 under b1 P2 (site 1) and
+    // under b2 P0 (site 2); i2 under b3 P1 everywhere.
+    a.set_parent("zz12.n1", "zz12.i2", "alice").unwrap();
+    b.set_parent("zz12.n1", "zz12.i3", "bob").unwrap();
+    a.set_parent("zz12.i1", "zz12.b1", "alice").unwrap();
+    b.set_parent("zz12.i1", "zz12.b2", "bob").unwrap();
+    let (ea, eb) = (a.export(), b.export());
+    a.apply(&eb);
+    b.apply(&ea);
+    a.set_parent("zz12.i2", "zz12.b3", "t").unwrap();
+    assert_eq!(a.parents_of("zz12.n1").len(), 2, "precondition: two edges");
+    assert_eq!(
+        a.get_item("zz12.n1")
+            .unwrap()
+            .unwrap()
+            .belongs_to
+            .as_deref(),
+        Some("zz12.i3")
+    );
+    assert_eq!(
+        a.get_item("zz12.i1")
+            .unwrap()
+            .unwrap()
+            .belongs_to
+            .as_deref(),
+        Some("zz12.b2")
+    );
+    let children = kinds_cfg(r#"[ { count = "children", dir = "desc" } ]"#);
+    assert_eq!(
+        ranked_items(&children, &a),
+        ["zz12.i3", "zz12.i1", "zz12.i2", "zz12.i4"],
+        "n1 counts under i3 alone, not under i2 as well"
+    );
+    let max = kinds_cfg(r#"[ { related = "parent", of = { field = "priority" }, pick = "max" } ]"#);
+    assert_eq!(
+        ranked_items(&max, &a),
+        ["zz12.i1", "zz12.i2", "zz12.i3", "zz12.i4"],
+        "i1 reads b2's P0 — max over the one projected parent, not b1's P2 as well"
+    );
+}
+
+#[test]
+fn a_list_rank_scope_ignores_the_status_filter() {
+    // spec §12, decision 2, pinned (review of PR #48, Test Quality #2): under `--status open` the
+    // closed box b2 is filtered out of the rows, but it is still in the scope its type ranks over,
+    // so its rank (0, P0) is still read by the item under it.
+    let mut s = kinds_board();
+    close(&mut s, "zz12.b2");
+    s.set_parent("zz12.i3", "zz12.b2", "t").unwrap(); // rank 0, closed
+    s.set_parent("zz12.i1", "zz12.b1", "t").unwrap(); // rank 2
+    let cfg = kinds_cfg(r#"[ { related = "parent", type = "box", of = "rank" } ]"#);
+    let rows = read::list_at(&cfg, &s, Some("open"), None, Some(SortKey::Rank), None).unwrap();
+    assert!(!ids(&rows).contains(&"zz12.b2".to_string()), "filtered out");
+    assert_eq!(
+        of_type(&rows, "item"),
+        ["zz12.i3", "zz12.i1", "zz12.i2", "zz12.i4"]
+    );
+}
+
+#[test]
+fn a_derived_key_ranks_in_the_list_default_order_without_per_type_tables() {
+    // Review of PR #48, Test Quality #5: the `[ranking.list]` default order takes derived keys
+    // (spec §12) and ranks every type by them when no per-type order is declared.
+    let cfg: PluginConfig = toml::from_str(
+        r#"
+        name = "list-default-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P0", "P1", "P2", "P3"]
+        [types]
+        list = ["item", "box", "note"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "priority" } ]
+        [ranking.list]
+        order = [ { count = "children", dir = "desc" }, { field = "priority" } ]
+        [presentation.list]
+        columns = ["id"]
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.ranking.list.has_derived() && !cfg.ranking.list.splits_by_type());
+    let mut s = kinds_board();
+    // b3 two children, i4 one; everyone else none, then priority (P0 items, b2 P0, b1 P2, n1 P3).
+    s.set_parent("zz12.i1", "zz12.b3", "t").unwrap();
+    s.set_parent("zz12.i2", "zz12.b3", "t").unwrap();
+    s.set_parent("zz12.n1", "zz12.i4", "t").unwrap();
+    let rows = read::list_at(&cfg, &s, None, None, Some(SortKey::Rank), None).unwrap();
+    assert_eq!(
+        ids(&rows),
+        ["zz12.b3", "zz12.i4", "zz12.b2", "zz12.i1", "zz12.i2", "zz12.i3", "zz12.b1", "zz12.n1"]
+    );
+}
+
+/// A plugin whose list ranks items by the rank of their parent box, and whose `next` ranks boxes
+/// by `box_order` — the cross-section read whose fingerprint a list token carries.
+fn cross_cfg(box_order: &str) -> PluginConfig {
+    toml::from_str(&format!(
+        r#"
+        name = "cross-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P0", "P1", "P2", "P3"]
+        [types]
+        list = ["item", "box", "note"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        types = ["box"]
+        order = [ {{ field = "priority" }} ]
+        [ranking.next.box]
+        order = {box_order}
+        [ranking.list]
+        types = ["item"]
+        [ranking.list.item]
+        order = [ {{ related = "parent", type = "box", of = "rank" }} ]
+        [presentation.list]
+        columns = ["id"]
+        "#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_derived_list_token_restarts_when_only_the_next_order_changes() {
+    // Review of PR #48, Test Quality #3: a list order that reads a `next` rank binds its token to
+    // `[ranking.next]` too. The changed `next` order adds a key that decides nothing here (every
+    // box is open), so the list order is the same and only the fingerprint can restart the token.
+    let mut s = kinds_board();
+    s.set_parent("zz12.i1", "zz12.b1", "t").unwrap();
+    s.set_parent("zz12.i2", "zz12.b2", "t").unwrap();
+    s.set_parent("zz12.i3", "zz12.b3", "t").unwrap();
+    let before = cross_cfg(r#"[ { field = "priority", dir = "asc" } ]"#);
+    let after =
+        cross_cfg(r#"[ { field = "priority", dir = "asc" }, { field = "status", dir = "asc" } ]"#);
+    let q = || {
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_type("item"))
+            .now(NOW)
+            .limit(2)
+    };
+    let p1 = read::list_page(&before, &s, &q().paginate()).unwrap();
+    assert_eq!(
+        ids(&p1.items),
+        ["zz12.i2", "zz12.i3"],
+        "b2 P0, b3 P1, b1 P2"
+    );
+    let token = p1.next_token.expect("rows remain");
+    let same = read::list_page(&before, &s, &q().token(token.clone())).unwrap();
+    assert!(!same.restarted, "the same plugin resumes");
+    assert_eq!(ids(&same.items), ["zz12.i1", "zz12.i4"]);
+    let fresh = read::list_page(&after, &s, &q()).unwrap();
+    assert_eq!(ids(&fresh.items), ids(&p1.items), "the order did not move");
+    let changed = read::list_page(&after, &s, &q().token(token)).unwrap();
+    assert!(
+        changed.restarted,
+        "a changed [ranking.next.box] restarts the list token"
+    );
+}
+
+#[test]
 fn a_plugin_without_derived_keys_ranks_list_and_next_as_before() {
     let cfg = plugin::load("issue-tracker").unwrap();
     let mut s = Store::open_in_memory(1);
@@ -625,6 +872,9 @@ fn another_edge_order_ranks_alike_and_ties_fall_to_the_id() {
         ("zz12.i1", "zz12.b3", EdgeKind::ContributesTo),
         ("zz12.i1", "zz12.b1", EdgeKind::ContributesTo),
         ("zz12.b3", "zz12.i1", EdgeKind::Mentions),
+        // i4 ties i2 on both keys (one mention, best box b1): a FULL tie.
+        ("zz12.n1", "zz12.i4", EdgeKind::Mentions),
+        ("zz12.i4", "zz12.b1", EdgeKind::ContributesTo),
     ];
     let build = |order: &[usize]| {
         let mut s = kinds_board();
@@ -634,12 +884,27 @@ fn another_edge_order_ranks_alike_and_ties_fall_to_the_id() {
         }
         ranked_items(&cfg, &s)
     };
-    let forward = build(&[0, 1, 2, 3, 4, 5, 6]);
-    assert_eq!(build(&[6, 5, 4, 3, 2, 1, 0]), forward);
-    assert_eq!(build(&[3, 0, 6, 1, 5, 2, 4]), forward);
-    // i3: 2 mentions; i1 and i2: 1 each, then the best box rank (b3 rank 1 vs b1 rank 2): i1;
-    // i4: 0. A full tie (no keys deciding) falls to the id, as every order does.
+    // The edge reads are ordered, so the insertion order cannot leak into the rank today; this
+    // pins that against a future read that is not (a hash map, an unordered scan).
+    let forward = build(&[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(build(&[8, 7, 6, 5, 4, 3, 2, 1, 0]), forward);
+    assert_eq!(build(&[3, 7, 0, 6, 1, 8, 5, 2, 4]), forward);
+    // i3: 2 mentions; i1, i2 and i4: 1 each, then the best box rank (b3 rank 1 vs b1 rank 2): i1;
+    // i2 and i4 tie on every key and fall to the id, as every order does.
     assert_eq!(forward, ["zz12.i3", "zz12.i1", "zz12.i2", "zz12.i4"]);
+    // The full tie, from the other side: renamed so that the id order is reversed, the tied pair
+    // swaps, and nothing else moves.
+    let mut s = kinds_board();
+    item(&mut s, "zz12.i0", "item", "0");
+    for &(from, to, kind) in &edges {
+        let swap = |id: &'static str| if id == "zz12.i4" { "zz12.i0" } else { id };
+        edge(&mut s, swap(from), swap(to), kind);
+    }
+    s.delete_item("zz12.i4", "t");
+    assert_eq!(
+        ranked_items(&cfg, &s),
+        ["zz12.i3", "zz12.i1", "zz12.i0", "zz12.i2"]
+    );
 }
 
 // ---- bounded cost (§9: a ratio guard in the style of xn8s) ----------------------------
@@ -709,9 +974,17 @@ fn the_edge_pass_runs_once_per_query_however_many_candidates() {
         small_edges,
         EdgeReadStats {
             passes: 2,
-            mention_lookups: 1
+            mention_lookups: 1,
+            ..small_edges
         },
         "one edge pass per query, one mention lookup for the one query that counts mentions"
+    );
+    // Every other read of edges, labels or custom fields is counted too (review of PR #48, Test
+    // Quality #1): none runs per item, and the bulk ones do not grow with the board (the equality
+    // below), so a per-candidate regression through any of them goes red here.
+    assert_eq!(
+        small_edges.per_item, 0,
+        "no per-item edge read: {small_edges:?}"
     );
     assert_eq!(
         large_edges, small_edges,

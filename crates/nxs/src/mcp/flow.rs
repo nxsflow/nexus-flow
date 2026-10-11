@@ -57,12 +57,9 @@ pub(super) fn list(db: Option<&str>, start: &Path, p: &FlowListParams) -> Result
     let store = ws.open_store()?;
     let sort = p.sort.as_deref().map(read::parse_sort).transpose()?;
     // `now` only matters to a derived ranking key of `[ranking.list]` that reads the rank of a
-    // type `next` ranks (6j6v.x0wf) — resolved as `nxf list` resolves it, and only for such a
-    // plugin, so the seams agree.
-    let now = cfg
-        .ranking
-        .list
-        .has_derived()
+    // type `next` ranks (6j6v.x0wf) — resolved as `nxf list` resolves it, and only for a ranked
+    // list under such a plugin, so the seams agree.
+    let now = (sort == Some(read::SortKey::Rank) && cfg.ranking.list.has_derived())
         .then(|| resolve_now(None))
         .transpose()?;
     let items = read::list_at(

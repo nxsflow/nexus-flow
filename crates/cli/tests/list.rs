@@ -339,12 +339,28 @@ fn list_human_view_discloses_the_cut_and_prints_the_token() {
 fn list_paginate_needs_a_limit_and_a_token_needs_paginate() {
     let tmp = TempDir::new().unwrap();
     contained_board(tmp.path());
-    let cases: [&[&str]; 3] = [
-        &["list", "--paginate"],
-        &["list", "--limit", "2", "--token", "x.2"],
-        &["list", "--limit", "0", "--paginate"],
+    // The refusal names what is missing, not just any failure (review of PR #48, Test Quality #9).
+    let cases: [(&[&str], &[&str]); 3] = [
+        (&["list", "--paginate"], &["required", "--limit"]),
+        (
+            &["list", "--limit", "2", "--token", "x.2"],
+            &["required", "--paginate"],
+        ),
+        (
+            &["list", "--limit", "0", "--paginate"],
+            &["paginate needs a limit of at least 1"],
+        ),
     ];
-    for args in cases {
-        nxf().args(args).current_dir(tmp.path()).assert().failure();
+    for (args, needles) in cases {
+        let out = nxf()
+            .args(args)
+            .current_dir(tmp.path())
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let err = String::from_utf8(out).unwrap();
+        assert!(needles.iter().all(|n| err.contains(n)), "{args:?}: {err}");
     }
 }

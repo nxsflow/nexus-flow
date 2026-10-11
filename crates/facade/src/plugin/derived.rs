@@ -181,7 +181,8 @@ impl Ranking {
     ///   ([`RANKABLE_FIELDS`](crate::record::RANKABLE_FIELDS)) or a custom field of `[fields]`,
     ///   and a custom field scoped `on` some types applies to the key's `type`;
     /// - `of = "rank"` with a `type` names a type with a declared order
-    ///   (`[ranking.next.<type>]` or `[ranking.list.<type>]`);
+    ///   (`[ranking.next.<type>]` or `[ranking.list.<type>]`), and in the `[ranking.list]`
+    ///   default order `of = "rank"` names a `type`;
     /// - the type graph is acyclic: an edge from each per-type order to every order its keys read
     ///   the rank of; a cycle is refused with the cycle named (spec §4).
     pub(crate) fn validate_derived(
@@ -253,6 +254,19 @@ impl Ranking {
                         }
                     }
                 }
+            }
+            // An untyped rank key in the default order (only `[ranking.list]`'s can hold one)
+            // would read the rank of every type with a declared order — a silent no-op without
+            // per-type tables, and with them a chain over every type that may demand `now`. The
+            // per-type orders refuse the same key as a self-cycle; refused here alike (review of
+            // PR #48, Integrity #3).
+            Some(RankOf::Rank) if scope.is_empty() && key.item_type.is_none() => {
+                return Err(format!(
+                    "[{}] default `order`: ranking key {desc} reads `of = \"rank\"` without \
+                     `type`, which would read the rank of every type with a declared order — \
+                     name the neighbour's `type`",
+                    verb.section()
+                ));
             }
             Some(RankOf::Rank) => {
                 if let Some(ty) = &key.item_type {
