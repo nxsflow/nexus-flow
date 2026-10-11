@@ -146,3 +146,74 @@ LOG
 That doubling is not redundancy — it *is* the explanation. The `--json` is the meaning; the
 plugin is how a particular audience reads and ranks it. Picking a plugin at `init` is therefore
 a real choice; run `nxf init --help` to see the options before you commit.
+
+## Declaring a ranking
+
+A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under
+`[ranking.list]`. Both take the same keys and the same rules:
+
+- `order = [...]` is the default order: a list of keys, compared in turn, with the id as the final
+  tiebreak.
+- `[ranking.next.<type>]` (or `[ranking.list.<type>]`) gives one type its own `order`.
+- `types = [...]` says how the types stand against each other once some have their own order.
+
+A key is a **field key**, such as `{ field = "priority", dir = "asc" }`. With a `precedence` list,
+a field key ranks by the value's position in that list instead. In a per-type order, or in the
+`[ranking.list]` default `order`, a key can also be a **derived key**, which ranks an item by its
+neighbours in the graph:
+
+```toml
+[ranking.next]
+types = ["project", "action"]
+order = [ { field = "priority" } ]
+
+# related: a value read on the neighbours over one outbound edge (parent, contributes_to, dep,
+# mentions). `of = "rank"` reads the neighbour's position in its own type's order;
+# `of = { field = "..." }` reads a field, a custom field included. `pick` is min (default) or max.
+[ranking.next.action]
+order = [
+  { related = "parent", type = "project", of = "rank", nulls = "last" },
+  { field = "priority" },
+]
+
+# count: how many neighbours match. children, contributors, dependents and mentioned_by count the
+# inbound parent, contributes_to, dep and mentions edges; an outbound kind counts the other way.
+# `type`, `status` (a list) and `label` filter the counted neighbours.
+[ranking.next.project]
+order = [
+  { related = "contributes_to", type = "goal", of = { field = "order" }, nulls = "last" },
+  { count = "children", type = "action", status = ["open", "in_progress"], dir = "desc" },
+]
+
+# sum: several counts, added with equal weight. `dir` belongs to the sum.
+[ranking.list]
+types = ["person"]
+[ranking.list.person]
+order = [
+  { sum = [ { count = "mentioned_by", type = "project" },
+            { count = "mentioned_by", type = "action", label = "waiting" } ], dir = "desc" },
+]
+```
+
+Derived keys count only live neighbours: a deleted one is gone, a closed or archived one counts.
+A rank is computed over the type's candidates under the verb that ranks it, and items that tie on
+every key share a rank. For `next` these candidates are its actionable items; for `list` they are
+the live, unarchived items. A neighbour outside that set, such as a closed project under `next`,
+has no rank and reads as null. A `list` key may read the rank of a type that only `next` ranks;
+`next`'s candidates are then taken at the current time (`NXF_NOW` pins it). Only `list --sort rank`
+reads that time.
+
+The plugin is refused at load, with the key named, when:
+
+- a key mixes kinds or names none;
+- a key names an unknown edge kind, type, status or field;
+- a key carries a part its kind does not take, such as `pick` on a count or `nulls` on a count or
+  sum (a count is never null);
+- `of = "rank"` names a type without an order of its own;
+- the types rank by each other in a cycle.
+
+A `related ... of = "rank"` key without `type` reads the rank of every type with an order, its own
+included. That is a cycle, so name the neighbour's `type`; the `[ranking.list]` default `order`
+refuses such a key too. Derived keys are not allowed in the
+`[ranking.next]` default `order`, because that order also ranks `blocked` and the lanes'
+`--sort rank`.

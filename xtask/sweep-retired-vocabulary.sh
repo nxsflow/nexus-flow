@@ -973,6 +973,13 @@ VOCABULARY=(
   'fold_(lww|item_lww|message|edge_add|edge_remove|note_add|note_redact|thread_open|thread_link_(add|remove)|membership_(add|remove)|label_(add|remove)|field)\b'
   'INSERT OR IGNORE INTO messages'
   'JOIN ops o ON o\.op_id'
+  #
+  # nxf 6j6v.x0wf (2026-10-11) — the per-type comparator `NextRank` became `TypeRank` when `list`
+  # took the same per-type orders (n698) and the derived keys were added to it once for both verbs.
+  # A RENAME, so the compiler followed every code site; what it could not follow is prose, and the
+  # review of PR #48 (Code Quality #2) found two spec lines still naming it. BARE: no identifier
+  # survives under the old name.
+  'NextRank'
 )
 
 # ---- THE EXCLUSIONS, each with the reason it is not a defect ----------------------------------

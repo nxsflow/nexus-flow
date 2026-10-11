@@ -1,6 +1,8 @@
 # Derived ranking keys — ranking over the graph, declared by the plugin (6j6v.e354)
 
 **Status: decided by the owner on 2026-10-09** (§10). The cuts that build it are listed in §11.
+**Built locally (x0wf, §12):** the three key kinds, their load-time rules and the type chain over
+the SQL path, in `next` and `list`. The server cuts (1c5s, xkr7) are open.
 Fourth cut of `6j6v.kfs7` (cut with the owner on 2026-10-09). The three cuts before it add the
 plumbing this one ranks with:
 
@@ -254,3 +256,37 @@ the plugin declares (`plugin-custom-fields.md`), as decided in §10.2.
   the table-contract note for the deploying stack, coordinated with app-foundations.
 - **Shared with `6j6v.q29p`.** The reverse mention lookup and `count = "mentioned_by"` use one
   implementation.
+
+## 12. The local cut as built (x0wf)
+
+How x0wf reads the points this spec leaves to the build. Each one is a load-time refusal or a
+reading of the text, so a later decision can loosen it without breaking a declaration.
+
+- **Which order `of = "rank"` reads.** The asking section's own `[ranking.<verb>.<type>]`, else
+  the other section's. That is how §8's persons, ranked by `list`, read the rank of the projects
+  that `next` ranks. A `list` query that needs `next`'s candidates takes them at a reference time:
+  `ListQuery::now`, which the CLI and MCP fill from the clock for a ranked list (`NXF_NOW` pins
+  it). Without one, such a query answers `validation`. The query's filters narrow the rows before
+  they are ranked, so only the orders the kept rows rank by are computed.
+- **The scope of a `list` rank** is the live, unarchived items of the type, whatever `--status`,
+  `--type`, `--in` or `--label` the query filters by. Filters select, keys order. `next`'s scope
+  is its candidates over the whole board, before its filters.
+- **A dense rank** (§4) means that items equal on every key of their type's order share a rank,
+  and the next distinct item takes the next integer. The id orders the sort, never the rank.
+- **Live neighbours.** A `related` or `count` key reads only live neighbours: a deleted one is
+  gone, a closed or archived one counts. This is the rule `mentioners_of` (q29p) applies, and
+  `count = "mentioned_by"` reads through it (§11).
+- **`of = { field, dir, nulls }`.** `dir` and `nulls` belong to the `related` key. Inside `of`
+  they are accepted at their defaults only, so §8's `dir = "asc"` loads, and refused otherwise.
+- **An untyped `related ... of = "rank"`** reads the rank of every type with an order, its own
+  included, so in a per-type order it is a cycle and refused. Name the neighbour's `type`. The
+  `[ranking.list]` default order refuses it too: there it would read nothing without per-type
+  orders, and every ranked type with them (review of PR #48).
+- **The `[ranking.next]` default `order` refuses derived keys**, because that order also ranks
+  `blocked` and the lanes' `--sort rank`, which compute none. The `[ranking.list]` default order
+  takes them.
+- **`nulls` on a `count` or `sum`** is refused: a count is never null (§3.2).
+- **The store-free lanes** (`read::next_active`) refuse a `[ranking.next]` with derived keys until
+  the server cut (1c5s) gives them the edges.
+- **TOML.** An inline table may not span lines outside its arrays (TOML 1.0), so a `sum`'s `dir`
+  stands on the line its array closes on. §8 above breaks that line for reading only.

@@ -48,7 +48,7 @@ impl Status {
 /// the OR-set replacement for the former single-parent `belongs_to` LWW register. The substrate is
 /// n:m-capable like every other edge; single-parent is enforced at the write seam during ②a and
 /// relaxed in ②c. The single current parent is projected by the `present_parent` view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     Dep,
     ContributesTo,

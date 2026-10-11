@@ -69,6 +69,41 @@ impl ItemReadStats {
     }
 }
 
+/// How many EDGE-, LABEL- and CUSTOM-FIELD-read queries a [`Store`] has run since it was opened
+/// (6j6v.x0wf) — the [`ItemReadStats`] instrument for the edge pass of the derived ranking keys
+/// (docs/specs/derived-ranking-keys.md §5): a test asserts the pass runs once per query, not once
+/// per candidate, by counting queries instead of timing them. Every read of an item's edges,
+/// labels or custom fields is counted in one of the four buckets, so a per-candidate regression
+/// through ANY of them shows (review of PR #48, Test Quality #1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeReadStats {
+    /// Whole-kind scans, [`Store::present_edges_of_kinds`] — one query each.
+    pub passes: u64,
+    /// Reverse mention lookups, [`Store::mentioned_by_bulk`] — one query per ≤500-target chunk.
+    pub mention_lookups: u64,
+    /// One-item reads — the edge targets ([`Store::deps_of`], [`Store::mentions_of`],
+    /// [`Store::contributes_to_of`], [`Store::parents_of`] and their fallible twins),
+    /// [`Store::children_of`], [`Store::labels_of`] and [`Store::custom_fields_of`]: one query each.
+    pub per_item: u64,
+    /// Bulk reads of labels, custom fields and `contributes_to` targets
+    /// ([`Store::labels_of_bulk`], [`Store::custom_fields_of_bulk`],
+    /// [`Store::contributes_to_of_bulk`]) — one query per ≤500-id chunk.
+    pub bulk: u64,
+}
+
+impl EdgeReadStats {
+    /// The queries run between an `earlier` snapshot and this one, saturating like
+    /// [`ItemReadStats::since`].
+    pub fn since(self, earlier: EdgeReadStats) -> EdgeReadStats {
+        EdgeReadStats {
+            passes: self.passes.saturating_sub(earlier.passes),
+            mention_lookups: self.mention_lookups.saturating_sub(earlier.mention_lookups),
+            per_item: self.per_item.saturating_sub(earlier.per_item),
+            bulk: self.bulk.saturating_sub(earlier.bulk),
+        }
+    }
+}
+
 /// flow's store over the shared substrate.
 pub struct Store {
     inner: Substrate,
@@ -76,6 +111,8 @@ pub struct Store {
     /// `&self`; `Store` is already `!Sync` (it holds a `rusqlite::Connection`), so this adds no
     /// constraint — and bumping a `Cell` is noise next to the SQLite query it counts.
     item_reads: std::cell::Cell<ItemReadStats>,
+    /// Query-shape instrumentation for the edge reads ([`EdgeReadStats`], 6j6v.x0wf).
+    edge_reads: std::cell::Cell<EdgeReadStats>,
 }
 
 impl Store {
@@ -92,6 +129,7 @@ impl Store {
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
+            edge_reads: std::cell::Cell::default(),
         };
         store.migrate_belongs_to_to_parent_edges();
         store
@@ -108,6 +146,7 @@ impl Store {
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
+            edge_reads: std::cell::Cell::default(),
         };
         store.migrate_belongs_to_to_parent_edges();
         Ok(store)
@@ -161,6 +200,18 @@ impl Store {
         c.single += single;
         c.bulk += bulk;
         self.item_reads.set(c);
+    }
+
+    /// Snapshot of the edge-read queries this store has run ([`EdgeReadStats`], 6j6v.x0wf).
+    pub fn edge_read_stats(&self) -> EdgeReadStats {
+        self.edge_reads.get()
+    }
+
+    /// Add one edge-read query to the running totals: `bump` raises the bucket it belongs to.
+    fn count_edge_read(&self, bump: impl FnOnce(&mut EdgeReadStats)) {
+        let mut c = self.edge_reads.get();
+        bump(&mut c);
+        self.edge_reads.set(c);
     }
 
     /// The current Lamport clock (highest lamport emitted/observed).
@@ -998,6 +1049,7 @@ impl Store {
         let mut stmt = self
             .conn()
             .prepare("SELECT label FROM present_labels WHERE item_id=?1 ORDER BY label")?;
+        self.count_edge_read(|c| c.per_item += 1);
         let rows = stmt.query_map([item_id], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -1028,6 +1080,7 @@ impl Store {
                  ORDER BY item_id, label"
             );
             let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(|c| c.bulk += 1);
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -1057,12 +1110,108 @@ impl Store {
                  ORDER BY from_id, to_id"
             );
             let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(|c| c.bulk += 1);
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
             for row in rows {
                 let (from, to) = row?;
                 out.entry(from).or_default().push(to);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The present `mentions` SOURCES of every id in `targets`: for each target, the items that
+    /// mention it, sorted and distinct — the reverse of [`mentions_of`](Self::mentions_of), in the
+    /// [`contributes_to_of_bulk`](Self::contributes_to_of_bulk) shape (one query per 500 ids, over
+    /// the `edge_adds_to` index). A target nothing mentions is absent from the map. The sources are
+    /// edge endpoints, not checked against the items: the facade's `read::mentioners_of` resolves
+    /// them and drops the deleted ones (6j6v.q29p).
+    ///
+    /// A target given twice is looked up once: the targets are deduplicated before they are
+    /// chunked, so a repeat across two chunks cannot list its sources twice.
+    pub fn mentioned_by_bulk(
+        &self,
+        targets: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, Vec<String>>> {
+        const CHUNK: usize = 500;
+        let mut targets = targets.to_vec();
+        targets.sort_unstable();
+        targets.dedup();
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for chunk in targets.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT to_id, from_id FROM present_edges \
+                 WHERE kind = 'mentions' AND to_id IN ({placeholders}) \
+                 ORDER BY to_id, from_id"
+            );
+            let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(|c| c.mention_lookups += 1);
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (to, from) = row?;
+                out.entry(to).or_default().push(from);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every present edge of the given `kinds`, as `(from, to, kind)`, in `(kind, from, to)` order —
+    /// ONE query however many kinds and edges (6j6v.x0wf). The edge pass of the derived ranking
+    /// keys (docs/specs/derived-ranking-keys.md §5): one scan over the edges of the kinds a
+    /// plugin's keys name, so a query's cost is O(E) in those edges, never one query per candidate.
+    /// The endpoints are not checked against the items; the caller drops the dead ones. No kinds,
+    /// no query.
+    ///
+    /// **`parent` is the projection, not the OR-set** (review of PR #48, Integrity #1): its rows
+    /// come from the `present_parent` view — each child's ONE current parent, the LWW winner that
+    /// `belongs_to`, `--in` and `show` read — never from the raw `parent` edges, which hold two
+    /// parents for a child after a concurrent re-parent. Every other kind is its present edges.
+    pub fn present_edges_of_kinds(
+        &self,
+        kinds: &[EdgeKind],
+    ) -> rusqlite::Result<Vec<(String, String, EdgeKind)>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let others: Vec<&str> = kinds
+            .iter()
+            .filter(|k| **k != EdgeKind::Parent)
+            .map(|k| k.as_str())
+            .collect();
+        let mut selects: Vec<String> = Vec::new();
+        if !others.is_empty() {
+            let placeholders = vec!["?"; others.len()].join(",");
+            selects.push(format!(
+                "SELECT from_id, to_id, kind FROM present_edges WHERE kind IN ({placeholders})"
+            ));
+        }
+        if kinds.contains(&EdgeKind::Parent) {
+            selects.push(
+                "SELECT child_id, parent_id, 'parent' AS kind FROM present_parent".to_string(),
+            );
+        }
+        let sql = format!("{} ORDER BY 3, 1, 2", selects.join(" UNION ALL "));
+        let mut stmt = self.conn().prepare(&sql)?;
+        self.count_edge_read(|c| c.passes += 1);
+        let names = others.into_iter();
+        let rows = stmt.query_map(rusqlite::params_from_iter(names), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (from, to, kind) = row?;
+            // A kind this binary does not know cannot match the `IN` list; skip defensively.
+            if let Some(kind) = EdgeKind::parse(&kind) {
+                out.push((from, to, kind));
             }
         }
         Ok(out)
@@ -1082,6 +1231,7 @@ impl Store {
         let mut stmt = self.conn().prepare(
             "SELECT field, value FROM custom_fields WHERE item_id=?1 AND value <> '' ORDER BY field",
         )?;
+        self.count_edge_read(|c| c.per_item += 1);
         let rows = stmt.query_map([item_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -1112,6 +1262,7 @@ impl Store {
                  ORDER BY item_id, field"
             );
             let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(|c| c.bulk += 1);
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1249,6 +1400,7 @@ impl Store {
         let mut stmt = self.conn().prepare(
             "SELECT from_id FROM present_edges WHERE to_id=?1 AND kind='parent' ORDER BY from_id",
         )?;
+        self.count_edge_read(|c| c.per_item += 1);
         let rows = stmt.query_map([parent], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -1297,6 +1449,7 @@ impl Store {
         let mut stmt = self.conn().prepare(
             "SELECT to_id FROM present_edges WHERE from_id=?1 AND kind=?2 ORDER BY to_id",
         )?;
+        self.count_edge_read(|c| c.per_item += 1);
         let rows = stmt.query_map(params![from, kind.as_str()], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -1511,6 +1664,139 @@ mod tests {
             ItemReadStats { single: 0, bulk: 2 },
             "one query per 500-id chunk; the empty slice runs none"
         );
+    }
+
+    #[test]
+    fn present_edges_of_kinds_reads_every_kind_asked_in_one_counted_query() {
+        // 6j6v.x0wf: the edge pass of the derived ranking keys — one query for every kind asked,
+        // removed edges excluded, other kinds left out; no kinds, no query.
+        let mut s = Store::open_in_memory(1);
+        for id in ["c1.a", "c1.b", "c1.c"] {
+            s.create_item(id, "task", "t", "t");
+        }
+        s.add_edge("c1.a", "c1.b", EdgeKind::Mentions, "t");
+        s.add_edge("c1.a", "c1.c", EdgeKind::Mentions, "t");
+        s.remove_edge("c1.a", "c1.c", EdgeKind::Mentions, "t");
+        s.add_edge("c1.b", "c1.c", EdgeKind::ContributesTo, "t");
+        s.add_edge("c1.c", "c1.a", EdgeKind::Dep, "t");
+        let before = s.edge_read_stats();
+        let edges = s
+            .present_edges_of_kinds(&[EdgeKind::Mentions, EdgeKind::ContributesTo])
+            .unwrap();
+        assert_eq!(
+            edges,
+            vec![
+                (
+                    "c1.b".to_string(),
+                    "c1.c".to_string(),
+                    EdgeKind::ContributesTo
+                ),
+                ("c1.a".to_string(), "c1.b".to_string(), EdgeKind::Mentions),
+            ]
+        );
+        assert!(s.present_edges_of_kinds(&[]).unwrap().is_empty());
+        let _ = s.mentioned_by_bulk(&["c1.b"]).unwrap();
+        assert_eq!(
+            s.edge_read_stats().since(before),
+            EdgeReadStats {
+                passes: 1,
+                mention_lookups: 1,
+                ..EdgeReadStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn present_edges_of_kinds_reads_parent_as_the_projected_single_parent() {
+        // Review of PR #48, Integrity #1: after two replicas re-point one child concurrently, the
+        // OR-set holds both `parent` edges, but the pass reports only the `present_parent` winner —
+        // the parent `belongs_to`, `--in` and `show` read — so a derived key cannot count the child
+        // under both. Other kinds still come from the present edges, in the same one query.
+        let mut a = Store::open_in_memory(1);
+        for id in ["c1.P", "c1.Q", "c1.T"] {
+            a.create_item(id, "task", id, "x");
+        }
+        let mut b = Store::open_in_memory(2);
+        b.apply(&a.export());
+        a.set_parent("c1.T", "c1.P", "alice").unwrap();
+        b.set_parent("c1.T", "c1.Q", "bob").unwrap();
+        let (ea, eb) = (a.export(), b.export());
+        a.apply(&eb);
+        b.apply(&ea);
+        a.add_edge("c1.T", "c1.P", EdgeKind::Mentions, "x");
+        assert_eq!(
+            a.parents_of("c1.T").len(),
+            2,
+            "precondition: two parent edges"
+        );
+        let before = a.edge_read_stats();
+        let edges = a
+            .present_edges_of_kinds(&[EdgeKind::Parent, EdgeKind::Mentions])
+            .unwrap();
+        assert_eq!(
+            edges,
+            vec![
+                ("c1.T".to_string(), "c1.P".to_string(), EdgeKind::Mentions),
+                ("c1.T".to_string(), "c1.Q".to_string(), EdgeKind::Parent),
+            ],
+            "one parent — the projection's winner (site 2 at equal lamport) — in (kind, from, to) order"
+        );
+        assert_eq!(
+            a.get_item("c1.T").unwrap().unwrap().belongs_to.as_deref(),
+            Some("c1.Q"),
+            "the same parent `belongs_to` reads"
+        );
+        assert_eq!(
+            a.present_edges_of_kinds(&[EdgeKind::Parent]).unwrap().len(),
+            1
+        );
+        assert_eq!(a.edge_read_stats().since(before).passes, 2);
+    }
+
+    #[test]
+    fn every_edge_label_and_custom_field_read_is_counted() {
+        // Review of PR #48, Test Quality #1: the ratio guard of the derived keys sees a
+        // per-candidate regression only if every read of an item's edges, labels or custom fields
+        // is counted somewhere.
+        let mut s = Store::open_in_memory(1);
+        s.create_item("c1.a", "task", "a", "x");
+        let before = s.edge_read_stats();
+        let _ = s.deps_of("c1.a").unwrap();
+        let _ = s.mentions_of("c1.a");
+        let _ = s.mentions_of_result("c1.a").unwrap();
+        let _ = s.contributes_to_of("c1.a").unwrap();
+        let _ = s.parents_of("c1.a");
+        let _ = s.parents_of_result("c1.a").unwrap();
+        let _ = s.children_of("c1.a");
+        let _ = s.labels_of("c1.a").unwrap();
+        let _ = s.custom_fields_of("c1.a").unwrap();
+        let _ = s.labels_of_bulk(&["c1.a"]).unwrap();
+        let _ = s.custom_fields_of_bulk(&["c1.a"]).unwrap();
+        let _ = s.contributes_to_of_bulk(&["c1.a"]).unwrap();
+        assert_eq!(
+            s.edge_read_stats().since(before),
+            EdgeReadStats {
+                per_item: 9,
+                bulk: 3,
+                ..EdgeReadStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn mentioned_by_bulk_lists_a_target_repeated_across_chunks_once() {
+        // Review of PR #48, Integrity #4: the doc promises each target's sources distinct, and a
+        // target given in two 500-id chunks must not collect its sources twice.
+        let mut s = Store::open_in_memory(1);
+        s.create_item("c1.m", "task", "m", "x");
+        s.create_item("c1.t", "task", "t", "x");
+        s.add_edge("c1.m", "c1.t", EdgeKind::Mentions, "x");
+        let fillers: Vec<String> = (0..600).map(|n| format!("c1.f{n:03}")).collect();
+        let mut targets: Vec<&str> = vec!["c1.t"];
+        targets.extend(fillers.iter().map(String::as_str));
+        targets.push("c1.t");
+        let m = s.mentioned_by_bulk(&targets).unwrap();
+        assert_eq!(m["c1.t"], ["c1.m"]);
     }
 
     #[test]
@@ -3759,6 +4045,27 @@ mod tests {
         let ready = crate::derive::ready(s.connection(), "2026-06-08T00:00:00Z").unwrap();
         assert!(ready.contains(&"c1.A".to_string()) && ready.contains(&"c1.B".to_string()));
         assert!(crate::derive::blocked(s.connection()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mentioned_by_bulk_inverts_the_present_mentions_edges_per_target() {
+        // 6j6v.q29p: the reverse of `mentions_of`, for many targets in one read.
+        let mut s = Store::open_in_memory(1);
+        for id in ["c1.A", "c1.B", "c1.C", "c1.D", "c1.T", "c1.U"] {
+            s.create_item(id, "task", id, "x");
+        }
+        s.add_edge("c1.C", "c1.T", EdgeKind::Mentions, "x");
+        s.add_edge("c1.A", "c1.T", EdgeKind::Mentions, "x");
+        s.add_edge("c1.A", "c1.T", EdgeKind::Mentions, "x"); // a second add: still one mentioner
+        s.add_edge("c1.B", "c1.U", EdgeKind::Mentions, "x");
+        s.add_edge("c1.D", "c1.T", EdgeKind::Mentions, "x");
+        s.remove_edge("c1.D", "c1.T", EdgeKind::Mentions, "x"); // removed: no longer a mentioner
+        s.add_edge("c1.B", "c1.T", EdgeKind::Dep, "x"); // another kind: not a mention
+        let m = s.mentioned_by_bulk(&["c1.T", "c1.U", "c1.A"]).unwrap();
+        assert_eq!(m["c1.T"], ["c1.A", "c1.C"], "sorted and distinct");
+        assert_eq!(m["c1.U"], ["c1.B"]);
+        assert!(!m.contains_key("c1.A"), "nothing mentions it: absent");
+        assert!(s.mentioned_by_bulk(&[]).unwrap().is_empty());
     }
 
     #[test]

@@ -1,0 +1,34 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH by 1  "by " 
+.SH NAME
+by \- List the items that mention `id` — the reverse of `list` — in id order, closed and archived mentioners included. `\-\-type`, `\-\-in` and `\-\-label` narrow it as they narrow `next`; `\-\-limit` shows only the head and says so; `\-\-paginate` adds a token for the next page. Under `\-\-json` the records are `list \-\-json`\*(Aqs, as a plain array — or, with `\-\-limit`, as `{"items": [...], "total": <n>}`, plus `"next_token"` (a string, or null on the last page) and `"restarted"` (bool) with `\-\-paginate`, exactly as `next \-\-limit \-\-json` wraps them
+.SH SYNOPSIS
+\fBby\fR [\fB\-\-type\fR] [\fB\-\-in\fR] [\fB\-\-label\fR] [\fB\-\-limit\fR] [\fB\-\-paginate\fR] [\fB\-\-token\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIID\fR> 
+.SH DESCRIPTION
+List the items that mention `id` — the reverse of `list` — in id order, closed and archived mentioners included. `\-\-type`, `\-\-in` and `\-\-label` narrow it as they narrow `next`; `\-\-limit` shows only the head and says so; `\-\-paginate` adds a token for the next page. Under `\-\-json` the records are `list \-\-json`\*(Aqs, as a plain array — or, with `\-\-limit`, as `{"items": [...], "total": <n>}`, plus `"next_token"` (a string, or null on the last page) and `"restarted"` (bool) with `\-\-paginate`, exactly as `next \-\-limit \-\-json` wraps them
+.SH OPTIONS
+.TP
+\fB\-\-type\fR \fI<TYPE>\fR
+Only mentioners of this type (the stored type, as `list \-\-type` takes it). Repeatable: the types are alternatives
+.TP
+\fB\-\-in\fR \fI<ID>\fR
+Only mentioners in this container: its children (whose parent it is) and the items that contribute to it
+.TP
+\fB\-\-label\fR \fI<LABEL>\fR
+Only mentioners carrying this label
+.TP
+\fB\-\-limit\fR \fI<LIMIT>\fR
+Max items to show (default: no limit). Applied after the filters and never silently: a truncated list is headed `showing <n> of <total>`, and under `\-\-json` the flag wraps the records as `{"items": [...], "total": <n>}`
+.TP
+\fB\-\-paginate\fR
+Page through the list `\-\-limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `\-\-json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+.TP
+\fB\-\-token\fR \fI<TOKEN>\fR
+The token a previous `\-\-paginate` answer printed: show the page after that one
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIID\fR>
+The mentioned item

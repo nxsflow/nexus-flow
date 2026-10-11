@@ -20,14 +20,16 @@
 //! caller decides whether that is the system clock or an override (the CLI's `--now`).
 
 use crate::error::{NxfError, Result};
-use crate::plugin::{Dir, Nulls, PluginConfig, RankKey};
+use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec, Verb};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
 use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+mod derived;
 
 // ---- schema (plugin-aware field + type-system introspection, 8qv.5 / y5j8) --------------------
 //
@@ -536,6 +538,16 @@ fn blocked_ids(store: &Store) -> Result<Vec<String>> {
 /// per-verb default ([`DEFAULT_SORT_LIST`], id, so `list --json` stays plugin-independent); the
 /// order is preserved into the `--json` projection ([`items_in_order_value`]), so `--sort rank`
 /// surfaces in the output too (C2 #916.2).
+///
+/// `--sort rank` ranks by the plugin's `[ranking.list]` policy ([`Ranking::list`], 6j6v.n698): its
+/// per-type orders and cross-type order where the plugin declares them, else the `[ranking.next]`
+/// default order as before.
+///
+/// [`Ranking::list`]: crate::plugin::Ranking::list
+///
+/// A `[ranking.list]` with a derived key that reads the rank of a type only `next` ranks needs a
+/// reference time for `next`'s candidates; this has none and answers `validation` there — take
+/// [`list_at`].
 pub fn list(
     cfg: &PluginConfig,
     store: &Store,
@@ -543,16 +555,210 @@ pub fn list(
     item_type: Option<&str>,
     sort: Option<SortKey>,
 ) -> Result<Vec<ItemRow>> {
-    let mut items: Vec<ItemRow> = store
-        .list_items()?
-        .into_iter()
-        .filter(|i| i.deleted.as_deref() != Some("1"))
-        .filter(|i| i.archived.is_none())
-        .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
-        .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
-        .collect();
-    order_by(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_LIST));
+    list_at(cfg, store, status, item_type, sort, None)
+}
+
+/// [`list`] with the reference time `now` (6j6v.x0wf): the instant `next`'s candidates are taken
+/// at when a derived key of `[ranking.list]` reads the rank of a type that `next` ranks
+/// (docs/specs/derived-ranking-keys.md §4: a type's rank is computed over its candidates under the
+/// verb that ranks it). Nothing else reads `now`; without such a key it changes nothing.
+pub fn list_at(
+    cfg: &PluginConfig,
+    store: &Store,
+    status: Option<&str>,
+    item_type: Option<&str>,
+    sort: Option<SortKey>,
+    now: Option<&str>,
+) -> Result<Vec<ItemRow>> {
+    list_selected(cfg, store, status, sort, now, |rows| {
+        Ok(rows
+            .into_iter()
+            .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
+            .collect())
+    })
+}
+
+/// The live items with the core status `status` that `select` keeps, ordered by `sort` — the body
+/// of [`list_at`] and [`list_page`]. `select` narrows the rows BEFORE they are ranked (review of
+/// PR #48, Code Quality #1), so the derived keys' type chain covers only the orders the kept rows
+/// rank by: a type filter whose order reads no `next` rank needs no `now`, and a filtered query
+/// does no work for the rows it drops. The rank SCOPE stays every live item of a type, whatever
+/// `status` or `select` keep (spec §12, decision 2) — filters select, keys order. A row's derived
+/// values depend on that scope only, never on the other ranked rows, so narrowing first orders
+/// the kept rows exactly as narrowing after would.
+fn list_selected(
+    cfg: &PluginConfig,
+    store: &Store,
+    status: Option<&str>,
+    sort: Option<SortKey>,
+    now: Option<&str>,
+    select: impl FnOnce(Vec<ItemRow>) -> Result<Vec<ItemRow>>,
+) -> Result<Vec<ItemRow>> {
+    if let Some(now) = now {
+        crate::validate::iso_date(now)?;
+    }
+    let live = derived::list_scope(store)?;
+    let key = sort.unwrap_or(DEFAULT_SORT_LIST);
+    let mut items: Vec<ItemRow> = select(
+        live.iter()
+            .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
+            .cloned()
+            .collect(),
+    )?;
+    if key == SortKey::Rank {
+        // The derived keys of `[ranking.list]` (6j6v.x0wf), computed once for these rows; the
+        // unfiltered live items are `list`'s scope for "rank" — filters select, keys order.
+        let derived = derived::compute(
+            cfg,
+            store,
+            Verb::List,
+            &items,
+            derived::Scopes {
+                next: None,
+                list: Some(&live),
+                now,
+            },
+        )?;
+        let rank = TypeRank::list(cfg).with_derived(derived.as_ref());
+        items.sort_by(|a, b| rank.cmp(a, b));
+    } else {
+        order_by(cfg, &mut items, key);
+    }
     Ok(items)
+}
+
+// ---- list: filters and paging (6j6v.n698) -----------------------------------
+
+/// One `list` request with its filters and paging (6j6v.n698) — the input of [`list_page`] and
+/// [`Engine::list_query`]. The paging is `next`'s ([`NextQuery`]): the same three shapes, the same
+/// machine-local snapshot cache, expiry, caps and invalidation, because it is the same mechanism.
+///
+/// - No `limit`: the whole list.
+/// - `limit` alone: the head of it, with the total disclosed and no token.
+/// - `limit` + `paginate`: the head plus a `next_token` while rows remain; a stale or invalid token
+///   answers the FIRST page of a fresh list with `restarted: true`.
+///
+/// The filter is a [`NextFilter`] and means what it means for `next`: the types are alternatives,
+/// the container keeps an item whose parent it is OR that contributes to it, the label keeps an
+/// item carrying it. `status` is `list`'s own filter (the core status).
+///
+/// `#[non_exhaustive]`: build it with [`ListQuery::new`] and the builder methods.
+///
+/// [`Engine::list_query`]: crate::engine::Engine::list_query
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListQuery {
+    /// Only items with this core status. `None`: any.
+    pub status: Option<String>,
+    /// The order; `None` is the id default ([`DEFAULT_SORT_LIST`]). `rank` is the plugin's
+    /// `[ranking.list]` policy.
+    pub sort: Option<SortKey>,
+    /// The filters; empty keeps every item.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+    /// The reference time (ISO-8601 / RFC3339) `next`'s candidates are taken at when a derived key
+    /// of `[ranking.list]` reads the rank of a type that `next` ranks (6j6v.x0wf, see
+    /// [`list_at`]). `None`: such a query answers `validation`; any other ignores it.
+    pub now: Option<String>,
+}
+
+impl ListQuery {
+    /// Every live, non-archived item, in id order, unpaged — what [`list`] returns unfiltered.
+    pub fn new() -> ListQuery {
+        ListQuery::default()
+    }
+
+    /// Only items with the core status `status`.
+    pub fn status(mut self, status: impl Into<String>) -> ListQuery {
+        self.status = Some(status.into());
+        self
+    }
+
+    /// Order by `sort` instead of id.
+    pub fn sort(mut self, sort: SortKey) -> ListQuery {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> ListQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> ListQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> ListQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> ListQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// Take `next`'s candidates at `now` where a derived key of `[ranking.list]` reads the rank of
+    /// a type that `next` ranks (6j6v.x0wf).
+    pub fn now(mut self, now: impl Into<String>) -> ListQuery {
+        self.now = Some(now.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: the read, status, sort, filter and the plugin's
+    /// `[ranking.list]` policy — never `limit`. Naming the read keeps a `list` token from answering
+    /// a `next` or `mentioned_by` query; the ranking's fingerprint makes a token restart under a
+    /// changed plugin order, as `next`'s does.
+    fn key(&self, cfg: &PluginConfig) -> String {
+        json!({
+            "read": "list",
+            "status": self.status,
+            "sort": self.sort.unwrap_or(DEFAULT_SORT_LIST).as_str(),
+            "filter": self.filter.key(),
+            "rank": policy_fingerprint(cfg, Verb::List),
+        })
+        .to_string()
+    }
+}
+
+/// One `list` page (6j6v.n698): [`list`] under `q.status` and `q.sort`, narrowed by `q.filter`
+/// before it is ranked (the rank scope stays every live item, see the private `list_selected`),
+/// cut and — under `paginate` — cached machine-locally like a `next` page, so
+/// the following pages come from the same list. A token's snapshot restarts when an op after it
+/// touches one of its items, or an item in it left or moved in the fresh list. `validation` for
+/// `paginate` without a non-zero `limit`, or a token without `paginate`.
+///
+/// A first page whose snapshot cannot be written is still answered, with `next_token: None`, as
+/// for [`next_page`].
+pub fn list_page(cfg: &PluginConfig, store: &Store, q: &ListQuery) -> Result<NextPage> {
+    list_page_at(cfg, store, q, unix_now())
+}
+
+/// [`list_page`] on the clock `clock` (unix seconds).
+fn list_page_at(cfg: &PluginConfig, store: &Store, q: &ListQuery, clock: i64) -> Result<NextPage> {
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
+    let mark = Watermark::read(store)?;
+    let fresh = list_selected(
+        cfg,
+        store,
+        q.status.as_deref(),
+        q.sort,
+        q.now.as_deref(),
+        |rows| filter_next_store(store, rows, &q.filter),
+    )?;
+    page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
 }
 
 /// The canonical `--json` array for a derived/queried item set: records ordered by id.
@@ -828,22 +1034,38 @@ pub fn next(
     let candidates = lanes(store, now)?.candidates;
     let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
     let items = resolve_items(store, &ids)?;
-    Ok(next_lane(
-        cfg,
-        candidates,
-        items,
-        sort.unwrap_or(DEFAULT_SORT_NEXT),
-    ))
+    let sort = sort.unwrap_or(DEFAULT_SORT_NEXT);
+    // Derived ranking keys (6j6v.x0wf) rank within the tiers, so only the rank order computes
+    // them — once for the whole candidate set; the candidates ARE `next`'s scope for "rank".
+    let derived = match sort {
+        SortKey::Rank => derived::compute(
+            cfg,
+            store,
+            Verb::Next,
+            &items,
+            derived::Scopes {
+                next: Some(&items),
+                list: None,
+                now: Some(now),
+            },
+        )?,
+        _ => None,
+    };
+    Ok(next_lane(cfg, candidates, items, sort, derived.as_ref()))
 }
 
 /// The `next` order over the library's candidates and their rows: the finish-first tiers under
 /// `rank`, the flat order under any other key. THE one mechanism behind [`next`] (rows from a
 /// store) and [`next_active`] (rows a server read), so the two cannot rank apart (6j6v.t1ym).
+///
+/// `derived` holds the values of the policy's derived keys for these rows (6j6v.x0wf), `None`
+/// when it declares none.
 fn next_lane(
     cfg: &PluginConfig,
     candidates: Vec<nexus_flow_core::graph::Candidate>,
     mut items: Vec<ItemRow>,
     sort: SortKey,
+    derived: Option<&derived::Derived>,
 ) -> Vec<ItemRow> {
     match sort {
         // The default: finishing beats starting.
@@ -857,7 +1079,7 @@ fn next_lane(
                     promoter: c.promoter,
                 })
                 .collect();
-            order_next_tiered(cfg, &candidates, &mut items)
+            order_next_tiered(cfg, &candidates, &mut items, derived)
         }
         // An explicit `--sort` is the escape hatch — the flat, untiered order (§4.2).
         key => order_by(cfg, &mut items, key),
@@ -865,7 +1087,8 @@ fn next_lane(
     items
 }
 
-/// One page of a `next` result: the rows to show, plus how many there were before the cut.
+/// One page of a `next` result — or of any read paged like it (`mentioned_by`, 6j6v.q29p; `list`,
+/// 6j6v.n698): the rows to show, plus how many there were before the cut.
 ///
 /// The type exists so the total cannot be dropped on the way to a renderer. A limit that cuts
 /// silently is worse than no limit at all — a list that shows 15 of 180 and looks like 15 of 15
@@ -1158,23 +1381,40 @@ impl NextQuery {
         json!({
             "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
             "filter": self.filter.key(),
-            "rank": rank_fingerprint(cfg),
+            "rank": policy_fingerprint(cfg, Verb::Next),
         })
         .to_string()
     }
 }
 
-/// A fixed-size fingerprint of the plugin's `next` ranking: FNV-1a (64 bit) over its canonical JSON
+/// A fixed-size fingerprint of a ranking policy (`[ranking.next]`, or `[ranking.list]` for a `list`
+/// snapshot, 6j6v.n698): FNV-1a (64 bit) over its canonical JSON
 /// (`serde_json` over the `Serialize` derive; the per-type orders are a `BTreeMap`, so the bytes
 /// are deterministic). FNV is spelled out here because it is stable across Rust releases, which
 /// `DefaultHasher` does not promise. A collision would only let a token survive a ranking change
 /// whose new order the snapshot check in `resume` still compares against.
-fn rank_fingerprint(cfg: &PluginConfig) -> String {
-    let canonical = serde_json::to_string(&cfg.ranking.next).unwrap_or_default();
+fn rank_fingerprint(spec: &RankSpec) -> String {
+    let canonical = serde_json::to_string(spec).unwrap_or_default();
     let hash = canonical.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     });
     format!("{hash:016x}")
+}
+
+/// The fingerprint a snapshot of `verb`'s rank is bound to: its policy's [`rank_fingerprint`], and
+/// — when that policy holds a derived key, which may read the rank of a type the OTHER policy
+/// orders (6j6v.x0wf) — the other policy's too, so a token restarts when either order changes.
+/// A policy without derived keys keeps exactly the fingerprint it had.
+fn policy_fingerprint(cfg: &PluginConfig, verb: Verb) -> String {
+    let own = rank_fingerprint(cfg.ranking.spec(verb));
+    if !cfg.ranking.has_derived(verb) {
+        return own;
+    }
+    let other = match verb {
+        Verb::Next => &cfg.ranking.list,
+        Verb::List => &cfg.ranking.next,
+    };
+    format!("{own}+{}", rank_fingerprint(other))
 }
 
 /// Unix seconds now — the clock the snapshot expiry reads. Not `now`: that is the caller's
@@ -1273,24 +1513,76 @@ pub fn next_page(cfg: &PluginConfig, store: &Store, q: &NextQuery) -> Result<Nex
 /// tested.
 fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) -> Result<NextPage> {
     crate::validate::iso_date(&q.now)?;
-    if q.token.is_some() && !q.paginate {
-        return Err(NxfError::validation("a page token needs paginate"));
-    }
-    let limit = match (q.paginate, q.limit) {
-        (false, _) => None,
-        (true, Some(n)) if n > 0 => Some(n),
-        (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
-    };
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
     // The watermark BEFORE the list: an op that lands while the list is computed is then above it
     // and counts as "since" — a spurious restart at worst, never a missed one.
-    let watermark = store.ops_watermark()?;
-    let watermark_op = store.op_at(watermark)?;
+    let mark = Watermark::read(store)?;
     let fresh = next_filtered(cfg, store, &q.now, q.sort, &q.filter)?;
-    let Some(n) = limit else {
-        return Ok(truncate_next(fresh, q.limit));
+    page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
+}
+
+/// The paging half of a request, checked: what [`page_through`] cuts and caches by. Shared by
+/// every paged read (`next`, `mentioned_by`, `list`), so their rules cannot drift apart
+/// (6j6v.q29p, 6j6v.n698).
+struct Paging<'a> {
+    /// The cut: `None` is the whole list.
+    limit: Option<usize>,
+    /// `Some(n)` when the read hands out tokens, `n` its page size (never 0).
+    page: Option<usize>,
+    /// The token of a previous page.
+    token: Option<&'a str>,
+}
+
+impl<'a> Paging<'a> {
+    /// `validation` for a `token` without `paginate`, and for `paginate` without a non-zero
+    /// `limit`.
+    fn check(limit: Option<usize>, paginate: bool, token: Option<&'a str>) -> Result<Paging<'a>> {
+        if token.is_some() && !paginate {
+            return Err(NxfError::validation("a page token needs paginate"));
+        }
+        let page = match (paginate, limit) {
+            (false, _) => None,
+            (true, Some(n)) if n > 0 => Some(n),
+            (true, _) => return Err(NxfError::validation("paginate needs a limit of at least 1")),
+        };
+        Ok(Paging { limit, page, token })
+    }
+}
+
+/// The log's position and identity when a list was computed — what a snapshot is checked against.
+struct Watermark {
+    rowid: i64,
+    op: Option<String>,
+}
+
+impl Watermark {
+    fn read(store: &Store) -> Result<Watermark> {
+        let rowid = store.ops_watermark()?;
+        let op = store.op_at(rowid)?;
+        Ok(Watermark { rowid, op })
+    }
+}
+
+/// Cut the freshly computed, ordered `fresh` list into one page per `paging` — and, when it pages,
+/// serve a token's page from its cached snapshot (if [`resume`] says it still answers) or cache
+/// `fresh` under `key` for the next one. THE paging mechanism behind [`next_page`],
+/// [`mentioned_by_page`] and [`list_page`] (6j6v.15ed, generalised by 6j6v.q29p and n698): one
+/// snapshot table, one expiry,
+/// one pair of caps, one invalidation rule. `key` must name the read as well as its filters, so a
+/// token of one read restarts under another; it is built only when the read pages.
+fn page_through(
+    store: &Store,
+    fresh: Vec<ItemRow>,
+    key: impl FnOnce() -> String,
+    paging: &Paging<'_>,
+    mark: Watermark,
+    clock: i64,
+) -> Result<NextPage> {
+    let Some(n) = paging.page else {
+        return Ok(truncate_next(fresh, paging.limit));
     };
-    let key = q.key(cfg);
-    if let Some(token) = &q.token {
+    let key = key();
+    if let Some(token) = paging.token {
         if let Some((snap, pos)) = resume(store, token, &key, &fresh, clock)? {
             // `pos < len` (resume checked it); a limit up to `usize::MAX` must not overflow.
             let end = pos.saturating_add(n).min(snap.ids.len());
@@ -1309,15 +1601,15 @@ fn next_page_at(cfg: &PluginConfig, store: &Store, q: &NextQuery, clock: i64) ->
             });
         }
     }
-    let restarted = q.token.is_some();
+    let restarted = paging.token.is_some();
     let total = fresh.len();
     let next_token = if total > n {
         let snap = nexus_flow_core::next_cache::CachedResult {
             id: ulid::Ulid::new().to_string(),
             created: clock,
             query: key,
-            watermark,
-            watermark_op,
+            watermark: mark.rowid,
+            watermark_op: mark.op,
             ids: fresh.iter().map(|i| i.id.clone()).collect(),
         };
         store
@@ -1374,17 +1666,18 @@ const CLUSTER_CHILD: u8 = 1;
 
 /// Order the `ready ∪ in_progress` candidates into the finish-first tiers (§4.3), in place.
 ///
-/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`NextRank`] as
+/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`TypeRank`] as
 /// the tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
 /// Clusters themselves are ordered by their **header's** rank, so a cluster is contiguous and a
 /// low-priority child never drags its epic up (nor a high-priority backlog item slice a cluster
-/// apart). `NextRank` ends in an id tiebreak, so the whole composed order is total and
-/// deterministic. Per-type orders (6j6v.z9jk) live inside `NextRank`: they order WITHIN a
+/// apart). `TypeRank` ends in an id tiebreak, so the whole composed order is total and
+/// deterministic. Per-type orders (6j6v.z9jk) live inside `TypeRank`: they order WITHIN a
 /// tier and never move an item between tiers.
 fn order_next_tiered(
     cfg: &PluginConfig,
     candidates: &[derive::NextCandidate],
     items: &mut [ItemRow],
+    derived: Option<&derived::Derived>,
 ) {
     // Split the one derivation into the three lookups the key needs. §3.3: the Tier-2 headers are
     // exactly `in_progress \ finishable` — the started items that still have a live non-closed
@@ -1410,7 +1703,7 @@ fn order_next_tiered(
         "a promoted child is ready, never in_progress — the tiers would overlap"
     );
 
-    let rank = NextRank::new(cfg);
+    let rank = TypeRank::next(cfg).with_derived(derived);
     let keys: HashMap<String, (u8, usize, u8)> = {
         let by_id: HashMap<&str, &ItemRow> = items.iter().map(|i| (i.id.as_str(), i)).collect();
         let mut headers: Vec<&str> = started
@@ -2066,41 +2359,79 @@ pub fn list_to_value_with_custom(
 /// (sp6.5): it is the first `ranking.next` key both bundled plugins declare, so ranking is entirely
 /// plugin-driven — no command-code special-case undercuts the "all policy flows from the config" seam.
 ///
-/// This is the DEFAULT order only. Per-type orders (6j6v.z9jk) apply to `next` alone, through
-/// [`NextRank`]; `list --sort rank` and `blocked` keep this one until `list` gets its own
-/// per-type orders (6j6v.n698).
+/// This is the `[ranking.next]` DEFAULT order only, which `blocked` and the lane verbs' `--sort
+/// rank` keep. Per-type orders apply through [`TypeRank`]: `next` over `[ranking.next]`
+/// (6j6v.z9jk), `list --sort rank` over `[ranking.list]` (6j6v.n698).
 fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
     keys_cmp(a, b, &cfg.ranking.next.order)
 }
 
 /// `keys` in declared order, then the id tiebreak — the total order every rank ends in.
 fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
-    for key in keys {
-        let c = cmp_rank_key(a, b, key);
+    keys_cmp_values(a, b, keys, None, None).then_with(|| a.id.cmp(&b.id))
+}
+
+/// `keys` in declared order WITHOUT the id tiebreak: a field key over the rows, a derived key
+/// (6j6v.x0wf) over the rows' derived values `va`/`vb`, aligned with `keys`. A row without values
+/// reads null on every derived key. The dense rank of a type (spec §4) is this order's ties.
+fn keys_cmp_values(
+    a: &ItemRow,
+    b: &ItemRow,
+    keys: &[RankKey],
+    va: Option<&[derived::DVal]>,
+    vb: Option<&[derived::DVal]>,
+) -> std::cmp::Ordering {
+    const NULL: derived::DVal = derived::DVal::Null;
+    for (n, key) in keys.iter().enumerate() {
+        let c = if key.is_derived() {
+            let x = va.and_then(|v| v.get(n)).unwrap_or(&NULL);
+            let y = vb.and_then(|v| v.get(n)).unwrap_or(&NULL);
+            derived::cmp_dval(x, y, key.dir, key.nulls)
+        } else {
+            cmp_rank_key(a, b, key)
+        };
         if c != std::cmp::Ordering::Equal {
             return c;
         }
     }
-    a.id.cmp(&b.id)
+    std::cmp::Ordering::Equal
 }
 
-/// The rank `next` orders by within a tier (6j6v.z9jk), built once per sort. A plugin without a
-/// per-type order ranks by [`rank_cmp`], exactly as before. Otherwise two items of different types
-/// compare by their type's position in the cross-type order
-/// ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by type name; two items
-/// of one type by that type's order ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)),
-/// then id. A lexicographic key, so the order is total — the tiers and the paging snapshot rely on
-/// that. Shared by the store path and the store-free path through [`order_next_tiered`].
-struct NextRank<'a> {
-    cfg: &'a PluginConfig,
+/// The rank a ranking policy orders by, built once per sort: `next` within a tier over
+/// `[ranking.next]` (6j6v.z9jk), and `list --sort rank` over `[ranking.list]` (6j6v.n698) — one
+/// comparator for both, so the two verbs cannot rank alike-declared orders differently, and a
+/// later key kind (the derived keys of `docs/specs/derived-ranking-keys.md`, 6j6v.x0wf) is added
+/// here once for both.
+///
+/// A policy without a per-type order ranks by its default order, then id — for `[ranking.next]`
+/// exactly [`rank_cmp`]. Otherwise two items of different types compare by their type's position in
+/// the cross-type order ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by
+/// type name; two items of one type by that type's order
+/// ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)), then id. A lexicographic key, so
+/// the order is total — the tiers and the paging snapshot rely on that. Shared by the store path and
+/// the store-free path through [`order_next_tiered`], and by [`list`].
+struct TypeRank<'a> {
+    spec: &'a RankSpec,
     /// `type → position` in the cross-type order, looked up once per comparison instead of a scan
-    /// of the list (review of #44, Integrity #5). `None` when the plugin does not split by type.
+    /// of the list (review of #44, Integrity #5). `None` when the policy does not split by type.
     ordinals: Option<(HashMap<&'a str, usize>, usize)>,
+    /// The values of the policy's derived keys for the rows being sorted (6j6v.x0wf), computed
+    /// once per query by `derived::compute`. `None` when the policy declares none.
+    derived: Option<&'a derived::Derived>,
 }
 
-impl<'a> NextRank<'a> {
-    fn new(cfg: &'a PluginConfig) -> NextRank<'a> {
-        let spec = &cfg.ranking.next;
+impl<'a> TypeRank<'a> {
+    /// The rank `next` orders by: `[ranking.next]`.
+    fn next(cfg: &'a PluginConfig) -> TypeRank<'a> {
+        TypeRank::new(&cfg.ranking.next)
+    }
+
+    /// The rank `list --sort rank` orders by: `[ranking.list]` (6j6v.n698).
+    fn list(cfg: &'a PluginConfig) -> TypeRank<'a> {
+        TypeRank::new(&cfg.ranking.list)
+    }
+
+    fn new(spec: &'a RankSpec) -> TypeRank<'a> {
         let ordinals = spec.splits_by_type().then(|| {
             let cross = spec.cross_type_order();
             let mut map = HashMap::new();
@@ -2110,12 +2441,28 @@ impl<'a> NextRank<'a> {
             }
             (map, cross.len())
         });
-        NextRank { cfg, ordinals }
+        TypeRank {
+            spec,
+            ordinals,
+            derived: None,
+        }
+    }
+
+    /// Rank with the derived values `derived` (6j6v.x0wf).
+    fn with_derived(mut self, derived: Option<&'a derived::Derived>) -> TypeRank<'a> {
+        self.derived = derived;
+        self
+    }
+
+    /// The policy's keys `keys` over `a` and `b`, then id — with the rows' derived values.
+    fn keys_cmp(&self, a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
+        let values = |row: &ItemRow| self.derived.and_then(|d| d.of(&row.id));
+        keys_cmp_values(a, b, keys, values(a), values(b)).then_with(|| a.id.cmp(&b.id))
     }
 
     fn cmp(&self, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
         let Some((ordinals, unlisted)) = &self.ordinals else {
-            return rank_cmp(self.cfg, a, b);
+            return self.keys_cmp(a, b, &self.spec.order);
         };
         let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
         if ta != tb {
@@ -2125,7 +2472,7 @@ impl<'a> NextRank<'a> {
             };
             return ord(ta).cmp(&ord(tb)).then_with(|| ta.cmp(&tb));
         }
-        keys_cmp(a, b, self.cfg.ranking.next.order_for(ta))
+        self.keys_cmp(a, b, self.spec.order_for(ta))
     }
 }
 
@@ -2475,11 +2822,22 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
 /// store holding the same board. A malformed `now` is `validation`-rejected, as there.
 ///
 /// [`Engine::next`]: crate::engine::Engine::next
+///
+/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is refused with `validation`: an
+/// [`ActiveBoard`] holds neither the edges nor the scopes those keys read, and ranking without them
+/// would order apart from the store path in silence. The server path is its own cut (6j6v.1c5s).
 pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
     crate::validate::iso_date(now)?;
+    if cfg.ranking.has_derived(Verb::Next) {
+        return Err(NxfError::validation(format!(
+            "plugin '{}' ranks `next` by derived ranking keys, which the store-free lanes do not \
+             compute yet — answer `next` from a store",
+            cfg.name
+        )));
+    }
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
-    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT))
+    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT, None))
 }
 
 /// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store
@@ -3049,6 +3407,140 @@ pub fn mentions(store: &Store, id: &str) -> Result<Vec<String>> {
 /// The `mention list` `--json` array: a plain array of the cited ids, in [`mentions`] order.
 pub fn mentions_to_value(mentions: &[String]) -> Value {
     json!(mentions)
+}
+
+// ---- mentioned by: the reverse of `mentions` (6j6v.q29p) --------------------
+
+/// THE reverse mention lookup: for every id in `targets`, the live items with a present `mentions`
+/// edge to it, id-sorted and distinct. A target nothing live mentions — or that is no item at all —
+/// is absent from the map; this is a bulk read over ids the caller already holds, so a miss is not
+/// `not_found`.
+///
+/// "Live" is the one rule here: a deleted mentioner is dropped, every other one is kept — closed
+/// and archived included, because a reference is not work. A caller narrows the rows itself:
+/// [`mentioned_by_page`] by a [`NextFilter`], and the derived ranking key
+/// `count = "mentioned_by"` (docs/specs/derived-ranking-keys.md §3.2, 6j6v.x0wf) by counting the
+/// rows that pass its `type`/`status`/`label` parts per candidate. Spec §11 requires the two to
+/// share one implementation; this is it. One edge query per 500 targets
+/// ([`Store::mentioned_by_bulk`]) and one item read for the distinct mentioners, so a whole
+/// candidate set costs O(E + N), as spec §5 budgets.
+pub fn mentioners_of(store: &Store, targets: &[&str]) -> Result<BTreeMap<String, Vec<ItemRow>>> {
+    let edges = store.mentioned_by_bulk(targets)?;
+    let sources: BTreeSet<&str> = edges.values().flatten().map(String::as_str).collect();
+    let sources: Vec<&str> = sources.into_iter().collect();
+    let live: HashMap<String, ItemRow> = store
+        .get_items(&sources)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (target, froms) in edges {
+        // `froms` is id-sorted and distinct (the store's ORDER BY over a DISTINCT view).
+        let rows: Vec<ItemRow> = froms.iter().filter_map(|f| live.get(f).cloned()).collect();
+        if !rows.is_empty() {
+            out.insert(target, rows);
+        }
+    }
+    Ok(out)
+}
+
+/// One `mentioned_by` request (6j6v.q29p): which mentioners to keep, and how to page them — the
+/// paging exactly as [`NextQuery`]'s (the same three shapes, the same snapshot cache, expiry, caps
+/// and invalidation), because it is the same mechanism.
+///
+/// - No `limit`: every mentioner.
+/// - `limit` alone: the head, with the total disclosed and no token.
+/// - `limit` + `paginate`: the head plus a `next_token` while rows remain; a stale or invalid
+///   token answers the FIRST page of a fresh list with `restarted: true`.
+///
+/// The filter is a [`NextFilter`] and means what it means for `next`: the types are alternatives,
+/// the container keeps an item whose parent it is OR that contributes to it, the label keeps an
+/// item carrying it. There is no sort: mentioners come in id order.
+///
+/// `#[non_exhaustive]`: build it with [`MentionedByQuery::new`] and the builder methods.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MentionedByQuery {
+    /// The filters; empty keeps every mentioner.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+}
+
+impl MentionedByQuery {
+    /// Every mentioner, unpaged.
+    pub fn new() -> MentionedByQuery {
+        MentionedByQuery::default()
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> MentionedByQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> MentionedByQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> MentionedByQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> MentionedByQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: the read, the target and the filter — never `limit`,
+    /// so a reader may change the page size between pages. Naming the read keeps a
+    /// `mentioned_by` token from answering a `next` query, and the other way round.
+    fn key(&self, target: &str) -> String {
+        json!({
+            "read": "mentioned_by",
+            "target": target,
+            "filter": self.filter.key(),
+        })
+        .to_string()
+    }
+}
+
+/// One `mentioned_by` page (6j6v.q29p): the live items that mention `target` ([`mentioners_of`]),
+/// narrowed by `q.filter`, in id order, cut and — under `paginate` — cached machine-locally like a
+/// `next` page, so the following pages come from the same list. A token's snapshot restarts when
+/// an op after it touches one of its items (a removed mention names the mentioner) or an item in it
+/// left the fresh list. `not_found` if `target` is missing or deleted (as [`mentions`]);
+/// `validation` for `paginate` without a non-zero `limit` or a token without `paginate`.
+pub fn mentioned_by_page(store: &Store, target: &str, q: &MentionedByQuery) -> Result<NextPage> {
+    mentioned_by_page_at(store, target, q, unix_now())
+}
+
+/// [`mentioned_by_page`] on the clock `clock` (unix seconds).
+fn mentioned_by_page_at(
+    store: &Store,
+    target: &str,
+    q: &MentionedByQuery,
+    clock: i64,
+) -> Result<NextPage> {
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
+    require_item(store, target)?;
+    let mark = Watermark::read(store)?;
+    let rows = mentioners_of(store, &[target])?
+        .remove(target)
+        .unwrap_or_default();
+    let fresh = filter_next_store(store, rows, &q.filter)?;
+    page_through(store, fresh, || q.key(target), &paging, mark, clock)
 }
 
 // ---- thread links (nxf 6j6v.8dbe) ------------------------------------------
@@ -4080,6 +4572,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&item("a", Some("2")), &item("b", Some("10")), &prio),
@@ -4101,6 +4594,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&item("ab12.0002", None), &item("ab12.0010", None), &id),
@@ -4126,6 +4620,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&typed("a", "epic"), &typed("b", "bug"), &key),
@@ -4159,6 +4654,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: vec!["in_progress".to_string(), "open".to_string()],
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&status("a", "in_progress"), &status("b", "open"), &key),
@@ -4181,6 +4677,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         let (two, ten, text) = (titled("a", "2"), titled("b", "10"), titled("c", "1a"));
         use std::cmp::Ordering::{Greater, Less};
@@ -4242,7 +4739,7 @@ mod tests {
             typed("a3", Some("action"), "0", Some("2026-07-01")),
             typed("a1", Some("action"), "1", Some("2026-06-01")),
         ];
-        let rank = NextRank::new(&cfg);
+        let rank = TypeRank::next(&cfg);
         items.sort_by(|a, b| rank.cmp(a, b));
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["a1", "a2", "a3", "x1", "m1", "m2", "n1"]);
@@ -4543,6 +5040,34 @@ mod tests {
         let t = token_at(&s, &q, T0);
         let at = |clock: i64| {
             next_page_at(&it_cfg(), &s, &q.clone().token(&t), clock)
+                .unwrap()
+                .restarted
+        };
+        assert!(!at(T0 + NEXT_CACHE_TTL_SECS), "at the TTL it still answers");
+        assert!(
+            at(T0 + NEXT_CACHE_TTL_SECS + 1),
+            "past it the token restarts"
+        );
+    }
+
+    #[test]
+    fn a_mentioned_by_token_expires_on_the_same_clock() {
+        // 6j6v.q29p: `mentioned_by` pages through the same mechanism, expiry included.
+        let (mut s, _) = paged_board();
+        for n in 0..4 {
+            s.add_edge(
+                &format!("c1.000{n}"),
+                "c1.0004",
+                nexus_flow_core::model::EdgeKind::Mentions,
+                "x",
+            );
+        }
+        let q = MentionedByQuery::new().limit(2).paginate();
+        let first = mentioned_by_page_at(&s, "c1.0004", &q, T0).unwrap();
+        assert_eq!(first.total, 4);
+        let t = first.next_token.expect("rows remain");
+        let at = |clock: i64| {
+            mentioned_by_page_at(&s, "c1.0004", &q.clone().token(&t), clock)
                 .unwrap()
                 .restarted
         };

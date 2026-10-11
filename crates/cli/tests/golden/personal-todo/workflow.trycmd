@@ -125,6 +125,20 @@ $ nxf mention list ab12.0002 --json
 
 ```
 
+The reverse read: the items that mention the project — `list` records, narrowed and paged like `next`:
+
+```console
+$ nxf mention by ab12.0001 --json
+[{"archived":null,"assignee":"me","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Reserve outbound and return","design":"Compare fares first.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"soon","status":"in_progress","title":"Book flights","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"}]
+
+```
+
+```console
+$ nxf mention by ab12.0001 --type todo --limit 1 --paginate --json
+{"items":[{"archived":null,"assignee":"me","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Reserve outbound and return","design":"Compare fares first.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"soon","status":"in_progress","title":"Book flights","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"}],"next_token":null,"restarted":false,"total":1}
+
+```
+
 ```console
 $ nxf mention remove ab12.0002 ab12.0001 --json
 {"msg":"removed mention ab12.0002 -> ab12.0001","ok":true}
@@ -220,6 +234,12 @@ Parents: ab12.0001 (read for full context)
 ```console
 $ nxf list --json
 [{"archived":null,"assignee":null,"belongs_to":null,"closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Get ready for the trip","design":null,"due":null,"id":"ab12.0001","priority":"1","priority_label":"soon","status":"in_progress","title":"Trip prep","type":"project","type_label":"project","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":"me","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Reserve outbound and return","design":"Compare fares first.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"soon","status":"in_progress","title":"Book flights","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":null,"belongs_to":null,"closed_at":"2026-06-23T00:00:00Z","closing_comment":"got it","completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Submit the renewal form","design":null,"due":null,"id":"ab12.0003","priority":"2","priority_label":"later","status":"closed","title":"Renew passport","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"}]
+
+```
+
+```console
+$ nxf list --sort rank --limit 2 --paginate --json
+{"items":[{"archived":null,"assignee":null,"belongs_to":null,"closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Get ready for the trip","design":null,"due":null,"id":"ab12.0001","priority":"1","priority_label":"soon","status":"in_progress","title":"Trip prep","type":"project","type_label":"project","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":"me","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Reserve outbound and return","design":"Compare fares first.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"soon","status":"in_progress","title":"Book flights","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"}],"next_token":"[..].2","restarted":false,"total":3}
 
 ```
 

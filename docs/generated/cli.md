@@ -27,6 +27,7 @@ This document contains the help content for the `nxf` command-line program.
 * [`nxf mention add`↴](#nxf-mention-add)
 * [`nxf mention remove`↴](#nxf-mention-remove)
 * [`nxf mention list`↴](#nxf-mention-list)
+* [`nxf mention by`↴](#nxf-mention-by)
 * [`nxf contributes`↴](#nxf-contributes)
 * [`nxf contributes add`↴](#nxf-contributes-add)
 * [`nxf contributes remove`↴](#nxf-contributes-remove)
@@ -65,7 +66,7 @@ nexus-flow agent CLI
 * `archive` — Archive one or more items — "closed and put away". Cascades DOWN: each root and its whole `belongs_to` subtree are archived, but only when the root is closed and every descendant is closed (already-archived counts as closed). Atomic per root, independent between roots; the result reports each root's outcome plus the full list of ids actually archived (incl. cascaded). Archiving is reversible — see `unarchive`
 * `unarchive` — Unarchive one or more items, making them visible again. Cascades UP only: each item and its ancestor chain resurface, but its children/siblings stay archived. Partial per root; the result reports each root's outcome plus the full list of ids actually unarchived
 * `close` — Close an item, recording why. Closing is final (no hard delete), so a reason is required
-* `list` — List items, optionally filtered by status and/or type. Id-ordered by default (so the `--json` record stays plugin-independent); override with `--sort rank`
+* `list` — List items, optionally filtered by status, type, container and/or label. Id-ordered by default (so the `--json` record stays plugin-independent); `--sort rank` ranks by the active plugin's `list` order. `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page
 * `blocked` — List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `--sort id`
 * `deferred` — List deferred items (open, unblocked, with a future defer date) — the lane that is neither ready nor blocked. Ordered by defer-date ascending (soonest first); override with `--sort`
 * `closed` — List closed items (excluding archived). Ordered by close-date descending (most recent first); override with `--sort`
@@ -73,7 +74,7 @@ nexus-flow agent CLI
 * `recap` — Recap the most recently closed work — "what got finished lately" — newest close first, archived closes INCLUDED. A recency recall view, distinct from `closed` (the lane, which drops archived). `--limit` caps the count (default 10); `--since` keeps only later closes
 * `next` — List actionable work — ready plus already-claimed, unblocked, not deferred — ranked by the active plugin's `next` policy and tiered to finish before starting: work you can close now, then each started epic with its open children, then the backlog. `--sort id` gives the flat, untiered order; `--type`, `--in` and `--label` narrow it without re-ranking; `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page
 * `dep` — Add or remove a dependency edge. Direction: `dep add A B` makes A depend on B, so B blocks A — A cannot be ready until B closes
-* `mention` — Add, remove, or list reference edges (free-text short-id citations)
+* `mention` — Add, remove, or list reference edges (free-text short-id citations), in either direction
 * `contributes` — Add, remove, or list contributes-to edges: `from` contributes to `to` (n:m). Like a mention it never blocks — it records a structural "feeds into" relation, not a dependency
 * `thread` — Link a chat thread to a board item, or list what a thread is about. This is how the conversation that did the work and the ticket it was about stop being two artefacts: a later reader of the item sees that there are conversations, without having to go looking
 * `label` — Add, remove, or list user labels (free-text tags) on an item. A label is user vocabulary, distinct from the plugin's display type; filter `list`/`next` with `--label`
@@ -221,16 +222,20 @@ Close an item, recording why. Closing is final (no hard delete), so a reason is 
 
 ## `nxf list`
 
-List items, optionally filtered by status and/or type. Id-ordered by default (so the `--json` record stays plugin-independent); override with `--sort rank`
+List items, optionally filtered by status, type, container and/or label. Id-ordered by default (so the `--json` record stays plugin-independent); `--sort rank` ranks by the active plugin's `list` order. `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page
 
 **Usage:** `nxf list [OPTIONS]`
 
 ###### **Options:**
 
 * `--status <STATUS>` — Filter by status
-* `--type <TY>` — Filter by type, using the active plugin's vocabulary (see `nxf schema`)
+* `--type <TYPE>` — Filter by type, using the active plugin's vocabulary (see `nxf schema`). Repeatable: the types are alternatives
+* `--in <ID>` — Only items in this container: its children (whose parent it is) and the items that contribute to it
 * `--label <LABEL>` — Filter to items carrying this label (user vocabulary, not the display type)
-* `--sort <SORT>` — Sort order: `rank` | `id` (default `id`). An unknown key is a loud error
+* `--sort <SORT>` — Sort order: `rank` | `id` (default `id`). `rank` is the plugin's `list` ranking: an order per type where it declares one (`[ranking.list.<type>]`), else its `next` order. An unknown key is a loud error
+* `--limit <LIMIT>` — Max items to show (default: no limit). Applied last — after `--sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{"items": [...], "total": <n>}`
+* `--paginate` — Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+* `--token <TOKEN>` — The token a previous `--paginate` answer printed: show the page after that one
 
 
 
@@ -356,7 +361,7 @@ Remove the dependency where `from` depends on `to`
 
 ## `nxf mention`
 
-Add, remove, or list reference edges (free-text short-id citations)
+Add, remove, or list reference edges (free-text short-id citations), in either direction
 
 **Usage:** `nxf mention <COMMAND>`
 
@@ -365,6 +370,7 @@ Add, remove, or list reference edges (free-text short-id citations)
 * `add` — Record that `from` cites the short-id `to` in its free text (no blocking)
 * `remove` — Remove the `from -> to` reference
 * `list` — List the short-ids `id` mentions
+* `by` — List the items that mention `id` — the reverse of `list` — in id order, closed and archived mentioners included. `--type`, `--in` and `--label` narrow it as they narrow `next`; `--limit` shows only the head and says so; `--paginate` adds a token for the next page. Under `--json` the records are `list --json`'s, as a plain array — or, with `--limit`, as `{"items": [...], "total": <n>}`, plus `"next_token"` (a string, or null on the last page) and `"restarted"` (bool) with `--paginate`, exactly as `next --limit --json` wraps them
 
 
 
@@ -403,6 +409,27 @@ List the short-ids `id` mentions
 ###### **Arguments:**
 
 * `<ID>`
+
+
+
+## `nxf mention by`
+
+List the items that mention `id` — the reverse of `list` — in id order, closed and archived mentioners included. `--type`, `--in` and `--label` narrow it as they narrow `next`; `--limit` shows only the head and says so; `--paginate` adds a token for the next page. Under `--json` the records are `list --json`'s, as a plain array — or, with `--limit`, as `{"items": [...], "total": <n>}`, plus `"next_token"` (a string, or null on the last page) and `"restarted"` (bool) with `--paginate`, exactly as `next --limit --json` wraps them
+
+**Usage:** `nxf mention by [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — The mentioned item
+
+###### **Options:**
+
+* `--type <TYPE>` — Only mentioners of this type (the stored type, as `list --type` takes it). Repeatable: the types are alternatives
+* `--in <ID>` — Only mentioners in this container: its children (whose parent it is) and the items that contribute to it
+* `--label <LABEL>` — Only mentioners carrying this label
+* `--limit <LIMIT>` — Max items to show (default: no limit). Applied after the filters and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{"items": [...], "total": <n>}`
+* `--paginate` — Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+* `--token <TOKEN>` — The token a previous `--paginate` answer printed: show the page after that one
 
 
 

@@ -1731,32 +1731,84 @@ pub fn next(json: bool, db: Option<&str>, args: NextArgs<'_>) -> Result<()> {
 
 // ---- list ------------------------------------------------------------------
 
-pub fn list(
-    json: bool,
-    db: Option<&str>,
-    status: Option<&str>,
-    item_type: Option<&str>,
-    label: Option<&str>,
-    sort: Option<&str>,
-) -> Result<()> {
+/// `nxf list`'s arguments, as clap parsed them.
+pub struct ListArgs<'a> {
+    pub status: Option<&'a str>,
+    pub types: &'a [String],
+    pub within: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub sort: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub paginate: bool,
+    pub token: Option<&'a str>,
+}
+
+/// `nxf list` (6j6v.n698: filters and paging) — ONE query through the function
+/// `Engine::list_query` answers from (`read::list_page`), so the filters, the order, the cut and
+/// the paging cannot drift apart between the two, nor from `next`'s.
+pub fn list(json: bool, db: Option<&str>, args: ListArgs<'_>) -> Result<()> {
     let (ws, cfg) = open(db)?;
     let store = ws.open_store()?;
-    let sort = sort.map(read::parse_sort).transpose()?;
-    let mut items = read::list(&cfg, &store, status, item_type, sort)?;
-    if let Some(label) = label {
-        items = read::with_label(&store, items, label)?;
+    let mut filter = read::NextFilter::new();
+    for ty in args.types {
+        filter = filter.with_type(ty.as_str());
     }
+    if let Some(c) = args.within {
+        filter = filter.with_container(ws.replica.resolve_id(c));
+    }
+    if let Some(label) = args.label {
+        filter = filter.with_label(label);
+    }
+    let mut query = read::ListQuery::new().filter(filter);
+    let sort = args.sort.map(read::parse_sort).transpose()?;
+    // The reference time a derived ranking key of `[ranking.list]` takes `next`'s candidates at
+    // when it reads the rank of a type `next` ranks (6j6v.x0wf); `NXF_NOW` pins it, as for `next`.
+    // Read only for a RANKED list under such a plugin, so any other `list` never trips on the
+    // clock — a malformed `NXF_NOW` included (review of PR #48, Code Quality #6).
+    if sort == Some(read::SortKey::Rank) && cfg.ranking.list.has_derived() {
+        query = query.now(resolve_now(None)?);
+    }
+    if let Some(status) = args.status {
+        query = query.status(status);
+    }
+    if let Some(sort) = sort {
+        query = query.sort(sort);
+    }
+    if let Some(n) = args.limit {
+        query = query.limit(n);
+    }
+    if args.paginate {
+        query = query.paginate();
+    }
+    if let Some(token) = args.token {
+        query = query.token(token);
+    }
+    let page = read::list_page(&cfg, &store, &query)?;
 
-    // Emit in the chosen order (default rank) — preserve it into JSON, do NOT re-sort by id. Each
+    // Emit in the chosen order (default id) — preserve it into JSON, do NOT re-sort by id. Each
     // record carries a sparse `parent_closed_reason` join for a closed-masked open child (07a.3 §5).
     if json {
         // ee2h: additive priority_label/type_label alongside the canonical record (CLI-only).
-        println!(
-            "{}",
-            with_presentation_labels(&cfg, read::list_to_value_with_custom(&cfg, &store, &items)?)
+        let value = with_presentation_labels(
+            &cfg,
+            read::list_to_value_with_custom(&cfg, &store, &page.items)?,
         );
+        // The shape follows the FLAG, as for `next`: the bare array without `--limit` (byte-stable
+        // as before), the envelope with it.
+        if args.limit.is_some() {
+            println!("{}", read::next_page_envelope(value, &page, args.paginate));
+        } else {
+            println!("{value}");
+        }
     } else {
-        print!("{}", render_list(&cfg, &ws.replica.prefix, &items));
+        let theme = nxs_ui::Theme::plain();
+        if let Some(notice) = next_truncation_notice(&page, &theme) {
+            print!("{notice}");
+        }
+        print!("{}", render_list(&cfg, &ws.replica.prefix, &page.items));
+        if let Some(line) = next_token_line(&page, &theme) {
+            print!("{line}");
+        }
     }
     Ok(())
 }
@@ -1994,6 +2046,69 @@ pub fn mention_list(json: bool, db: Option<&str>, id: &str) -> Result<()> {
     } else {
         for m in &mentions {
             println!("{}", workspace::display_id(&ws.replica.prefix, m));
+        }
+    }
+    Ok(())
+}
+
+/// `nxf mention by`'s arguments, as clap parsed them.
+pub struct MentionByArgs<'a> {
+    pub types: &'a [String],
+    pub within: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub paginate: bool,
+    pub token: Option<&'a str>,
+}
+
+/// List the items that mention `id` (6j6v.q29p) — through the function `Engine::mentioned_by`
+/// answers from (`read::mentioned_by_page`), so the filters and the paging cannot drift apart
+/// between the two, nor from `next`'s.
+pub fn mention_by(json: bool, db: Option<&str>, id: &str, args: MentionByArgs<'_>) -> Result<()> {
+    let (ws, cfg) = open(db)?;
+    let store = ws.open_store()?;
+    let id = ws.replica.resolve_id(id);
+    let mut filter = read::NextFilter::new();
+    for ty in args.types {
+        filter = filter.with_type(ty.as_str());
+    }
+    if let Some(c) = args.within {
+        filter = filter.with_container(ws.replica.resolve_id(c));
+    }
+    if let Some(label) = args.label {
+        filter = filter.with_label(label);
+    }
+    let mut query = read::MentionedByQuery::new().filter(filter);
+    if let Some(n) = args.limit {
+        query = query.limit(n);
+    }
+    if args.paginate {
+        query = query.paginate();
+    }
+    if let Some(token) = args.token {
+        query = query.token(token);
+    }
+    let page = read::mentioned_by_page(&store, &id, &query)?;
+    if json {
+        let value = with_presentation_labels(
+            &cfg,
+            read::list_to_value_with_custom(&cfg, &store, &page.items)?,
+        );
+        // The shape follows the FLAG, as for `next`: a plain array without `--limit`, the envelope
+        // with it.
+        if args.limit.is_some() {
+            println!("{}", read::next_page_envelope(value, &page, args.paginate));
+        } else {
+            println!("{value}");
+        }
+    } else {
+        let theme = nxs_ui::Theme::plain();
+        if let Some(notice) = next_truncation_notice(&page, &theme) {
+            print!("{notice}");
+        }
+        print!("{}", render_list(&cfg, &ws.replica.prefix, &page.items));
+        if let Some(line) = next_token_line(&page, &theme) {
+            print!("{line}");
         }
     }
     Ok(())

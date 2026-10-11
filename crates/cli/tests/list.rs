@@ -147,3 +147,220 @@ fn deleted_items_are_excluded() {
     create(tmp.path(), "bug", "keep");
     assert_eq!(list(tmp.path(), &[]).len(), 1);
 }
+
+// ---- filters and paging (6j6v.n698) ---------------------------------------------------
+
+fn run_json(dir: &Path, args: &[&str]) -> serde_json::Value {
+    let out = nxf()
+        .args(args)
+        .current_dir(dir)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&out).expect("json output")
+}
+
+fn ids_of(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .expect("an array")
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An epic with a child bug and a contributing feature, plus an unrelated chore. Returns
+/// `(epic, bug, feature, chore)`.
+fn contained_board(dir: &Path) -> (String, String, String, String) {
+    init(dir);
+    let epic = create(dir, "epic", "E");
+    let bug = create(dir, "bug", "B");
+    let feature = create(dir, "feature", "F");
+    let chore = create_with_prio(dir, "chore", "C", "P0");
+    run_json(
+        dir,
+        &["update", &bug, "--set", &format!("parent={epic}"), "--json"],
+    );
+    run_json(dir, &["contributes", "add", &feature, &epic, "--json"]);
+    (epic, bug, feature, chore)
+}
+
+#[test]
+fn list_filters_by_several_types_and_by_container_like_next() {
+    let tmp = TempDir::new().unwrap();
+    let (epic, bug, feature, chore) = contained_board(tmp.path());
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    assert_eq!(
+        list(tmp.path(), &["--in", &epic]),
+        sorted(vec![bug.clone(), feature.clone()]),
+        "a container holds its children and its contributors"
+    );
+    assert_eq!(
+        list(tmp.path(), &["--type", "bug", "--type", "chore"]),
+        sorted(vec![bug.clone(), chore]),
+        "the types are alternatives"
+    );
+    assert_eq!(list(tmp.path(), &["--in", &epic, "--type", "bug"]), [bug]);
+    // A short id resolves, as for `next --in`.
+    let short = epic.rsplit('.').next().unwrap().to_string();
+    assert_eq!(list(tmp.path(), &["--in", &short]).len(), 2);
+}
+
+#[test]
+fn list_limit_and_paginate_answer_with_the_next_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let (_, bug, _, _) = contained_board(tmp.path());
+    let all = list(tmp.path(), &[]);
+
+    let cut = run_json(tmp.path(), &["list", "--limit", "3", "--json"]);
+    assert_eq!(ids_of(&cut["items"]), all[0..3]);
+    assert_eq!(cut["total"], 4);
+    assert!(
+        cut.get("next_token").is_none(),
+        "no token without --paginate"
+    );
+
+    let p1 = run_json(
+        tmp.path(),
+        &["list", "--limit", "3", "--paginate", "--json"],
+    );
+    assert_eq!(ids_of(&p1["items"]), all[0..3]);
+    assert_eq!(p1["restarted"], false);
+    let token = p1["next_token"]
+        .as_str()
+        .expect("a row remains")
+        .to_string();
+    let page2 = |dir: &Path| {
+        run_json(
+            dir,
+            &[
+                "list",
+                "--limit",
+                "3",
+                "--paginate",
+                "--token",
+                &token,
+                "--json",
+            ],
+        )
+    };
+    let p2 = page2(tmp.path());
+    assert_eq!(ids_of(&p2["items"]), all[3..]);
+    assert_eq!(p2["next_token"], serde_json::Value::Null, "the last page");
+
+    // A change to a cached item makes the token stale: the answer is the first page again.
+    run_json(tmp.path(), &["update", &bug, "--set", "title=B2", "--json"]);
+    let again = page2(tmp.path());
+    assert_eq!(again["restarted"], true);
+    assert_eq!(ids_of(&again["items"]), all[0..3]);
+}
+
+#[test]
+fn list_sort_rank_pages_through_the_ranked_order() {
+    let tmp = TempDir::new().unwrap();
+    contained_board(tmp.path());
+    let ranked = list(tmp.path(), &["--sort", "rank"]);
+    // The P0 chore ranks first under issue-tracker; by id it would not necessarily.
+    assert_eq!(ranked.len(), 4);
+    let p1 = run_json(
+        tmp.path(),
+        &[
+            "list",
+            "--sort",
+            "rank",
+            "--limit",
+            "2",
+            "--paginate",
+            "--json",
+        ],
+    );
+    assert_eq!(ids_of(&p1["items"]), ranked[0..2]);
+    let token = p1["next_token"].as_str().unwrap().to_string();
+    let p2 = run_json(
+        tmp.path(),
+        &[
+            "list",
+            "--sort",
+            "rank",
+            "--limit",
+            "2",
+            "--paginate",
+            "--token",
+            &token,
+            "--json",
+        ],
+    );
+    assert_eq!(ids_of(&p2["items"]), ranked[2..]);
+    // The same token under the id order is another query: it restarts.
+    let other = run_json(
+        tmp.path(),
+        &[
+            "list",
+            "--limit",
+            "2",
+            "--paginate",
+            "--token",
+            &token,
+            "--json",
+        ],
+    );
+    assert_eq!(other["restarted"], true);
+}
+
+#[test]
+fn list_human_view_discloses_the_cut_and_prints_the_token() {
+    let tmp = TempDir::new().unwrap();
+    contained_board(tmp.path());
+    let out = list_human(tmp.path(), &["--limit", "2", "--paginate"]);
+    // Trimmed: the CLI frames a human answer with blank lines (`output_framing.rs`).
+    let out = out.trim().to_string();
+    assert!(out.starts_with("showing 2 of 4\n"), "{out}");
+    assert_eq!(out.lines().count(), 4, "notice, two rows, token: {out}");
+    assert!(
+        out.lines()
+            .last()
+            .unwrap()
+            .starts_with("next page: --paginate --token "),
+        "{out}"
+    );
+    // Without --limit, the view is the plain list: no notice, no token.
+    let plain = list_human(tmp.path(), &[]);
+    assert!(
+        !plain.contains("showing") && !plain.contains("next page"),
+        "{plain}"
+    );
+}
+
+#[test]
+fn list_paginate_needs_a_limit_and_a_token_needs_paginate() {
+    let tmp = TempDir::new().unwrap();
+    contained_board(tmp.path());
+    // The refusal names what is missing, not just any failure (review of PR #48, Test Quality #9).
+    let cases: [(&[&str], &[&str]); 3] = [
+        (&["list", "--paginate"], &["required", "--limit"]),
+        (
+            &["list", "--limit", "2", "--token", "x.2"],
+            &["required", "--paginate"],
+        ),
+        (
+            &["list", "--limit", "0", "--paginate"],
+            &["paginate needs a limit of at least 1"],
+        ),
+    ];
+    for (args, needles) in cases {
+        let out = nxf()
+            .args(args)
+            .current_dir(tmp.path())
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let err = String::from_utf8(out).unwrap();
+        assert!(needles.iter().all(|n| err.contains(n)), "{args:?}: {err}");
+    }
+}

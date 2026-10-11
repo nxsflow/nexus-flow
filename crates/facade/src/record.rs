@@ -77,7 +77,8 @@ pub fn items_value(items: &[ItemRow]) -> serde_json::Value {
 
 /// Every field name [`raw_field`] reads — so every field a ranking key can sort on. A plugin's
 /// ranking key naming anything else is refused at load (6j6v.z9jk): `raw_field` would return
-/// `None` for every item and the key would never decide. Custom fields are not rankable yet (x0wf).
+/// `None` for every item and the key would never decide. A custom field ranks only as a
+/// neighbour's value, `related ... of = { field = ... }` (6j6v.x0wf), never as a field key.
 pub const RANKABLE_FIELDS: &[&str] = &[
     "id",
     "type",

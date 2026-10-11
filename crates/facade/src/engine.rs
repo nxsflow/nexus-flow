@@ -11,7 +11,9 @@
 
 use crate::error::Result;
 use crate::plugin::{self, PluginConfig};
-use crate::read::{self, BlockedItem, NextPage, NextQuery, PrimeReport, ShowRecord};
+use crate::read::{
+    self, BlockedItem, ListQuery, MentionedByQuery, NextPage, NextQuery, PrimeReport, ShowRecord,
+};
 use crate::validate;
 use crate::workspace::{Workspace, WorkspaceExt};
 use crate::write::{self, NewItem};
@@ -265,6 +267,37 @@ impl Engine {
             .with_state_mut(|s| write::mention_remove(&mut s.store, now, actor, from, to))
     }
 
+    /// The ids `id` mentions — its outgoing reference edges, sorted (6j6v.q29p): the read
+    /// [`mention_add`](Engine::mention_add) writes, and what the CLI's `mention list` prints.
+    /// `not_found` if the item is missing/deleted, `io` on a db fault.
+    pub fn mentions(&self, id: &str) -> Result<Vec<String>> {
+        self.handle.try_with_state(|s| read::mentions(&s.store, id))
+    }
+
+    /// The items that mention `id` (6j6v.q29p): the live mentioners — closed and archived included,
+    /// deleted ones not — in id order, narrowed by `query`'s filter (type, container, label, as for
+    /// [`next_query`](Engine::next_query)) and cut or paged exactly as `next_query` pages: the
+    /// same `total`/`start`/`next_token`/`restarted`, the same machine-local `next_page_cache`
+    /// (so the same db write another handle's [`subscribe`](Engine::subscribe) sees), the same
+    /// expiry and invalidation. The CLI's `mention by`. `not_found` if `id` is missing/deleted;
+    /// `validation` for `paginate` without a non-zero `limit`, or a token without `paginate`.
+    pub fn mentioned_by(&self, id: &str, query: &MentionedByQuery) -> Result<NextPage> {
+        self.handle
+            .try_with_state(|s| read::mentioned_by_page(&s.store, id, query))
+    }
+
+    /// [`mentioned_by`](Engine::mentioned_by) as JSON: `{"items", "total"}`, plus `next_token`
+    /// and `restarted` when the query paginates — `items` being the records
+    /// [`list_value`](Engine::list_value) gives. The envelope the CLI's
+    /// `mention by --limit <n> --json` prints.
+    pub fn mentioned_by_value(&self, id: &str, query: &MentionedByQuery) -> Result<Value> {
+        self.handle.try_with_state(|s| {
+            let page = read::mentioned_by_page(&s.store, id, query)?;
+            let items = read::list_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
+            Ok(read::next_page_envelope(items, &page, query.paginate))
+        })
+    }
+
     /// Record a `from -> to` contributes-to edge (n:m; never blocks).
     pub fn contributes_add(&self, now: &str, actor: &str, from: &str, to: &str) -> Result<()> {
         self.handle
@@ -454,6 +487,42 @@ impl Engine {
         self.handle.try_with_state(|s| {
             let items = read::list(&self.cfg, &s.store, status, item_type, None)?;
             read::list_to_value_with_custom(&self.cfg, &s.store, &items)
+        })
+    }
+
+    /// [`list`](Engine::list) narrowed, ordered and paged (6j6v.n698): `--status`, `--type`, `--in`,
+    /// `--label`, `--sort`, `--limit`, `--paginate` and the page token, as one [`ListQuery`].
+    /// Additive beside [`list`](Engine::list), whose signature and order stay. The CLI's `list`.
+    ///
+    /// The order is id unless the query sorts; `SortKey::Rank` ranks by the plugin's
+    /// `[ranking.list]` policy (its per-type orders `[ranking.list.<type>]` and cross-type order
+    /// `types`, else the `[ranking.next]` default order). The type and container filters mean what
+    /// they mean for [`next_query`](Engine::next_query), and the page is cut and paged exactly as
+    /// `next_query` pages: the same `total`/`start`/`next_token`/`restarted`, the same
+    /// machine-local `next_page_cache` (so the same db write another handle's
+    /// [`subscribe`](Engine::subscribe) sees), the same expiry and invalidation. `validation` for
+    /// `paginate` without a non-zero `limit`, or a token without `paginate`.
+    ///
+    /// **`now` (6j6v.x0wf).** When the rows a ranked query keeps rank by a derived key of
+    /// `[ranking.list]` that reads the rank of a type `next` ranks, that rank is computed over
+    /// `next`'s candidates at a reference time: set it with [`ListQuery::now`], or the query
+    /// answers `validation` ("pass `now`"). The filters narrow the rows before they are ranked, so
+    /// a type filter whose order reads no such rank needs no `now`; the id order never does. A
+    /// malformed `now` answers `validation` too.
+    pub fn list_query(&self, query: &ListQuery) -> Result<NextPage> {
+        self.handle
+            .try_with_state(|s| read::list_page(&self.cfg, &s.store, query))
+    }
+
+    /// [`list_query`](Engine::list_query) as JSON: `{"items", "total"}`, plus `next_token` and
+    /// `restarted` when the query paginates — `items` being the records
+    /// [`list_value`](Engine::list_value) gives. The envelope the CLI's `list --limit <n> --json`
+    /// prints. `now` is needed exactly as for [`list_query`](Engine::list_query).
+    pub fn list_query_value(&self, query: &ListQuery) -> Result<Value> {
+        self.handle.try_with_state(|s| {
+            let page = read::list_page(&self.cfg, &s.store, query)?;
+            let items = read::list_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
+            Ok(read::next_page_envelope(items, &page, query.paginate))
         })
     }
 

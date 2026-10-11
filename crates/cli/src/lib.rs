@@ -227,21 +227,44 @@ enum Command {
         #[arg(long = "reason-file")]
         reason_file: Option<String>,
     },
-    /// List items, optionally filtered by status and/or type. Id-ordered by default (so the
-    /// `--json` record stays plugin-independent); override with `--sort rank`.
+    /// List items, optionally filtered by status, type, container and/or label. Id-ordered by
+    /// default (so the `--json` record stays plugin-independent); `--sort rank` ranks by the active
+    /// plugin's `list` order. `--limit` shows only the head of it, and says so; `--paginate` adds a
+    /// token for the next page.
     List {
         /// Filter by status.
         #[arg(long)]
         status: Option<String>,
-        /// Filter by type, using the active plugin's vocabulary (see `nxf schema`).
-        #[arg(long = "type")]
-        ty: Option<String>,
+        /// Filter by type, using the active plugin's vocabulary (see `nxf schema`). Repeatable: the
+        /// types are alternatives.
+        #[arg(long = "type", value_name = "TYPE")]
+        ty: Vec<String>,
+        /// Only items in this container: its children (whose parent it is) and the items that
+        /// contribute to it.
+        #[arg(long = "in", value_name = "ID")]
+        within: Option<String>,
         /// Filter to items carrying this label (user vocabulary, not the display type).
         #[arg(long)]
         label: Option<String>,
-        /// Sort order: `rank` | `id` (default `id`). An unknown key is a loud error.
+        /// Sort order: `rank` | `id` (default `id`). `rank` is the plugin's `list` ranking: an
+        /// order per type where it declares one (`[ranking.list.<type>]`), else its `next` order.
+        /// An unknown key is a loud error.
         #[arg(long)]
         sort: Option<String>,
+        /// Max items to show (default: no limit). Applied last — after `--sort` and the filters —
+        /// and never silently: a truncated list is headed `showing <n> of <total>`, and under
+        /// `--json` the flag wraps the records as `{"items": [...], "total": <n>}`.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Page through the list `--limit` rows at a time: the answer ends with a token for the
+        /// next page (`next_token` and `restarted` under `--json`). The list is cached on this
+        /// machine for an hour; a change to an item in it, or a stale or invalid token, restarts
+        /// at the first page.
+        #[arg(long, requires = "limit")]
+        paginate: bool,
+        /// The token a previous `--paginate` answer printed: show the page after that one.
+        #[arg(long, value_name = "TOKEN", requires = "paginate")]
+        token: Option<String>,
     },
     /// List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `--sort id`.
     Blocked {
@@ -329,7 +352,7 @@ enum Command {
         #[command(subcommand)]
         action: DepAction,
     },
-    /// Add, remove, or list reference edges (free-text short-id citations).
+    /// Add, remove, or list reference edges (free-text short-id citations), in either direction.
     Mention {
         #[command(subcommand)]
         action: MentionAction,
@@ -462,6 +485,41 @@ enum MentionAction {
     Remove { from: String, to: String },
     /// List the short-ids `id` mentions.
     List { id: String },
+    /// List the items that mention `id` — the reverse of `list` — in id order, closed and archived
+    /// mentioners included. `--type`, `--in` and `--label` narrow it as they narrow `next`;
+    /// `--limit` shows only the head and says so; `--paginate` adds a token for the next page.
+    /// Under `--json` the records are `list --json`'s, as a plain array — or, with `--limit`, as
+    /// `{"items": [...], "total": <n>}`, plus `"next_token"` (a string, or null on the last page)
+    /// and `"restarted"` (bool) with `--paginate`, exactly as `next --limit --json` wraps them.
+    By {
+        /// The mentioned item.
+        id: String,
+        /// Only mentioners of this type (the stored type, as `list --type` takes it). Repeatable:
+        /// the types are alternatives.
+        #[arg(long = "type", value_name = "TYPE")]
+        ty: Vec<String>,
+        /// Only mentioners in this container: its children (whose parent it is) and the items that
+        /// contribute to it.
+        #[arg(long = "in", value_name = "ID")]
+        within: Option<String>,
+        /// Only mentioners carrying this label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Max items to show (default: no limit). Applied after the filters and never silently:
+        /// a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps
+        /// the records as `{"items": [...], "total": <n>}`.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Page through the list `--limit` rows at a time: the answer ends with a token for the
+        /// next page (`next_token` and `restarted` under `--json`). The list is cached on this
+        /// machine for an hour; a change to an item in it, or a stale or invalid token, restarts
+        /// at the first page.
+        #[arg(long, requires = "limit")]
+        paginate: bool,
+        /// The token a previous `--paginate` answer printed: show the page after that one.
+        #[arg(long, value_name = "TOKEN", requires = "paginate")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -659,15 +717,25 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Command::List {
             status,
             ty,
+            within,
             label,
             sort,
+            limit,
+            paginate,
+            token,
         } => commands::list(
             cli.json,
             db,
-            status.as_deref(),
-            ty.as_deref(),
-            label.as_deref(),
-            sort.as_deref(),
+            commands::ListArgs {
+                status: status.as_deref(),
+                types: ty,
+                within: within.as_deref(),
+                label: label.as_deref(),
+                sort: sort.as_deref(),
+                limit: *limit,
+                paginate: *paginate,
+                token: token.as_deref(),
+            },
         ),
         Command::Blocked { sort } => commands::blocked(cli.json, db, sort.as_deref()),
         Command::Deferred { now, sort } => {
@@ -707,6 +775,27 @@ fn dispatch(cli: &Cli) -> Result<()> {
             MentionAction::Add { from, to } => commands::mention_add(cli.json, db, from, to),
             MentionAction::Remove { from, to } => commands::mention_remove(cli.json, db, from, to),
             MentionAction::List { id } => commands::mention_list(cli.json, db, id),
+            MentionAction::By {
+                id,
+                ty,
+                within,
+                label,
+                limit,
+                paginate,
+                token,
+            } => commands::mention_by(
+                cli.json,
+                db,
+                id,
+                commands::MentionByArgs {
+                    types: ty,
+                    within: within.as_deref(),
+                    label: label.as_deref(),
+                    limit: *limit,
+                    paginate: *paginate,
+                    token: token.as_deref(),
+                },
+            ),
         },
         Command::Thread { action } => match action {
             ThreadAction::Link {
