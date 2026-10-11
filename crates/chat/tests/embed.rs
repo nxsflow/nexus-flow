@@ -172,7 +172,9 @@ fn rejections_carry_their_kind() {
     // the refusal it gives is the one an app actually meets.
     seed_board(dir.path());
     assert_eq!(
-        eng.thread("m-t1", "o/outsider").unwrap_err().kind,
+        eng.thread("m-t1", nexus_chat::facade::Reader::Handle("o/outsider"))
+            .unwrap_err()
+            .kind,
         ErrorKind::Forbidden
     );
 }
@@ -241,7 +243,11 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
     // The bulk read for an EXPLICIT SET of thread ids — the quorum bar's no-N+1 read, which is a
     // scope now. `tests/bulk_quorum.rs` is where the "ONE query" half of it is measured.
     let report = eng
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&["m-t1"]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&["m-t1"]),
+        )
         .unwrap();
     assert_eq!(report.operations.len(), 1);
     let board = &report.operations[0].threads[0];
@@ -255,7 +261,9 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
 
     // The board's MESSAGES are the other reader — `status` carries state, never text, which is why
     // one message reader had to stay at all.
-    let thread = eng.thread("m-t1", "o/a").unwrap();
+    let thread = eng
+        .thread("m-t1", nexus_chat::facade::Reader::Handle("o/a"))
+        .unwrap();
     assert_eq!(thread.messages.len(), 1);
     assert_eq!(thread.messages[0].body, "please review");
 
@@ -290,7 +298,11 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
     );
     // …and the SAME handle now re-reads the board as complete, and the opener is woken.
     let report = eng
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&["m-t1"]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&["m-t1"]),
+        )
         .unwrap();
     assert!(report.operations[0].threads[0].outstanding.is_empty());
     assert!(report.operations[0].threads[0].awaiting_human);
@@ -366,6 +378,7 @@ fn engine_status_reports_working_tree_holding_and_waiting() {
 
     let report = eng
         .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
             NOW,
             nexus_chat::facade::StatusScope::Threads(&["m-holding", "m-waiting", "m-neither"]),
         )
@@ -463,7 +476,9 @@ fn the_one_message_reader_enforces_a_declared_channels_requester_only_visibility
 
     // bob (bare, the shape a declared member's own membership is recorded in): opening + his own
     // reply — not carol's.
-    let board = eng.thread("m-t2", "bob").unwrap();
+    let board = eng
+        .thread("m-t2", nexus_chat::facade::Reader::Handle("bob"))
+        .unwrap();
     assert_eq!(
         board
             .messages
@@ -475,7 +490,9 @@ fn the_one_message_reader_enforces_a_declared_channels_requester_only_visibility
     );
 
     // the opener: sees everything.
-    let board = eng.thread("m-t2", "o/opener").unwrap();
+    let board = eng
+        .thread("m-t2", nexus_chat::facade::Reader::Handle("o/opener"))
+        .unwrap();
     assert_eq!(
         board
             .messages

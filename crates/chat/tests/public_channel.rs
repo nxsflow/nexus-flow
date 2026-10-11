@@ -169,8 +169,13 @@ fn a_stranger_reads_a_thread_and_its_board_in_a_public_channel() {
     // BOTH readers take the channel's `visibility` since nxf 6j6v.yr59 — `thread` gained it with
     // the seam's one message reader, and it is passed here the way `thread_board` beside it always
     // took it: as an explicit capability, resolved by the adapter above.
-    let t = facade::thread(&s, &thread, STRANGER, Visibility::RequesterOnly)
-        .expect("a stranger reads the thread");
+    let t = facade::thread(
+        &s,
+        &thread,
+        nexus_chat::facade::Reader::Handle(STRANGER),
+        Visibility::RequesterOnly,
+    )
+    .expect("a stranger reads the thread");
     assert_eq!(t.channel_id, DOOR);
     assert_eq!(t.messages.len(), 1, "the opening message is there");
 
@@ -190,9 +195,14 @@ fn a_stranger_is_still_refused_a_thread_and_board_in_a_private_channel() {
     let thread = open_board(&mut s, PRIVATE);
 
     assert_eq!(
-        facade::thread(&s, &thread, STRANGER, Visibility::RequesterOnly)
-            .unwrap_err()
-            .kind,
+        facade::thread(
+            &s,
+            &thread,
+            nexus_chat::facade::Reader::Handle(STRANGER),
+            Visibility::RequesterOnly
+        )
+        .unwrap_err()
+        .kind,
         ErrorKind::Forbidden
     );
     assert_eq!(
@@ -305,12 +315,27 @@ fn the_membership_scoped_reads_do_not_change_their_result_set() {
     );
     // ... and search stays scoped too: a body-substring read that silently swept in every public
     // channel would change every existing caller's hit list.
-    assert!(facade::search(&s, STRANGER, "findable", &[])
-        .unwrap()
-        .is_empty());
+    assert!(facade::search(
+        &s,
+        nexus_chat::facade::Reader::Handle(STRANGER),
+        "findable",
+        &[]
+    )
+    .unwrap()
+    .is_empty());
     // The owner, being a member, sees both as before.
     assert_eq!(facade::channels(&s, OWNER).unwrap().len(), 2);
-    assert_eq!(facade::search(&s, OWNER, "findable", &[]).unwrap().len(), 1);
+    assert_eq!(
+        facade::search(
+            &s,
+            nexus_chat::facade::Reader::Handle(OWNER),
+            "findable",
+            &[]
+        )
+        .unwrap()
+        .len(),
+        1
+    );
 }
 
 // ---- the two ways a public channel comes into being -------------------------
@@ -386,7 +411,7 @@ fn a_declared_channel_carries_its_declared_kind_into_the_store() {
     // folded into it, so an app learns the front doors from the same call that names the personas
     // and the declared channels.
     let found = e
-        .directory(None)
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
         .expect("the seam an app links offers discovery too")
         .public_channels;
     assert_eq!(
@@ -500,7 +525,7 @@ fn the_engine_seam_opens_a_thread_and_its_board_on_a_declared_public_channel() {
 
     // The opening: both reads answer a stranger on the PUBLIC channel.
     let t = e
-        .thread(&public_thread, STRANGER)
+        .thread(&public_thread, nexus_chat::facade::Reader::Handle(STRANGER))
         .expect("Engine::thread reads a public channel without membership");
     assert_eq!(t.channel_id, DOOR);
     // `visibility` is UNCHANGED by the opened gate, and since nxf 6j6v.yr59 the ONE message reader
@@ -510,7 +535,12 @@ fn the_engine_seam_opens_a_thread_and_its_board_on_a_declared_public_channel() {
 
     // The twin: the same seam call, a `group` channel — the refusal is untouched.
     assert_eq!(
-        e.thread(&private_thread, STRANGER).unwrap_err().kind,
+        e.thread(
+            &private_thread,
+            nexus_chat::facade::Reader::Handle(STRANGER)
+        )
+        .unwrap_err()
+        .kind,
         ErrorKind::Forbidden
     );
 }
@@ -693,7 +723,9 @@ fn the_directory_names_everything_addressable_including_a_door_no_declaration_he
     .expect("open engine");
 
     // ONE call. Everything below comes out of this single value.
-    let dir = e.directory(None).expect("the directory reads");
+    let dir = e
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .expect("the directory reads");
 
     // WHO — every declared persona, with what they are for.
     assert_eq!(

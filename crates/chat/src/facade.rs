@@ -1109,6 +1109,111 @@ impl TranscriptView {
     }
 }
 
+// ---- who is reading (nxf 6j6v.6gpr) -----------------------------------------
+
+/// **WHO is reading** — the reader a conversation read is answered for, named by the EMBEDDER at
+/// every call (nxf 6j6v.6gpr).
+///
+/// # Why there are three, and why the embedder picks
+///
+/// Until this item every reader was a chat identity, and that holds locally: `nxc` reads as
+/// `<origin>/<actor>`, and the rules below — channel membership, the opener of the operation, a
+/// channel's declared `visibility` — are all comparisons against that identity. A HOSTED replica
+/// broke all three at once (measured in app-foundations, 41j0.hnpn): it reads as its own throwaway
+/// replica prefix plus the server process's actor, which is never a member and never an opener, so
+/// opening a thread answered `forbidden` to everyone. Nor could a better handle have fixed it: the
+/// opener of an operation run in a terminal carries a machine-minted `<origin>/<actor>` that no
+/// signed-in account knows.
+///
+/// The owner's decision of 2026-10-05: **a board has an owner, and the owner reads everything** —
+/// the account signed in as the board's owner reads as if it had opened every operation on it, and
+/// any other account sees no conversations at all. The hosted engine decides WHO that is, from the
+/// central login; this type is how it says so, and [`Reader::standing`] is what this crate decides
+/// reading as that account MEANS.
+///
+/// **Nothing a local caller can set produces [`Reader::Owner`].** No `nxc` flag, environment
+/// variable or declaration maps to it — `cli.rs` only ever builds [`Reader::Handle`], and
+/// `tests/owner_reads.rs` holds that at the source. Locally every read is exactly what it was.
+///
+/// # What each read does with it
+///
+/// One rule ([`Reader::standing`]), applied where each read gates:
+///
+/// | read | `Handle` | `Owner` | `NotOwner` |
+/// | --- | --- | --- | --- |
+/// | [`thread`] | the local rules, unchanged | every thread, unfiltered — the opener door for every operation | `forbidden` |
+/// | [`search`] | the caller's channels, filtered | every channel, unfiltered | `forbidden` |
+/// | `Engine::status` | caller-free, unchanged | the same caller-free report | `forbidden` |
+/// | `Engine::directory` | unchanged | the same record | `forbidden` |
+///
+/// **A refusal, never an empty answer.** "Sees no conversations at all" is spelled `forbidden` on
+/// every read, the enumerations included: an empty search or an empty status would read as "this
+/// board has nothing", which is a different fact, and a refusal is what the ticket asks for in so
+/// many words ("a refusal — not a fallback to everyone"). It also comes BEFORE `not_found`, so a
+/// non-owner cannot learn which thread ids exist by asking.
+///
+/// **Why the owner's view is unfiltered and that is not a widening past `visibility`.** The rule
+/// for the opener of an operation is already that it is not a peer of the round it reads — it is
+/// the party the whole chain answers to, so [`requester_for`] hands it the requester's view, which
+/// `requester_only` never filters. Reading as if it had opened every operation is that same view in
+/// every thread; nothing about the rule changed, only who it covers. And because a non-owner reads
+/// nothing, the fallback of a channel no declaration names to `all_members` — the case a hosted
+/// replica without the repository's `channels.yaml` is always in — widens nothing for anyone.
+///
+/// **Search is the one read where it goes further than the opener's local reach**, and it does so
+/// on the decision's own words. Locally the opener of an operation does not search across channels
+/// it is not a member of — [`search`] left that door shut as "the owner's to decide". The decision
+/// names `search` among the reads the owner mode applies to, and the owner reads everything, so
+/// [`Reader::Owner`] searches every channel the board holds.
+///
+/// # What it does not touch
+///
+/// Only READS take a reader. A write still acts as a chat identity, through its
+/// [`Caller`](crate::orchestration::Caller): reading as the owner authorizes no reply, no withdraw
+/// and no session. And it says nothing about which declaration SOURCES a hosted workspace reads —
+/// entries from the user-level folder count only for the owner's own workspace, never for a foreign
+/// one, and selecting the sources per workspace is a later cut (47jy.z1tt); this type neither
+/// widens nor narrows that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reader<'a> {
+    /// A chat identity — `<origin>/<actor>`, or a bare declared handle — read under the local
+    /// rules: channel membership (the declaration's where there is one), the opener of the
+    /// operation, the `public` front door, and the channel's declared `visibility`. What `nxc`
+    /// always reads as, and the only reader `cli.rs` builds.
+    Handle(&'a str),
+    /// The board's OWNER, as the embedder authenticated it: reads as if it had opened every
+    /// operation on the board. Only an embedder that has authenticated the account selects this.
+    Owner,
+    /// An authenticated account that is NOT the board's owner: every read refuses it, `forbidden`.
+    NotOwner,
+}
+
+/// What a [`Reader`] stands as, once [`Reader::standing`] has admitted it — the two shapes a read
+/// branches on. `NotOwner` has no standing: it never gets this far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Standing<'a> {
+    /// The board's owner: past the opener door of every operation, the requester of every round.
+    Owner,
+    /// A chat identity, under the local rules.
+    Handle(&'a str),
+}
+
+impl<'a> Reader<'a> {
+    /// **The one rule** every reader-keyed read is admitted by (nxf 6j6v.6gpr) — so the reads
+    /// cannot come to disagree about who an account is. See [`Reader`] for what each read does with
+    /// the answer.
+    pub(crate) fn standing(self) -> Result<Standing<'a>> {
+        match self {
+            Reader::Handle(handle) => Ok(Standing::Handle(handle)),
+            Reader::Owner => Ok(Standing::Owner),
+            Reader::NotOwner => Err(NxfError::forbidden(
+                "this account is not the owner of this board, and only the owner reads its \
+                 conversations",
+            )),
+        }
+    }
+}
+
 // ---- shared rejection helpers (moved from cli.rs — one source for both seams) ----
 
 // `require_member` stood here — the plain membership gate (spec §5.1), unknown channel →
@@ -1447,18 +1552,28 @@ pub fn messages(store: &ChatStore, channel: &str, as_handle: &str) -> Result<Vec
 /// next `send` to materialise it. And whoever opened the OPERATION this thread belongs to may read
 /// it whatever channel it sits in — see [`require_thread_readable`] for both doors, and
 /// [`requester_for`] for why that reader is not a peer of the round it is reading.
+///
+/// # It is answered for a [`Reader`] since nxf 6j6v.6gpr
+///
+/// A [`Reader::Handle`] reads under exactly the rules above. [`Reader::Owner`] — the board's owner,
+/// as an embedder authenticated it — passes the opener door of every operation and so reads every
+/// thread unfiltered, which is what the opener of the operation already sees in its own tree
+/// ([`requester_for`]). [`Reader::NotOwner`] is refused before the thread is even looked up.
 pub fn thread(
     store: &ChatStore,
     thread_id: &str,
-    as_handle: &str,
+    reader: Reader<'_>,
     policy: impl Into<ChannelPolicy>,
 ) -> Result<ThreadView> {
+    let standing = reader.standing()?;
     let policy = policy.into();
     let channel = store
         .thread_channel(thread_id)
         .or_else(|| store.thread_channel_via_message(thread_id))
         .ok_or_else(|| NxfError::not_found(format!("no such thread: {thread_id}")))?;
-    require_thread_readable(store, &channel, thread_id, as_handle, &policy)?;
+    if let Standing::Handle(as_handle) = standing {
+        require_thread_readable(store, &channel, thread_id, as_handle, &policy)?;
+    }
     let messages: Vec<MessageView> = store
         .messages_in_thread(thread_id)?
         .into_iter()
@@ -1469,9 +1584,14 @@ pub fn thread(
     // The REQUESTER, resolved exactly as `thread_board` resolves it — usually the thread's own
     // opener, but a supervisor-opened member thread inherits its parent's, and the reader who opened
     // the whole operation is never a peer of the round it is reading (see `requester_for`).
-    let requester = requester_for(store, thread_id, opener.as_deref(), as_handle)?;
-    let messages =
-        filter_board_messages(messages, as_handle, requester.as_deref(), policy.visibility);
+    let messages = visible_messages(
+        store,
+        thread_id,
+        opener.as_deref(),
+        standing,
+        policy.visibility,
+        messages,
+    )?;
     Ok(ThreadView {
         thread_id: thread_id.to_string(),
         channel_id: channel,
@@ -1564,9 +1684,14 @@ pub fn thread_board(
             held: false,
         },
     };
-    let requester = requester_for(store, thread_id, quorum.opener.as_deref(), as_handle)?;
-    let messages =
-        filter_board_messages(messages, as_handle, requester.as_deref(), policy.visibility);
+    let messages = visible_messages(
+        store,
+        thread_id,
+        quorum.opener.as_deref(),
+        Standing::Handle(as_handle),
+        policy.visibility,
+        messages,
+    )?;
     let status = working_tree_status_by_thread(store, now)?;
     let (working_tree, working_tree_queue_position) = working_tree_fields(&status, thread_id);
     Ok(ThreadBoardView {
@@ -1650,6 +1775,34 @@ fn requester_for(
         return Ok(Some(as_handle.to_string()));
     }
     Ok(requester)
+}
+
+/// One reader's view of a thread's `messages` — the half of the thread readers that comes AFTER the
+/// gate, shared by [`thread`] and [`thread_board`] so the two cannot filter differently.
+///
+/// The board's [`Standing::Owner`] reads as the opener of every operation, and the opener of an
+/// operation is the requester of every round in it ([`requester_for`]) — the reader
+/// `requester_only` reserves the answers FOR, which sees them all. So the owner's view is the
+/// thread as it stands, and no filter runs. A [`Standing::Handle`] goes through [`requester_for`]
+/// and [`filter_board_messages`] exactly as before nxf 6j6v.6gpr.
+fn visible_messages(
+    store: &ChatStore,
+    thread_id: &str,
+    opener: Option<&str>,
+    standing: Standing<'_>,
+    visibility: Visibility,
+    messages: Vec<MessageView>,
+) -> Result<Vec<MessageView>> {
+    let Standing::Handle(as_handle) = standing else {
+        return Ok(messages);
+    };
+    let requester = requester_for(store, thread_id, opener, as_handle)?;
+    Ok(filter_board_messages(
+        messages,
+        as_handle,
+        requester.as_deref(),
+        visibility,
+    ))
 }
 
 /// Apply a channel's declared `visibility` policy (6j6v.xrk3) to one reader's view of a thread's
@@ -1837,12 +1990,29 @@ fn same_identity(qualified: Option<&str>, as_handle: &str) -> bool {
 /// this read's: a QUALIFIED identity that opened a board in a declared channel keeps it although no
 /// `members:` names it, and none may revoke it. That is why "the declaration decides" is stated of
 /// the DECLARED SEAT — a bare handle is a member exactly when the file says so, in both directions.
+///
+/// # It is answered for a [`Reader`] since nxf 6j6v.6gpr
+///
+/// A [`Reader::Handle`] searches exactly as above. [`Reader::Owner`] searches EVERY channel the
+/// board holds a message in, unfiltered — the second of the two doors above, opened for the board's
+/// owner only and by the owner's own decision, which names `search` among the reads it covers (the
+/// argument is on [`Reader`]). [`Reader::NotOwner`] is refused: `forbidden`, never an empty list.
 pub fn search(
     store: &ChatStore,
-    handle: &str,
+    reader: Reader<'_>,
     query: &str,
     channels: &[ChannelDecl],
 ) -> Result<Vec<MessageHitView>> {
+    let handle = match reader.standing()? {
+        Standing::Owner => {
+            return Ok(store
+                .search_messages(&store.message_channel_ids()?, query)?
+                .into_iter()
+                .map(MessageHitView::from)
+                .collect());
+        }
+        Standing::Handle(handle) => handle,
+    };
     let hits = store.search_messages(&searchable_channels(store, handle, channels)?, query)?;
     let mut visibility: HashMap<String, Visibility> = HashMap::new();
     let mut boards: HashMap<String, SearchBoard> = HashMap::new();
@@ -5278,7 +5448,7 @@ mod tests {
         let id1 = s.post_message(&e);
         e.body = "a!".into();
         let id2 = s.post_message(&e);
-        let t = thread(&s, "m-th", "o/a", Visibility::AllMembers).unwrap();
+        let t = thread(&s, "m-th", Reader::Handle("o/a"), Visibility::AllMembers).unwrap();
         assert_eq!(t.channel_id, "c-1");
         assert_eq!(t.opener.as_deref(), Some("o/a"));
         // Concrete causal order [id1, id2] (0b1m): `thread` reads via `messages_in_thread`, now
@@ -5295,15 +5465,25 @@ mod tests {
             t.messages.iter().map(|m| m.body.as_str()).collect();
         assert_eq!(bodies, std::collections::HashSet::from(["q?", "a!"]));
         assert_eq!(
-            thread(&s, "m-th", "o/outsider", Visibility::AllMembers)
-                .unwrap_err()
-                .kind,
+            thread(
+                &s,
+                "m-th",
+                Reader::Handle("o/outsider"),
+                Visibility::AllMembers
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::Forbidden
         );
         assert_eq!(
-            thread(&s, "m-missing", "o/a", Visibility::AllMembers)
-                .unwrap_err()
-                .kind,
+            thread(
+                &s,
+                "m-missing",
+                Reader::Handle("o/a"),
+                Visibility::AllMembers
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::NotFound
         );
     }
@@ -5314,11 +5494,13 @@ mod tests {
         post(&mut s, "c-1", "ship the release now", Disposition::InTurn);
         // No declarations: every channel here is `undeclared` ⇒ `AllMembers`, so the visibility
         // filter (nxf 6j6v.px98) is a true no-op and this test still says what it always said.
-        let hits = search(&s, "o/reader", "RELEASE", &[]).unwrap();
+        let hits = search(&s, Reader::Handle("o/reader"), "RELEASE", &[]).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].body, "ship the release now");
         assert!(
-            search(&s, "o/outsider", "release", &[]).unwrap().is_empty(),
+            search(&s, Reader::Handle("o/outsider"), "release", &[])
+                .unwrap()
+                .is_empty(),
             "non-member sees nothing"
         );
     }

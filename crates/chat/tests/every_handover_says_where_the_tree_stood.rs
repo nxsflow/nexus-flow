@@ -252,7 +252,7 @@ impl Bench {
             facade::thread(
                 store,
                 thread,
-                "local/carsten",
+                nexus_chat::facade::Reader::Handle("local/carsten"),
                 nexus_chat::channel::ChannelPolicy::undeclared(),
             )
             .expect("thread")

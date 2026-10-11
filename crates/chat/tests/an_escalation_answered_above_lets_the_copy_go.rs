@@ -237,7 +237,11 @@ fn holder(tmp: &TempDir) -> Option<String> {
 fn operation(engine: &Engine, root: &str, at: &str) -> StatusOperation {
     let ids = [root];
     engine
-        .status(at, StatusScope::Threads(&ids))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            at,
+            StatusScope::Threads(&ids),
+        )
         .expect("status")
         .operations
         .into_iter()

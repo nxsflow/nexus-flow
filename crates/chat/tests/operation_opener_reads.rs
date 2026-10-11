@@ -163,7 +163,7 @@ fn the_operation_opener_reads_a_thread_in_a_channel_an_agent_opened_below_it() {
     let view = thread(
         &s,
         &child,
-        HUMAN,
+        nexus_chat::facade::Reader::Handle(HUMAN),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect("whoever opened the operation reads the tree `nxc status` shows them");
@@ -181,7 +181,7 @@ fn a_reader_who_opened_no_operation_here_is_still_refused() {
     let err = thread(
         &s,
         &child,
-        "o/stranger",
+        nexus_chat::facade::Reader::Handle("o/stranger"),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect_err("the tree door opens for the operation's opener, not for anyone who asks");
@@ -216,7 +216,7 @@ fn an_ancestry_this_workspace_has_not_folded_yet_does_not_open_the_door() {
     let err = thread(
         &s,
         &orphan,
-        HUMAN,
+        nexus_chat::facade::Reader::Handle(HUMAN),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect_err("an unfolded parent is fail-closed, not fail-open");
@@ -235,7 +235,7 @@ fn requester_only_still_hides_a_peer_members_reply_from_another_member() {
     let view = thread(
         &s,
         &child,
-        "reviewer",
+        nexus_chat::facade::Reader::Handle("reviewer"),
         coding_policy(&["coder", "reviewer"], Visibility::RequesterOnly),
     )
     .expect("a declared member reads the board");
@@ -257,7 +257,7 @@ fn requester_only_does_not_stand_between_the_operations_opener_and_the_answers_i
     let view = thread(
         &s,
         &child,
-        HUMAN,
+        nexus_chat::facade::Reader::Handle(HUMAN),
         coding_policy(&["coder"], Visibility::RequesterOnly),
     )
     .expect("the operation's opener reads its own tree");
@@ -285,7 +285,7 @@ fn adding_a_handle_to_declared_members_reaches_the_gate_with_no_send_in_between(
     thread(
         &s,
         &child,
-        "outsider",
+        nexus_chat::facade::Reader::Handle("outsider"),
         coding_policy(&["coder", "outsider"], Visibility::AllMembers),
     )
     .expect("the declaration IS the membership, with no `send` needed to materialise the edit");
@@ -306,7 +306,7 @@ fn a_handle_the_declaration_no_longer_names_loses_the_gate_although_the_store_st
     let err = thread(
         &s,
         &child,
-        "coder",
+        nexus_chat::facade::Reader::Handle("coder"),
         coding_policy(&["someone-else"], Visibility::AllMembers),
     )
     .expect_err("a seat the declaration no longer names is not a seat");
@@ -335,7 +335,7 @@ fn a_declared_member_reads_its_own_channel_under_its_qualified_identity() {
     thread(
         &s,
         &child,
-        "o/coder",
+        nexus_chat::facade::Reader::Handle("o/coder"),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect("a declared member reads the channel it is declared into, under its own identity");
@@ -353,7 +353,7 @@ fn a_board_opener_keeps_its_own_channel_although_no_declaration_names_it() {
     thread(
         &s,
         &child,
-        "o/pm",
+        nexus_chat::facade::Reader::Handle("o/pm"),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect("whoever opened the board reads it back, declared member or not");
@@ -384,9 +384,20 @@ fn an_undeclared_channel_is_still_answered_by_the_store_alone() {
     .unwrap()
     .thread_id;
 
-    thread(&s, &thread_id, "o/a", ChannelPolicy::undeclared()).expect("a member reads it");
-    let err = thread(&s, &thread_id, "o/b", ChannelPolicy::undeclared())
-        .expect_err("a non-member does not");
+    thread(
+        &s,
+        &thread_id,
+        nexus_chat::facade::Reader::Handle("o/a"),
+        ChannelPolicy::undeclared(),
+    )
+    .expect("a member reads it");
+    let err = thread(
+        &s,
+        &thread_id,
+        nexus_chat::facade::Reader::Handle("o/b"),
+        ChannelPolicy::undeclared(),
+    )
+    .expect_err("a non-member does not");
     assert_eq!(err.kind, nxs_foundation::error::ErrorKind::Forbidden);
 }
 
@@ -407,11 +418,16 @@ fn found(
     members: &[&str],
     visibility: Visibility,
 ) -> Vec<String> {
-    nexus_chat::facade::search(s, handle, q, &coding_decls(members, visibility))
-        .expect("search reads")
-        .into_iter()
-        .map(|h| h.body)
-        .collect()
+    nexus_chat::facade::search(
+        s,
+        nexus_chat::facade::Reader::Handle(handle),
+        q,
+        &coding_decls(members, visibility),
+    )
+    .expect("search reads")
+    .into_iter()
+    .map(|h| h.body)
+    .collect()
 }
 
 #[test]
@@ -551,7 +567,13 @@ fn the_two_readers_agree_about_membership_in_every_shape_a_reader_arrives_in() {
         ),
     ] {
         let policy = coding_policy(members, Visibility::AllMembers);
-        let serves = thread(&s, &child, handle, policy).is_ok();
+        let serves = thread(
+            &s,
+            &child,
+            nexus_chat::facade::Reader::Handle(handle),
+            policy,
+        )
+        .is_ok();
         let finds = !found(&s, handle, "scaffolding", members, Visibility::AllMembers).is_empty();
         assert_eq!(
             (serves, finds),
@@ -585,7 +607,7 @@ fn the_text_search_does_not_follow_an_operation_across_a_channel_border() {
     thread(
         &s,
         &child,
-        HUMAN,
+        nexus_chat::facade::Reader::Handle(HUMAN),
         coding_policy(&["coder"], Visibility::AllMembers),
     )
     .expect("the operation's opener reads its whole tree");

@@ -130,6 +130,18 @@ Für alle anderen weitet das `requester_only` nicht: diese Regel gilt zwischen d
 Operation steht nicht in der Runde — er ist die Partei, der die ganze Kette antwortet, und jede
 Zusammenführung wird ohnehin zu ihm hin geliefert.
 
+**Ein gehostetes Brett liest als sein EIGENTÜMER.** Wo ein Brett einem Browser ausgeliefert statt im
+Terminal gelesen wird, ist niemand, der es liest, eine Chat-Identität: das im Web angemeldete Konto
+kennt weder den eigenen Handle der Replik noch den maschinell geprägten, den eine im Terminal
+eröffnete Operation trägt. Deshalb benennt eine gehostete Engine den Leser anders, und die Regel ist
+ein Satz: **ein Brett hat einen Eigentümer, und der Eigentümer liest alles.** Das als Eigentümer des
+Bretts angemeldete Konto liest, als hätte es jede Operation darauf eröffnet — jeden Faden,
+ungefiltert, genau das, was der Eröffner oben sieht — und durchsucht jeden Kanal des Bretts. Jedes
+andere Konto sieht überhaupt keine Unterhaltungen: Faden, Suche, Status und Verzeichnis antworten
+ihm mit einer Ablehnung, nie mit einer leeren Liste. Welches Konto der Eigentümer ist, entscheidet
+der gehostete Dienst aus seiner Anmeldung, nie etwas, das ein lokaler Aufrufer setzen kann; `nxc`
+liest immer als Sie, nach den Regeln oben, unverändert.
+
 Und `members:` ist wirklich die Mitgliedschaft, in beide Richtungen: eine Änderung an der Datei
 erreicht das Tor beim nächsten *Lesen*, nicht beim nächsten `send`. Ein hinzugefügter Handle liest
 sofort; ein entfernter liest nicht mehr, ohne dass dazwischen irgendetwas neu gesendet werden muss.

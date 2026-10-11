@@ -237,7 +237,10 @@ fn an_absent_machine_is_asked_about_at_the_seam_and_nothing_is_written() {
         .unwrap();
     // …and now it is gone: a reply asks, and posts nothing.
     let before = eng
-        .thread(&first.thread_id, &format!("{}/alice", eng.origin()))
+        .thread(
+            &first.thread_id,
+            nexus_chat::facade::Reader::Handle(&format!("{}/alice", eng.origin())),
+        )
         .unwrap()
         .messages
         .len();
@@ -257,10 +260,13 @@ fn an_absent_machine_is_asked_about_at_the_seam_and_nothing_is_written() {
     assert!(err.msg.contains("not online"), "{}", err.msg);
     assert!(err.msg.contains("laptop (01jlaptop"), "{}", err.msg);
     assert_eq!(
-        eng.thread(&first.thread_id, &format!("{}/alice", eng.origin()))
-            .unwrap()
-            .messages
-            .len(),
+        eng.thread(
+            &first.thread_id,
+            nexus_chat::facade::Reader::Handle(&format!("{}/alice", eng.origin()))
+        )
+        .unwrap()
+        .messages
+        .len(),
         before
     );
     let asked = eng

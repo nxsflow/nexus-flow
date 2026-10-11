@@ -568,7 +568,11 @@ fn a_question_from_the_foreign_pm_wakes_the_commissioner_and_its_answer_goes_bac
     assert!(in_beta.escalated && !in_beta.awaiting_human, "{in_beta:?}");
     let beta_ops = b
         .engine
-        .status(NOW, nexus_chat::facade::StatusScope::Workspace)
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Workspace,
+        )
         .unwrap()
         .operations;
     let op = beta_ops
@@ -740,7 +744,11 @@ fn without_peers_an_address_is_refused_and_a_bare_handle_is_untouched() {
 fn status_row(side: &Side, thread: &str) -> nexus_chat::facade::StatusThread {
     let report = side
         .engine
-        .status(NOW, nexus_chat::facade::StatusScope::All(None))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::All(None),
+        )
         .expect("status");
     report
         .operations

@@ -1,0 +1,8 @@
+---
+type: added
+facade: breaking
+---
+[en]
+A hosted board now reads as its owner. The embedding seam names WHO reads with a new `facade::Reader` — a chat identity (`Reader::Handle`, the local rules, unchanged), the board's authenticated owner (`Reader::Owner`), or an account that is not the owner (`Reader::NotOwner`). The owner reads every thread as if it had opened every operation on the board, unfiltered, and searches every channel the board holds; any other account is refused (`forbidden`, never an empty list) on thread, search, status and directory. Breaking for embedders: `Engine::thread`, `Engine::search`, `Engine::status` and `Engine::directory` take the reader as an argument, and `facade::thread` / `facade::search` take a `Reader` instead of a handle. `nxc` always reads as you and is unchanged.
+[de]
+Ein gehostetes Brett liest jetzt als sein Eigentümer. Die Einbettungsnaht benennt mit dem neuen `facade::Reader`, WER liest — eine Chat-Identität (`Reader::Handle`, die lokalen Regeln, unverändert), der angemeldete Eigentümer des Bretts (`Reader::Owner`) oder ein Konto, das nicht der Eigentümer ist (`Reader::NotOwner`). Der Eigentümer liest jeden Faden, als hätte er jede Operation auf dem Brett eröffnet, ungefiltert, und durchsucht jeden Kanal des Bretts; jedes andere Konto wird bei Faden, Suche, Status und Verzeichnis abgelehnt (`forbidden`, nie eine leere Liste). Brechend für Einbettende: `Engine::thread`, `Engine::search`, `Engine::status` und `Engine::directory` nehmen den Leser als Argument, und `facade::thread` / `facade::search` nehmen einen `Reader` statt eines Handles. `nxc` liest immer als Sie und bleibt unverändert.

@@ -74,7 +74,9 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
     );
 
     // `directory`: every entry stamped with its origin, the same record `nxc list --json` prints.
-    let directory = engine.directory(None).unwrap();
+    let directory = engine
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .unwrap();
     let pm = directory
         .personas
         .iter()

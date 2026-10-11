@@ -2830,6 +2830,21 @@ impl ChatStore {
         }
     }
 
+    /// Every channel id the log holds at least one message in, channel-id ordered — the scope
+    /// [`facade::search`](crate::facade::search) reads for the board's OWNER (nxf 6j6v.6gpr), who
+    /// reads every conversation on the board. From `messages` rather than from the channel rows, so a
+    /// message that arrived by sync into a channel this replica holds no row for is still found:
+    /// "the owner reads everything" means the log, not the materialised channel list.
+    pub fn message_channel_ids(&self) -> crate::error::Result<Vec<String>> {
+        let conn = self.inner.connection();
+        let mut st =
+            conn.prepare("SELECT DISTINCT channel_id FROM messages ORDER BY channel_id")?;
+        let ids = st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
     /// Messages whose `body` contains `q` (case-insensitive, bound `LIKE ? ESCAPE '\'`), in the
     /// GIVEN `channels`, ordered by `(channel_id, lamport, site, message_id)` — deterministic (spec
     /// §5.1). An empty `channels` is an empty result and no query at all — never "then all of them".

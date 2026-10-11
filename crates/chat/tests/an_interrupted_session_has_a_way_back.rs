@@ -268,7 +268,11 @@ fn the_operational_view_says_that_a_session_stopped_at_a_boundary_and_when_it_li
     // And the same fact, spelled the same way, on the board-wide read — two readers of one question
     // must not qualify it differently.
     let status = engine
-        .status(NOW, StatusScope::Threads(&[&thread]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&thread]),
+        )
         .expect("the board renders");
     let op = &status.operations[0];
     assert!(op.interrupted, "the operation carries the mark: {op:?}");

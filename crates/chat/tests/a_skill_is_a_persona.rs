@@ -415,7 +415,9 @@ fn the_engine_carries_the_source_and_tells_a_skill_where_its_references_point() 
     );
     let engine = nexus_chat::engine::Engine::open(None, repo.path()).unwrap();
 
-    let directory = engine.directory(None).unwrap();
+    let directory = engine
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .unwrap();
     let wire = serde_json::to_value(&directory).unwrap();
     let comms = wire["personas"]
         .as_array()

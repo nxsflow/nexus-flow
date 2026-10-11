@@ -123,6 +123,17 @@ round*, and a member still never sees its neighbour's answer. The operation's op
 round — it is the party the whole chain answers to, and every consolidation is delivered towards it
 anyway.
 
+**A hosted board reads as its OWNER.** Where a board is served to a browser rather than read in a
+terminal, nobody reading it is a chat identity: the account signed in on the web knows neither the
+replica's own handle nor the machine-minted one an operation opened in a terminal carries. So a
+hosted engine names the reader differently, and the rule is one sentence: **a board has an owner,
+and the owner reads everything.** The account signed in as the board's owner reads as if it had
+opened every operation on it — every thread, unfiltered, exactly what the opener above sees — and
+searches every channel the board holds. Any other account sees no conversations at all: thread,
+search, status and directory all answer it with a refusal, never with an empty list. Which account
+is the owner is decided by the hosted service from its login, never by anything a local caller can
+set; `nxc` always reads as you, under the rules above, unchanged.
+
 And `members:` is genuinely the membership, in both directions: an edit to the file reaches the door
 on the next *read*, not on the next `send`. Add a handle and it can read at once; remove one and it
 cannot, without anything having to be re-sent in between. That holds for **every** read of the

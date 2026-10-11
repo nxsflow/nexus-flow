@@ -273,7 +273,7 @@ fn the_one_message_reader_applies_the_channels_declared_visibility() {
     let (_tmp, e, thread) = a_board_with_two_members_answers();
 
     let mine = e
-        .thread(&thread, "pm")
+        .thread(&thread, nexus_chat::facade::Reader::Handle("pm"))
         .expect("the requester reads its own thread");
     assert_eq!(
         bodies(&mine.messages),
@@ -285,7 +285,7 @@ fn the_one_message_reader_applies_the_channels_declared_visibility() {
     // says `requester_only`. Before yr59 this reader had no policy at all and handed back
     // everything — the filter lived on `thread_board`, which is the reader that went.
     let theirs = e
-        .thread(&thread, "dev")
+        .thread(&thread, nexus_chat::facade::Reader::Handle("dev"))
         .expect("a member reads the thread it takes part in");
     assert_eq!(
         bodies(&theirs.messages),
@@ -347,7 +347,7 @@ fn a_board_with_two_members_answers() -> (tempfile::TempDir, nexus_chat::engine:
         .expect("open the declared channel")
         .thread_id;
     let channel = e
-        .thread(&thread, "pm")
+        .thread(&thread, nexus_chat::facade::Reader::Handle("pm"))
         .expect("the requester reads its own thread")
         .channel_id;
     {
@@ -378,7 +378,7 @@ fn the_text_search_applies_the_same_declared_visibility_as_the_one_message_reade
     let (_tmp, e, _thread) = a_board_with_two_members_answers();
 
     let hits = |as_handle: &str| -> Vec<String> {
-        e.search(as_handle, "looked")
+        e.search(nexus_chat::facade::Reader::Handle(as_handle), "looked")
             .expect("search reads")
             .into_iter()
             .map(|h| h.body)
@@ -412,7 +412,7 @@ fn the_text_search_answers_a_declared_member_that_has_only_ever_replied() {
 
     let qualified = format!("{}/dev", e.origin());
     let hits: Vec<String> = e
-        .search(&qualified, "looked")
+        .search(nexus_chat::facade::Reader::Handle(&qualified), "looked")
         .expect("search reads")
         .into_iter()
         .map(|h| h.body)
@@ -441,7 +441,7 @@ fn an_edit_to_declared_members_reaches_the_text_search_at_the_seam_in_both_direc
     .unwrap();
 
     let bodies = |as_handle: &str, q: &str| -> Vec<String> {
-        e.search(as_handle, q)
+        e.search(nexus_chat::facade::Reader::Handle(as_handle), q)
             .expect("search reads")
             .into_iter()
             .map(|h| h.body)
@@ -478,7 +478,7 @@ fn an_edit_to_declared_members_reaches_the_text_search_at_the_seam_in_both_direc
         "struck from `members:`: the answer it found a moment ago is gone"
     );
     assert_eq!(
-        e.thread(&thread, &qa).unwrap_err().kind,
+        e.thread(&thread, nexus_chat::facade::Reader::Handle(&qa)).unwrap_err().kind,
         nxs_foundation::error::ErrorKind::Forbidden,
         "and the reader beside it refuses that same caller in the same breath — one membership rule, \
          whichever seam read is asked"
@@ -505,7 +505,7 @@ fn the_declared_request_itself_stays_findable_by_a_member_that_did_not_open_it()
     // out of it too), so this is the board's every matching body — what the filter is measured
     // against.
     let channel = e
-        .thread(&thread, "pm")
+        .thread(&thread, nexus_chat::facade::Reader::Handle("pm"))
         .expect("the requester reads it")
         .channel_id;
     let unfiltered = Workspace::resolve(None, tmp.path())
@@ -514,7 +514,9 @@ fn the_declared_request_itself_stays_findable_by_a_member_that_did_not_open_it()
         .unwrap()
         .search_messages(&[channel], "please look")
         .expect("the store read applies no policy");
-    let found = e.search("qa", "please look").expect("search reads");
+    let found = e
+        .search(nexus_chat::facade::Reader::Handle("qa"), "please look")
+        .expect("search reads");
 
     assert!(
         !unfiltered.is_empty(),
@@ -571,7 +573,7 @@ fn post_into(
 
 /// The bodies `as_handle` finds for `query`, through the seam's own search.
 fn found(e: &nexus_chat::engine::Engine, as_handle: &str, query: &str) -> Vec<String> {
-    e.search(as_handle, query)
+    e.search(nexus_chat::facade::Reader::Handle(as_handle), query)
         .expect("search reads")
         .into_iter()
         .map(|h| h.body)
@@ -588,7 +590,10 @@ fn a_message_with_no_thread_is_withheld_from_everyone_but_its_author() {
     //
     // Flipping that `else` to `Ok(true)` passed every test this file had before this one.
     let (tmp, e, board) = a_board_with_two_members_answers();
-    let channel = e.thread(&board, "pm").unwrap().channel_id;
+    let channel = e
+        .thread(&board, nexus_chat::facade::Reader::Handle("pm"))
+        .unwrap()
+        .channel_id;
     post_into(
         &e,
         tmp.path(),
@@ -620,7 +625,11 @@ fn a_message_with_no_thread_is_withheld_from_everyone_but_its_author() {
 /// the seam's own tree read, rather than reconstructed from the store.
 fn member_thread_of(e: &nexus_chat::engine::Engine, board: &str, expects: &str) -> String {
     let report = e
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&[board]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&[board]),
+        )
         .expect("status reads the operation tree");
     report
         .operations
@@ -645,7 +654,10 @@ fn the_requester_reads_a_supervisor_opened_member_thread_and_a_peer_does_not() {
     // they never exercise the inheritance. This one puts the answer where the fan-out really puts
     // it: in dev's own member thread, opened by the supervisor.
     let (tmp, e, board) = a_board_with_two_members_answers();
-    let channel = e.thread(&board, "pm").unwrap().channel_id;
+    let channel = e
+        .thread(&board, nexus_chat::facade::Reader::Handle("pm"))
+        .unwrap()
+        .channel_id;
     let dev_thread = member_thread_of(&e, &board, "dev");
     post_into(
         &e,
@@ -685,7 +697,10 @@ fn the_bare_declared_handle_is_recognized_against_the_qualified_identities_in_th
     // accident. Named here so that breaking it fails with the reason rather than as a puzzling
     // change in three unrelated assertions.
     let (_tmp, e, board) = a_board_with_two_members_answers();
-    let opener = e.thread(&board, "pm").unwrap().opener;
+    let opener = e
+        .thread(&board, nexus_chat::facade::Reader::Handle("pm"))
+        .unwrap()
+        .opener;
 
     assert_eq!(
         opener.as_deref(),
@@ -711,7 +726,10 @@ fn two_channels_in_one_search_are_each_judged_under_their_own_declaration() {
     // later hit, which on this fixture would leak `requester_only` content the moment an
     // `all_members` channel is searched first (the channels sort `decl:open` before `decl:review`).
     let (tmp, e, board) = a_board_with_two_members_answers();
-    let review = e.thread(&board, "pm").unwrap().channel_id;
+    let review = e
+        .thread(&board, nexus_chat::facade::Reader::Handle("pm"))
+        .unwrap()
+        .channel_id;
 
     // A second declared channel, `all_members`, materialized the way `ensure_declared_channel`
     // materializes one: the declared members, bare.
@@ -829,11 +847,16 @@ fn whoever_opened_the_operation_finds_the_answers_it_commissioned_in_a_reserved_
 
     let hits = |as_handle: &str| -> Vec<String> {
         // "settle" matches BOTH bodies; the filter is what separates them, not the query.
-        nexus_chat::facade::search(&s, as_handle, "settle", &decls)
-            .expect("search reads")
-            .into_iter()
-            .map(|h| h.body)
-            .collect()
+        nexus_chat::facade::search(
+            &s,
+            nexus_chat::facade::Reader::Handle(as_handle),
+            "settle",
+            &decls,
+        )
+        .expect("search reads")
+        .into_iter()
+        .map(|h| h.body)
+        .collect()
     };
 
     assert_eq!(

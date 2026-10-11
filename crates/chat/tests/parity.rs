@@ -481,7 +481,11 @@ fn read_parity_embed_surface_equals_nxc_json_over_the_same_store() {
     // differential over one surface is not a differential, and while `search` HAS two surfaces the
     // gate should be reading both.
     assert_eq!(
-        json_str(&engine.search(&handle, "hello").unwrap()),
+        json_str(
+            &engine
+                .search(nexus_chat::facade::Reader::Handle(&handle), "hello")
+                .unwrap()
+        ),
         nxc_json(dir, &["search", "hello"]),
         "search parity"
     );
@@ -607,27 +611,67 @@ fn read_parity_quorum_surface_equals_nxc_json_over_the_same_store() {
     // a ROOT operation (opened by `ask` from a bare terminal), so each form has something to say
     // about it — `--all` because it is finished, the other three because they show it either way.
     assert_eq!(
-        json_str(&engine.status(NOW, StatusScope::Workspace).unwrap()),
+        json_str(
+            &engine
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    StatusScope::Workspace
+                )
+                .unwrap()
+        ),
         nxc_json(dir, &["status"]),
         "status parity"
     );
     assert_eq!(
-        json_str(&engine.status(NOW, StatusScope::Threads(&[&tid])).unwrap()),
+        json_str(
+            &engine
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    StatusScope::Threads(&[&tid])
+                )
+                .unwrap()
+        ),
         nxc_json(dir, &["status", "--thread", &tid]),
         "status --thread parity"
     );
     assert_eq!(
-        json_str(&engine.status(NOW, StatusScope::Channel(&ch)).unwrap()),
+        json_str(
+            &engine
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    StatusScope::Channel(&ch)
+                )
+                .unwrap()
+        ),
         nxc_json(dir, &["status", "--channel", &ch]),
         "status --channel parity"
     );
     assert_eq!(
-        json_str(&engine.status(NOW, StatusScope::All(None)).unwrap()),
+        json_str(
+            &engine
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    StatusScope::All(None)
+                )
+                .unwrap()
+        ),
         nxc_json(dir, &["status", "--all"]),
         "status --all parity"
     );
     assert_eq!(
-        json_str(&engine.status(NOW, StatusScope::All(Some(&ch))).unwrap()),
+        json_str(
+            &engine
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    StatusScope::All(Some(&ch))
+                )
+                .unwrap()
+        ),
         nxc_json(dir, &["status", "--all", "--channel", &ch]),
         "status --all --channel parity"
     );
@@ -1350,8 +1394,14 @@ fn surface_parity_engine_and_nxc_open_and_answer_one_thread_identically() {
     let app_session;
     {
         let e = orch_engine(app.path(), &app_log);
-        app_full = json_str(&e.directory(None).unwrap());
-        app_book = json_str(&e.directory(Some(PERSONA)).unwrap());
+        app_full = json_str(
+            &e.directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+                .unwrap(),
+        );
+        app_book = json_str(
+            &e.directory(nexus_chat::facade::Reader::Handle("o/human"), Some(PERSONA))
+                .unwrap(),
+        );
 
         let opened = e
             .send_to(

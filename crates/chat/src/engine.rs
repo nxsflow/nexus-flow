@@ -63,7 +63,8 @@ use crate::channel::ChannelPolicy;
 use crate::definitions::Definitions;
 use crate::error::Result;
 use crate::facade::{
-    self, MessageHitView, PrimeReport, StatusReport, StatusScope, ThreadView, TranscriptView,
+    self, MessageHitView, PrimeReport, Reader, StatusReport, StatusScope, ThreadView,
+    TranscriptView,
 };
 use crate::naming::{Namer, NamerConfig};
 use crate::orchestration::{self, Ambient, Caller, Ctx, ReplyReceipt};
@@ -425,13 +426,20 @@ impl Engine {
     /// it this cut would have WIDENED what a non-requester may read, since the reader that carried
     /// the filter is the one that went. `AllMembers` remains the honest fallback for a thread whose
     /// channel no declaration names.
-    pub fn thread(&self, thread_id: &str, as_handle: &str) -> Result<ThreadView> {
+    ///
+    /// **WHO reads is the embedder's to say** ([`Reader`], nxf 6j6v.6gpr): a [`Reader::Handle`]
+    /// reads under the rules above, the board's [`Reader::Owner`] reads every thread as the opener
+    /// of its operation does, unfiltered, and [`Reader::NotOwner`] is refused (`forbidden`).
+    pub fn thread(&self, thread_id: &str, reader: Reader<'_>) -> Result<ThreadView> {
+        // Refused before anything is read — the declarations included — so a non-owner learns
+        // nothing about the board, not even whether its declaration folder parses.
+        reader.standing()?;
         // The merged CHANNELS (nxf 6j6v.7k58) — channels only, so a malformed persona file cannot
         // make a thread unreadable — read before the store lock is taken.
         let channels = crate::definitions::merged_channels(self.workspace().workspace_root()?)?;
         self.handle.try_with_state(|s| {
             let policy = declared_policy_of(&s.store, &channels, thread_id)?;
-            facade::thread(&s.store, thread_id, as_handle, policy)
+            facade::thread(&s.store, thread_id, reader, policy)
         })
     }
 
@@ -477,10 +485,15 @@ impl Engine {
     /// an access rule and not a display rule. [`facade::search`](crate::facade::search) carries the
     /// rule and what it costs; `AllMembers` remains the honest fallback for a channel no
     /// declaration names, so an undeclared workspace reads exactly as it always did.
-    pub fn search(&self, handle: &str, query: &str) -> Result<Vec<MessageHitView>> {
+    ///
+    /// **WHO searches is the embedder's to say** ([`Reader`], nxf 6j6v.6gpr): a [`Reader::Handle`]
+    /// searches its own channels as above, the board's [`Reader::Owner`] searches every channel the
+    /// board holds, unfiltered, and [`Reader::NotOwner`] is refused (`forbidden`, not an empty list).
+    pub fn search(&self, reader: Reader<'_>, query: &str) -> Result<Vec<MessageHitView>> {
+        reader.standing()?;
         let channels = crate::definitions::merged_channels(self.workspace().workspace_root()?)?;
         self.handle
-            .try_with_state(|s| facade::search(&s.store, handle, query, &channels))
+            .try_with_state(|s| facade::search(&s.store, reader, query, &channels))
     }
 
     /// **Where does this operation stand** (nxf 6j6v.a71h) — the thread TREE an operation is, across
@@ -502,7 +515,21 @@ impl Engine {
     ///
     /// `now` drives only the clock-dependent `stale` flag, like every other read here; the app passes its
     /// own wall clock rather than an ambient one.
-    pub fn status(&self, now: &str, scope: StatusScope<'_>) -> Result<StatusReport> {
+    ///
+    /// **It is admitted by the [`Reader`] since nxf 6j6v.6gpr, and still projects by nobody.** A
+    /// hosted board answers this for its owner and refuses every other account
+    /// ([`Reader::NotOwner`] → `forbidden`), which is the whole of what the reader does here: once
+    /// admitted, a [`Reader::Handle`] and [`Reader::Owner`] get the SAME report, byte for byte —
+    /// the caller-free read `nxc status` runs, which takes no reader at all and is unchanged
+    /// (`thread_tree.rs::status_reads_the_same_for_every_caller_because_there_is_no_caller`). A
+    /// gate is not a projection: nothing in the report depends on who asked.
+    pub fn status(
+        &self,
+        reader: Reader<'_>,
+        now: &str,
+        scope: StatusScope<'_>,
+    ) -> Result<StatusReport> {
+        reader.standing()?;
         self.handle
             .try_with_state(|s| facade::status(&s.store, &*self.worker, now, scope))
     }
@@ -628,7 +655,18 @@ impl Engine {
     /// logged-in user therefore gets the right answer; one rendering it as a neutral catalogue must
     /// read [`PersonaEntry::addressable`](crate::persona::PersonaBrief::addressable)'s sibling on
     /// the declaration instead of reading `direct` as "is a direct message possible at all".
-    pub fn directory(&self, persona: Option<&str>) -> Result<crate::persona::Directory> {
+    ///
+    /// **It is admitted by the [`Reader`] since nxf 6j6v.6gpr**, for the reason [`status`](Engine::status)
+    /// is: a hosted board answers it for its owner and refuses every other account
+    /// ([`Reader::NotOwner`] → `forbidden`). Once admitted the record is the same for a
+    /// [`Reader::Handle`] and for [`Reader::Owner`] — `persona` decides the audience, the reader
+    /// only whether there is an answer at all.
+    pub fn directory(
+        &self,
+        reader: Reader<'_>,
+        persona: Option<&str>,
+    ) -> Result<crate::persona::Directory> {
+        reader.standing()?;
         let defs = self.definitions()?;
         let directory = match persona {
             Some(handle) => {

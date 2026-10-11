@@ -258,7 +258,11 @@ fn a_host_whose_worker_cannot_answer_reads_unknown_for_everything_unended() {
     let minted: Vec<String> = store
         .sessions_in_thread(
             &engine
-                .status(NOW, nexus_chat::facade::StatusScope::Workspace)
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    nexus_chat::facade::StatusScope::Workspace,
+                )
                 .unwrap()
                 .operations[0]
                 .threads
@@ -354,7 +358,11 @@ fn the_two_unknowns_that_mean_opposite_things_are_told_apart_on_the_report() {
     let unasked = silent
         .session_state(SessionScope::Thread(
             &silent
-                .status(NOW, nexus_chat::facade::StatusScope::Workspace)
+                .status(
+                    nexus_chat::facade::Reader::Handle("o/human"),
+                    NOW,
+                    nexus_chat::facade::StatusScope::Workspace,
+                )
                 .unwrap()
                 .operations[0]
                 .threads

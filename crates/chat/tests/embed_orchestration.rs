@@ -497,7 +497,11 @@ fn engine_persona_send_declares_the_summoned_role_expected_on_its_own_thread() {
     // became. `outstanding` is `expects` minus whoever answered, so "nobody has answered yet" is
     // the two lists being equal — the `replied` field the quorum carried is that difference.
     let report = eng
-        .status(NOW, StatusScope::Threads(&[&receipt.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&receipt.thread_id]),
+        )
         .unwrap();
     let q = &report
         .operations
