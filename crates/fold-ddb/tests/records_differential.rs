@@ -22,7 +22,7 @@ use nxs_fold_ddb::{board, records};
 use nxs_foundation::change::Cell;
 
 mod common;
-use common::{delivered, id, merged, serve, Lcg, NOW};
+use common::{delivered, head, id, merged, serve, Lcg, NOW};
 
 /// A plugin that declares the generator's custom field, so the `custom` join is exercised, and
 /// ranks by priority and due date.
@@ -440,7 +440,7 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
         // stream and fold it again from position 0. No step of its own.
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
         assert!(!folder.is_current(&mark), "seed {seed}");
-        ready(Folder::clear(&t)).unwrap();
+        ready(Folder::clear(&t, head(&ops))).unwrap();
         ready(folder.fold_batch(&t, &ops)).unwrap();
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
         assert!(folder.is_current(&mark), "seed {seed}");
@@ -634,7 +634,7 @@ fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_co
         }
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
         assert!(!folder.is_current(&mark), "seed {seed}");
-        ready(Folder::clear(&t)).unwrap();
+        ready(Folder::clear(&t, head(&ops))).unwrap();
         ready(folder.fold_batch(&t, &ops)).unwrap();
 
         let served = served_board(&t);

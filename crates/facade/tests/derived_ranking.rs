@@ -11,6 +11,8 @@
 //! - Determinism (§9): another edge insertion order ranks alike, and ties fall to the id.
 //! - Bounded cost (§9, a query-shape guard in the style of xn8s): the edge pass runs once per query
 //!   however many candidates there are.
+//! - Without a store (6j6v.1c5s, 6j6v.xkr7): `read::next_active` and `read::list_board_page` over
+//!   the boards a server reads rank as the store path does.
 //!
 //! Its own test binary, so the fixture plugin does not pollute the facade lib tests' "exactly two
 //! OSS plugins" assertion.
@@ -359,8 +361,37 @@ fn the_rank_follows_the_board_on_the_next_query() {
 }
 
 #[test]
-fn the_store_free_lanes_refuse_a_plugin_with_derived_next_keys() {
-    // The server path is its own cut (1c5s); ranking without the edges would differ in silence.
+fn the_store_free_next_ranks_from_the_ranking_graph_as_the_store_does() {
+    // 6j6v.1c5s: the board a server reads carries the graph the keys read, and the store-free
+    // `next` ranks from it exactly as the store path does — the spec's three-type chain.
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let cfg = plugin::load("derived-rank-fixture").unwrap();
+    let s = writer(tmp.path());
+    let reads = read::next_ranking_reads(&cfg)
+        .unwrap()
+        .expect("derived next keys");
+    assert_eq!(
+        reads.kinds.iter().copied().collect::<Vec<_>>(),
+        [EdgeKind::ContributesTo, EdgeKind::Parent],
+        "the edges the next orders follow or count"
+    );
+    assert!(reads.custom && !reads.labels, "{reads:?}");
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let got = read::next_active(&cfg, &board, NOW).unwrap();
+    assert_eq!(ids(&got), ids(&read::next(&cfg, &s, NOW, None).unwrap()));
+    assert_eq!(of_type(&got, "project"), PROJECTS);
+    assert_eq!(of_type(&got, "action"), ACTIONS);
+    assert_eq!(
+        read::next_active_value(&cfg, &board, NOW).unwrap(),
+        read::next_to_value_with_custom(&cfg, &s, &read::next(&cfg, &s, NOW, None).unwrap())
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_store_free_next_refuses_a_board_read_without_the_graph_its_keys_read() {
+    // Ranking without the edges would order apart from the store path in silence.
     let tmp = workspace("derived-rank-fixture");
     spec_board(tmp.path());
     let cfg = plugin::load("derived-rank-fixture").unwrap();
@@ -369,6 +400,350 @@ fn the_store_free_lanes_refuse_a_plugin_with_derived_next_keys() {
     let err = read::next_active(&cfg, &board, NOW).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Validation);
     assert!(err.msg.contains("derived ranking keys"), "{}", err.msg);
+    // A graph read for less than the keys need is refused too: here without the custom values
+    // the goals' `order` lives in.
+    let mut reads = read::next_ranking_reads(&cfg).unwrap().unwrap();
+    reads.custom = false;
+    let short = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let err = read::next_active(&cfg, &short, NOW).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    // `blocked` and `deferred` rank by no derived key and need no graph.
+    read::blocked_active(&cfg, &board);
+    read::deferred_active(&cfg, &board, NOW).unwrap();
+}
+
+/// A plugin ranking `next` by its neighbours with no status filter, so closed, archived and
+/// deleted neighbours each decide something (owner, 2026-10-11: a key reads every LIVE neighbour).
+const LIVE_ORDERS: &str = r#"
+name = "live-neighbours-fixture"
+[description]
+en = "x"
+de = "y"
+[priority]
+labels = ["P0", "P1", "P2", "P3"]
+[types]
+list = ["goal", "project", "action"]
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+[ranking.next]
+types = ["project", "action"]
+order = [ { field = "priority", dir = "asc" } ]
+[ranking.next.project]
+order = [
+  { related = "contributes_to", type = "goal", of = { field = "order" }, pick = "min", nulls = "last" },
+  { count = "children", dir = "desc" },
+  { count = "mentioned_by", dir = "desc" },
+]
+[ranking.next.action]
+order = [ { related = "parent", type = "project", of = "rank", nulls = "last" } ]
+[presentation.list]
+columns = ["id"]
+[fields.order]
+type = "text"
+on = ["goal"]
+"#;
+
+#[test]
+fn a_closed_archived_or_deleted_neighbour_reads_alike_with_and_without_a_store() {
+    // Goals: `gc` closed (order 1), `ga` archived (order 2), `go` open (order 3), `gd` deleted
+    // (order 0). Projects `pa`..`pd` contribute to one each: a closed or archived goal still gives
+    // its order, a deleted one gives none (null, last). Projects `q1`..`q4` have no goal: `q1` has
+    // three children — two closed, one archived — `q2` one open child, `q3` is mentioned by a
+    // closed project and `q4` by nothing. Every child and mentioner but `q2`'s is out of `next`.
+    let cfg: plugin::PluginConfig = toml::from_str(LIVE_ORDERS).unwrap();
+    let mut s = Store::open_in_memory(1);
+    for (g, order) in [
+        ("zz12.gc", "1"),
+        ("zz12.ga", "2"),
+        ("zz12.go", "3"),
+        ("zz12.gd", "0"),
+    ] {
+        item(&mut s, g, "goal", "1");
+        custom(&mut s, g, "order", order);
+    }
+    close(&mut s, "zz12.gc");
+    s.set_field("zz12.ga", "archived", Some("2026-06-01".into()), "t");
+    for (p, g) in [
+        ("zz12.pa", "zz12.gc"),
+        ("zz12.pb", "zz12.ga"),
+        ("zz12.pc", "zz12.gd"),
+        ("zz12.pd", "zz12.go"),
+    ] {
+        item(&mut s, p, "project", "1");
+        edge(&mut s, p, g, EdgeKind::ContributesTo);
+    }
+    s.delete_item("zz12.gd", "t");
+    for q in ["zz12.q1", "zz12.q2", "zz12.q3", "zz12.q4"] {
+        item(&mut s, q, "project", "1");
+    }
+    for (a, parent) in [
+        ("zz12.a1", "zz12.q1"),
+        ("zz12.a2", "zz12.q1"),
+        ("zz12.a3", "zz12.q1"),
+        ("zz12.a4", "zz12.q2"),
+    ] {
+        item(&mut s, a, "action", "1");
+        s.set_parent(a, parent, "t").unwrap();
+    }
+    close(&mut s, "zz12.a1");
+    close(&mut s, "zz12.a2");
+    s.set_field("zz12.a3", "archived", Some("2026-06-01".into()), "t");
+    item(&mut s, "zz12.px", "project", "1");
+    edge(&mut s, "zz12.px", "zz12.q3", EdgeKind::Mentions);
+    close(&mut s, "zz12.px");
+
+    let want = [
+        "zz12.pa", "zz12.pb", "zz12.pd", "zz12.q1", "zz12.q2", "zz12.q3", "zz12.pc", "zz12.q4",
+    ];
+    let store = read::next(&cfg, &s, NOW, None).unwrap();
+    assert_eq!(of_type(&store, "project"), want, "the store path");
+    let reads = read::next_ranking_reads(&cfg).unwrap().unwrap();
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let graph = board.ranking.as_ref().unwrap();
+    for id in ["zz12.gc", "zz12.ga", "zz12.a1", "zz12.a3", "zz12.px"] {
+        assert!(
+            graph.neighbours.contains_key(id),
+            "{id} is a live neighbour"
+        );
+    }
+    assert!(
+        !graph.neighbours.contains_key("zz12.gd"),
+        "a deleted one is not"
+    );
+    assert!(
+        graph.edges.iter().all(|e| e.to != "zz12.gd"),
+        "nor an edge to it"
+    );
+    assert_eq!(
+        ids(&read::next_active(&cfg, &board, NOW).unwrap()),
+        ids(&store)
+    );
+}
+
+#[test]
+fn a_next_order_reading_the_rank_of_a_type_only_list_orders_ranks_from_the_listed_items() {
+    // Spec §12 point 1 lets a `next` key read the rank `[ranking.list]` gives a type. That rank is
+    // computed over the type's live, unarchived items, which a board of active tickets does not
+    // hold: since 6j6v.xkr7 the reads name the type (`list_types`) and the graph holds its items —
+    // a server reads them off its `typed` index — so the store-free `next` ranks as the store
+    // path does. A board read without them is refused.
+    let cfg: plugin::PluginConfig = toml::from_str(
+        r#"
+        name = "list-rank-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P0", "P1", "P2"]
+        [types]
+        list = ["action", "person"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "priority" } ]
+        [ranking.next.action]
+        order = [ { related = "mentions", type = "person", of = "rank", nulls = "last" } ]
+        [ranking.list.person]
+        order = [ { count = "mentioned_by", dir = "desc" }, { field = "priority", dir = "asc" } ]
+        [presentation.list]
+        columns = ["id"]
+        "#,
+    )
+    .unwrap();
+    let mut s = Store::open_in_memory(1);
+    // Persons: u1 mentioned twice (rank 0); u2 and the closed u3 once each, u3 with the better
+    // priority; u4 archived (no rank: outside the list scope); u5 deleted.
+    for (u, prio) in [
+        ("u1", "2"),
+        ("u2", "1"),
+        ("u3", "0"),
+        ("u4", "0"),
+        ("u5", "0"),
+    ] {
+        item(&mut s, &format!("zz12.{u}"), "person", prio);
+    }
+    close(&mut s, "zz12.u3");
+    s.set_field("zz12.u4", "archived", Some("2026-06-01".into()), "t");
+    for (a, person) in [
+        ("zz12.a1", "zz12.u2"),
+        ("zz12.a2", "zz12.u1"),
+        ("zz12.a3", "zz12.u3"),
+        ("zz12.a4", "zz12.u4"),
+        ("zz12.a5", "zz12.u5"),
+    ] {
+        item(&mut s, a, "action", "1");
+        edge(&mut s, a, person, EdgeKind::Mentions);
+    }
+    item(&mut s, "zz12.a6", "action", "1");
+    edge(&mut s, "zz12.a6", "zz12.u1", EdgeKind::Mentions);
+    s.delete_item("zz12.u5", "t");
+
+    let reads = read::next_ranking_reads(&cfg)
+        .unwrap()
+        .expect("derived next keys");
+    assert_eq!(
+        reads.list_types.iter().collect::<Vec<_>>(),
+        ["person"],
+        "{reads:?}"
+    );
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &reads).unwrap();
+    let graph = board.ranking.as_ref().unwrap();
+    assert_eq!(
+        graph.listed.iter().collect::<Vec<_>>(),
+        ["zz12.u1", "zz12.u2", "zz12.u3"],
+        "the live, unarchived persons"
+    );
+    let store = read::next(&cfg, &s, NOW, None).unwrap();
+    assert_eq!(
+        of_type(&store, "action"),
+        ["zz12.a2", "zz12.a6", "zz12.a3", "zz12.a1", "zz12.a4", "zz12.a5"]
+    );
+    assert_eq!(
+        ids(&read::next_active(&cfg, &board, NOW).unwrap()),
+        ids(&store)
+    );
+
+    // Without the person's items the graph is short of what the keys read: refused.
+    let mut short = reads.clone();
+    short.list_types.clear();
+    let board = read::with_ranking(&s, read::active_board(&s).unwrap(), &short).unwrap();
+    assert_eq!(
+        read::next_active(&cfg, &board, NOW).unwrap_err().kind,
+        ErrorKind::Validation
+    );
+}
+
+#[test]
+fn the_store_free_list_ranks_persons_as_list_query_does() {
+    // 6j6v.xkr7: the hosted `list` — `read::list_board_page` over a `ListBoard` read for
+    // `read::list_reads` — gives the rows, the order, the total and the JSON `Engine::list_query`
+    // gives: persons by a sum of mentions, then by the rank `next` gives the projects they
+    // contribute to (`now` takes `next`'s candidates), filtered by type, status, container and
+    // label as locally.
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let cfg = plugin::load("derived-rank-fixture").unwrap();
+    let s = writer(tmp.path());
+    let engine = engine(&tmp);
+    let queries = [
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_type("person"))
+            .now(NOW),
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_type("person"))
+            .now(NOW)
+            .limit(2),
+        ListQuery::new().sort(SortKey::Rank).now(NOW),
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(
+                NextFilter::new()
+                    .with_type("action")
+                    .with_container("zz12.p5"),
+            )
+            .now(NOW),
+        ListQuery::new()
+            .sort(SortKey::Rank)
+            .filter(NextFilter::new().with_label("waiting"))
+            .now(NOW),
+        ListQuery::new().status("closed"),
+        ListQuery::new()
+            .filter(NextFilter::new().with_type("project").with_type("goal"))
+            .sort(SortKey::Rank),
+    ];
+    for q in &queries {
+        let reads = read::list_reads(&cfg, q);
+        let board = read::list_board(&s, &reads).unwrap();
+        let page = read::list_board_page(&cfg, &board, q).unwrap();
+        let want = engine.list_query(q).unwrap();
+        assert_eq!(ids(&page.items), ids(&want.items), "{q:?}");
+        assert_eq!(page.total, want.total, "{q:?}");
+        assert_eq!(
+            read::list_board_value(&cfg, &board, q).unwrap(),
+            engine.list_query_value(q).unwrap(),
+            "{q:?}"
+        );
+    }
+    let persons = read::list_board_page(
+        &cfg,
+        &read::list_board(&s, &read::list_reads(&cfg, &queries[0])).unwrap(),
+        &queries[0],
+    )
+    .unwrap();
+    assert_eq!(ids(&persons.items), PERSONS);
+    let reads = read::list_reads(&cfg, &queries[0]);
+    assert!(
+        reads.next,
+        "persons read the rank `next` gives projects: {reads:?}"
+    );
+    assert_eq!(
+        reads.types,
+        Some(["person".to_string()].into_iter().collect())
+    );
+}
+
+#[test]
+fn the_store_free_list_refuses_what_its_board_was_not_read_for() {
+    let tmp = workspace("derived-rank-fixture");
+    spec_board(tmp.path());
+    let cfg = plugin::load("derived-rank-fixture").unwrap();
+    let s = writer(tmp.path());
+    let persons = ListQuery::new()
+        .sort(SortKey::Rank)
+        .filter(NextFilter::new().with_type("person"))
+        .now(NOW);
+    let board = read::list_board(&s, &read::list_reads(&cfg, &persons)).unwrap();
+    let refused = |q: &ListQuery, board: &read::ListBoard| {
+        let err = read::list_board_page(&cfg, board, q).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation, "{q:?}");
+        err.msg
+    };
+    // Not paged: a server cuts the list itself.
+    refused(&persons.clone().limit(2).paginate(), &board);
+    // Other types, or every type, than the board lists.
+    refused(
+        &ListQuery::new().filter(NextFilter::new().with_type("project")),
+        &board,
+    );
+    refused(&ListQuery::new(), &board);
+    // Without `now`, `next`'s candidates cannot be taken — as on the store path.
+    let no_now = ListQuery::new()
+        .sort(SortKey::Rank)
+        .filter(NextFilter::new().with_type("person"));
+    let reads = read::list_reads(&cfg, &no_now);
+    assert!(!reads.next, "nothing to read `next`'s board for: {reads:?}");
+    let msg = refused(&no_now, &read::list_board(&s, &reads).unwrap());
+    assert!(msg.contains("pass `now`"), "{msg}");
+    // A board without the graph its keys read.
+    let mut short = read::list_reads(&cfg, &persons);
+    short.ranking = None;
+    let msg = refused(&persons, &read::list_board(&s, &short).unwrap());
+    assert!(msg.contains("derived ranking keys"), "{msg}");
+    // Without `next`'s board.
+    let mut short = read::list_reads(&cfg, &persons);
+    short.next = false;
+    let msg = refused(&persons, &read::list_board(&s, &short).unwrap());
+    assert!(msg.contains("active board"), "{msg}");
+    // A list that is not ranked is kept and cut before its joins: its board holds the page of ONE
+    // query, and answers no other — not another status, not another limit (review of PR #55).
+    let closed = ListQuery::new().status("closed").limit(1);
+    let cut = read::list_board(&s, &read::list_reads(&cfg, &closed)).unwrap();
+    assert!(cut.cut.is_some() && cut.items.len() <= 1);
+    read::list_board_page(&cfg, &cut, &closed).unwrap();
+    for other in [
+        ListQuery::new().status("open").limit(1),
+        ListQuery::new().status("closed").limit(2),
+        ListQuery::new().status("closed"),
+    ] {
+        let msg = refused(&other, &cut);
+        assert!(msg.contains("kept and cut for another query"), "{msg}");
+    }
 }
 
 // ---- each kind over hand-built boards (§9 "per kind") -------------------------------------

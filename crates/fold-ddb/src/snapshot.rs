@@ -7,9 +7,11 @@
 //! change is idempotent. The order is what makes that safe: tables read before the watermark could
 //! lack an op the watermark claims.
 //!
-//! [`import`] starts an EMPTY stream from one: it writes the rows, rebuilds the board's indexes from
-//! them, and writes the watermark last, so a stream whose import died has no watermark and is
-//! started again. The log stays where it is — on the relay — and the run then folds it from the
+//! [`import`] starts an EMPTY stream from one — one never folded, or one [`Folder::clear`] left —
+//! and keeps it unserved while it does: it writes a sentinel watermark that names no revision
+//! first, so readers answer `NotCurrent` throughout; then the rows; it rebuilds the board's
+//! indexes from them, and writes the real watermark last, so a stream whose import died is still
+//! unserved and is started again. The log stays where it is — on the relay — and the run then folds it from the
 //! watermark on, in batches.
 //!
 //! [`from_sqlite`] makes one from a local replica's views, for a server that starts from a board
@@ -186,10 +188,12 @@ pub async fn import<T: Table>(
             folder: folder.revisions(),
         });
     }
+    // A cleared stream's watermark — and that of an import that died — names no revision: it
+    // holds nothing to keep.
     if Folder::watermark(table)
         .await
         .map_err(ImportError::Table)?
-        .is_some()
+        .is_some_and(|mark| !mark.revisions.is_empty())
     {
         return Err(ImportError::NotEmpty);
     }
@@ -232,18 +236,23 @@ pub async fn import<T: Table>(
             });
         }
     }
+    // Unserved from the first row on: a watermark without revisions (review of PR #55,
+    // Integrity #2).
+    table
+        .write(&Folder::sentinel(0, None))
+        .await
+        .map_err(ImportError::Table)?;
     for write in &writes {
         table.write(write).await.map_err(ImportError::Table)?;
     }
+    // An item whose row has no room for its index attributes keeps none: as with the row writes
+    // above, whose `TooLarge` an import does not report either (`6j6v.jtfy`).
     board::reindex(table).await.map_err(ImportError::Table)?;
-    // A NEW watermark, not an advance: the stream had none.
-    folder
-        .advance(table, snapshot.folded_through)
+    // The real watermark over the sentinel, unconditionally: the stream had none of its own.
+    table
+        .write(&folder.stamp(snapshot.folded_through))
         .await
-        .map_err(|e| match e {
-            crate::fold::FoldError::Table(e) => ImportError::Table(e),
-            crate::fold::FoldError::Layout(e) => ImportError::Layout(e),
-        })?;
+        .map_err(ImportError::Table)?;
     Ok(())
 }
 
@@ -313,5 +322,6 @@ pub fn watermark(snapshot: &Snapshot) -> Watermark {
     Watermark {
         folded_through: snapshot.folded_through,
         revisions: snapshot.revisions.clone(),
+        refold_until: None,
     }
 }

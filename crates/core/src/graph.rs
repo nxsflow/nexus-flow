@@ -30,7 +30,8 @@ pub struct Ticket {
 }
 
 /// A present edge, `from` → `to` (a `dep` points at its blocker, a `parent` edge at the parent).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Ordered by `from`, `to`, `kind`, so a set of edges has one order whatever order they came in.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Edge {
     pub from: String,
     pub to: String,

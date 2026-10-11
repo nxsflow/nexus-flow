@@ -1,5 +1,5 @@
-//! The board's two indexes, kept beside the folded rows, and the reads that use them
-//! (6j6v.vvw6 points 4 and 5).
+//! The board's indexes, kept beside the folded rows, and the reads that use them
+//! (6j6v.vvw6 points 4 and 5; `typed`, 6j6v.xkr7).
 //!
 //! # `active`
 //!
@@ -27,6 +27,17 @@
 //! one instant keep one order. A ticket without the instant sits under `"0"`, which sorts after
 //! every date — last, as the local lanes put it. [`dated`] reads one lane newest first.
 //!
+//! # `typed`
+//!
+//! Sparse as well (6j6v.xkr7): a live item — not deleted, archived or not — with a type sits in
+//! partition `<stream>#<type>` ([`typed_partition`]) under its own sort key, so ONE Query lists the
+//! live items of a type in id order: the `list` scope of a type the derived ranking keys rank by
+//! (docs/specs/derived-ranking-keys.md §6). Like the `active` flag of a ticket it is a function of
+//! the row alone, set whenever an op touches the row ([`refresh_item`]) — after the row, so a run
+//! that dies in between sets it when it folds the op again. Generic: every typed item is listed,
+//! whatever the plugin ranks, at one attribute per item row. A row's `typed` attribute never
+//! names another row, so a retype or a delete moves nothing else.
+//!
 //! # Who owns a label or a thread link
 //!
 //! `label_adds` and `thread_link_adds` key on the add's tag alone, so nothing in them is found by
@@ -49,6 +60,19 @@
 //! Only `contributes_to` adds get one: folding another edge's add costs nothing more, and folding
 //! an edge remove one `GetItem` of its add, to learn its kind.
 //!
+//! # What an adjacency entry says
+//!
+//! Revision 3 (6j6v.1c5s) makes the `.adj#<ticket>#<tag>` entries self-describing, as the entries
+//! under a ticket are: each copies the edge add's `from_id`, `to_id`, `kind`, `lamport` and `site`
+//! and says whether the add is removed ([`REMOVED`]). Every edge add has one under each end,
+//! whatever its kind and whatever the ends' activity, so ONE Query on a ticket's `.adj#` prefix
+//! reads every edge touching it, in and out, with its presence — what the derived ranking keys read
+//! ([`crate::records::with_ranking`]): inbound `contributes_to`, `mentions` both ways, the
+//! `parent` edges a child's current parent is picked from. The entries keep their place and key;
+//! only their attributes grow. Folding an edge add reads its remove (a `dep` or `parent` add read it
+//! already, for its flag); folding an edge remove now reads the add and the remove and rewrites
+//! both entries — two `GetItem`s and two writes, one when the edge is a loop.
+//!
 //! # One writer per stream
 //!
 //! The rows a reducer describes converge whatever the order and however many folders write them.
@@ -59,10 +83,11 @@
 
 use crate::layout::{
     adjacency_key, adjacency_prefix, contributes_adjacency_key, label_adjacency_key,
-    link_adjacency_key, row_key, table_prefix, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK,
+    link_adjacency_key, row_key, table_prefix, typed_partition, ACTIVE, DATED, DATED_AT,
+    MAX_KEY_BYTES, SK, TYPED,
 };
-use crate::table::{text, Dated, Row, Table};
-use crate::write::{Cond, Write};
+use crate::table::{text, Dated, Outcome, Row, Table};
+use crate::write::{attribute_bytes, Cond, Write};
 use nexus_flow_core::graph::{Board, Edge, Ticket};
 use nexus_flow_core::model::EdgeKind;
 use nxs_foundation::change::{Cell, Change, Effect};
@@ -220,6 +245,29 @@ pub fn is_active(row: &Row) -> bool {
     )
 }
 
+/// The type a stored `items` row is listed under on the `typed` index (6j6v.xkr7): its type, when
+/// it has one and is live — not deleted; archived or not. A type too long for an index partition
+/// ([`MAX_PARTITION_BYTES`](crate::layout::MAX_PARTITION_BYTES)) is never folded: [`typed_partitions`] refuses its op first.
+pub fn typed(row: &Row) -> Option<&str> {
+    if text(row, "deleted") == Some("1") {
+        return None;
+    }
+    text(row, "type")
+}
+
+/// The `typed` partitions the item rows these changes write would be listed under — what
+/// [`Folder`](crate::fold::Folder) checks against
+/// [`MAX_PARTITION_BYTES`](crate::layout::MAX_PARTITION_BYTES) before an op writes
+/// anything.
+pub(crate) fn typed_partitions(stream: &str, changes: &[Change]) -> Vec<String> {
+    changes
+        .iter()
+        .filter(|c| c.table == "items")
+        .filter_map(|c| effect_text(c, "type"))
+        .map(|ty| typed_partition(stream, ty))
+        .collect()
+}
+
 /// The `dated` lane of a stored `items` row, and the instant it sorts by.
 pub fn lane(row: &Row) -> Option<(Dated, String)> {
     if text(row, "deleted") == Some("1") {
@@ -246,8 +294,47 @@ pub fn dated_key(at: &str, id: &str) -> String {
     }
 }
 
-/// Keep the indexes after one op's changes were carried out.
-pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(), T::Error> {
+/// The index attributes a stored `items` row of ticket `id` carries by the rules above — what
+/// [`refresh_item`] leaves on it: `active`, `typed` and the `dated` pair, each only where it
+/// applies.
+pub(crate) fn index_attributes(stream: &str, id: &str, row: &Row) -> Vec<(String, Cell)> {
+    let mut cells = Vec::new();
+    if is_active(row) {
+        cells.push((ACTIVE.to_string(), Cell::Text(stream.to_string())));
+    }
+    if let Some(ty) = typed(row) {
+        cells.push((TYPED.to_string(), Cell::Text(typed_partition(stream, ty))));
+    }
+    if let Some((l, at)) = lane(row) {
+        cells.push((DATED.to_string(), Cell::Text(l.partition(stream))));
+        cells.push((DATED_AT.to_string(), Cell::Text(dated_key(&at, id))));
+    }
+    cells
+}
+
+/// What an `items` row weighs toward `MAX_ITEM_BYTES` once it carries the index attributes its
+/// cells call for ([`index_attributes`]) instead of the ones it has — what
+/// [`Folder::fold`](crate::fold::Folder::fold) checks before an op writes anything, so a row with
+/// no room left for them is refused rather than left off an index (review of PR #55, Integrity
+/// #4).
+pub(crate) fn indexed_bytes(stream: &str, id: &str, row: &Row) -> usize {
+    let own: usize = row
+        .iter()
+        .filter(|(n, _)| ![ACTIVE, TYPED, DATED, DATED_AT].contains(&n.as_str()))
+        .map(|(n, c)| attribute_bytes(n, c))
+        .sum();
+    own + index_attributes(stream, id, row)
+        .iter()
+        .map(|(n, c)| attribute_bytes(n, c))
+        .sum::<usize>()
+}
+
+/// Keep the indexes after one op's changes were carried out. Returns the items whose row could not
+/// take its index attributes ([`Outcome::TooLarge`]) — none, when the fold's size check ran first.
+pub(crate) async fn after<T: Table>(
+    table: &T,
+    changes: &[Change],
+) -> Result<Vec<String>, T::Error> {
     let mut items = BTreeSet::new();
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
@@ -272,19 +359,22 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
             _ => {}
         }
     }
+    let mut unindexed = Vec::new();
     for id in items {
-        refresh_item(table, id).await?;
+        if refresh_item(table, id).await? == Some(Outcome::TooLarge) {
+            unindexed.push(id.to_string());
+        }
     }
     for tag in added {
         link_edge(table, tag).await?;
     }
     for tag in removed {
-        refresh_edge(table, tag).await?;
+        link_edge(table, tag).await?;
     }
     for (at, tag) in owned_tags {
         refresh_owned(table, &OWNED[at], tag).await?;
     }
-    Ok(())
+    Ok(unindexed)
 }
 
 /// Set ticket `id`'s index attributes from its row; when its activity flipped, refresh every edge
@@ -293,10 +383,17 @@ pub(crate) async fn after<T: Table>(table: &T, changes: &[Change]) -> Result<(),
 /// The edges go FIRST, told the ticket's new activity, and the ticket's own flag after: the flag is
 /// what says whether the activity flipped, so a run that dies in between still sees the flip when
 /// it folds the op again, and redoes the fan-out (review of PR #24, Integrity #2).
-pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T::Error> {
+///
+/// Returns the outcome of the write of its index attributes, `None` when nothing changed — a
+/// [`Outcome::TooLarge`] means the row is left with the attributes it had, which the caller must
+/// report rather than drop (review of PR #55, Integrity #4).
+pub(crate) async fn refresh_item<T: Table>(
+    table: &T,
+    id: &str,
+) -> Result<Option<Outcome>, T::Error> {
     let sk = item_key(id);
     let Some(row) = table.get(&sk).await? else {
-        return Ok(());
+        return Ok(None);
     };
     let active = is_active(&row);
     let was_active = row.contains_key(ACTIVE);
@@ -304,7 +401,7 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
         for entry in table.query_prefix(&adjacency_prefix(id)).await? {
             if let Some(tag) = text(&entry, "tag") {
                 if let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? {
-                    flag_edge(table, tag, edge, Some((id, active))).await?;
+                    flag_edge(table, tag, edge, None, Some((id, active))).await?;
                 }
             }
         }
@@ -316,6 +413,14 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             set.push((ACTIVE.to_string(), Cell::Text(table.stream().to_string())));
         } else {
             remove.push(ACTIVE.to_string());
+        }
+    }
+    let typed_now = typed(&row).map(|ty| typed_partition(table.stream(), ty));
+    let typed_was = text(&row, TYPED).map(str::to_string);
+    if typed_now != typed_was {
+        match typed_now {
+            Some(p) => set.push((TYPED.to_string(), Cell::Text(p))),
+            None => remove.push(TYPED.to_string()),
         }
     }
     let dated_now = lane(&row).map(|(l, at)| (l.partition(table.stream()), dated_key(&at, id)));
@@ -336,9 +441,9 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
         }
     }
     if set.is_empty() && remove.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    table
+    let outcome = table
         .write(&Write {
             sk,
             set,
@@ -346,49 +451,71 @@ pub(crate) async fn refresh_item<T: Table>(table: &T, id: &str) -> Result<(), T:
             condition: Some(Cond::RowPresent),
         })
         .await?;
-    Ok(())
+    Ok(Some(outcome))
 }
 
-/// Record that edge `tag` touches its ends, then set its flag.
-pub(crate) async fn link_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
-    let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? else {
-        return Ok(());
-    };
-    let ends: BTreeSet<&str> = [text(&edge, "from_id"), text(&edge, "to_id")]
+/// The cells of edge add `edge` an adjacency entry copies beside its tag and [`REMOVED`] (index
+/// revision 3, 6j6v.1c5s): its ends, its kind and its coordinate.
+const EDGE_COPIES: [&str; 5] = ["from_id", "to_id", "kind", "lamport", "site"];
+
+/// The adjacency entries of edge add `tag` — one under each end, the same entry twice for an edge
+/// from a ticket to itself — from the add's row and whether it is removed.
+async fn write_adjacency<T: Table>(
+    table: &T,
+    tag: &str,
+    edge: &Row,
+    removed: bool,
+) -> Result<(), T::Error> {
+    let mut set = vec![("tag".to_string(), Cell::Text(tag.to_string()))];
+    for column in EDGE_COPIES {
+        match edge.get(column) {
+            None | Some(Cell::Null) => {}
+            Some(cell) => set.push((column.to_string(), cell.clone())),
+        }
+    }
+    set.push((REMOVED.to_string(), Cell::Int(i64::from(removed))));
+    let ends: BTreeSet<&str> = [text(edge, "from_id"), text(edge, "to_id")]
         .into_iter()
         .flatten()
         .collect();
     for end in ends {
         table
-            .write(&Write::put(
-                adjacency_key(end, tag),
-                vec![("tag".to_string(), Cell::Text(tag.to_string()))],
-            ))
+            .write(&Write::put(adjacency_key(end, tag), set.clone()))
             .await?;
     }
-    flag_edge(table, tag, edge, None).await
+    Ok(())
 }
 
-/// Set edge `tag`'s flag from its row, its remove and its ends.
-pub(crate) async fn refresh_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
-    match table.get(&tag_key("edge_adds", tag)).await? {
-        Some(edge) => flag_edge(table, tag, edge, None).await,
-        None => Ok(()),
-    }
+/// Record that edge `tag` touches its ends — the entry under each end says what the edge is and
+/// whether it is removed — then set its flag. Run when the add is folded and again when its remove
+/// is; nothing while the add has not been folded, since the add writes both.
+pub(crate) async fn link_edge<T: Table>(table: &T, tag: &str) -> Result<(), T::Error> {
+    let Some(edge) = table.get(&tag_key("edge_adds", tag)).await? else {
+        return Ok(());
+    };
+    let removed = table.get(&tag_key("edge_removes", tag)).await?.is_some();
+    write_adjacency(table, tag, &edge, removed).await?;
+    flag_edge(table, tag, edge, Some(removed), None).await
 }
 
-/// `known` is a ticket whose activity the caller knows ahead of its stored flag.
+/// `removed` is whether the edge's remove is folded, when the caller has read it already; `known`
+/// a ticket whose activity the caller knows ahead of its stored flag.
 async fn flag_edge<T: Table>(
     table: &T,
     tag: &str,
     edge: Row,
+    removed: Option<bool>,
     known: Option<(&str, bool)>,
 ) -> Result<(), T::Error> {
     let indexed = matches!(
         text(&edge, "kind").and_then(EdgeKind::parse),
         Some(EdgeKind::Dep | EdgeKind::Parent)
     );
-    let mut flag = indexed && table.get(&tag_key("edge_removes", tag)).await?.is_none();
+    let mut flag = indexed
+        && match removed {
+            Some(removed) => !removed,
+            None => table.get(&tag_key("edge_removes", tag)).await?.is_none(),
+        };
     if flag {
         let mut any_active = false;
         for end in [text(&edge, "from_id"), text(&edge, "to_id")]
@@ -432,11 +559,15 @@ async fn flag_edge<T: Table>(
 }
 
 /// Recompute every index attribute and adjacency entry from the rows — after a snapshot was
-/// loaded, or to repair a stream two folders wrote at once.
-pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
+/// loaded, or to repair a stream two folders wrote at once. Returns the items whose row could not
+/// take its index attributes (past `MAX_ITEM_BYTES` with them), which keep the ones they had.
+pub async fn reindex<T: Table>(table: &T) -> Result<Vec<String>, T::Error> {
+    let mut unindexed = Vec::new();
     for row in table.query_prefix(&table_prefix("items")).await? {
         if let Some(id) = text(&row, "id") {
-            refresh_item(table, id).await?;
+            if refresh_item(table, id).await? == Some(Outcome::TooLarge) {
+                unindexed.push(id.to_string());
+            }
         }
     }
     for row in table.query_prefix(&table_prefix("edge_adds")).await? {
@@ -451,7 +582,7 @@ pub async fn reindex<T: Table>(table: &T) -> Result<(), T::Error> {
             }
         }
     }
-    Ok(())
+    Ok(unindexed)
 }
 
 /// The active tickets — their whole rows — and the board the library derives the lanes from.

@@ -1,21 +1,28 @@
 //! What a server fold does when things go wrong (review of PR #24): a run that dies at any write
 //! and folds its batch again, an op the table cannot hold, a clear that dies half way, a release
-//! with other fold revisions, a lane cut by a limit, and a snapshot that does not fit.
+//! with other fold revisions, a lane cut by a limit, a snapshot that does not fit — and the `typed`
+//! index kept through retypes, archives and deletes (6j6v.xkr7); a stream being refolded, a row
+//! with no room for its index attributes and the escaping of a `typed` partition (review of PR
+//! #55).
 
 mod common;
 
-use common::{delivered, merged, NOW};
+use common::{delivered, head, merged, NOW};
 use nexus_flow_core::model::EdgeKind;
 use nexus_flow_core::store::Store;
+use nexus_flow_facade::read;
 use nxs_fold_ddb::board;
 use nxs_fold_ddb::fold::{Folded, Folder};
-use nxs_fold_ddb::layout::WATERMARK_KEY;
+use nxs_fold_ddb::layout::{typed_partition, MAX_ITEM_BYTES, MAX_PARTITION_BYTES, WATERMARK_KEY};
 use nxs_fold_ddb::mem::{ready, MemTable};
+use nxs_fold_ddb::records::{self, RecordsError};
 use nxs_fold_ddb::snapshot::{self, ImportError};
 use nxs_fold_ddb::table::{text, Dated, Outcome, Row, Table};
+use nxs_fold_ddb::write::attribute_bytes;
 use nxs_fold_ddb::write::{Cond, Write};
 use nxs_foundation::change::Cell;
 use nxs_foundation::model::Op;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
@@ -72,6 +79,10 @@ impl Table for Failing<'_> {
         Ok(ok(self.inner.get(sk).await))
     }
 
+    async fn get_many(&self, sks: &[String]) -> Result<BTreeMap<String, Row>, Injected> {
+        Ok(ok(self.inner.get_many(sks).await))
+    }
+
     async fn write(&self, write: &Write) -> Result<Outcome, Injected> {
         self.tick()?;
         Ok(ok(self.inner.write(write).await))
@@ -93,6 +104,10 @@ impl Table for Failing<'_> {
 
     async fn query_dated(&self, lane: Dated, limit: Option<usize>) -> Result<Vec<Row>, Injected> {
         Ok(ok(self.inner.query_dated(lane, limit).await))
+    }
+
+    async fn query_typed(&self, item_type: &str) -> Result<Vec<Row>, Injected> {
+        Ok(ok(self.inner.query_typed(item_type).await))
     }
 }
 
@@ -191,7 +206,8 @@ fn an_op_the_table_cannot_hold_is_refused_and_the_stream_folds_on() {
     let refused = ready(folder.fold_batch(&t, &ops)).unwrap();
     let reasons: Vec<&str> = refused.iter().map(|r| r.reason.as_str()).collect();
     // The long id's own three field ops and its edge (whose adjacency key is too long); the 500 KB
-    // description; and the design that would grow ab12.0002 past the limit.
+    // description; and the design that would grow ab12.0002 past the limit — weighed with the row
+    // it lands on before anything is written (review of PR #55, Integrity #4).
     assert_eq!(refused.len(), 6, "{reasons:#?}");
     assert_eq!(
         reasons.iter().filter(|r| r.contains("a key of")).count(),
@@ -199,7 +215,12 @@ fn an_op_the_table_cannot_hold_is_refused_and_the_stream_folds_on() {
         "{reasons:#?}"
     );
     assert!(reasons.iter().any(|r| r.contains("a row of")));
-    assert!(reasons.iter().any(|r| r.contains("kept their state")));
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("item ab12.0002 would weigh")),
+        "{reasons:#?}"
+    );
     // The stream folded on: the watermark moved past every op, and what fits is there.
     let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
     assert_eq!(mark.folded_through, ops.len() as i64);
@@ -212,6 +233,130 @@ fn an_op_the_table_cannot_hold_is_refused_and_the_stream_folds_on() {
     assert!(grows.get("design").is_none());
     let lanes = ready(board::select(&t)).unwrap().board.lanes(NOW);
     assert_eq!(lanes.ready, vec!["ab12.0001", "ab12.0002"]);
+}
+
+#[test]
+fn a_type_too_long_for_the_typed_index_is_refused_and_the_item_folds_on_without_it() {
+    // 6j6v.xkr7: the `typed` index partition carries the type; DynamoDB refuses an index key past
+    // 2,048 bytes, and a refused write would fail every run at the same op. So the op that sets
+    // such a type is refused before it writes, as an op with a key too long is, and the item keeps
+    // the type it had.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", "task", "T", "u");
+    s.set_field("ab12.0001", "type", Some("t".repeat(2100)), "u");
+    s.create_item("ab12.0002", &"n".repeat(2030), "Just fits", "u");
+    let t = MemTable::new("stream-1");
+    let refused = ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let reasons: Vec<&str> = refused.iter().map(|r| r.reason.as_str()).collect();
+    assert_eq!(refused.len(), 1, "{reasons:#?}");
+    assert!(
+        reasons[0].contains("`typed` index partition"),
+        "{reasons:#?}"
+    );
+    let ids = |ty: &str| -> Vec<String> {
+        ready(t.query_typed(ty))
+            .unwrap()
+            .iter()
+            .map(|r| text(r, "id").unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids("task"), ["ab12.0001"]);
+    assert_eq!(ids(&"n".repeat(2030)), ["ab12.0002"]);
+}
+
+#[test]
+fn retyping_archiving_and_deleting_move_an_item_on_the_typed_index() {
+    // 6j6v.xkr7: an item is listed under its type while it is live — archived or not — moves with a
+    // retype, and leaves when it is deleted. A type with `#` in it gets its own partition.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", "person", "Ada", "u");
+    s.create_item("ab12.0002", "person", "Bob", "u");
+    s.create_item("ab12.0003", "a#b", "Odd", "u");
+    let t = MemTable::new("stream-1");
+    let mut seen = 0;
+    let mut step = |s: &Store| {
+        let ops = numbered(s, seen);
+        seen += ops.len();
+        ready(folder.fold_batch(&t, &ops)).unwrap();
+        ["person", "project", "a#b", "a"].map(|ty| {
+            ready(t.query_typed(ty))
+                .unwrap()
+                .iter()
+                .map(|r| text(r, "id").unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let v = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let none = v(&[]);
+
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0001", "ab12.0002"]),
+            none.clone(),
+            v(&["ab12.0003"]),
+            none.clone()
+        ]
+    );
+    s.set_field("ab12.0002", "archived", Some("2026-10-08".into()), "u");
+    s.set_field("ab12.0001", "status", Some("closed".into()), "u");
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0001", "ab12.0002"]),
+            none.clone(),
+            v(&["ab12.0003"]),
+            none.clone()
+        ],
+        "closed and archived items stay listed"
+    );
+    s.set_field("ab12.0001", "type", Some("project".into()), "u");
+    assert_eq!(
+        step(&s),
+        [
+            v(&["ab12.0002"]),
+            v(&["ab12.0001"]),
+            v(&["ab12.0003"]),
+            none.clone()
+        ]
+    );
+    s.delete_item("ab12.0002", "u");
+    s.delete_item("ab12.0003", "u");
+    assert_eq!(
+        step(&s),
+        [none.clone(), v(&["ab12.0001"]), none.clone(), none.clone()]
+    );
+    // Created again under a deleted id, and a type cleared to none: the index lists what the store
+    // holds live, by type — whatever the store makes of the re-create — and an item without a type
+    // is on no partition (review of PR #55, Test #6).
+    s.create_item("ab12.0002", "person", "Bob again", "u");
+    s.set_field("ab12.0001", "type", None, "u");
+    let live = |s: &Store| {
+        ["person", "project", "a#b", "a"].map(|ty| {
+            let mut ids: Vec<String> = s
+                .list_items()
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.deleted.as_deref() != Some("1"))
+                .filter(|i| i.item_type.as_deref() == Some(ty))
+                .map(|i| i.id)
+                .collect();
+            ids.sort();
+            ids
+        })
+    };
+    let want = live(&s);
+    assert_eq!(want[1], none, "the type cleared to none leaves `project`");
+    assert_eq!(step(&s), want);
+    assert!(!t.rows()["items#ab12.0001"].contains_key("nxf_typed"));
+    // The attribute is on the item rows only, never on an adjacency entry or another row.
+    assert!(t
+        .rows()
+        .iter()
+        .filter(|(_, r)| r.contains_key("nxf_typed"))
+        .all(|(sk, _)| sk.starts_with("items#")));
 }
 
 #[test]
@@ -235,16 +380,27 @@ fn a_clear_that_dies_keeps_the_watermark_and_a_release_with_other_rules_refolds_
     let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
     assert!(!folder.is_current(&mark));
 
-    // A clear that dies half way leaves the watermark — the next run sees the old revisions again.
-    assert!(ready(Folder::clear(&Failing::new(&t, 3))).is_err());
+    // A clear that dies half way leaves a watermark that is not current — the next run clears it
+    // again.
+    assert!(ready(Folder::clear(&Failing::new(&t, 3), head(&ops))).is_err());
     let after = ready(Folder::watermark(&t)).unwrap().unwrap();
     assert!(!folder.is_current(&after));
 
-    // Cleared for good and folded from position 0, it holds what a fresh fold holds.
-    ready(Folder::clear(&t)).unwrap();
-    assert!(t.rows().is_empty());
+    // Cleared for good, only the sentinel watermark is left; folded from position 0, the stream
+    // holds what a fresh fold holds, its watermark current and caught up with the clear's head.
+    ready(Folder::clear(&t, head(&ops))).unwrap();
+    assert_eq!(t.rows().keys().collect::<Vec<_>>(), [WATERMARK_KEY]);
     ready(folder.fold_batch(&t, &ops)).unwrap();
-    assert_eq!(t.rows(), clean.rows());
+    let without_mark = |t: &MemTable| {
+        let mut rows = t.rows();
+        rows.remove(WATERMARK_KEY);
+        rows
+    };
+    assert_eq!(without_mark(&t), without_mark(&clean));
+    let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+    assert!(folder.is_current(&mark));
+    assert_eq!(mark.folded_through, head(&ops));
+    assert_eq!(mark.refold_until, Some(head(&ops)));
 }
 
 #[test]
@@ -382,11 +538,17 @@ fn a_snapshot_that_does_not_fit_is_refused_before_anything_is_written() {
     column.tables.get_mut("items").unwrap()[0].insert("nope".into(), serde_json::json!("x"));
     assert!(matches!(refused(&column), ImportError::Layout(_)));
 
-    // An import that died after some rows — no watermark yet — is simply run again.
+    // An import that died after some rows is refused to readers — its watermark is the sentinel
+    // it wrote first, naming no revision — and is simply run again.
     let t = MemTable::new("stream-1");
     let partial = ready(snapshot::import(&Failing::new(&t, 10), &folder, &good));
     assert!(partial.is_err());
-    assert!(ready(Folder::watermark(&t)).unwrap().is_none());
+    let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+    assert!(mark.revisions.is_empty() && !folder.is_current(&mark));
+    assert!(matches!(
+        ready(records::list_board(&t, &read::ListReads::default())),
+        Err(RecordsError::NotCurrent { found: None })
+    ));
     ready(snapshot::import(&t, &folder, &good)).unwrap();
     let whole = MemTable::new("stream-1");
     ready(snapshot::import(&whole, &folder, &good)).unwrap();
@@ -395,4 +557,177 @@ fn a_snapshot_that_does_not_fit_is_refused_before_anything_is_written() {
         ready(folder.fold(&t, &s.export()[0])).unwrap(),
         Folded::Folded
     ));
+}
+
+/// What the three readers of a hosted board answer for `t`: the records, the list, the ranking
+/// graph (`plain` read before).
+fn served(
+    t: &MemTable,
+    plain: &read::ActiveBoard,
+) -> [Result<(), RecordsError<std::convert::Infallible>>; 3] {
+    let selection = ready(board::select(t)).unwrap();
+    [
+        ready(records::active_board(t, selection)).map(drop),
+        ready(records::list_board(t, &read::ListReads::default())).map(drop),
+        ready(records::with_ranking(
+            t,
+            plain.clone(),
+            &read::RankingReads::default(),
+        ))
+        .map(drop),
+    ]
+}
+
+#[test]
+fn a_refolding_stream_is_refused_from_its_clear_until_the_refold_reaches_the_head() {
+    // Review of PR #55, Integrity #2: between a clear and the end of its refold the tables hold part
+    // of the history. Every reader refuses the stream for that whole window — `NotCurrent` while
+    // the watermark names no revision, `Refolding` once the first batch wrote them — and serves it
+    // again exactly when the refold reaches the head the clear named.
+    let folder = Folder::platform().unwrap();
+    let s = merged(4);
+    let ops = delivered(&s, 4);
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &ops)).unwrap();
+    let plain = ready(records::active_board(&t, ready(board::select(&t)).unwrap())).unwrap();
+    assert!(!plain.tickets.is_empty());
+    assert!(served(&t, &plain).iter().all(Result::is_ok));
+    let whole = t.rows();
+
+    // A clear that dies after its sentinel: refused, and not current, so the next run clears again.
+    assert!(ready(Folder::clear(&Failing::new(&t, 1), head(&ops))).is_err());
+    for answer in served(&t, &plain) {
+        assert!(
+            matches!(answer, Err(RecordsError::NotCurrent { found: None })),
+            "{answer:?}"
+        );
+    }
+    assert!(!folder.is_current(&ready(Folder::watermark(&t)).unwrap().unwrap()));
+
+    ready(Folder::clear(&t, head(&ops))).unwrap();
+    for answer in served(&t, &plain) {
+        assert!(
+            matches!(answer, Err(RecordsError::NotCurrent { found: None })),
+            "{answer:?}"
+        );
+    }
+
+    // Half the history refolded: this build's revisions are written, the head is not reached.
+    let half = ops.len() / 2;
+    ready(folder.fold_batch(&t, &ops[..half])).unwrap();
+    assert!(folder.is_current(&ready(Folder::watermark(&t)).unwrap().unwrap()));
+    for answer in served(&t, &plain) {
+        match answer {
+            Err(RecordsError::Refolding {
+                folded_through,
+                until,
+            }) => assert_eq!((folded_through, until), (head(&ops[..half]), head(&ops))),
+            other => panic!("a half-refolded stream must be refused, got {other:?}"),
+        }
+    }
+
+    // Caught up: served again, the same tables as before the clear; a batch folded twice changes
+    // nothing.
+    ready(folder.fold_batch(&t, &ops[half..])).unwrap();
+    assert!(served(&t, &plain).iter().all(Result::is_ok));
+    ready(folder.fold_batch(&t, &ops[half..])).unwrap();
+    assert!(served(&t, &plain).iter().all(Result::is_ok));
+    let without_mark = |mut rows: BTreeMap<String, Row>| {
+        rows.remove(WATERMARK_KEY);
+        rows
+    };
+    assert_eq!(without_mark(t.rows()), without_mark(whole));
+}
+
+#[test]
+fn a_typed_partition_escapes_the_type_so_no_stream_and_type_share_one() {
+    // Review of PR #55, Test #2: the stream is the partition's prefix and the type its rest, so a
+    // `#` in the type must not read as the separator.
+    assert_ne!(typed_partition("a", "b#c"), typed_partition("a#b", "c"));
+    assert_eq!(typed_partition("a", "b#c"), "a#b%23c");
+    assert_ne!(typed_partition("a", "b%23c"), typed_partition("a", "b#c"));
+
+    // A type of `#`s triples when escaped: it is weighed escaped, so a type whose own bytes fit is
+    // refused once its partition would not.
+    let folder = Folder::platform().unwrap();
+    let hashes = "#".repeat(700);
+    assert!("stream-1#".len() + hashes.len() <= MAX_PARTITION_BYTES);
+    assert!(typed_partition("stream-1", &hashes).len() > MAX_PARTITION_BYTES);
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.0001", &hashes, "Hashes", "u");
+    s.create_item("ab12.0002", &"x".repeat(700), "Plain", "u");
+    let t = MemTable::new("stream-1");
+    let refused = ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let reasons: Vec<&str> = refused.iter().map(|r| r.reason.as_str()).collect();
+    assert_eq!(refused.len(), 1, "{reasons:#?}");
+    assert!(
+        reasons[0].contains("`typed` index partition"),
+        "{reasons:#?}"
+    );
+    assert!(ready(t.query_typed(&hashes)).unwrap().is_empty());
+    let plain: Vec<String> = ready(t.query_typed(&"x".repeat(700)))
+        .unwrap()
+        .iter()
+        .map(|r| text(r, "id").unwrap().to_string())
+        .collect();
+    assert_eq!(plain, ["ab12.0002"]);
+}
+
+#[test]
+fn an_item_with_no_room_for_its_index_attributes_is_refused_rather_than_left_off_an_index() {
+    // Review of PR #55, Integrity #4: closing a ticket swaps its `active` attribute for the two
+    // `dated` ones, which weigh more. A row the close itself fits, but not with those, used to take
+    // the close and drop the attribute write in silence — closed in its cells, still on `active`,
+    // on no `dated` lane. The op is refused before it writes anything instead.
+    let folder = Folder::platform().unwrap();
+    let stream = "stream-1";
+    let ops_with = |description: usize| {
+        let mut s = Store::open_in_memory(1);
+        s.create_item("ab12.0001", "task", "T", "u");
+        s.set_field(
+            "ab12.0001",
+            "description",
+            Some("d".repeat(description)),
+            "u",
+        );
+        s.set_field("ab12.0001", "status", Some("closed".into()), "u");
+        numbered(&s, 0)
+    };
+    let weigh = |r: &Row| r.iter().map(|(n, c)| attribute_bytes(n, c)).sum::<usize>();
+
+    // Measured on a small row: the closed row with its index attributes (`typed`, `dated`), and as
+    // it would weigh still carrying the open row's (`typed`, `active`).
+    let small = MemTable::new(stream);
+    ready(folder.fold_batch(&small, &ops_with(10))).unwrap();
+    let row = small.rows()["items#ab12.0001"].clone();
+    let dated: usize = ["nxf_dated", "nxf_dated_at"]
+        .iter()
+        .map(|a| attribute_bytes(a, &row[*a]))
+        .sum();
+    let active = attribute_bytes("nxf_active", &Cell::Text(stream.into()));
+    assert!(dated > active, "the close makes the row heavier");
+    let with_open_attributes = weigh(&row) - dated + active;
+
+    // The description that leaves the closed row exactly at the limit with the open row's
+    // attributes: the close itself fits, its index attributes do not.
+    let ops = ops_with(10 + MAX_ITEM_BYTES - with_open_attributes);
+    let t = MemTable::new(stream);
+    let (close, before) = ops.split_last().unwrap();
+    assert!(ready(folder.fold_batch(&t, before)).unwrap().is_empty());
+    match ready(folder.fold(&t, &close.1)).unwrap() {
+        Folded::Refused(r) => assert!(r.reason.contains("index attributes"), "{r:?}"),
+        other => panic!("the close must be refused, got {other:?}"),
+    }
+    // Refused whole: still open in its cells and on its indexes, on no `dated` lane.
+    let row = &t.rows()["items#ab12.0001"];
+    assert_eq!(text(row, "status"), Some("open"));
+    assert!(row.contains_key("nxf_active") && row.contains_key("nxf_typed"));
+    assert!(weigh(row) <= MAX_ITEM_BYTES);
+    assert!(ready(board::dated(&t, Dated::Closed, None))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        ready(board::select(&t)).unwrap().board.lanes(NOW).ready,
+        vec!["ab12.0001"]
+    );
 }

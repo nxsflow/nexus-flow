@@ -2,7 +2,7 @@
 name = "nxs-fold-ddb"
 version.workspace = true
 edition = "2021"
-description = "Folding on a server (6j6v.vvw6): the reducers' described changes carried out against DynamoDB, the board's active and dated indexes, next/blocked over them, snapshots as tables plus watermark"
+description = "Folding on a server (6j6v.vvw6): the reducers' described changes carried out against DynamoDB, the board's active, dated and typed indexes, next/blocked and a ranked list over them, snapshots as tables plus watermark"
 publish = false
 
 [features]
@@ -37,3 +37,6 @@ aws-sdk-dynamodb = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # The records differential test (6j6v.t1ym) parses a plugin fixture that declares a custom field.
 toml = "0.8"
+# The derived-keys differential test (6j6v.1c5s) registers its plugin fixture, so `plugin::load`
+# validates it as it validates a consumer's plugin.
+inventory = "0.3"

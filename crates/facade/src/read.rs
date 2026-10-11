@@ -24,7 +24,7 @@ use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec, Verb};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
-use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
+use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2102,6 +2102,20 @@ fn blocked_record(cfg: Option<&PluginConfig>, row: &BlockedItem, j: &RecordJoins
     rec
 }
 
+/// One `list` record without a store (6j6v.xkr7): what [`list_to_value_with_custom`] gives — the
+/// canonical item, the sparse `labels` and `parent_closed_reason` joins, and the lane joins.
+fn list_record(cfg: Option<&PluginConfig>, item: &ItemRow, j: &RecordJoins) -> Value {
+    let mut rec = item_value(item);
+    if !j.labels.is_empty() {
+        rec["labels"] = json!(j.labels);
+    }
+    if let Some(reasons) = parent_closed_reason_value(j.parent_closed) {
+        rec["parent_closed_reason"] = reasons;
+    }
+    put_lane_joins(cfg, &mut rec, j);
+    rec
+}
+
 /// One record of a bare lane (`deferred`/`closed`/`archived`/`search`): the canonical item and the
 /// lane joins.
 fn lane_record(cfg: Option<&PluginConfig>, item: &ItemRow, j: &RecordJoins) -> Value {
@@ -2578,7 +2592,15 @@ fn date_cmp(a: &ItemRow, b: &ItemRow, field: &str, dir: Dir) -> std::cmp::Orderi
 fn sort_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow, key: SortKey) -> std::cmp::Ordering {
     match key {
         SortKey::Rank => rank_cmp(cfg, a, b),
-        SortKey::Id => a.id.cmp(&b.id),
+        _ => row_cmp(a, b, key),
+    }
+}
+
+/// [`sort_cmp`] for every key but `rank`: the orders that read the row alone, and no plugin.
+fn row_cmp(a: &ItemRow, b: &ItemRow, key: SortKey) -> std::cmp::Ordering {
+    match key {
+        // Never asked: `sort_cmp` ranks, and a `ListSelect` never orders by rank.
+        SortKey::Rank | SortKey::Id => a.id.cmp(&b.id),
         SortKey::Defer => date_cmp(a, b, "defer_until", Dir::Asc),
         SortKey::Closed => date_cmp(a, b, "closed_at", Dir::Desc),
         SortKey::Archived => date_cmp(a, b, "archived", Dir::Desc),
@@ -2734,6 +2756,11 @@ pub struct ActiveBoard {
     pub board: Board,
     /// By id.
     pub tickets: BTreeMap<String, ActiveTicket>,
+    /// The graph the derived ranking keys of `[ranking.next]` read (6j6v.1c5s): `None` until a
+    /// reader fills it — [`with_ranking`] from a store, `nxs_fold_ddb::records::with_ranking` from
+    /// the folded tables — for what [`next_ranking_reads`] names. A plugin without derived `next`
+    /// keys never needs it; [`next_active`] refuses one with such keys while it is missing.
+    pub ranking: Option<RankingGraph>,
 }
 
 impl ActiveBoard {
@@ -2745,6 +2772,7 @@ impl ActiveBoard {
                 .into_iter()
                 .map(|t| (t.item.id.clone(), t))
                 .collect(),
+            ranking: None,
         }
     }
 
@@ -2778,6 +2806,209 @@ impl ActiveBoard {
                 .collect(),
         )
     }
+}
+
+/// What the derived ranking keys of a `[ranking.next]` read beyond the active tickets' records
+/// (6j6v.1c5s) — what a reader of an [`ActiveBoard`] puts in its [`RankingGraph`].
+/// [`next_ranking_reads`] gives it for a plugin.
+///
+/// `#[non_exhaustive]`: start from `RankingReads::default()` and set the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RankingReads {
+    /// The edge kinds the keys follow or count; `mentions` too when a key counts `mentioned_by`.
+    pub kinds: BTreeSet<EdgeKind>,
+    /// A count filters on a label: the neighbours' labels.
+    pub labels: bool,
+    /// An `of` reads a custom field: the neighbours' custom values.
+    pub custom: bool,
+    /// The types whose `[ranking.list]` rank a key reads (6j6v.xkr7): the graph also holds every
+    /// live, unarchived item of each — the type's `list` scope ([`RankingGraph::listed`]) — and the
+    /// edges around them. A server reads them from its `typed` index.
+    pub list_types: BTreeSet<String>,
+}
+
+impl RankingReads {
+    /// Whether a graph read for `self` holds everything a graph read for `needed` holds.
+    pub fn covers(&self, needed: &RankingReads) -> bool {
+        needed.kinds.is_subset(&self.kinds)
+            && (self.labels || !needed.labels)
+            && (self.custom || !needed.custom)
+            && needed.list_types.is_subset(&self.list_types)
+    }
+}
+
+/// The graph around a board's rows that the derived ranking keys read (6j6v.1c5s,
+/// docs/specs/derived-ranking-keys.md §6): the input [`next_active`] ranks a `[ranking.next]` with
+/// `related` / `count` / `sum` keys from, and [`list_board_page`] a `[ranking.list]` (6j6v.xkr7),
+/// so a server ranks exactly as [`next`] and [`list_page`] do over a store.
+///
+/// The SUBJECTS are the rows a key is evaluated on: the board's own rows — an [`ActiveBoard`]'s
+/// active tickets; a [`ListBoard`]'s listed items and, when it carries one, its active board's
+/// tickets — and the `listed` items below.
+///
+/// - `edges`: every present edge of a kind in `reads.kinds` with at least one end a subject and
+///   both ends LIVE (not deleted, not missing). A `parent` edge is the `present_parent` projection —
+///   a child's one current parent, the one `belongs_to` reads — so a child re-parented concurrently
+///   is under one parent only. Distinct, ordered.
+/// - `listed`: the ids of every live, unarchived item of a type in `reads.list_types` — the `list`
+///   scope a `[ranking.list]` rank is computed over (6j6v.xkr7). Empty without list types.
+/// - `neighbours`: every live row the board does not hold itself — the other ends of `edges` and
+///   the `listed` items, closed and archived items included, since a key reads every LIVE neighbour
+///   (owner, 2026-10-11) — each with its row (`belongs_to` filled as the store fills it), its
+///   labels when `reads.labels` and its non-empty custom values when `reads.custom`, else empty.
+///
+/// `#[non_exhaustive]`: build it with [`RankingGraph::new`] and set the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RankingGraph {
+    /// What the graph was read for.
+    pub reads: RankingReads,
+    pub edges: BTreeSet<nexus_flow_core::graph::Edge>,
+    /// By id.
+    pub neighbours: BTreeMap<String, Neighbour>,
+    /// The live, unarchived items of `reads.list_types` (6j6v.xkr7), by id.
+    pub listed: BTreeSet<String>,
+}
+
+impl RankingGraph {
+    /// An empty graph read for `reads`.
+    pub fn new(reads: RankingReads) -> RankingGraph {
+        RankingGraph {
+            reads,
+            ..RankingGraph::default()
+        }
+    }
+}
+
+/// A live item a derived ranking key reads that the board does not hold itself — next to one of
+/// its rows, or in the `list` scope of a type ([`RankingGraph::neighbours`]).
+///
+/// `#[non_exhaustive]`: build it with [`Neighbour::new`] and set the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Neighbour {
+    pub item: ItemRow,
+    /// Present labels, sorted and distinct, as `present_labels`.
+    pub labels: Vec<String>,
+    /// Every non-empty custom value, as the store reads them in bulk.
+    pub custom: BTreeMap<String, String>,
+}
+
+impl Neighbour {
+    /// A neighbour with no labels or custom values read.
+    pub fn new(item: ItemRow) -> Neighbour {
+        Neighbour {
+            item,
+            labels: Vec::new(),
+            custom: BTreeMap::new(),
+        }
+    }
+}
+
+/// What the store-free `next` of `cfg` reads beyond the active tickets' records — the
+/// [`RankingReads`] a reader fills [`ActiveBoard::ranking`] for — or `None` when `[ranking.next]`
+/// declares no derived ranking key (6j6v.1c5s). It does not depend on the board.
+///
+/// A `[ranking.next]` that reads, directly or down its type chain, the rank of a type only
+/// `[ranking.list]` orders names that type in [`RankingReads::list_types`] (6j6v.xkr7): that rank
+/// is computed over the type's live items, which the reader puts in the graph. Until 6j6v.xkr7
+/// such a plugin was refused here; it is no longer, and the `Result` stays for a later refusal.
+pub fn next_ranking_reads(cfg: &PluginConfig) -> Result<Option<RankingReads>> {
+    derived::reads_for_next(cfg)
+}
+
+/// `board` with its [`RankingGraph`] for `reads` read from `store` (6j6v.1c5s) — the parity oracle
+/// for `nxs_fold_ddb::records::with_ranking`, as [`active_board`] is for the records. One edge pass
+/// ([`Store::present_edges_of_kinds`]), one bulk read of the neighbours' rows, and one of their
+/// labels and of their custom values when `reads` asks for them; with list types, one read of the
+/// live items (6j6v.xkr7).
+pub fn with_ranking(
+    store: &Store,
+    mut board: ActiveBoard,
+    reads: &RankingReads,
+) -> Result<ActiveBoard> {
+    let held: BTreeSet<&str> = board.tickets.keys().map(String::as_str).collect();
+    board.ranking = Some(ranking_graph(store, reads, &held)?);
+    Ok(board)
+}
+
+/// The [`RankingGraph`] for `reads` around the rows a board holds itself (`held`, every one a
+/// subject), read from `store` — what [`with_ranking`] and [`list_board`] put on their boards.
+fn ranking_graph(
+    store: &Store,
+    reads: &RankingReads,
+    held: &BTreeSet<&str>,
+) -> Result<RankingGraph> {
+    let listed: Vec<ItemRow> = if reads.list_types.is_empty() {
+        Vec::new()
+    } else {
+        derived::list_scope(store)?
+            .into_iter()
+            .filter(|i| {
+                i.item_type
+                    .as_deref()
+                    .is_some_and(|t| reads.list_types.contains(t))
+            })
+            .collect()
+    };
+    let listed_ids: BTreeSet<&str> = listed.iter().map(|i| i.id.as_str()).collect();
+    let subject = |id: &str| held.contains(id) || listed_ids.contains(id);
+    let kinds: Vec<EdgeKind> = reads.kinds.iter().copied().collect();
+    let touching: Vec<(String, String, EdgeKind)> = store
+        .present_edges_of_kinds(&kinds)?
+        .into_iter()
+        .filter(|(from, to, _)| subject(from) || subject(to))
+        .collect();
+    let others: BTreeSet<&str> = touching
+        .iter()
+        .flat_map(|(from, to, _)| [from.as_str(), to.as_str()])
+        .filter(|id| !subject(id))
+        .collect();
+    let others: Vec<&str> = others.into_iter().collect();
+    let live: BTreeMap<String, ItemRow> = store
+        .get_items(&others)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    let edges: BTreeSet<nexus_flow_core::graph::Edge> = touching
+        .into_iter()
+        .filter(|(from, to, _)| {
+            (subject(from) || live.contains_key(from)) && (subject(to) || live.contains_key(to))
+        })
+        .map(|(from, to, kind)| nexus_flow_core::graph::Edge { from, to, kind })
+        .collect();
+    let mut rows = live;
+    for item in &listed {
+        if !held.contains(item.id.as_str()) {
+            rows.insert(item.id.clone(), item.clone());
+        }
+    }
+    let ids: Vec<&str> = rows.keys().map(String::as_str).collect();
+    let mut labels = if reads.labels {
+        store.labels_of_bulk(&ids)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut custom = if reads.custom {
+        store.custom_fields_of_bulk(&ids)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut graph = RankingGraph::new(reads.clone());
+    graph.edges = edges;
+    graph.listed = listed_ids.iter().map(|id| id.to_string()).collect();
+    graph.neighbours = rows
+        .into_iter()
+        .map(|(id, item)| {
+            let mut n = Neighbour::new(item);
+            n.labels = labels.remove(&id).unwrap_or_default();
+            n.custom = custom.remove(&id).unwrap_or_default();
+            (id, n)
+        })
+        .collect();
+    Ok(graph)
 }
 
 /// The store path's input as an [`ActiveBoard`]: the store's selection ([`graph::select`]) and, for
@@ -2823,21 +3054,45 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
 ///
 /// [`Engine::next`]: crate::engine::Engine::next
 ///
-/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is refused with `validation`: an
-/// [`ActiveBoard`] holds neither the edges nor the scopes those keys read, and ranking without them
-/// would order apart from the store path in silence. The server path is its own cut (6j6v.1c5s).
+/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is ranked from the board's
+/// [`RankingGraph`] (6j6v.1c5s), by the same evaluation the store path runs — a key that reads the
+/// rank of a type only `[ranking.list]` orders too, from the graph's listed items (6j6v.xkr7). It
+/// is refused with `validation` when the board carries no graph, or one read for less than
+/// [`next_ranking_reads`] names: ranking without those edges would order apart from the store path
+/// in silence.
 pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
     crate::validate::iso_date(now)?;
-    if cfg.ranking.has_derived(Verb::Next) {
-        return Err(NxfError::validation(format!(
-            "plugin '{}' ranks `next` by derived ranking keys, which the store-free lanes do not \
-             compute yet — answer `next` from a store",
-            cfg.name
-        )));
-    }
+    let graph = match next_ranking_reads(cfg)? {
+        None => None,
+        Some(needed) => Some(
+            board
+                .ranking
+                .as_ref()
+                .filter(|g| g.reads.covers(&needed))
+                .ok_or_else(|| {
+                    NxfError::validation(format!(
+                        "plugin '{}' ranks `next` by derived ranking keys, and the board was read \
+                         without the graph they read — fill `ActiveBoard::ranking` for \
+                         `next_ranking_reads` (`read::with_ranking` from a store, \
+                         `records::with_ranking` from the folded tables)",
+                        cfg.name
+                    ))
+                })?,
+        ),
+    };
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
-    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT, None))
+    let derived = match graph {
+        Some(graph) => derived::compute_active(cfg, board, graph, &items)?,
+        None => None,
+    };
+    Ok(next_lane(
+        cfg,
+        candidates,
+        items,
+        DEFAULT_SORT_NEXT,
+        derived.as_ref(),
+    ))
 }
 
 /// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store
@@ -2927,6 +3182,401 @@ pub fn deferred_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Re
 pub fn deferred_active_value(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Value> {
     let items = deferred_active(cfg, board, now)?;
     Ok(board.records(&items, |i, j| lane_record(Some(cfg), i, j)))
+}
+
+// ---- list without a store (6j6v.xkr7) ----------------------------------------
+//
+// The hosted `list`: the same rows in the same order as [`list_page`] over a store holding the same
+// board, from a [`ListBoard`] a server reads off its `typed` index (docs/specs/derived-ranking-keys.md
+// §6) — the listed types' live items with their joins, `next`'s board when a key reads a rank
+// `next` gives, and the [`RankingGraph`] the derived keys read. As for the store-free `next`, the
+// facade decides what to read ([`list_reads`]) and ranks and projects it; the server only reads.
+
+/// What the store-free `list` a [`ListQuery`] asks for reads (6j6v.xkr7) — the input of a reader
+/// that builds the [`ListBoard`] ([`list_board`] from a store, `nxs_fold_ddb::records::list_board`
+/// from the folded tables). [`list_reads`] gives it.
+///
+/// `#[non_exhaustive]`: start from `ListReads::default()` and set the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListReads {
+    /// The listed types: the board holds every live, unarchived item of each. `None`: every live,
+    /// unarchived item, whatever its type — a query without a type filter.
+    pub types: Option<BTreeSet<String>>,
+    /// A key reads the rank of a type `next` ranks: the board carries `next`'s board, the active
+    /// tickets and their [`Board`], to take `next`'s candidates from at the query's `now`.
+    pub next: bool,
+    /// The graph the derived keys read (`None`: none in play). Its subjects are the listed items,
+    /// the active tickets when `next` is set, and its own listed items
+    /// ([`RankingReads::list_types`]).
+    pub ranking: Option<RankingReads>,
+    /// What a `list` that is NOT ranked keeps and where it cuts (review of PR #55): its order and
+    /// its row predicates read the item rows alone, so a reader keeps and cuts BEFORE it reads the
+    /// joins a record carries, and reads them for the kept page only ([`list_select`]). `None` for
+    /// `sort = rank`: a rank is computed over the whole `list` scope of a type — every live,
+    /// unarchived item of it, whatever the query's status, filter or limit
+    /// (docs/specs/derived-ranking-keys.md §12, decision 2) — so a ranked list reads the scope
+    /// whole.
+    pub select: Option<ListSelect>,
+}
+
+/// The query of a `list` that is not ranked, as a reader applies it before the joins
+/// ([`ListReads::select`], [`list_select`]).
+///
+/// `#[non_exhaustive]`: only [`list_reads`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListSelect {
+    /// Only items with this core status.
+    pub status: Option<String>,
+    /// The query's filter: its types read the row, its label the item's labels, its container the
+    /// item's current parent and `contributes_to` targets.
+    pub filter: NextFilter,
+    /// The order — any key but `rank` ([`ListSelect::sort`]); it reads the row alone.
+    pub(crate) sort: SortKey,
+    /// The cut; `None`: every kept item.
+    pub limit: Option<usize>,
+}
+
+impl ListSelect {
+    /// The order: any key but `rank`, which reads the row alone.
+    pub fn sort(&self) -> SortKey {
+        self.sort
+    }
+
+    /// Whether an item passes what its row alone decides: live, unarchived, of the status and of a
+    /// type the filter names. A reader asks it first, and reads no join of an item it refuses.
+    pub fn keeps_row(&self, item: &ItemRow) -> bool {
+        item.deleted.as_deref() != Some("1")
+            && item.archived.is_none()
+            && self
+                .status
+                .as_deref()
+                .is_none_or(|s| item.status.as_deref() == Some(s))
+            && (self.filter.types.is_empty()
+                || item
+                    .item_type
+                    .as_deref()
+                    .is_some_and(|t| self.filter.types.iter().any(|f| f == t)))
+    }
+
+    /// Whether the filter reads an item's labels: a reader reads them before [`list_select`].
+    pub fn reads_labels(&self) -> bool {
+        self.filter.label.is_some()
+    }
+
+    /// Whether the filter reads an item's current parent (`belongs_to`) and `contributes_to`
+    /// targets: a reader reads them before [`list_select`].
+    pub fn reads_edges(&self) -> bool {
+        self.filter.within.is_some()
+    }
+}
+
+/// Where a reader cut a [`ListBoard`] ([`list_select`]): the query it kept and cut for, and how many
+/// items it kept before the cut — the total the page discloses.
+///
+/// `#[non_exhaustive]`: only [`list_select`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListCut {
+    pub select: ListSelect,
+    pub total: usize,
+}
+
+/// The items of `items` that `select` keeps — [`ListSelect::keeps_row`] and the filter's one
+/// membership rule ([`NextFilter`]) — in `select.sort` order, cut to `select.limit`, with the
+/// [`ListCut`] to put on the board ([`ListBoard::cut`]). What [`list_board_page`] keeps, orders and
+/// cuts, so a reader that reads the joins of the kept items only answers the same page.
+///
+/// Every item must carry its labels when [`ListSelect::reads_labels`], and its `belongs_to` and
+/// `contributes_to` when [`ListSelect::reads_edges`]; no other join is read here.
+pub fn list_select(select: &ListSelect, items: Vec<ListItem>) -> (Vec<ListItem>, ListCut) {
+    let mut kept: Vec<ListItem> = items
+        .into_iter()
+        .filter(|i| {
+            select.keeps_row(&i.item) && select.filter.keeps(&i.item, &i.labels, &i.contributes_to)
+        })
+        .collect();
+    // Ties by id: `list_board_page` sorts the board's items stably from id order, so ties are cut
+    // alike.
+    kept.sort_by(|a, b| {
+        row_cmp(&a.item, &b.item, select.sort).then_with(|| a.item.id.cmp(&b.item.id))
+    });
+    let total = kept.len();
+    if let Some(n) = select.limit {
+        kept.truncate(n);
+    }
+    (
+        kept,
+        ListCut {
+            select: select.clone(),
+            total,
+        },
+    )
+}
+
+/// One listed item and the joins its `list` record and the filters read (6j6v.xkr7) — the
+/// per-item input of the store-free `list`. Every field holds what the store path reads for the
+/// same item: `item` with its `belongs_to` (`present_parent`), `labels` as `present_labels`,
+/// `custom` every non-empty custom value, the timestamps with an unstamped `''` as `None`,
+/// `contributes_to` the present targets sorted and distinct, and `parent_closed` what
+/// [`parent_closed_reason`] gives.
+///
+/// `#[non_exhaustive]`: build it with [`ListItem::new`] and set the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListItem {
+    pub item: ItemRow,
+    pub labels: Vec<String>,
+    pub custom: BTreeMap<String, String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub contributes_to: Vec<String>,
+    pub parent_closed: Vec<(String, Option<String>)>,
+}
+
+impl ListItem {
+    /// An item with no joins yet.
+    pub fn new(item: ItemRow) -> ListItem {
+        ListItem {
+            item,
+            labels: Vec::new(),
+            custom: BTreeMap::new(),
+            created_at: None,
+            updated_at: None,
+            contributes_to: Vec::new(),
+            parent_closed: Vec::new(),
+        }
+    }
+
+    fn joins(&self) -> RecordJoins<'_> {
+        RecordJoins {
+            labels: &self.labels,
+            parent_closed: &self.parent_closed,
+            created_at: self.created_at.as_deref(),
+            updated_at: self.updated_at.as_deref(),
+            custom: Some(&self.custom),
+            ..RecordJoins::default()
+        }
+    }
+}
+
+/// The input of the store-free `list` (6j6v.xkr7): what a reader read for a [`ListReads`].
+///
+/// `#[non_exhaustive]`: build it with [`ListBoard::new`] and set the fields.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ListBoard {
+    /// The types `items` holds every live, unarchived item of; `None`: every type.
+    pub types: Option<BTreeSet<String>>,
+    /// The listed items, by id: live and unarchived, of `types`.
+    pub items: BTreeMap<String, ListItem>,
+    /// `next`'s board, for a key that reads the rank of a type `next` ranks
+    /// ([`ListReads::next`]): the active tickets' rows — their labels and custom values when the
+    /// graph reads them — and their [`Board`]. Its own `ranking` stays `None`.
+    pub active: Option<ActiveBoard>,
+    /// The graph the derived keys read ([`ListReads::ranking`]).
+    pub ranking: Option<RankingGraph>,
+    /// Set when the reader kept and cut `items` for a [`ListReads::select`] ([`list_select`]):
+    /// `items` then holds the kept page only, and the cut the total before it. `None`: `items`
+    /// holds every listed item.
+    pub cut: Option<ListCut>,
+}
+
+impl ListBoard {
+    /// The listed items of `types` (`None`: every type), keyed by their ids.
+    pub fn new(
+        types: Option<BTreeSet<String>>,
+        items: impl IntoIterator<Item = ListItem>,
+    ) -> ListBoard {
+        ListBoard {
+            types,
+            items: items.into_iter().map(|i| (i.item.id.clone(), i)).collect(),
+            active: None,
+            ranking: None,
+            cut: None,
+        }
+    }
+}
+
+/// What the store-free `list` `q` reads under `cfg` (6j6v.xkr7): the listed types — `q`'s type
+/// filter, else every type —, `next`'s board when a `[ranking.list]` key reads a rank `next` gives
+/// and `q` has a `now`, and the graph the derived keys of a `sort = rank` read. It depends on the
+/// query, not on the board.
+pub fn list_reads(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
+    derived::reads_for_list(cfg, q)
+}
+
+/// The store's [`ListBoard`] for `reads` — the parity oracle for
+/// `nxs_fold_ddb::records::list_board`, as [`active_board`] is for the records: the listed items
+/// with their joins read in bulk, `next`'s board from the store's selection, and the graph.
+pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
+    let items: Vec<ItemRow> = derived::list_scope(store)?
+        .into_iter()
+        .filter(|i| {
+            reads
+                .types
+                .as_ref()
+                .is_none_or(|types| i.item_type.as_deref().is_some_and(|t| types.contains(t)))
+        })
+        .collect();
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let mut labels = store.labels_of_bulk(&ids)?;
+    let mut custom = store.custom_fields_of_bulk(&ids)?;
+    let mut ts = store.item_timestamps_of_bulk(&ids)?;
+    let mut contributes = store.contributes_to_of_bulk(&ids)?;
+    let mut listed = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item.id.clone();
+        let (created_at, updated_at) = ts.remove(&id).unwrap_or_default();
+        let mut i = ListItem::new(item);
+        i.labels = labels.remove(&id).unwrap_or_default();
+        i.custom = custom.remove(&id).unwrap_or_default();
+        i.created_at = created_at;
+        i.updated_at = updated_at;
+        i.contributes_to = contributes.remove(&id).unwrap_or_default();
+        listed.push(i);
+    }
+    // Kept and cut as a server keeps and cuts it (`list_select`), so the two boards compare whole.
+    let cut = match &reads.select {
+        Some(select) => {
+            let (kept, cut) = list_select(select, listed);
+            listed = kept;
+            Some(cut)
+        }
+        None => None,
+    };
+    for i in &mut listed {
+        i.parent_closed = parent_closed_reason(store, &i.item)?;
+    }
+    let mut board = ListBoard::new(reads.types.clone(), listed);
+    board.cut = cut;
+    let graph_reads = reads.ranking.clone().unwrap_or_default();
+    if reads.next {
+        let selection = nexus_flow_core::graph::select(store.connection())?;
+        let ids: Vec<&str> = selection.tickets().map(|t| t.id.as_str()).collect();
+        let items = store.get_items(&ids)?;
+        let mut labels = if graph_reads.labels {
+            store.labels_of_bulk(&ids)?
+        } else {
+            BTreeMap::new()
+        };
+        let mut custom = if graph_reads.custom {
+            store.custom_fields_of_bulk(&ids)?
+        } else {
+            BTreeMap::new()
+        };
+        let tickets = items.into_iter().map(|item| {
+            let id = item.id.clone();
+            let mut t = ActiveTicket::new(item);
+            t.labels = labels.remove(&id).unwrap_or_default();
+            t.custom = custom.remove(&id).unwrap_or_default();
+            t
+        });
+        board.active = Some(ActiveBoard::new(selection, tickets));
+    }
+    if let Some(r) = &reads.ranking {
+        let mut held: BTreeSet<&str> = board.items.keys().map(String::as_str).collect();
+        if let Some(active) = &board.active {
+            held.extend(active.tickets.keys().map(String::as_str));
+        }
+        let graph = ranking_graph(store, r, &held)?;
+        board.ranking = Some(graph);
+    }
+    Ok(board)
+}
+
+/// [`list_page`] without a store (6j6v.xkr7): the rows of `board` that `q` keeps — its `status`,
+/// its filter through the same membership rule ([`NextFilter`]) — ordered by `q.sort`, with the
+/// derived keys of a `sort = rank` from the board's graph, and cut to `q.limit` with the total
+/// disclosed. The same rows in the same order as [`list_page`] over a store holding the same board.
+///
+/// Not paged: the store path's page cache is machine-local, and a server's paging is an open
+/// decision (6j6v.15ed) — as for [`next_active_filtered`], a server cuts this list itself. So
+/// `validation` for `q.paginate` or a token; and for a malformed `q.now`, a type filter (or none)
+/// the board does not list every item for, a board read for less than the ranking needs, and a
+/// board kept and cut ([`ListBoard::cut`]) for another query than `q`. A cut board answers the
+/// total its reader counted before the cut.
+pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> Result<NextPage> {
+    if q.paginate || q.token.is_some() {
+        return Err(NxfError::validation(
+            "the store-free `list` is not paged — a server cuts it itself; drop paginate and the \
+             token",
+        ));
+    }
+    if let Some(now) = &q.now {
+        crate::validate::iso_date(now)?;
+    }
+    let listed = match &board.types {
+        None => true,
+        Some(types) => {
+            !q.filter.types.is_empty() && q.filter.types.iter().all(|t| types.contains(t))
+        }
+    };
+    if !listed {
+        return Err(NxfError::validation(
+            "the list board was read for other types than the query lists — read it with \
+             `list_reads` for this query",
+        ));
+    }
+    if let Some(cut) = &board.cut {
+        if list_reads(cfg, q).select.as_ref() != Some(&cut.select) {
+            return Err(NxfError::validation(
+                "the list board was kept and cut for another query — read it with `list_reads` \
+                 for this query",
+            ));
+        }
+    }
+    let mut items: Vec<ItemRow> = board
+        .items
+        .values()
+        // The board holds live, unarchived items; a caller-built one is held to the same rule.
+        .filter(|i| i.item.deleted.as_deref() != Some("1") && i.item.archived.is_none())
+        .filter(|i| {
+            q.status
+                .as_deref()
+                .is_none_or(|s| i.item.status.as_deref() == Some(s))
+        })
+        .filter(|i| q.filter.keeps(&i.item, &i.labels, &i.contributes_to))
+        .map(|i| i.item.clone())
+        .collect();
+    let key = q.sort.unwrap_or(DEFAULT_SORT_LIST);
+    if key == SortKey::Rank {
+        let derived = derived::compute_list(cfg, board, &items, q.now.as_deref())?;
+        let rank = TypeRank::list(cfg).with_derived(derived.as_ref());
+        items.sort_by(|a, b| rank.cmp(a, b));
+    } else {
+        order_by(cfg, &mut items, key);
+    }
+    let mut page = truncate_next(items, q.limit);
+    if let Some(cut) = &board.cut {
+        // The reader kept the page only: the total is the one it counted before its cut.
+        page.total = cut.total;
+    }
+    Ok(page)
+}
+
+/// [`list_board_page`] as the `list` JSON envelope `{"items", "total"}` — the value
+/// [`Engine::list_query_value`] gives for the same board and an unpaged query, every record with
+/// its joins from the item's [`ListItem`].
+///
+/// [`Engine::list_query_value`]: crate::engine::Engine::list_query_value
+pub fn list_board_value(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> Result<Value> {
+    let page = list_board_page(cfg, board, q)?;
+    let records = Value::Array(
+        page.items
+            .iter()
+            .map(|i| {
+                let joins = board
+                    .items
+                    .get(&i.id)
+                    .map(ListItem::joins)
+                    .unwrap_or_default();
+                list_record(Some(cfg), i, &joins)
+            })
+            .collect(),
+    );
+    Ok(next_page_envelope(records, &page, false))
 }
 
 // ---- lane-ranked search (C6 #916.6) ----------------------------------------
