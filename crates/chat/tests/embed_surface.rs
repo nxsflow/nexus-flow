@@ -173,7 +173,10 @@ fn sending_to_a_persona_opens_a_thread_and_starts_it() {
     // The message is in the thread, and it is the caller's own words — not the plumbing the
     // persona was additionally told.
     let messages = eng
-        .thread(&receipt.thread_id, &handle(&eng, "carsten"))
+        .thread(
+            &receipt.thread_id,
+            nexus_chat::facade::Reader::Handle(&handle(&eng, "carsten")),
+        )
         .expect("read the thread back");
     assert_eq!(messages.messages.len(), 1);
     assert_eq!(messages.messages[0].body, "plan the release");
@@ -251,7 +254,10 @@ fn send_to_a_persona_reports_a_warning_when_a_real_worker_refuses_the_spawn() {
     // The message and the open thread really are there — `nxc reply --thread` (or an app reading
     // the same store, as here) can still find them.
     let messages = eng
-        .thread(&receipt.thread_id, &handle(&eng, "carsten"))
+        .thread(
+            &receipt.thread_id,
+            nexus_chat::facade::Reader::Handle(&handle(&eng, "carsten")),
+        )
         .expect("read the thread back");
     assert_eq!(
         messages
@@ -280,7 +286,11 @@ fn sending_to_a_persona_now_plans_the_reply_it_expects_on_the_new_thread() {
 
     // `status` with an EXPLICIT SET is what `thread_quorums` became (nxf 6j6v.yr59).
     let report = eng
-        .status(NOW, StatusScope::Threads(&[&receipt.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&receipt.thread_id]),
+        )
         .unwrap();
     let q = &report
         .operations
@@ -394,7 +404,11 @@ fn sending_to_a_declared_channel_opens_its_board_under_its_own_policy() {
     // The channel's own policy still decides who must answer; it decides it one level down, one
     // expectation per member thread, which is what the caller reads back off the tree.
     let members: Vec<Vec<String>> = eng
-        .status(NOW, StatusScope::Threads(&[&receipt.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&receipt.thread_id]),
+        )
         .unwrap()
         .operations
         .into_iter()
@@ -481,7 +495,11 @@ fn the_answering_session_learns_of_the_failed_consequence_in_the_very_call_it_is
         .expect("the fan-out itself succeeds — the reviewer starts fine");
 
     let member = eng
-        .status(NOW, StatusScope::Threads(&[&board.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&board.thread_id]),
+        )
         .unwrap()
         .operations
         .remove(0)
@@ -742,7 +760,11 @@ fn a_forged_thread_opener_neither_shows_on_the_seam_nor_passes_the_opener_only_g
     // The Engine seam: the board names the op's author, not the opener the payload declared. Read
     // through `status` since nxf 6j6v.yr59 folded `threads` into it.
     let report = eng
-        .status(NOW, StatusScope::Threads(&["m-forged-thread"]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&["m-forged-thread"]),
+        )
         .expect("read the boards");
     let board = report
         .operations
@@ -889,7 +911,11 @@ fn a_completing_reply_into_a_board_keeps_the_quorum_routing() {
     // `coder` answers in the thread the supervisor opened for it (nxf 6j6v.pf6j) — the level a
     // member is triggered into and the only one it is ever pointed at.
     let member_thread = eng
-        .status(NOW, StatusScope::Threads(&[&board.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&board.thread_id]),
+        )
         .unwrap()
         .operations
         .into_iter()
@@ -931,7 +957,11 @@ fn an_app_replying_into_a_round_that_is_over_meets_the_same_refusal_the_cli_does
         .send_to(caller("pm"), send_req("standup", "status?"))
         .expect("open the board");
     let member_thread = eng
-        .status(NOW, StatusScope::Threads(&[&board.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&board.thread_id]),
+        )
         .unwrap()
         .operations
         .into_iter()
@@ -943,7 +973,10 @@ fn an_app_replying_into_a_round_that_is_over_meets_the_same_refusal_the_cli_does
         .expect("the expected member replies and the channel consolidates");
 
     let messages_before = eng
-        .thread(&member_thread, &handle(&eng, "coder"))
+        .thread(
+            &member_thread,
+            nexus_chat::facade::Reader::Handle(&handle(&eng, "coder")),
+        )
         .expect("read the member thread")
         .messages
         .len();
@@ -971,10 +1004,13 @@ fn an_app_replying_into_a_round_that_is_over_meets_the_same_refusal_the_cli_does
         err.msg
     );
     assert_eq!(
-        eng.thread(&member_thread, &handle(&eng, "coder"))
-            .expect("read the member thread")
-            .messages
-            .len(),
+        eng.thread(
+            &member_thread,
+            nexus_chat::facade::Reader::Handle(&handle(&eng, "coder"))
+        )
+        .expect("read the member thread")
+        .messages
+        .len(),
         messages_before,
         "a refused reply writes nothing — the refusal is a preflight, not a rollback"
     );
@@ -1016,13 +1052,15 @@ fn the_directory_is_the_whole_team_or_one_personas_derived_view() {
     .unwrap();
     let eng = engine(tmp.path(), defs);
 
-    let all = eng.directory(None).expect("the full catalogue");
+    let all = eng
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .expect("the full catalogue");
     assert_eq!(all.personas.len(), 2);
     assert_eq!(all.channels.len(), 1);
     assert_eq!(all.personas[1].stage, Some(Stage::Senior));
 
     let mine = eng
-        .directory(Some("coder"))
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), Some("coder"))
         .expect("one persona's own view");
     assert_eq!(mine.persona.as_deref(), Some("coder"));
     assert_eq!(mine.personas.len(), 1, "the team minus the persona itself");
@@ -1047,7 +1085,9 @@ fn the_directory_follows_the_workspaces_own_declarations() {
         tmp.path(),
         Definitions::new(vec![simple_role("declared-here")], vec![]).unwrap(),
     );
-    let dir = eng.directory(None).unwrap();
+    let dir = eng
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .unwrap();
     assert_eq!(dir.personas.len(), 1);
     assert_eq!(dir.personas[0].handle, "declared-here");
 
@@ -1057,7 +1097,9 @@ fn the_directory_follows_the_workspaces_own_declarations() {
         tmp.path(),
         &Definitions::new(vec![simple_role("edited-in")], vec![]).unwrap(),
     );
-    let dir = eng.directory(None).unwrap();
+    let dir = eng
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .unwrap();
     assert_eq!(dir.personas.len(), 1);
     assert_eq!(dir.personas[0].handle, "edited-in");
 }
@@ -1079,7 +1121,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
     // `prime_as` with no persona IS `prime` — which is why the latter went (nxf 6j6v.yr59), and
     // `None` is exactly the human at the keyboard this case is about.
     let human = eng
-        .prime_as("local/carsten", None, NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/carsten"),
+            "local/carsten",
+            None,
+            NOW,
+        )
         .expect("a human primes");
     assert!(human.persona.is_none(), "a human is told no identity");
     assert!(
@@ -1088,7 +1135,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
     );
 
     let persona = eng
-        .prime_as("local/pm", Some("pm"), NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/pm"),
+            "local/pm",
+            Some("pm"),
+            NOW,
+        )
         .expect("a persona primes");
     let brief = persona
         .persona
@@ -1105,7 +1157,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
 
     // A persona that is no longer declared still gets its inbox rather than an error.
     let vanished = eng
-        .prime_as("local/ghost", Some("ghost"), NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/ghost"),
+            "local/ghost",
+            Some("ghost"),
+            NOW,
+        )
         .expect("a deleted declaration must not cost a session its catch-up");
     assert!(vanished.persona.is_none());
 }
@@ -1132,7 +1189,9 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
     let defs = Definitions::new(vec![simple_role("pm")], vec![]).unwrap();
     let eng = engine(tmp.path(), defs);
 
-    let block = eng.persona_prime("pm", NOW).expect("a declared persona");
+    let block = eng
+        .persona_prime(nexus_chat::facade::Reader::Handle("pm"), "pm", NOW)
+        .expect("a declared persona");
     assert!(
         block.contains("## You are `pm`") && block.contains("## How a conversation moves"),
         "the block carries the persona's identity and how it answers:\n{block}"
@@ -1148,7 +1207,7 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
     // still deserves its inbox. This does not: the caller is ASKING about a declaration, and an
     // empty string would read as "this persona is told nothing", which is a different fact.
     let err = eng
-        .persona_prime("nobody", NOW)
+        .persona_prime(nexus_chat::facade::Reader::Handle("nobody"), "nobody", NOW)
         .expect_err("an undeclared handle is not a persona");
     assert_eq!(err.kind, ErrorKind::NotFound, "{err:?}");
     assert!(
@@ -1157,7 +1216,13 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
         err.msg
     );
     assert!(
-        eng.prime_as("local/nobody", Some("nobody"), NOW).is_ok(),
+        eng.prime_as(
+            nexus_chat::facade::Reader::Handle("local/nobody"),
+            "local/nobody",
+            Some("nobody"),
+            NOW
+        )
+        .is_ok(),
         "…while `prime_as` still degrades softly for the same handle — the two contracts differ \
          on purpose, and that is what this pins"
     );
@@ -1175,7 +1240,11 @@ fn engine_persona_prime_of_an_unprimed_persona_is_empty_rather_than_an_error() {
     )
     .unwrap();
     let eng = engine(tmp.path(), defs);
-    assert_eq!(eng.persona_prime("narrow", NOW).unwrap(), "");
+    assert_eq!(
+        eng.persona_prime(nexus_chat::facade::Reader::Handle("narrow"), "narrow", NOW)
+            .unwrap(),
+        ""
+    );
 }
 
 #[test]
@@ -1309,7 +1378,11 @@ fn engine_withdraw_takes_back_the_commission_the_queue_receipt_reported() {
     // release has nothing to fire. Asked through the seam's own read rather than the store — this
     // is the board an app renders.
     let report = eng
-        .status(NOW, StatusScope::Threads(&[&queued.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&queued.thread_id]),
+        )
         .expect("the board the host renders");
     let board = report
         .operations
@@ -1561,7 +1634,13 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
         )
         .expect("send --to from inside a session");
 
-    let report = eng.status(NOW, StatusScope::Workspace).expect("status");
+    let report = eng
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Workspace,
+        )
+        .expect("status");
     assert_eq!(report.operations.len(), 1, "one operation: {report:?}");
     let op = &report.operations[0];
     assert_eq!(op.root, opened.thread_id);
@@ -1608,7 +1687,11 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
     // …and the same operation, this time named by its LEAF, which is the form an app uses when the
     // user clicked on one thread: the tree comes back from the root down either way.
     let report = eng
-        .status(NOW, StatusScope::Threads(&[&handed_on.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&handed_on.thread_id]),
+        )
         .expect("status --thread");
     let op = &report.operations[0];
     assert_eq!(op.root, opened.thread_id);
@@ -1646,7 +1729,11 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
     )
     .expect("the coder answers into a chain nobody is waiting on");
     let op = eng
-        .status(NOW, StatusScope::Threads(&[&stray.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&stray.thread_id]),
+        )
         .expect("status --thread")
         .operations
         .remove(0);
@@ -1670,7 +1757,12 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
         op.threads[1]
     );
     let followed = eng
-        .transcript_page(op.threads[1].session.as_deref().unwrap(), -1, None)
+        .transcript_page(
+            nexus_chat::facade::Reader::Handle("local/carsten"),
+            op.threads[1].session.as_deref().unwrap(),
+            -1,
+            None,
+        )
         .expect("and the EXISTING transcript path carries on from there");
     assert_eq!(followed.session, coder_session);
 
@@ -1680,17 +1772,25 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
         .clone()
         .expect("the root's channel");
     assert_eq!(
-        eng.status(NOW, StatusScope::Channel(&dm))
-            .expect("status --channel")
-            .operations
-            .len(),
+        eng.status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Channel(&dm)
+        )
+        .expect("status --channel")
+        .operations
+        .len(),
         1
     );
     assert_eq!(
-        eng.status(NOW, StatusScope::Channel("no-such-channel"))
-            .expect("status --channel")
-            .operations
-            .len(),
+        eng.status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Channel("no-such-channel")
+        )
+        .expect("status --channel")
+        .operations
+        .len(),
         0
     );
 
@@ -1704,9 +1804,18 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
             .unwrap()
     };
     let before = ops();
-    eng.status(NOW, StatusScope::Workspace).expect("status");
-    eng.status(NOW, StatusScope::Threads(&[&opened.thread_id]))
-        .expect("status");
+    eng.status(
+        nexus_chat::facade::Reader::Handle("o/human"),
+        NOW,
+        StatusScope::Workspace,
+    )
+    .expect("status");
+    eng.status(
+        nexus_chat::facade::Reader::Handle("o/human"),
+        NOW,
+        StatusScope::Threads(&[&opened.thread_id]),
+    )
+    .expect("status");
     assert_eq!(ops(), before, "status writes nothing at all");
 }
 
@@ -1844,7 +1953,11 @@ fn engine_name_thread_names_a_conversation_once_and_the_read_carries_it() {
 
     // The read an app refreshes on carries it — the conversation list's whole reason for asking.
     let status = eng
-        .status(NOW, StatusScope::Threads(&[&opened.thread_id]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[&opened.thread_id]),
+        )
         .expect("status");
     let thread = status
         .operations

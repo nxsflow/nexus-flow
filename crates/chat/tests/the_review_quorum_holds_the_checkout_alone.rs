@@ -316,7 +316,11 @@ fn a_reviewer_that_cannot_run_ends_the_round_instead_of_folding_a_verdict_out_of
         worker.started_handles()
     );
     let report = engine
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&[&board]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&[&board]),
+        )
         .expect("the requester reads the round");
     let row = report
         .operations

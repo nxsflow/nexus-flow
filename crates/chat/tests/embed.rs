@@ -172,7 +172,9 @@ fn rejections_carry_their_kind() {
     // the refusal it gives is the one an app actually meets.
     seed_board(dir.path());
     assert_eq!(
-        eng.thread("m-t1", "o/outsider").unwrap_err().kind,
+        eng.thread("m-t1", nexus_chat::facade::Reader::Handle("o/outsider"))
+            .unwrap_err()
+            .kind,
         ErrorKind::Forbidden
     );
 }
@@ -241,7 +243,11 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
     // The bulk read for an EXPLICIT SET of thread ids — the quorum bar's no-N+1 read, which is a
     // scope now. `tests/bulk_quorum.rs` is where the "ONE query" half of it is measured.
     let report = eng
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&["m-t1"]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&["m-t1"]),
+        )
         .unwrap();
     assert_eq!(report.operations.len(), 1);
     let board = &report.operations[0].threads[0];
@@ -255,13 +261,15 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
 
     // The board's MESSAGES are the other reader — `status` carries state, never text, which is why
     // one message reader had to stay at all.
-    let thread = eng.thread("m-t1", "o/a").unwrap();
+    let thread = eng
+        .thread("m-t1", nexus_chat::facade::Reader::Handle("o/a"))
+        .unwrap();
     assert_eq!(thread.messages.len(), 1);
     assert_eq!(thread.messages[0].body, "please review");
 
     // Nothing is complete yet → the opener wake `prime_as` carries is empty.
     assert!(eng
-        .prime_as("o/a", None, NOW)
+        .prime_as(nexus_chat::facade::Reader::Handle("o/a"), "o/a", None, NOW)
         .unwrap()
         .wake
         .complete
@@ -290,11 +298,18 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
     );
     // …and the SAME handle now re-reads the board as complete, and the opener is woken.
     let report = eng
-        .status(NOW, nexus_chat::facade::StatusScope::Threads(&["m-t1"]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            nexus_chat::facade::StatusScope::Threads(&["m-t1"]),
+        )
         .unwrap();
     assert!(report.operations[0].threads[0].outstanding.is_empty());
     assert!(report.operations[0].threads[0].awaiting_human);
-    let wake = eng.prime_as("o/a", None, NOW).unwrap().wake;
+    let wake = eng
+        .prime_as(nexus_chat::facade::Reader::Handle("o/a"), "o/a", None, NOW)
+        .unwrap()
+        .wake;
     assert_eq!(
         wake.complete.len(),
         1,
@@ -366,6 +381,7 @@ fn engine_status_reports_working_tree_holding_and_waiting() {
 
     let report = eng
         .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
             NOW,
             nexus_chat::facade::StatusScope::Threads(&["m-holding", "m-waiting", "m-neither"]),
         )
@@ -463,7 +479,9 @@ fn the_one_message_reader_enforces_a_declared_channels_requester_only_visibility
 
     // bob (bare, the shape a declared member's own membership is recorded in): opening + his own
     // reply — not carol's.
-    let board = eng.thread("m-t2", "bob").unwrap();
+    let board = eng
+        .thread("m-t2", nexus_chat::facade::Reader::Handle("bob"))
+        .unwrap();
     assert_eq!(
         board
             .messages
@@ -475,7 +493,9 @@ fn the_one_message_reader_enforces_a_declared_channels_requester_only_visibility
     );
 
     // the opener: sees everything.
-    let board = eng.thread("m-t2", "o/opener").unwrap();
+    let board = eng
+        .thread("m-t2", nexus_chat::facade::Reader::Handle("o/opener"))
+        .unwrap();
     assert_eq!(
         board
             .messages
@@ -570,7 +590,9 @@ fn a_host_running_its_own_role_runtime_fills_the_transcript_through_the_handle()
         1
     );
 
-    let v = eng.transcript_page("s-1", -1, None).unwrap();
+    let v = eng
+        .transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
+        .unwrap();
     assert_eq!(
         v.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
         [0, 2],
@@ -589,7 +611,7 @@ fn a_host_running_its_own_role_runtime_fills_the_transcript_through_the_handle()
             .unwrap();
     }
     assert_eq!(
-        eng.transcript_page("s-1", -1, None)
+        eng.transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
             .unwrap()
             .entries
             .iter()
@@ -642,7 +664,9 @@ fn transcript_reads_through_the_handle_with_its_subagent_sub_timeline_nested() {
     let eng = Engine::open(None, dir.path()).unwrap();
     // `transcript_page(s, -1, None)` IS the whole session — which is why the unwindowed
     // `Engine::transcript` went in nxf 6j6v.yr59 rather than being kept beside it.
-    let v = eng.transcript_page("s-1", -1, None).unwrap();
+    let v = eng
+        .transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
+        .unwrap();
     assert_eq!(v.session, "s-1");
     assert_eq!(v.role.as_deref(), Some("coder"));
     assert_eq!(v.real_sdk_id.as_deref(), Some("real-abc"));
@@ -651,7 +675,12 @@ fn transcript_reads_through_the_handle_with_its_subagent_sub_timeline_nested() {
     assert_eq!(v.entries[0].subagent[0].data["text"], "reading the diff");
     // An unknown session reads as an empty transcript through the handle too, never an error.
     assert!(eng
-        .transcript_page("never-existed", -1, None)
+        .transcript_page(
+            nexus_chat::facade::Reader::Handle("o/a"),
+            "never-existed",
+            -1,
+            None
+        )
         .unwrap()
         .entries
         .is_empty());

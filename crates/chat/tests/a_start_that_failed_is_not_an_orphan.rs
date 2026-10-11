@@ -281,7 +281,11 @@ fn store(tmp: &TempDir) -> nexus_chat::store::ChatStore {
 
 fn operation(engine: &Engine, now: &str, root: &str) -> StatusOperation {
     engine
-        .status(now, StatusScope::Threads(&[root]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            now,
+            StatusScope::Threads(&[root]),
+        )
         .expect("status")
         .operations
         .into_iter()

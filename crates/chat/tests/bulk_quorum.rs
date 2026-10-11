@@ -367,7 +367,11 @@ fn the_seam_serves_the_read_the_query_count_was_measured_on() {
     )
     .expect("open engine");
     let through_the_seam = engine
-        .status(NOW, StatusScope::Threads(&picked))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&picked),
+        )
         .expect("the seam reads");
 
     assert_eq!(through_the_seam, direct);

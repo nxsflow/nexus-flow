@@ -395,7 +395,11 @@ impl Bench {
 
     fn status(&self, now: &str) -> StatusReport {
         self.engine()
-            .status(now, StatusScope::Workspace)
+            .status(
+                nexus_chat::facade::Reader::Handle("o/human"),
+                now,
+                StatusScope::Workspace,
+            )
             .expect("status reads")
     }
 

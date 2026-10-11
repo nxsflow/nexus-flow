@@ -145,7 +145,11 @@ fn an_operation_with_parked_work_lists_it_on_the_status_view() {
 
     let ids = [thread.as_str()];
     let report = engine
-        .status(NOW, StatusScope::Threads(&ids))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&ids),
+        )
         .expect("status reads");
     let op = &report.operations[0];
     assert_eq!(op.parked.len(), 1, "{:?}", op.parked);
@@ -186,7 +190,11 @@ fn a_parked_operation_with_nothing_else_open_is_still_listed_by_default() {
         .expect("the coder answers");
     assert!(
         !engine
-            .status(NOW, StatusScope::Workspace)
+            .status(
+                nexus_chat::facade::Reader::Handle("o/human"),
+                NOW,
+                StatusScope::Workspace
+            )
             .expect("status reads")
             .operations
             .iter()
@@ -197,7 +205,11 @@ fn a_parked_operation_with_nothing_else_open_is_still_listed_by_default() {
     record_park(&tmp, &thread, &a_park(), PARKED_AT);
 
     let report = engine
-        .status(NOW, StatusScope::Workspace)
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Workspace,
+        )
         .expect("status reads");
     let op = report
         .operations
@@ -225,7 +237,11 @@ fn resumed_parked_work_is_not_listed() {
 
     let ids = [thread.as_str()];
     let report = engine
-        .status(NOW, StatusScope::Threads(&ids))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&ids),
+        )
         .expect("status reads");
     assert!(
         report.operations[0].parked.is_empty(),
@@ -242,7 +258,11 @@ fn a_workspace_that_never_parked_serialises_no_parked_key() {
 
     let ids = [thread.as_str()];
     let report = engine
-        .status(NOW, StatusScope::Threads(&ids))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&ids),
+        )
         .expect("status reads");
     let value = report.to_value();
     let op = &value["operations"][0];

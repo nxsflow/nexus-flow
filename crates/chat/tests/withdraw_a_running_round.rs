@@ -696,7 +696,11 @@ impl Bench {
     /// failure of its own, which is why this panics rather than answering `None`.
     fn operation(&self, now: &str, root: &str) -> nexus_chat::facade::StatusOperation {
         self.engine()
-            .status(now, StatusScope::Workspace)
+            .status(
+                nexus_chat::facade::Reader::Handle("o/human"),
+                now,
+                StatusScope::Workspace,
+            )
             .expect("status reads")
             .operations
             .iter()
@@ -878,7 +882,11 @@ fn withdrawing_a_running_round_stops_its_session_and_parks_its_work() {
     // `nxc status` names the parked work under the operation until somebody comes back for it.
     let status = b
         .engine()
-        .status(TICK, StatusScope::Workspace)
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            TICK,
+            StatusScope::Workspace,
+        )
         .expect("status reads");
     let op = status
         .operations

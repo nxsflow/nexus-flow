@@ -74,7 +74,9 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
     );
 
     // `directory`: every entry stamped with its origin, the same record `nxc list --json` prints.
-    let directory = engine.directory(None).unwrap();
+    let directory = engine
+        .directory(nexus_chat::facade::Reader::Handle("o/human"), None)
+        .unwrap();
     let pm = directory
         .personas
         .iter()
@@ -92,7 +94,14 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
 
     // `prime_as` for the persona: it is told where its declaration lives, because a path in its
     // instructions relative to "this repository" means the repository it runs in.
-    let report = engine.prime_as("local/pm", Some("pm"), NOW).unwrap();
+    let report = engine
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/pm"),
+            "local/pm",
+            Some("pm"),
+            NOW,
+        )
+        .unwrap();
     let brief = report.persona.as_ref().expect("a persona brief");
     assert_eq!(brief.declared_in.as_deref(), Some(user.as_path()));
     let rendered = brief.render_markdown();
@@ -101,7 +110,9 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
         "{rendered}"
     );
     // The composed session start a spawned persona is actually handed carries it.
-    let start = engine.persona_prime("pm", NOW).unwrap();
+    let start = engine
+        .persona_prime(nexus_chat::facade::Reader::Handle("pm"), "pm", NOW)
+        .unwrap();
     assert!(start.contains("**Declared in:**"), "{start}");
     // ... and the workspace's own declaration of the same name takes over, reported.
     std::fs::create_dir_all(repo.path().join(".nxs-personas")).unwrap();
@@ -115,7 +126,14 @@ fn the_engine_reads_the_user_level_folder_the_cli_reads_and_says_where_each_entr
         defs.role("pm").unwrap().system_prompt,
         "The repository's own PM."
     );
-    let report = engine.prime_as("local/pm", Some("pm"), NOW).unwrap();
+    let report = engine
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/pm"),
+            "local/pm",
+            Some("pm"),
+            NOW,
+        )
+        .unwrap();
     assert_eq!(report.persona.as_ref().unwrap().declared_in, None);
     assert_eq!(report.declarations.shadowed.len(), 1);
 }

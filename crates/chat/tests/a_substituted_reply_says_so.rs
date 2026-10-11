@@ -299,6 +299,7 @@ fn an_embedding_host_reads_the_same_fact_off_the_engine_seam() {
     .expect("a host opens the same workspace");
     let report = engine
         .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
             NOW,
             nexus_chat::facade::StatusScope::Threads(&[thread.as_str()]),
         )

@@ -216,7 +216,10 @@ fn answer(engine: &Engine, session: &str, thread: &str, escalate: bool) {
 }
 
 fn listed(engine: &Engine, scope: StatusScope<'_>) -> Vec<StatusOperation> {
-    engine.status(NOW, scope).expect("status reads").operations
+    engine
+        .status(nexus_chat::facade::Reader::Handle("o/human"), NOW, scope)
+        .expect("status reads")
+        .operations
 }
 
 // ---- (1) what the default listing is about (nxf 6j6v.1vxs) -------------------------------------
@@ -489,7 +492,11 @@ fn a_report_says_whether_its_worker_could_answer_the_process_question_at_all() {
     live.running.lock().unwrap().insert(coder);
     assert!(
         engine
-            .status(NOW, StatusScope::Workspace)
+            .status(
+                nexus_chat::facade::Reader::Handle("o/human"),
+                NOW,
+                StatusScope::Workspace
+            )
             .unwrap()
             .worker_answers_liveness,
         "this worker looks at processes, so its `unknown` would be evidence"
@@ -507,7 +514,13 @@ fn a_report_says_whether_its_worker_could_answer_the_process_question_at_all() {
             },
         )
         .expect("the channel opens");
-    let report = silent.status(NOW, StatusScope::Workspace).unwrap();
+    let report = silent
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Workspace,
+        )
+        .unwrap();
     assert!(
         !report.worker_answers_liveness,
         "and one resting on the trait default admits it: {report:?}"
@@ -868,7 +881,11 @@ fn the_two_empty_answers_are_different_sentences() {
 /// One thread of the operation `slot` belongs to, read fresh through the handle.
 fn thread_of(engine: &Engine, slot: &str) -> nexus_chat::facade::StatusThread {
     engine
-        .status(NOW, StatusScope::Threads(&[slot]))
+        .status(
+            nexus_chat::facade::Reader::Handle("o/human"),
+            NOW,
+            StatusScope::Threads(&[slot]),
+        )
         .expect("status reads")
         .operations
         .into_iter()

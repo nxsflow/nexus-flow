@@ -4063,7 +4063,14 @@ fn search(json: bool, db: Option<&str>, query: &str, consumer: Option<&str>) -> 
     // the qualified handle `resolve_consumer` falls back to now finds a declared channel's boards at
     // all, where it used to match no materialised member row and answer "no matches".
     let channels = declared_channels(db)?;
-    let hits = crate::facade::search(&store, &consumer, query, &channels)?;
+    // Always a chat identity: no flag, variable or declaration a local caller sets reads as the
+    // board's owner (nxf 6j6v.6gpr) — that reader is an embedder's to select, never `nxc`'s.
+    let hits = crate::facade::search(
+        &store,
+        crate::facade::Reader::Handle(&consumer),
+        query,
+        &channels,
+    )?;
     if json {
         println!("{}", serde_json::to_string(&hits).expect("hits serialize"));
     } else if hits.is_empty() {
