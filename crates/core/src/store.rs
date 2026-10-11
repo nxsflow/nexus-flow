@@ -69,6 +69,29 @@ impl ItemReadStats {
     }
 }
 
+/// How many EDGE-read queries a [`Store`] has run since it was opened (6j6v.x0wf) — the
+/// [`ItemReadStats`] instrument for the edge pass of the derived ranking keys
+/// (docs/specs/derived-ranking-keys.md §5): a test asserts the pass runs once per query, not once
+/// per candidate, by counting queries instead of timing them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeReadStats {
+    /// Whole-kind scans, [`Store::present_edges_of_kinds`] — one query each.
+    pub passes: u64,
+    /// Reverse mention lookups, [`Store::mentioned_by_bulk`] — one query per ≤500-target chunk.
+    pub mention_lookups: u64,
+}
+
+impl EdgeReadStats {
+    /// The queries run between an `earlier` snapshot and this one, saturating like
+    /// [`ItemReadStats::since`].
+    pub fn since(self, earlier: EdgeReadStats) -> EdgeReadStats {
+        EdgeReadStats {
+            passes: self.passes.saturating_sub(earlier.passes),
+            mention_lookups: self.mention_lookups.saturating_sub(earlier.mention_lookups),
+        }
+    }
+}
+
 /// flow's store over the shared substrate.
 pub struct Store {
     inner: Substrate,
@@ -76,6 +99,8 @@ pub struct Store {
     /// `&self`; `Store` is already `!Sync` (it holds a `rusqlite::Connection`), so this adds no
     /// constraint — and bumping a `Cell` is noise next to the SQLite query it counts.
     item_reads: std::cell::Cell<ItemReadStats>,
+    /// Query-shape instrumentation for the edge reads ([`EdgeReadStats`], 6j6v.x0wf).
+    edge_reads: std::cell::Cell<EdgeReadStats>,
 }
 
 impl Store {
@@ -92,6 +117,7 @@ impl Store {
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
+            edge_reads: std::cell::Cell::default(),
         };
         store.migrate_belongs_to_to_parent_edges();
         store
@@ -108,6 +134,7 @@ impl Store {
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
+            edge_reads: std::cell::Cell::default(),
         };
         store.migrate_belongs_to_to_parent_edges();
         Ok(store)
@@ -161,6 +188,22 @@ impl Store {
         c.single += single;
         c.bulk += bulk;
         self.item_reads.set(c);
+    }
+
+    /// Snapshot of the edge-read queries this store has run ([`EdgeReadStats`], 6j6v.x0wf).
+    pub fn edge_read_stats(&self) -> EdgeReadStats {
+        self.edge_reads.get()
+    }
+
+    /// Add one edge-read query to the running totals.
+    fn count_edge_read(&self, pass: bool) {
+        let mut c = self.edge_reads.get();
+        if pass {
+            c.passes += 1;
+        } else {
+            c.mention_lookups += 1;
+        }
+        self.edge_reads.set(c);
     }
 
     /// The current Lamport clock (highest lamport emitted/observed).
@@ -1088,12 +1131,52 @@ impl Store {
                  ORDER BY to_id, from_id"
             );
             let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(false);
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
             for row in rows {
                 let (to, from) = row?;
                 out.entry(to).or_default().push(from);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every present edge of the given `kinds`, as `(from, to, kind)`, in `(kind, from, to)` order —
+    /// ONE query however many kinds and edges (6j6v.x0wf). The edge pass of the derived ranking
+    /// keys (docs/specs/derived-ranking-keys.md §5): one scan over the edges of the kinds a
+    /// plugin's keys name, so a query's cost is O(E) in those edges, never one query per candidate.
+    /// The endpoints are not checked against the items; the caller drops the dead ones. No kinds,
+    /// no query.
+    pub fn present_edges_of_kinds(
+        &self,
+        kinds: &[EdgeKind],
+    ) -> rusqlite::Result<Vec<(String, String, EdgeKind)>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; kinds.len()].join(",");
+        let sql = format!(
+            "SELECT from_id, to_id, kind FROM present_edges WHERE kind IN ({placeholders}) \
+             ORDER BY kind, from_id, to_id"
+        );
+        let mut stmt = self.conn().prepare(&sql)?;
+        self.count_edge_read(true);
+        let names = kinds.iter().map(|k| k.as_str());
+        let rows = stmt.query_map(rusqlite::params_from_iter(names), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (from, to, kind) = row?;
+            // A kind this binary does not know cannot match the `IN` list; skip defensively.
+            if let Some(kind) = EdgeKind::parse(&kind) {
+                out.push((from, to, kind));
             }
         }
         Ok(out)
@@ -1541,6 +1624,45 @@ mod tests {
             s.item_read_stats().since(before),
             ItemReadStats { single: 0, bulk: 2 },
             "one query per 500-id chunk; the empty slice runs none"
+        );
+    }
+
+    #[test]
+    fn present_edges_of_kinds_reads_every_kind_asked_in_one_counted_query() {
+        // 6j6v.x0wf: the edge pass of the derived ranking keys — one query for every kind asked,
+        // removed edges excluded, other kinds left out; no kinds, no query.
+        let mut s = Store::open_in_memory(1);
+        for id in ["c1.a", "c1.b", "c1.c"] {
+            s.create_item(id, "task", "t", "t");
+        }
+        s.add_edge("c1.a", "c1.b", EdgeKind::Mentions, "t");
+        s.add_edge("c1.a", "c1.c", EdgeKind::Mentions, "t");
+        s.remove_edge("c1.a", "c1.c", EdgeKind::Mentions, "t");
+        s.add_edge("c1.b", "c1.c", EdgeKind::ContributesTo, "t");
+        s.add_edge("c1.c", "c1.a", EdgeKind::Dep, "t");
+        let before = s.edge_read_stats();
+        let edges = s
+            .present_edges_of_kinds(&[EdgeKind::Mentions, EdgeKind::ContributesTo])
+            .unwrap();
+        assert_eq!(
+            edges,
+            vec![
+                (
+                    "c1.b".to_string(),
+                    "c1.c".to_string(),
+                    EdgeKind::ContributesTo
+                ),
+                ("c1.a".to_string(), "c1.b".to_string(), EdgeKind::Mentions),
+            ]
+        );
+        assert!(s.present_edges_of_kinds(&[]).unwrap().is_empty());
+        let _ = s.mentioned_by_bulk(&["c1.b"]).unwrap();
+        assert_eq!(
+            s.edge_read_stats().since(before),
+            EdgeReadStats {
+                passes: 1,
+                mention_lookups: 1
+            }
         );
     }
 

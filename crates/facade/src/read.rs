@@ -20,7 +20,7 @@
 //! caller decides whether that is the system clock or an override (the CLI's `--now`).
 
 use crate::error::{NxfError, Result};
-use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec};
+use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec, Verb};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
@@ -28,6 +28,8 @@ use nexus_flow_core::model::{ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+mod derived;
 
 // ---- schema (plugin-aware field + type-system introspection, 8qv.5 / y5j8) --------------------
 //
@@ -542,6 +544,10 @@ fn blocked_ids(store: &Store) -> Result<Vec<String>> {
 /// default order as before.
 ///
 /// [`Ranking::list`]: crate::plugin::Ranking::list
+///
+/// A `[ranking.list]` with a derived key that reads the rank of a type only `next` ranks needs a
+/// reference time for `next`'s candidates; this has none and answers `validation` there — take
+/// [`list_at`].
 pub fn list(
     cfg: &PluginConfig,
     store: &Store,
@@ -549,27 +555,52 @@ pub fn list(
     item_type: Option<&str>,
     sort: Option<SortKey>,
 ) -> Result<Vec<ItemRow>> {
-    let mut items: Vec<ItemRow> = store
-        .list_items()?
-        .into_iter()
-        .filter(|i| i.deleted.as_deref() != Some("1"))
-        .filter(|i| i.archived.is_none())
-        .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
-        .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
-        .collect();
-    order_list(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_LIST));
-    Ok(items)
+    list_at(cfg, store, status, item_type, sort, None)
 }
 
-/// Order `list` rows by `key`: `rank` through the `[ranking.list]` policy (6j6v.n698), every other
-/// key through the orderer every read verb shares.
-fn order_list(cfg: &PluginConfig, items: &mut [ItemRow], key: SortKey) {
+/// [`list`] with the reference time `now` (6j6v.x0wf): the instant `next`'s candidates are taken
+/// at when a derived key of `[ranking.list]` reads the rank of a type that `next` ranks
+/// (docs/specs/derived-ranking-keys.md §4: a type's rank is computed over its candidates under the
+/// verb that ranks it). Nothing else reads `now`; without such a key it changes nothing.
+pub fn list_at(
+    cfg: &PluginConfig,
+    store: &Store,
+    status: Option<&str>,
+    item_type: Option<&str>,
+    sort: Option<SortKey>,
+    now: Option<&str>,
+) -> Result<Vec<ItemRow>> {
+    if let Some(now) = now {
+        crate::validate::iso_date(now)?;
+    }
+    let live = derived::list_scope(store)?;
+    let key = sort.unwrap_or(DEFAULT_SORT_LIST);
+    let mut items: Vec<ItemRow> = live
+        .iter()
+        .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
+        .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
+        .cloned()
+        .collect();
     if key == SortKey::Rank {
-        let rank = TypeRank::list(cfg);
+        // The derived keys of `[ranking.list]` (6j6v.x0wf), computed once for these rows; the
+        // unfiltered live items are `list`'s scope for "rank" — filters select, keys order.
+        let derived = derived::compute(
+            cfg,
+            store,
+            Verb::List,
+            &items,
+            derived::Scopes {
+                next: None,
+                list: Some(&live),
+                now,
+            },
+        )?;
+        let rank = TypeRank::list(cfg).with_derived(derived.as_ref());
         items.sort_by(|a, b| rank.cmp(a, b));
     } else {
-        order_by(cfg, items, key);
+        order_by(cfg, &mut items, key);
     }
+    Ok(items)
 }
 
 // ---- list: filters and paging (6j6v.n698) -----------------------------------
@@ -606,6 +637,10 @@ pub struct ListQuery {
     pub paginate: bool,
     /// The token of a previous page (requires `paginate`).
     pub token: Option<String>,
+    /// The reference time (ISO-8601 / RFC3339) `next`'s candidates are taken at when a derived key
+    /// of `[ranking.list]` reads the rank of a type that `next` ranks (6j6v.x0wf, see
+    /// [`list_at`]). `None`: such a query answers `validation`; any other ignores it.
+    pub now: Option<String>,
 }
 
 impl ListQuery {
@@ -651,6 +686,13 @@ impl ListQuery {
         self
     }
 
+    /// Take `next`'s candidates at `now` where a derived key of `[ranking.list]` reads the rank of
+    /// a type that `next` ranks (6j6v.x0wf).
+    pub fn now(mut self, now: impl Into<String>) -> ListQuery {
+        self.now = Some(now.into());
+        self
+    }
+
     /// The cache key a snapshot is bound to: the read, status, sort, filter and the plugin's
     /// `[ranking.list]` policy — never `limit`. Naming the read keeps a `list` token from answering
     /// a `next` or `mentioned_by` query; the ranking's fingerprint makes a token restart under a
@@ -661,7 +703,7 @@ impl ListQuery {
             "status": self.status,
             "sort": self.sort.unwrap_or(DEFAULT_SORT_LIST).as_str(),
             "filter": self.filter.key(),
-            "rank": rank_fingerprint(&cfg.ranking.list),
+            "rank": policy_fingerprint(cfg, Verb::List),
         })
         .to_string()
     }
@@ -683,7 +725,14 @@ pub fn list_page(cfg: &PluginConfig, store: &Store, q: &ListQuery) -> Result<Nex
 fn list_page_at(cfg: &PluginConfig, store: &Store, q: &ListQuery, clock: i64) -> Result<NextPage> {
     let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
     let mark = Watermark::read(store)?;
-    let items = list(cfg, store, q.status.as_deref(), None, q.sort)?;
+    let items = list_at(
+        cfg,
+        store,
+        q.status.as_deref(),
+        None,
+        q.sort,
+        q.now.as_deref(),
+    )?;
     let fresh = filter_next_store(store, items, &q.filter)?;
     page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
 }
@@ -961,22 +1010,38 @@ pub fn next(
     let candidates = lanes(store, now)?.candidates;
     let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
     let items = resolve_items(store, &ids)?;
-    Ok(next_lane(
-        cfg,
-        candidates,
-        items,
-        sort.unwrap_or(DEFAULT_SORT_NEXT),
-    ))
+    let sort = sort.unwrap_or(DEFAULT_SORT_NEXT);
+    // Derived ranking keys (6j6v.x0wf) rank within the tiers, so only the rank order computes
+    // them — once for the whole candidate set; the candidates ARE `next`'s scope for "rank".
+    let derived = match sort {
+        SortKey::Rank => derived::compute(
+            cfg,
+            store,
+            Verb::Next,
+            &items,
+            derived::Scopes {
+                next: Some(&items),
+                list: None,
+                now: Some(now),
+            },
+        )?,
+        _ => None,
+    };
+    Ok(next_lane(cfg, candidates, items, sort, derived.as_ref()))
 }
 
 /// The `next` order over the library's candidates and their rows: the finish-first tiers under
 /// `rank`, the flat order under any other key. THE one mechanism behind [`next`] (rows from a
 /// store) and [`next_active`] (rows a server read), so the two cannot rank apart (6j6v.t1ym).
+///
+/// `derived` holds the values of the policy's derived keys for these rows (6j6v.x0wf), `None`
+/// when it declares none.
 fn next_lane(
     cfg: &PluginConfig,
     candidates: Vec<nexus_flow_core::graph::Candidate>,
     mut items: Vec<ItemRow>,
     sort: SortKey,
+    derived: Option<&derived::Derived>,
 ) -> Vec<ItemRow> {
     match sort {
         // The default: finishing beats starting.
@@ -990,7 +1055,7 @@ fn next_lane(
                     promoter: c.promoter,
                 })
                 .collect();
-            order_next_tiered(cfg, &candidates, &mut items)
+            order_next_tiered(cfg, &candidates, &mut items, derived)
         }
         // An explicit `--sort` is the escape hatch — the flat, untiered order (§4.2).
         key => order_by(cfg, &mut items, key),
@@ -1292,7 +1357,7 @@ impl NextQuery {
         json!({
             "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
             "filter": self.filter.key(),
-            "rank": rank_fingerprint(&cfg.ranking.next),
+            "rank": policy_fingerprint(cfg, Verb::Next),
         })
         .to_string()
     }
@@ -1310,6 +1375,22 @@ fn rank_fingerprint(spec: &RankSpec) -> String {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     });
     format!("{hash:016x}")
+}
+
+/// The fingerprint a snapshot of `verb`'s rank is bound to: its policy's [`rank_fingerprint`], and
+/// — when that policy holds a derived key, which may read the rank of a type the OTHER policy
+/// orders (6j6v.x0wf) — the other policy's too, so a token restarts when either order changes.
+/// A policy without derived keys keeps exactly the fingerprint it had.
+fn policy_fingerprint(cfg: &PluginConfig, verb: Verb) -> String {
+    let own = rank_fingerprint(cfg.ranking.spec(verb));
+    if !cfg.ranking.has_derived(verb) {
+        return own;
+    }
+    let other = match verb {
+        Verb::Next => &cfg.ranking.list,
+        Verb::List => &cfg.ranking.next,
+    };
+    format!("{own}+{}", rank_fingerprint(other))
 }
 
 /// Unix seconds now — the clock the snapshot expiry reads. Not `now`: that is the caller's
@@ -1570,6 +1651,7 @@ fn order_next_tiered(
     cfg: &PluginConfig,
     candidates: &[derive::NextCandidate],
     items: &mut [ItemRow],
+    derived: Option<&derived::Derived>,
 ) {
     // Split the one derivation into the three lookups the key needs. §3.3: the Tier-2 headers are
     // exactly `in_progress \ finishable` — the started items that still have a live non-closed
@@ -1595,7 +1677,7 @@ fn order_next_tiered(
         "a promoted child is ready, never in_progress — the tiers would overlap"
     );
 
-    let rank = TypeRank::next(cfg);
+    let rank = TypeRank::next(cfg).with_derived(derived);
     let keys: HashMap<String, (u8, usize, u8)> = {
         let by_id: HashMap<&str, &ItemRow> = items.iter().map(|i| (i.id.as_str(), i)).collect();
         let mut headers: Vec<&str> = started
@@ -2260,13 +2342,33 @@ fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering 
 
 /// `keys` in declared order, then the id tiebreak — the total order every rank ends in.
 fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
-    for key in keys {
-        let c = cmp_rank_key(a, b, key);
+    keys_cmp_values(a, b, keys, None, None).then_with(|| a.id.cmp(&b.id))
+}
+
+/// `keys` in declared order WITHOUT the id tiebreak: a field key over the rows, a derived key
+/// (6j6v.x0wf) over the rows' derived values `va`/`vb`, aligned with `keys`. A row without values
+/// reads null on every derived key. The dense rank of a type (spec §4) is this order's ties.
+fn keys_cmp_values(
+    a: &ItemRow,
+    b: &ItemRow,
+    keys: &[RankKey],
+    va: Option<&[derived::DVal]>,
+    vb: Option<&[derived::DVal]>,
+) -> std::cmp::Ordering {
+    const NULL: derived::DVal = derived::DVal::Null;
+    for (n, key) in keys.iter().enumerate() {
+        let c = if key.is_derived() {
+            let x = va.and_then(|v| v.get(n)).unwrap_or(&NULL);
+            let y = vb.and_then(|v| v.get(n)).unwrap_or(&NULL);
+            derived::cmp_dval(x, y, key.dir, key.nulls)
+        } else {
+            cmp_rank_key(a, b, key)
+        };
         if c != std::cmp::Ordering::Equal {
             return c;
         }
     }
-    a.id.cmp(&b.id)
+    std::cmp::Ordering::Equal
 }
 
 /// The rank a ranking policy orders by, built once per sort: `next` within a tier over
@@ -2287,6 +2389,9 @@ struct TypeRank<'a> {
     /// `type → position` in the cross-type order, looked up once per comparison instead of a scan
     /// of the list (review of #44, Integrity #5). `None` when the policy does not split by type.
     ordinals: Option<(HashMap<&'a str, usize>, usize)>,
+    /// The values of the policy's derived keys for the rows being sorted (6j6v.x0wf), computed
+    /// once per query by `derived::compute`. `None` when the policy declares none.
+    derived: Option<&'a derived::Derived>,
 }
 
 impl<'a> TypeRank<'a> {
@@ -2310,12 +2415,28 @@ impl<'a> TypeRank<'a> {
             }
             (map, cross.len())
         });
-        TypeRank { spec, ordinals }
+        TypeRank {
+            spec,
+            ordinals,
+            derived: None,
+        }
+    }
+
+    /// Rank with the derived values `derived` (6j6v.x0wf).
+    fn with_derived(mut self, derived: Option<&'a derived::Derived>) -> TypeRank<'a> {
+        self.derived = derived;
+        self
+    }
+
+    /// The policy's keys `keys` over `a` and `b`, then id — with the rows' derived values.
+    fn keys_cmp(&self, a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
+        let values = |row: &ItemRow| self.derived.and_then(|d| d.of(&row.id));
+        keys_cmp_values(a, b, keys, values(a), values(b)).then_with(|| a.id.cmp(&b.id))
     }
 
     fn cmp(&self, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
         let Some((ordinals, unlisted)) = &self.ordinals else {
-            return keys_cmp(a, b, &self.spec.order);
+            return self.keys_cmp(a, b, &self.spec.order);
         };
         let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
         if ta != tb {
@@ -2325,7 +2446,7 @@ impl<'a> TypeRank<'a> {
             };
             return ord(ta).cmp(&ord(tb)).then_with(|| ta.cmp(&tb));
         }
-        keys_cmp(a, b, self.spec.order_for(ta))
+        self.keys_cmp(a, b, self.spec.order_for(ta))
     }
 }
 
@@ -2675,11 +2796,22 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
 /// store holding the same board. A malformed `now` is `validation`-rejected, as there.
 ///
 /// [`Engine::next`]: crate::engine::Engine::next
+///
+/// A `[ranking.next]` with derived ranking keys (6j6v.x0wf) is refused with `validation`: an
+/// [`ActiveBoard`] holds neither the edges nor the scopes those keys read, and ranking without them
+/// would order apart from the store path in silence. The server path is its own cut (6j6v.1c5s).
 pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
     crate::validate::iso_date(now)?;
+    if cfg.ranking.has_derived(Verb::Next) {
+        return Err(NxfError::validation(format!(
+            "plugin '{}' ranks `next` by derived ranking keys, which the store-free lanes do not \
+             compute yet — answer `next` from a store",
+            cfg.name
+        )));
+    }
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
-    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT))
+    Ok(next_lane(cfg, candidates, items, DEFAULT_SORT_NEXT, None))
 }
 
 /// [`next_active`], narrowed by `filter` (6j6v.15ed): the rows [`next_filtered`] gives over a store
@@ -4414,6 +4546,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&item("a", Some("2")), &item("b", Some("10")), &prio),
@@ -4435,6 +4568,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&item("ab12.0002", None), &item("ab12.0010", None), &id),
@@ -4460,6 +4594,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&typed("a", "epic"), &typed("b", "bug"), &key),
@@ -4493,6 +4628,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: vec!["in_progress".to_string(), "open".to_string()],
+            ..RankKey::field_key("")
         };
         assert_eq!(
             cmp_rank_key(&status("a", "in_progress"), &status("b", "open"), &key),
@@ -4515,6 +4651,7 @@ mod tests {
             dir: Dir::Asc,
             nulls: Nulls::Last,
             precedence: Vec::new(),
+            ..RankKey::field_key("")
         };
         let (two, ten, text) = (titled("a", "2"), titled("b", "10"), titled("c", "1a"));
         use std::cmp::Ordering::{Greater, Less};

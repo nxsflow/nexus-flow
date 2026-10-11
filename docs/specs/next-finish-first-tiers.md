@@ -184,7 +184,8 @@ per-type orders never move an item between tiers. `list --sort rank` and `blocke
 order (`rank_cmp`) until `list` gets its own per-type orders (6j6v.n698).
 
 `types` is this cut's own addition; `derived-ranking-keys.md` §8 relates types only through derived
-keys (`related … of = "rank"`, x0wf). Under type-first ordering, an `action` order ranks actions
+keys (`related … of = "rank"`, built locally by x0wf: derived keys order within a tier, inside
+`NextRank`, and never move an item between tiers). Under type-first ordering, an `action` order ranks actions
 only among actions: an action never sits next to its project in one feed. x0wf decides whether a
 derived key may relax that (pending the spec owner's confirmation of `types`, PR #44).
 

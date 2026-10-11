@@ -9,7 +9,10 @@ use crate::matrix::RelationshipMatrix;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod derived;
 pub mod registry;
+pub(crate) use derived::Verb;
+pub use derived::{CountPart, OfField, Pick, RankOf, COUNT_EDGES, RELATED_EDGES};
 pub use registry::PluginRegistration;
 
 /// The registered plugin names in canonical order — the registry-driven replacement for the old
@@ -164,15 +167,31 @@ fn is_valid_field_name(name: &str) -> bool {
     bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// One ordering key in the `next` ranking policy. Two modes: a FIELD key (`dir`/`nulls` over the
-/// stored value — numeric-aware for the priority ordinal, lexicographic else) and, when
-/// `precedence` is non-empty, an ENUM-INDEX key (sp6.5): items sort by the position of their
-/// `field` value in `precedence`, e.g. type `epic` before `bug` or status `in_progress` before
-/// `open`. The list order IS the sort order, so a precedence key ignores `dir`/`nulls`; a value
-/// absent from the list sorts after every listed one (the deterministic `id` tiebreak then settles
-/// it). This is how a plugin expresses type/status precedence without any hardcoding in the engine.
+/// One ordering key in a ranking policy. Two kinds of key share the struct:
+///
+/// - A FIELD key (`field` set): `dir`/`nulls` over the stored value — numeric-aware for the
+///   priority ordinal, lexicographic else — and, when `precedence` is non-empty, an ENUM-INDEX key
+///   (sp6.5): items sort by the position of their `field` value in `precedence`, e.g. type `epic`
+///   before `bug` or status `in_progress` before `open`. The list order IS the sort order, so a
+///   precedence key ignores `dir`/`nulls`; a value absent from the list sorts after every listed
+///   one (the deterministic `id` tiebreak then settles it). This is how a plugin expresses
+///   type/status precedence without any hardcoding in the engine.
+/// - A DERIVED key (6j6v.x0wf, docs/specs/derived-ranking-keys.md): exactly one of `related`,
+///   `count` or `sum`, ranking an item by facts about its neighbours in the graph. `related`
+///   reads a value on the neighbours over one outbound edge kind (`of`, combined by `pick`);
+///   `count` counts the neighbours over one edge kind and direction that pass its `type`/`status`/
+///   `label` filters; `sum` adds several counts with equal weight. The value compares like a
+///   field key's, with `dir` and `nulls`.
+///
+/// A key that is neither, or both, or that carries a part its kind does not take, is refused at
+/// load ([`RankSpec::validate`]). Unknown parts are a parse error. `#[non_exhaustive]` since
+/// 6j6v.x0wf, so a later part (a summand `weight`, say) is additive.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RankKey {
+    /// The field a field key sorts on; empty on a derived key.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub field: String,
     #[serde(default)]
     pub dir: Dir,
@@ -180,9 +199,52 @@ pub struct RankKey {
     pub nulls: Nulls,
     #[serde(default)]
     pub precedence: Vec<String>,
+    /// `related = "<edge>"`: follow this edge kind outward ([`RELATED_EDGES`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related: Option<String>,
+    /// `count = "<kind>"`: count the neighbours over this kind and direction ([`COUNT_EDGES`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+    /// `sum = [ { count = ... }, ... ]`: add these counts with equal weight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sum: Option<Vec<CountPart>>,
+    /// `type`: only neighbours of this item type (`related`, `count`).
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// `of`: what a `related` key reads on each neighbour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<RankOf>,
+    /// `pick`: how a `related` key makes one value of several neighbours (default `min`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<Pick>,
+    /// `status`: a `count` counts only neighbours with one of these core statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<String>>,
+    /// `label`: a `count` counts only neighbours carrying this label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl RankKey {
+    /// A field key on `field`, ascending, nulls last, no precedence — the starting point for
+    /// building a key in code now that the struct is `#[non_exhaustive]`.
+    pub fn field_key(field: impl Into<String>) -> RankKey {
+        RankKey {
+            field: field.into(),
+            dir: Dir::Asc,
+            nulls: Nulls::Last,
+            precedence: Vec::new(),
+            related: None,
+            count: None,
+            sum: None,
+            item_type: None,
+            of: None,
+            pick: None,
+            status: None,
+            label: None,
+        }
+    }
+
     /// The value's sort ordinal for an enum-index (`precedence`) key: its position in the list, or
     /// `precedence.len()` when absent/none (so unlisted values sort after every listed one). Only
     /// meaningful when [`precedence`](Self::precedence) is non-empty.
@@ -319,7 +381,12 @@ impl RankSpec {
             .iter()
             .map(|(t, o)| (format!("[{section}.{t}] "), &o.order));
         for (scope, order) in std::iter::once((String::new(), &self.order)).chain(per_type) {
+            let default_next = section == NEXT_SECTION && scope.is_empty();
             for key in order {
+                key.validate_kind(&scope, default_next)?;
+                if key.is_derived() {
+                    continue;
+                }
                 if !crate::record::RANKABLE_FIELDS.contains(&key.field.as_str()) {
                     return Err(format!(
                         "{scope}ranking key '{}' names no field the ranking can read; valid: {}",
@@ -390,6 +457,21 @@ impl RankSpec {
             }
             Ok(())
         };
+        for (scope, order) in self.orders(section) {
+            for key in order {
+                if let Some(ty) = key
+                    .named_types()
+                    .into_iter()
+                    .find(|t| !declared.contains(*t))
+                {
+                    return Err(format!(
+                        "{scope}ranking key {} filters on type '{ty}', which the plugin does not \
+                         declare in [types].list",
+                        key.describe()
+                    ));
+                }
+            }
+        }
         distinct_declared("`types`", &self.types)?;
         for key in self.order.iter().filter(|k| k.field == "type") {
             distinct_declared("the precedence key on 'type'", &key.precedence)?;
@@ -764,6 +846,16 @@ fn load_registration(reg: &PluginRegistration) -> Result<PluginConfig> {
                 ))
             })?;
     }
+    // 6j6v.x0wf: the derived keys' rules that need the whole plugin — statuses, the fields `of`
+    // reads, the orders `of = "rank"` reads, and the acyclic type chain across both sections.
+    cfg.ranking
+        .validate_derived(&cfg.vocabulary.status, &cfg.fields)
+        .map_err(|e| {
+            NxfError::validation(format!(
+                "plugin '{}' has an invalid [ranking]: {e}",
+                reg.name
+            ))
+        })?;
     // w213: a mis-declared `[merge]` field is caught at load (a typo would otherwise silently
     // no-op at fold time), the same loud posture as the `[types]`/`[ranking]` checks above. Now on
     // the registration path, so a consumer/external plugin gets the same [merge] validation.
@@ -1010,6 +1102,7 @@ mod tests {
                 dir,
                 nulls,
                 precedence: vec!["epic".into(), "bug".into()],
+                ..RankKey::field_key("")
             }],
             types: Vec::new(),
             by_type: BTreeMap::new(),
@@ -1031,6 +1124,7 @@ mod tests {
                 dir: Dir::Desc,
                 nulls: Nulls::First,
                 precedence: Vec::new(),
+                ..RankKey::field_key("")
             }],
             types: Vec::new(),
             by_type: BTreeMap::new(),
@@ -1950,5 +2044,379 @@ mod tests {
             "{}",
             err.msg
         );
+    }
+
+    // ---- derived ranking keys (6j6v.x0wf, docs/specs/derived-ranking-keys.md §7) -------------
+
+    /// A `[ranking.next]` whose `action` order is the single key `key`, with `project` ranked by
+    /// priority — the fixture the derived-key load tests vary.
+    fn with_action_key(key: &str) -> String {
+        format!(
+            r#"
+            [ranking.next]
+            types = ["action", "project"]
+            order = [ {{ field = "priority" }} ]
+            [ranking.next.action]
+            order = [ {key} ]
+            [ranking.next.project]
+            order = [ {{ field = "priority" }} ]
+            "#
+        )
+    }
+
+    /// The validation message for a plugin whose `action` order is `key`.
+    fn refused_key(key: &str) -> String {
+        let err = refused(&with_action_key(key));
+        assert_eq!(
+            err.kind,
+            crate::error::ErrorKind::Validation,
+            "a load-time refusal, not a parse error: {}",
+            err.msg
+        );
+        err.msg
+    }
+
+    /// The parse error for a plugin whose `action` order is `key`.
+    fn unparsable_key(key: &str) -> String {
+        let err = refused(&with_action_key(key));
+        assert_eq!(err.kind, crate::error::ErrorKind::Io, "{}", err.msg);
+        err.msg
+    }
+
+    #[test]
+    fn each_derived_key_kind_parses_in_a_per_type_order() {
+        let cfg = load_with_ranking(&with_action_key(
+            r#"
+            { related = "parent", type = "project", of = "rank", pick = "max", nulls = "first" },
+            { related = "contributes_to", of = { field = "priority", precedence = ["P1"] } },
+            { count = "children", type = "note", status = ["open", "in_progress"], label = "x", dir = "desc" },
+            { sum = [ { count = "mentioned_by", type = "project" }, { count = "dependents" } ], dir = "desc" },
+            "#,
+        ))
+        .unwrap();
+        let order = cfg.ranking.next.order_for(Some("action"));
+        assert_eq!(order.len(), 4);
+        assert!(order.iter().all(RankKey::is_derived));
+        assert_eq!(order[0].related.as_deref(), Some("parent"));
+        assert_eq!(order[0].of, Some(RankOf::Rank));
+        assert_eq!(order[0].pick, Some(Pick::Max));
+        assert_eq!(order[0].nulls, Nulls::First);
+        match &order[1].of {
+            Some(RankOf::Field(of)) => assert_eq!(of.precedence, ["P1"]),
+            other => panic!("of = {{ field }} parses as a field: {other:?}"),
+        }
+        assert_eq!(order[2].count.as_deref(), Some("children"));
+        assert_eq!(order[2].label.as_deref(), Some("x"));
+        assert_eq!(order[3].sum.as_ref().map(Vec::len), Some(2));
+        assert!(cfg.ranking.next.has_derived());
+        assert!(
+            !cfg.ranking.list.has_derived(),
+            "list inherits the default order only"
+        );
+    }
+
+    #[test]
+    fn the_specs_declared_orders_load() {
+        // docs/specs/derived-ranking-keys.md §8, with `types` under [ranking.list] (the per-type
+        // rule of n698) and the goal's `order` declared as a custom field (§10.2). The `sum`'s
+        // `dir` stands on the line its array closes on: TOML 1.0 allows no newline inside an
+        // inline table outside its arrays.
+        load_with_ranking(
+            r#"
+            [ranking.next]
+            types = ["project", "action"]
+            order = [ { field = "priority" } ]
+            [ranking.next.project]
+            order = [
+              { related = "contributes_to", type = "note", of = { field = "order", dir = "asc" }, pick = "min", nulls = "last" },
+              { field = "priority", dir = "asc" },
+              { count = "children", type = "action", status = ["open", "in_progress"], dir = "desc" },
+            ]
+            [ranking.next.action]
+            order = [
+              { related = "parent", type = "project", of = "rank", nulls = "last" },
+              { field = "priority", dir = "asc" },
+            ]
+            [ranking.list]
+            types = ["note"]
+            [ranking.list.note]
+            order = [
+              { sum = [ { count = "mentioned_by", type = "project" },
+                        { count = "mentioned_by", type = "action", label = "waiting", status = ["open", "in_progress"] } ], dir = "desc" },
+              { related = "contributes_to", type = "project", of = "rank", pick = "min", nulls = "last" },
+            ]
+            [fields.order]
+            type = "text"
+            on = ["note"]
+            "#,
+        )
+        .expect("the spec's orders are valid");
+    }
+
+    #[test]
+    fn a_key_that_mixes_kinds_or_names_none_is_refused() {
+        let msg = refused_key(r#"{ related = "parent", count = "children", of = "rank" }"#);
+        assert!(msg.contains("mixes kinds (related, count)"), "{msg}");
+        let msg = refused_key(r#"{ field = "due", count = "children" }"#);
+        assert!(msg.contains("mixes kinds (field, count)"), "{msg}");
+        let msg = refused_key(r#"{ dir = "desc" }"#);
+        assert!(msg.contains("names no kind"), "{msg}");
+        assert!(
+            msg.contains("[ranking.next.action]"),
+            "names its table: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_edge_kind_or_direction_is_refused() {
+        let msg = refused_key(r#"{ related = "children", of = "rank" }"#);
+        assert!(
+            msg.contains("`related = \"children\"`") && msg.contains("valid: parent"),
+            "related follows outbound kinds only: {msg}"
+        );
+        let msg = refused_key(r#"{ count = "siblings" }"#);
+        assert!(
+            msg.contains("'siblings'") && msg.contains("mentioned_by"),
+            "{msg}"
+        );
+        let msg = refused_key(r#"{ sum = [ { count = "kids" } ] }"#);
+        assert!(msg.contains("'kids'"), "{msg}");
+    }
+
+    #[test]
+    fn a_part_the_kind_does_not_take_is_refused() {
+        for (key, part) in [
+            (r#"{ count = "children", pick = "max" }"#, "pick"),
+            (r#"{ count = "children", of = "rank" }"#, "of"),
+            (
+                r#"{ related = "parent", of = "rank", status = ["open"] }"#,
+                "status",
+            ),
+            (
+                r#"{ related = "parent", of = "rank", label = "x" }"#,
+                "label",
+            ),
+            (
+                r#"{ sum = [ { count = "children" } ], type = "note" }"#,
+                "type",
+            ),
+            (r#"{ field = "due", type = "note" }"#, "type"),
+        ] {
+            let msg = refused_key(key);
+            assert!(msg.contains(&format!("`{part}`")), "{key}: {msg}");
+        }
+        let msg = refused_key(r#"{ count = "children", nulls = "first" }"#);
+        assert!(msg.contains("never null"), "{msg}");
+        let msg = refused_key(r#"{ sum = [ { count = "children" } ], nulls = "first" }"#);
+        assert!(msg.contains("never null"), "{msg}");
+        let msg = refused_key(r#"{ count = "children", precedence = ["a"] }"#);
+        assert!(msg.contains("precedence"), "{msg}");
+    }
+
+    #[test]
+    fn a_related_key_must_say_what_it_reads_and_keeps_dir_out_of_of() {
+        let msg = refused_key(r#"{ related = "parent" }"#);
+        assert!(msg.contains("add `of = \"rank\"`"), "{msg}");
+        let msg =
+            refused_key(r#"{ related = "parent", of = { field = "priority", dir = "desc" } }"#);
+        assert!(msg.contains("inside `of`"), "{msg}");
+        let msg =
+            refused_key(r#"{ related = "parent", of = { field = "priority", nulls = "first" } }"#);
+        assert!(msg.contains("inside `of`"), "{msg}");
+        let msg = unparsable_key(r#"{ related = "parent", of = "position" }"#);
+        assert!(msg.contains("\"rank\""), "{msg}");
+    }
+
+    #[test]
+    fn unknown_parts_are_parse_errors_and_weight_is_not_taken_yet() {
+        let msg = unparsable_key(r#"{ count = "children", stauts = ["open"] }"#);
+        assert!(msg.contains("stauts"), "{msg}");
+        let msg = unparsable_key(r#"{ sum = [ { count = "children", weight = 2 } ] }"#);
+        assert!(
+            msg.contains("weight"),
+            "a summand takes no weight (§10.3): {msg}"
+        );
+        let msg = unparsable_key(r#"{ sum = [ { count = "children", dir = "desc" } ] }"#);
+        assert!(msg.contains("dir"), "dir belongs to the sum (§3.3): {msg}");
+        let msg = refused_key(r#"{ sum = [] }"#);
+        assert!(msg.contains("adds no counts"), "{msg}");
+    }
+
+    #[test]
+    fn filters_must_name_declared_types_and_statuses() {
+        let msg = refused_key(r#"{ count = "children", type = "epic" }"#);
+        assert!(
+            msg.contains("'epic'") && msg.contains("[types].list"),
+            "{msg}"
+        );
+        let msg = refused_key(r#"{ sum = [ { count = "children", type = "epic" } ] }"#);
+        assert!(msg.contains("'epic'"), "{msg}");
+        let msg = refused_key(r#"{ count = "children", status = ["done"] }"#);
+        assert!(
+            msg.contains("status 'done'") && msg.contains("valid: closed"),
+            "{msg}"
+        );
+        let msg = refused_key(r#"{ sum = [ { count = "children", status = ["done"] } ] }"#);
+        assert!(msg.contains("status 'done'"), "{msg}");
+        let msg = refused_key(r#"{ count = "children", status = [] }"#);
+        assert!(msg.contains("empty status list"), "{msg}");
+    }
+
+    #[test]
+    fn of_reads_a_rankable_or_a_declared_custom_field_only() {
+        let msg = refused_key(r#"{ related = "parent", of = { field = "order" } }"#);
+        assert!(
+            msg.contains("'order'") && msg.contains("custom field"),
+            "{msg}"
+        );
+        // A declared custom field reads (spec §10.2); scoped to the neighbour's type it must apply.
+        let ok = format!(
+            "{}\n[fields.order]\ntype = \"text\"\non = [\"project\"]",
+            with_action_key(
+                r#"{ related = "parent", type = "project", of = { field = "order" } }"#
+            )
+        );
+        load_with_ranking(&ok).expect("a custom field on the neighbour's type reads");
+        let off_type = format!(
+            "{}\n[fields.order]\ntype = \"text\"\non = [\"note\"]",
+            with_action_key(
+                r#"{ related = "parent", type = "project", of = { field = "order" } }"#
+            )
+        );
+        let msg = refused(&off_type).msg;
+        assert!(msg.contains("applies only to note"), "{msg}");
+    }
+
+    #[test]
+    fn of_rank_must_name_a_type_with_a_declared_order() {
+        let msg = refused_key(r#"{ related = "contributes_to", type = "note", of = "rank" }"#);
+        assert!(
+            msg.contains("rank of 'note'") && msg.contains("[ranking.next.note]"),
+            "{msg}"
+        );
+        // An order under the OTHER section serves (spec §8: persons by the projects `next` ranks).
+        let cross = r#"
+            [ranking.next]
+            order = [ { field = "priority" } ]
+            [ranking.list]
+            types = ["note", "project"]
+            [ranking.list.note]
+            order = [ { related = "contributes_to", type = "action", of = "rank" } ]
+            [ranking.list.project]
+            order = [ { field = "priority" } ]
+        "#;
+        let msg = refused(cross).msg;
+        assert!(msg.contains("rank of 'action'"), "{msg}");
+        let cross = format!("{cross}\n[ranking.next.action]\norder = [ {{ field = \"due\" }} ]")
+            .replace(
+                "[ranking.next]\n            order",
+                "[ranking.next]\n            types = [\"action\"]\n            order",
+            );
+        let cfg = load_with_ranking(&cross).expect("[ranking.next.action] serves a list key");
+        assert_eq!(
+            cfg.ranking.rank_source(Verb::List, "action"),
+            Some(Verb::Next)
+        );
+        assert_eq!(
+            cfg.ranking.rank_source(Verb::List, "project"),
+            Some(Verb::List),
+            "the asking section's own order first"
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_the_type_chain_is_refused_and_named() {
+        // spec §4: project by action, action by project.
+        let err = refused(
+            r#"
+            [ranking.next]
+            types = ["action", "project"]
+            order = [ { field = "priority" } ]
+            [ranking.next.action]
+            order = [ { related = "parent", type = "project", of = "rank" } ]
+            [ranking.next.project]
+            order = [ { related = "mentions", type = "action", of = "rank", pick = "min" } ]
+            "#,
+        );
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation);
+        assert!(
+            err.msg
+                .contains("[ranking.next.action] → [ranking.next.project] → [ranking.next.action]"),
+            "{}",
+            err.msg
+        );
+        // Across the two sections.
+        let err = refused(
+            r#"
+            [ranking.next]
+            types = ["project"]
+            order = [ { field = "priority" } ]
+            [ranking.next.project]
+            order = [ { related = "mentions", type = "note", of = "rank" } ]
+            [ranking.list]
+            types = ["note"]
+            [ranking.list.note]
+            order = [ { related = "contributes_to", type = "project", of = "rank" } ]
+            "#,
+        );
+        assert!(
+            err.msg
+                .contains("[ranking.list.note] → [ranking.next.project] → [ranking.list.note]")
+                || err.msg.contains(
+                    "[ranking.next.project] → [ranking.list.note] → [ranking.next.project]"
+                ),
+            "{}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn an_untyped_rank_key_in_a_per_type_order_reads_its_own_rank_and_is_refused() {
+        // `{ related = "parent", of = "rank" }` without `type` reads the rank of every ranked type,
+        // its own included — a self-cycle. Naming the neighbour's type is the fix.
+        let msg = refused_key(r#"{ related = "parent", of = "rank" }"#);
+        assert!(
+            msg.contains("[ranking.next.action] → [ranking.next.action]")
+                && msg.contains("name the neighbour's `type`"),
+            "{msg}"
+        );
+        load_with_ranking(&with_action_key(
+            r#"{ related = "parent", type = "project", of = "rank" }"#,
+        ))
+        .expect("typed, it is a chain");
+    }
+
+    #[test]
+    fn derived_keys_are_refused_in_the_next_default_order_but_not_the_list_one() {
+        let err = refused(
+            r#"
+            [ranking.next]
+            order = [ { count = "children", dir = "desc" } ]
+            "#,
+        );
+        assert!(
+            err.msg.contains("[ranking.next] default `order`"),
+            "it also orders `blocked` and the lanes: {}",
+            err.msg
+        );
+        let cfg = load_with_ranking(
+            r#"
+            [ranking.next]
+            order = [ { field = "priority" } ]
+            [ranking.list]
+            order = [ { count = "children", dir = "desc" } ]
+            "#,
+        )
+        .expect("the list default order takes derived keys");
+        assert!(cfg.ranking.list.has_derived());
+        assert!(!cfg.ranking.next.has_derived());
+    }
+
+    #[test]
+    fn the_bundled_plugins_declare_no_derived_keys() {
+        for name in ["issue-tracker", "personal-todo"] {
+            let cfg = load(name).unwrap();
+            assert!(!cfg.ranking.next.has_derived() && !cfg.ranking.list.has_derived());
+        }
     }
 }

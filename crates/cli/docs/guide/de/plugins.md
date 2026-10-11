@@ -150,3 +150,76 @@ Diese Verdopplung ist keine Redundanz — sie *ist* die Erklärung. Das `--json`
 das Plugin ist, wie ein bestimmtes Publikum sie liest und rankt. Ein Plugin bei `init` zu wählen
 ist daher eine echte Entscheidung; führen Sie `nxf init --help` aus, um die Optionen zu sehen,
 bevor Sie sich festlegen.
+
+## Ein Ranking deklarieren
+
+Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie
+`list --sort rank` rankt. Beide nehmen dieselben Schlüssel und dieselben Regeln:
+
+- `order = [...]` ist die Standardreihenfolge: eine Liste von Schlüsseln, der Reihe nach
+  verglichen, mit der Id als letztem Entscheider.
+- `[ranking.next.<typ>]` (oder `[ranking.list.<typ>]`) gibt einem Typ eine eigene `order`.
+- `types = [...]` sagt, wie die Typen zueinander stehen, sobald einige eine eigene Reihenfolge
+  haben.
+
+Ein Schlüssel ist ein **Feldschlüssel**, etwa `{ field = "priority", dir = "asc" }`. Mit einer
+`precedence`-Liste rankt ein Feldschlüssel stattdessen nach der Position des Werts in dieser
+Liste. In einer Reihenfolge pro Typ kann ein Schlüssel auch ein **abgeleiteter Schlüssel** sein,
+der ein Item nach seinen Nachbarn im Graphen rankt:
+
+```toml
+[ranking.next]
+types = ["project", "action"]
+order = [ { field = "priority" } ]
+
+# related: ein Wert, gelesen an den Nachbarn über eine ausgehende Kante (parent, contributes_to,
+# dep, mentions). `of = "rank"` liest die Position des Nachbarn in der Reihenfolge seines eigenen
+# Typs; `of = { field = "..." }` liest ein Feld, auch ein eigenes Feld. `pick` ist min (Standard)
+# oder max.
+[ranking.next.action]
+order = [
+  { related = "parent", type = "project", of = "rank", nulls = "last" },
+  { field = "priority" },
+]
+
+# count: wie viele Nachbarn passen. children, contributors, dependents und mentioned_by zählen die
+# eingehenden Kanten parent, contributes_to, dep und mentions; eine ausgehende Art zählt in die
+# andere Richtung. `type`, `status` (eine Liste) und `label` filtern die gezählten Nachbarn.
+[ranking.next.project]
+order = [
+  { related = "contributes_to", type = "goal", of = { field = "order" }, nulls = "last" },
+  { count = "children", type = "action", status = ["open", "in_progress"], dir = "desc" },
+]
+
+# sum: mehrere Zählungen, mit gleichem Gewicht addiert. `dir` gehört zur Summe.
+[ranking.list]
+types = ["person"]
+[ranking.list.person]
+order = [
+  { sum = [ { count = "mentioned_by", type = "project" },
+            { count = "mentioned_by", type = "action", label = "waiting" } ], dir = "desc" },
+]
+```
+
+Abgeleitete Schlüssel zählen nur lebende Nachbarn: ein gelöschter fällt weg, ein geschlossener
+oder archivierter zählt. Ein Rang wird über die Kandidaten des Typs unter dem Verb berechnet, das
+ihn rankt, und Items, die in jedem Schlüssel gleich sind, teilen sich einen Rang. Für `next` sind
+diese Kandidaten seine umsetzbaren Items, für `list` die lebenden, nicht archivierten Items. Ein
+Nachbar außerhalb dieser Menge, etwa ein geschlossenes Projekt unter `next`, hat keinen Rang und
+liest sich als null. Ein `list`-Schlüssel darf den Rang eines Typs lesen, den nur `next` rankt;
+die Kandidaten von `next` werden dann zur aktuellen Zeit genommen (`NXF_NOW` legt sie fest).
+
+Das Plugin wird beim Laden abgelehnt, mit dem Schlüssel benannt, wenn:
+
+- ein Schlüssel Arten mischt oder keine nennt;
+- ein Schlüssel eine unbekannte Kantenart, einen unbekannten Typ, Status oder ein unbekanntes Feld
+  nennt;
+- ein Schlüssel einen Teil trägt, den seine Art nicht nimmt, etwa `pick` an einer Zählung oder
+  `nulls` an einer Zählung oder Summe (eine Zählung ist nie null);
+- `of = "rank"` einen Typ ohne eigene Reihenfolge nennt;
+- die Typen sich im Kreis gegenseitig ranken.
+
+Ein Schlüssel `related ... of = "rank"` ohne `type` liest den Rang jedes Typs mit einer
+Reihenfolge, auch des eigenen. Das ist ein Kreis, also nennen Sie den `type` des Nachbarn.
+Abgeleitete Schlüssel sind in der Standard-`order` von `[ranking.next]` nicht erlaubt, weil diese
+Reihenfolge auch `blocked` und `--sort rank` der Lanes rankt.

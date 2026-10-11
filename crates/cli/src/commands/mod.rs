@@ -1760,6 +1760,12 @@ pub fn list(json: bool, db: Option<&str>, args: ListArgs<'_>) -> Result<()> {
         filter = filter.with_label(label);
     }
     let mut query = read::ListQuery::new().filter(filter);
+    // The reference time a derived ranking key of `[ranking.list]` takes `next`'s candidates at
+    // when it reads the rank of a type `next` ranks (6j6v.x0wf); `NXF_NOW` pins it, as for `next`.
+    // Read only for such a plugin, so `list` under any other never trips on the clock.
+    if cfg.ranking.list.has_derived() {
+        query = query.now(resolve_now(None)?);
+    }
     if let Some(status) = args.status {
         query = query.status(status);
     }

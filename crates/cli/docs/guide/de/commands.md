@@ -56,7 +56,10 @@ $ nxf list --json
 
 `list --sort rank` rankt stattdessen: nach der `list`-Reihenfolge des Plugins — einer Reihenfolge
 pro Typ, wo das Plugin eine deklariert (`[ranking.list.<typ>]`, mit `types = [...]` dafür, wie die
-Typen zueinander stehen), sonst nach seiner `next`-Reihenfolge. `--type` (mehrfach), `--in <id>`
+Typen zueinander stehen), sonst nach seiner `next`-Reihenfolge. Eine Reihenfolge kann auch nach den
+Nachbarn eines Items ranken — dem Rang seines Elternteils, der Zahl seiner offenen Kinder, wie oft
+es erwähnt wird — mit den abgeleiteten Schlüsseln, die unter [Plugins](nxf-plugins) beschrieben
+sind. `--type` (mehrfach), `--in <id>`
 (die Kinder und Beitragenden des Containers), `--status` und `--label` grenzen ein. `--limit` und
 `--paginate` kürzen und blättern genau wie bei `next`: mit `--limit` ist die Antwort `{"items":
 [...], "total": <n>}`, und `--paginate` ergänzt `next_token` (mit `--token` zurückgeben; null auf
