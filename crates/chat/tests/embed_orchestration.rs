@@ -769,6 +769,7 @@ fn a_declaration_written_to_the_folder_is_visible_to_the_next_verb_and_to_an_exi
     assert_eq!(
         clone
             .transcript_page(
+                nexus_chat::facade::Reader::Handle("local/alice"),
                 receipt
                     .session
                     .as_deref()
@@ -1565,7 +1566,7 @@ fn reply_through_the_handle_completes_a_board_and_wakes_the_opener() {
     // Before: the board is outstanding and its opener has nothing to act on.
     assert!(!common::quorums_of(tmp.path(), &[&tid], NOW).unwrap()[0].complete);
     assert!(eng
-        .prime_as(&pm, None, NOW)
+        .prime_as(nexus_chat::facade::Reader::Handle(&pm), &pm, None, NOW)
         .unwrap()
         .wake
         .complete

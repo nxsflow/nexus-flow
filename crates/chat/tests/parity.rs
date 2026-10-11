@@ -715,7 +715,14 @@ fn read_parity_prime_report_equals_nxc_prime_on_both_views() {
     let engine = Engine::open(None, dir).unwrap();
     let handle = handle(dir);
     // `prime_as` with no persona IS `prime`, which is why the latter went (nxf 6j6v.yr59).
-    let report = engine.prime_as(&handle, None, NOW).unwrap();
+    let report = engine
+        .prime_as(
+            nexus_chat::facade::Reader::Handle(&handle),
+            &handle,
+            None,
+            NOW,
+        )
+        .unwrap();
 
     // The CLI subprocess inherits `NXC_ACTOR` from `nxc()`, so it renders as a SPAWNED context —
     // declaration errors suppressed. The handle is told the same thing explicitly, which is the
@@ -1457,6 +1464,7 @@ fn surface_parity_engine_and_nxc_open_and_answer_one_thread_identically() {
         // Read LAST, so the persona's own prime reports a conversation that has actually happened.
         let report = e
             .prime_as(
+                nexus_chat::facade::Reader::Handle(PERSONA),
                 &format!("{}/{PERSONA}", origin(app.path())),
                 Some(PERSONA),
                 NOW,

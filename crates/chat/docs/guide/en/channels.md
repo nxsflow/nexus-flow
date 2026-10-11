@@ -129,10 +129,17 @@ replica's own handle nor the machine-minted one an operation opened in a termina
 hosted engine names the reader differently, and the rule is one sentence: **a board has an owner,
 and the owner reads everything.** The account signed in as the board's owner reads as if it had
 opened every operation on it — every thread, unfiltered, exactly what the opener above sees — and
-searches every channel the board holds. Any other account sees no conversations at all: thread,
-search, status and directory all answer it with a refusal, never with an empty list. Which account
-is the owner is decided by the hosted service from its login, never by anything a local caller can
-set; `nxc` always reads as you, under the rules above, unchanged.
+searches every channel the board holds — including channels that arrived by sync and threads handed
+over across the border, because they are on the board. Any other account sees no conversations at
+all: eight reads answer it with a refusal, never with an empty list — thread, search, status, the
+directory, the session start (`prime_as` and a persona's composed prime, which carry the
+directory), a session's transcript, and the answers held for a session. What the refusal does NOT
+cover is the hosted service's to authorize itself: whether a session is running or has ended, the
+worker's liveness, which machine a chat would start on, the change notification, the replica's own identity, and the raw declaration
+catalogue (`definitions`) — none of these carries a message, but the catalogue is what the
+directory is built from, so a service must not hand it to another account. Which account is the
+owner is decided by the hosted service from its login, never by anything a local caller can set;
+`nxc` always reads as you, under the rules above, unchanged.
 
 And `members:` is genuinely the membership, in both directions: an edit to the file reaches the door
 on the next *read*, not on the next `send`. Add a handle and it can read at once; remove one and it

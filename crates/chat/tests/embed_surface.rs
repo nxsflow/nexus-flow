@@ -1121,7 +1121,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
     // `prime_as` with no persona IS `prime` — which is why the latter went (nxf 6j6v.yr59), and
     // `None` is exactly the human at the keyboard this case is about.
     let human = eng
-        .prime_as("local/carsten", None, NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/carsten"),
+            "local/carsten",
+            None,
+            NOW,
+        )
         .expect("a human primes");
     assert!(human.persona.is_none(), "a human is told no identity");
     assert!(
@@ -1130,7 +1135,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
     );
 
     let persona = eng
-        .prime_as("local/pm", Some("pm"), NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/pm"),
+            "local/pm",
+            Some("pm"),
+            NOW,
+        )
         .expect("a persona primes");
     let brief = persona
         .persona
@@ -1147,7 +1157,12 @@ fn priming_as_a_persona_adds_its_identity_and_leaves_a_humans_prime_alone() {
 
     // A persona that is no longer declared still gets its inbox rather than an error.
     let vanished = eng
-        .prime_as("local/ghost", Some("ghost"), NOW)
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/ghost"),
+            "local/ghost",
+            Some("ghost"),
+            NOW,
+        )
         .expect("a deleted declaration must not cost a session its catch-up");
     assert!(vanished.persona.is_none());
 }
@@ -1174,7 +1189,9 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
     let defs = Definitions::new(vec![simple_role("pm")], vec![]).unwrap();
     let eng = engine(tmp.path(), defs);
 
-    let block = eng.persona_prime("pm", NOW).expect("a declared persona");
+    let block = eng
+        .persona_prime(nexus_chat::facade::Reader::Handle("pm"), "pm", NOW)
+        .expect("a declared persona");
     assert!(
         block.contains("## You are `pm`") && block.contains("## How a conversation moves"),
         "the block carries the persona's identity and how it answers:\n{block}"
@@ -1190,7 +1207,7 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
     // still deserves its inbox. This does not: the caller is ASKING about a declaration, and an
     // empty string would read as "this persona is told nothing", which is a different fact.
     let err = eng
-        .persona_prime("nobody", NOW)
+        .persona_prime(nexus_chat::facade::Reader::Handle("nobody"), "nobody", NOW)
         .expect_err("an undeclared handle is not a persona");
     assert_eq!(err.kind, ErrorKind::NotFound, "{err:?}");
     assert!(
@@ -1199,7 +1216,13 @@ fn engine_persona_prime_composes_the_block_and_refuses_a_handle_nobody_declared(
         err.msg
     );
     assert!(
-        eng.prime_as("local/nobody", Some("nobody"), NOW).is_ok(),
+        eng.prime_as(
+            nexus_chat::facade::Reader::Handle("local/nobody"),
+            "local/nobody",
+            Some("nobody"),
+            NOW
+        )
+        .is_ok(),
         "…while `prime_as` still degrades softly for the same handle — the two contracts differ \
          on purpose, and that is what this pins"
     );
@@ -1217,7 +1240,11 @@ fn engine_persona_prime_of_an_unprimed_persona_is_empty_rather_than_an_error() {
     )
     .unwrap();
     let eng = engine(tmp.path(), defs);
-    assert_eq!(eng.persona_prime("narrow", NOW).unwrap(), "");
+    assert_eq!(
+        eng.persona_prime(nexus_chat::facade::Reader::Handle("narrow"), "narrow", NOW)
+            .unwrap(),
+        ""
+    );
 }
 
 #[test]
@@ -1730,7 +1757,12 @@ fn the_operation_tree_and_its_three_states_are_readable_from_the_engine_itself()
         op.threads[1]
     );
     let followed = eng
-        .transcript_page(op.threads[1].session.as_deref().unwrap(), -1, None)
+        .transcript_page(
+            nexus_chat::facade::Reader::Handle("local/carsten"),
+            op.threads[1].session.as_deref().unwrap(),
+            -1,
+            None,
+        )
         .expect("and the EXISTING transcript path carries on from there");
     assert_eq!(followed.session, coder_session);
 

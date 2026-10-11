@@ -19,6 +19,7 @@
 //! demands a resolvable `claude` only for the bundled sidecar, and this test is about the spawn
 //! guard, not about the SDK.
 
+use nexus_chat::facade::Reader;
 use nexus_chat::worker::{
     Coordinator, RoleSpec, TriggerError, TriggerRequest, TriggerResult, TurnTerms, Worker,
     WorkerConfig,
@@ -322,7 +323,7 @@ fn a_refused_wake_holds_the_answer_instead_of_reporting_a_failure() {
     // And it is really in the queue, readable back through the seam that filled it — not merely
     // announced on a receipt.
     let waiting = refusing
-        .held_deliveries(&session)
+        .held_deliveries(Reader::Handle("local/alice"), &session)
         .expect("the queue is readable");
     assert_eq!(waiting.len(), 1, "{waiting:?}");
     assert_eq!(waiting[0].held.thread_id, thread);

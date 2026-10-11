@@ -1132,22 +1132,63 @@ impl TranscriptView {
 /// reading as that account MEANS.
 ///
 /// **Nothing a local caller can set produces [`Reader::Owner`].** No `nxc` flag, environment
-/// variable or declaration maps to it — `cli.rs` only ever builds [`Reader::Handle`], and
-/// `tests/owner_reads.rs` holds that at the source. Locally every read is exactly what it was.
+/// variable or declaration maps to it — `cli.rs` only ever builds [`Reader::Handle`]. That is held
+/// at the source by `tests/owner_reads.rs::nothing_on_the_local_surface_can_read_as_the_owner`:
+/// in every crate that links `nexus-chat` (this one, `nxs`, `fold-ddb`), walked recursively, no
+/// CODE names `Owner` or `NotOwner` as a word — whatever path, glob import or alias it came by —
+/// except the lines of this definition, of [`Reader::standing`] and of [`Standing::handle`], which
+/// the test lists one by one. Comments are not code and are skipped. It is a source check and not
+/// a type-level guarantee: a variant of a public enum is constructible by any code in this crate,
+/// and a cargo feature would not hold either, since features unify across the workspace the `nxs`
+/// binary is built in. Locally every read is exactly what it was.
+///
+/// **A hosted embedder passes [`Reader::Owner`] or [`Reader::NotOwner`] only — never a
+/// [`Reader::Handle`] built from anything an account chose.** A handle is matched origin-blind
+/// against the board's openers and members (`same_identity`, nxf 6j6v.6aza), so an account that
+/// could name its own handle could read as anyone it can name. `Handle` is the local reader.
 ///
 /// # What each read does with it
 ///
-/// One rule ([`Reader::standing`]), applied where each read gates:
+/// One rule ([`Reader::standing`]), applied where each read gates. **These eight reads, and only
+/// these, take a reader:**
 ///
 /// | read | `Handle` | `Owner` | `NotOwner` |
 /// | --- | --- | --- | --- |
-/// | [`thread`] | the local rules, unchanged | every thread, unfiltered — the opener door for every operation | `forbidden` |
-/// | [`search`] | the caller's channels, filtered | every channel, unfiltered | `forbidden` |
+/// | [`thread`] / `Engine::thread` | the local rules, unchanged | every thread, unfiltered — the opener door for every operation | `forbidden` |
+/// | [`search`] / `Engine::search` | the caller's channels, filtered | every channel, unfiltered | `forbidden` |
 /// | `Engine::status` | caller-free, unchanged | the same caller-free report | `forbidden` |
 /// | `Engine::directory` | unchanged | the same record | `forbidden` |
+/// | `Engine::prime_as` | unchanged | the same record | `forbidden` |
+/// | `Engine::persona_prime` | unchanged | the same text | `forbidden` |
+/// | `Engine::transcript_page` | unchanged | the same window | `forbidden` |
+/// | `Engine::held_deliveries` | unchanged | the same queue | `forbidden` |
+///
+/// `prime_as` and `persona_prime` carry the declared directory that `directory` refuses (and
+/// `prime_as` the wake), `transcript_page` a session's raw tool inputs and results, and
+/// `held_deliveries` the bodies of the answers waiting for a session — each is conversation
+/// content or the directory, so each is refused exactly where `directory` is. On `status`,
+/// `directory` and these four the reader ADMITS and never projects: once admitted, `Handle` and
+/// `Owner` get the same answer, byte for byte. The reader is checked first, before any
+/// declaration, store or `not_found`.
+///
+/// **What the reader does NOT gate — the embedder's to authorize.** On `Engine` these take no
+/// reader and answer whoever calls them: `session_state` and `worker_answers_liveness` (session
+/// and worker CONTROL state — which session is running, ended or unknown, its role, thread and
+/// timestamps; no message body, no directory), `machine` (which machine a chat would start on and
+/// which are online — host control state, asked for its [`Caller`](crate::orchestration::Caller)),
+/// `subscribe` (a domain-blind change tick, no content), `workspace` and `origin` (this replica's
+/// own identity), and `definitions` — the raw
+/// declaration catalogue the directory is built from, which an embedder serving more than one
+/// account must not hand to a non-owner (whether it should take a reader too is nxf 6j6v.5zkv).
+/// Below the seam, the public facade functions keep their local shapes: [`messages`],
+/// [`channels`], [`threads`] and [`thread_board`] take a raw handle, and [`status`],
+/// [`transcript_page`] and [`held_deliveries`] take no reader at all — they are what `nxc` and the
+/// `Engine` calls above are built from, and a hosted embedder reaches conversations through
+/// `Engine`, where the reader is checked.
+/// Every write acts through its [`Caller`](crate::orchestration::Caller), below.
 ///
 /// **A refusal, never an empty answer.** "Sees no conversations at all" is spelled `forbidden` on
-/// every read, the enumerations included: an empty search or an empty status would read as "this
+/// every gated read, the enumerations included: an empty search or an empty status would read as "this
 /// board has nothing", which is a different fact, and a refusal is what the ticket asks for in so
 /// many words ("a refusal — not a fallback to everyone"). It also comes BEFORE `not_found`, so a
 /// non-owner cannot learn which thread ids exist by asking.
@@ -1164,7 +1205,11 @@ impl TranscriptView {
 /// on the decision's own words. Locally the opener of an operation does not search across channels
 /// it is not a member of — [`search`] left that door shut as "the owner's to decide". The decision
 /// names `search` among the reads the owner mode applies to, and the owner reads everything, so
-/// [`Reader::Owner`] searches every channel the board holds.
+/// [`Reader::Owner`] searches every channel the board holds. "Every channel the board holds" is
+/// the message LOG, so it includes channels that reached this replica by sync from a foreign
+/// workspace and threads handed over across the border (`border::hand_over`) — the board holds
+/// them, and the owner reads everything on the board. Which declaration SOURCES count is a
+/// separate question, below.
 ///
 /// # What it does not touch
 ///
@@ -1196,6 +1241,19 @@ pub(crate) enum Standing<'a> {
     Owner,
     /// A chat identity, under the local rules.
     Handle(&'a str),
+}
+
+impl<'a> Standing<'a> {
+    /// **The one shape the owner bypass is written in** (review of PR #52, Code #3): the chat
+    /// identity the local rules apply to, or `None` for the board's owner, who passes them all.
+    /// Every read that treats the owner differently branches on this — `let Some(handle) =
+    /// standing.handle() else { <the owner's answer> }` — so there is one pattern to copy, not two.
+    pub(crate) fn handle(self) -> Option<&'a str> {
+        match self {
+            Standing::Owner => None,
+            Standing::Handle(handle) => Some(handle),
+        }
+    }
 }
 
 impl<'a> Reader<'a> {
@@ -1571,7 +1629,7 @@ pub fn thread(
         .thread_channel(thread_id)
         .or_else(|| store.thread_channel_via_message(thread_id))
         .ok_or_else(|| NxfError::not_found(format!("no such thread: {thread_id}")))?;
-    if let Standing::Handle(as_handle) = standing {
+    if let Some(as_handle) = standing.handle() {
         require_thread_readable(store, &channel, thread_id, as_handle, &policy)?;
     }
     let messages: Vec<MessageView> = store
@@ -1793,7 +1851,7 @@ fn visible_messages(
     visibility: Visibility,
     messages: Vec<MessageView>,
 ) -> Result<Vec<MessageView>> {
-    let Standing::Handle(as_handle) = standing else {
+    let Some(as_handle) = standing.handle() else {
         return Ok(messages);
     };
     let requester = requester_for(store, thread_id, opener, as_handle)?;
@@ -1997,21 +2055,27 @@ fn same_identity(qualified: Option<&str>, as_handle: &str) -> bool {
 /// board holds a message in, unfiltered — the second of the two doors above, opened for the board's
 /// owner only and by the owner's own decision, which names `search` among the reads it covers (the
 /// argument is on [`Reader`]). [`Reader::NotOwner`] is refused: `forbidden`, never an empty list.
+///
+/// "Unfiltered" includes the one hit the handle path can never show: a message stamped with NO
+/// thread in a `requester_only` channel. For a chat identity that did not write it there is no
+/// board to judge it against, so [`hit_is_visible`] keeps it shut; the owner reads the log, so it
+/// is found. And the owner's scope is the log itself
+/// ([`ChatStore::search_all_messages`]), so no catalogue is consulted — `channels` is ignored for
+/// it, and `Engine::search` does not load one.
 pub fn search(
     store: &ChatStore,
     reader: Reader<'_>,
     query: &str,
     channels: &[ChannelDecl],
 ) -> Result<Vec<MessageHitView>> {
-    let handle = match reader.standing()? {
-        Standing::Owner => {
-            return Ok(store
-                .search_messages(&store.message_channel_ids()?, query)?
-                .into_iter()
-                .map(MessageHitView::from)
-                .collect());
-        }
-        Standing::Handle(handle) => handle,
+    let Some(handle) = reader.standing()?.handle() else {
+        // The owner: the whole log, unscoped — no channel list bound into the query, so the read
+        // has no ceiling in SQLite's variable limit however many channels the board holds.
+        return Ok(store
+            .search_all_messages(query)?
+            .into_iter()
+            .map(MessageHitView::from)
+            .collect());
     };
     let hits = store.search_messages(&searchable_channels(store, handle, channels)?, query)?;
     let mut visibility: HashMap<String, Visibility> = HashMap::new();

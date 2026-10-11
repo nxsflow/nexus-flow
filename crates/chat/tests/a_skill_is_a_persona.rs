@@ -440,11 +440,20 @@ fn the_engine_carries_the_source_and_tells_a_skill_where_its_references_point() 
     assert_eq!(pm["declaration"]["form"], "yaml", "{pm:#}");
 
     let folder = repo.path().join(".nxs-personas/comms");
-    let report = engine.prime_as("local/comms", Some("comms"), NOW).unwrap();
+    let report = engine
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/comms"),
+            "local/comms",
+            Some("comms"),
+            NOW,
+        )
+        .unwrap();
     let brief = report.persona.as_ref().unwrap();
     assert_eq!(brief.declared_in.as_deref(), Some(folder.as_path()));
     assert_eq!(brief.declared_form, Some(DeclarationForm::Skill));
-    let start = engine.persona_prime("comms", NOW).unwrap();
+    let start = engine
+        .persona_prime(nexus_chat::facade::Reader::Handle("comms"), "comms", NOW)
+        .unwrap();
     assert!(
         start.contains(&format!(
             "**Declared in:** `{}`, as a skill",
@@ -453,10 +462,17 @@ fn the_engine_carries_the_source_and_tells_a_skill_where_its_references_point() 
         "{start}"
     );
 
-    let report = engine.prime_as("local/pm", Some("pm"), NOW).unwrap();
+    let report = engine
+        .prime_as(
+            nexus_chat::facade::Reader::Handle("local/pm"),
+            "local/pm",
+            Some("pm"),
+            NOW,
+        )
+        .unwrap();
     assert_eq!(report.persona.as_ref().unwrap().declared_in, None);
     assert!(!engine
-        .persona_prime("pm", NOW)
+        .persona_prime(nexus_chat::facade::Reader::Handle("pm"), "pm", NOW)
         .unwrap()
         .contains("Declared in"));
 }

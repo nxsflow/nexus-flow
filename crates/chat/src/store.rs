@@ -693,6 +693,19 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// One [`MessageHit`] off a `SELECT message_id, channel_id, sender, body, thread_id` row — shared
+/// by [`ChatStore::search_messages`] and [`ChatStore::search_all_messages`], so the two body
+/// searches cannot come to read a hit differently.
+fn message_hit_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageHit> {
+    Ok(MessageHit {
+        message_id: r.get(0)?,
+        channel_id: r.get(1)?,
+        sender: r.get(2)?,
+        body: r.get(3)?,
+        thread_id: r.get(4)?,
+    })
+}
+
 /// The read-side degraded-DM contract (spec §3.3): a `direct` channel whose resolved membership is
 /// not exactly 2 is degraded. ONE definition, shared by [`ChatStore::is_degraded_dm`] and
 /// [`ChatStore::list_member_channels`], so the invariant can never drift between them.
@@ -2830,21 +2843,6 @@ impl ChatStore {
         }
     }
 
-    /// Every channel id the log holds at least one message in, channel-id ordered — the scope
-    /// [`facade::search`](crate::facade::search) reads for the board's OWNER (nxf 6j6v.6gpr), who
-    /// reads every conversation on the board. From `messages` rather than from the channel rows, so a
-    /// message that arrived by sync into a channel this replica holds no row for is still found:
-    /// "the owner reads everything" means the log, not the materialised channel list.
-    pub fn message_channel_ids(&self) -> crate::error::Result<Vec<String>> {
-        let conn = self.inner.connection();
-        let mut st =
-            conn.prepare("SELECT DISTINCT channel_id FROM messages ORDER BY channel_id")?;
-        let ids = st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(ids)
-    }
-
     /// Messages whose `body` contains `q` (case-insensitive, bound `LIKE ? ESCAPE '\'`), in the
     /// GIVEN `channels`, ordered by `(channel_id, lamport, site, message_id)` — deterministic (spec
     /// §5.1). An empty `channels` is an empty result and no query at all — never "then all of them".
@@ -2868,11 +2866,14 @@ impl ChatStore {
     /// a caller is being answered.**
     ///
     /// **The scope binds one SQL variable per channel, so it is bounded by SQLite's
-    /// `SQLITE_LIMIT_VARIABLE_NUMBER`** — 32766 in the bundled build, i.e. a caller would have to be
-    /// a member of that many channels to reach it (independent review, Integrity #1). Named rather
-    /// than capped, because the failure mode is already the safe one: `prepare` returns an `Err`
-    /// that travels as an `io` error, so the read refuses rather than truncating its scope — and a
-    /// truncated scope is the one outcome that would be a silent confidentiality change.
+    /// `SQLITE_LIMIT_VARIABLE_NUMBER`** — 32766 in the bundled build, i.e. a chat identity would
+    /// have to be a member of that many channels to reach it (independent review, Integrity #1).
+    /// Named rather than capped, because the failure mode is already the safe one: `prepare`
+    /// returns an `Err` that travels as an `io` error, so the read refuses rather than truncating
+    /// its scope — and a truncated scope is the one outcome that would be a silent confidentiality
+    /// change. The board's OWNER, who searches every channel (nxf 6j6v.6gpr), does not come through
+    /// here at all: [`search_all_messages`](Self::search_all_messages) binds no channel list, so
+    /// the ceiling does not apply to it. Neither read bounds its RESULT — that is nxf 6j6v.hx3j.
     pub fn search_messages(
         &self,
         channels: &[String],
@@ -2898,15 +2899,32 @@ impl ChatStore {
         let mut binds: Vec<&str> = channels.iter().map(String::as_str).collect();
         binds.push(&like);
         let rows = st
-            .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
-                Ok(MessageHit {
-                    message_id: r.get(0)?,
-                    channel_id: r.get(1)?,
-                    sender: r.get(2)?,
-                    body: r.get(3)?,
-                    thread_id: r.get(4)?,
-                })
-            })?
+            .query_map(rusqlite::params_from_iter(binds.iter()), message_hit_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// [`search_messages`](Self::search_messages) over EVERY channel the log holds a message in —
+    /// the scope [`facade::search`](crate::facade::search) reads for the board's OWNER (nxf
+    /// 6j6v.6gpr), who reads every conversation on the board. Same match, same order, same row.
+    ///
+    /// **Unscoped rather than an IN list of every channel id**, for two reasons. "The owner reads
+    /// everything" means the LOG, not the materialised channel rows — a message that arrived by sync
+    /// into a channel this replica holds no row for is found all the same. And an IN list of every
+    /// channel would bind one SQL variable per channel and refuse past SQLite's variable limit
+    /// (review of PR #52, Integrity #2); with no list there is no ceiling to reach. The RESULT is
+    /// not bounded, exactly as for a chat identity's search — nxf 6j6v.hx3j.
+    pub fn search_all_messages(&self, q: &str) -> crate::error::Result<Vec<MessageHit>> {
+        let like = format!("%{}%", escape_like(q));
+        let conn = self.inner.connection();
+        let mut st = conn.prepare(
+            "SELECT m.message_id, m.channel_id, m.sender, m.body, m.thread_id
+               FROM messages m
+              WHERE lower(m.body) LIKE lower(?1) ESCAPE '\\'
+              ORDER BY m.channel_id, m.lamport, m.site, m.message_id",
+        )?;
+        let rows = st
+            .query_map([&like], message_hit_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

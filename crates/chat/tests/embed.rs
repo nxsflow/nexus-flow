@@ -269,7 +269,7 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
 
     // Nothing is complete yet → the opener wake `prime_as` carries is empty.
     assert!(eng
-        .prime_as("o/a", None, NOW)
+        .prime_as(nexus_chat::facade::Reader::Handle("o/a"), "o/a", None, NOW)
         .unwrap()
         .wake
         .complete
@@ -306,7 +306,10 @@ fn engine_exposes_the_quorum_surface_and_wakes_on_a_reply() {
         .unwrap();
     assert!(report.operations[0].threads[0].outstanding.is_empty());
     assert!(report.operations[0].threads[0].awaiting_human);
-    let wake = eng.prime_as("o/a", None, NOW).unwrap().wake;
+    let wake = eng
+        .prime_as(nexus_chat::facade::Reader::Handle("o/a"), "o/a", None, NOW)
+        .unwrap()
+        .wake;
     assert_eq!(
         wake.complete.len(),
         1,
@@ -587,7 +590,9 @@ fn a_host_running_its_own_role_runtime_fills_the_transcript_through_the_handle()
         1
     );
 
-    let v = eng.transcript_page("s-1", -1, None).unwrap();
+    let v = eng
+        .transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
+        .unwrap();
     assert_eq!(
         v.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
         [0, 2],
@@ -606,7 +611,7 @@ fn a_host_running_its_own_role_runtime_fills_the_transcript_through_the_handle()
             .unwrap();
     }
     assert_eq!(
-        eng.transcript_page("s-1", -1, None)
+        eng.transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
             .unwrap()
             .entries
             .iter()
@@ -659,7 +664,9 @@ fn transcript_reads_through_the_handle_with_its_subagent_sub_timeline_nested() {
     let eng = Engine::open(None, dir.path()).unwrap();
     // `transcript_page(s, -1, None)` IS the whole session — which is why the unwindowed
     // `Engine::transcript` went in nxf 6j6v.yr59 rather than being kept beside it.
-    let v = eng.transcript_page("s-1", -1, None).unwrap();
+    let v = eng
+        .transcript_page(nexus_chat::facade::Reader::Handle("o/a"), "s-1", -1, None)
+        .unwrap();
     assert_eq!(v.session, "s-1");
     assert_eq!(v.role.as_deref(), Some("coder"));
     assert_eq!(v.real_sdk_id.as_deref(), Some("real-abc"));
@@ -668,7 +675,12 @@ fn transcript_reads_through_the_handle_with_its_subagent_sub_timeline_nested() {
     assert_eq!(v.entries[0].subagent[0].data["text"], "reading the diff");
     // An unknown session reads as an empty transcript through the handle too, never an error.
     assert!(eng
-        .transcript_page("never-existed", -1, None)
+        .transcript_page(
+            nexus_chat::facade::Reader::Handle("o/a"),
+            "never-existed",
+            -1,
+            None
+        )
         .unwrap()
         .entries
         .is_empty());

@@ -431,12 +431,10 @@ impl Engine {
     /// reads under the rules above, the board's [`Reader::Owner`] reads every thread as the opener
     /// of its operation does, unfiltered, and [`Reader::NotOwner`] is refused (`forbidden`).
     pub fn thread(&self, thread_id: &str, reader: Reader<'_>) -> Result<ThreadView> {
-        // Refused before anything is read — the declarations included — so a non-owner learns
-        // nothing about the board, not even whether its declaration folder parses.
-        reader.standing()?;
         // The merged CHANNELS (nxf 6j6v.7k58) — channels only, so a malformed persona file cannot
-        // make a thread unreadable — read before the store lock is taken.
-        let channels = crate::definitions::merged_channels(self.workspace().workspace_root()?)?;
+        // make a thread unreadable — read before the store lock is taken, and only for a reader
+        // they apply to (see `channels_for`).
+        let channels = self.channels_for(reader)?;
         self.handle.try_with_state(|s| {
             let policy = declared_policy_of(&s.store, &channels, thread_id)?;
             facade::thread(&s.store, thread_id, reader, policy)
@@ -490,10 +488,25 @@ impl Engine {
     /// searches its own channels as above, the board's [`Reader::Owner`] searches every channel the
     /// board holds, unfiltered, and [`Reader::NotOwner`] is refused (`forbidden`, not an empty list).
     pub fn search(&self, reader: Reader<'_>, query: &str) -> Result<Vec<MessageHitView>> {
-        reader.standing()?;
-        let channels = crate::definitions::merged_channels(self.workspace().workspace_root()?)?;
+        let channels = self.channels_for(reader)?;
         self.handle
             .try_with_state(|s| facade::search(&s.store, reader, query, &channels))
+    }
+
+    /// The declared channels a reader-keyed read applies, resolved for `reader` — the FIRST thing
+    /// [`thread`](Engine::thread) and [`search`](Engine::search) do (nxf 6j6v.6gpr).
+    ///
+    /// **The reader is checked before any declaration is read.** A [`Reader::NotOwner`] is refused
+    /// here, so a non-owner learns nothing about the board — not even whether its declaration
+    /// folder parses. And the board's [`Reader::Owner`] reads NO declaration: its view ignores
+    /// membership and `visibility` alike, so loading them could only fail it — a malformed
+    /// `channels.yaml` would otherwise refuse the owner a read it never consults (review of PR #52,
+    /// Integrity #3). Only a [`Reader::Handle`] loads the merged channels, which are its rules.
+    fn channels_for(&self, reader: Reader<'_>) -> Result<Vec<crate::channel::ChannelDecl>> {
+        match reader.standing()?.handle() {
+            Some(_) => crate::definitions::merged_channels(self.workspace().workspace_root()?),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// **Where does this operation stand** (nxf 6j6v.a71h) — the thread TREE an operation is, across
@@ -567,12 +580,20 @@ impl Engine {
     ///
     /// `now` drives only the wake's clock-dependent `stale` flag; the workspace's declaration
     /// directory is resolved from the handle's own workspace.
+    ///
+    /// **It is admitted by the [`Reader`] since nxf 6j6v.6gpr**, because the record carries the
+    /// same [`Directory`](crate::persona::Directory) [`directory`](Engine::directory) refuses a
+    /// non-owner, plus the wake: [`Reader::NotOwner`] → `forbidden`, before anything is read. Once
+    /// admitted the record is the same for a [`Reader::Handle`] and for [`Reader::Owner`] —
+    /// `consumer` decides whose record it is, the reader only whether there is an answer at all.
     pub fn prime_as(
         &self,
+        reader: Reader<'_>,
         consumer: &str,
         persona: Option<&str>,
         now: &str,
     ) -> Result<PrimeReport> {
+        reader.standing()?;
         // The whole catalogue, resolved ONCE: the report carries the declaration COUNT (which
         // only loading answers — `locate` alone said 0, a lie the parity differential caught
         // against `nxc prime`), and the merged team its source describes (nxf 6j6v.7k58).
@@ -604,7 +625,13 @@ impl Engine {
     /// mid-flight still deserves its session start, while here the caller is ASKING about a
     /// declaration and an empty answer would read as "this persona is told nothing", which is a
     /// different fact.
-    pub fn persona_prime(&self, handle: &str, now: &str) -> Result<String> {
+    ///
+    /// **It is admitted by the [`Reader`] since nxf 6j6v.6gpr**, for [`prime_as`](Engine::prime_as)'s
+    /// reason — the text carries the persona's view of the directory: [`Reader::NotOwner`] →
+    /// `forbidden`, before anything is read; a [`Reader::Handle`] and [`Reader::Owner`] get the
+    /// same text.
+    pub fn persona_prime(&self, reader: Reader<'_>, handle: &str, now: &str) -> Result<String> {
+        reader.standing()?;
         let defs = self.definitions()?;
         let decl = defs.role(handle)?.clone();
         if !decl.prime.is_primed() {
@@ -707,17 +734,21 @@ impl Engine {
     /// carries no parent id to re-attach it with, so an app that needs the exact tree reads the
     /// session unwindowed.
     ///
-    /// **This read takes no acting handle and enforces no membership**, unlike
-    /// [`thread`](Engine::thread) beside it — a transcript has no channel to gate on, so the
-    /// sibling gate is undefined rather than merely skipped (the full argument is on
-    /// [`facade::transcript`]). It returns raw tool inputs and results, so **an app serving more
-    /// than one user must authorize the caller itself before calling this.**
+    /// **This read enforces no membership**, unlike [`thread`](Engine::thread) beside it — a
+    /// transcript has no channel to gate on, so the sibling gate is undefined rather than merely
+    /// skipped (the full argument is on [`facade::transcript`]). **It is admitted by the
+    /// [`Reader`] since nxf 6j6v.6gpr**, because it returns raw tool inputs and results: a hosted
+    /// board serves it to its owner and refuses every other account ([`Reader::NotOwner`] →
+    /// `forbidden`, before the store is read). Once admitted, a [`Reader::Handle`] and
+    /// [`Reader::Owner`] get the same window; locally (`Handle`) nothing changed.
     pub fn transcript_page(
         &self,
+        reader: Reader<'_>,
         internal_session: &str,
         after_seq: i64,
         limit: Option<i64>,
     ) -> Result<TranscriptView> {
+        reader.standing()?;
         self.handle.try_with_state(|s| {
             facade::transcript_page(&s.store, internal_session, after_seq, limit)
         })
@@ -1389,10 +1420,17 @@ impl Engine {
     /// among the read verbs for [`session_state`](Engine::session_state)'s reason, which is the
     /// same reason: it asks about this handle's own delivery machinery, not about what was said in
     /// the workspace.
+    ///
+    /// **But unlike `session_state` it is admitted by the [`Reader`] since nxf 6j6v.6gpr**, because
+    /// what the machinery holds is conversation: each row carries the held answer's `body` and
+    /// `sender`. [`Reader::NotOwner`] → `forbidden`, before the store is read; a
+    /// [`Reader::Handle`] and [`Reader::Owner`] get the same queue.
     pub fn held_deliveries(
         &self,
+        reader: Reader<'_>,
         internal_session: &str,
     ) -> Result<Vec<crate::collecting::HeldRow>> {
+        reader.standing()?;
         self.handle
             .try_with_state(|s| facade::held_deliveries(&s.store, internal_session))
     }
@@ -1429,6 +1467,11 @@ impl Engine {
     ///
     /// It is on the handle rather than among the seven read verbs for its two siblings' reason: it
     /// answers about this handle's own session machinery, not about what was said in the workspace.
+    ///
+    /// **It takes no [`Reader`]** (nxf 6j6v.6gpr), unlike [`held_deliveries`](Engine::held_deliveries)
+    /// beside it: what it answers is session CONTROL state — running, ended or unknown, the role,
+    /// the thread it was put in motion on, the runtime id and timestamps — and no message body and
+    /// no directory. A hosted embedder serving more than one account authorizes the caller itself.
     pub fn session_state(
         &self,
         scope: orchestration::SessionScope<'_>,
