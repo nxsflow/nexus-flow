@@ -12,7 +12,7 @@
 use crate::error::Result;
 use crate::plugin::{self, PluginConfig};
 use crate::read::{
-    self, BlockedItem, MentionedByQuery, NextPage, NextQuery, PrimeReport, ShowRecord,
+    self, BlockedItem, ListQuery, MentionedByQuery, NextPage, NextQuery, PrimeReport, ShowRecord,
 };
 use crate::validate;
 use crate::workspace::{Workspace, WorkspaceExt};
@@ -487,6 +487,35 @@ impl Engine {
         self.handle.try_with_state(|s| {
             let items = read::list(&self.cfg, &s.store, status, item_type, None)?;
             read::list_to_value_with_custom(&self.cfg, &s.store, &items)
+        })
+    }
+
+    /// [`list`](Engine::list) narrowed, ordered and paged (6j6v.n698): `--status`, `--type`, `--in`,
+    /// `--label`, `--sort`, `--limit`, `--paginate` and the page token, as one [`ListQuery`].
+    /// Additive beside [`list`](Engine::list), whose signature and order stay. The CLI's `list`.
+    ///
+    /// The order is id unless the query sorts; `SortKey::Rank` ranks by the plugin's
+    /// `[ranking.list]` policy (its per-type orders `[ranking.list.<type>]` and cross-type order
+    /// `types`, else the `[ranking.next]` default order). The type and container filters mean what
+    /// they mean for [`next_query`](Engine::next_query), and the page is cut and paged exactly as
+    /// `next_query` pages: the same `total`/`start`/`next_token`/`restarted`, the same
+    /// machine-local `next_page_cache` (so the same db write another handle's
+    /// [`subscribe`](Engine::subscribe) sees), the same expiry and invalidation. `validation` for
+    /// `paginate` without a non-zero `limit`, or a token without `paginate`.
+    pub fn list_query(&self, query: &ListQuery) -> Result<NextPage> {
+        self.handle
+            .try_with_state(|s| read::list_page(&self.cfg, &s.store, query))
+    }
+
+    /// [`list_query`](Engine::list_query) as JSON: `{"items", "total"}`, plus `next_token` and
+    /// `restarted` when the query paginates — `items` being the records
+    /// [`list_value`](Engine::list_value) gives. The envelope the CLI's `list --limit <n> --json`
+    /// prints.
+    pub fn list_query_value(&self, query: &ListQuery) -> Result<Value> {
+        self.handle.try_with_state(|s| {
+            let page = read::list_page(&self.cfg, &s.store, query)?;
+            let items = read::list_to_value_with_custom(&self.cfg, &s.store, &page.items)?;
+            Ok(read::next_page_envelope(items, &page, query.paginate))
         })
     }
 

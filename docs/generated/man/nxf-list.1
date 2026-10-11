@@ -2,24 +2,36 @@
 .el .ds Aq '
 .TH list 1  "list " 
 .SH NAME
-list \- List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+list \- List items, optionally filtered by status, type, container and/or label. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); `\-\-sort rank` ranks by the active plugin\*(Aqs `list` order. `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH SYNOPSIS
-\fBlist\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBlist\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-in\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-\-paginate\fR] [\fB\-\-token\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+List items, optionally filtered by status, type, container and/or label. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); `\-\-sort rank` ranks by the active plugin\*(Aqs `list` order. `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH OPTIONS
 .TP
 \fB\-\-status\fR \fI<STATUS>\fR
 Filter by status
 .TP
-\fB\-\-type\fR \fI<TY>\fR
-Filter by type, using the active plugin\*(Aqs vocabulary (see `nxf schema`)
+\fB\-\-type\fR \fI<TYPE>\fR
+Filter by type, using the active plugin\*(Aqs vocabulary (see `nxf schema`). Repeatable: the types are alternatives
+.TP
+\fB\-\-in\fR \fI<ID>\fR
+Only items in this container: its children (whose parent it is) and the items that contribute to it
 .TP
 \fB\-\-label\fR \fI<LABEL>\fR
 Filter to items carrying this label (user vocabulary, not the display type)
 .TP
 \fB\-\-sort\fR \fI<SORT>\fR
-Sort order: `rank` | `id` (default `id`). An unknown key is a loud error
+Sort order: `rank` | `id` (default `id`). `rank` is the plugin\*(Aqs `list` ranking: an order per type where it declares one (`[ranking.list.<type>]`), else its `next` order. An unknown key is a loud error
+.TP
+\fB\-\-limit\fR \fI<LIMIT>\fR
+Max items to show (default: no limit). Applied last — after `\-\-sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `\-\-json` the flag wraps the records as `{"items": [...], "total": <n>}`
+.TP
+\fB\-\-paginate\fR
+Page through the list `\-\-limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `\-\-json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
+.TP
+\fB\-\-token\fR \fI<TOKEN>\fR
+The token a previous `\-\-paginate` answer printed: show the page after that one
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

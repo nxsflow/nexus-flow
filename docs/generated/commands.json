@@ -545,7 +545,7 @@
       },
       {
         "name": "list",
-        "about": "List items, optionally filtered by status and/or type. Id-ordered by default (so the `--json` record stays plugin-independent); override with `--sort rank`",
+        "about": "List items, optionally filtered by status, type, container and/or label. Id-ordered by default (so the `--json` record stays plugin-independent); `--sort rank` ranks by the active plugin's `list` order. `--limit` shows only the head of it, and says so; `--paginate` adds a token for the next page",
         "args": [
           {
             "name": "status",
@@ -561,7 +561,15 @@
             "short": null,
             "required": false,
             "takes_value": true,
-            "help": "Filter by type, using the active plugin's vocabulary (see `nxf schema`)"
+            "help": "Filter by type, using the active plugin's vocabulary (see `nxf schema`). Repeatable: the types are alternatives"
+          },
+          {
+            "name": "within",
+            "long": "in",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Only items in this container: its children (whose parent it is) and the items that contribute to it"
           },
           {
             "name": "label",
@@ -577,7 +585,31 @@
             "short": null,
             "required": false,
             "takes_value": true,
-            "help": "Sort order: `rank` | `id` (default `id`). An unknown key is a loud error"
+            "help": "Sort order: `rank` | `id` (default `id`). `rank` is the plugin's `list` ranking: an order per type where it declares one (`[ranking.list.<type>]`), else its `next` order. An unknown key is a loud error"
+          },
+          {
+            "name": "limit",
+            "long": "limit",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Max items to show (default: no limit). Applied last — after `--sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{\"items\": [...], \"total\": <n>}`"
+          },
+          {
+            "name": "paginate",
+            "long": "paginate",
+            "short": null,
+            "required": false,
+            "takes_value": false,
+            "help": "Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page"
+          },
+          {
+            "name": "token",
+            "long": "token",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "The token a previous `--paginate` answer printed: show the page after that one"
           }
         ],
         "subcommands": []

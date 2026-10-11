@@ -52,6 +52,19 @@ $ nxf list --json
 [{"archived":null,"assignee":null,"belongs_to":null,"closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Cut the first release","design":null,"due":null,"id":"ab12.0001","priority":"1","priority_label":"P1","status":"in_progress","title":"Ship v1","type":"epic","type_label":"epic","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":null,"belongs_to":null,"closed_at":"2026-06-23T00:00:00Z","closing_comment":"approved","completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Approve the final spec","design":null,"due":null,"id":"ab12.0003","priority":"2","priority_label":"P2","status":"closed","title":"Spec sign-off","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}]
 ```
 
+`list --sort rank` ranks instead: by the plugin's `list` order — an order per type where the plugin
+declares one (`[ranking.list.<type>]`, with `types = [...]` for how the types stand against each
+other), else its `next` order. `--type` (repeatable), `--in <id>` (the container's children and
+contributors), `--status` and `--label` narrow it. `--limit` and `--paginate` cut and page it
+exactly as they do `next`: with `--limit` the answer is `{"items": [...], "total": <n>}`, and
+`--paginate` adds `next_token` (pass it back with `--token`; null on the last page) and
+`restarted`:
+
+```console
+$ nxf list --sort rank --limit 2 --paginate --json
+{"items":[{"archived":null,"assignee":null,"belongs_to":null,"closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Cut the first release","design":null,"due":null,"id":"ab12.0001","priority":"1","priority_label":"P1","status":"in_progress","title":"Ship v1","type":"epic","type_label":"epic","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":"dev","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Build the command-line tool","design":"Thin CLI over the core.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"P1","status":"in_progress","title":"Write the CLI","type":"feature","type_label":"feature","updated_at":"2026-06-23T00:00:00Z"}],"next_token":"[..].2","restarted":false,"total":3}
+```
+
 `search` matches across title, description, and notes:
 
 ```console

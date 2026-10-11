@@ -1731,32 +1731,76 @@ pub fn next(json: bool, db: Option<&str>, args: NextArgs<'_>) -> Result<()> {
 
 // ---- list ------------------------------------------------------------------
 
-pub fn list(
-    json: bool,
-    db: Option<&str>,
-    status: Option<&str>,
-    item_type: Option<&str>,
-    label: Option<&str>,
-    sort: Option<&str>,
-) -> Result<()> {
+/// `nxf list`'s arguments, as clap parsed them.
+pub struct ListArgs<'a> {
+    pub status: Option<&'a str>,
+    pub types: &'a [String],
+    pub within: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub sort: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub paginate: bool,
+    pub token: Option<&'a str>,
+}
+
+/// `nxf list` (6j6v.n698: filters and paging) — ONE query through the function
+/// `Engine::list_query` answers from (`read::list_page`), so the filters, the order, the cut and
+/// the paging cannot drift apart between the two, nor from `next`'s.
+pub fn list(json: bool, db: Option<&str>, args: ListArgs<'_>) -> Result<()> {
     let (ws, cfg) = open(db)?;
     let store = ws.open_store()?;
-    let sort = sort.map(read::parse_sort).transpose()?;
-    let mut items = read::list(&cfg, &store, status, item_type, sort)?;
-    if let Some(label) = label {
-        items = read::with_label(&store, items, label)?;
+    let mut filter = read::NextFilter::new();
+    for ty in args.types {
+        filter = filter.with_type(ty.as_str());
     }
+    if let Some(c) = args.within {
+        filter = filter.with_container(ws.replica.resolve_id(c));
+    }
+    if let Some(label) = args.label {
+        filter = filter.with_label(label);
+    }
+    let mut query = read::ListQuery::new().filter(filter);
+    if let Some(status) = args.status {
+        query = query.status(status);
+    }
+    if let Some(sort) = args.sort.map(read::parse_sort).transpose()? {
+        query = query.sort(sort);
+    }
+    if let Some(n) = args.limit {
+        query = query.limit(n);
+    }
+    if args.paginate {
+        query = query.paginate();
+    }
+    if let Some(token) = args.token {
+        query = query.token(token);
+    }
+    let page = read::list_page(&cfg, &store, &query)?;
 
-    // Emit in the chosen order (default rank) — preserve it into JSON, do NOT re-sort by id. Each
+    // Emit in the chosen order (default id) — preserve it into JSON, do NOT re-sort by id. Each
     // record carries a sparse `parent_closed_reason` join for a closed-masked open child (07a.3 §5).
     if json {
         // ee2h: additive priority_label/type_label alongside the canonical record (CLI-only).
-        println!(
-            "{}",
-            with_presentation_labels(&cfg, read::list_to_value_with_custom(&cfg, &store, &items)?)
+        let value = with_presentation_labels(
+            &cfg,
+            read::list_to_value_with_custom(&cfg, &store, &page.items)?,
         );
+        // The shape follows the FLAG, as for `next`: the bare array without `--limit` (byte-stable
+        // as before), the envelope with it.
+        if args.limit.is_some() {
+            println!("{}", read::next_page_envelope(value, &page, args.paginate));
+        } else {
+            println!("{value}");
+        }
     } else {
-        print!("{}", render_list(&cfg, &ws.replica.prefix, &items));
+        let theme = nxs_ui::Theme::plain();
+        if let Some(notice) = next_truncation_notice(&page, &theme) {
+            print!("{notice}");
+        }
+        print!("{}", render_list(&cfg, &ws.replica.prefix, &page.items));
+        if let Some(line) = next_token_line(&page, &theme) {
+            print!("{line}");
+        }
     }
     Ok(())
 }

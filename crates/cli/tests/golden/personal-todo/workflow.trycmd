@@ -237,6 +237,12 @@ $ nxf list --json
 
 ```
 
+```console
+$ nxf list --sort rank --limit 2 --paginate --json
+{"items":[{"archived":null,"assignee":null,"belongs_to":null,"closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Get ready for the trip","design":null,"due":null,"id":"ab12.0001","priority":"1","priority_label":"soon","status":"in_progress","title":"Trip prep","type":"project","type_label":"project","updated_at":"2026-06-23T00:00:00Z"},{"archived":null,"assignee":"me","belongs_to":"ab12.0001","closed_at":null,"closing_comment":null,"completion_criterion":null,"created_at":"2026-06-23T00:00:00Z","defer_until":null,"deleted":null,"description":"Reserve outbound and return","design":"Compare fares first.","due":"2026-12-31","id":"ab12.0002","priority":"1","priority_label":"soon","status":"in_progress","title":"Book flights","type":"todo","type_label":"todo","updated_at":"2026-06-23T00:00:00Z"}],"next_token":"[..].2","restarted":false,"total":3}
+
+```
+
 Close it out, drop the dependency, and read the session snapshot:
 
 ```console

@@ -20,7 +20,7 @@
 //! caller decides whether that is the system clock or an override (the CLI's `--now`).
 
 use crate::error::{NxfError, Result};
-use crate::plugin::{Dir, Nulls, PluginConfig, RankKey};
+use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
@@ -536,6 +536,12 @@ fn blocked_ids(store: &Store) -> Result<Vec<String>> {
 /// per-verb default ([`DEFAULT_SORT_LIST`], id, so `list --json` stays plugin-independent); the
 /// order is preserved into the `--json` projection ([`items_in_order_value`]), so `--sort rank`
 /// surfaces in the output too (C2 #916.2).
+///
+/// `--sort rank` ranks by the plugin's `[ranking.list]` policy ([`Ranking::list`], 6j6v.n698): its
+/// per-type orders and cross-type order where the plugin declares them, else the `[ranking.next]`
+/// default order as before.
+///
+/// [`Ranking::list`]: crate::plugin::Ranking::list
 pub fn list(
     cfg: &PluginConfig,
     store: &Store,
@@ -551,8 +557,135 @@ pub fn list(
         .filter(|i| status.is_none_or(|s| i.status.as_deref() == Some(s)))
         .filter(|i| item_type.is_none_or(|t| i.item_type.as_deref() == Some(t)))
         .collect();
-    order_by(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_LIST));
+    order_list(cfg, &mut items, sort.unwrap_or(DEFAULT_SORT_LIST));
     Ok(items)
+}
+
+/// Order `list` rows by `key`: `rank` through the `[ranking.list]` policy (6j6v.n698), every other
+/// key through the orderer every read verb shares.
+fn order_list(cfg: &PluginConfig, items: &mut [ItemRow], key: SortKey) {
+    if key == SortKey::Rank {
+        let rank = TypeRank::list(cfg);
+        items.sort_by(|a, b| rank.cmp(a, b));
+    } else {
+        order_by(cfg, items, key);
+    }
+}
+
+// ---- list: filters and paging (6j6v.n698) -----------------------------------
+
+/// One `list` request with its filters and paging (6j6v.n698) — the input of [`list_page`] and
+/// [`Engine::list_query`]. The paging is `next`'s ([`NextQuery`]): the same three shapes, the same
+/// machine-local snapshot cache, expiry, caps and invalidation, because it is the same mechanism.
+///
+/// - No `limit`: the whole list.
+/// - `limit` alone: the head of it, with the total disclosed and no token.
+/// - `limit` + `paginate`: the head plus a `next_token` while rows remain; a stale or invalid token
+///   answers the FIRST page of a fresh list with `restarted: true`.
+///
+/// The filter is a [`NextFilter`] and means what it means for `next`: the types are alternatives,
+/// the container keeps an item whose parent it is OR that contributes to it, the label keeps an
+/// item carrying it. `status` is `list`'s own filter (the core status).
+///
+/// `#[non_exhaustive]`: build it with [`ListQuery::new`] and the builder methods.
+///
+/// [`Engine::list_query`]: crate::engine::Engine::list_query
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListQuery {
+    /// Only items with this core status. `None`: any.
+    pub status: Option<String>,
+    /// The order; `None` is the id default ([`DEFAULT_SORT_LIST`]). `rank` is the plugin's
+    /// `[ranking.list]` policy.
+    pub sort: Option<SortKey>,
+    /// The filters; empty keeps every item.
+    pub filter: NextFilter,
+    /// The page size; `None` is no cut.
+    pub limit: Option<usize>,
+    /// Hand out a next-token (requires a non-zero `limit`).
+    pub paginate: bool,
+    /// The token of a previous page (requires `paginate`).
+    pub token: Option<String>,
+}
+
+impl ListQuery {
+    /// Every live, non-archived item, in id order, unpaged — what [`list`] returns unfiltered.
+    pub fn new() -> ListQuery {
+        ListQuery::default()
+    }
+
+    /// Only items with the core status `status`.
+    pub fn status(mut self, status: impl Into<String>) -> ListQuery {
+        self.status = Some(status.into());
+        self
+    }
+
+    /// Order by `sort` instead of id.
+    pub fn sort(mut self, sort: SortKey) -> ListQuery {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Narrow by `filter`.
+    pub fn filter(mut self, filter: NextFilter) -> ListQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Cut to `limit` rows (a page of that size under [`paginate`](Self::paginate)).
+    pub fn limit(mut self, limit: usize) -> ListQuery {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Ask for a next-token.
+    pub fn paginate(mut self) -> ListQuery {
+        self.paginate = true;
+        self
+    }
+
+    /// Continue from a previous page's token (implies [`paginate`](Self::paginate)).
+    pub fn token(mut self, token: impl Into<String>) -> ListQuery {
+        self.paginate = true;
+        self.token = Some(token.into());
+        self
+    }
+
+    /// The cache key a snapshot is bound to: the read, status, sort, filter and the plugin's
+    /// `[ranking.list]` policy — never `limit`. Naming the read keeps a `list` token from answering
+    /// a `next` or `mentioned_by` query; the ranking's fingerprint makes a token restart under a
+    /// changed plugin order, as `next`'s does.
+    fn key(&self, cfg: &PluginConfig) -> String {
+        json!({
+            "read": "list",
+            "status": self.status,
+            "sort": self.sort.unwrap_or(DEFAULT_SORT_LIST).as_str(),
+            "filter": self.filter.key(),
+            "rank": rank_fingerprint(&cfg.ranking.list),
+        })
+        .to_string()
+    }
+}
+
+/// One `list` page (6j6v.n698): [`list`] under `q.status` and `q.sort`, narrowed by `q.filter`
+/// (keeping the order), cut and — under `paginate` — cached machine-locally like a `next` page, so
+/// the following pages come from the same list. A token's snapshot restarts when an op after it
+/// touches one of its items, or an item in it left or moved in the fresh list. `validation` for
+/// `paginate` without a non-zero `limit`, or a token without `paginate`.
+///
+/// A first page whose snapshot cannot be written is still answered, with `next_token: None`, as
+/// for [`next_page`].
+pub fn list_page(cfg: &PluginConfig, store: &Store, q: &ListQuery) -> Result<NextPage> {
+    list_page_at(cfg, store, q, unix_now())
+}
+
+/// [`list_page`] on the clock `clock` (unix seconds).
+fn list_page_at(cfg: &PluginConfig, store: &Store, q: &ListQuery, clock: i64) -> Result<NextPage> {
+    let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
+    let mark = Watermark::read(store)?;
+    let items = list(cfg, store, q.status.as_deref(), None, q.sort)?;
+    let fresh = filter_next_store(store, items, &q.filter)?;
+    page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
 }
 
 /// The canonical `--json` array for a derived/queried item set: records ordered by id.
@@ -1159,19 +1292,20 @@ impl NextQuery {
         json!({
             "sort": format!("{:?}", self.sort.unwrap_or(DEFAULT_SORT_NEXT)),
             "filter": self.filter.key(),
-            "rank": rank_fingerprint(cfg),
+            "rank": rank_fingerprint(&cfg.ranking.next),
         })
         .to_string()
     }
 }
 
-/// A fixed-size fingerprint of the plugin's `next` ranking: FNV-1a (64 bit) over its canonical JSON
+/// A fixed-size fingerprint of a ranking policy (`[ranking.next]`, or `[ranking.list]` for a `list`
+/// snapshot, 6j6v.n698): FNV-1a (64 bit) over its canonical JSON
 /// (`serde_json` over the `Serialize` derive; the per-type orders are a `BTreeMap`, so the bytes
 /// are deterministic). FNV is spelled out here because it is stable across Rust releases, which
 /// `DefaultHasher` does not promise. A collision would only let a token survive a ranking change
 /// whose new order the snapshot check in `resume` still compares against.
-fn rank_fingerprint(cfg: &PluginConfig) -> String {
-    let canonical = serde_json::to_string(&cfg.ranking.next).unwrap_or_default();
+fn rank_fingerprint(spec: &RankSpec) -> String {
+    let canonical = serde_json::to_string(spec).unwrap_or_default();
     let hash = canonical.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     });
@@ -1425,12 +1559,12 @@ const CLUSTER_CHILD: u8 = 1;
 
 /// Order the `ready ∪ in_progress` candidates into the finish-first tiers (§4.3), in place.
 ///
-/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`NextRank`] as
+/// The sort key is `(tier, cluster, header-before-child)` with the plugin's [`TypeRank`] as
 /// the tiebreak — which is what ranks Tier 1 and Tier 3 internally, and orders a cluster's children.
 /// Clusters themselves are ordered by their **header's** rank, so a cluster is contiguous and a
 /// low-priority child never drags its epic up (nor a high-priority backlog item slice a cluster
-/// apart). `NextRank` ends in an id tiebreak, so the whole composed order is total and
-/// deterministic. Per-type orders (6j6v.z9jk) live inside `NextRank`: they order WITHIN a
+/// apart). `TypeRank` ends in an id tiebreak, so the whole composed order is total and
+/// deterministic. Per-type orders (6j6v.z9jk) live inside `TypeRank`: they order WITHIN a
 /// tier and never move an item between tiers.
 fn order_next_tiered(
     cfg: &PluginConfig,
@@ -1461,7 +1595,7 @@ fn order_next_tiered(
         "a promoted child is ready, never in_progress — the tiers would overlap"
     );
 
-    let rank = NextRank::new(cfg);
+    let rank = TypeRank::next(cfg);
     let keys: HashMap<String, (u8, usize, u8)> = {
         let by_id: HashMap<&str, &ItemRow> = items.iter().map(|i| (i.id.as_str(), i)).collect();
         let mut headers: Vec<&str> = started
@@ -2117,9 +2251,9 @@ pub fn list_to_value_with_custom(
 /// (sp6.5): it is the first `ranking.next` key both bundled plugins declare, so ranking is entirely
 /// plugin-driven — no command-code special-case undercuts the "all policy flows from the config" seam.
 ///
-/// This is the DEFAULT order only. Per-type orders (6j6v.z9jk) apply to `next` alone, through
-/// [`NextRank`]; `list --sort rank` and `blocked` keep this one until `list` gets its own
-/// per-type orders (6j6v.n698).
+/// This is the `[ranking.next]` DEFAULT order only, which `blocked` and the lane verbs' `--sort
+/// rank` keep. Per-type orders apply through [`TypeRank`]: `next` over `[ranking.next]`
+/// (6j6v.z9jk), `list --sort rank` over `[ranking.list]` (6j6v.n698).
 fn rank_cmp(cfg: &PluginConfig, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
     keys_cmp(a, b, &cfg.ranking.next.order)
 }
@@ -2135,23 +2269,38 @@ fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
     a.id.cmp(&b.id)
 }
 
-/// The rank `next` orders by within a tier (6j6v.z9jk), built once per sort. A plugin without a
-/// per-type order ranks by [`rank_cmp`], exactly as before. Otherwise two items of different types
-/// compare by their type's position in the cross-type order
-/// ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by type name; two items
-/// of one type by that type's order ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)),
-/// then id. A lexicographic key, so the order is total — the tiers and the paging snapshot rely on
-/// that. Shared by the store path and the store-free path through [`order_next_tiered`].
-struct NextRank<'a> {
-    cfg: &'a PluginConfig,
+/// The rank a ranking policy orders by, built once per sort: `next` within a tier over
+/// `[ranking.next]` (6j6v.z9jk), and `list --sort rank` over `[ranking.list]` (6j6v.n698) — one
+/// comparator for both, so the two verbs cannot rank alike-declared orders differently, and a
+/// later key kind (the derived keys of `docs/specs/derived-ranking-keys.md`, 6j6v.x0wf) is added
+/// here once for both.
+///
+/// A policy without a per-type order ranks by its default order, then id — for `[ranking.next]`
+/// exactly [`rank_cmp`]. Otherwise two items of different types compare by their type's position in
+/// the cross-type order ([`RankSpec::type_ordinal`](crate::plugin::RankSpec::type_ordinal)), then by
+/// type name; two items of one type by that type's order
+/// ([`RankSpec::order_for`](crate::plugin::RankSpec::order_for)), then id. A lexicographic key, so
+/// the order is total — the tiers and the paging snapshot rely on that. Shared by the store path and
+/// the store-free path through [`order_next_tiered`], and by [`list`].
+struct TypeRank<'a> {
+    spec: &'a RankSpec,
     /// `type → position` in the cross-type order, looked up once per comparison instead of a scan
-    /// of the list (review of #44, Integrity #5). `None` when the plugin does not split by type.
+    /// of the list (review of #44, Integrity #5). `None` when the policy does not split by type.
     ordinals: Option<(HashMap<&'a str, usize>, usize)>,
 }
 
-impl<'a> NextRank<'a> {
-    fn new(cfg: &'a PluginConfig) -> NextRank<'a> {
-        let spec = &cfg.ranking.next;
+impl<'a> TypeRank<'a> {
+    /// The rank `next` orders by: `[ranking.next]`.
+    fn next(cfg: &'a PluginConfig) -> TypeRank<'a> {
+        TypeRank::new(&cfg.ranking.next)
+    }
+
+    /// The rank `list --sort rank` orders by: `[ranking.list]` (6j6v.n698).
+    fn list(cfg: &'a PluginConfig) -> TypeRank<'a> {
+        TypeRank::new(&cfg.ranking.list)
+    }
+
+    fn new(spec: &'a RankSpec) -> TypeRank<'a> {
         let ordinals = spec.splits_by_type().then(|| {
             let cross = spec.cross_type_order();
             let mut map = HashMap::new();
@@ -2161,12 +2310,12 @@ impl<'a> NextRank<'a> {
             }
             (map, cross.len())
         });
-        NextRank { cfg, ordinals }
+        TypeRank { spec, ordinals }
     }
 
     fn cmp(&self, a: &ItemRow, b: &ItemRow) -> std::cmp::Ordering {
         let Some((ordinals, unlisted)) = &self.ordinals else {
-            return rank_cmp(self.cfg, a, b);
+            return keys_cmp(a, b, &self.spec.order);
         };
         let (ta, tb) = (a.item_type.as_deref(), b.item_type.as_deref());
         if ta != tb {
@@ -2176,7 +2325,7 @@ impl<'a> NextRank<'a> {
             };
             return ord(ta).cmp(&ord(tb)).then_with(|| ta.cmp(&tb));
         }
-        keys_cmp(a, b, self.cfg.ranking.next.order_for(ta))
+        keys_cmp(a, b, self.spec.order_for(ta))
     }
 }
 
@@ -4427,7 +4576,7 @@ mod tests {
             typed("a3", Some("action"), "0", Some("2026-07-01")),
             typed("a1", Some("action"), "1", Some("2026-06-01")),
         ];
-        let rank = NextRank::new(&cfg);
+        let rank = TypeRank::next(&cfg);
         items.sort_by(|a, b| rank.cmp(a, b));
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["a1", "a2", "a3", "x1", "m1", "m2", "n1"]);

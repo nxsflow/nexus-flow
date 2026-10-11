@@ -50,7 +50,7 @@ nxf\-close(1)
 Close an item, recording why. Closing is final (no hard delete), so a reason is required
 .TP
 nxf\-list(1)
-List items, optionally filtered by status and/or type. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); override with `\-\-sort rank`
+List items, optionally filtered by status, type, container and/or label. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); `\-\-sort rank` ranks by the active plugin\*(Aqs `list` order. `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .TP
 nxf\-blocked(1)
 List blocked items (open, with an open blocker or in a cycle). Ranked by default; override with `\-\-sort id`
