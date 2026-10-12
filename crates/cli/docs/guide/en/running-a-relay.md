@@ -303,8 +303,8 @@ top of `crates/server/src/store_ddb.rs`.
 
 The relay's IAM role needs, on the **op table**, `dynamodb:Query`, `dynamodb:PutItem`,
 `dynamodb:UpdateItem` and **`dynamodb:ConditionCheckItem`**, and on the **registry table**
-`dynamodb:GetItem`, `dynamodb:PutItem` and `dynamodb:Query`. `ConditionCheckItem` is new in the
-first release after v0.210.0: each write now also checks the op one position below it, so that a
+`dynamodb:GetItem`, `dynamodb:PutItem` and `dynamodb:Query`. `ConditionCheckItem` is new in
+v0.210.1: each write now also checks the op one position below it, so that a
 reader is never handed a position before every lower one is written. **Grant it before you deploy
 that version** — a relay without it refuses every push with `AccessDeniedException` (a 500 to the
 client) while reads keep working.

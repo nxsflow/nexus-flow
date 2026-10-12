@@ -329,8 +329,8 @@ selbst anlegen — der Relay legt oder wandert sie nie. Ihre nötige Form steht 
 
 Die IAM-Rolle des Relays braucht auf der **Op-Tabelle** `dynamodb:Query`, `dynamodb:PutItem`,
 `dynamodb:UpdateItem` und **`dynamodb:ConditionCheckItem`**, auf der **Registry-Tabelle**
-`dynamodb:GetItem`, `dynamodb:PutItem` und `dynamodb:Query`. `ConditionCheckItem` ist neu im ersten
-Release nach v0.210.0: Jeder Schreibvorgang prüft jetzt auch das Op eine Position darunter, damit
+`dynamodb:GetItem`, `dynamodb:PutItem` und `dynamodb:Query`. `ConditionCheckItem` ist neu in
+v0.210.1: Jeder Schreibvorgang prüft jetzt auch das Op eine Position darunter, damit
 ein Leser nie eine Position erhält, bevor jede niedrigere geschrieben ist. **Gewähre es, bevor du
 diese Version ausrollst** — ohne es lehnt der Relay jeden Push mit `AccessDeniedException` ab (für
 den Client ein 500), während Lesen weiter funktioniert.
