@@ -326,3 +326,137 @@ fn the_nxf_entry_verbs_write_through_the_command_line() {
         .unwrap()
         .is_empty());
 }
+
+/// Run `probe-nxf` — the real `nxf` command tree with the fixture linked — as a subprocess in
+/// `dir`, `$HOME` pinned inside it, against the workspace whose db is `db`: (success, stdout).
+fn probe_nxf(dir: &std::path::Path, db: &str, args: &[&str]) -> (bool, String) {
+    use nxs_test_support::PinHome;
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_probe-nxf"))
+        .current_dir(dir)
+        .pin_home(&home)
+        .arg("--db")
+        .arg(db)
+        .args(args)
+        .output()
+        .expect("probe-nxf runs");
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).expect("utf-8 output"),
+    )
+}
+
+#[test]
+fn nxf_entry_list_prints_the_entries_in_order_human_and_json() {
+    // Review of PR #63, Test Quality #5: what a successful `nxf entry list` prints, byte for byte,
+    // and the receipts of `entry add`/`remove` — through the real command tree in a subprocess, so
+    // the assertion is on stdout and not on a function the verb happens to call.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = nxs_foundation::workspace::setup(
+        tmp.path(),
+        &nexus_flow_facade::workspace::flow_config("file-fixture"),
+    )
+    .unwrap();
+    let db = ws.db_path().to_string_lossy().into_owned();
+    let run = |args: &[&str]| probe_nxf(tmp.path(), &db, args);
+    let (ok, _) = run(&[
+        "create",
+        "--type",
+        "file",
+        "--title",
+        "report.md",
+        "--description",
+        "d",
+        "--priority",
+        "P1",
+        "--set",
+        "uri=.nxs/files/report.md",
+    ]);
+    assert!(ok, "create");
+    let id = {
+        let store = Store::open(&db, 1).unwrap();
+        store.list_items().unwrap()[0].id.clone()
+    };
+
+    // An empty list is `[]` under --json.
+    assert_eq!(
+        run(&["--json", "entry", "list", &id, "mirrors"]),
+        (true, "[]\n".to_string())
+    );
+
+    // The receipts carry the entry as stored: trimmed, the label after it.
+    assert_eq!(
+        run(&[
+            "--json",
+            "entry",
+            "add",
+            &id,
+            "mirrors",
+            "  s3://b/r.md ",
+            "--label",
+            " backup "
+        ]),
+        (
+            true,
+            format!(
+                "{}\n",
+                json!({ "ok": true, "msg": format!("{id} mirrors + s3://b/r.md (backup)") })
+            )
+        )
+    );
+    assert!(run(&["entry", "add", &id, "mirrors", "https://cdn/r.md"]).0);
+    assert!(
+        run(&[
+            "entry",
+            "add",
+            &id,
+            "mirrors",
+            "ftp://old/r.md",
+            "--label",
+            "old"
+        ])
+        .0
+    );
+    assert_eq!(
+        run(&[
+            "--json",
+            "entry",
+            "remove",
+            &id,
+            "mirrors",
+            " ftp://old/r.md "
+        ]),
+        (
+            true,
+            format!(
+                "{}\n",
+                json!({ "ok": true, "msg": format!("{id} mirrors - ftp://old/r.md") })
+            )
+        )
+    );
+
+    // --json: the `[{value, label?}]` array, in entry order.
+    let (ok, out) = run(&["--json", "entry", "list", &id, "mirrors"]);
+    assert!(ok);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        json!([
+            { "value": "s3://b/r.md", "label": "backup" },
+            { "value": "https://cdn/r.md" }
+        ])
+    );
+    assert_eq!(
+        out.lines().count(),
+        1,
+        "one line of JSON, unframed: {out:?}"
+    );
+    // Human: one entry per line, its label after a tab, framed by a blank line before and after.
+    assert_eq!(
+        run(&["entry", "list", &id, "mirrors"]),
+        (
+            true,
+            "\ns3://b/r.md\tbackup\nhttps://cdn/r.md\n\n".to_string()
+        )
+    );
+}

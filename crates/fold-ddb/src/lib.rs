@@ -88,9 +88,9 @@
 //! derived ranking keys read ([`records::with_ranking`]) costs one Query per active ticket and, per
 //! inactive neighbour, up to three Queries, their rows read by `BatchGetItem` (100 keys a request).
 //! A hosted `list` ([`records::list_board`]) costs one `typed` Query per listed type; one that is
-//! not ranked keeps and cuts its rows first and reads three Queries per row of its page plus one
+//! not ranked keeps and cuts its rows first and reads four Queries per row of its page plus one
 //! `BatchGetItem` for their timestamps, however many items the stream holds; a ranked one reads
-//! three Queries per live item of its types — the scope its rank is computed over — and its point
+//! four Queries per live item of its types — the scope its rank is computed over — and its point
 //! reads by `BatchGetItem`. No read caps its own requests: a server bounds one request by the
 //! table it hands in (E4 spec §5.1). The `typed` index costs a fold at most one write per item
 //! op, and only when the op gains, changes or loses the item's partition — a create, a retype, a

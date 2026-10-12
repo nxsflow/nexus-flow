@@ -9,8 +9,8 @@
 
 use crate::model::{
     is_valid_chunk_field, is_valid_chunk_id, parse_entry_value, EdgeKind, LinkRelation, LinkWeight,
-    MergeStrategy, Op, CHUNK_PAYLOAD_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES, MAX_ENTRY_TAGS,
-    MAX_FIELD_ENTRY_BYTES, MAX_SUPERSEDED,
+    MergeStrategy, Op, CHUNK_PAYLOAD_SEP, ENTRY_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES,
+    MAX_ENTRY_TAGS, MAX_FIELD_ENTRY_BYTES, MAX_SUPERSEDED,
 };
 use crate::reducer::Reducer;
 use crate::schema;
@@ -120,24 +120,34 @@ impl TaskReducer {
         )
     }
 
-    /// Whether a list-field entry op (6j6v.4g6r) names a foldable place: a non-empty item and field,
-    /// and — as every id that becomes a key cell of a server row — each within
-    /// [`MAX_CHUNK_ID_BYTES`] and free of the separator. Shared by the add and the remove.
+    /// Whether a list-field entry op (6j6v.4g6r) names a foldable place: a non-empty item within
+    /// [`MAX_CHUNK_ID_BYTES`] and free of the separator — as every id that becomes a key cell of a
+    /// server row — and a field name of the chunk-field grammar ([`is_valid_chunk_field`]: at most
+    /// 64 plain ASCII characters, which a plugin's list field name always is). The grammar keeps a
+    /// server's sort key `field_entries#<item>#<field>#<tag>` under its 1 KiB limit even when the
+    /// item and the tag escape every byte, so a server folds every op a replica folds (review of
+    /// PR #63, Integrity #4). Shared by the add and the remove.
     fn entry_place_ok(op: &Op) -> bool {
-        let id_ok =
-            |id: &str| !id.is_empty() && id.len() <= MAX_CHUNK_ID_BYTES && !id.contains(SEP);
-        id_ok(&op.target_id) && id_ok(&op.field)
+        !op.target_id.is_empty()
+            && op.target_id.len() <= MAX_CHUNK_ID_BYTES
+            && !op.target_id.contains(ENTRY_SEP)
+            && is_valid_chunk_field(&op.field)
     }
 
     /// A list-field entry add's value and label (6j6v.4g6r), or `None` when the op does not fold:
     /// a malformed place or value ([`parse_entry_value`]), a value over [`MAX_FIELD_ENTRY_BYTES`],
-    /// or an op id a server could not key.
+    /// or an op id a server could not key or a remove could not name. The op id is the add's tag,
+    /// and a remove joins the tags it observed with [`ENTRY_SEP`]: a tag holding the separator
+    /// would split into other tags there — an entry nobody can remove, and a clear dropped whole
+    /// for an empty piece (review of PR #63, Integrity #1). Only a peer that skipped the store
+    /// mints such an id; its add is stored and not folded, the same on every replica.
     fn parse_entry_add(op: &Op) -> Option<(&str, Option<&str>)> {
         let raw = op.value.as_deref()?;
         if !Self::entry_place_ok(op)
             || raw.len() > MAX_FIELD_ENTRY_BYTES
             || op.op_id.is_empty()
             || op.op_id.len() > MAX_CHUNK_ID_BYTES
+            || op.op_id.contains(ENTRY_SEP)
         {
             return None;
         }
@@ -152,7 +162,7 @@ impl TaskReducer {
         if !Self::entry_place_ok(op) {
             return None;
         }
-        let tags: Vec<&str> = raw.split(SEP).collect();
+        let tags: Vec<&str> = raw.split(ENTRY_SEP).collect();
         (tags.len() <= MAX_ENTRY_TAGS
             && tags
                 .iter()

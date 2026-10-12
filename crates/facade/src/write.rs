@@ -26,7 +26,7 @@ use crate::plugin::{FieldType, MergeStrategy, PluginConfig};
 use crate::validate;
 use nexus_flow_core::id::ReplicaIds;
 use nexus_flow_core::model::{
-    EdgeKind, ItemRow, LinkRelation, LinkWeight, MergeStrategy as CoreMergeStrategy,
+    EdgeKind, FieldEntry, ItemRow, LinkRelation, LinkWeight, MergeStrategy as CoreMergeStrategy,
 };
 use nexus_flow_core::store::Store;
 use std::collections::{HashMap, HashSet};
@@ -1158,14 +1158,15 @@ pub fn label_remove(
 // the entry's identity: adding a value the field holds relabels it, removing a value removes it
 // whatever its label, and an add another device made concurrently survives a remove (add wins).
 
-/// The declared LIST field `field`, applicable to the live item `id`'s type — the shared check of
-/// [`entry_add`] and [`entry_remove`].
+/// The declared LIST field `field` of the live item `id` — the shared check of [`entry_add`] and
+/// [`entry_remove`], which returns the item's type too, so the add can apply the field's `on`
+/// scope (the remove does not, see there).
 fn require_list_field<'c>(
     store: &Store,
     cfg: &'c PluginConfig,
     id: &str,
     field: &str,
-) -> Result<&'c crate::plugin::FieldDecl> {
+) -> Result<(&'c crate::plugin::FieldDecl, String)> {
     let item = require_item(store, id)?;
     match cfg.fields.get(field) {
         Some(decl) if decl.list => {}
@@ -1187,11 +1188,11 @@ fn require_list_field<'c>(
             )));
         }
     }
-    applicable_decl(cfg, item.item_type.as_deref().unwrap_or_default(), field)
+    Ok((&cfg.fields[field], item.item_type.unwrap_or_default()))
 }
 
-/// An entry value as the caller gave it, trimmed: non-blank and free of U+001F (the separator the
-/// entry op uses).
+/// An entry value as the caller gave it, trimmed: non-blank and free of U+001F
+/// ([`ENTRY_SEP`](nexus_flow_core::model::ENTRY_SEP), the separator the entry op uses).
 fn entry_text<'v>(field: &str, value: &'v str) -> Result<&'v str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1199,7 +1200,7 @@ fn entry_text<'v>(field: &str, value: &'v str) -> Result<&'v str> {
             "an entry of '{field}' must not be blank"
         )));
     }
-    if trimmed.contains('\u{1f}') {
+    if trimmed.contains(nexus_flow_core::model::ENTRY_SEP) {
         return Err(NxfError::validation(format!(
             "an entry of '{field}' must not contain the U+001F control character"
         )));
@@ -1211,7 +1212,9 @@ fn entry_text<'v>(field: &str, value: &'v str) -> Result<&'v str> {
 /// validated against the field's type (a `datetime` is stored as the UTC instant, as a single
 /// `datetime` field is); the optional label is trimmed and non-blank (free text, like an item
 /// label). Adding a value the field already holds is not an error: the entry stays one entry and
-/// takes this label — how an entry is relabelled, or unlabelled with `label = None`.
+/// takes this label — how an entry is relabelled, or unlabelled with `label = None`. The field's
+/// `on` scope applies, as for `--set`. Returns the entry as stored — what a receipt reports
+/// ([`entry_add_receipt`]), so a `datetime` entry given with an offset reads back in UTC.
 // The write seam's shape (store, cfg, now, actor, target) plus the entry's three parts.
 #[allow(clippy::too_many_arguments)]
 pub fn entry_add(
@@ -1223,9 +1226,10 @@ pub fn entry_add(
     field: &str,
     value: &str,
     label: Option<&str>,
-) -> Result<()> {
+) -> Result<FieldEntry> {
     let actor = validate::actor(actor)?;
-    let decl = require_list_field(store, cfg, id, field)?;
+    let (_, item_type) = require_list_field(store, cfg, id, field)?;
+    let decl = applicable_decl(cfg, &item_type, field)?;
     let value = typed_custom_value(decl, field, entry_text(field, value)?)?;
     let label = label.map(validate::label).transpose()?;
     let size = nexus_flow_core::model::entry_value(&value, label.as_deref()).len();
@@ -1237,13 +1241,21 @@ pub fn entry_add(
     }
     stamp_now(store, now)?;
     store.add_field_entry(id, field, &value, label.as_deref(), actor);
-    Ok(())
+    Ok(FieldEntry { value, label })
 }
 
 /// Remove the entry `value` from the list field `field` of item `id` (observed-remove), whatever
-/// its label. The value is matched as [`entry_add`] stores it — trimmed, a `datetime` as its UTC
-/// instant — but not re-validated otherwise, so an entry the plugin no longer accepts (an enum
-/// member since dropped) can still be removed. Removing a value the field does not hold is a no-op.
+/// its label. Removing a value the field does not hold is a no-op.
+///
+/// What every entry on show can be removed by: the value is matched as [`entry_add`] stores it —
+/// trimmed, a `datetime` as its UTC instant — but not re-validated otherwise, so an entry the
+/// plugin no longer accepts (an enum member since dropped) can still be removed. For the same
+/// reason the field's `on` scope does not apply here: a plugin that narrows `on` leaves the entries
+/// of the other types on show (records show every declared field's entries), and they stay
+/// removable (review of PR #63, Code Quality #5). A `datetime` value removes the entries of its UTC
+/// instant AND of its text as given, so an entry a peer stored without normalizing it
+/// (`…+02:00`) is removable by that text too (Integrity #5). Returns the value as matched — the
+/// stored form a receipt reports ([`entry_remove_receipt`]).
 pub fn entry_remove(
     store: &mut Store,
     cfg: &PluginConfig,
@@ -1252,9 +1264,9 @@ pub fn entry_remove(
     id: &str,
     field: &str,
     value: &str,
-) -> Result<()> {
+) -> Result<String> {
     let actor = validate::actor(actor)?;
-    let decl = require_list_field(store, cfg, id, field)?;
+    let (decl, _) = require_list_field(store, cfg, id, field)?;
     let text = entry_text(field, value)?;
     let value = match decl.field_type {
         FieldType::Datetime => validate::datetime(text).unwrap_or_else(|_| text.to_string()),
@@ -1262,7 +1274,26 @@ pub fn entry_remove(
     };
     stamp_now(store, now)?;
     store.remove_field_entry(id, field, &value, actor);
-    Ok(())
+    if value != text {
+        store.remove_field_entry(id, field, text, actor);
+    }
+    Ok(value)
+}
+
+/// The receipt message of an entry add — `<id> <field> + <value> (<label>)`, the label part only
+/// for a labelled entry — from the entry as [`entry_add`] stored it. The one spelling the CLI and
+/// the MCP server share; `id` is whichever form the surface shows.
+pub fn entry_add_receipt(id: &str, field: &str, entry: &FieldEntry) -> String {
+    match &entry.label {
+        Some(label) => format!("{id} {field} + {} ({label})", entry.value),
+        None => format!("{id} {field} + {}", entry.value),
+    }
+}
+
+/// The receipt message of an entry remove — `<id> <field> - <value>` — from the value as
+/// [`entry_remove`] matched it.
+pub fn entry_remove_receipt(id: &str, field: &str, value: &str) -> String {
+    format!("{id} {field} - {value}")
 }
 
 // ---- thread links (nxf 6j6v.8dbe) -------------------------------------------

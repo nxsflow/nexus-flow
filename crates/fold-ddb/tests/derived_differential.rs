@@ -486,12 +486,18 @@ fn a_stream_folded_by_index_revision_2_is_refused_then_refolded_and_ranks() {
 
         let selection = ready(board::select(&t)).unwrap();
         match ready(records::active_board(&t, selection)) {
-            Err(records::RecordsError::NotCurrent { found: Some(2) }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: Some(2),
+            }) => {}
             other => panic!("seed {seed}: a revision-2 stream must be refused, got {other:?}"),
         }
         // The graph read refuses it itself (review of PR #55, Integrity #3)…
         match ready(records::with_ranking(&t, plain.clone(), &reads)) {
-            Err(records::RecordsError::NotCurrent { found: Some(2) }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: Some(2),
+            }) => {}
             other => panic!(
                 "seed {seed}: the graph of a revision-2 stream must be refused, got {other:?}"
             ),

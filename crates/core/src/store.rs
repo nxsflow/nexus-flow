@@ -428,10 +428,11 @@ impl Store {
         label: Option<&str>,
         author: &str,
     ) -> String {
+        use crate::model::ENTRY_SEP;
         assert!(
             !value.is_empty()
-                && !value.contains(SEP)
-                && label.is_none_or(|l| !l.is_empty() && !l.contains(SEP)),
+                && !value.contains(ENTRY_SEP)
+                && label.is_none_or(|l| !l.is_empty() && !l.contains(ENTRY_SEP)),
             "a list entry is a non-empty, separator-free value with an optional non-empty, \
              separator-free label: {value:?} / {label:?}"
         );
@@ -454,7 +455,10 @@ impl Store {
         self.emit_entry_removes(item_id, field, &tags, author);
     }
 
-    /// The live (untombstoned) add tags of one list field, of one value or of all.
+    /// The live (untombstoned) add tags of one list field, of one value or of all. A tag holding
+    /// [`ENTRY_SEP`](crate::model::ENTRY_SEP) is skipped: a remove naming it would split it into
+    /// other tags (review of PR #63, Integrity #1). The reducer never folds such an add, so this is
+    /// the backstop for a row folded by anything else.
     fn live_entry_tags(&self, item_id: &str, field: &str, value: Option<&str>) -> Vec<String> {
         let mut stmt = self
             .conn()
@@ -468,6 +472,7 @@ impl Store {
         stmt.query_map(params![item_id, field, value], |r| r.get::<_, String>(0))
             .unwrap()
             .map(Result::unwrap)
+            .filter(|tag| !tag.contains(crate::model::ENTRY_SEP))
             .collect()
     }
 
@@ -475,7 +480,7 @@ impl Store {
     /// larger one); nothing when there is nothing to remove.
     fn emit_entry_removes(&mut self, item_id: &str, field: &str, tags: &[String], author: &str) {
         for chunk in tags.chunks(crate::model::MAX_ENTRY_TAGS) {
-            let joined = chunk.join(&SEP.to_string());
+            let joined = chunk.join(&crate::model::ENTRY_SEP.to_string());
             self.emit_task("field", item_id, field, "remove", Some(joined), author);
         }
     }

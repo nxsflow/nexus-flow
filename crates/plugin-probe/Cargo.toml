@@ -12,6 +12,11 @@ description = "Test-only: proves an externally-registered plugin survives realis
 [dependencies]
 nexus-flow-facade = { path = "../facade" }
 inventory = "0.3"
+# `src/bin/probe-nxf.rs` (review of PR #63, Test Quality #5): the real `nxf` command tree with this
+# crate's plugins linked, which `tests/list_field_consumer.rs` runs as a subprocess to assert what a
+# verb prints. A bin cannot use dev-dependencies, so the CLI is a dependency here; the crate is
+# still never a dependency of a shipped binary.
+nexus-flow-cli = { path = "../cli" }
 
 [dev-dependencies]
 # The ky26 acceptance test (`tests/ky26_file_consumer.rs`) drives the real facade read+write layer
@@ -20,8 +25,8 @@ inventory = "0.3"
 nexus-flow-core = { path = "../core" }
 serde_json = "1"
 # The list-field acceptance (`tests/list_field_consumer.rs`, 6j6v.4g6r) also drives the real `nxf`
-# command tree in-process (`nexus_flow_cli::run_from`) over a workspace whose plugin is this crate's
-# fixture — a subprocess `nxf` cannot see a test-only plugin.
-nexus-flow-cli = { path = "../cli" }
+# command tree — in-process (`nexus_flow_cli::run_from`) and as the `probe-nxf` subprocess, its
+# `$HOME` pinned (`nxs-test-support`) — over a workspace whose plugin is this crate's fixture.
 nxs-foundation = { path = "../foundation" }
+nxs-test-support = { path = "../test-support" }
 tempfile = "3"

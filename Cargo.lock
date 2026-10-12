@@ -2722,6 +2722,7 @@ dependencies = [
  "nexus-flow-core",
  "nexus-flow-facade",
  "nxs-foundation",
+ "nxs-test-support",
  "serde_json",
  "tempfile",
 ]

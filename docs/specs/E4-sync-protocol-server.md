@@ -311,7 +311,10 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
   so `Folder::is_current` is false and the fold run clears and refolds it from position 0, exactly
   as for a release with other reducer revisions — no manual step. Until then every records read
   (`active_board`, `with_ranking`, `list_board`) refuses the stream (`RecordsError::NotCurrent`)
-  rather than answer without its labels — and goes on refusing it through the refold (review of PR
+  rather than answer without its labels. The readers check the task reducer's revision
+  (`revision_task`) the same way, since every row they read is a task row: a stream folded at task
+  revision 2 holds list-field entry ops stored unfolded (`6j6v.4g6r`) and is refused with
+  `NotCurrent { domain: "task", .. }` until refolded (review of PR #63) — and goes on refusing it through the refold (review of PR
   #55): `Folder::clear(table, until)` rewrites the watermark FIRST as a sentinel that names no
   revision, `folded_through` 0 and `refold_until` = `until`, the relay head the refold must reach;
   the refold's first batch writes the revisions, and the reads answer `RecordsError::Refolding`
@@ -321,16 +324,16 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
   with older rules also clears a stream folded by newer ones — roll a revision bump out to every
   fold run at once, and roll back the same way.
 - **What a hosted read costs, per call** (review of PR #55, Integrity #1). One `GetItem` of the
-  watermark per read. `active_board`: `4n + p` more for `n` active tickets and `p` parents
+  watermark per read. `active_board`: `5n + p` more for `n` active tickets and `p` parents
   outside them. `with_ranking`: one Query per active ticket, the neighbours' rows by `BatchGetItem`
   (100 keys a request, unprocessed keys sent again), and per live neighbour up to three Queries;
   a `next` key that reads a `[ranking.list]` rank adds one `typed` Query per such type and up to
   three Queries per live, unarchived item of it. `list_board`: one `typed` Query per listed type
   (or one `items#` Query, paged at 1 MB, without a type filter); a list that is NOT ranked keeps
-  and cuts on the rows first (`ListReads::select`), so beyond the rows it costs three Queries per
+  and cuts on the rows first (`ListReads::select`), so beyond the rows it costs four Queries per
   page row, one per kept row for a container or label filter, and one `BatchGetItem` per 100
-  timestamps and outside parents — `list --limit 10` about 33 requests, whatever the stream
-  holds. A RANKED list reads three Queries per live, unarchived item of its types plus the batched
+  timestamps and outside parents — `list --limit 10` about 43 requests, whatever the stream
+  holds. A RANKED list reads four Queries per live, unarchived item of its types plus the batched
   point reads, and `next`'s board and the graph when its keys read them: a rank is computed over
   the type's whole `list` scope (`docs/specs/derived-ranking-keys.md` §12), so that cost is the
   scope's, not the answer's. No read caps its requests; a hard per-call budget that answers with an

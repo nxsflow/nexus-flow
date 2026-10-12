@@ -209,6 +209,12 @@ whatever its label. Two devices may add and remove at the same time: an address 
 survives a remove on the other that never saw it, and both end with the same list. `--set` only
 clears a list field; a list field cannot be `required`, a `longtext`, take a `merge`, or rank.
 
+`entry add` and `entry remove` print the entry as stored, so a `datetime` entry given as
+`10:30:00+02:00` reads back as `08:30:00Z`, and a `datetime` entry is removed by the same moment at
+any offset. Every entry you can see can be removed: `entry remove` checks neither the value against
+the field's type (an enum value since dropped) nor `on` (a type the plugin has since left out). A
+list field's name is at most 64 characters.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under

@@ -288,15 +288,18 @@ pub const MAX_FIELD_ENTRY_BYTES: usize = 16 * 1024;
 /// more tags to remove emits several removes. Fold semantics, as [`MAX_CHUNK_BYTES`].
 pub const MAX_ENTRY_TAGS: usize = 1024;
 
-/// What separates an entry's value from its label in an entry add op's `value` (6j6v.4g6r): U+001F,
-/// which neither may contain. No separator: the entry has no label.
-pub const ENTRY_LABEL_SEP: char = '\u{1f}';
+/// The one separator of the list-field entry ops (6j6v.4g6r), U+001F: it separates an add's entry
+/// value from its label (no separator: the entry has no label), and the add tags a remove names.
+/// So neither a value, a label nor an add's op id — the tag a remove names it by — may contain it:
+/// the write seam refuses it in a value or label, and the reducer leaves an add whose op id holds
+/// it unfolded, since no remove could name that add. Every entry path spells it by this name.
+pub const ENTRY_SEP: char = '\u{1f}';
 
-/// An entry add op's `value`: the entry value, then [`ENTRY_LABEL_SEP`] and the label when there
+/// An entry add op's `value`: the entry value, then [`ENTRY_SEP`] and the label when there
 /// is one. The one place the layout is written; [`parse_entry_value`] reads it back.
 pub fn entry_value(value: &str, label: Option<&str>) -> String {
     match label {
-        Some(label) => format!("{value}{ENTRY_LABEL_SEP}{label}"),
+        Some(label) => format!("{value}{ENTRY_SEP}{label}"),
         None => value.to_string(),
     }
 }
@@ -304,11 +307,11 @@ pub fn entry_value(value: &str, label: Option<&str>) -> String {
 /// The entry value and label an entry add op's `value` carries, or `None` for a malformed one: an
 /// empty value, an empty label after the separator, or a second separator.
 pub fn parse_entry_value(raw: &str) -> Option<(&str, Option<&str>)> {
-    let (value, label) = match raw.split_once(ENTRY_LABEL_SEP) {
+    let (value, label) = match raw.split_once(ENTRY_SEP) {
         Some((value, label)) => (value, Some(label)),
         None => (raw, None),
     };
-    let label_ok = label.is_none_or(|l| !l.is_empty() && !l.contains(ENTRY_LABEL_SEP));
+    let label_ok = label.is_none_or(|l| !l.is_empty() && !l.contains(ENTRY_SEP));
     (!value.is_empty() && label_ok).then_some((value, label))
 }
 

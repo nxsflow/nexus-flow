@@ -227,7 +227,8 @@ label = "Occurred on"
 
 - **Accepted:** an RFC 3339 date-time **with a time zone** — `Z` or a numeric offset
   (`2026-10-12T10:30:00+02:00`, `2026-10-12T08:30:00Z`, `…T08:30:00.250Z`). Lowercase `t`/`z` are
-  RFC 3339 too.
+  RFC 3339 too, and so is a space for the `T` (`2026-10-12 08:30:00Z`). Surrounding whitespace is
+  trimmed, in `--set` as in a list entry. A leap second (`23:59:60Z`) is stored as `23:59:59Z`.
 - **Refused (`validation`, naming the field):** a plain date (`2026-10-12` — a plugin wanting a
   date declares `date`), a local time without an offset (`2026-10-12T08:30:00`), anything else
   that is not RFC 3339, and an instant whose UTC year falls outside `0000..=9999`.
@@ -275,6 +276,9 @@ label = "E-mail"
   derived ranking key (`of = { field = … }` naming it is refused at load): a list holds several
   values, none of which is the one to rank by.
 
+- **The name** of a list field is at most 64 characters (refused at load otherwise): the fold keys
+  each entry by it, and a server's key has to hold it beside the item and the add's op id.
+
 **Writing.** `--set` does not write entries — `update --set email=` (empty) **clears** the list,
 and a non-empty value is a `validation` error that names the verbs below (so does `create --set
 email=…`):
@@ -295,6 +299,19 @@ order, `label` present only on a labelled entry; a list with no entry is absent:
 
 `nxf schema --json` / `flow_schema` mark the field `"list": true` beside its element `kind`
 (`"kind": "text"`); a single-value field carries no `list` key, so its entry is unchanged.
+
+**Receipts.** `entry add` and `entry remove` answer `{ok, msg}` with the entry **as stored**:
+`<id> <field> + <value> (<label>)` and `<id> <field> - <value>`, so a `datetime` entry given as
+`…10:30:00+02:00` is reported as `…08:30:00Z` (one spelling, `write::entry_add_receipt` /
+`entry_remove_receipt`, shared by the CLI and the MCP server).
+
+**Every entry on show is removable.** `entry add` applies the field's `on` scope, as `--set` does.
+`entry remove` does not: when a plugin narrows `on`, the records of the other types still show
+their entries (a record shows every declared field's entries), and they can still be removed. Nor
+is a removed value re-validated, so an entry the plugin no longer accepts (an enum member since
+dropped) is removable too. A `datetime` value removes the entries of its UTC instant and of its
+text as given, so an entry another writer stored without normalizing it (`…+02:00`) is removable
+by that text.
 
 **Merge semantics — an observed-remove set (add wins).**
 
@@ -331,13 +348,35 @@ projected by one function both read (`model::present_entries`). Like every custo
 needs no plugin config: a list op of another plugin folds and syncs, and surfaces only where a
 plugin declares the name as a list (§7). A malformed op — an empty value or label, a value over
 16 KiB, an id over 128 bytes, a remove naming no tag or more than 1,024 — is stored and not folded,
-the same on every replica.
+the same on every replica. So is an add whose op id contains U+001F: its op id is the tag a
+remove names it by, and a remove joins its tags with U+001F, so such a tag would split into other
+tags there — an entry nobody could remove, and a clear dropped whole for an empty piece. And so is
+an op whose field name is not 1 to 64 characters of ASCII letters, digits, `_`, `-` and `.` (the
+chunk-field grammar, which a declared list name always meets): with `%`/`#` escaped to three bytes,
+a longer or stranger name could push a server's sort key past 1 KiB, and the server would refuse an
+op a replica folds.
+
+**Tombstones grow and are not collected.** A remove keeps the row of every add it observed — value,
+label and coordinate — marked `removed`, because an add arriving later must still be checked
+against it; a relabel adds a row each time. So `field_entries#<item>#` grows with the field's
+**history**, not with its present entries: an address relabelled ten times and removed is eleven
+rows. A remove may also name tags no add ever carried (up to 1,024 per op, and nothing limits the
+number of removes): each becomes a row with no value — a **phantom tombstone**, never an entry, but
+read with every other row. A replica reads only the present rows (`value IS NOT NULL AND removed =
+0`); a server's hosted record and `list` reads take the whole range on every read — paged past
+1 MB (about 64 rows at the 16 KiB limit), so the answer stays whole and the cost grows. Collecting
+tombstones safely needs to know that every replica has seen the remove (causal stability), which
+the relay does not track today; until then, a compaction — or keeping the tombstones under a
+separate key prefix the read skips — is filed as `6j6v.2sbr`.
 
 **Migration.** An older binary knows only `set*` under the `field` kind, so it stores an entry op
 without folding it (§7). The task reducer's fold revision moves to 3, so a replica and a hosted
 stream fold their log once more and surface entry ops an older binary stored. On a server the
 entries of one item are one range (`field_entries#<item>#`), read with one Query per item record;
-the `.adj`-style index revision does not change, and no index is added.
+the `.adj`-style index revision does not change (`INDEX_REVISION` stays 3), and no index is added.
+A hosted reader refuses a stream whose watermark names another task revision than its own
+(`RecordsError::NotCurrent { domain: "task", .. }`), as it refuses another index revision, so a
+stream still folded at task revision 2 is not served with empty lists before its refold.
 
 ## 6. Read & schema surface
 

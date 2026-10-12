@@ -26,10 +26,20 @@
 //! One join is read only when asked for: [`with_contributes_to`] fills each ticket's outgoing
 //! `contributes_to` targets, which only the facade's container filter (`next --in`) reads. It is one
 //! more Query per ticket, on `.cadj#<ticket>#` — `6n + 1 + p` with it — bounded the same way. A
-//! Query returns more than one page only past 1 MB, which one ticket's custom values, list
-//! entries, labels or links do not reach. The entries under a ticket carry their add's label or link and its presence
+//! Query returns more than one page only past 1 MB, which one ticket's custom values, labels or
+//! links do not reach. The entries under a ticket carry their add's label or link and its presence
 //! (see [`board`](crate::board), "Who owns a label or a thread link"), so a label toggled many
 //! times costs nothing more to read.
+//!
+//! List-field entries are the exception (6j6v.4g6r): `field_entries#<ticket>#` holds one row per
+//! add ever folded, and a remove keeps the row, value and all, marked `removed` — the observed-
+//! remove tombstone a later add must still be checked against. So the range grows with the field's
+//! history, not with its present entries: every relabel is a row, every removed entry stays one,
+//! and a peer can tombstone tags no add ever carried (up to 1,024 per remove op), each a row with
+//! no value. At 16 KiB a row, about 64 rows pass 1 MB, and the Query then takes more than one
+//! page; [`Table::query_prefix`] follows every page, so the answer stays whole and only the cost
+//! grows. Nothing collects the tombstones yet (spec plugin-custom-fields §5.2; compaction is filed
+//! as 6j6v.2sbr).
 //!
 //! The requests are not sent one after the other: at most [`READ_CONCURRENCY`] tickets are read at
 //! a time, so a board's latency is about `n / READ_CONCURRENCY` round trips, and no board sends more
@@ -66,9 +76,12 @@
 //! (6j6v.15ed), the self-describing `.adj#` entries and the `typed` index attribute with revision 3
 //! (6j6v.1c5s, 6j6v.xkr7). A stream whose watermark names an older one — or none, folded before
 //! revisions were recorded for the index — lacks them, and its records would come back without
-//! labels or conversations, its list empty. [`active_board`], [`with_ranking`] and [`list_board`]
-//! refuse such a stream ([`RecordsError::NotCurrent`]); the fold run refolds it
-//! ([`Folder::is_current`]), after which it reads normally.
+//! labels or conversations, its list empty. The rows themselves are the task reducer's, so its
+//! revision counts too: a stream folded by task revision 2 holds list-field entry ops an older
+//! server stored without folding them (revision 3, 6j6v.4g6r), and would serve their lists empty.
+//! [`active_board`], [`with_ranking`] and [`list_board`] refuse a stream whose watermark names
+//! another index or task revision than this build's ([`RecordsError::NotCurrent`], naming the
+//! domain); the fold run refolds it ([`Folder::is_current`]), after which it reads normally.
 //!
 //! A refold is refused for its whole length, not only until it starts: [`Folder::clear`] leaves a
 //! sentinel watermark that names no revision (`NotCurrent`), and once the refold has written this
@@ -88,12 +101,16 @@ use crate::layout::{
 use crate::table::{text, Row, Table};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use nexus_flow_core::graph::Edge;
-use nexus_flow_core::model::{self, EdgeKind, EntryAdd, FieldEntry, ItemRow, LinkWeight};
+use nexus_flow_core::model::{
+    self, EdgeKind, EntryAdd, FieldEntry, ItemRow, LinkWeight, DOMAIN_TASK,
+};
+use nexus_flow_core::task_reducer::TaskReducer;
 use nexus_flow_facade::read::{
     self, ActiveBoard, ActiveTicket, ListBoard, ListItem, ListReads, ListSelect, Neighbour,
     ParentRef, RankingGraph, RankingReads,
 };
 use nxs_foundation::change::Cell;
+use nxs_foundation::reducer::Reducer;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How many tickets [`active_board`] reads at a time. Each ticket is five requests, so at most five
@@ -105,10 +122,15 @@ pub const READ_CONCURRENCY: usize = 16;
 pub enum RecordsError<E> {
     /// The table refused a request.
     Table(E),
-    /// The stream was folded by older index rules than this build reads (`found`: the revision its
-    /// watermark names, `None` when it names none). Its records would lack joins; the fold run
-    /// refolds it.
-    NotCurrent { found: Option<i64> },
+    /// The stream was folded by other rules than this build reads: `domain` is the watermark
+    /// revision that differs — [`INDEX_DOMAIN`] for this crate's index rules, or the task
+    /// reducer's domain (`task`) for the rows the records read — and `found` the revision the
+    /// watermark names for it (`None` when it names none). Its records would lack joins or rows;
+    /// the fold run refolds it.
+    NotCurrent {
+        domain: &'static str,
+        found: Option<i64>,
+    },
     /// The stream is being folded again from position 0 ([`Folder::clear`]) and has not yet
     /// reached `until`, the relay position the refold has to reach before it is served: its
     /// tables hold part of its history only.
@@ -119,10 +141,11 @@ impl<E: std::fmt::Display> std::fmt::Display for RecordsError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RecordsError::Table(e) => write!(f, "the views table refused a request: {e}"),
-            RecordsError::NotCurrent { found } => write!(
+            RecordsError::NotCurrent { domain, found } => write!(
                 f,
-                "the stream was folded by index revision {found:?}, this build reads revision \
-                 {INDEX_REVISION}; it has to be folded again"
+                "the stream was folded by {domain} revision {found:?}, this build reads revision \
+                 {}; it has to be folded again",
+                served_revision(domain)
             ),
             RecordsError::Refolding {
                 folded_through,
@@ -797,16 +820,40 @@ fn list_item(row: &Row, id: &str, edges: Option<&BTreeMap<String, EdgeEntry>>) -
     i
 }
 
-/// Refuse a stream folded by older index rules than this build reads, and one being folded again
-/// that has not caught up yet. A cleared stream's watermark names no revision
-/// ([`Folder::clear`]), so it is refused from the clear on; once the refold has written this
-/// build's revisions it is still refused until it reaches the position the clear named. A stream
-/// with no watermark at all has never been folded: it reads as the empty board it is.
+/// The revisions a stream must have been folded by for [`check_current`] to serve it: this crate's
+/// index rules, and the task reducer's — every row the records read is a task row, so a stream
+/// folded by an older task reducer lacks what that reducer folds since (revision 3, 6j6v.4g6r: a
+/// stream that held entry ops an older server stored unfolded would serve empty lists; review of
+/// PR #63, Code Quality #2). Not the chat's or the memory's: a board read reads none of their rows,
+/// and the fold run refolds a stream for them on its own ([`Folder::is_current`]).
+fn served_revisions() -> [(&'static str, i64); 2] {
+    [
+        (INDEX_DOMAIN, INDEX_REVISION),
+        (DOMAIN_TASK, TaskReducer.fold_revision()),
+    ]
+}
+
+/// This build's revision of `domain`, one of [`served_revisions`].
+fn served_revision(domain: &str) -> i64 {
+    served_revisions()
+        .into_iter()
+        .find(|(d, _)| *d == domain)
+        .map_or(0, |(_, rev)| rev)
+}
+
+/// Refuse a stream folded by other index or task-reducer rules than this build reads
+/// ([`served_revisions`]), and one being folded again that has not caught up yet. A cleared
+/// stream's watermark names no revision ([`Folder::clear`]), so it is refused from the clear on;
+/// once the refold has written this build's revisions it is still refused until it reaches the
+/// position the clear named. A stream with no watermark at all has never been folded: it reads as
+/// the empty board it is.
 async fn check_current<T: Table>(table: &T) -> Result<(), RecordsError<T::Error>> {
     if let Some(mark) = Folder::watermark(table).await? {
-        let found = mark.revisions.get(INDEX_DOMAIN).copied();
-        if found != Some(INDEX_REVISION) {
-            return Err(RecordsError::NotCurrent { found });
+        for (domain, revision) in served_revisions() {
+            let found = mark.revisions.get(domain).copied();
+            if found != Some(revision) {
+                return Err(RecordsError::NotCurrent { domain, found });
+            }
         }
         if let Some(until) = mark.refold_until.filter(|u| mark.folded_through < *u) {
             return Err(RecordsError::Refolding {

@@ -2334,7 +2334,7 @@ pub fn entry_add(
     let (ws, cfg) = open(db)?;
     let mut store = ws.open_store()?;
     let id = ws.replica.resolve_id(id);
-    write::entry_add(
+    let stored = write::entry_add(
         &mut store,
         &cfg,
         &resolve_now(None)?,
@@ -2344,11 +2344,9 @@ pub fn entry_add(
         value,
         label,
     )?;
-    let msg = |i: &str| match label {
-        Some(l) => format!("{i} {field} + {} ({})", value.trim(), l.trim()),
-        None => format!("{i} {field} + {}", value.trim()),
-    };
-    emit_entry(json, &ws.replica.prefix, &id, msg);
+    emit_entry(json, &ws.replica.prefix, &id, |i| {
+        write::entry_add_receipt(i, field, &stored)
+    });
     Ok(())
 }
 
@@ -2363,7 +2361,7 @@ pub fn entry_remove(
     let (ws, cfg) = open(db)?;
     let mut store = ws.open_store()?;
     let id = ws.replica.resolve_id(id);
-    write::entry_remove(
+    let matched = write::entry_remove(
         &mut store,
         &cfg,
         &resolve_now(None)?,
@@ -2373,7 +2371,7 @@ pub fn entry_remove(
         value,
     )?;
     emit_entry(json, &ws.replica.prefix, &id, |i| {
-        format!("{i} {field} - {}", value.trim())
+        write::entry_remove_receipt(i, field, &matched)
     });
     Ok(())
 }

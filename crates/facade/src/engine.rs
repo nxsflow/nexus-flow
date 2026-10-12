@@ -365,8 +365,10 @@ impl Engine {
 
     /// Add an entry to the list field `field` of item `id`, optionally labelled. Adding a value
     /// the field already holds relabels that entry (or unlabels it, with `label = None`) instead
-    /// of adding a second one. `validation` for a field that is not a declared list field of the
-    /// item's type, or a value its type refuses; `not_found` for a missing item.
+    /// of adding a second one. Returns the entry as stored — a `datetime` as its UTC instant —
+    /// which [`write::entry_add_receipt`] spells as a receipt. `validation` for a field that is not
+    /// a declared list field of the item's type, or a value its type refuses; `not_found` for a
+    /// missing item.
     pub fn field_entry_add(
         &self,
         now: &str,
@@ -375,14 +377,18 @@ impl Engine {
         field: &str,
         value: &str,
         label: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<crate::FieldEntry> {
         self.handle.with_state_mut(|s| {
             write::entry_add(&mut s.store, &self.cfg, now, actor, id, field, value, label)
         })
     }
 
     /// Remove the entry `value` from the list field `field` of item `id`, whatever its label
-    /// (observed-remove; removing a value the field does not hold is a no-op).
+    /// (observed-remove; removing a value the field does not hold is a no-op). The field's `on`
+    /// scope does not apply, so every entry on show stays removable. Returns the value as matched
+    /// (a `datetime` as its UTC instant), which [`write::entry_remove_receipt`] spells.
+    /// `validation` for a field that is not a declared list field, or a blank value; `not_found`
+    /// for a missing item.
     pub fn field_entry_remove(
         &self,
         now: &str,
@@ -390,7 +396,7 @@ impl Engine {
         id: &str,
         field: &str,
         value: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.handle.with_state_mut(|s| {
             write::entry_remove(&mut s.store, &self.cfg, now, actor, id, field, value)
         })

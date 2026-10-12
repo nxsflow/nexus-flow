@@ -481,7 +481,10 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
         // Read as it is, it would answer without labels or conversations — so it is refused.
         let selection = ready(board::select(&t)).unwrap();
         match ready(records::active_board(&t, selection)) {
-            Err(records::RecordsError::NotCurrent { found: None }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: None,
+            }) => {}
             other => panic!("seed {seed}: an old stream must be refused, got {other:?}"),
         }
 
@@ -690,7 +693,10 @@ fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_co
 
         let selection = ready(board::select(&t)).unwrap();
         match ready(records::active_board(&t, selection)) {
-            Err(records::RecordsError::NotCurrent { found: Some(1) }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: Some(1),
+            }) => {}
             other => panic!("seed {seed}: a revision-1 stream must be refused, got {other:?}"),
         }
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
@@ -711,4 +717,74 @@ fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_co
             .count();
     }
     assert!(seen > 0, "the refolded streams have contributing tickets");
+}
+
+#[test]
+fn a_stream_folded_by_task_revision_2_is_refused_then_refolded_and_reads_its_list_entries() {
+    // Review of PR #63, Code Quality #2. A server on task fold revision 2 stored the list-field
+    // entry ops without folding them: the same rows otherwise, no `field_entries#` rows, and a
+    // watermark naming task revision 2 beside the CURRENT index revision. Served as it is, every
+    // list would read empty — so it is refused, naming the task domain, and the fold run's rule
+    // (not current, clear, refold) brings the entries in.
+    let folder = Folder::platform().unwrap();
+    let mut seen = 0;
+    for seed in [3, 11, 27] {
+        let s = gen_board(seed);
+        let ops = delivered(&s, seed);
+        let t = serve(&s, seed, &folder);
+        for (sk, _) in t.rows() {
+            if sk.starts_with("field_entries#") {
+                ready(t.delete(&sk)).unwrap();
+            }
+        }
+        ready(t.write(&Write {
+            sk: WATERMARK_KEY.into(),
+            set: vec![("revision_task".to_string(), Cell::Int(2))],
+            remove: Vec::new(),
+            condition: Some(Cond::RowPresent),
+        }))
+        .unwrap();
+
+        let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+        assert_eq!(
+            mark.revisions.get(INDEX_DOMAIN),
+            folder.revisions().get(INDEX_DOMAIN),
+            "seed {seed}: only the task revision is older"
+        );
+        let selection = ready(board::select(&t)).unwrap();
+        match ready(records::active_board(&t, selection)) {
+            Err(records::RecordsError::NotCurrent {
+                domain: "task",
+                found: Some(2),
+            }) => {}
+            other => panic!("seed {seed}: a task-revision-2 stream must be refused, got {other:?}"),
+        }
+        let reads = read::list_reads(&cfg_with_fields(), &Default::default());
+        assert!(
+            matches!(
+                ready(records::list_board(&t, &reads)),
+                Err(records::RecordsError::NotCurrent { domain: "task", .. })
+            ),
+            "seed {seed}: a hosted list is refused too"
+        );
+        assert!(!folder.is_current(&mark), "seed {seed}");
+        ready(Folder::clear(&t, head(&ops))).unwrap();
+        ready(folder.fold_batch(&t, &ops)).unwrap();
+
+        let served = served_board(&t);
+        assert_eq!(
+            served.tickets,
+            read::active_board(&s).unwrap().tickets,
+            "seed {seed}"
+        );
+        seen += served
+            .tickets
+            .values()
+            .filter(|t| !t.custom_lists.is_empty())
+            .count();
+    }
+    assert!(
+        seen > 0,
+        "the refolded streams have tickets with list entries"
+    );
 }

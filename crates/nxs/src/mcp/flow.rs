@@ -486,14 +486,17 @@ pub(super) fn entry_add(
 ) -> Result<Value> {
     let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
     let id = ws.replica.resolve_id(&p.id).into_owned();
-    let label = p.label.as_deref();
-    write::entry_add(
-        &mut store, &cfg, &now, actor, &id, &p.field, &p.value, label,
+    let stored = write::entry_add(
+        &mut store,
+        &cfg,
+        &now,
+        actor,
+        &id,
+        &p.field,
+        &p.value,
+        p.label.as_deref(),
     )?;
-    let msg = match label {
-        Some(l) => format!("{id} {} + {} ({})", p.field, p.value.trim(), l.trim()),
-        None => format!("{id} {} + {}", p.field, p.value.trim()),
-    };
+    let msg = write::entry_add_receipt(&id, &p.field, &stored);
     Ok(json!({ "ok": true, "msg": msg }))
 }
 
@@ -507,8 +510,8 @@ pub(super) fn entry_remove(
 ) -> Result<Value> {
     let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
     let id = ws.replica.resolve_id(&p.id).into_owned();
-    write::entry_remove(&mut store, &cfg, &now, actor, &id, &p.field, &p.value)?;
-    let msg = format!("{id} {} - {}", p.field, p.value.trim());
+    let matched = write::entry_remove(&mut store, &cfg, &now, actor, &id, &p.field, &p.value)?;
+    let msg = write::entry_remove_receipt(&id, &p.field, &matched);
     Ok(json!({ "ok": true, "msg": msg }))
 }
 
@@ -933,5 +936,83 @@ mod custom_field_tests {
         wrong.field = "uri".into();
         let err = entry_add(None, start, "tester", &wrong).expect_err("uri is not a list");
         assert!(err.to_string().contains("--set uri="), "{err}");
+    }
+
+    #[test]
+    fn flow_entry_tools_refuse_with_the_error_kind_the_envelope_carries() {
+        // Review of PR #63, Test Quality #9: the refusals of flow_entry_add / flow_entry_remove and
+        // the `kind` the MCP envelope maps them to (`{ error: { kind, msg } }`), and the receipts
+        // spelled from the entry as stored.
+        use nxs_foundation::error::ErrorKind;
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let id = create(
+            None,
+            start,
+            "tester",
+            &create_params(vec!["uri=.nxs/files/a.md".into()], "2026-10-12T09:00:00Z"),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let receipt = entry_add(
+            None,
+            start,
+            "tester",
+            &entry(&id, "  s3://b/a.md ", Some(" backup ")),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({ "ok": true, "msg": format!("{id} mirrors + s3://b/a.md (backup)") })
+        );
+        let receipt =
+            entry_remove(None, start, "tester", &entry(&id, " s3://b/a.md ", None)).unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({ "ok": true, "msg": format!("{id} mirrors - s3://b/a.md") })
+        );
+
+        let with = |id: &str, field: &str, value: &str, label: Option<&str>| {
+            let mut p = entry(id, value, label);
+            p.field = field.into();
+            p
+        };
+        for (p, kind, why) in [
+            (
+                with("ab12.9999", "mirrors", "x", None),
+                ErrorKind::NotFound,
+                "a missing item",
+            ),
+            (
+                with(&id, "nope", "x", None),
+                ErrorKind::Validation,
+                "an undeclared field",
+            ),
+            (
+                with(&id, "uri", "x", None),
+                ErrorKind::Validation,
+                "a single-value field",
+            ),
+            (
+                with(&id, "mirrors", "  ", None),
+                ErrorKind::Validation,
+                "a blank value",
+            ),
+            (
+                with(&id, "mirrors", "a\u{1f}b", None),
+                ErrorKind::Validation,
+                "a separator",
+            ),
+        ] {
+            let err = entry_add(None, start, "tester", &p).expect_err(why);
+            assert_eq!(err.kind, kind, "add, {why}: {err}");
+            let err = entry_remove(None, start, "tester", &p).expect_err(why);
+            assert_eq!(err.kind, kind, "remove, {why}: {err}");
+        }
+        let err = entry_add(None, start, "tester", &with(&id, "mirrors", "x", Some(" ")))
+            .expect_err("a blank label");
+        assert_eq!(err.kind, ErrorKind::Validation);
     }
 }

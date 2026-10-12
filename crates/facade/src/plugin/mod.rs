@@ -820,6 +820,15 @@ impl PluginConfig {
                          entries always merge as an observed-remove set; drop `merge`"
                     ));
                 }
+                // The fold keys an entry by its field name, bounded where a server's key is
+                // (`nexus_flow_core::model::is_valid_chunk_field`): a longer name never folds.
+                if !nexus_flow_core::model::is_valid_chunk_field(name) {
+                    return Err(format!(
+                        "custom field '{name}' is a list with a {}-byte name — a list field's name \
+                         is at most 64 characters",
+                        name.len()
+                    ));
+                }
                 if decl.required {
                     return Err(format!(
                         "custom field '{name}' is a list and declares `required = true` — entries \
@@ -1469,6 +1478,26 @@ mod tests {
                 "{why}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_list_field_name_is_at_most_64_characters() {
+        // Review of PR #63, Integrity #4: the fold keys an entry by its field name, bounded where a
+        // server's key is, so a longer list name would never fold — refused at load instead. A
+        // single-value field keeps the plain grammar.
+        let at = |n: usize| format!("e{}", "x".repeat(n - 1));
+        let decl = |name: &str| format!("[fields.{name}]\ntype = \"text\"\nlist = true");
+        assert!(cfg_with_fields(&decl(&at(64))).validate_fields().is_ok());
+        let err = cfg_with_fields(&decl(&at(65)))
+            .validate_fields()
+            .expect_err("a 65-character list name");
+        assert!(err.contains("at most 64"), "{err}");
+        assert!(
+            cfg_with_fields(&format!("[fields.{}]\ntype = \"text\"", at(65)))
+                .validate_fields()
+                .is_ok(),
+            "a single-value field is not keyed per entry"
+        );
     }
 
     #[test]

@@ -214,6 +214,13 @@ entfernen: Eine Adresse, die auf dem einen hinzukommt, übersteht ein Entfernen 
 sie nie gesehen hat, und beide enden mit derselben Liste. `--set` leert ein Listenfeld nur; ein
 Listenfeld kann weder `required` noch `longtext` sein, kein `merge` haben und nicht ranken.
 
+`entry add` und `entry remove` geben den Eintrag so aus, wie er gespeichert ist: Ein
+`datetime`-Eintrag, eingegeben als `10:30:00+02:00`, erscheint als `08:30:00Z`, und ein
+`datetime`-Eintrag lässt sich mit demselben Zeitpunkt in jedem Offset entfernen. Jeder Eintrag, den
+du siehst, lässt sich entfernen: `entry remove` prüft weder den Wert gegen den Typ des Felds (einen
+inzwischen gestrichenen Enum-Wert) noch `on` (einen Typ, den das Plugin inzwischen ausnimmt). Der
+Name eines Listenfelds hat höchstens 64 Zeichen.
+
 ## Ein Ranking deklarieren
 
 Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie

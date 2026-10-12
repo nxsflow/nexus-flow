@@ -453,7 +453,10 @@ fn a_stream_not_folded_by_this_index_revision_is_refused_for_a_list() {
     .unwrap();
     let q = &queries("ab12.p000")[0];
     match ready(records::list_board(&t, &read::list_reads(&cfg, q))) {
-        Err(records::RecordsError::NotCurrent { found: Some(2) }) => {}
+        Err(records::RecordsError::NotCurrent {
+            domain: "index",
+            found: Some(2),
+        }) => {}
         other => panic!("a revision-2 stream must be refused, got {other:?}"),
     }
 }

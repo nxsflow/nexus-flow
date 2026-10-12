@@ -42,7 +42,10 @@ pub fn iso_date(value: &str) -> Result<String> {
 /// discarded. One fixed shape means the text order of stored values IS their chronological order,
 /// which is what every comparison downstream relies on (the SQL sort, the hosted fold, the ranking
 /// comparator's text arm). A UTC year outside `0000..=9999` is refused for the same reason.
+/// Surrounding whitespace is trimmed first, so a `--set` value and a list entry (which the write
+/// seam trims anyway) accept the same spellings (review of PR #63, Code Quality #6).
 pub fn datetime(value: &str) -> Result<String> {
+    let value = value.trim();
     let refuse = || {
         NxfError::validation(format!(
             "'{value}' is not an RFC 3339 date-time with a time zone \
@@ -248,6 +251,44 @@ mod tests {
             assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{v}");
             assert!(err.msg.contains("RFC 3339"), "{v}: {}", err.msg);
         }
+    }
+
+    #[test]
+    fn datetime_trims_surrounding_whitespace() {
+        assert_eq!(
+            datetime("  2026-10-12T10:30:00+02:00\n").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+        assert!(datetime("   ").is_err());
+    }
+
+    #[test]
+    fn datetime_stores_a_leap_second_as_the_second_before() {
+        // RFC 3339 allows `:60`; the `time` crate reads it as the last representable instant of
+        // that minute, so the stored form keeps the fixed shape and its chronological text order.
+        assert_eq!(
+            datetime("2016-12-31T23:59:60Z").unwrap(),
+            "2016-12-31T23:59:59Z"
+        );
+        assert_eq!(
+            datetime("2017-01-01T00:59:60+01:00").unwrap(),
+            "2016-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn datetime_accepts_a_space_for_the_t_with_a_time_zone_and_stores_the_t() {
+        // RFC 3339 §5.6 NOTE permits a space for the `T`, and the `time` crate reads it. With a
+        // zone it is the same instant and is stored in the one shape; without a zone it is still
+        // refused (`datetime_refuses_a_value_without_a_time_zone`).
+        assert_eq!(
+            datetime("2026-10-12 08:30:00Z").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+        assert_eq!(
+            datetime("2026-10-12 10:30:00+02:00").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
     }
 
     #[test]

@@ -1707,3 +1707,332 @@ fn a_datetime_custom_field_refuses_a_value_without_a_time_zone() {
     assert_eq!(err.kind, ErrorKind::Validation);
     assert_eq!(custom_ops(&s, &id).len(), before, "nothing was written");
 }
+
+// ---- typed list-field entries (6j6v.4g6r; review of PR #63, Test Quality #4) -------------------
+
+/// A PluginConfig with a list field of every element type, all on `person` only: `emails` (text),
+/// `kinds` (enum), `days` (date), `seen` (datetime).
+fn cfg_lists() -> PluginConfig {
+    toml::from_str(
+        r#"
+        name = "lists-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P1"]
+        [types]
+        list = ["person", "file"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "id", dir = "asc" } ]
+        [presentation.list]
+        columns = ["id"]
+
+        [fields.emails]
+        type = "text"
+        list = true
+        on = ["person"]
+
+        [fields.kinds]
+        type = "enum"
+        values = ["friend", "colleague"]
+        list = true
+        on = ["person"]
+
+        [fields.days]
+        type = "date"
+        list = true
+        on = ["person"]
+
+        [fields.seen]
+        type = "datetime"
+        list = true
+        on = ["person"]
+        "#,
+    )
+    .unwrap()
+}
+
+/// A store holding the person `ab12.0001` and the file `ab12.0002`.
+fn list_store() -> Store {
+    let mut s = store();
+    s.create_item("ab12.0001", "person", "Ada", "t");
+    s.create_item("ab12.0002", "file", "a.md", "t");
+    s
+}
+
+fn entries_of(s: &Store, field: &str) -> Vec<nexus_flow_facade::FieldEntry> {
+    s.field_entries_of("ab12.0001")
+        .unwrap()
+        .remove(field)
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_typed_list_entry_is_validated_as_a_single_value_is() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    let before = s.op_count();
+    for (field, value, needle) in [
+        ("kinds", "enemy", "expected one of"),
+        ("days", "2026-13-01", "ISO-8601"),
+        ("days", "yesterday", "ISO-8601"),
+        ("seen", "2026-10-12T08:30:00", "time zone"),
+        ("seen", "2026-10-12", "time zone"),
+    ] {
+        let err = write::entry_add(&mut s, &cfg, NOW, ACTOR, "ab12.0001", field, value, None)
+            .expect_err(value);
+        assert_eq!(err.kind, ErrorKind::Validation, "{field}={value}");
+        assert!(err.msg.contains(needle), "{field}={value}: {}", err.msg);
+    }
+    assert_eq!(s.op_count(), before, "no refused entry was written");
+    // The members and the well-formed values are accepted, an enum member exactly as declared.
+    write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "kinds",
+        " friend ",
+        None,
+    )
+    .unwrap();
+    write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "days",
+        "2026-10-12",
+        None,
+    )
+    .unwrap();
+    assert_eq!(entries_of(&s, "kinds")[0].value, "friend");
+    assert_eq!(entries_of(&s, "days")[0].value, "2026-10-12");
+}
+
+#[test]
+fn a_datetime_entry_is_stored_and_reported_as_the_utc_instant() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    let stored = write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "seen",
+        " 2026-10-12T10:30:00.9+02:00 ",
+        Some(" meeting "),
+    )
+    .unwrap();
+    let utc = nexus_flow_facade::FieldEntry {
+        value: "2026-10-12T08:30:00Z".into(),
+        label: Some("meeting".into()),
+    };
+    assert_eq!(stored, utc, "the entry as stored, not as given");
+    assert_eq!(entries_of(&s, "seen"), vec![utc.clone()]);
+    // The receipt the CLI and the MCP server both print (review of PR #63, Code Quality #3).
+    assert_eq!(
+        write::entry_add_receipt("ab12.0001", "seen", &stored),
+        "ab12.0001 seen + 2026-10-12T08:30:00Z (meeting)"
+    );
+    // The same instant at another offset is the same entry: a relabel, not a second one.
+    write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "seen",
+        "2026-10-12T03:30:00-05:00",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        entries_of(&s, "seen"),
+        vec![nexus_flow_facade::FieldEntry {
+            value: "2026-10-12T08:30:00Z".into(),
+            label: None
+        }]
+    );
+}
+
+#[test]
+fn a_datetime_entry_is_removed_by_the_same_instant_at_any_offset() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "seen",
+        "2026-10-12T08:30:00Z",
+        None,
+    )
+    .unwrap();
+    let matched = write::entry_remove(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "seen",
+        "2026-10-12T10:30:00+02:00",
+    )
+    .unwrap();
+    assert_eq!(matched, "2026-10-12T08:30:00Z", "matched as stored");
+    assert!(entries_of(&s, "seen").is_empty(), "removed across offsets");
+    assert_eq!(
+        write::entry_remove_receipt("ab12.0001", "seen", &matched),
+        "ab12.0001 seen - 2026-10-12T08:30:00Z"
+    );
+}
+
+#[test]
+fn a_datetime_entry_a_peer_stored_unnormalized_is_removable_by_its_text() {
+    // Review of PR #63, Integrity #5: a writer that skipped the seam stored `…+02:00` as it was.
+    // The remove matches the UTC instant AND the text as given, so the entry is not stuck until a
+    // clear.
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    s.add_field_entry(
+        "ab12.0001",
+        "seen",
+        "2026-10-12T10:30:00+02:00",
+        None,
+        "peer",
+    );
+    write::entry_remove(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "seen",
+        "2026-10-12T10:30:00+02:00",
+    )
+    .unwrap();
+    assert!(entries_of(&s, "seen").is_empty());
+}
+
+#[test]
+fn an_entry_over_16_kib_with_its_label_is_refused() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    let limit = nexus_flow_core::model::MAX_FIELD_ENTRY_BYTES;
+    // The value, U+001F (one byte) and the label count together.
+    let at_limit = "v".repeat(limit - 1 - "work".len());
+    write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "emails",
+        &at_limit,
+        Some("work"),
+    )
+    .expect("exactly at the limit");
+    let before = s.op_count();
+    let err = write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0001",
+        "emails",
+        &format!("{at_limit}v"),
+        Some("work"),
+    )
+    .expect_err("one byte over");
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(err.msg.contains("the limit is 16384"), "{}", err.msg);
+    assert_eq!(s.op_count(), before, "nothing written");
+}
+
+#[test]
+fn the_on_scope_applies_to_an_add_but_not_to_a_remove() {
+    // Review of PR #63, Code Quality #5: the file `ab12.0002` holds an entry from before the plugin
+    // narrowed `emails` to `person`. Records still show it, so it stays removable; a new add is
+    // refused, as `--set` is.
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    s.add_field_entry("ab12.0002", "emails", "old@x", None, "t");
+    let err = write::entry_add(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        "ab12.0002",
+        "emails",
+        "new@x",
+        None,
+    )
+    .expect_err("outside `on`");
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(
+        err.msg.contains("does not apply to type 'file'"),
+        "{}",
+        err.msg
+    );
+    write::entry_remove(&mut s, &cfg, NOW, ACTOR, "ab12.0002", "emails", "old@x").unwrap();
+    assert!(s.field_entries_of("ab12.0002").unwrap().is_empty());
+}
+
+#[test]
+fn an_entry_the_plugin_no_longer_accepts_is_still_removable() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    // `enemy` was a member once; the remove does not re-validate it.
+    s.add_field_entry("ab12.0001", "kinds", "enemy", None, "t");
+    write::entry_remove(&mut s, &cfg, NOW, ACTOR, "ab12.0001", "kinds", "enemy").unwrap();
+    assert!(entries_of(&s, "kinds").is_empty());
+}
+
+#[test]
+fn entry_remove_refuses_what_entry_add_refuses_about_the_place() {
+    let cfg = cfg_lists();
+    let mut s = list_store();
+    for (id, field, value, kind, why) in [
+        (
+            "ab12.9999",
+            "emails",
+            "a",
+            ErrorKind::NotFound,
+            "a missing item",
+        ),
+        (
+            "ab12.0001",
+            "nope",
+            "a",
+            ErrorKind::Validation,
+            "an undeclared field",
+        ),
+        (
+            "ab12.0001",
+            "emails",
+            "  ",
+            ErrorKind::Validation,
+            "a blank value",
+        ),
+        (
+            "ab12.0001",
+            "emails",
+            "a\u{1f}b",
+            ErrorKind::Validation,
+            "a separator",
+        ),
+    ] {
+        let err = write::entry_remove(&mut s, &cfg, NOW, ACTOR, id, field, value).expect_err(why);
+        assert_eq!(err.kind, kind, "{why}: {}", err.msg);
+    }
+}

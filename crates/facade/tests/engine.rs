@@ -1331,3 +1331,86 @@ fn engine_field_entries_add_relabel_remove_and_ride_every_record() {
         ErrorKind::Validation
     );
 }
+
+#[test]
+fn engine_field_entry_writes_return_the_stored_form_and_refuse_at_the_seam() {
+    // Review of PR #63, Test Quality #8: the Engine seam's own refusals of `field_entry_remove` and
+    // of blank or separator-holding values, and what both writes return.
+    let tmp = seeded_fields_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let id = "cf12.0002";
+    assert_eq!(
+        engine
+            .field_entry_add(NOW, "tester", id, "emails", "  a@x ", Some(" work "))
+            .unwrap(),
+        nexus_flow_facade::FieldEntry {
+            value: "a@x".into(),
+            label: Some("work".into()),
+        },
+        "the add returns the entry as stored"
+    );
+    assert_eq!(
+        engine
+            .field_entry_remove(NOW, "tester", id, "emails", " a@x ")
+            .unwrap(),
+        "a@x",
+        "the remove returns the value as matched"
+    );
+    for (value, label, why) in [
+        ("   ", None, "a blank value"),
+        ("a\u{1f}b", None, "a separator in the value"),
+        ("a@x", Some("  "), "a blank label"),
+    ] {
+        assert_eq!(
+            engine
+                .field_entry_add(NOW, "tester", id, "emails", value, label)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Validation,
+            "{why}"
+        );
+    }
+    for (item, field, value, kind, why) in [
+        (
+            "cf12.9999",
+            "emails",
+            "a@x",
+            ErrorKind::NotFound,
+            "a missing item",
+        ),
+        (
+            "cf12.0002",
+            "uri",
+            "a@x",
+            ErrorKind::Validation,
+            "a single-value field",
+        ),
+        (
+            "cf12.0002",
+            "nope",
+            "a@x",
+            ErrorKind::Validation,
+            "an undeclared field",
+        ),
+        (
+            "cf12.0002",
+            "emails",
+            "  ",
+            ErrorKind::Validation,
+            "a blank value",
+        ),
+    ] {
+        assert_eq!(
+            engine
+                .field_entry_remove(NOW, "tester", item, field, value)
+                .unwrap_err()
+                .kind,
+            kind,
+            "{why}"
+        );
+    }
+    assert!(
+        engine.field_entries(id, "emails").unwrap().is_empty(),
+        "no refused write changed the list"
+    );
+}

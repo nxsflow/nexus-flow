@@ -399,7 +399,7 @@ async fn a_board_larger_than_one_query_page_reads_back_whole() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_records_read_back_as_from_memory_with_four_requests_per_ticket_and_no_scan() {
+async fn the_records_read_back_as_from_memory_with_five_requests_per_ticket_and_no_scan() {
     // 6j6v.t1ym: `records::active_board` against DynamoDB — the key forms of the joins and the
     // entries under a ticket, read through the SDK — gives what it gives over the memory table,
     // and sends exactly the requests the crate doc counts.
@@ -451,7 +451,8 @@ async fn the_records_read_back_as_from_memory_with_four_requests_per_ticket_and_
 
         let count = |op: &str| sent.get(op).copied().unwrap_or(0);
         assert_eq!(count("GetItem"), 1 + n + outside, "seed {seed}: {sent:?}");
-        assert_eq!(count("Query"), 3 * n, "seed {seed}: {sent:?}");
+        // Custom values, list entries (6j6v.4g6r), labels and links: one Query each per ticket.
+        assert_eq!(count("Query"), 4 * n, "seed {seed}: {sent:?}");
         assert_eq!(count("Scan"), 0);
         assert!(
             sent.keys()
