@@ -48,7 +48,8 @@ one domain uses).
    app-foundations / `@nxsflow/engine-client` surfaces them without a bespoke change (§8).
 
 **Explicit non-goals (§9):** slice *implementation* (post-approval); **set-valued** (`or-set`)
-custom fields (scalar-only v1 — no v1 consumer, and they need their own view+fold like `labels`);
+custom fields (scalar-only v1 — no v1 consumer, and they need their own view+fold like `labels`;
+**list fields** have since been added with exactly that — §5.2, 6j6v.4g6r);
 richer scalar types beyond text/longtext/date/enum (int/bool/format-validated uri/email/color;
 `datetime` has since been added — §5.1, 6j6v.vbp6);
 the `r16h`/`file` consumer plugin itself (`ky26`) and blob sync; a per-field permission model.
@@ -133,7 +134,8 @@ annotates each custom field with its `on` set (§6).
 - **`on` types** — every listed type must be in `[types].list`.
 - **`enum`** — `values` non-empty and required; forbidden for non-enum types.
 - **`merge`** — `lww` or `crdt-text` only in v1 (`or-set` is rejected — TB-CF-4); reuses the
-  existing `MergeStrategy` vocabulary (`plugin/mod.rs:60`).
+  existing `MergeStrategy` vocabulary (`plugin/mod.rs:60`). A set of values is declared with
+  `list = true` instead (§5.2), which refuses `merge`, `required = true` and `type = "longtext"`.
 
 ## 4. CRDT / op semantics — the `field set` op and the (now-live) `w213` merge
 
@@ -247,6 +249,96 @@ log, every replica and a hosted fold carry the canonical value — nothing type-
 **What is lost.** The writer's offset is not kept: a reader shows the instant in its own time zone.
 A consumer that must show "10:30 in the attendee's zone" stores that zone separately.
 
+### 5.2 List fields (6j6v.4g6r)
+
+A person has several e-mail addresses and phone numbers, each perhaps marked work or private. A
+single-value field cannot hold them, and an LWW register would lose one device's address when two
+devices add one each. `list = true` makes a field a **list of entries**:
+
+```toml
+[fields.email]
+type  = "text"
+list  = true
+on    = ["person"]
+label = "E-mail"
+```
+
+- **An entry** is a value of the field's `type` — `text`, `date`, `datetime` or `enum` (validated
+  exactly as a single value is; a `datetime` entry is stored as the UTC instant, §5.1) — and an
+  optional **label**: free text such as `work` or `private`, trimmed, not blank. Both are trimmed;
+  neither may be blank or contain U+001F; value and label together are at most 16 KiB
+  (`MAX_FIELD_ENTRY_BYTES`). The labels are not declared: like item labels they are the user's
+  vocabulary.
+- **Refused at load:** `type = "longtext"` with `list = true` (a list holds short entries),
+  `merge` other than the default (a list always merges as below), and `required = true` (entries
+  are added after the item exists, so create cannot require one). A list field cannot be read by a
+  derived ranking key (`of = { field = … }` naming it is refused at load): a list holds several
+  values, none of which is the one to rank by.
+
+**Writing.** `--set` does not write entries — `update --set email=` (empty) **clears** the list,
+and a non-empty value is a `validation` error that names the verbs below (so does `create --set
+email=…`):
+
+| surface | add | remove | read |
+|---|---|---|---|
+| CLI | `nxf entry add <id> email ada@example.com [--label work]` | `nxf entry remove <id> email ada@example.com` | `nxf entry list <id> email` |
+| MCP | `flow_entry_add {id, field, value, label?}` | `flow_entry_remove {id, field, value}` | `flow_entry_list {id, field}` |
+| Engine | `field_entry_add(now, actor, id, field, value, label)` | `field_entry_remove(now, actor, id, field, value)` | `field_entries(id, field)` |
+
+**Reading.** A list rides the same sparse `custom` map as a single value, as an array in entry
+order, `label` present only on a labelled entry; a list with no entry is absent:
+
+```json
+"custom": { "email": [ { "value": "ada@work.example", "label": "work" },
+                       { "value": "ada@home.example" } ] }
+```
+
+`nxf schema --json` / `flow_schema` mark the field `"list": true` beside its element `kind`
+(`"kind": "text"`); a single-value field carries no `list` key, so its entry is unchanged.
+
+**Merge semantics — an observed-remove set (add wins).**
+
+- **Identity is the value.** An entry is identified by its value within its (item, field). Adding
+  a value the field already holds — on this device, or concurrently on another — does not make a
+  second entry.
+- **Label: the latest add wins.** Several present adds of one value are one entry whose label is
+  the label of the add with the highest `(lamport, site, op id)`. Relabelling is therefore an add of
+  the same value with the new label (`entry add <id> email ada@… --label private`); without
+  `--label` the entry loses its label. Two concurrent relabels converge on the higher coordinate.
+- **Remove is observed.** Removing a value tombstones every add of it this replica has seen,
+  whatever its label. An add it has not seen — made concurrently on another device, a re-add or a
+  relabel — survives: **add wins**. A concurrent add of another value is untouched.
+- **Clear** (`--set email=`) is a remove of every entry this replica sees, with the same rule: an
+  entry added concurrently elsewhere survives the clear.
+- **Order** is deterministic: each entry where its value was **first added** (the earliest present
+  add, by `(lamport, site, op id)`). A relabel keeps the entry's place; an entry removed and added
+  again is new and comes last.
+
+**Ops and fold.** The ops share the custom field's `field` kind (§4.1), the target still one
+custom field of one item:
+
+| `target_kind` | `op_type` | `target_id` | `field` | `value` |
+|---|---|---|---|---|
+| `field` | `add` | `<item id>` | `<list name>` | the entry value, then U+001F and the label when there is one |
+| `field` | `remove` | `<item id>` | `<list name>` | the observed add op ids, joined by U+001F (at most 1,024 per op) |
+
+They fold into one table, `field_entries(item_id, field, tag, value, label, lamport, site,
+removed)` keyed `(item_id, field, tag)` — a row per add, keyed by the add's op id: the add writes
+its value, label and coordinate, a remove writes `removed = 1` on each row it observed. Each writes
+only its own cells, so a remove that arrives before its add still hides it, in any order, on a
+replica and on a server alike. The present entries are the rows with a value and no tombstone,
+projected by one function both read (`model::present_entries`). Like every custom field the fold
+needs no plugin config: a list op of another plugin folds and syncs, and surfaces only where a
+plugin declares the name as a list (§7). A malformed op — an empty value or label, a value over
+16 KiB, an id over 128 bytes, a remove naming no tag or more than 1,024 — is stored and not folded,
+the same on every replica.
+
+**Migration.** An older binary knows only `set*` under the `field` kind, so it stores an entry op
+without folding it (§7). The task reducer's fold revision moves to 3, so a replica and a hosted
+stream fold their log once more and surface entry ops an older binary stored. On a server the
+entries of one item are one range (`field_entries#<item>#`), read with one Query per item record;
+the `.adj`-style index revision does not change, and no index is added.
+
 ## 6. Read & schema surface
 
 **`nxf schema --json` / `flow_schema`** (`crates/facade/src/read.rs:322`, one source for CLI + MCP):
@@ -323,7 +415,8 @@ per-field change — the generic seam the epic is designed to feed.
   change. Adding that needs an update/retype validation pass with no v1 consumer — deferred.
 - **Set-valued (`or-set`) custom fields.** Scalar-only in v1. A multi-value custom field needs its
   own observed-remove view + fold (like `labels`/edges); no v1 consumer needs it, so it is deferred
-  rather than half-built (TB-CF-4).
+  rather than half-built (TB-CF-4). **Delivered since** as list fields with their own fold (§5.2,
+  6j6v.4g6r), for the nexflow.it migration's e-mail addresses and phone numbers.
 - **Richer scalar types.** `int`, `bool`, and format-validated `uri`/`email`/`color` are out; v1 is
   `text`/`longtext`/`date`/`enum` (a hex color or uri is `text`, a fixed palette is `enum`) —
   TB-CF-3. Adding a type later is additive; `datetime` was the first such addition (§5.1).
@@ -341,7 +434,7 @@ All eight decisions were approved as proposed.
 | **TB-CF-1** | Where do custom values live — dynamic `items` columns or a separate view? | **Separate folded `custom_fields` EAV view** (§2). Keeps `items`/`ItemRow`/`CanonicalItem` byte-identical (oracle + goldens green, SemVer-minor), sparse, and mirrors `labels`/edges. Dynamic columns would make the core table plugin-dependent. |
 | **TB-CF-2** | Are fields global or type-scoped? | **Type-scoped** via `on = […]` (default: all types). Matches every consumer (`person.email`, `project.status`, `file.uri`); `--set` on a non-applicable type errors. |
 | **TB-CF-3** | Which data types in v1? | **`text` \| `longtext` \| `date` \| `enum`.** Covers all named consumers (uri/email/color = `text`; a fixed palette/status = `enum`; deadline = `date`). `int`/`bool`/format-validated types are additive follow-ups. **Extended 2026-10-12 (6j6v.vbp6):** `datetime` — an RFC 3339 instant with a time zone, stored in UTC at whole seconds (§5.1). |
-| **TB-CF-4** | Multi-value (list) custom fields in v1? | **No — scalar only.** `or-set` custom fields need their own view+fold and have no v1 consumer; deferred (§9). |
+| **TB-CF-4** | Multi-value (list) custom fields in v1? | **No — scalar only.** `or-set` custom fields need their own view+fold and have no v1 consumer; deferred (§9). **Extended 2026-10-12 (6j6v.4g6r):** `list = true` — entries `{value, label?}` in an observed-remove set keyed by value, add wins, the latest add's label (§5.2). |
 | **TB-CF-5** | Merge policy & the `w213` seam? | **All v1 custom fields fold keep-if-beats LWW**, with the op carrying the `w213` strategy marker (`set`/`set:crdt-text`) so a real char-level merge is a future drop-in. This epic is the **first** writer to activate the dormant `w213` `set_field_merge` path; canonical fields are untouched. |
 | **TB-CF-6** | Write namespace — flat `--set uri=` or a `custom.`/`x-` prefix? | **Flat `--set <name>=` with a load-time collision guard** vs the canonical set; values read back under a sparse `custom{}` map (so `CanonicalItem`'s 16 keys stay parity-stable). Best agent-ergonomics; a future canonical-field collision is caught loudly at plugin load. |
 | **TB-CF-7** | `required` custom fields? | **Supported** (default false), enforced at **`create` only** for applicable types — cheap, reuses the create-validation path, and `file.uri` wants it. `update`/retype do NOT re-enforce it in v1 (clearing is allowed, LWW-consistent); stricter enforcement is a §9 non-goal (PR-review Integrity #1). |

@@ -1,0 +1,37 @@
+`nxf entry` adds, removes and lists the entries of a plugin LIST field (6j6v.4g6r) — a custom
+field a plugin declares with `list = true`, such as a person's e-mail addresses. The bundled
+plugins declare no custom fields, so here every `entry` verb refuses the field and names the list
+fields the active plugin has (none). A plugin that declares one is shown in `nxf guide plugins`.
+
+```console
+$ nxf init --plugin issue-tracker --json
+[..]
+
+```
+
+```console
+$ nxf create --type bug --title "Fix login" --description "Users cannot log in" --priority P1 --json
+[..]
+
+```
+
+```console
+$ nxf entry add ab12.0001 email ada@work.example --label work --json
+? failed
+{"error":{"kind":"validation","msg":"'email' is not a list field of the active plugin (list fields: [])"}}
+
+```
+
+```console
+$ nxf entry remove ab12.0001 email ada@work.example --json
+? failed
+{"error":{"kind":"validation","msg":"'email' is not a list field of the active plugin (list fields: [])"}}
+
+```
+
+```console
+$ nxf entry list ab12.0001 email --json
+? failed
+{"error":{"kind":"validation","msg":"'email' is not a list field of the active plugin"}}
+
+```

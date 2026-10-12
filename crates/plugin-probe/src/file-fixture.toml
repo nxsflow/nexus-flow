@@ -55,3 +55,12 @@ label = "File URI"
 type = "datetime"
 on = ["file"]
 label = "Produced at"
+
+# Where else the linked file lives (6j6v.4g6r): a `text` LIST field, so the consumer path also
+# proves list fields — entries added and removed with `nxf entry`, each with an optional label
+# (`backup`, `cdn`, …), merged as an observed-remove set and read back under `custom`.
+[fields.mirrors]
+type = "text"
+on = ["file"]
+list = true
+label = "Mirrors"

@@ -52,6 +52,10 @@ fn cfg_with_fields() -> PluginConfig {
         [fields.estimate]
         type = "text"
         on = ["task"]
+
+        [fields.emails]
+        type = "text"
+        list = true
         "#,
     )
     .expect("the fixture parses")
@@ -171,6 +175,16 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
             seen.add(
                 "tickets with custom values",
                 usize::from(!ticket.custom.is_empty()),
+            );
+            seen.add(
+                "tickets with list entries",
+                usize::from(!ticket.custom_lists.is_empty()),
+            );
+            seen.add(
+                "tickets with a labelled and an unlabelled entry",
+                usize::from(ticket.custom_lists.values().any(|es| {
+                    es.iter().any(|e| e.label.is_some()) && es.iter().any(|e| e.label.is_none())
+                })),
             );
             seen.add(
                 "tickets with conversations",
@@ -326,6 +340,8 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
         "deferred rows",
         "labelled tickets",
         "tickets with custom values",
+        "tickets with list entries",
+        "tickets with a labelled and an unlabelled entry",
         "tickets with conversations",
         "tickets with a parent",
         "tickets whose parent is not active",
@@ -497,7 +513,7 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
 }
 
 #[test]
-fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent() {
+fn reading_the_records_costs_five_requests_per_ticket_and_one_per_outside_parent() {
     // Every label toggled many times and many thread links: the read does not grow with history.
     use nexus_flow_core::model::{LinkRelation, LinkWeight};
     let folder = Folder::platform().unwrap();
@@ -525,6 +541,13 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
             s.set_field(&id, "status", Some("in_progress".into()), "u");
             s.add_edge(&id, "ab12.p000", EdgeKind::Parent, "u");
         }
+        // List entries added and removed many times (6j6v.4g6r): still one Query.
+        for round in 0..10 {
+            s.add_field_entry(&id, "emails", &format!("e{round}@x"), Some("work"), "u");
+            if round < 9 {
+                s.remove_field_entry(&id, "emails", &format!("e{round}@x"), "u");
+            }
+        }
         for round in 0..5 {
             s.add_edge(&id, "ab12.p000", EdgeKind::ContributesTo, "u");
             if round < 4 {
@@ -542,8 +565,13 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
     assert!(served.tickets.values().all(|t| t.conversations == 10));
     // The watermark, a timestamps read per ticket, and the one parent outside the selection.
     assert_eq!(after.gets - before.gets, 1 + n + 1);
-    // Custom values, labels and links: one Query each per ticket.
-    assert_eq!(after.queries - before.queries, 3 * n);
+    // Custom values, list entries, labels and links: one Query each per ticket.
+    assert_eq!(after.queries - before.queries, 4 * n);
+    assert!(served.tickets.values().all(|t| t.custom_lists["emails"]
+        == [nexus_flow_core::model::FieldEntry {
+            value: "e9@x".into(),
+            label: Some("work".into())
+        }]));
     assert_eq!(after.index_queries, before.index_queries);
     assert_eq!(after.writes, before.writes);
     // The contributes-to targets, on request: one Query per ticket, nothing else (6j6v.15ed).

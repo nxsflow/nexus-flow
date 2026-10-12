@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH add 1  "add " 
+.SH NAME
+add \- Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field\*(Aqs type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `\-\-label`)
+.SH SYNOPSIS
+\fBadd\fR [\fB\-\-label\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIID\fR> <\fIFIELD\fR> <\fIVALUE\fR> 
+.SH DESCRIPTION
+Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field\*(Aqs type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `\-\-label`)
+.SH OPTIONS
+.TP
+\fB\-\-label\fR \fI<LABEL>\fR
+Label the entry (free text, e.g. `work` or `private`; trimmed, not blank)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIID\fR>
+
+.TP
+<\fIFIELD\fR>
+
+.TP
+<\fIVALUE\fR>
+

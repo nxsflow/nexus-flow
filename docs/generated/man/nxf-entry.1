@@ -1,0 +1,26 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH entry 1  "entry " 
+.SH NAME
+entry \- Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person\*(Aqs e\-mail addresses). An entry is a value of the field\*(Aqs type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed\-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update \-\-set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin\*(Aqs list fields
+.SH SYNOPSIS
+\fBentry\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person\*(Aqs e\-mail addresses). An entry is a value of the field\*(Aqs type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed\-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update \-\-set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin\*(Aqs list fields
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+entry\-add(1)
+Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field\*(Aqs type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `\-\-label`)
+.TP
+entry\-remove(1)
+Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed\-remove; a value the field does not hold is a no\-op)
+.TP
+entry\-list(1)
+List the entries of the list field `field` of item `id`, in order: each where its value was first added
+.TP
+entry\-help(1)
+Print this message or the help of the given subcommand(s)

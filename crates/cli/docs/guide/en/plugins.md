@@ -177,6 +177,38 @@ The `type` decides what a value may be:
   offset you typed is not kept.
 - `enum`: one of the declared `values`.
 
+### List fields
+
+`list = true` makes a field hold several entries instead of one value — a person's e-mail
+addresses, say. Each entry is a value of the field's `type` (`text`, `date`, `datetime` or `enum`,
+checked as above) and may carry a label of your own, such as `work` or `private`:
+
+```toml
+[fields.email]
+type = "text"
+list = true
+on = ["person"]
+```
+
+```
+nxf entry add <id> email ada@work.example --label work
+nxf entry add <id> email ada@home.example
+nxf entry list <id> email
+nxf entry remove <id> email ada@home.example
+nxf update <id> --set email=          # clears the list
+```
+
+`show --json` and the lists return the entries under `custom`, in the order their values were
+first added: `"email": [{"value": "ada@work.example", "label": "work"}, ...]`, `label` only where
+there is one. `nxf schema --json` marks the field `"list": true`. Over MCP the verbs are
+`flow_entry_add`, `flow_entry_remove` and `flow_entry_list`.
+
+The value is the entry: adding a value the list already holds gives that entry the new label
+(or none, without `--label`) instead of adding it twice, and removing a value removes it
+whatever its label. Two devices may add and remove at the same time: an address added on one
+survives a remove on the other that never saw it, and both end with the same list. `--set` only
+clears a list field; a list field cannot be `required`, a `longtext`, take a `merge`, or rank.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under

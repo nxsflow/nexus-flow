@@ -36,10 +36,10 @@ use crate::workspaces::write_new_exclusive;
 use nxs_foundation::workspace::Workspace;
 use params::{
     FlowArchiveParams, FlowBlockedParams, FlowClaimParams, FlowCloseParams, FlowCreateParams,
-    FlowEdgeParams, FlowItemRefParams, FlowLabelParams, FlowListParams, FlowNextParams,
-    FlowNoteAddParams, FlowSchemaParams, FlowSearchParams, FlowShowParams, FlowUpdateParams,
-    ListWorkspacesParams, MemoryAddParams, MemoryClassifyParams, MemoryCloseParams,
-    MemoryListParams, MemoryReorderParams, MemorySearchParams, MemoryShowParams,
+    FlowEdgeParams, FlowEntryListParams, FlowEntryParams, FlowItemRefParams, FlowLabelParams,
+    FlowListParams, FlowNextParams, FlowNoteAddParams, FlowSchemaParams, FlowSearchParams,
+    FlowShowParams, FlowUpdateParams, ListWorkspacesParams, MemoryAddParams, MemoryClassifyParams,
+    MemoryCloseParams, MemoryListParams, MemoryReorderParams, MemorySearchParams, MemoryShowParams,
     MemoryUpdateParams,
 };
 use rmcp::handler::server::tool::ToolRouter;
@@ -506,6 +506,70 @@ impl NxsMcp {
     fn flow_label_list(&self, Parameters(p): Parameters<FlowItemRefParams>) -> CallToolResult {
         let (db, start) = self.effective(p.workspace.as_deref());
         self.tool_result(flow::label_list(db, &start, &p))
+    }
+
+    // ---- list-field entries (6j6v.4g6r) -----------------------------------------------------
+    //
+    // A plugin list field's entries, each byte-identical to its `nxf entry <cmd> --json`. An add
+    // is additive and idempotent in effect (re-adding a held value relabels it, the same state on a
+    // repeat); a remove is destructive (observed-remove). `list` is read-only.
+
+    /// Add an entry to a plugin list field.
+    #[tool(
+        name = "flow_entry_add",
+        description = "Add an entry to a plugin LIST field of a flow item (flow_schema marks one \
+                       \"list\": true) — e.g. one of a person's e-mail addresses — with an \
+                       optional label such as work or private. The value is validated against \
+                       the field's type and is the entry's identity: adding a value the field \
+                       already holds gives that entry this label instead of adding a second one. \
+                       Entries merge as an observed-remove set across devices (add wins). \
+                       Returns a receipt.",
+        annotations(
+            title = "Add list entry",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn flow_entry_add(&self, Parameters(p): Parameters<FlowEntryParams>) -> CallToolResult {
+        let actor = self.resolve_actor(p.actor.as_deref());
+        let (db, start) = self.effective(p.workspace.as_deref());
+        self.tool_result(flow::entry_add(db, &start, &actor, &p))
+    }
+
+    /// Remove an entry from a plugin list field (observed-remove).
+    #[tool(
+        name = "flow_entry_remove",
+        description = "Remove an entry (by its value, whatever its label) from a plugin LIST field \
+                       of a flow item (observed-remove: an add made concurrently on another device \
+                       survives). To clear the whole list, flow_update with set [\"<field>=\"]. \
+                       Returns a receipt.",
+        annotations(
+            title = "Remove list entry",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn flow_entry_remove(&self, Parameters(p): Parameters<FlowEntryParams>) -> CallToolResult {
+        let actor = self.resolve_actor(p.actor.as_deref());
+        let (db, start) = self.effective(p.workspace.as_deref());
+        self.tool_result(flow::entry_remove(db, &start, &actor, &p))
+    }
+
+    /// List the entries of a plugin list field.
+    #[tool(
+        name = "flow_entry_list",
+        description = "List the entries of a plugin LIST field of a flow item, in order, as a JSON \
+                       array of {value, label?}. The same entries ride every item record under \
+                       custom.<field>.",
+        annotations(title = "List entries", read_only_hint = true, open_world_hint = false)
+    )]
+    fn flow_entry_list(&self, Parameters(p): Parameters<FlowEntryListParams>) -> CallToolResult {
+        let (db, start) = self.effective(p.workspace.as_deref());
+        self.tool_result(flow::entry_list(db, &start, &p))
     }
 
     /// Archive a batch of roots, cascading down each fully-closed subtree.

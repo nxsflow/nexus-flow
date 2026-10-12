@@ -379,6 +379,16 @@ enum Command {
         #[command(subcommand)]
         action: LabelAction,
     },
+    /// Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]`
+    /// declaration, e.g. a person's e-mail addresses). An entry is a value of the field's type
+    /// with an optional label (`work`, `private`, …); the value is its identity. Entries merge as
+    /// an observed-remove set: adds and removes made concurrently on two devices both survive, and
+    /// an add the remover had not seen wins. `update --set <field>=` (empty) clears the list. Run
+    /// `nxf schema` for the active plugin's list fields.
+    Entry {
+        #[command(subcommand)]
+        action: EntryAction,
+    },
     /// Add or list notes (the change/worklog stream) on an item.
     Note {
         #[command(subcommand)]
@@ -569,6 +579,31 @@ enum LabelAction {
     Remove { id: String, label: String },
     /// List an item's labels (sorted).
     List { id: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum EntryAction {
+    /// Add `value` to the list field `field` of item `id`. The value is trimmed and validated
+    /// against the field's type. Adding a value the field already holds does not add a second
+    /// entry: it gives that entry this label (or none, without `--label`).
+    Add {
+        id: String,
+        field: String,
+        value: String,
+        /// Label the entry (free text, e.g. `work` or `private`; trimmed, not blank).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove the entry `value` from the list field `field` of item `id`, whatever its label
+    /// (observed-remove; a value the field does not hold is a no-op).
+    Remove {
+        id: String,
+        field: String,
+        value: String,
+    },
+    /// List the entries of the list field `field` of item `id`, in order: each where its value was
+    /// first added.
+    List { id: String, field: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -822,6 +857,18 @@ fn dispatch(cli: &Cli) -> Result<()> {
             LabelAction::Add { id, label } => commands::label_add(cli.json, db, id, label),
             LabelAction::Remove { id, label } => commands::label_remove(cli.json, db, id, label),
             LabelAction::List { id } => commands::label_list(cli.json, db, id),
+        },
+        Command::Entry { action } => match action {
+            EntryAction::Add {
+                id,
+                field,
+                value,
+                label,
+            } => commands::entry_add(cli.json, db, id, field, value, label.as_deref()),
+            EntryAction::Remove { id, field, value } => {
+                commands::entry_remove(cli.json, db, id, field, value)
+            }
+            EntryAction::List { id, field } => commands::entry_list(cli.json, db, id, field),
         },
         Command::Note { action } => match action {
             NoteAction::Add { id, text } => commands::note_add(cli.json, db, id, text),

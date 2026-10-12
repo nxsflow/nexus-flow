@@ -68,7 +68,7 @@ operation log** is the single source of truth. It unifies three concerns:
 | `op_id` | TEXT PK | ULID of the writing replica → globally unique, time-sortable per replica. In OR-sets it also serves as the add tag. |
 | `lamport` | INTEGER | Lamport counter of the replica (counted past everything merged in). |
 | `site` | INTEGER | Replica/site id (tiebreak). |
-| `target_kind` | TEXT | `item` \| `edge` \| `note` \| `chunk` (§3.2) |
+| `target_kind` | TEXT | `item` \| `edge` \| `note` \| `chunk` \| `field` (§3.2) |
 | `target_id` | TEXT | Item id; edge composite `{from}{to}{kind}`; or note id. |
 | `field` | TEXT | Affected attribute (`title`, `status`, `present`, `body`, …). |
 | `op_type` | TEXT | `set` (LWW) \| `add` / `remove` (OR-set) \| `note_add` \| `append` / `supersede` (chunks). |
@@ -119,6 +119,20 @@ backed by the Automerge differential oracle (see §8).
   - Views `chunks` / `chunk_superseded`, keyed `(item_id, field, …)`; read with
     `Engine::chunks` (a replica) or `nxs_fold_ddb::chunks::chunks` (a server). Never a note, never
     in `show`, search, history or MCP text, and a chunk does not change its item's `updated_at`.
+
+- **Plugin list fields** (added 2026-10-12, `6j6v.4g6r`; docs/specs/plugin-custom-fields.md
+  §5.2): an observed-remove OR-set of entries per (item, list field). Ops: `target_kind = field`,
+  `target_id` = the item, `field` = the list field's name.
+  - `add`: `value` is the entry value, then U+001F and its label when it has one. Its `op_id` is
+    the add tag.
+  - `remove`: `value` is the observed add tags, joined by U+001F (at most `MAX_ENTRY_TAGS`, 1024).
+  - One view, `field_entries`, keyed `(item_id, field, tag)`: an add writes its row's value, label
+    and coordinate, a remove writes `removed = 1` on each row it names — each only its own cells,
+    so any order converges. An entry is a value with a present add; its label is that of the
+    latest present add of the value, its place that of the earliest (`model::present_entries`).
+  - An entry's `value` with its label holds at most `MAX_FIELD_ENTRY_BYTES` (16 KiB), and the
+    item, the field, the op id and every tag at most 128 bytes; past them the op is stored and not
+    folded, on every replica and on a server alike. Fold semantics, as for chunks.
 
 ### 3.3 Materialized Views
 

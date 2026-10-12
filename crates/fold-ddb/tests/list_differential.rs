@@ -459,9 +459,9 @@ fn a_stream_not_folded_by_this_index_revision_is_refused_for_a_list() {
 }
 
 #[test]
-fn reading_a_typed_list_costs_one_index_query_three_per_item_and_one_batch() {
+fn reading_a_typed_list_costs_one_index_query_four_per_item_and_one_batch() {
     // §9 "bounded cost": the persons of a board are one Query on the `typed` index, and each costs
-    // its adjacency, labels and custom values, the timestamps of all of them one `BatchGetItem` —
+    // its adjacency, labels, custom values and list entries (6j6v.4g6r), the timestamps of all of them one `BatchGetItem` —
     // whatever else the board holds, which this list reads nothing of. A type filter reads only its
     // own type.
     let folder = Folder::platform().unwrap();
@@ -486,7 +486,7 @@ fn reading_a_typed_list_costs_one_index_query_three_per_item_and_one_batch() {
     let server = ready(records::list_board(&t, &reads)).unwrap();
     let after = t.requests();
     assert_eq!(after.index_queries - before.index_queries, 1);
-    assert_eq!(after.queries - before.queries, 3 * n);
+    assert_eq!(after.queries - before.queries, 4 * n);
     // The watermark; the persons' timestamps in one batch; no parents.
     assert_eq!(after.gets - before.gets, 1);
     assert_eq!(after.batch_gets - before.batch_gets, 1);
@@ -558,10 +558,10 @@ fn an_unranked_list_costs_its_page_not_the_stream() {
         costs
     };
     let small = cost(0);
-    // The watermark; one `items#` Query; per page row `.adj#`, `.ladj#`, `custom_fields#`; its
-    // timestamps in one batch. With a label filter, each open row's labels first (12), then the
-    // page's adjacency and custom values.
-    assert_eq!(small, [(1, 1, 1 + 3 * 5, 0), (1, 1, 1 + 12 + 2 * 2, 0)]);
+    // The watermark; one `items#` Query; per page row `.adj#`, `.ladj#`, `custom_fields#`,
+    // `field_entries#` (6j6v.4g6r); its timestamps in one batch. With a label filter, each open
+    // row's labels first (12), then the page's adjacency, custom values and list entries.
+    assert_eq!(small, [(1, 1, 1 + 4 * 5, 0), (1, 1, 1 + 12 + 3 * 2, 0)]);
     assert_eq!(cost(300), small, "300 closed items cost nothing more");
 }
 

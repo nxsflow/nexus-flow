@@ -15,18 +15,19 @@
 //! | (the stream's rules)       | one `GetItem` of `.meta#watermark`, per board               |
 //! | `created_at`, `updated_at` | one `GetItem` of `item_timestamps#<ticket>`                 |
 //! | `custom`                   | one Query on `custom_fields#<ticket>#`                      |
+//! | `custom_lists`             | one Query on `field_entries#<ticket>#` (6j6v.4g6r)           |
 //! | `labels`                   | one Query on `.ladj#<ticket>#`                              |
 //! | `conversations`            | one Query on `.tadj#<ticket>#`                              |
 //! | `parent`                   | one `GetItem` per distinct parent outside the selection     |
 //!
-//! So a board of `n` active tickets costs `1 + n` `GetItem`s and `3n` Queries, plus one `GetItem`
-//! per distinct parent that is not itself active — `4n + 1 + p` requests besides the selection.
+//! So a board of `n` active tickets costs `1 + n` `GetItem`s and `4n` Queries, plus one `GetItem`
+//! per distinct parent that is not itself active — `5n + 1 + p` requests besides the selection.
 //!
 //! One join is read only when asked for: [`with_contributes_to`] fills each ticket's outgoing
 //! `contributes_to` targets, which only the facade's container filter (`next --in`) reads. It is one
-//! more Query per ticket, on `.cadj#<ticket>#` — `5n + 1 + p` with it — bounded the same way. A
-//! Query returns more than one page only past 1 MB, which one ticket's custom values, labels or
-//! links do not reach. The entries under a ticket carry their add's label or link and its presence
+//! more Query per ticket, on `.cadj#<ticket>#` — `6n + 1 + p` with it — bounded the same way. A
+//! Query returns more than one page only past 1 MB, which one ticket's custom values, list
+//! entries, labels or links do not reach. The entries under a ticket carry their add's label or link and its presence
 //! (see [`board`](crate::board), "Who owns a label or a thread link"), so a label toggled many
 //! times costs nothing more to read.
 //!
@@ -87,7 +88,7 @@ use crate::layout::{
 use crate::table::{text, Row, Table};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use nexus_flow_core::graph::Edge;
-use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight};
+use nexus_flow_core::model::{self, EdgeKind, EntryAdd, FieldEntry, ItemRow, LinkWeight};
 use nexus_flow_facade::read::{
     self, ActiveBoard, ActiveTicket, ListBoard, ListItem, ListReads, ListSelect, Neighbour,
     ParentRef, RankingGraph, RankingReads,
@@ -95,7 +96,7 @@ use nexus_flow_facade::read::{
 use nxs_foundation::change::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// How many tickets [`active_board`] reads at a time. Each ticket is four requests, so at most four
+/// How many tickets [`active_board`] reads at a time. Each ticket is five requests, so at most five
 /// times this many requests are in flight for one board.
 pub const READ_CONCURRENCY: usize = 16;
 
@@ -182,6 +183,7 @@ pub async fn active_board<T: Table>(
                 let (created_at, updated_at) = timestamps(table, id).await?;
                 let mut t = ActiveTicket::new(item_row(row, belongs_to.map(str::to_string)));
                 t.custom = custom(table, id).await?;
+                t.custom_lists = custom_lists(table, id).await?;
                 t.labels = labels(table, id).await?;
                 t.conversations = conversations(table, id).await?;
                 t.created_at = created_at;
@@ -530,16 +532,17 @@ async fn ranking_graph<T: Table>(
 ///
 /// | read                                                         | per                       |
 /// |--------------------------------------------------------------|---------------------------|
-/// | one Query each on `.adj#`, `.ladj#`, `custom_fields#` (less what the filter read) | page item |
+/// | one Query each on `.adj#`, `.ladj#`, `custom_fields#`, `field_entries#` (less what the filter read) | page item |
 /// | `item_timestamps` rows, by `BatchGetItem`                    | page — `⌈k / 100⌉` requests |
 /// | parents of open page items outside the page, by `BatchGetItem` | page — `⌈p / 100⌉` requests |
 ///
-/// So `list --limit 10` costs `1 + 30 + 2` requests beside the rows' Query, at most, however many
+/// So `list --limit 10` costs `1 + 40 + 2` requests beside the rows' Query, at most, however many
 /// items the stream holds and however many the status refuses — plus one Query per item the row
 /// kept when the query filters by container or label.
 ///
 /// **`sort = rank`** reads every live, unarchived item of the listed types in full — one Query
-/// each on `.adj#`, `.ladj#`, `custom_fields#` per item, and the timestamps and outside parents by
+/// each on `.adj#`, `.ladj#`, `custom_fields#`, `field_entries#` per item, and the timestamps and
+/// outside parents by
 /// `BatchGetItem` — whatever its status, filter or limit: a rank is computed over the type's whole
 /// `list` scope (docs/specs/derived-ranking-keys.md §12, decision 2), and a derived key reads the
 /// labels and custom values of every item in it. When a key reads a rank `next` gives, one Query on
@@ -549,7 +552,7 @@ async fn ranking_graph<T: Table>(
 /// parents for `parent_closed_reason` at once, and the graph reuses it.
 ///
 /// Nothing here caps the requests of one call: a ranked list of a type with `n` live items costs
-/// about `3n` Queries, the number its rank is computed over. A server that must bound one request
+/// about `4n` Queries, the number its rank is computed over. A server that must bound one request
 /// sets its own budget around the table it hands in (`6j6v.wq9e`, E4 spec §5.1).
 ///
 /// [`read::list_board`]: nexus_flow_facade::read::list_board
@@ -650,6 +653,7 @@ pub async fn list_board<T: Table>(
                 i.labels = labels(table, &id).await?;
             }
             i.custom = custom(table, &id).await?;
+            i.custom_lists = custom_lists(table, &id).await?;
             Ok::<_, T::Error>((row, edges, i))
         })
         .buffered(READ_CONCURRENCY)
@@ -893,6 +897,41 @@ async fn present_entries<T: Table>(table: &T, prefix: &str) -> Result<Vec<Row>, 
         .await?
         .into_iter()
         .filter(|e| int(e, REMOVED) == Some(0))
+        .collect())
+}
+
+/// Every list field's present entries of the ticket, by field (6j6v.4g6r) — what
+/// `Store::field_entries_of` answers on a replica, through the same projection
+/// ([`model::present_entries`]). One Query on `field_entries#<ticket>#`: a row is one add, and a remove
+/// marks the row it observed `removed`, so the range holds the tombstones too. A row with no value
+/// was written by a remove whose add has not been folded, and is no entry.
+async fn custom_lists<T: Table>(
+    table: &T,
+    id: &str,
+) -> Result<BTreeMap<String, Vec<FieldEntry>>, T::Error> {
+    let mut prefix = key("field_entries", &[("item_id", id)]);
+    prefix.push('#');
+    let mut adds: BTreeMap<String, Vec<EntryAdd>> = BTreeMap::new();
+    for r in table.query_prefix(&prefix).await? {
+        if text(&r, "item_id") != Some(id) || int(&r, "removed").unwrap_or(0) != 0 {
+            continue;
+        }
+        let (Some(field), Some(value), Some(tag)) =
+            (text(&r, "field"), text(&r, "value"), text(&r, "tag"))
+        else {
+            continue;
+        };
+        adds.entry(field.to_string()).or_default().push(EntryAdd {
+            value: value.to_string(),
+            label: text(&r, "label").map(str::to_string),
+            lamport: int(&r, "lamport").unwrap_or(-1),
+            site: int(&r, "site").unwrap_or(-1),
+            tag: tag.to_string(),
+        });
+    }
+    Ok(adds
+        .into_iter()
+        .map(|(field, adds)| (field, model::present_entries(adds)))
         .collect())
 }
 

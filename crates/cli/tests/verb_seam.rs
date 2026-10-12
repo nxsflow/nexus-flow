@@ -69,6 +69,13 @@ const WAIVERS: &[Waiver] = &[
                  path (`Engine::labels` hands it to an app, plus `labels_bulk` for many items).",
     },
     Waiver::Alias {
+        verb: "entry list",
+        seam: "field_entries",
+        reason: "`read::field_entries` is what the verb body calls (`Engine::field_entries` hands \
+                 it to an app) — the seam names what it reads, a list field's entries, the CLI the \
+                 verb path beside `entry add`/`entry remove` (6j6v.4g6r).",
+    },
+    Waiver::Alias {
         verb: "mention list",
         seam: "mentions",
         reason: "`read::mentions` is what the verb body calls; the CLI only renders it.",

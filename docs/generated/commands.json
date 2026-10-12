@@ -430,6 +430,106 @@
         ]
       },
       {
+        "name": "entry",
+        "about": "Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person's e-mail addresses). An entry is a value of the field's type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update --set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin's list fields",
+        "args": [],
+        "subcommands": [
+          {
+            "name": "add",
+            "about": "Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "field",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "value",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "label",
+                "long": "label",
+                "short": null,
+                "required": false,
+                "takes_value": true,
+                "help": "Label the entry (free text, e.g. `work` or `private`; trimmed, not blank)"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": "List the entries of the list field `field` of item `id`, in order: each where its value was first added",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "field",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed-remove; a value the field does not hold is a no-op)",
+            "args": [
+              {
+                "name": "id",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "field",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              },
+              {
+                "name": "value",
+                "long": null,
+                "short": null,
+                "required": true,
+                "takes_value": true,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
         "name": "guide",
         "about": "Print an embedded, offline guide. Omit the topic to list the available ones",
         "args": [

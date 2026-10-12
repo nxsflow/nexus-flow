@@ -174,6 +174,46 @@ pub struct FlowLabelParams {
     pub workspace: Option<String>,
 }
 
+/// `flow_entry_add`/`flow_entry_remove` input (6j6v.4g6r) — one entry of a plugin LIST field:
+/// the item, the field, the entry value and (on add) an optional label. `flow_schema` marks a list
+/// field `"list": true`; its entries arrive under `custom` as `[{value, label?}]`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FlowEntryParams {
+    /// Item id (a bare local suffix or a full `<prefix>.<suffix>`).
+    pub id: String,
+    /// The list field's name (a custom field the active plugin declares with `list = true`).
+    pub field: String,
+    /// The entry value, validated against the field's type (a `datetime` needs a time zone and is
+    /// stored as the UTC instant). It is the entry's identity: adding a value the field holds
+    /// relabels that entry, removing a value removes it whatever its label.
+    pub value: String,
+    /// `flow_entry_add` only: label the entry (free text, e.g. `work`, `private`). Omitted on an
+    /// add of a value the field holds, the entry loses its label. Ignored by `flow_entry_remove`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Reference time (ISO-8601 / RFC3339) stamped on the emitted ops.
+    #[serde(default)]
+    pub now: Option<String>,
+    /// Actor recorded on the emitted ops; overrides the server's launch `--actor`.
+    #[serde(default)]
+    pub actor: Option<String>,
+    /// Per-call workspace override (S7/ppa); empty/omitted ⇒ the launch default. See the module docs.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// `flow_entry_list` input (6j6v.4g6r) — the item and the list field to read.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FlowEntryListParams {
+    /// Item id (a bare local suffix or a full `<prefix>.<suffix>`).
+    pub id: String,
+    /// The list field's name.
+    pub field: String,
+    /// Per-call workspace override (S7/ppa); empty/omitted ⇒ the launch default. See the module docs.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
 /// `flow_archive`/`flow_unarchive` input — a batch of cascade roots (#76u.12). `archive` cascades
 /// DOWN each fully-closed subtree; `unarchive` cascades UP each item's ancestor chain. Each id may
 /// be a bare suffix or a full id; at least one is required (an empty batch is a no-op receipt).

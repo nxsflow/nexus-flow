@@ -2718,9 +2718,12 @@ name = "plugin-probe"
 version = "0.210.1"
 dependencies = [
  "inventory",
+ "nexus-flow-cli",
  "nexus-flow-core",
  "nexus-flow-facade",
+ "nxs-foundation",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

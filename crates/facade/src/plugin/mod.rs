@@ -70,7 +70,8 @@ pub enum MergeStrategy {
 }
 
 /// The declared data type of a plugin custom field (plugin-custom-fields §3, TB-CF-3). Governs
-/// value validation and presentation, never storage (a value is always a `TEXT` LWW cell). The v1
+/// value validation and presentation, never storage (a value is always `TEXT`: an LWW cell, or a
+/// list field's entries, 6j6v.4g6r). The v1
 /// set: `text`/`longtext` are free UTF-8; `date` is ISO-8601 (the same check `due`/`defer` use);
 /// `datetime` is an RFC 3339 instant with a time zone, stored in UTC at whole seconds (nxf
 /// 6j6v.vbp6, [`validate::datetime`](crate::validate::datetime)); `enum` is one of a declared
@@ -105,9 +106,11 @@ impl FieldType {
 /// One plugin custom field declaration — a `[fields.<name>]` sub-table (plugin-custom-fields §3).
 /// The `<name>` key is the field name (validated by [`PluginConfig::validate_fields`]); this struct
 /// carries its attributes. Modelled on the `[types.rules.<t>]` shape, all attributes but `type`
-/// default so a minimal declaration is `type = "…"`.
+/// default so a minimal declaration is `type = "…"`. `#[non_exhaustive]` since 6j6v.4g6r, so the
+/// next attribute is an additive change.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct FieldDecl {
     /// The field's data type. `type` is a Rust keyword, so the TOML key `type` maps to `field_type`.
     #[serde(rename = "type")]
@@ -133,6 +136,13 @@ pub struct FieldDecl {
     /// [`MergeStrategy::OrSet`] is rejected at load (TB-CF-4).
     #[serde(default)]
     pub merge: MergeStrategy,
+    /// `list = true` makes the field a LIST of entries of [`field_type`](Self::field_type), each
+    /// with an optional label (6j6v.4g6r, plugin-custom-fields §5.2): several e-mail addresses of
+    /// a person, say. Its entries are an observed-remove set — concurrent adds and removes on two
+    /// devices both survive, an add the remover did not see wins — written with `nxf entry add` /
+    /// `remove`, never `--set` (which only clears it). Defaults to `false`, a single value.
+    #[serde(default)]
+    pub list: bool,
 }
 
 /// The canonical item field names + aliases a custom field may not shadow (plugin-custom-fields §3,
@@ -793,11 +803,35 @@ impl PluginConfig {
                 }
                 _ => {}
             }
+            if decl.list {
+                // A list field (6j6v.4g6r): an OR-set of entries, so the scalar merge choice and the
+                // create-time `required` guard (entries are added after the item exists) have no
+                // meaning, and a list of long texts is not what the field is for.
+                if decl.field_type == FieldType::Longtext {
+                    return Err(format!(
+                        "custom field '{name}' is a list of `longtext` — a list field holds short \
+                         entries (text, date, datetime, enum); put long text in a `longtext` field \
+                         or the item's notes"
+                    ));
+                }
+                if decl.merge != MergeStrategy::Lww {
+                    return Err(format!(
+                        "custom field '{name}' is a list and declares `merge` — a list field's \
+                         entries always merge as an observed-remove set; drop `merge`"
+                    ));
+                }
+                if decl.required {
+                    return Err(format!(
+                        "custom field '{name}' is a list and declares `required = true` — entries \
+                         are added after the item exists (`nxf entry add`), so a list field cannot \
+                         be required at create"
+                    ));
+                }
+            }
             if matches!(decl.merge, MergeStrategy::OrSet) {
                 return Err(format!(
-                    "custom field '{name}' declares merge = \"or-set\" — or-set is not supported \
-                     for custom fields in v1 (only lww or crdt-text); a set-valued custom field \
-                     needs its own view + fold"
+                    "custom field '{name}' declares merge = \"or-set\" — a custom field merges \
+                     lww or crdt-text; for a set of values declare `list = true` instead"
                 ));
             }
         }
@@ -1392,6 +1426,52 @@ mod tests {
     }
 
     #[test]
+    fn a_list_field_parses_and_validates() {
+        // 4g6r: `list = true` makes a field a list of entries of its type. Every element type but
+        // longtext may be a list; an enum list still needs its values.
+        for ty in ["text", "date", "datetime"] {
+            let cfg = cfg_with_fields(&format!("[fields.email]\ntype = \"{ty}\"\nlist = true"));
+            assert!(cfg.validate_fields().is_ok(), "a {ty} list");
+            assert!(cfg.fields["email"].list);
+        }
+        let cfg =
+            cfg_with_fields("[fields.kind]\ntype = \"enum\"\nvalues = [\"a\", \"b\"]\nlist = true");
+        assert!(cfg.validate_fields().is_ok(), "an enum list");
+        assert!(
+            !cfg_with_fields("[fields.uri]\ntype = \"text\"").fields["uri"].list,
+            "a field is a single value unless declared a list"
+        );
+    }
+
+    #[test]
+    fn a_list_field_refuses_longtext_merge_and_required() {
+        // 4g6r: a list's entries always merge as an OR-set and are added after the item exists.
+        for (toml, why) in [
+            ("type = \"longtext\"\nlist = true", "a longtext list"),
+            (
+                "type = \"text\"\nlist = true\nmerge = \"crdt-text\"",
+                "a merge choice",
+            ),
+            (
+                "type = \"text\"\nlist = true\nmerge = \"or-set\"",
+                "an or-set merge",
+            ),
+            (
+                "type = \"text\"\nlist = true\nrequired = true",
+                "a required list",
+            ),
+        ] {
+            let err = cfg_with_fields(&format!("[fields.email]\n{toml}"))
+                .validate_fields()
+                .expect_err(why);
+            assert!(
+                err.contains("'email'") && err.contains("list"),
+                "{why}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_fields_rejects_a_canonical_name_collision() {
         // §3 / TB-CF-6: a custom field must not shadow a canonical field or alias — a loud load
         // error, never a silently-shadowing declaration.
@@ -1536,8 +1616,8 @@ mod tests {
 
     #[test]
     fn validate_fields_rejects_or_set_merge() {
-        // §3 / TB-CF-4: or-set custom fields need their own view+fold — a v1 non-goal, so declaring
-        // one is a loud load error. lww and crdt-text (and the omitted default) are accepted.
+        // §3 / TB-CF-4: `merge = "or-set"` is a loud load error — a set of values is declared with
+        // `list = true` (6j6v.4g6r, §5.2), not as a merge strategy. lww and crdt-text (and the omitted default) are accepted.
         assert!(
             cfg_with_fields("[fields.uri]\ntype = \"text\"\nmerge = \"or-set\"")
                 .validate_fields()
@@ -2339,6 +2419,18 @@ mod tests {
         );
         let msg = refused(&off_type).msg;
         assert!(msg.contains("applies only to note"), "{msg}");
+        // A list field holds several entries, so it cannot rank (6j6v.4g6r).
+        let list = format!(
+            "{}\n[fields.order]\ntype = \"text\"\nlist = true",
+            with_action_key(
+                r#"{ related = "parent", type = "project", of = { field = "order" } }"#
+            )
+        );
+        let msg = refused(&list).msg;
+        assert!(
+            msg.contains("'order'") && msg.contains("list field"),
+            "{msg}"
+        );
     }
 
     #[test]

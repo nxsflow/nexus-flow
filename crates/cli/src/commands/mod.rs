@@ -2319,6 +2319,95 @@ pub fn label_list(json: bool, db: Option<&str>, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- entry (list fields, 6j6v.4g6r) --------------------------------------------
+
+/// Add an entry to a plugin list field. Field, value and label validation live in the shared write
+/// layer ([`write::entry_add`]).
+pub fn entry_add(
+    json: bool,
+    db: Option<&str>,
+    id: &str,
+    field: &str,
+    value: &str,
+    label: Option<&str>,
+) -> Result<()> {
+    let (ws, cfg) = open(db)?;
+    let mut store = ws.open_store()?;
+    let id = ws.replica.resolve_id(id);
+    write::entry_add(
+        &mut store,
+        &cfg,
+        &resolve_now(None)?,
+        &actor(),
+        &id,
+        field,
+        value,
+        label,
+    )?;
+    let msg = |i: &str| match label {
+        Some(l) => format!("{i} {field} + {} ({})", value.trim(), l.trim()),
+        None => format!("{i} {field} + {}", value.trim()),
+    };
+    emit_entry(json, &ws.replica.prefix, &id, msg);
+    Ok(())
+}
+
+/// Remove an entry from a plugin list field (observed-remove).
+pub fn entry_remove(
+    json: bool,
+    db: Option<&str>,
+    id: &str,
+    field: &str,
+    value: &str,
+) -> Result<()> {
+    let (ws, cfg) = open(db)?;
+    let mut store = ws.open_store()?;
+    let id = ws.replica.resolve_id(id);
+    write::entry_remove(
+        &mut store,
+        &cfg,
+        &resolve_now(None)?,
+        &actor(),
+        &id,
+        field,
+        value,
+    )?;
+    emit_entry(json, &ws.replica.prefix, &id, |i| {
+        format!("{i} {field} - {}", value.trim())
+    });
+    Ok(())
+}
+
+/// The `{ok, msg}` receipt of an entry write (as a label write's), the id in full under `--json`
+/// and by its display form otherwise.
+fn emit_entry(json: bool, prefix: &str, id: &str, msg: impl Fn(&str) -> String) {
+    if json {
+        println!("{}", serde_json::json!({ "ok": true, "msg": msg(id) }));
+    } else {
+        println!("{}", msg(workspace::display_id(prefix, id)));
+    }
+}
+
+/// List the entries of a plugin list field, in order. `--json` is the `[{value, label?}]` array
+/// records carry under `custom`; the human form is one entry per line, its label after a tab.
+pub fn entry_list(json: bool, db: Option<&str>, id: &str, field: &str) -> Result<()> {
+    let (ws, cfg) = open(db)?;
+    let store = ws.open_store()?;
+    let id = ws.replica.resolve_id(id);
+    let entries = read::field_entries(&cfg, &store, &id, field)?;
+    if json {
+        println!("{}", read::field_entries_to_value(&entries));
+    } else {
+        for e in &entries {
+            match &e.label {
+                Some(l) => println!("{}\t{l}", e.value),
+                None => println!("{}", e.value),
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---- note ------------------------------------------------------------------
 
 pub fn note_add(json: bool, db: Option<&str>, id: &str, text: &str) -> Result<()> {
@@ -2397,14 +2486,31 @@ pub fn show(json: bool, db: Option<&str>, id: &str) -> Result<()> {
         // custom fields to the active plugin's declaration so a foreign field is not rendered.
         // T4-review efficiency (ky26): a plugin with no declared `[fields]` renders no custom section,
         // so skip the `custom_fields_of` read entirely rather than query then filter everything out.
+        // A list field (6j6v.4g6r) renders its entries one per line, a label in parentheses.
         let custom: BTreeMap<String, String> = if cfg.fields.is_empty() {
             BTreeMap::new()
         } else {
-            store
+            let mut custom: BTreeMap<String, String> = store
                 .custom_fields_of(&id)?
                 .into_iter()
-                .filter(|(name, _)| cfg.fields.contains_key(name))
-                .collect()
+                .filter(|(name, _)| cfg.fields.get(name).is_some_and(|d| !d.list))
+                .collect();
+            if cfg.fields.values().any(|d| d.list) {
+                for (name, entries) in store.field_entries_of(&id)? {
+                    if !cfg.fields.get(&name).is_some_and(|d| d.list) || entries.is_empty() {
+                        continue;
+                    }
+                    let lines: Vec<String> = entries
+                        .iter()
+                        .map(|e| match &e.label {
+                            Some(l) => format!("{} ({l})", e.value),
+                            None => e.value.clone(),
+                        })
+                        .collect();
+                    custom.insert(name, lines.join("\n"));
+                }
+            }
+            custom
         };
         // 2kjy: the NOTES section renders each note's op-log date, so fetch the dated projection.
         let notes = read::notes_with_created(&store, &id)?;
@@ -2691,15 +2797,23 @@ pub fn schema(json: bool, db: Option<&str>) -> Result<()> {
                     tags.push(format!("create --json \"{k}\""));
                 }
             }
-            if f.settable {
+            if f.list {
+                // A list field (6j6v.4g6r): entries, not a value — `--set` only clears it.
+                tags.push(format!("entry add <id> {} <value> [--label …]", f.field));
+            } else if f.settable {
                 let how = f.update_alias.as_deref().unwrap_or(f.field.as_str());
                 tags.push(format!("update --set {how}=…"));
             }
+            let kind = if f.list {
+                format!("{} list", f.kind)
+            } else {
+                f.kind.clone()
+            };
             println!(
                 "  {:<20} {:<20} {:<9} {}",
                 f.field,
                 f.label,
-                f.kind,
+                kind,
                 tags.join(", ")
             );
         }

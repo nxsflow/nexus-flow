@@ -294,8 +294,9 @@ relay — does it with `nxs-fold-ddb`: the reducers a local replica registers, t
   kept in other tables — labels, custom values, timestamps, bearing thread links, the parent's
   title and type. `records::active_board` reads them per active ticket, a fixed number of requests
   whatever the ticket's history: one `GetItem` of `item_timestamps`, one Query each on
-  `custom_fields#<ticket>#`, `.ladj#<ticket>#` and `.tadj#<ticket>#`, plus one `GetItem` of the
-  watermark per board and one per parent outside the selection — `4n + 1 + p` requests, at most
+  `custom_fields#<ticket>#`, `field_entries#<ticket>#` (list-field entries, `6j6v.4g6r`),
+  `.ladj#<ticket>#` and `.tadj#<ticket>#`, plus one `GetItem` of the
+  watermark per board and one per parent outside the selection — `5n + 1 + p` requests, at most
   16 tickets (`READ_CONCURRENCY`) in flight. `label_adds` and `thread_link_adds` key on the tag
   alone, so the fold keeps one `.ladj#<ticket>#<tag>` / `.tadj#<ticket>#<tag>` entry per add,
   carrying what the reader needs of the add and whether it is removed; folding an add or its

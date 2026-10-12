@@ -181,6 +181,39 @@ Der `type` entscheidet, was ein Wert sein darf:
   eines Ranking-Schlüssels. Der eingegebene Offset bleibt nicht erhalten.
 - `enum`: einer der deklarierten `values`.
 
+### Listenfelder
+
+`list = true` lässt ein Feld mehrere Einträge statt eines Werts halten — etwa die E-Mail-Adressen
+einer Person. Jeder Eintrag ist ein Wert des `type` des Felds (`text`, `date`, `datetime` oder
+`enum`, geprüft wie oben) und kann eine eigene Kennzeichnung tragen, etwa `work` oder `private`:
+
+```toml
+[fields.email]
+type = "text"
+list = true
+on = ["person"]
+```
+
+```
+nxf entry add <id> email ada@work.example --label work
+nxf entry add <id> email ada@home.example
+nxf entry list <id> email
+nxf entry remove <id> email ada@home.example
+nxf update <id> --set email=          # leert die Liste
+```
+
+`show --json` und die Listen geben die Einträge unter `custom` zurück, in der Reihenfolge, in der
+ihre Werte zuerst hinzugefügt wurden: `"email": [{"value": "ada@work.example", "label": "work"},
+...]`, `label` nur, wo es eine gibt. `nxf schema --json` markiert das Feld mit `"list": true`. Über
+MCP heißen die Verben `flow_entry_add`, `flow_entry_remove` und `flow_entry_list`.
+
+Der Wert ist der Eintrag: Wer einen Wert hinzufügt, den die Liste schon hat, gibt diesem Eintrag
+die neue Kennzeichnung (oder keine, ohne `--label`), statt ihn doppelt anzulegen; wer einen Wert
+entfernt, entfernt ihn mit jeder Kennzeichnung. Zwei Geräte dürfen gleichzeitig hinzufügen und
+entfernen: Eine Adresse, die auf dem einen hinzukommt, übersteht ein Entfernen auf dem anderen, das
+sie nie gesehen hat, und beide enden mit derselben Liste. `--set` leert ein Listenfeld nur; ein
+Listenfeld kann weder `required` noch `longtext` sein, kein `merge` haben und nicht ranken.
+
 ## Ein Ranking deklarieren
 
 Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie

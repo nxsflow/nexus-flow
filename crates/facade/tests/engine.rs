@@ -770,6 +770,9 @@ type = "text"
 label = "URI"
 [fields.occurred_on]
 type = "datetime"
+[fields.emails]
+type = "text"
+list = true
 "#,
     order: 101,
 });
@@ -1220,4 +1223,111 @@ fn engine_update_stores_a_datetime_custom_value_in_utc_and_reads_it_back() {
         .expect("schema lists the datetime field");
     assert_eq!(field.kind, "datetime");
     assert!(field.custom && field.settable);
+}
+
+// ---- list fields at the Engine seam (6j6v.4g6r) -------------------------------------------------
+
+#[test]
+fn engine_field_entries_add_relabel_remove_and_ride_every_record() {
+    // The embedding seam app-foundations drives: `field_entry_add`/`_remove`/`field_entries`, and
+    // the entries under `custom` on `show_value`, the lanes and the bulk join.
+    let tmp = seeded_fields_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let id = "cf12.0002";
+    engine
+        .field_entry_add(
+            NOW,
+            "tester",
+            id,
+            "emails",
+            "ada@work.example",
+            Some("work"),
+        )
+        .unwrap();
+    engine
+        .field_entry_add(NOW, "tester", id, "emails", "ada@home.example", None)
+        .unwrap();
+    engine
+        .field_entry_add(
+            NOW,
+            "tester",
+            id,
+            "emails",
+            "ada@work.example",
+            Some("office"),
+        )
+        .unwrap();
+    let entries = engine.field_entries(id, "emails").unwrap();
+    assert_eq!(
+        entries,
+        vec![
+            nexus_flow_facade::FieldEntry {
+                value: "ada@work.example".into(),
+                label: Some("office".into()),
+            },
+            nexus_flow_facade::FieldEntry {
+                value: "ada@home.example".into(),
+                label: None,
+            },
+        ],
+        "one entry per value, relabelled in place"
+    );
+    let expected = serde_json::json!([
+        { "value": "ada@work.example", "label": "office" },
+        { "value": "ada@home.example" }
+    ]);
+    assert_eq!(engine.show_value(id).unwrap()["custom"]["emails"], expected);
+    assert_eq!(
+        engine.show_value(id).unwrap()["custom"]["uri"],
+        "u-deferred"
+    );
+    assert_eq!(
+        engine.custom_fields_bulk(&[id]).unwrap()[id]["emails"],
+        expected
+    );
+    let deferred = engine.deferred_value(NOW).unwrap();
+    assert_eq!(
+        deferred[0]["custom"]["emails"], expected,
+        "a lane record carries it"
+    );
+
+    engine
+        .field_entry_remove(NOW, "tester", id, "emails", "ada@work.example")
+        .unwrap();
+    assert_eq!(
+        engine.show_value(id).unwrap()["custom"]["emails"],
+        serde_json::json!([{ "value": "ada@home.example" }])
+    );
+    // `--set` clears a list and refuses a value.
+    let err = engine
+        .update(NOW, "tester", id, &["emails=x".to_string()])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    engine
+        .update(NOW, "tester", id, &["emails=".to_string()])
+        .unwrap();
+    assert!(engine.field_entries(id, "emails").unwrap().is_empty());
+    assert!(engine.show_value(id).unwrap()["custom"]
+        .get("emails")
+        .is_none());
+    // The seam's refusals.
+    assert_eq!(
+        engine
+            .field_entry_add(NOW, "tester", id, "uri", "x", None)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation,
+        "a single-value field is not a list"
+    );
+    assert_eq!(
+        engine
+            .field_entries("cf12.9999", "emails")
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        engine.field_entries(id, "uri").unwrap_err().kind,
+        ErrorKind::Validation
+    );
 }

@@ -10,8 +10,9 @@
 
 use super::params::{
     FlowArchiveParams, FlowBlockedParams, FlowClaimParams, FlowCloseParams, FlowCreateParams,
-    FlowEdgeParams, FlowItemRefParams, FlowLabelParams, FlowListParams, FlowNextParams,
-    FlowNoteAddParams, FlowSchemaParams, FlowSearchParams, FlowShowParams, FlowUpdateParams,
+    FlowEdgeParams, FlowEntryListParams, FlowEntryParams, FlowItemRefParams, FlowLabelParams,
+    FlowListParams, FlowNextParams, FlowNoteAddParams, FlowSchemaParams, FlowSearchParams,
+    FlowShowParams, FlowUpdateParams,
 };
 use nexus_flow_facade::plugin::{self, PluginConfig};
 use nexus_flow_facade::workspace::{self as fws, WorkspaceExt};
@@ -475,6 +476,52 @@ pub(super) fn label_list(db: Option<&str>, start: &Path, p: &FlowItemRefParams) 
     Ok(read::labels_to_value(&labels))
 }
 
+/// `flow_entry_add`: add an entry to a plugin list field (6j6v.4g6r). Mirrors
+/// `nxf entry add <id> <field> <value> [--label <label>] --json`.
+pub(super) fn entry_add(
+    db: Option<&str>,
+    start: &Path,
+    actor: &str,
+    p: &FlowEntryParams,
+) -> Result<Value> {
+    let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
+    let id = ws.replica.resolve_id(&p.id).into_owned();
+    let label = p.label.as_deref();
+    write::entry_add(
+        &mut store, &cfg, &now, actor, &id, &p.field, &p.value, label,
+    )?;
+    let msg = match label {
+        Some(l) => format!("{id} {} + {} ({})", p.field, p.value.trim(), l.trim()),
+        None => format!("{id} {} + {}", p.field, p.value.trim()),
+    };
+    Ok(json!({ "ok": true, "msg": msg }))
+}
+
+/// `flow_entry_remove`: remove an entry from a plugin list field, whatever its label
+/// (observed-remove). Mirrors `nxf entry remove <id> <field> <value> --json`.
+pub(super) fn entry_remove(
+    db: Option<&str>,
+    start: &Path,
+    actor: &str,
+    p: &FlowEntryParams,
+) -> Result<Value> {
+    let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
+    let id = ws.replica.resolve_id(&p.id).into_owned();
+    write::entry_remove(&mut store, &cfg, &now, actor, &id, &p.field, &p.value)?;
+    let msg = format!("{id} {} - {}", p.field, p.value.trim());
+    Ok(json!({ "ok": true, "msg": msg }))
+}
+
+/// `flow_entry_list`: the entries of a plugin list field, in order, as `[{value, label?}]`.
+/// Mirrors `nxf entry list <id> <field> --json`.
+pub(super) fn entry_list(db: Option<&str>, start: &Path, p: &FlowEntryListParams) -> Result<Value> {
+    let (ws, cfg) = open(db, start)?;
+    let store = ws.open_store()?;
+    let id = ws.replica.resolve_id(&p.id);
+    let entries = read::field_entries(&cfg, &store, &id, &p.field)?;
+    Ok(read::field_entries_to_value(&entries))
+}
+
 /// The archive/unarchive batch receipt the CLI's `emit_batch` emits under `--json`:
 /// `{ "<verb>": [affected ids], "results": [{ id, status, reason }] }`, where `status` is the verb
 /// success word or `"failed"` with a machine-readable `reason` code. `verb` is the success word and
@@ -540,7 +587,10 @@ mod custom_field_tests {
     //! this drives the flow handlers IN-PROCESS with `file-fixture` linked: it proves the MCP WRITE
     //! path forwards a custom `set` to the shared facade and the READ path surfaces the sparse
     //! `custom` map, closing the "parity is load-bearing" gap for this transport.
-    use super::{create, show, update, FlowCreateParams, FlowShowParams, FlowUpdateParams};
+    use super::{
+        create, entry_add, entry_list, entry_remove, show, update, FlowCreateParams,
+        FlowEntryListParams, FlowEntryParams, FlowShowParams, FlowUpdateParams,
+    };
     use nxs_foundation::workspace::{self, WorkspaceConfig};
     use tempfile::TempDir;
 
@@ -768,5 +818,120 @@ mod custom_field_tests {
             serde_json::json!("2026-10-12T08:30:00Z"),
             "the refused update changed nothing"
         );
+    }
+
+    fn entry(id: &str, value: &str, label: Option<&str>) -> FlowEntryParams {
+        FlowEntryParams {
+            id: id.to_string(),
+            field: "mirrors".into(),
+            value: value.into(),
+            label: label.map(str::to_string),
+            now: Some("2026-10-12T09:00:00Z".into()),
+            actor: None,
+            workspace: None,
+        }
+    }
+
+    #[test]
+    fn flow_entry_tools_add_relabel_remove_and_clear_a_list_field() {
+        // 4g6r: the MCP entry tools hand a list-field entry to the shared facade; the entries ride
+        // flow_show under `custom` as `[{value, label?}]` and flow_entry_list answers the same array.
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let id = create(
+            None,
+            start,
+            "tester",
+            &create_params(vec!["uri=.nxs/files/a.md".into()], "2026-10-12T09:00:00Z"),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let receipt = entry_add(
+            None,
+            start,
+            "tester",
+            &entry(&id, " s3://bucket/a.md ", Some("backup")),
+        )
+        .expect("flow_entry_add on a list field succeeds");
+        assert_eq!(receipt["ok"], serde_json::json!(true));
+        entry_add(None, start, "tester", &entry(&id, "https://cdn/a.md", None)).unwrap();
+        // Re-adding a held value relabels it in place.
+        entry_add(
+            None,
+            start,
+            "tester",
+            &entry(&id, "s3://bucket/a.md", Some("archive")),
+        )
+        .unwrap();
+        let list = |id: &str| {
+            entry_list(
+                None,
+                start,
+                &FlowEntryListParams {
+                    id: id.to_string(),
+                    field: "mirrors".into(),
+                    workspace: None,
+                },
+            )
+            .unwrap()
+        };
+        let expected = serde_json::json!([
+            { "value": "s3://bucket/a.md", "label": "archive" },
+            { "value": "https://cdn/a.md" }
+        ]);
+        assert_eq!(list(&id), expected);
+        let shown = show(
+            None,
+            start,
+            &FlowShowParams {
+                id: id.clone(),
+                workspace: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            shown["custom"]["mirrors"], expected,
+            "the record carries the same entries"
+        );
+        assert_eq!(shown["custom"]["uri"], serde_json::json!(".nxs/files/a.md"));
+
+        entry_remove(None, start, "tester", &entry(&id, "https://cdn/a.md", None)).unwrap();
+        assert_eq!(
+            list(&id),
+            serde_json::json!([{ "value": "s3://bucket/a.md", "label": "archive" }])
+        );
+        // flow_update with an empty value clears the list; a value is refused, naming the tool.
+        let set = |set: &str| FlowUpdateParams {
+            id: id.clone(),
+            set: vec![set.to_string()],
+            now: Some("2026-10-12T09:01:00Z".into()),
+            actor: None,
+            workspace: None,
+        };
+        let err = update(None, start, "tester", &set("mirrors=x")).expect_err("a value is refused");
+        assert!(err.to_string().contains("flow_entry_add"), "{err}");
+        update(None, start, "tester", &set("mirrors=")).expect("an empty value clears the list");
+        assert_eq!(list(&id), serde_json::json!([]));
+        assert!(
+            show(
+                None,
+                start,
+                &FlowShowParams {
+                    id: id.clone(),
+                    workspace: None,
+                },
+            )
+            .unwrap()["custom"]
+                .get("mirrors")
+                .is_none(),
+            "an empty list leaves the sparse custom map"
+        );
+        // A single-value field is not a list.
+        let mut wrong = entry(&id, "x", None);
+        wrong.field = "uri".into();
+        let err = entry_add(None, start, "tester", &wrong).expect_err("uri is not a list");
+        assert!(err.to_string().contains("--set uri="), "{err}");
     }
 }
