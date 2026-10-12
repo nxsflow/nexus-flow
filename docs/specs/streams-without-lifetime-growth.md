@@ -1,6 +1,7 @@
 # Streams without lifetime growth — snapshot at P, then truncation below P (6j6v.kg3e)
 
-**Status: DRAFT, waiting for the owner's decisions (§11).** Nothing here is built yet.
+**Status: decided by the owner on 2026-10-12** (§11). Nothing here is built yet. The relay seq
+fix (§4.1, `r3jf`) lands first, as its own PR; then slice 1, then slice 2.
 Board: epic `6j6v.kg3e` (direction 9, coordinator `47jy.d28m`). Slice 1 is `6j6v.0cfa` (a reader
 that starts from a snapshot), slice 2 is `6j6v.5vxp` (truncation). Related: `6j6v.r3jf` (relay seq
 order) and `6j6v.3201` (text CRDT).
@@ -30,7 +31,10 @@ running is marked **[inferred]**.
   that hits honest replicas is the DynamoDB relay: a seq becomes visible before a lower one, so
   pullers and the fold can skip an op for good (r3jf, worse than filed). A snapshot at P that misses
   an op ≤ P passes the miss to every replica that starts from it. **Fixing it is a precondition of
-  slice 1.**
+  slice 1, and it lands separately and first:** its own small PR, with a reproduction test (owner,
+  2026-10-12; §4.1).
+- **Truncated ops go to a cold archive** (owner, 2026-10-12, D4): not served, not counted, deleted
+  with the stream, and the last resort for a refold (§5.6).
 
 ## 1. Problem and constraints
 
@@ -130,7 +134,8 @@ The chat message reducer's "first write wins by ARRIVAL", recorded on `47jy.d28m
 
 **Scope.**
 
-- Finding 1 is fixed in slice 1, as a precondition (§4.1).
+- Finding 1 is fixed IMMEDIATELY, before slice 1, as its own PR with a reproduction test (owner,
+  2026-10-12; §4.1).
 - Finding 2 is a one-line refusal of `lamport < 1` in `folder_for`
   (`crates/foundation/src/reducer.rs:81-92`). It changes which ops fold, so it needs a fold revision,
   and every stream refolds, locally and on the server. Recommended: ride the next revision bump.
@@ -170,7 +175,7 @@ Applying a view row with its stored version is a join, which is what §5.3 relie
 | L4 | Refold on a fold-revision or schema change | `bind_views`, `force_refold`, `fold_whole_log` (`store.rs:747-760,798-829,1163-1169`) | **Cannot run.** The replica must start from a snapshot folded by its own revisions (§4.5, D8). |
 | L5 | Stored-not-folded ops (unknown shapes, oversized chunks, lamport > `MAX_LAMPORT`, `emit_unfolded`) | `folder_for` returns None, giving `Ingest::Deferred` (`store.rs:538-555`; `reducer.rs:28-31`) | Lost unless carried. The snapshot carries them verbatim as the **residue** (§4.2). |
 | L6 | Memory migration mark: a register with no view | written unfolded (`crates/memory/src/store.rs:185-200`), read off `ops` (`:211-235`), used at `crates/memory/src/migration.rs:1480` | Covered by the residue, because it is stored-not-folded. |
-| L7 | Item history | `crates/core/src/history.rs:25-45` reads `ops`; only a test calls it (`crates/core/src/store.rs:4175`) | History before P is empty. User-visible only once a surface shows history (D4). |
+| L7 | Item history | `crates/core/src/history.rs:25-45` reads `ops`; only a test calls it (`crates/core/src/store.rs:4175`) | History before P is empty on a based replica. After truncation the archive still holds it (§5.6, D4); a history read for ops ≤ P′ is an archive read, not built in these slices. |
 | L8 | Chat: whether an op acts (provenance) | `acting_ops` view over `ops.provenance` (`crates/foundation/src/trust.rs:123-127`); chat joins it by `(lamport, site)` (`crates/chat/src/store.rs:344-350`); `held_sql` reads `open` ops (`:417-438`) | **Fail-closed but wrong.** Every message ≤ P would act nowhere, so every thread opened ≤ P is held. The E4-auth rule "a verdict is never taken from outside" forbids carrying verdicts (§4.5). |
 | L9 | Border-thread copy | `crates/chat/src/border.rs:537-547` selects op ids from `ops` | Same domain as L8. |
 | L10 | Prefix remap | `crates/core/src/store.rs:566-626` rewrites every op carrying the old prefix, then refolds | Needs the log. It runs on the empty store before an import (E4-continuous §10, CLI order), so a based replica never needs it for ops ≤ P. |
@@ -192,7 +197,14 @@ every platform reducer's views. fold-ddb's `platform_reducers()` already does
 
 ## 4. Slice 1 — a reader that starts from a snapshot at P (`0cfa`)
 
-### 4.1 Precondition: relay seq order equals visibility order (r3jf)
+### 4.1 Precondition: relay seq order equals visibility order (r3jf) — lands separately
+
+**Owner, 2026-10-12: fixed immediately, as its own small PR with a reproduction test, before slice
+1.** Slice 1 assumes it is merged and released; this section records what that PR does so the
+spec stays readable on its own. The reproduction test comes first: two concurrent appends on
+dynamodb-local with the second one's write delayed between allocation and `TransactWriteItems`,
+and a reader polling between them, which today stores a cursor past the missing seq.
+
 
 A snapshot at P must contain every op with seq ≤ P. The design makes the DynamoDB relay assign the
 seq inside the write, as the other two backends do.
@@ -262,9 +274,10 @@ Image {
   - removed edges and labels keep their add rows;
   - redacted notes keep their bodies.
 
-  Eliding those payloads, while keeping every tombstone, is safe: a re-delivered append or add is
-  hidden by the tombstone it meets. It is the one lever that bounds a snapshot by live content for a
-  chunk-heavy stream like nexflow.it's (D10). **[unverified]:** the size of a views-only image of
+  Slice 1 elides those payloads and keeps every tombstone (owner, 2026-10-12, D10). That is safe:
+  a re-delivered append or add is hidden by the tombstone it meets. It is the one lever that bounds
+  a snapshot by live content for a chunk-heavy stream like nexflow.it's. The data stays on the
+  relay's log, and after truncation in the archive (§5.6). **[unverified]:** the size of a views-only image of
   manufakt's board. The with-log image is 1.56 MB gzipped; slice 1 measures the views-only one.
 - **Bounds.** `MAX_UNPACKED_BYTES` stays 256 MiB (`crates/sync/src/snapshot.rs:76`). A relay
   refuses an upload over its own limit (§4.4).
@@ -279,8 +292,8 @@ Image {
 - **When.**
   - The replica has no unpushed ops (today's refusal, `crates/sync/src/snapshot.rs:233-240`).
   - The anchor at P matches the relay (`:242-253`).
-  - The relay's last snapshot is K ops behind P. The proposed K is 5,000, with at most one snapshot
-    per stream per hour (D7).
+  - The relay's last snapshot is K ops behind P. K is 5,000, with at most one snapshot per stream
+    per hour (decided, D7).
   - The writer's `ops_through_p` and `digest_through_p` equal the relay's (below). Otherwise it
     refuses as `Incomplete`, which is the r3jf victim detector.
 - **The relay's half of the check.** `GET /streams/{id}/digest?through=P` returns the count and an
@@ -300,15 +313,15 @@ Image {
 
 | Route | Body / answer | Rules |
 |---|---|---|
-| `PUT /streams/{id}/snapshot` | format-2 bytes | Accepted iff the header's `anchor` is the op the relay holds at seq P (so a stream that was deleted and recreated, or a forged position, is refused), and P > the stored P (a conditional put: the latest wins, older uploads answer 409). Size limit 32 MiB gzipped **[unverified: right number]**. 413 above it. |
-| `GET /streams/{id}/snapshot` | latest bytes, or 404 | `ETag` = P |
+| `PUT /streams/{id}/snapshot` | format-2 bytes | Accepted iff the header's `anchor` is the op the relay holds at seq P (so a stream that was deleted and recreated, or a forged position, is refused), and P > the stored P for the same reducer revision set (a conditional put: the latest wins per revision set, older uploads answer 409; D8). Size limit 32 MiB gzipped **[unverified: right number]**. 413 above it. |
+| `GET /streams/{id}/snapshot?revisions=…` | latest bytes for that revision set (default: the newest P of any set), or 404 | `ETag` = P |
 | `GET /streams/{id}/digest?through=P` | `{count, digest}` | §4.3 |
 
 - **Storage.** A new optional `SnapshotStore` capability of the registry, like `PresenceStore`
   (`crates/server/src/presence.rs`). A relay without it answers 404, and clients read that as
   "no snapshot here", exactly as for presence (E4 §4.5).
   - SQLite and Postgres keep a blob row per stream.
-  - DynamoDB keeps a pointer item `snapshot#latest` in the registry table, and the bytes in S3 under
+  - DynamoDB keeps a pointer item `snapshot#<revision set>` in the registry table, and the bytes in S3 under
     `<stream>/<P>.nxs-snapshot`. An item is limited to 400 KB.
 - **Authorization (requirement R4).** This repo's relay authenticates nobody (`crates/server/src/main.rs:2`).
   All three routes live under `/streams/{id}/`, so manufakt's authorizer
@@ -384,8 +397,9 @@ It then counts the tail as today.
 
 - **Ops: at most 30,000 in the tail since the snapshot**, not over the lifetime. With K = 5,000
   and writers keeping up, a hosted stream would need 25,000 un-snapshotted ops to hit the cap.
-- **Bytes: snapshot (unpacked) + tail ≤ 32 MiB.** The snapshot's size is the board's state, plus
-  hidden payloads unless D10 elides them.
+- **Bytes: snapshot (unpacked) + tail ≤ 32 MiB.** The snapshot's size is the board's live state:
+  hidden payloads are elided (D10).
+- **Unchanged by slice 2.** Truncation's archive is never pulled during hydration (§5.6).
 
 The cap numbers themselves are the engine's to keep or change. The spec proposes keeping them: they
 are sized against the 18 s pass budget, and a based replica stays far below both.
@@ -394,13 +408,21 @@ are sized against the 18 s pass budget, and a based replica stays far below both
 
 ### 5.1 What the relay does
 
-- The relay deletes the op items with seq ≤ P′, where P′ ≤ the latest snapshot's P, and records
+- The relay first copies the op items with seq ≤ P′ into the stream's cold archive (§5.6, D4),
+  where P′ ≤ the latest snapshot's P. Only then does it delete them from the live stream and record
   `base = P′` per stream (counter item attribute or registry row).
 - **The tm4k claim items stay** (D6), as does the counter at seq 0.
 - `GET ops?since=s` with s < base answers **`410 Gone {base, snapshot: true}`** instead of a page.
   A client of today reads 410 as an error and fails the pass loudly. It does not silently diverge.
-- The cap of a hosted replica counts only the tail (§4.6). Relay storage is bounded by the
-  retention window plus the tail.
+- **What is counted afterwards** (requirement R6):
+  - **The hosted cap** counts the snapshot's unpacked bytes, its residue and kept chat ops, and the
+    tail since the snapshot, against 30,000 ops / 32 MiB (§4.6). The archive is never pulled
+    during hydration, so it counts for nothing.
+  - **Live relay storage** holds the retention window W plus the tail, the latest snapshot, and
+    the claims. Claims grow with the lifetime op count, about 60 bytes an op **[unverified]**, and
+    are never served.
+  - **Lifetime growth moves into the cold archive.** It is not served, not counted, and deleted
+    with the stream (§5.6).
 
 ### 5.2 Devices offline since before P′ (requirements R5, `5vxp` open question a)
 
@@ -439,7 +461,7 @@ Who re-pushes ops ≤ P′:
 
 | Option | How | Trade-off |
 |---|---|---|
-| **A. Keep the claims (recommended)** | DynamoDB keeps its claim items at negative seq when the op items go. SQLite/Postgres keep `(stream_id, op_id, seq)` with the body dropped. A re-push answers the old seq and stores nothing. | Exact, server-side, already built for DynamoDB. About 60 bytes a claim **[unverified]**, never served, never counted by the cap. Grows with lifetime op count: a million ops ≈ 60 MB of claims per stream. |
+| **A. Keep the claims (decided, D6)** | DynamoDB keeps its claim items at negative seq when the op items go. SQLite/Postgres keep `(stream_id, op_id, seq)` with the body dropped. A re-push answers the old seq and stores nothing. | Exact, server-side, already built for DynamoDB. About 60 bytes a claim **[unverified]**, never served, never counted by the cap. Grows with lifetime op count: a million ops ≈ 60 MB of claims per stream. |
 | B. Op-id set in the snapshot | Exact set of op ids ≤ P in the snapshot; clients drop known ids. | 26+ bytes per op ever written, in every snapshot, so the snapshot grows with history again. The relay still stores the duplicate and the cap still counts it. A Bloom filter would drop genuine ops on a false positive: unacceptable. |
 | C. Per-site frontier (a version vector) | Header carries `max lamport per site ≤ P`. An op with lamport ≤ F[site] is "known". | Small, and it is the owner's Yjs picture ("version state per source"). **But it is only correct if each site's ops reach the relay in lamport order.** That holds for honest pushes (rowid order, own site, `engine.rs:714-725`). A foreign op squatting a site with a high lamport makes F jump, and genuine lower ops of that site would be dropped as known: **data loss from one hostile op.** Pre-fc5p duplicate coordinates break it too. Also against E4 decision 4. |
 
@@ -448,16 +470,17 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 
 ### 5.4 Who triggers, retention window (`5vxp` open questions c and d)
 
-- **Proposal: the relay truncates on its own schedule**, never past:
+- **Decided (D7): the relay truncates on its own schedule**, never past:
   - the latest snapshot's P;
   - ops younger than the retention window W (proposed **30 days**, matching presence's
-    forget-after, E4 §4.5);
+    forget-after, E4 §4.5, decided);
   - the DynamoDB stream's 24 h retention (so board-fold has seen every op it deletes).
 
   The relay checks positions only and still never folds.
 - **The alternative** is the snapshot writer calling `POST /streams/{id}/truncate {through}`. That
   puts a destructive call in every writer's hands. Rejected as the default; kept as an operator
-  route behind the stream's `write` authorization (D7).
+  route behind the stream's `write` authorization (D7). Either way the archive is written first
+  (§5.6).
 - **W is a trade:**
   - a device offline less than W catches up from the tail (cheap, no merge);
   - one offline longer takes the §5.2 path;
@@ -478,20 +501,73 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
   index from the rows (`crates/fold-ddb/src/snapshot.rs:179-190,250`).
 - **A reducer revision needs a snapshot folded by the new reducers.** So the release order is:
   1. a writer on the new revision publishes;
-  2. then the fold runs switch (D8).
+  2. then the fold runs switch (D8). If no writer can, the archive rebuild of §5.6 is the last
+     resort.
 - **The claim items with negative seq and the counter at seq 0 stay**, as above. Readers already
   skip seq ≤ 0 (`store_ddb.rs:65-72`; board-fold `record.rs:160-165`).
+
+### 5.6 The cold archive (owner, 2026-10-12, D4)
+
+Truncated ops are kept, not destroyed. This keeps the signed audit log (E4-auth §2.2), the data
+superseded chunks still hold, item history, and the last-resort refold of D8. The archive keeps
+them **off every path a sync pass, a hydration or the cap sees.**
+
+- **Who writes it.** The relay itself, as a step of truncation. Copying op items it already stores
+  is custody, not folding, so the relay stays a dumb carrier (E4 §2.1).
+- **Format.** One segment per truncation step: `(from_seq, to_seq]` as gzipped JSON lines. Each line
+  is one `WireOp`, verbatim, with its seq, its `extra`, and its `key_id`/`sig`. A segment header
+  carries `{stream_id, from_seq, to_seq, count, digest}`, where the digest is the same op-id digest
+  as §4.3. Segments are append-only and never rewritten.
+- **Order of writes, crash-safe.** Steps 1–3 can be redone: a rerun rewrites the same segment and
+  finds nothing more to delete.
+  1. Write the segment.
+  2. Re-read its count and digest and compare them with the relay's digest of the same range.
+  3. Record it in the stream's archive index (`archive#<to_seq>`).
+  4. Delete the op items. The claims stay (D6).
+  5. Move `base`.
+
+  A crash before step 4 leaves the live stream whole. A crash after step 4 but before step 5 leaves
+  the base behind the deletions, so a pull below the actual items still returns what remains, and
+  the next run finishes.
+- **Storage.**
+  - SQLite and Postgres: one blob row per segment, keyed `(stream_id, to_seq)`.
+  - DynamoDB: S3 objects `<stream>/archive/<to_seq>.nxs-archive` in the snapshot bucket, next to
+    `<stream>/<P>.nxs-snapshot` (§4.4). The storage class is the deployer's choice.
+  - Archive storage is an optional capability, like `SnapshotStore`. **A relay without it never
+    truncates.** Truncating without an archive would contradict D4.
+- **Not served.** Neither `GET …/ops` nor the snapshot routes ever return archived ops. One
+  separate route, `GET /streams/{id}/archive` (the index) and `GET /streams/{id}/archive/{to_seq}`
+  (one segment), exists for the two readers below. It sits under the stream's `read`
+  authorization, but manufakt's authorizer maps it to the owner's own tokens only, never to
+  delegated read-only engine tokens (hand-over §7).
+- **Not counted.** No hydration reads it. engine-server never calls the archive route, and its
+  `Capped` sees only snapshot and tail.
+- **Who reads it.** Two readers, both offline jobs, never on a request path:
+  - **D8's last resort.** A replica on a new reducer revision with no snapshot of its revision
+    runs `nxs sync rebuild-snapshot`. It folds the archive segments in seq order into a fresh store,
+    then the live tail, then publishes a format-2 snapshot at the new revision.
+  - **A future history or audit reader.** Not built in these slices (L7).
+- **Deletion (requirement R1).** The archive lives under the stream's key: blob rows keyed by
+  stream, the S3 prefix `<stream>/archive/` inside `<stream>/`.
+  - Deleting a stream deletes the whole prefix `<stream>/`: snapshots and archive in one go, plus
+    the archive index and claim items. manufakt.io's account deletion must cover the prefix
+    (hand-over §7).
+  - For the backends in this repo, slice 2 adds `purge_stream(stream)` to the store traits. It
+    deletes ops, claims, counter, snapshot and archive, for tests and self-hosted relays.
+  - **No resurrection.** An archive is never re-imported into a live stream. A segment can only
+    feed a rebuild into a fresh store, whose snapshot upload then needs the anchor op at P on the
+    live relay (§4.4). A deleted stream has none.
 
 ## 6. Requirements from manufakt.io (note on `kg3e`, 2026-10-11) — where each is met
 
 | # | Requirement | Where / how | Open? |
 |---|---|---|---|
-| R1 | Deletion reaches snapshots; no resurrection | §4.4: the snapshot lives under the stream key, and an upload needs the anchor op at P on the relay. Truncated state is the snapshot plus claims, also under the stream key. Hand-over: loeschung.ts deletes `snapshot#*`, the S3 prefix and claim items (it already deletes every row). | The archive in D4(a) must be deleted too, if chosen. |
-| R2 | One format, not two | §4.2: format 2 of the `nxs_sync::snapshot` envelope. fold-ddb's struct becomes a projection of it, and r6ef's S3 snapshot is the same envelope (format 1 today). Compatibility: D8. | D3 |
-| R3 | Truncation vs. the fold path, the index revision, claims and counter | §5.5 | D8 |
-| R4 | Snapshot reads go through per-person authorization | §4.4: the routes live under `/streams/{id}/`, read vs. write mapping in the authorizer. No stream-less route. | Hand-over to manufakt-io |
-| R5 | Long-offline devices get a defined path, measured together with arrival order | §5.2 (410 → merge snapshot → tail; unpushed ops pushed first and placed causally) and §2 (finding 1 is the one honest-replica order bug, and slice 1 fixes it first) | D6, D7 |
-| R6 | The cap after the change | §4.6: 30,000 ops / 32 MiB counted over the tail since the snapshot, plus the snapshot's unpacked bytes, plus residue and kept-domain ops | D1, D10 |
+| R1 | Deletion reaches snapshots; no resurrection | §4.4: the snapshot lives under the stream key, and an upload needs the anchor op at P on the relay. §5.6: the cold archive lives under the same key (`<stream>/archive/`), is deleted with the stream's whole prefix, and is never re-imported into a live stream. Truncated state is snapshot, claims and archive, all under the stream key. Hand-over: loeschung.ts deletes `snapshot#*`, `archive#*`, the S3 prefix `<stream>/` and the claim items. It already deletes every ops-table row. | Decided (D4, D5) |
+| R2 | One format, not two | §4.2: format 2 of the `nxs_sync::snapshot` envelope. fold-ddb's struct becomes a projection of it, and r6ef's S3 snapshot is the same envelope (format 1 today). Compatibility: D8. The archive is not a snapshot: it holds ops in their wire form (§5.6). | Decided (D3) |
+| R3 | Truncation vs. the fold path, the index revision, claims and counter | §5.5 | Decided (D8) |
+| R4 | Snapshot reads go through per-person authorization | §4.4: the routes live under `/streams/{id}/`, read vs. write mapping in the authorizer. No stream-less route. The archive route (§5.6) goes to the owner's own tokens only. | Hand-over to manufakt-io |
+| R5 | Long-offline devices get a defined path, measured together with arrival order | §5.2 (410 → merge snapshot → tail; unpushed ops pushed first and placed causally) and §2 (finding 1 is the one honest-replica order bug; its fix lands first, separately) | Decided (D6, D7) |
+| R6 | The cap after the change | §4.6 and §5.1: 30,000 ops / 32 MiB counted over the tail since the snapshot, plus the snapshot's unpacked bytes, plus residue and kept chat ops. The archive counts for nothing. Lifetime growth remains only in the claims (live, never served) and the cold archive. | Decided (D1, D4, D10) |
 
 ## 7. Hand-over: what app-foundations' engine-server must change (it is paused)
 
@@ -534,13 +610,20 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 9. Set the snapshot source, so the block stops hydrating by full replay
    (`packages/bb-hosted-engine/src/index.cdk.ts:185-197` sets no `NXS_ENGINE_SNAPSHOTS`).
 10. Give the relay in the same image (`nxf-relay`) the snapshot store: the S3 bucket and prefix,
-    IAM, and a lifecycle rule for superseded objects.
+    IAM, and a lifecycle rule for superseded snapshot objects.
+11. Slice 2: the same bucket holds the cold archive under `<stream>/archive/` (§5.6). No lifecycle
+    expiry on that prefix: the archive is deleted with the stream, not by age. The storage class
+    for it is the deployer's choice.
 
 **Not app-foundations, but needed** (manufakt-io, listed so it can be forwarded):
 
 - the authorizer's route map for the three snapshot routes (§4.4);
-- loeschung.ts deleting the snapshot pointer, the S3 prefix and the claim items (R1);
-- the manufakt relay's nexus-flow pin moving past the r3jf fix (§4.1).
+- the archive routes (§5.6) mapped to the stream owner's own tokens only, never to delegated
+  read-only engine tokens;
+- loeschung.ts deleting the snapshot and archive pointers (`snapshot#*`, `archive#*`), the whole S3
+  prefix `<stream>/` (snapshots and archive), and the claim items (R1);
+- the manufakt relay's nexus-flow pin moving past the r3jf fix (§4.1). That fix ships in its own
+  release, before slice 1, so the pin can move ahead of everything else here.
 
 ## 8. Tests
 
@@ -568,9 +651,11 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 - **The cap.** A test transport counting like engine-server's `Capped`, over a 35,000-op stream with
   a snapshot at 33,000. It is served within 30,000 counted ops. A replay of the same stream is
   refused.
-- **r3jf.** Concurrent appends to one DynamoDB stream (dynamodb-local) with a reader polling between
-  them. The reader never stores a cursor above a seq it has not received. An injected delay between
-  allocation and write must not change that.
+- **r3jf** is tested in its own PR, before slice 1 (§4.1). Slice 1 re-runs the snapshot
+  differential on the DynamoDB relay under concurrent pushes, with that fix in place.
+- **Hidden payloads (D10).** A snapshot omits superseded chunk bodies, removed edge and label add
+  rows, and redacted note bodies, but keeps every tombstone. A tail that re-delivers such an
+  append or add leaves the based replica equal to the full replay.
 - **Clock (L1).** A based replica's first write to a field the snapshot holds at `_v = 900` wins.
 - **Residue (L5/L6).** An unknown-shape op ≤ P survives the import and folds once the reducer
   learns the shape. The memory migration mark reads the same before and after.
@@ -596,15 +681,25 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
   accepts writes from a fresh hosted replica.
 - **Fold.** board-fold starts a build from the snapshot after truncation, and it equals the serving
   build.
+- **Archive.**
+  - After truncation, the archive segments hold exactly the truncated ops: the same count and
+    digest, verbatim signatures.
+  - No pull and no hydration touches them: the test relay asserts that the archive route is never
+    called during a pass.
+  - A truncation that dies between any two steps of §5.6 and runs again ends in the same live
+    stream and archive.
+  - `nxs sync rebuild-snapshot` from archive plus tail equals the full fold.
+  - Purging the stream removes ops, claims, counter, snapshot and archive.
+  - A relay without archive storage refuses to truncate.
 
 ## 9. What slice 1 changes in code (for sizing, not a plan)
 
-- `crates/server`:
-  - `store_ddb.rs`: seq inside the transaction;
+- `crates/server` (the seq fix of §4.1 is NOT here: it lands first, in its own PR):
   - the `SnapshotStore` capability for all three backends;
   - the three routes.
 - `crates/sync`:
-  - snapshot format 2: header, base, signature, the writer check against `digest`;
+  - snapshot format 2: header, base, signature, the writer check against `digest`, hidden payloads
+    elided (D10);
   - import outcomes;
   - the engine's pass gets a "publish if due" step, opt-in.
 - `crates/foundation`:
@@ -620,10 +715,13 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 
 ## 10. Cuts
 
+**Before slice 1, its own PR (owner, 2026-10-12):** the r3jf fix with its reproduction test (§4.1),
+released on its own, so manufakt's relay pin can take it first.
+
 **Slice 1 (`0cfa`) builds:**
 
-- the r3jf fix (§4.1);
-- format 2 with the base, residue, chat kept, signature and digest check (§4.2–4.3);
+- format 2 with the base, residue, chat kept, signature and digest check, and hidden payloads
+  elided (§4.2–4.3, D10);
 - relay snapshot routes and storage on all three backends (§4.4);
 - the based import, local and fold-ddb (§4.5);
 - the publish step in the local service;
@@ -632,6 +730,8 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 **Slice 2 (`5vxp`) builds:**
 
 - relay truncation with base and 410, claims kept (§5.1, §5.3);
+- the cold archive: segments, index, archive routes, `purge_stream`, `nxs sync rebuild-snapshot`
+  (§5.6, D4);
 - the scheduled trigger with window W (§5.4);
 - the snapshot merge into an existing store (§5.2, `row_changes`);
 - the slice-2 tests.
@@ -642,152 +742,104 @@ row and a cap count. The choice is about cost and cleanliness, not correctness.
 - findings 4–7;
 - the text CRDT (`3201`);
 - bounding chat's kept log (D9);
-- eliding hidden payloads, if D10 says later;
+- a history or audit reader over the archive (L7);
 - a per-call read budget (`wq9e`);
 - relay authentication in this repo (`ax54`).
 
-## 11. Decisions for the owner
 
-Each decision lists options, trade-offs and a recommendation. None is settled by this draft.
+## 11. Decisions (owner, 2026-10-12)
 
-**D1. Does the end-of-2026 deadline need slice 2, or does slice 1 meet it?**
+The draft put ten decisions to the owner, each with options and a recommendation. On 2026-10-12 the
+owner accepted nine as recommended and chose the cold archive for D4. Separately, the owner ruled
+that the relay seq bug is fixed immediately, in its own PR (§4.1). Each decision below keeps the
+options and the reasons, as the derived-ranking spec does in its §10.
 
-- (a) **Slice 1 plus the engine-server hand-over by the deadline.** The hosted cap then counts only
-  the tail since the last snapshot (§4.6), and relay storage keeps growing. Slice 2 follows in
-  2027.
-- (b) Both slices by the deadline.
+0. **The relay seq bug (§2 item 1, `r3jf`) is fixed immediately**, as its own small PR with a
+   reproduction test, before slice 1. Slice 1 names it as a precondition that lands separately
+   (§4.1, §10). It also stands on its own: it can make a puller miss an op for good on today's
+   DynamoDB relay, snapshot or not.
 
-Trade-off: under (a), the relay's storage grows with the lifetime (DynamoDB cost, no product
-limit), and a device that refuses to trust snapshots can still full-replay. (b) adds destructive
-relay work under deadline pressure. (a) also depends on app-foundations being un-paused for §7.
-Without that, neither option reaches the hosted cap.
+1. **D1 — The deadline is met by slice 1 plus the engine-server hand-over; slice 2 follows.** The
+   hosted cap then counts only the tail since the last snapshot (§4.6). Relay storage keeps growing
+   until slice 2.
+   - *Declined:* both slices by the deadline. That puts destructive relay work under deadline
+     pressure, and the cap does not need it.
+   - *Named:* the cap is only reached through §7, so app-foundations must take the hand-over before
+     the deadline.
 
-**Recommendation: (a)**, with §7 scheduled in app-foundations before November.
+2. **D2 — A reader believes only snapshots signed by a key on its own trust list**, otherwise it
+   falls back to a full replay. That means the hosted engine's stable key, and the user's own
+   devices. `nxs sync bind` offers to trust the key that signed the latest snapshot after showing
+   it, as `trust list` does for op signers.
+   - *Declined:* trusting any snapshot the relay accepted from an authorized writer. That would let
+     the relay operator, or anyone with the stream's write token, forge a whole board.
+   - *Declined:* a split rule, strict for local replicas and lenient for the hosted engine.
+   - *Reason:* E4-auth's rule that trust is local and explicit, now that a remote party decides
+     state for the first time.
 
-**D2. Whose snapshot does a reader believe?** For the first time a remote party decides state, not
-only actions.
+3. **D3 — The one format is `nxs_sync::snapshot` format 2.** fold-ddb's tables-plus-watermark
+   becomes a projection of it, and r6ef's S3 objects become format 2.
+   - *Compatibility promise:* every build reads every older format, and format 1 stays readable at
+     least through the bgwn base window.
+   - *Declined:* fold-ddb's struct as the format. It has no anchor, no engine or schema version,
+     and no production caller.
+   - *Declined:* keeping both formats, which requirement R2 forbids.
 
-- (a) Only snapshots signed by a key on the reader's trust list, otherwise a full replay. That
-  means the hosted engine's stable key, and the user's own devices.
-- (b) Any snapshot the relay accepted from an authorized writer of the stream (the relay's
-  per-person authorization is the trust).
-- (c) (a) for local replicas and (b) for the hosted engine.
+4. **D4 — Truncated ops go to a cold archive** (§5.6). It is not served, not counted against the
+   cap, deleted with the stream, and the last resort for D8. It keeps the signed audit log (E4-auth
+   §2.2), item history and the data superseded chunks hold.
+   - *Declined:* dropping truncated ops for good. That is simplest, but it ends the audit log and
+     history.
+   - *Declined:* never truncating. That keeps everything at the cost of unbounded relay storage.
+   - *Cost, named:* a second store per stream, and a second thing deletion must reach (R1, covered
+     in §5.6 and §7).
 
-Trade-off: (a) is consistent with E4-auth (trust is local and explicit), but a brand-new device must
-`nxs sync trust add` before it can skip the replay, and after slice 2 it cannot replay at all. (b)
-makes the relay operator and anyone with the stream's write token able to forge a board.
+5. **D5 — Snapshots live on the relay** under `/streams/{id}/snapshot` (§4.4). This reverses
+   E4-continuous §10 ("not on the relay"). That decision rested on a relay that authenticated
+   nobody and a snapshot nobody could check. Signing (D2), the anchor rule, and manufakt's
+   per-person authorizer now answer both.
+   - *Declined:* snapshots only in S3 next to the hosted engine. Local replicas and slice 2 need
+     them on the relay, and a second store per product would have to be deleted and authorized
+     separately.
 
-**Recommendation: (a)**, with `nxs sync bind` offering to trust the key that signed the latest
-snapshot after showing it, as `trust list` already does for op signers.
+6. **D6 — Re-pushed op ids below P′ are deduplicated by keeping the claims** (§5.3). DynamoDB keeps
+   the tm4k claim items; SQLite and Postgres keep slim `(stream_id, op_id, seq)` rows.
+   - *Declined:* an op-id set in the snapshot. It grows with history, and the relay would still
+     store and count duplicates.
+   - *Declined:* a per-site frontier. It is small and matches the Yjs picture, but one hostile op
+     squatting a site could make genuine ops read as known: data loss.
+   - *Cost, named:* claims grow with the lifetime op count, about 60 bytes an op **[unverified]**.
+     They are never served or counted.
 
-**D3. One format: which one survives?**
+7. **D7 — Cadence, trigger and window.**
+   - A snapshot every K = 5,000 ops, at most hourly, written by the local service and the hosted
+     engine.
+   - The relay truncates on its own schedule, never past the latest snapshot, never ops younger
+     than W = 30 days, never younger than the DynamoDB stream's 24 h.
+   - Writer-triggered truncation is kept only as an operator route.
+   - *Declined:* K = 1,000 or 10,000, W = 7 or 90 days, and writer-triggered truncation as the
+     default.
+   - *To revisit if* manufakt.io or nexflow.it expect laptops to stay away longer than 30 days.
 
-- (a) The `nxs_sync::snapshot` envelope, format 2. fold-ddb's struct becomes a projection of it,
-  and r6ef's S3 objects become format 2.
-- (b) fold-ddb's tables-plus-watermark becomes the format, and the sync envelope wraps it.
-- (c) Keep both.
+8. **D8 — Fold-revision compatibility.**
+   - The relay keeps the latest snapshot per reducer revision set.
+   - The release order is "a writer on the new revision publishes, then readers and fold runs
+     switch". The release runbook gains that step.
+   - The archive rebuild (`nxs sync rebuild-snapshot`, §5.6) is the last resort.
+   - *Declined:* requiring every rewriting revision to ship a view migration. Not always possible:
+     fold revision 1 needed op coordinates no view held.
 
-Trade-off: (a) keeps the header engine-server already reads (anchor, engine, header ops), and the
-loader that is already in production. (b) is smaller, but it has no anchor, no engine or schema
-version, and no production caller today. (c) is what R2 forbids.
+9. **D9 — Chat keeps its log in a based snapshot.** Every `message`-domain op ≤ P rides in the
+   snapshot, so chat's actions keep reading their own verdicts (E4-auth: a verdict is never taken
+   from outside).
+   - *Declined for now:* carrying `(lamport, site, key_id, sig)` of the referenced ops. That would
+     be a second provenance mechanism.
+   - *To revisit when* a chat-heavy stream approaches the cap.
 
-**Recommendation: (a).** Compatibility promise: every build reads every older format, and format 1
-stays readable for at least the bgwn base window.
-
-**D4. History and audit after truncation.** The owner made the log a signed audit log (E4-auth
-§2.2, 2026-08-10). The log also keeps superseded chunk data ("the log keeps the data", E4 §4.4.1)
-and item history (L7). Truncation ends all three for ops ≤ P′.
-
-- (a) The relay moves truncated ops to a cold archive object per stream: not served, not counted,
-  deleted with the stream.
-- (b) Drop them for good.
-- (c) Never truncate (slice 1 only, see D1).
-
-Trade-off:
-
-- (a) keeps the audit log, item history and a refold path (D8), but adds storage and a second thing
-  to delete (R1).
-- (b) is simplest and truly bounds storage, but loses audit and history.
-- (c) keeps everything at the cost of relay storage.
-
-**Recommendation: (a) if audit matters for manufakt.io's customers, otherwise (b).** This is a
-product call, not an engineering one.
-
-**D5. Snapshots at all on the relay (versus only next to the hosted engine).**
-
-- (a) On the relay, under `/streams/{id}/snapshot` (§4.4).
-- (b) Only in S3 next to the hosted engine (r6ef, today).
-
-Trade-off: (a) is required for local replicas and for slice 2, and it inherits the relay's per-person
-authorization and deletion. E4-continuous §10 kept snapshots off the relay because the relay
-authenticated nobody and a snapshot could not be checked. Signing (D2), the anchor rule and
-manufakt's authorizer now answer that. (b) keeps a second store per product.
-
-**Recommendation: (a).** This reverses a recorded decision, so it is listed here.
-
-**D6. Dedup of re-pushed op ids below P′ (§5.3).**
-
-- (a) Keep the claims.
-- (b) An op-id set in the snapshot.
-- (c) A per-site frontier.
-
-**Recommendation: (a).** It is exact and already built for DynamoDB, and it is the only option
-where one hostile op cannot cause data loss. Its cost grows with the lifetime op count (about 60 MB
-per million ops **[unverified]**), but it is never served or counted.
-
-**D7. Cadence, trigger and retention window.**
-
-- **Snapshot every K = 5,000 ops**, at most hourly. Who writes: the local service and the hosted
-  engine.
-- **Truncation by the relay on a schedule**, never past the latest snapshot, never younger than
-  W = 30 days, never younger than 24 h. Plus an operator route.
-- **Alternatives:**
-  - K = 1,000 (fresher, more writes) or 10,000;
-  - W = 7 days (smaller relay, more merges) or 90 days;
-  - writer-triggered truncation.
-
-**Recommendation: as proposed.** W should match how long manufakt.io and nexflow.it expect a laptop
-to stay away.
-
-**D8. Fold-revision compatibility once history is gone (bgwn).** A replica can import only a
-snapshot folded by its own reducer revisions.
-
-- (a) The relay keeps the latest snapshot per revision set, and the rollout order is "new writer
-  publishes, then readers switch".
-- (b) Every revision that changes what an existing op folds to must ship a view migration.
-- (c) Refold from the archive (needs D4 (a)).
-
-Trade-off:
-
-- (a) is simple, but a revision bump on a stream nobody writes at the new revision leaves new
-  readers without a start.
-- (b) is not always possible: fold revision 1 needed op coordinates no view held.
-- (c) makes the archive load-bearing.
-
-**Recommendation: (a), with (c) as the last resort if D4 is (a).** Add "a revision bump publishes a
-snapshot before readers switch" to the release runbook.
-
-**D9. Chat in a based snapshot.**
-
-- (a) Keep every `message`-domain op ≤ P in the snapshot (chat's log is not truncated).
-- (b) Carry `(lamport, site, key_id, sig)` of the ops chat's action reads, re-verified at import.
-
-Trade-off: (a) is correct now and keeps E4-auth's "a verdict is never taken from outside", but chat
-ops still count. (b) bounds chat too, at the cost of a second carried-provenance mechanism.
-
-**Recommendation: (a) for slice 1**, and revisit when a chat-heavy stream approaches the cap.
-
-**D10. Elide hidden payloads in a snapshot.** That covers superseded chunk bodies, removed
-edge/label add rows and redacted note bodies. Tombstones are kept, so this is safe for convergence
-(§4.2).
-
-- (a) Elide them from slice 1 on.
-- (b) Carry them.
-
-Trade-off: (a) bounds a snapshot by live content, which matters most for nexflow.it's chunk-carried
-text. A new replica no longer receives superseded text or redacted note bodies at all; while the
-relay still holds the log (slice 1), they remain there. (b) lets snapshot size grow with edit
-history.
-
-**Recommendation: (a).** Redaction then actually stops spreading a note's body to new devices,
-which is arguably what a user expects from it.
+10. **D10 — Hidden payloads are elided from snapshots, from slice 1 on.** That covers superseded
+    chunk bodies, removed edge and label add rows, and redacted note bodies. Tombstones are kept,
+    so convergence is unaffected (§4.2).
+    - *Reason:* it bounds a snapshot by live content, which matters most for nexflow.it's
+      chunk-carried text. Redaction then actually stops a note's body reaching new devices.
+    - *Declined:* carrying the payloads, which lets the snapshot grow with edit history.
+    - The data itself stays on the relay's log, and after truncation in the archive.
