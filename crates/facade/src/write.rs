@@ -528,11 +528,14 @@ fn prepare_custom_set(
         )));
     }
     // Per-type value validation — skipped for an empty value, which is the clear sentinel (§4.2).
-    if !value.is_empty() {
+    // A `datetime` value is the one type stored in a canonical form rather than as given (vbp6).
+    let canonical = if value.is_empty() {
+        String::new()
+    } else {
         match decl.field_type {
-            FieldType::Date => {
-                validate::iso_date(value)?;
-            }
+            FieldType::Date => validate::iso_date(value)?,
+            FieldType::Datetime => validate::datetime(value)
+                .map_err(|e| NxfError::validation(format!("custom field '{name}': {}", e.msg)))?,
             FieldType::Enum => {
                 if !decl.values.iter().any(|v| v == value) {
                     return Err(NxfError::validation(format!(
@@ -540,11 +543,12 @@ fn prepare_custom_set(
                         decl.values
                     )));
                 }
+                value.to_string()
             }
-            FieldType::Text | FieldType::Longtext => {}
+            FieldType::Text | FieldType::Longtext => value.to_string(),
         }
-    }
-    Ok((value.to_string(), custom_merge_strategy(decl.merge)))
+    };
+    Ok((canonical, custom_merge_strategy(decl.merge)))
 }
 
 /// Parse + validate the create/update custom-field `--set name=value` pairs (plugin-custom-fields

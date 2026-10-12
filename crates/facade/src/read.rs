@@ -224,6 +224,8 @@ fn titleise(name: &str) -> String {
 pub struct SchemaField {
     pub field: String,
     pub label: String,
+    /// How the value is interpreted: a canonical field's kind, or a custom field's declared type
+    /// (`text | longtext | date | datetime | enum`, [`FieldType::as_str`](crate::plugin::FieldType::as_str)).
     pub kind: String,
     pub required: bool,
     pub settable: bool,

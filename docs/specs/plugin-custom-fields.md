@@ -49,7 +49,8 @@ one domain uses).
 
 **Explicit non-goals (§9):** slice *implementation* (post-approval); **set-valued** (`or-set`)
 custom fields (scalar-only v1 — no v1 consumer, and they need their own view+fold like `labels`);
-richer scalar types beyond text/longtext/date/enum (int/bool/format-validated uri/email/color);
+richer scalar types beyond text/longtext/date/enum (int/bool/format-validated uri/email/color;
+`datetime` has since been added — §5.1, 6j6v.vbp6);
 the `r16h`/`file` consumer plugin itself (`ky26`) and blob sync; a per-field permission model.
 
 ## 2. Data model — the 16 canonical, unchanged, plus a folded `custom_fields` view
@@ -101,7 +102,7 @@ A plugin declares custom fields in a new top-level TOML table, parsed + validate
 
 ```toml
 [fields.uri]
-type = "text"            # text | longtext | date | enum        (v1 set — TB-CF-3)
+type = "text"            # text | longtext | date | datetime | enum   (TB-CF-3; datetime §5.1)
 on   = ["file"]          # types this field applies to; omit ⇒ all types (TB-CF-2)
 required = true          # must be set at create for an applicable type (default false)
 label = "File URI"       # display label; default = titleised name
@@ -186,8 +187,9 @@ scalar register); the row remains with an empty `value` and reads as unset in th
 1. If `name` is canonical/aliased → unchanged path (bare `set_field` LWW).
 2. Else if `name` is a **declared custom field** of the active plugin → **new path**: validate the
    item's `type` is in the field's `on` set; validate `value` against the declared type (`date` →
-   ISO-8601, reusing the `due`/`defer` check; `enum` → member of `values`; `text`/`longtext` → any
-   UTF-8); emit a merge-tagged `field set` op via `set_field_merge`.
+   ISO-8601, reusing the `due`/`defer` check; `datetime` → RFC 3339 with a time zone, stored as
+   the UTC instant (§5.1); `enum` → member of `values`; `text`/`longtext` → any UTF-8); emit a
+   merge-tagged `field set` op via `set_field_merge`.
 3. Else (undeclared) → the existing **loud `validation` error**, now listing canonical + declared
    custom names (`write.rs:418`).
 
@@ -207,6 +209,43 @@ new type — is a **deliberate v1 non-goal** (§9): it needs an update/retype-si
 no v1 consumer, and `file.uri` is satisfied by the create guard. T3 (`6j6v.p7b2`) implements the
 create guard only; a presentation layer that wants "this file is missing its uri" derives it from the
 sparse `custom` map, not from a write-time reject.
+
+### 5.1 The `datetime` type (6j6v.vbp6)
+
+`date` stores what it is given: a plain `YYYY-MM-DD` or any RFC 3339 timestamp, as typed. That is
+enough for a deadline, not for a moment such as a meeting's start. `type = "datetime"` is the type
+for a moment:
+
+```toml
+[fields.occurred_on]
+type  = "datetime"
+on    = ["note"]
+label = "Occurred on"
+```
+
+- **Accepted:** an RFC 3339 date-time **with a time zone** — `Z` or a numeric offset
+  (`2026-10-12T10:30:00+02:00`, `2026-10-12T08:30:00Z`, `…T08:30:00.250Z`). Lowercase `t`/`z` are
+  RFC 3339 too.
+- **Refused (`validation`, naming the field):** a plain date (`2026-10-12` — a plugin wanting a
+  date declares `date`), a local time without an offset (`2026-10-12T08:30:00`), anything else
+  that is not RFC 3339, and an instant whose UTC year falls outside `0000..=9999`.
+- **Stored:** the same instant in UTC at whole seconds, `YYYY-MM-DDTHH:MM:SSZ`. The offset is
+  applied and then discarded; fractional seconds are dropped (truncated, not rounded).
+  `2026-10-12T10:30:00.9+02:00` is stored as `2026-10-12T08:30:00Z`.
+- **Cleared** by an empty value, like every custom field (§4.2).
+
+**Why one fixed shape.** Every comparison downstream compares the stored text: the derived ranking
+comparator (numbers before text, then text order), a server's fold, any SQL sort. With one
+offset and one precision, text order **is** chronological order — no reader needs to know the
+type. Keeping the given offset would order `09:00Z` before `10:00+02:00` (08:00Z); keeping a
+variable precision would order `…00.5Z` before `…00Z` (`.` sorts before `Z`). So a `datetime`
+field ranks chronologically wherever a field is read, today in a derived key's
+`of = { field = "…" }` (custom fields are not direct `[ranking]` field keys). The normalization
+happens once, at the write seam (`validate::datetime`, called from `prepare_custom_set`), so the op
+log, every replica and a hosted fold carry the canonical value — nothing type-aware downstream.
+
+**What is lost.** The writer's offset is not kept: a reader shows the instant in its own time zone.
+A consumer that must show "10:30 in the attendee's zone" stores that zone separately.
 
 ## 6. Read & schema surface
 
@@ -287,7 +326,7 @@ per-field change — the generic seam the epic is designed to feed.
   rather than half-built (TB-CF-4).
 - **Richer scalar types.** `int`, `bool`, and format-validated `uri`/`email`/`color` are out; v1 is
   `text`/`longtext`/`date`/`enum` (a hex color or uri is `text`, a fixed palette is `enum`) —
-  TB-CF-3. Adding a type later is additive.
+  TB-CF-3. Adding a type later is additive; `datetime` was the first such addition (§5.1).
 - **The `r16h` / `file` consumer plugin itself** (`ky26`) and **blob sync** — this epic ships the
   *mechanism*; `file`+`uri` is its first *user*, tracked separately.
 - **A per-field permission / audit model** — custom fields obey the same actor model as canonical
@@ -301,7 +340,7 @@ All eight decisions were approved as proposed.
 |---|---|---|
 | **TB-CF-1** | Where do custom values live — dynamic `items` columns or a separate view? | **Separate folded `custom_fields` EAV view** (§2). Keeps `items`/`ItemRow`/`CanonicalItem` byte-identical (oracle + goldens green, SemVer-minor), sparse, and mirrors `labels`/edges. Dynamic columns would make the core table plugin-dependent. |
 | **TB-CF-2** | Are fields global or type-scoped? | **Type-scoped** via `on = […]` (default: all types). Matches every consumer (`person.email`, `project.status`, `file.uri`); `--set` on a non-applicable type errors. |
-| **TB-CF-3** | Which data types in v1? | **`text` \| `longtext` \| `date` \| `enum`.** Covers all named consumers (uri/email/color = `text`; a fixed palette/status = `enum`; deadline = `date`). `int`/`bool`/format-validated types are additive follow-ups. |
+| **TB-CF-3** | Which data types in v1? | **`text` \| `longtext` \| `date` \| `enum`.** Covers all named consumers (uri/email/color = `text`; a fixed palette/status = `enum`; deadline = `date`). `int`/`bool`/format-validated types are additive follow-ups. **Extended 2026-10-12 (6j6v.vbp6):** `datetime` — an RFC 3339 instant with a time zone, stored in UTC at whole seconds (§5.1). |
 | **TB-CF-4** | Multi-value (list) custom fields in v1? | **No — scalar only.** `or-set` custom fields need their own view+fold and have no v1 consumer; deferred (§9). |
 | **TB-CF-5** | Merge policy & the `w213` seam? | **All v1 custom fields fold keep-if-beats LWW**, with the op carrying the `w213` strategy marker (`set`/`set:crdt-text`) so a real char-level merge is a future drop-in. This epic is the **first** writer to activate the dormant `w213` `set_field_merge` path; canonical fields are untouched. |
 | **TB-CF-6** | Write namespace — flat `--set uri=` or a `custom.`/`x-` prefix? | **Flat `--set <name>=` with a load-time collision guard** vs the canonical set; values read back under a sparse `custom{}` map (so `CanonicalItem`'s 16 keys stay parity-stable). Best agent-ergonomics; a future canonical-field collision is caught loudly at plugin load. |

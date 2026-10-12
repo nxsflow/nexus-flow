@@ -768,6 +768,8 @@ columns = ["id"]
 [fields.uri]
 type = "text"
 label = "URI"
+[fields.occurred_on]
+type = "datetime"
 "#,
     order: 101,
 });
@@ -1167,4 +1169,55 @@ fn a_chunk_op_of_exactly_the_limit_is_taken_and_folded_and_one_byte_more_is_refu
             .kind,
         ErrorKind::Validation
     );
+}
+
+// ---- the `datetime` custom field type at the Engine seam (6j6v.vbp6) ---------------------------
+
+#[test]
+fn engine_update_stores_a_datetime_custom_value_in_utc_and_reads_it_back() {
+    // The embedding seam app-foundations drives: `Engine::update --set` with an offset timestamp,
+    // read back through `show_value` and the bulk join as the normalized UTC instant.
+    let tmp = seeded_fields_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    engine
+        .update(
+            NOW,
+            "tester",
+            "cf12.0002",
+            &["occurred_on=2026-10-12T10:30:00.123+02:00".to_string()],
+        )
+        .unwrap();
+    let v = engine.show_value("cf12.0002").unwrap();
+    assert_eq!(
+        v["custom"]["occurred_on"],
+        serde_json::json!("2026-10-12T08:30:00Z"),
+        "show_value reads the stored UTC instant: {v}"
+    );
+    assert_eq!(
+        engine.custom_fields_bulk(&["cf12.0002"]).unwrap()["cf12.0002"]["occurred_on"],
+        serde_json::json!("2026-10-12T08:30:00Z")
+    );
+    // A value without a zone is refused at the seam and changes nothing.
+    let err = engine
+        .update(
+            NOW,
+            "tester",
+            "cf12.0002",
+            &["occurred_on=2026-10-12T09:00:00".to_string()],
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(
+        engine.show_value("cf12.0002").unwrap()["custom"]["occurred_on"],
+        serde_json::json!("2026-10-12T08:30:00Z")
+    );
+    // The schema the seam reports names the type.
+    let schema = read::schema(&engine.plugin_config());
+    let field = schema
+        .fields
+        .iter()
+        .find(|f| f.field == "occurred_on")
+        .expect("schema lists the datetime field");
+    assert_eq!(field.kind, "datetime");
+    assert!(field.custom && field.settable);
 }

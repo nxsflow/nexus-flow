@@ -407,6 +407,39 @@ fn a_ticket_reads_only_its_own_labels_custom_values_and_links() {
 }
 
 #[test]
+fn a_datetime_custom_value_reaches_the_server_as_the_utc_instant_the_replica_holds() {
+    // vbp6: the write seam stores a `datetime` value in its canonical UTC form, so the op log carries
+    // that form and a hosted fold holds the same instant the replica does — nothing type-aware on
+    // the server side.
+    let mut cfg = cfg_with_fields();
+    cfg.fields.insert(
+        "occurred_on".into(),
+        toml::from_str("type = \"datetime\"").expect("a datetime declaration parses"),
+    );
+    let mut s = nexus_flow_core::store::Store::open_in_memory(1);
+    s.create_item("ab12.0001", "task", "T", "u");
+    nexus_flow_facade::write::update(
+        &mut s,
+        &cfg,
+        NOW,
+        "u",
+        "ab12.0001",
+        &["occurred_on=2026-10-12T10:30:00.5+02:00".to_string()],
+    )
+    .unwrap();
+    let folder = Folder::platform().unwrap();
+    let served = served_board(&serve(&s, 3, &folder));
+    assert_eq!(
+        served.tickets["ab12.0001"]
+            .custom
+            .get("occurred_on")
+            .map(String::as_str),
+        Some("2026-10-12T08:30:00Z")
+    );
+    assert_eq!(served.tickets, read::active_board(&s).unwrap().tickets);
+}
+
+#[test]
 fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_labels() {
     // A stream an older release folded: the same rows, no entries under its tickets, and a
     // watermark that names no index revision.

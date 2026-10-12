@@ -1322,7 +1322,7 @@ fn label_add_rejects_a_separator_in_the_label() {
 
 /// A PluginConfig declaring custom fields (plugin-custom-fields §3), the fixture the T3 write-path
 /// tests vary. `uri` (required text on `file`), `body` (crdt-text longtext on `file`), `stage`
-/// (enum on `project`), `deadline` (date on `project`).
+/// (enum on `project`), `deadline` (date on `project`), `met_at` (datetime on `project`).
 fn cfg_custom() -> PluginConfig {
     toml::from_str(
         r#"
@@ -1360,6 +1360,10 @@ fn cfg_custom() -> PluginConfig {
 
         [fields.deadline]
         type = "date"
+        on = ["project"]
+
+        [fields.met_at]
+        type = "datetime"
         on = ["project"]
         "#,
     )
@@ -1620,4 +1624,86 @@ fn a_date_custom_field_rejects_a_non_iso_value() {
         ops.contains(&("deadline".into(), "set".into(), "2026-07-01".into())),
         "a valid ISO date is accepted: {ops:?}"
     );
+}
+
+// ---- the `datetime` custom field type (6j6v.vbp6) ----------------------------------------------
+
+/// A `project` created with the given custom `--set` assignments.
+fn create_project(
+    s: &mut Store,
+    cfg: &PluginConfig,
+    custom: &[String],
+) -> nexus_flow_facade::error::Result<String> {
+    let mut item = minimal("why", "P1");
+    item.custom = custom;
+    write::create(s, cfg, "ab12", NOW, ACTOR, "project", "P", item).map(|i| i.id)
+}
+
+#[test]
+fn a_datetime_custom_field_is_stored_in_utc_at_whole_seconds_on_create_and_update() {
+    let mut s = store();
+    let cfg = cfg_custom();
+    // Create: the +02:00 offset is applied and the stored value is the UTC instant.
+    let id = create_project(
+        &mut s,
+        &cfg,
+        &["met_at=2026-10-12T10:30:00+02:00".to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        custom_ops(&s, &id).last(),
+        Some(&(
+            "met_at".to_string(),
+            "set".to_string(),
+            "2026-10-12T08:30:00Z".to_string()
+        )),
+        "create stores the normalized instant"
+    );
+    // Update: fractional seconds are dropped, `Z` stays `Z`.
+    write::update(
+        &mut s,
+        &cfg,
+        NOW,
+        ACTOR,
+        &id,
+        &["met_at=2026-10-13T07:00:00.250Z".to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        s.custom_fields_of(&id)
+            .unwrap()
+            .get("met_at")
+            .map(String::as_str),
+        Some("2026-10-13T07:00:00Z"),
+        "update stores the normalized instant in the folded view"
+    );
+    // An empty value is the clear sentinel and bypasses the type check, as for `date`.
+    write::update(&mut s, &cfg, NOW, ACTOR, &id, &["met_at=".to_string()]).unwrap();
+    assert_eq!(
+        custom_ops(&s, &id).last(),
+        Some(&("met_at".to_string(), "set".to_string(), String::new())),
+        "an empty value clears the field"
+    );
+}
+
+#[test]
+fn a_datetime_custom_field_refuses_a_value_without_a_time_zone() {
+    let mut s = store();
+    let cfg = cfg_custom();
+    let id = create_project(&mut s, &cfg, &[]).unwrap();
+    let before = custom_ops(&s, &id).len();
+    for bad in ["2026-10-12", "2026-10-12T08:30:00", "yesterday"] {
+        let err = write::update(&mut s, &cfg, NOW, ACTOR, &id, &[format!("met_at={bad}")])
+            .expect_err(bad);
+        assert_eq!(err.kind, ErrorKind::Validation, "{bad}");
+        assert!(
+            err.msg.contains("met_at") && err.msg.contains("time zone"),
+            "the error names the field and the missing zone: {}",
+            err.msg
+        );
+    }
+    // A refused create writes nothing either.
+    let err = create_project(&mut s, &cfg, &["met_at=2026-10-12".to_string()]).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(custom_ops(&s, &id).len(), before, "nothing was written");
 }

@@ -72,14 +72,19 @@ pub enum MergeStrategy {
 /// The declared data type of a plugin custom field (plugin-custom-fields §3, TB-CF-3). Governs
 /// value validation and presentation, never storage (a value is always a `TEXT` LWW cell). The v1
 /// set: `text`/`longtext` are free UTF-8; `date` is ISO-8601 (the same check `due`/`defer` use);
-/// `enum` is one of a declared `values` list. Richer types (`int`/`bool`/format-validated
-/// uri/email/color) are additive follow-ups (§9).
+/// `datetime` is an RFC 3339 instant with a time zone, stored in UTC at whole seconds (nxf
+/// 6j6v.vbp6, [`validate::datetime`](crate::validate::datetime)); `enum` is one of a declared
+/// `values` list. Richer types (`int`/`bool`/format-validated uri/email/color) are additive
+/// follow-ups (§9). `#[non_exhaustive]` since 6j6v.vbp6, so the next type is an additive change for
+/// a consumer that matches on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum FieldType {
     Text,
     Longtext,
     Date,
+    Datetime,
     Enum,
 }
 
@@ -91,6 +96,7 @@ impl FieldType {
             FieldType::Text => "text",
             FieldType::Longtext => "longtext",
             FieldType::Date => "date",
+            FieldType::Datetime => "datetime",
             FieldType::Enum => "enum",
         }
     }
@@ -1348,6 +1354,41 @@ mod tests {
         assert!(!stage.required, "required defaults to false");
         assert_eq!(stage.label, None, "label defaults to None");
         assert_eq!(stage.merge, MergeStrategy::CrdtText);
+    }
+
+    #[test]
+    fn a_datetime_field_parses_validates_and_reports_its_kind() {
+        // vbp6: `type = "datetime"` is a declarable type, spelled `datetime` on the wire, and like
+        // every non-enum it refuses `values`.
+        let cfg = cfg_with_fields(
+            r#"
+            [fields.occurred_on]
+            type = "datetime"
+            on = ["project"]
+            label = "Occurred on"
+            "#,
+        );
+        assert!(cfg.validate_fields().is_ok());
+        let decl = &cfg.fields["occurred_on"];
+        assert_eq!(decl.field_type, FieldType::Datetime);
+        assert_eq!(decl.field_type.as_str(), "datetime");
+        assert!(
+            cfg_with_fields("[fields.at]\ntype = \"datetime\"\nvalues = [\"a\"]")
+                .validate_fields()
+                .is_err(),
+            "a datetime field carries no enum values"
+        );
+        // The spelling is exact: `date-time`/`dateTime` are not types.
+        for bad in ["date-time", "dateTime", "timestamp"] {
+            let toml = format!("[fields.at]\ntype = \"{bad}\"");
+            let parsed = toml::from_str::<toml::Table>(&toml)
+                .unwrap()
+                .get("fields")
+                .cloned()
+                .unwrap()
+                .try_into::<BTreeMap<String, FieldDecl>>();
+            assert!(parsed.is_err(), "'{bad}' is not a field type");
+        }
     }
 
     #[test]

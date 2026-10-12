@@ -47,3 +47,11 @@ type = "text"
 on = ["file"]
 required = true
 label = "File URI"
+
+# When the linked file was produced (6j6v.vbp6): an optional `datetime` field, so the consumer
+# path also proves the one type stored in a canonical form — an RFC 3339 instant with a time zone,
+# stored in UTC at whole seconds.
+[fields.produced_at]
+type = "datetime"
+on = ["file"]
+label = "Produced at"

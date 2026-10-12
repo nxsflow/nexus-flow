@@ -708,4 +708,65 @@ mod custom_field_tests {
             "a cleared custom field drops the sparse map"
         );
     }
+
+    #[test]
+    fn flow_create_and_update_store_a_datetime_custom_field_as_the_utc_instant() {
+        // vbp6: the MCP write path hands a `datetime` value to the shared facade, which stores the
+        // UTC instant; a value without a time zone is refused.
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let id = create(
+            None,
+            start,
+            "tester",
+            &create_params(
+                vec![
+                    "uri=.nxs/files/a.md".into(),
+                    "produced_at=2026-10-12T10:30:00+02:00".into(),
+                ],
+                "2026-10-12T09:00:00Z",
+            ),
+        )
+        .expect("flow_create with a zoned datetime succeeds")["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let shown = |id: &str| {
+            show(
+                None,
+                start,
+                &FlowShowParams {
+                    id: id.to_string(),
+                    workspace: None,
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            shown(&id)["custom"]["produced_at"],
+            serde_json::json!("2026-10-12T08:30:00Z")
+        );
+        let err = update(
+            None,
+            start,
+            "tester",
+            &FlowUpdateParams {
+                id: id.clone(),
+                set: vec!["produced_at=2026-10-12".into()],
+                now: Some("2026-10-12T09:01:00Z".into()),
+                actor: None,
+                workspace: None,
+            },
+        )
+        .expect_err("a plain date is not a datetime");
+        assert!(
+            err.to_string().contains("time zone"),
+            "the refusal says what is missing: {err}"
+        );
+        assert_eq!(
+            shown(&id)["custom"]["produced_at"],
+            serde_json::json!("2026-10-12T08:30:00Z"),
+            "the refused update changed nothing"
+        );
+    }
 }

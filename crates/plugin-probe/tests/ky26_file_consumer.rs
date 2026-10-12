@@ -154,6 +154,36 @@ fn schema_marks_uri_as_a_required_file_scoped_custom_text_field() {
 }
 
 #[test]
+fn schema_reports_the_datetime_field_kind_and_create_stores_the_utc_instant() {
+    // vbp6: `nxf schema --json` (the same `read::schema(..).to_value()`) names the `datetime` kind,
+    // and a create through the consumer plugin stores the zoned value as the UTC instant.
+    let cfg = cfg();
+    let v = read::schema(&cfg).to_value();
+    let produced = v["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["field"] == "produced_at")
+        .expect("produced_at appears in schema --json");
+    assert_eq!(produced["kind"], "datetime");
+    assert_eq!(produced["custom"], serde_json::json!(true));
+    assert_eq!(produced["settable"], serde_json::json!(true));
+
+    let mut s = Store::open_in_memory(1);
+    let sets = vec![
+        format!("uri={URI}"),
+        "produced_at=2026-10-12T23:15:00-07:00".to_string(),
+    ];
+    let item = create_file(&mut s, &cfg, "report.md", &sets).unwrap();
+    let sv = read::show_value_with_custom(&cfg, &s, &item.id).unwrap();
+    assert_eq!(
+        sv["custom"]["produced_at"],
+        serde_json::json!("2026-10-13T06:15:00Z"),
+        "the -07:00 evening is the next UTC morning"
+    );
+}
+
+#[test]
 fn read_surfaces_the_sparse_custom_uri_map_on_show_and_lane() {
     // read: `show --json` and a lane read (`list`/`next --json`) surface the sparse `custom` map
     // { "uri": ".nxs/files/report.md" } — the declared-and-non-empty projection.

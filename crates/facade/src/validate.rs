@@ -35,6 +35,36 @@ pub fn iso_date(value: &str) -> Result<String> {
     }
 }
 
+/// Validate a `datetime` custom-field value (nxf 6j6v.vbp6) and return its stored form. The input
+/// must be an RFC 3339 timestamp WITH a time zone (`Z` or `±hh:mm`); a plain date or a local time
+/// without an offset is refused. The stored form is the same instant in UTC at whole seconds,
+/// `YYYY-MM-DDTHH:MM:SSZ`: fractional seconds are dropped and the given offset is applied, then
+/// discarded. One fixed shape means the text order of stored values IS their chronological order,
+/// which is what every comparison downstream relies on (the SQL sort, the hosted fold, the ranking
+/// comparator's text arm). A UTC year outside `0000..=9999` is refused for the same reason.
+pub fn datetime(value: &str) -> Result<String> {
+    let refuse = || {
+        NxfError::validation(format!(
+            "'{value}' is not an RFC 3339 date-time with a time zone \
+             (e.g. 2026-10-12T08:30:00Z or 2026-10-12T10:30:00+02:00)"
+        ))
+    };
+    let utc = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| refuse())?
+        .checked_to_offset(time::UtcOffset::UTC)
+        .filter(|utc| (0..=9999).contains(&utc.year()))
+        .ok_or_else(refuse)?;
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second()
+    ))
+}
+
 /// Canonicalize + validate a user label (h89s): trim surrounding whitespace, reject an empty
 /// result, and reject the U+001F composite separator (it would break the OR-set's `item␟label`
 /// target_id). Returns the stored form. The ONE definition every label path shares — the facade
@@ -165,5 +195,70 @@ mod tests {
         assert!(iso_date("not-a-date").is_err());
         assert!(iso_date("2026-13-01").is_err());
         assert!(iso_date("2026/06/09").is_err());
+    }
+
+    #[test]
+    fn datetime_normalizes_any_offset_to_utc_seconds() {
+        // The offset is applied, not dropped: 10:30 at +02:00 is 08:30 UTC.
+        assert_eq!(
+            datetime("2026-10-12T10:30:00+02:00").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+        assert_eq!(
+            datetime("2026-10-12T08:30:00Z").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+        // A negative offset can cross midnight into the next day.
+        assert_eq!(
+            datetime("2026-12-31T23:00:00-05:00").unwrap(),
+            "2027-01-01T04:00:00Z"
+        );
+        // Lowercase separators are RFC 3339 too.
+        assert_eq!(
+            datetime("2026-10-12t08:30:00z").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+    }
+
+    #[test]
+    fn datetime_drops_fractional_seconds() {
+        // Fixed precision keeps text order chronological: `…00.5Z` would sort BEFORE `…00Z`.
+        assert_eq!(
+            datetime("2026-10-12T08:30:00.000Z").unwrap(),
+            "2026-10-12T08:30:00Z"
+        );
+        assert_eq!(
+            datetime("2026-10-12T08:30:59.999999+00:00").unwrap(),
+            "2026-10-12T08:30:59Z"
+        );
+    }
+
+    #[test]
+    fn datetime_refuses_a_value_without_a_time_zone() {
+        for v in [
+            "2026-10-12",
+            "2026-10-12T08:30:00",
+            "2026-10-12T08:30",
+            "2026-10-12 08:30:00",
+            "not-a-date",
+            "2026-13-01T00:00:00Z",
+            "",
+        ] {
+            let err = datetime(v).expect_err(v);
+            assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{v}");
+            assert!(err.msg.contains("RFC 3339"), "{v}: {}", err.msg);
+        }
+    }
+
+    #[test]
+    fn datetime_refuses_a_utc_year_outside_four_digits() {
+        // In range as given, out of range once moved to UTC: refused, not stored with a 5-digit or
+        // negative year that would break the text order.
+        assert!(datetime("9999-12-31T23:30:00-01:00").is_err());
+        assert!(datetime("0000-01-01T00:30:00+01:00").is_err());
+        assert_eq!(
+            datetime("0000-01-01T00:30:00Z").unwrap(),
+            "0000-01-01T00:30:00Z"
+        );
     }
 }

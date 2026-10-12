@@ -147,6 +147,36 @@ That doubling is not redundancy — it *is* the explanation. The `--json` is the
 plugin is how a particular audience reads and ranks it. Picking a plugin at `init` is therefore
 a real choice; run `nxf init --help` to see the options before you commit.
 
+## Declaring custom fields
+
+A plugin can give its types fields of their own under `[fields.<name>]`. `nxf schema --json` lists
+them with `"custom": true` and their `kind`; `create` and `update` set them with
+`--set <name>=<value>`; `show --json` and the lists return the set ones under `custom`. An empty
+value clears a field.
+
+```toml
+[fields.stage]
+type = "enum"
+values = ["backlog", "active", "done"]
+on = ["project"]          # the types it applies to; omit it for every type
+
+[fields.occurred_on]
+type = "datetime"
+label = "Occurred on"
+```
+
+The `type` decides what a value may be:
+
+- `text` and `longtext`: any text.
+- `date`: a date (`2026-10-12`) or an RFC 3339 timestamp, stored as given.
+- `datetime`: a moment, as an RFC 3339 timestamp **with a time zone** — `Z` or an offset such as
+  `+02:00`. It is stored as the same moment in UTC at whole seconds:
+  `--set occurred_on=2026-10-12T10:30:00+02:00` stores `2026-10-12T08:30:00Z`. A plain date or a
+  time without a zone is refused. Because every value has the same shape, `datetime` values sort
+  in time order wherever a field is read, such as a ranking key's `of = { field = "..." }`. The
+  offset you typed is not kept.
+- `enum`: one of the declared `values`.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under

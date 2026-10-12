@@ -61,6 +61,8 @@ pub struct FlowCreateParams {
     /// Plugin custom-field assignments as `name=value` strings (plugin-custom-fields §5), mirroring
     /// `nxf create --set name=value`. Canonical fields use the dedicated params above; `set` carries
     /// the active plugin's declared custom fields, validated against the resolved type at write time.
+    /// `flow_schema` names each custom field's `kind`; a `datetime` value needs a time zone
+    /// (`2026-10-12T10:30:00+02:00`) and is stored as the UTC instant (`2026-10-12T08:30:00Z`).
     #[serde(default)]
     pub set: Vec<String>,
     /// Reference time (ISO-8601 / RFC3339) stamped on the emitted ops.
@@ -81,7 +83,8 @@ pub struct FlowCreateParams {
 pub struct FlowUpdateParams {
     /// Item id (a bare local suffix or a full `<prefix>.<suffix>`).
     pub id: String,
-    /// Field assignments as `field=value` strings (e.g. `status=in_progress`, `priority=P0`).
+    /// Field assignments as `field=value` strings (e.g. `status=in_progress`, `priority=P0`). A
+    /// custom `datetime` field needs a time zone and is stored as the UTC instant.
     pub set: Vec<String>,
     /// Reference time (ISO-8601 / RFC3339) stamped on the emitted ops.
     #[serde(default)]
