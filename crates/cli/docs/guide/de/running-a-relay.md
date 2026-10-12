@@ -327,6 +327,19 @@ Du brauchst `cmake` und eine C-Toolchain auf der Baumaschine, und du musst die b
 selbst anlegen — der Relay legt oder wandert sie nie. Ihre nötige Form steht oben in
 `crates/server/src/store_ddb.rs`.
 
+Die IAM-Rolle des Relays braucht auf der **Op-Tabelle** `dynamodb:Query`, `dynamodb:PutItem`,
+`dynamodb:UpdateItem` und **`dynamodb:ConditionCheckItem`**, auf der **Registry-Tabelle**
+`dynamodb:GetItem`, `dynamodb:PutItem` und `dynamodb:Query`. `ConditionCheckItem` ist neu im ersten
+Release nach v0.210.0: Jeder Schreibvorgang prüft jetzt auch das Op eine Position darunter, damit
+ein Leser nie eine Position erhält, bevor jede niedrigere geschrieben ist. **Gewähre es, bevor du
+diese Version ausrollst** — ohne es lehnt der Relay jeden Push mit `AccessDeniedException` ab (für
+den Client ein 500), während Lesen weiter funktioniert.
+
+Ein Push darf höchstens 20 Sekunden schreiben; danach hört der Relay auf und antwortet 503, und der
+Client pusht beim nächsten Durchlauf erneut. So bleibt ein Push auf einem stark umkämpften Stream
+innerhalb der ~30 s, die API Gateway oder CloudFront vor einem serverlosen Relay erlauben. Hinter
+einem kürzeren Timeout setzt du `NXF_RELAY_PUSH_DEADLINE_SECS` darunter.
+
 Zeigst du eine **ausgelieferte** Binary auf `NXF_RELAY_BACKEND=dynamodb`, startet sie nicht und sagt
 dir genau das: der Backend ist eine Bau-Zeit-Fähigkeit, und dieser Bau trägt sie nicht.
 

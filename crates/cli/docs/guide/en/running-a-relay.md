@@ -301,6 +301,19 @@ You need `cmake` and a C toolchain on the build host, and you must create the tw
 yourself — the relay never creates or migrates them. Their required shape is documented at the
 top of `crates/server/src/store_ddb.rs`.
 
+The relay's IAM role needs, on the **op table**, `dynamodb:Query`, `dynamodb:PutItem`,
+`dynamodb:UpdateItem` and **`dynamodb:ConditionCheckItem`**, and on the **registry table**
+`dynamodb:GetItem`, `dynamodb:PutItem` and `dynamodb:Query`. `ConditionCheckItem` is new in the
+first release after v0.210.0: each write now also checks the op one position below it, so that a
+reader is never handed a position before every lower one is written. **Grant it before you deploy
+that version** — a relay without it refuses every push with `AccessDeniedException` (a 500 to the
+client) while reads keep working.
+
+A push may write for at most 20 seconds; past that the relay stops and answers 503, and the client
+pushes again on its next pass. That keeps a push on a heavily contended stream inside the ~30 s
+that API Gateway or CloudFront in front of a serverless relay allow. Behind a shorter timeout, set
+`NXF_RELAY_PUSH_DEADLINE_SECS` below it.
+
 If you point a **released** binary at `NXF_RELAY_BACKEND=dynamodb`, it will refuse to start and
 tell you exactly this: the backend is a build-time feature, and this build does not carry it.
 

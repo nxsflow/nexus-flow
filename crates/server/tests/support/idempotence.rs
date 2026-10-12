@@ -1,7 +1,7 @@
 //! The idempotent-append contract every `OpStore` keeps (spec §4.4, 6j6v.tm4k), as ONE script the
-//! SQLite, Postgres and DynamoDB suites each run against their backend. The backends may differ in
-//! one documented way only: SQLite and Postgres consume no seq for a re-push (`dense`), DynamoDB
-//! burns the one it allocated.
+//! SQLite, Postgres and DynamoDB suites each run against their backend. `dense` asserts that a
+//! re-push consumes no seq. All three backends keep it today; DynamoDB does since 6j6v.r3jf moved
+//! its seq into the write transaction (before, it burned the seq it had allocated).
 
 use nxs_server::store::OpStore;
 use nxs_sync::protocol::{Cursor, StreamId};
@@ -39,4 +39,18 @@ pub fn assert_idempotent_append(store: &dyn OpStore, wire: impl Fn(&str) -> Wire
         "each op is stored once"
     );
     assert_eq!(end, o2);
+
+    // The re-pushes after o2 consumed no seq either: the next fresh op follows o2 directly.
+    let o3 = store.append(&s, &wire("o3")).unwrap();
+    assert!(
+        o3 > o2,
+        "a fresh op after the re-pushes still advances the stream"
+    );
+    if dense {
+        assert_eq!(
+            o3,
+            Cursor(o2.0 + 1),
+            "this backend consumed no seq for the later re-pushes"
+        );
+    }
 }

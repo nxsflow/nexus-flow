@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use nxs_server::app::{app, app_with_clock, MAX_PUSH_OPS};
+use nxs_server::app::{app, app_with_clock, app_with_push_deadline, system_clock, MAX_PUSH_OPS};
 use nxs_server::registry::PrefixRegistry;
 use nxs_server::registry::SqlitePrefixRegistry;
 use nxs_server::store::SqliteOpStore;
@@ -509,4 +509,95 @@ fn a_registry_written_before_presence_still_builds_the_relay_which_then_answers_
         RegisterOutcome::Registered
     );
     assert_eq!(push(&base, "s1", &[wire("o1", "set")]).appended, 1);
+}
+
+// ----- the push deadline (6j6v.r3jf) ----------------------------------------------------------
+
+/// A store whose every append takes `delay` — a stand-in for a contended DynamoDB stream — and
+/// that fails outright for an op id starting with "broken".
+struct SlowStore {
+    inner: SqliteOpStore,
+    delay: std::time::Duration,
+}
+
+impl nxs_server::store::OpStore for SlowStore {
+    fn append(&self, stream: &StreamId, op: &WireOp) -> StoreResult<nxs_sync::protocol::Cursor> {
+        if op.op_id.starts_with("broken") {
+            return Err(nxs_server::store::StoreError("broken on purpose".into()));
+        }
+        std::thread::sleep(self.delay);
+        self.inner.append(stream, op)
+    }
+
+    fn read_since(
+        &self,
+        stream: &StreamId,
+        cursor: nxs_sync::protocol::Cursor,
+        limit: usize,
+    ) -> StoreResult<(Vec<WireOp>, nxs_sync::protocol::Cursor)> {
+        self.inner.read_since(stream, cursor, limit)
+    }
+}
+
+fn spawn_slow_relay(delay: std::time::Duration, deadline: std::time::Duration) -> String {
+    let ops = Arc::new(SlowStore {
+        inner: SqliteOpStore::open_in_memory().unwrap(),
+        delay,
+    });
+    let registry = Arc::new(SqlitePrefixRegistry::open_in_memory().unwrap());
+    let router = app_with_push_deadline(ops, registry, system_clock(), deadline);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router).await.unwrap();
+        });
+    });
+    format!("http://{addr}")
+}
+
+fn push_status(base: &str, stream: &str, ops: &[WireOp]) -> u16 {
+    let body = serde_json::json!({ "ops": ops });
+    match ureq::post(&format!("{base}/streams/{stream}/ops")).send_json(body) {
+        Ok(resp) => resp.status(),
+        Err(ureq::Error::Status(status, _)) => status,
+        Err(e) => panic!("transport error: {e}"),
+    }
+}
+
+#[test]
+fn a_push_past_its_deadline_stops_writing_and_answers_503() {
+    // Review of PR #59, Integrity #2: a push that cannot finish before the front door gives up
+    // stops writing and answers, instead of writing on while the client re-pushes. 503, which the
+    // client handles like any failed push (every status but 413): nothing is marked pushed, and
+    // the next pass re-pushes the page, which idempotence by op id makes safe.
+    let base = spawn_slow_relay(
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(250),
+    );
+    let ops: Vec<WireOp> = (0..10).map(|i| wire(&format!("o{i}"), "set")).collect();
+    let started = std::time::Instant::now();
+    assert_eq!(push_status(&base, "s1", &ops), 503);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "stopped near the deadline, not after all ten ops: {:?}",
+        started.elapsed()
+    );
+    let stored = pull(&base, "s1", 0, 100).ops;
+    assert!(
+        !stored.is_empty() && stored.len() < ops.len(),
+        "what was appended before the deadline stays, the rest was never sent: {}",
+        stored.len()
+    );
+
+    // A store fault before the deadline is still a 500.
+    let failing = [wire("broken-1", "set")];
+    assert_eq!(push_status(&base, "s2", &failing), 500);
 }

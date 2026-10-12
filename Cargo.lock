@@ -2500,6 +2500,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "axum",
+ "nxs-server",
  "nxs-sync",
  "nxs-test-support",
  "postgres",

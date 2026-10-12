@@ -35,7 +35,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
@@ -47,7 +47,7 @@ use nxs_server::app::app;
 use nxs_server::presence::PresenceStore;
 use nxs_server::registry::{PrefixRegistry, SqlitePrefixRegistry};
 use nxs_server::store::OpStore;
-use nxs_server::store_ddb::{DynamoDbOpStore, DynamoDbPrefixRegistry};
+use nxs_server::store_ddb::{DynamoDbOpStore, DynamoDbPrefixRegistry, WriteAttempt};
 use nxs_sync::protocol::{
     Cursor, MachineHello, MachinesResponse, PullResponse, PushResponse, RegisterOutcome, StreamId,
 };
@@ -295,50 +295,216 @@ fn append_read_since_round_trips_a_batch_in_order() {
 
 #[test]
 fn dynamodb_appends_idempotently_by_op_id() {
-    // 6j6v.tm4k: the contract SQLite and Postgres keep (spec §4.4), run from the same script. The
-    // one documented difference: a re-push burns the seq it allocated, so the stream is not dense.
+    // 6j6v.tm4k: the contract SQLite and Postgres keep (spec §4.4), run from the same script.
+    // Since 6j6v.r3jf the seq is taken inside the transaction the claim turns back, so a re-push
+    // consumes no seq here either: dense, like the other two.
     let Some(ep) = endpoint("dynamodb_appends_idempotently_by_op_id") else {
         return;
     };
-    idempotence::assert_idempotent_append(&opstore(&ep), wire, false);
+    idempotence::assert_idempotent_append(&opstore(&ep), wire, true);
 }
 
 /// Put an item straight into the op table, as the store writes an op — without its claim. What a
 /// stream written before the claims existed holds.
 fn put_unclaimed_op(ep: &str, table: &str, seq: i64, op_id: &str) {
-    let client = admin_client(ep);
-    admin_rt().block_on(async {
-        client
-            .put_item()
-            .table_name(table)
-            .item("stream_id", AttributeValue::S("s".into()))
-            .item("seq", AttributeValue::N(seq.to_string()))
-            .item(
-                "envelope_version",
-                AttributeValue::N(ENVELOPE_VERSION.to_string()),
-            )
-            .item("op_id", AttributeValue::S(op_id.into()))
-            .item("lamport", AttributeValue::N("1".into()))
-            .item("site", AttributeValue::N("1".into()))
-            .item("domain", AttributeValue::S("task".into()))
-            .item("target_kind", AttributeValue::S("item".into()))
-            .item("target_id", AttributeValue::S("ab12.0001".into()))
-            .item("field", AttributeValue::S("title".into()))
-            .item("op_type", AttributeValue::S("set".into()))
-            .item("value", AttributeValue::S("t".into()))
-            .item("author", AttributeValue::S("a".into()))
-            .item("wall_clock", AttributeValue::S(String::new()))
-            .send()
-            .await
-            .expect("plant an unclaimed op");
+    assert!(
+        put_op(ep, table, seq, op_id, false),
+        "plant an unclaimed op"
+    );
+}
+
+/// Put an op item at `seq` of stream "s", without a claim; with `if_free`, conditioned on the key
+/// being free, as every build's op put is — how an older relay writes the op it allocated with
+/// `ADD`. Whether the put landed. Runs off any runtime, so a test seam may call it.
+fn put_op(ep: &str, table: &str, seq: i64, op_id: &str, if_free: bool) -> bool {
+    let (ep, table, op_id) = (ep.to_string(), table.to_string(), op_id.to_string());
+    off_runtime(move || {
+        let client = admin_client(&ep);
+        admin_rt().block_on(async {
+            let put = client
+                .put_item()
+                .table_name(&table)
+                .item("stream_id", AttributeValue::S("s".into()))
+                .item("seq", AttributeValue::N(seq.to_string()))
+                .item(
+                    "envelope_version",
+                    AttributeValue::N(ENVELOPE_VERSION.to_string()),
+                )
+                .item("op_id", AttributeValue::S(op_id))
+                .item("lamport", AttributeValue::N("1".into()))
+                .item("site", AttributeValue::N("1".into()))
+                .item("domain", AttributeValue::S("task".into()))
+                .item("target_kind", AttributeValue::S("item".into()))
+                .item("target_id", AttributeValue::S("ab12.0001".into()))
+                .item("field", AttributeValue::S("title".into()))
+                .item("op_type", AttributeValue::S("set".into()))
+                .item("value", AttributeValue::S("t".into()))
+                .item("author", AttributeValue::S("a".into()))
+                .item("wall_clock", AttributeValue::S(String::new()));
+            let put = if if_free {
+                put.condition_expression("attribute_not_exists(stream_id)")
+            } else {
+                put
+            };
+            match put.send().await {
+                Ok(_) => true,
+                Err(e) if if_free => {
+                    eprintln!("conditional put at {seq} refused: {e:?}");
+                    false
+                }
+                Err(e) => panic!("put an op at {seq}: {e:?}"),
+            }
+        })
+    })
+}
+
+/// Run `f` on a plain thread of its own. The store's test seam runs on the store's bridge runtime,
+/// where driving the harness's admin runtime directly would panic (a runtime inside a runtime).
+fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    thread::scope(|scope| scope.spawn(f).join().expect("the admin call panicked"))
+}
+
+/// The stream "s"'s counter (`next_seq` of the item at seq 0), `None` when there is none.
+fn counter_of(ep: &str, table: &str) -> Option<i64> {
+    let (ep, table) = (ep.to_string(), table.to_string());
+    off_runtime(move || {
+        let client = admin_client(&ep);
+        admin_rt().block_on(async {
+            let resp = client
+                .query()
+                .table_name(&table)
+                .key_condition_expression("stream_id = :s AND seq = :zero")
+                .expression_attribute_values(":s", AttributeValue::S("s".into()))
+                .expression_attribute_values(":zero", AttributeValue::N("0".into()))
+                .consistent_read(true)
+                .send()
+                .await
+                .expect("read the counter");
+            resp.items()
+                .first()
+                .and_then(|item| item.get("next_seq"))
+                .map(|n| n.as_n().unwrap().parse().unwrap())
+        })
+    })
+}
+
+/// Is an item stored at `seq` of stream "s"?
+fn occupied(ep: &str, table: &str, seq: i64) -> bool {
+    let (ep, table) = (ep.to_string(), table.to_string());
+    off_runtime(move || {
+        let client = admin_client(&ep);
+        admin_rt().block_on(async {
+            let resp = client
+                .query()
+                .table_name(&table)
+                .key_condition_expression("stream_id = :s AND seq = :seq")
+                .expression_attribute_values(":s", AttributeValue::S("s".into()))
+                .expression_attribute_values(":seq", AttributeValue::N(seq.to_string()))
+                .consistent_read(true)
+                .send()
+                .await
+                .expect("read an item");
+            !resp.items().is_empty()
+        })
+    })
+}
+
+/// What an older relay does to allocate a seq: `UpdateItem ADD next_seq :1` on the counter, with
+/// no condition. Returns the seq it got.
+fn old_relay_allocates(ep: &str, table: &str) -> i64 {
+    let (ep, table) = (ep.to_string(), table.to_string());
+    off_runtime(move || {
+        let client = admin_client(&ep);
+        admin_rt().block_on(async {
+            let resp = client
+                .update_item()
+                .table_name(&table)
+                .key("stream_id", AttributeValue::S("s".into()))
+                .key("seq", AttributeValue::N("0".into()))
+                .update_expression("ADD next_seq :one")
+                .expression_attribute_values(":one", AttributeValue::N("1".into()))
+                .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+                .send()
+                .await
+                .expect("ADD on the counter");
+            resp.attributes().unwrap()["next_seq"]
+                .as_n()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+    })
+}
+
+/// Set the stream "s"'s counter to `n`, as a transaction that took seq `n` shows it before its op,
+/// or an earlier build's `ADD` left it over a seq whose op never came.
+fn set_counter(ep: &str, table: &str, n: i64) {
+    let (ep, table) = (ep.to_string(), table.to_string());
+    off_runtime(move || {
+        let client = admin_client(&ep);
+        admin_rt().block_on(async {
+            client
+                .put_item()
+                .table_name(&table)
+                .item("stream_id", AttributeValue::S("s".into()))
+                .item("seq", AttributeValue::N("0".into()))
+                .item("next_seq", AttributeValue::N(n.to_string()))
+                .send()
+                .await
+                .expect("set the counter");
+        })
+    })
+}
+
+/// An ops table of its own and a store on it, plus the table's name for the admin calls above.
+fn opstore_and_table(ep: &str) -> (DynamoDbOpStore, String) {
+    ensure_fake_credentials();
+    let table = unique_ops_table(ep);
+    let store = DynamoDbOpStore::new(table.clone(), Some(ep.to_string()), None);
+    (store, table)
+}
+
+/// Every append attempt the store's test seam saw, in order.
+type Attempts = Arc<std::sync::Mutex<Vec<WriteAttempt>>>;
+
+/// A store that records every attempt into the returned list, and calls `also` on each.
+fn recording(
+    store: DynamoDbOpStore,
+    also: impl Fn(&WriteAttempt) + Send + Sync + 'static,
+) -> (DynamoDbOpStore, Attempts) {
+    let attempts: Attempts = Arc::default();
+    let seen = Arc::clone(&attempts);
+    let store = store.with_before_write(move |attempt| {
+        seen.lock().unwrap().push(attempt.clone());
+        also(attempt);
     });
+    (store, attempts)
+}
+
+/// `(expected, seq, counter_from, predecessor)` of one attempt.
+type Seen = (i64, i64, &'static str, Option<bool>);
+
+/// What each attempt for `op_id` was about to write.
+fn attempts_of(attempts: &Attempts, op_id: &str) -> Vec<Seen> {
+    attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|a| a.op_id == op_id)
+        .map(|a| (a.expected, a.seq, a.counter_from, a.predecessor))
+        .collect()
+}
+
+fn ids(ops: &[WireOp]) -> Vec<&str> {
+    ops.iter().map(|o| o.op_id.as_str()).collect()
 }
 
 #[test]
 fn an_op_stored_before_the_claims_is_stored_once_more_and_then_absorbed() {
     // The documented trade-off for streams written before 6j6v.tm4k. The legacy op sits at seq 1
-    // with no counter, so the first allocation (1) also collides on the op's own seq and must be
-    // retried at a fresh one — the taken-seq path, for real.
+    // with no counter, so the first round (counter 0, seq 1) finds seq 1 occupied: the taken-seq
+    // path, for real. The round after steps above the highest occupied seq, still expecting the
+    // counter at 0, and checks that seq's op (the legacy one) as its predecessor.
     let Some(ep) = endpoint("an_op_stored_before_the_claims_is_stored_once_more_and_then_absorbed")
     else {
         return;
@@ -350,20 +516,23 @@ fn an_op_stored_before_the_claims_is_stored_once_more_and_then_absorbed() {
     let s = StreamId("s".into());
 
     let again = store.append(&s, &wire("legacy")).unwrap();
-    assert!(
-        again > Cursor(1),
-        "stored once more, at a fresh seq: {again:?}"
+    assert_eq!(
+        again,
+        Cursor(2),
+        "stored once more, at the seq right above the occupied one"
     );
     assert_eq!(
         store.append(&s, &wire("legacy")).unwrap(),
         again,
         "from then on its claim absorbs every re-push"
     );
-    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
     assert_eq!(
-        ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
-        ["legacy", "legacy"]
+        store.append(&s, &wire("fresh")).unwrap(),
+        Cursor(3),
+        "the counter moved to the stepped-over seq, so the next op follows it densely"
     );
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(ids(&ops), ["legacy", "legacy", "fresh"]);
 }
 
 #[test]
@@ -520,9 +689,8 @@ fn an_op_over_dynamodbs_400kb_item_ceiling_fails_loudly() {
 
     // The failure is confined to the oversized op: the stream still works afterwards, and the
     // failed transaction left no claim behind that would answer a retry with a seq nothing
-    // occupies. (The seq it consumed is gone — allocate_seq runs before the put — which is
-    // exactly the "gaps are normal in production" property the module doc documents.)
-    store.append(&s, &wire("after")).unwrap();
+    // occupies — nor a moved counter: the seq it tried is taken by the next op (6j6v.r3jf).
+    assert_eq!(store.append(&s, &wire("after")).unwrap(), Cursor(1));
     store.append(&s, &wire("huge")).unwrap();
     let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
     assert_eq!(
@@ -789,14 +957,10 @@ fn concurrent_appends_get_unique_contiguous_sequences() {
         .collect();
     all.sort_unstable();
     let expected: Vec<i64> = (1..=THREADS * PER).collect();
-    // CONTIGUITY IS NOT A BACKEND GUARANTEE — do not read this assertion as a contract. The
-    // backend guarantees uniqueness and monotonicity; density is a happy accident of the test
-    // environment. `allocate_seq`'s `UpdateItem` + `ADD` is not idempotent, so any retry of
-    // that call — including one the SDK performs internally after a throttle or a lost
-    // response — burns a seq that no op will ever occupy. Gaps are therefore normal against
-    // real AWS. This holds here only because DynamoDB Local never throttles, and asserting
-    // the stronger property is deliberate: it is the sharpest available detector of the
-    // duplicate/overwrite bug this test exists for.
+    // Contiguity is a property of this build, not a contract (module doc, "Density"): since
+    // 6j6v.r3jf a seq is taken only by the transaction that writes its op, so neither a lost
+    // round nor a retry consumes one. Asserting it is deliberate: it is the sharpest available
+    // detector of the duplicate/overwrite bug this test exists for.
     assert_eq!(
         all, expected,
         "sequences are unique and contiguous under contention"
@@ -842,7 +1006,7 @@ fn concurrent_appends_get_unique_contiguous_sequences() {
 #[test]
 fn concurrent_appends_to_different_streams_keep_independent_sequences() {
     // Independent per-stream state: hammering two DIFFERENT streams concurrently must not
-    // let one stream's allocations bleed into the other's — each still reaches a
+    // let one stream's seqs bleed into the other's — each still reaches a
     // contiguous, gap-free 1..=N of its own.
     let Some(ep) = endpoint("concurrent_appends_to_different_streams_keep_independent_sequences")
     else {
@@ -897,6 +1061,483 @@ fn concurrent_appends_to_different_streams_keep_independent_sequences() {
         expected,
         "stream b reaches its own contiguous 1..=N, independent of stream a"
     );
+}
+
+// ----- seq order is visibility order (6j6v.r3jf) --------------------------------------
+//
+// DynamoDB Local serialises transactions, so nothing here can hold a transaction INSIDE its
+// commit, and no test here shows visibility order on real AWS. The test seam holds an append
+// after it has chosen its seq and before it sends its write; the predecessor check's
+// transaction-against-transaction argument (module doc) is what covers the commit itself.
+
+/// A test-seam hook, boxed so it can be handed around by name.
+type Hook = Box<dyn Fn(&WriteAttempt) + Send + Sync>;
+
+/// One-shot gate for the test seam: the first call that `pick`s takes it, says so on the returned
+/// receiver, and blocks until the returned sender fires; every other call runs straight through.
+fn gate(
+    pick: impl Fn(&WriteAttempt) -> bool + Send + Sync + 'static,
+) -> (
+    Hook,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(Some((held_tx, release_rx)));
+    let hook = move |attempt: &WriteAttempt| {
+        if !pick(attempt) {
+            return;
+        }
+        let taken = gate.lock().unwrap().take();
+        if let Some((held, release)) = taken {
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        }
+    };
+    (Box::new(hook), held_rx, release_tx)
+}
+
+#[test]
+fn a_reader_is_never_handed_a_seq_above_an_append_still_in_flight() {
+    // 6j6v.r3jf, the reproduction. Append A decides its seq and is held right there — AFTER
+    // choosing its seq and BEFORE sending its write (not while DynamoDB commits it, which no test
+    // against DynamoDB Local can do); append B then runs start to finish; a reader pulls between
+    // the two, exactly as the sync engine does, storing the cursor it is handed; then A is let go.
+    // Before the fix A held seq 10 from an `ADD`, B committed 11, the reader stored cursor 11 —
+    // and A, committed at 10 afterwards, was below every cursor that reader would ever send
+    // again: missing for good. Now a seq is taken only by the write that commits it, so B lands
+    // at 10, A is turned back by the counter and lands at 11, and the reader gets both.
+    let Some(ep) = endpoint("a_reader_is_never_handed_a_seq_above_an_append_still_in_flight")
+    else {
+        return;
+    };
+    let (hook, held_rx, release_tx) = gate(|a| a.op_id == "a");
+    let (store, attempts) = recording(opstore(&ep), hook);
+    let store = Arc::new(store);
+    let s = StreamId("s".into());
+    for i in 1..=9 {
+        store.append(&s, &wire(&format!("o{i}"))).unwrap();
+    }
+    let reader_cursor = Cursor(9);
+
+    let writer_a = {
+        let (store, s) = (Arc::clone(&store), s.clone());
+        thread::spawn(move || store.append(&s, &wire("a")).unwrap())
+    };
+    held_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("A reaches the point between choosing its seq and writing");
+    let b = store.append(&s, &wire("b")).unwrap();
+
+    // The reader polls while A is still in flight and keeps the cursor it is handed.
+    let (first, reader_cursor) = store.read_since(&s, reader_cursor, 100).unwrap();
+    assert_eq!(ids(&first), ["b"], "only the committed append is visible");
+    assert_eq!(reader_cursor, b, "the cursor is B's seq");
+
+    release_tx.send(()).unwrap();
+    let a = writer_a.join().unwrap();
+
+    let (second, _) = store.read_since(&s, reader_cursor, 100).unwrap();
+    assert_eq!(
+        ids(&second),
+        ["a"],
+        "the reader's next pull, from the cursor it stored, still gets A: nothing was skipped"
+    );
+    assert_eq!(
+        (b, a),
+        (Cursor(10), Cursor(11)),
+        "seq order is commit order, with no seq burned"
+    );
+    assert_eq!(
+        attempts_of(&attempts, "a"),
+        [(9, 10, "read", Some(true)), (10, 11, "hint", Some(true))],
+        "A's second round takes the counter the failed check handed back (ALL_OLD), with no \
+         read, and checks B's op below it"
+    );
+}
+
+#[test]
+fn an_append_does_not_commit_over_a_missing_op_below_it_and_crosses_a_legacy_gap_once() {
+    // The predecessor check (review of PR #59, Integrity #1). The counter stands at 4 but op 4 is
+    // not there: on real AWS that is either the window in which the transaction that took 4 shows
+    // its counter but not yet its op — where the check makes the next append conflict and retry —
+    // or a seq an earlier build's `ADD` burned. Either way the round that checks op 4 must not
+    // commit; this pins that, and that the next round, for the same seq only, flips the check to
+    // `attribute_not_exists` and steps over the gap — once, without wedging the stream.
+    let Some(ep) = endpoint(
+        "an_append_does_not_commit_over_a_missing_op_below_it_and_crosses_a_legacy_gap_once",
+    ) else {
+        return;
+    };
+    let (store, table) = opstore_and_table(&ep);
+    for seq in 1..=3 {
+        put_unclaimed_op(&ep, &table, seq, &format!("o{seq}"));
+    }
+    set_counter(&ep, &table, 4);
+    let probe = {
+        let (ep, table) = (ep.clone(), table.clone());
+        move |attempt: &WriteAttempt| {
+            if attempt.op_id == "x" && attempt.predecessor == Some(false) {
+                // Between the checked round and the flipped one: the checked round wrote nothing.
+                assert!(!occupied(&ep, &table, 5), "the checked round stored no op");
+                assert_eq!(counter_of(&ep, &table), Some(4), "nor moved the counter");
+            }
+        }
+    };
+    let (store, attempts) = recording(store, probe);
+    let s = StreamId("s".into());
+
+    assert_eq!(store.append(&s, &wire("x")).unwrap(), Cursor(5));
+    assert_eq!(
+        attempts_of(&attempts, "x"),
+        [(4, 5, "read", Some(true)), (4, 5, "known", Some(false))],
+        "op 4 missing: no commit; then the same slot with the check flipped, counter not re-read"
+    );
+    assert_eq!(store.append(&s, &wire("y")).unwrap(), Cursor(6));
+    assert_eq!(
+        attempts_of(&attempts, "y"),
+        [(5, 6, "read", Some(true))],
+        "past the gap the check finds the op below again: one round"
+    );
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(ids(&ops), ["o1", "o2", "o3", "x", "y"]);
+}
+
+#[test]
+fn an_older_relay_allocating_with_add_meanwhile_overwrites_nothing_and_never_moves_the_counter_back(
+) {
+    // Rolling upgrade (review of PR #59, Test Quality #4), deterministic: while this build's append
+    // sits between choosing its seq and writing, an older relay allocates twice with a raw
+    // `UpdateItem ADD` and writes its ops only afterwards. Pins the counter condition: were the
+    // counter set unconditionally, the new append would commit at 4, move the counter back from 5
+    // to 4, and the older relay's own write at 4 would be refused.
+    let Some(ep) = endpoint(
+        "an_older_relay_allocating_with_add_meanwhile_overwrites_nothing_and_never_moves_the_counter_back",
+    ) else {
+        return;
+    };
+    let (store, table) = opstore_and_table(&ep);
+    let old_seqs: Arc<std::sync::Mutex<Vec<i64>>> = Arc::default();
+    let in_hook = {
+        let (ep, table, old_seqs) = (ep.clone(), table.clone(), Arc::clone(&old_seqs));
+        let done = std::sync::atomic::AtomicBool::new(false);
+        move |attempt: &WriteAttempt| {
+            if attempt.op_id == "new" && !done.swap(true, Ordering::SeqCst) {
+                let mut seqs = old_seqs.lock().unwrap();
+                seqs.push(old_relay_allocates(&ep, &table));
+                seqs.push(old_relay_allocates(&ep, &table));
+            }
+        }
+    };
+    let (store, attempts) = recording(store, in_hook);
+    let s = StreamId("s".into());
+    for i in 1..=3 {
+        store.append(&s, &wire(&format!("o{i}"))).unwrap();
+    }
+
+    let new = store.append(&s, &wire("new")).unwrap();
+    let old = old_seqs.lock().unwrap().clone();
+    assert_eq!(old, [4, 5], "the older relay allocated 4 and 5 by ADD");
+    assert_eq!(new, Cursor(6), "this build steps above both allocations");
+    assert_eq!(
+        attempts_of(&attempts, "new"),
+        [
+            (3, 4, "read", Some(true)),
+            (5, 6, "hint", Some(true)),
+            (5, 6, "known", Some(false)),
+        ],
+        "turned back by the moved counter; op 5 not there yet, so the check flips once"
+    );
+    assert_eq!(
+        counter_of(&ep, &table),
+        Some(6),
+        "the counter never went below 5"
+    );
+
+    // The older relay now writes the ops it allocated, as it does: conditioned on the key.
+    assert!(
+        put_op(&ep, &table, 4, "old-a", true),
+        "seq 4 is still free for it"
+    );
+    assert!(put_op(&ep, &table, 5, "old-b", true), "and so is seq 5");
+    assert_eq!(counter_of(&ep, &table), Some(6));
+
+    let (ops, end) = store.read_since(&s, Cursor::BEGINNING, 100).unwrap();
+    assert_eq!(
+        ids(&ops),
+        ["o1", "o2", "o3", "old-a", "old-b", "new"],
+        "nothing overwritten, every op readable in seq order"
+    );
+    assert_eq!(end, Cursor(6));
+    assert_eq!(
+        store.append(&s, &wire("after")).unwrap(),
+        Cursor(7),
+        "and the stream goes on"
+    );
+}
+
+#[test]
+fn a_re_push_that_lost_the_counter_race_answers_its_own_seq_and_burns_none() {
+    // Review of PR #59, Test Quality #5, deterministic: the re-push of o1 chooses seq 2 and is held
+    // there; o2 commits at 2; the re-push's transaction then fails on BOTH the moved counter and
+    // its taken claim, and the claim must win: o1's own seq, in that one round, and the next fresh
+    // op right after o2.
+    let Some(ep) =
+        endpoint("a_re_push_that_lost_the_counter_race_answers_its_own_seq_and_burns_none")
+    else {
+        return;
+    };
+    let (hook, held_rx, release_tx) = gate(|a| a.op_id == "o1" && a.expected == 1);
+    let (store, attempts) = recording(opstore(&ep), hook);
+    let store = Arc::new(store);
+    let s = StreamId("s".into());
+    assert_eq!(store.append(&s, &wire("o1")).unwrap(), Cursor(1));
+
+    let re_push = {
+        let (store, s) = (Arc::clone(&store), s.clone());
+        thread::spawn(move || store.append(&s, &wire("o1")).unwrap())
+    };
+    held_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the re-push reaches its write");
+    assert_eq!(store.append(&s, &wire("o2")).unwrap(), Cursor(2));
+    release_tx.send(()).unwrap();
+
+    assert_eq!(re_push.join().unwrap(), Cursor(1), "o1's own seq");
+    assert_eq!(
+        attempts_of(&attempts, "o1"),
+        [(0, 1, "read", None), (1, 2, "read", Some(true))],
+        "the re-push settled in its one round: the taken claim outranked the moved counter"
+    );
+    assert_eq!(
+        store.append(&s, &wire("o3")).unwrap(),
+        Cursor(3),
+        "no seq burned: the next op lands right after o2"
+    );
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(ids(&ops), ["o1", "o2", "o3"]);
+}
+
+#[test]
+fn a_run_of_occupied_seqs_above_the_counter_is_stepped_over_in_one_round() {
+    // Review of PR #59, Integrity #4: forty ops with no counter (out-of-band writes, or a stream
+    // older than the counter). Stepping one seq per round would exhaust APPEND_ATTEMPTS (32) and
+    // wedge the stream; one reverse Query finds the top and the next round lands above it.
+    let Some(ep) =
+        endpoint("a_run_of_occupied_seqs_above_the_counter_is_stepped_over_in_one_round")
+    else {
+        return;
+    };
+    let (store, table) = opstore_and_table(&ep);
+    for seq in 1..=40 {
+        put_unclaimed_op(&ep, &table, seq, &format!("legacy-{seq}"));
+    }
+    let (store, attempts) = recording(store, |_| {});
+    let s = StreamId("s".into());
+
+    assert_eq!(store.append(&s, &wire("x")).unwrap(), Cursor(41));
+    assert_eq!(
+        attempts_of(&attempts, "x"),
+        [(0, 1, "read", None), (0, 41, "known", Some(true))],
+        "one taken seq, then straight above the top one, the counter not re-read"
+    );
+    assert_eq!(store.append(&s, &wire("y")).unwrap(), Cursor(42));
+}
+
+#[test]
+fn a_push_carries_the_seq_it_wrote_forward_and_reads_the_counter_once() {
+    // Review of PR #59, Integrity #3: within one push the seq an op was written at is the counter
+    // the next op expects, so a push of n ops costs n transactions and one read.
+    let Some(ep) = endpoint("a_push_carries_the_seq_it_wrote_forward_and_reads_the_counter_once")
+    else {
+        return;
+    };
+    let (store, attempts) = recording(opstore(&ep), |_| {});
+    let s = StreamId("s".into());
+    store.append(&s, &wire("o1")).unwrap();
+
+    let push = [wire("o2"), wire("o1"), wire("o3"), wire("o4")];
+    store
+        .append_batch(&s, &push, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    let from: Vec<(String, &str)> = attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|a| (a.op_id.clone(), a.counter_from))
+        .collect();
+    assert_eq!(
+        from,
+        [
+            ("o2".to_string(), "read"),
+            ("o1".to_string(), "carried"),
+            ("o3".to_string(), "carried"),
+            ("o4".to_string(), "carried"),
+        ],
+        "read once; an already stored op (o1) carries the same expectation on"
+    );
+    let (ops, end) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(ids(&ops), ["o1", "o2", "o3", "o4"]);
+    assert_eq!(end, Cursor(4));
+}
+
+#[test]
+fn a_push_stops_at_its_deadline_and_keeps_what_it_stored() {
+    // Review of PR #59, Integrity #2: the deadline is checked between ops and against the round in
+    // flight. Here the second op's round is held past it.
+    let Some(ep) = endpoint("a_push_stops_at_its_deadline_and_keeps_what_it_stored") else {
+        return;
+    };
+    // The held op sleeps until just past the deadline the push runs under — whatever that is —
+    // so the test does not depend on how fast DynamoDB Local serves the op before it.
+    let push_deadline: Arc<std::sync::Mutex<Option<Instant>>> = Arc::default();
+    let store = {
+        let push_deadline = Arc::clone(&push_deadline);
+        opstore(&ep).with_before_write(move |attempt| {
+            let deadline = *push_deadline.lock().unwrap();
+            if let (Some(deadline), "b") = (deadline, attempt.op_id.as_str()) {
+                thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let s = StreamId("s".into());
+
+    let err = store
+        .append_batch(&s, &[wire("a")], Instant::now())
+        .expect_err("a deadline already passed stores nothing");
+    assert!(err.to_string().contains("after 0 of 1"), "{err}");
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert!(ops.is_empty());
+
+    let push = [wire("a"), wire("b"), wire("c")];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    *push_deadline.lock().unwrap() = Some(deadline);
+    let err = store
+        .append_batch(&s, &push, deadline)
+        .expect_err("the held op runs past the deadline");
+    *push_deadline.lock().unwrap() = None;
+    assert!(err.to_string().contains("after 1 of 3"), "{err}");
+    let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(
+        ids(&ops)[0],
+        "a",
+        "what was stored before the deadline stays"
+    );
+    assert!(
+        !ids(&ops).contains(&"c"),
+        "nothing after the deadline is sent"
+    );
+
+    // The client's re-push of the whole page then lands every op exactly once.
+    store
+        .append_batch(&s, &push, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    let (ops, end) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
+    assert_eq!(ids(&ops), ["a", "b", "c"]);
+    assert_eq!(end, Cursor(3));
+}
+
+#[test]
+fn soak_concurrent_writers_and_pullers_see_every_op_once_in_gap_free_seq_order() {
+    // A SOAK test, not a proof: nothing here forces the interleaving the reproduction test above
+    // forces, so it catches an ordering bug only when the scheduler happens to produce it (and
+    // DynamoDB Local serialises transactions besides). It stays as a regression net over the
+    // whole path — many writers, pullers following the stream.
+    //
+    // N writers push in parallel while pullers follow the stream the way the sync engine does —
+    // `since` is the cursor of the previous answer, stored unconditionally. Every puller must end
+    // up with every op exactly once, and the one-op-per-page puller sees the seqs themselves:
+    // strictly increasing by one, no seq skipped.
+    let Some(ep) =
+        endpoint("soak_concurrent_writers_and_pullers_see_every_op_once_in_gap_free_seq_order")
+    else {
+        return;
+    };
+    let store = Arc::new(opstore(&ep));
+    let s = StreamId("s".into());
+    const WRITERS: usize = 6;
+    const PER: usize = 30;
+    const TOTAL: usize = WRITERS * PER;
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let pullers: Vec<_> = [1usize, 7, 64]
+        .into_iter()
+        .map(|page| {
+            let (store, s, done) = (Arc::clone(&store), s.clone(), Arc::clone(&done));
+            thread::spawn(move || {
+                let mut cursor = Cursor::BEGINNING;
+                let mut seen: Vec<(String, Cursor)> = Vec::new();
+                loop {
+                    // Read the flag BEFORE the pull: once it is set, a pull that comes back empty
+                    // has seen everything every writer committed.
+                    let finished = done.load(Ordering::SeqCst);
+                    let (ops, next) = store.read_since(&s, cursor, page).unwrap();
+                    let empty = ops.is_empty();
+                    seen.extend(ops.into_iter().map(|o| (o.op_id, next)));
+                    cursor = next.max(cursor);
+                    if empty && finished {
+                        return (page, seen);
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let (store, s) = (Arc::clone(&store), s.clone());
+            thread::spawn(move || {
+                (0..PER)
+                    .map(|i| store.append(&s, &wire(&format!("w{w}-{i}"))).unwrap().0)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut answered: Vec<i64> = writers
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    done.store(true, Ordering::SeqCst);
+    answered.sort_unstable();
+    assert_eq!(
+        answered,
+        (1..=TOTAL as i64).collect::<Vec<_>>(),
+        "every append is answered with its own seq, none burned"
+    );
+
+    let mut expected: Vec<String> = (0..WRITERS)
+        .flat_map(|w| (0..PER).map(move |i| format!("w{w}-{i}")))
+        .collect();
+    expected.sort();
+    for puller in pullers {
+        let (page, seen) = puller.join().unwrap();
+        let mut ids: Vec<&str> = seen.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        let missing: Vec<&String> = expected
+            .iter()
+            .filter(|id| ids.binary_search(&id.as_str()).is_err())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the page-{page} puller never received {missing:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            TOTAL,
+            "the page-{page} puller received an op more than once"
+        );
+        if page == 1 {
+            let seqs: Vec<i64> = seen.iter().map(|(_, at)| at.0).collect();
+            assert_eq!(
+                seqs,
+                (1..=TOTAL as i64).collect::<Vec<_>>(),
+                "one op per page: the seqs arrive strictly increasing, none skipped"
+            );
+        }
+    }
 }
 
 // ----- DynamoDB PrefixRegistry — claim-if-free ---------------------------------------
