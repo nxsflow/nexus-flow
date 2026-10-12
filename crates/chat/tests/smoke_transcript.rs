@@ -615,18 +615,18 @@ fn a_declared_model_is_the_model_the_live_sdk_session_actually_runs_on() {
 
     // The middle link: the alias the role declared, resolved to an SDK id on the Rust side
     // (`Model::sdk_id`) and written into the spec the sidecar reads.
-    assert_eq!(spec_model(root, &opus_session), "claude-opus-5");
-    assert_eq!(spec_model(root, &sonnet_session), "claude-sonnet-5");
+    assert_eq!(spec_model(root, &opus_session), "claude-opus-5-5");
+    assert_eq!(spec_model(root, &sonnet_session), "claude-sonnet-5-5");
 
     // The last link: what the live session says it is running on. `starts_with`, not equality — the
-    // SDK may report a dated snapshot id (`claude-opus-5-2026…`) for the same alias, and pinning the
+    // SDK may report a dated snapshot id (`claude-opus-5-5-2026…`) for the same alias, and pinning the
     // exact string would make this smoke fail on a routine snapshot bump for no reason.
     assert!(
-        opus_reported.starts_with("claude-opus-5"),
+        opus_reported.starts_with("claude-opus-5-5"),
         "asks_opus declared `model: opus` but the live session ran on {opus_reported:?}"
     );
     assert!(
-        sonnet_reported.starts_with("claude-sonnet-5"),
+        sonnet_reported.starts_with("claude-sonnet-5-5"),
         "asks_sonnet declared `model: sonnet` but the live session ran on {sonnet_reported:?}"
     );
     assert_ne!(

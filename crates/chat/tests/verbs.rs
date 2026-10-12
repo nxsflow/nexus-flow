@@ -1961,7 +1961,7 @@ fn a_send_trigger_runs_on_the_roles_own_declared_model_or_on_none_at_all() {
         .as_str()
         .unwrap()
         .to_string();
-    assert_eq!(spec_json(&tmp, &session)["model"], "claude-sonnet-5");
+    assert_eq!(spec_json(&tmp, &session)["model"], "claude-sonnet-5-5");
 
     let tmp = workspace_with_coding_role("");
     let out = nxc_sidecar(&tmp)

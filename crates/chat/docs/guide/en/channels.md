@@ -315,8 +315,8 @@ not also declare `flow: sequential`**: that would be two lists deciding one thin
   see below.
 - **`task`** says what the target is to do *here*, and becomes a fourth layer of its prompt, under
   the persona's own (`nxc guide personas`). See below.
-- **`stage`** runs the target at another band than the one it declared — `junior | senior |
-  principal`, the persona vocabulary (`nxc guide personas`). See below.
+- **`stage`** runs the target at another band than the one it declared — `intern | junior |
+  senior | principal`, the persona vocabulary (`nxc guide personas`). See below.
 - **`input`** says what this step is given out of the round: the request, the answer of a named
   step, both, or nothing. Leave it out and the defaults apply, which is what you want almost always
   — see below.

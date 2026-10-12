@@ -158,7 +158,7 @@ fn the_declared_fold_model_is_the_one_the_synthesizer_actually_runs_on() {
     );
     assert_eq!(specs[0]["role"], "__synth__", "{}", specs[0]);
     assert_eq!(
-        specs[0]["model"], "claude-opus-5",
+        specs[0]["model"], "claude-opus-5-5",
         "the channel's declared summary_model is what the fold runs on: {}",
         specs[0]
     );
@@ -210,7 +210,7 @@ fn a_fold_with_no_declared_model_runs_on_the_documented_fallback_not_on_silence(
         specs[0]
     );
     assert_eq!(
-        specs[0]["model"], "claude-sonnet-5",
+        specs[0]["model"], "claude-sonnet-5-5",
         "…and it is this one, spelled out so a change to the constant is visible here too: {}",
         specs[0]
     );
