@@ -114,7 +114,7 @@ The chat message reducer's "first write wins by ARRIVAL", recorded on `47jy.d28m
 
 | # | Where | What decides | Two-op example | Who hits it | Snapshot at P + tail ≠ full replay? |
 |---|---|---|---|---|---|
-| 1 | DynamoDB relay: seq is allocated by `ADD` (`crates/server/src/store_ddb.rs:505-525`) before the op is written (`:716-742`). `read_since` returns `seq > since` and sets `next` to the last seq seen (`:780,793-795`). The client stores that cursor unconditionally (`crates/sync/src/engine.rs:486`). fold-ddb advances to the batch's max seq (`crates/fold-ddb/src/fold.rs:336-338`), and `advance` never moves back (`:343`). | Commit order vs. seq order of concurrent appends | Writer A gets seq 10, writer B gets 11, and B commits first. A reader at `since=9` gets [11] and stores cursor 11. Then A@10 commits. That reader never asks below 11 again, so A is **missing for good** on it. A replica that pulled later has A. | **Honest replicas**, whenever two pushes to one stream overlap: a service and a manual pass, two devices, the hosted writer and a device. SQLite and Postgres relays are immune: a mutex (`crates/server/src/store.rs:206-212`) and an advisory lock held to commit (`crates/server/src/store_pg.rs:334,352-356`). | **Yes, and it propagates.** A snapshot at P from a replica that skipped op 10 claims P and omits 10. Every replica started from it misses 10 too. The anchor check only compares the op AT P (`crates/sync/src/snapshot.rs:422-440`). r3jf rated live reading harmless. That holds for the fold, which folds a late op when it arrives through the DynamoDB stream, but **not for pullers**. **[inferred from code, not reproduced]** |
+| 1 | DynamoDB relay, before #59 (`r3jf`): the seq was allocated by an `UpdateItem ADD` on the counter item before the op was written by its own transaction (`allocate_seq` and `try_append_op` in `crates/server/src/store_ddb.rs` at `130c048`). **Fixed by #59, see §4.1.** `read_since` returns `seq > since` and sets `next` to the last seq seen. The client stores that cursor unconditionally (`crates/sync/src/engine.rs:486`). fold-ddb advances to the batch's max seq (`crates/fold-ddb/src/fold.rs:336-338`), and `advance` never moves back (`:343`). | Commit order vs. seq order of concurrent appends | Writer A gets seq 10, writer B gets 11, and B commits first. A reader at `since=9` gets [11] and stores cursor 11. Then A@10 commits. That reader never asks below 11 again, so A is **missing for good** on it. A replica that pulled later has A. | **Honest replicas**, whenever two pushes to one stream overlap: a service and a manual pass, two devices, the hosted writer and a device. SQLite and Postgres relays are immune: a mutex (`crates/server/src/store.rs:206-212`) and an advisory lock held to commit (`crates/server/src/store_pg.rs:334,352-356`). | **Yes, and it propagates.** A snapshot at P from a replica that skipped op 10 claims P and omits 10. Every replica started from it misses 10 too. The anchor check only compares the op AT P (`crates/sync/src/snapshot.rs:422-440`). r3jf rated live reading harmless. That holds for the fold, which folds a late op when it arrives through the DynamoDB stream, but **not for pullers**. **[reproduced: #59's test `a_reader_is_never_handed_a_seq_above_an_append_still_in_flight`, backported onto the `ADD` allocation, fails with the second pull empty]** |
 | 2 | Rows holding several registers whose version columns default to 0: `items` (`crates/core/src/schema.rs:69-73`), and chat `channels`, `profiles`, `threads`. The fresh-row INSERT writes unconditionally (`change.rs:246-272`; DynamoDB `crates/fold-ddb/src/write.rs:147-156`). `lamport_in_bound` bounds only the top (`crates/foundation/src/model.rs:100-102`). | Which op creates the row | A sets `title=x` at (−1, 5). B sets `status=open` at (5, 2). In order AB the row is created with `title=x`. In order BA, B creates the row with `title_v=0`, and A needs (−1,5) > (0,0), so it is refused: `title` stays NULL. | Hostile or malformed ops only: honest clocks start at 1 (`crates/foundation/src/store.rs:226-231`). | Yes: the snapshot freezes its source's arrival order. A local full refold folds in `(lamport, site)` order (`store.rs:573-578`), so it can disagree even with the replica's own incremental fold. |
 | 3 | Two different ops with the same `(lamport, site)`. Locally the unique coordinate index makes the second one `Collided` and it is never stored (`store.rs:499-531`). The server folds both, and an equal version keeps the first (`fold.rs:38-44`). | Which copy arrives first | A and B are both at (7,3) and both set `title`. Order AB keeps A, order BA keeps B. | Logs written before fc5p only: four pairs in this board's own log (`hehx` point 4). | Yes: every snapshot lineage inherits its source's choice. |
 | 4 | Two copies of one `op_id`: `INSERT OR IGNORE` keeps the first copy's content, signature and verdict (`store.rs:496-531`). | Which copy arrives first | A stripped copy arrives first and is stored `unsigned`. The signed copy arrives later and is ignored. `acting_ops` then differs between replicas (`crates/foundation/src/trust.rs:123-127`), and so do chat's `held` and `answers` (`crates/chat/src/store.rs:344-363,417-438`). | A stripping or hostile transport. | State: no (same content). Actions: yes. A snapshot carries its source's `key_id`/`sig`; the importer re-verifies them but has no other copy (`crates/foundation/src/image.rs:468-470`). |
@@ -200,29 +200,78 @@ every platform reducer's views. fold-ddb's `platform_reducers()` already does
 ### 4.1 Precondition: relay seq order equals visibility order (r3jf) — lands separately
 
 **Owner, 2026-10-12: fixed immediately, as its own small PR with a reproduction test, before slice
-1.** Slice 1 assumes it is merged and released; this section records what that PR does so the
-spec stays readable on its own. The reproduction test comes first: two concurrent appends on
-dynamodb-local with the second one's write delayed between allocation and `TransactWriteItems`,
-and a reader polling between them, which today stores a cursor past the missing seq.
+1.** Slice 1 assumes it is merged and released; this section records what that PR (#59) built, so
+the spec stays readable on its own. The reproduction test came first: two appends on
+dynamodb-local, the first one held by a test seam after it has chosen its seq and before it sends
+its write, the second one committing meanwhile, and a reader polling between them — which on the
+`ADD` allocation stores a cursor past the missing seq.
 
+A snapshot at P must contain every op with seq ≤ P. The DynamoDB relay now assigns the seq inside
+the write, as the other two backends do.
 
-A snapshot at P must contain every op with seq ≤ P. The design makes the DynamoDB relay assign the
-seq inside the write, as the other two backends do.
+- **Fix.** Each append round knows a counter value `c` — read with one strongly consistent `Query`
+  of the counter item for the first op of a push, otherwise learned without a read (handed back by
+  a failed counter check through `ReturnValuesOnConditionCheckFailure = ALL_OLD`, or carried from
+  the op the same push wrote before). Its `TransactWriteItems` then carries up to four items:
+  - `Update counter SET next_seq = :seq` (`s = c + 1`) with the condition `next_seq = :expected`
+    (`c`; for `c = 0`, also "no counter yet");
+  - the claim (as before);
+  - for `s > 1`, a `ConditionCheck attribute_exists` on the op at `s − 1` — the **predecessor
+    check**;
+  - the op, conditioned on its key being free.
 
-- **Fix.** `try_append_op` reads the counter. Its `TransactWriteItems` then carries three things:
-  - `Update counter SET next_seq = :n` with the condition `next_seq = :n-1`;
-  - the claim (as today);
-  - the op.
-
-  Concurrent appends to a stream serialize on the counter item. A loser retries with a fresh read.
-  Commit order becomes seq order, as with Postgres' advisory lock.
-- **Cost.** One strongly consistent `GetItem` more per append. Contention retries on a hot stream
-  are bounded by `APPEND_ATTEMPTS = 32` (`store_ddb.rs:341`). DynamoDB caps a transaction at 100
-  items; this one has 3. **[unverified]:** throughput under contention. Measure it in slice 1 with
-  dynamodb-local.
-- **What is rejected.** A "visibility horizon" (serving only seqs older than N seconds) is rejected:
-  gaps are normal on this backend (`store_ddb.rs:101-106,126-130`), so a hole cannot be told from a
-  burned seq.
+  Concurrent appends to a stream serialize on the counter item; a loser retries from the counter
+  the failed check handed back, after a jitter of at most 16 ms.
+- **Why the predecessor check (review of #59, Integrity #1).** AWS documents transactions as
+  serializable against each other, but a `Query` only as read-committed against a transaction: a
+  transaction's items need not become visible to a reader at the same instant. The counter
+  condition alone orders the transactions, not what a reader sees — the transaction that took `c`
+  can show its counter before its op, the next one can write op `c + 1` and commit, and a reader in
+  that window is handed `[c + 1]`. The predecessor check makes op `c`'s item part of the next
+  transaction, so that transaction conflicts (`TransactionConflict`, retried as a lost round) while
+  op `c` is still being written and can commit only once it exists. Commit visibility then follows
+  seq order — transaction against transaction, the case AWS documents — as with Postgres' advisory
+  lock.
+- **Legacy gaps.** When op `s − 1` is legitimately absent (a seq an `ADD`-era relay burned), a failed
+  `attribute_exists` with the counter condition holding proves it: no transaction of this build can
+  still write that seq. The next round, for the same `s` only, checks `attribute_not_exists`
+  instead — still an item of the transaction, so a writer of it still conflicts — and steps over
+  the gap. One extra round per legacy gap; the stream never wedges. Seq 1 has no check; a floor
+  step (below) checks the occupied seq it steps over.
+- **Occupied seqs above the counter** (a stream older than the counter, out-of-band writes) are
+  found with one reverse `Query` (`Limit 1`), and the next round takes the seq above the top one —
+  one extra round for a run of any length, not one per seq. Seqs past `i64::MAX` are a loud error.
+- **IAM — changed.** The predecessor check needs **`dynamodb:ConditionCheckItem`** on the op table.
+  It must be granted **before** a relay of this build is deployed; without it every push past a
+  stream's first op fails with `AccessDeniedException` (a 500). The op table's role now needs
+  `Query`, `PutItem`, `UpdateItem` and `ConditionCheckItem`. Wire protocol and table shape are
+  unchanged.
+- **Cost.** Uncontended, one transaction per op plus one counter read per push. A transaction is
+  billed at twice the plain write per item; the predecessor check is a transactional read of op
+  `s − 1`. Under contention a lost round is a cancelled transaction, and cancelled transactions
+  consume capacity like committed ones, so `N` writers racing for one stream cost up to about `N`
+  times the capacity per stored op; two transactions can also cancel each other, so there is not
+  always a winner per round. The per-stream ceiling is about one append per counter round-trip —
+  30-60 appends/s by latency arithmetic. **[unverified]:** throughput and capacity under contention
+  on real AWS; not measurable on dynamodb-local, which serialises transactions (chore filed with
+  #59). Bounds: 256 rounds lost in a row (`CONTENTION_ROUNDS`), 32 rounds failing otherwise
+  (`APPEND_ATTEMPTS`), and a per-push deadline of 20 s (`PUSH_DEADLINE`, configurable as
+  `NXF_RELAY_PUSH_DEADLINE_SECS`), below the ~30 s of API Gateway and CloudFront in front of the
+  hosted relay; checked between ops, between rounds and against the round in flight, answered 503,
+  which the client re-pushes like any failed push.
+- **Density.** A stream written by this build has no gaps: a seq is taken only together with its
+  op, so neither a re-push, a lost round nor an SDK retry consumes one. Streams written before
+  carry the `ADD`'s gaps. Nothing downstream depends on density.
+- **What is rejected.** A "visibility horizon" (serving only seqs older than N seconds): a time
+  bound is a guess about commit latency, not an ordering, and the old streams' burned seqs make a
+  hole indistinguishable from a gap anyway. Also rejected (review of #59): bounding `read_since`
+  by the counter and stopping a page at an unexpected gap — it would put the ordering into every
+  reader instead of the one writer path, and legacy gaps would stall it.
+- **Rolling upgrade.** Grant `ConditionCheckItem` first. Mixed with an `ADD`-era relay nothing is
+  overwritten and the counter never moves backwards; the ordering guarantee holds once every relay
+  writing a table runs the new build. Meanwhile the old relays answer more pushes with a 500 (their
+  `ADD` is cancelled by a `TransactionConflict` whenever a new relay's transaction holds the
+  counter).
 - **What it does not repair.** Ops already skipped by today's replicas stay skipped. The writer
   check in §4.3 (count and digest ≤ P) detects such a replica before it publishes.
 

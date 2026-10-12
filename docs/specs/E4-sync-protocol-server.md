@@ -149,9 +149,10 @@ The relay keeps the same union on its side: every backend appends idempotently b
 re-pushed op answers with the cursor it already has and the log does not grow. SQLite and Postgres
 do it with `UNIQUE (stream_id, op_id)`; DynamoDB, which has no secondary unique constraint, with a
 claim item per op written in the same transaction (`6j6v.tm4k`, contract in `store_ddb.rs`). Since
-`6j6v.r3jf` that transaction also takes the seq, conditioned on the stream's counter, so on every
-backend a seq becomes visible only after every lower one, and a re-push consumes none; nothing reads
-density.
+`6j6v.r3jf` that transaction also takes the seq, conditioned on the stream's counter, and checks
+the op one seq below (a `ConditionCheck`, which needs `dynamodb:ConditionCheckItem` on the op table),
+so on every backend a seq becomes visible only after every lower one, and a re-push consumes none;
+nothing reads density.
 
 ### 4.4.1 Opaque chunks (added 2026-10-08, `6j6v.c0kn`)
 
@@ -253,7 +254,9 @@ trait PrefixRegistry {
 - **DynamoDB:** PK = `stream_id`, SK = `seq`. `read_since` = range query `SK > cursor`. The
   **main risk is the atomic monotonic sequence per stream** (atomic counter item / conditional
   put), **not** the 400 KB item limit — the trait already handles that via `limit` +
-  `next cursor` pagination.
+  `next cursor` pagination. **Impl note (`6j6v.r3jf`):** the seq is taken by the transaction that
+  writes the op — counter `SET` conditioned on the value read, plus a `ConditionCheck` on the op
+  one seq below — so commit visibility follows seq order; contract and IAM in `store_ddb.rs`.
 
 Slice 1: a single SQLite impl carries **both** traits and proves convergence. The durable
 backends (§10) are split **per trait**, because `PrefixRegistry` only comes into being with

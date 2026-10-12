@@ -4,6 +4,7 @@
 //! the stores — they fold nothing, derive nothing, and reject no well-formed op (spec §2/§3).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -51,6 +52,8 @@ pub struct AppState {
     pub ops: SharedStore,
     pub registry: SharedRegistry,
     pub clock: Clock,
+    /// How long one push may write ([`PUSH_DEADLINE`] unless the relay was built with another).
+    pub push_deadline: Duration,
 }
 
 /// Default page size when a client omits `limit` — bounds the response without forcing
@@ -78,6 +81,23 @@ const MAX_PRESENCE_BYTES: usize = 4 * 1024;
 /// body would pass [`MAX_PUSH_BYTES`] (6j6v.3gq0), so a page of large ops trips neither axis.
 pub const MAX_PUSH_OPS: usize = 1000;
 
+/// How long one push may write before the relay stops it and answers 503 (`6j6v.r3jf`). The
+/// deployed relay sits behind API Gateway and CloudFront (E4 continuous-sync spec §9a.3), whose
+/// own request timeouts are about 30 s (API Gateway's integration limit is 29-30 s, CloudFront's
+/// default origin response timeout 30 s). Past that the client has already got a 504 and will
+/// re-push while the handler would still be writing, which only adds a writer to a stream that
+/// is already slow. 20 s leaves a third of that margin and is still about twice what an
+/// uncontended push of a full client page (500 ops, `SYNC_PAGE_LIMIT`) takes on DynamoDB, the
+/// slowest backend (one transaction of ~10-20 ms per op). A relay behind a shorter timeout sets
+/// `NXF_RELAY_PUSH_DEADLINE_SECS` (read at boot, `src/main.rs`) below it.
+///
+/// It is checked between ops by every backend and, on DynamoDB, also between an append's rounds
+/// and against the round in flight ([`OpStore::append_batch`]). The answer is 503 Service
+/// Unavailable: the client treats every push status but 413 the same way — the pass fails,
+/// nothing is marked pushed, and the next pass re-pushes the page, which idempotence by
+/// `op_id` makes safe — so the status only tells an operator which failures were the deadline.
+pub const PUSH_DEADLINE: Duration = Duration::from_secs(20);
+
 /// Build the relay router over the op log + registry, on the system clock. Loopback, no auth (a
 /// later slice). The body limit guards the push route; register/read/presence bodies are tiny.
 pub fn app(ops: SharedStore, registry: SharedRegistry) -> Router {
@@ -86,6 +106,17 @@ pub fn app(ops: SharedStore, registry: SharedRegistry) -> Router {
 
 /// [`app`] with the clock presence is stamped with named explicitly — what a test turns by hand.
 pub fn app_with_clock(ops: SharedStore, registry: SharedRegistry, clock: Clock) -> Router {
+    app_with_push_deadline(ops, registry, clock, PUSH_DEADLINE)
+}
+
+/// [`app_with_clock`] with the push deadline named explicitly (see [`PUSH_DEADLINE`]) — what
+/// `src/main.rs` builds when `NXF_RELAY_PUSH_DEADLINE_SECS` is set, and what a test shrinks.
+pub fn app_with_push_deadline(
+    ops: SharedStore,
+    registry: SharedRegistry,
+    clock: Clock,
+    push_deadline: Duration,
+) -> Router {
     Router::new()
         .route("/streams/:id/ops", post(append).get(read_since))
         .route("/streams/:id/register", post(register))
@@ -100,6 +131,7 @@ pub fn app_with_clock(ops: SharedStore, registry: SharedRegistry, clock: Clock) 
             ops,
             registry,
             clock,
+            push_deadline,
         })
 }
 
@@ -114,12 +146,21 @@ async fn append(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let stream = StreamId(id);
-    for op in &req.ops {
-        state
-            .ops
-            .append(&stream, op)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+    let deadline = Instant::now() + state.push_deadline;
+    state
+        .ops
+        .append_batch(&stream, &req.ops, deadline)
+        .map_err(|e| {
+            // A failure once the deadline has passed is the deadline, whichever check caught it
+            // (between ops, between rounds, or the round in flight cut short): 503, and the
+            // reason in the operator's log. Anything earlier is a store fault, as before.
+            if Instant::now() >= deadline {
+                eprintln!("nxf-relay: {e}");
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
     Ok(Json(PushResponse {
         appended: req.ops.len(),
     }))

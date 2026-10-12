@@ -37,6 +37,11 @@ postgres = [
 # TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry). `sha2` derives
 # the range key of an op's claim item, which makes append idempotent (store_ddb::claim_seq).
 dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "dep:sha2", "tokio/time"]
+# Test seams on the production types (`DynamoDbOpStore::with_before_write`, 6j6v.r3jf). Off in every
+# shipped build: only this package's own dev-dependency on itself (below) turns it on, so the
+# integration tests can hold an append between choosing its seq and sending its write while the
+# relay binary and every embedder never carry the hook.
+test-seams = []
 
 [dependencies]
 # Wire types ONLY — no `engine` feature, so core's fold code never enters this graph.
@@ -103,3 +108,6 @@ nxs-test-support = { path = "../test-support" }
 # (`nxf`/`nxs` go through the gated `nxs-test-support::cargo_bin` instead; they belong to another
 # package, which is exactly the case that needs the freshness gate.)
 assert_cmd = "2"
+# This package itself, with its test seams on (see the `test-seams` feature). A dev-dependency, so
+# the feature is unified into the library only when tests are built.
+nxs-server = { path = ".", features = ["test-seams"] }

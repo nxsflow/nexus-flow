@@ -69,8 +69,19 @@ pub(crate) fn decode_extra(
     })
 }
 
+/// The error [`OpStore::append_batch`] stops with once its deadline has passed: how far the push
+/// got, so an operator reading the log can tell a slow stream from a stuck one.
+pub(crate) fn past_deadline(stream: &StreamId, done: usize, of: usize) -> StoreError {
+    StoreError(format!(
+        "push to stream {:?} stopped at its deadline after {done} of {of} ops; the client \
+         re-pushes, and the ops already stored are turned back by op id",
+        stream.as_str()
+    ))
+}
+
 /// The durable op log behind the relay. Two operations, each with explicit write
-/// semantics — the atomic, per-stream monotone sequence is the real backend risk (§5).
+/// semantics — the atomic, per-stream monotone sequence is the real backend risk (§5) — plus
+/// [`OpStore::append_batch`], the push handler's way in, which a backend need not implement.
 pub trait OpStore {
     /// Append one opaque op and assign it the next monotone sequence **for its stream**.
     /// Atomic under concurrent writers (the contract the durable backends must honour).
@@ -78,6 +89,32 @@ pub trait OpStore {
     /// the answer is the position THAT OP holds — which may lie below the stream's current end,
     /// so the result is never "the position the stream has reached".
     fn append(&self, stream: &StreamId, op: &WireOp) -> StoreResult<Cursor>;
+
+    /// Append one push's ops in order, stopping at the first failure — and once `deadline` has
+    /// passed (`6j6v.r3jf`): the relay's push handler sets it below the front door's own timeout,
+    /// so a push that cannot finish in time stops writing and answers, instead of writing on
+    /// after the client has given up on it and re-pushed (one more writer on a contended
+    /// stream). The ops appended before the stop stay stored; the client re-pushes the whole
+    /// page, and idempotence by `op_id` turns those back without growing the log.
+    ///
+    /// The default checks the deadline between ops and suits a backend whose single append is
+    /// local and short (SQLite, Postgres). A backend whose append can retry over the network
+    /// overrides it to check between its rounds too, and may carry state from one op of the push
+    /// to the next (DynamoDB carries the seq it wrote as the counter value to expect).
+    fn append_batch(
+        &self,
+        stream: &StreamId,
+        ops: &[WireOp],
+        deadline: std::time::Instant,
+    ) -> StoreResult<()> {
+        for (done, op) in ops.iter().enumerate() {
+            if std::time::Instant::now() >= deadline {
+                return Err(past_deadline(stream, done, ops.len()));
+            }
+            self.append(stream, op)?;
+        }
+        Ok(())
+    }
 
     /// One page of ops with `seq > cursor`, ordered by seq, at most `limit`. Never returns the
     /// whole stream at once.

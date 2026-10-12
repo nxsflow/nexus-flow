@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use nxs_server::app::{app, SharedRegistry, SharedStore};
+use nxs_server::app::{
+    app_with_push_deadline, system_clock, SharedRegistry, SharedStore, PUSH_DEADLINE,
+};
 use nxs_server::registry::SqlitePrefixRegistry;
 use nxs_server::store::SqliteOpStore;
 
@@ -160,6 +162,20 @@ fn sqlite_backends() -> (SharedStore, SharedRegistry) {
     (ops, registry)
 }
 
+/// The push deadline from `NXF_RELAY_PUSH_DEADLINE_SECS` (whole seconds, at least 1), or
+/// [`PUSH_DEADLINE`] when it is unset. Set it below the timeout of whatever fronts the relay; see
+/// `PUSH_DEADLINE` for why the default is 20 s. A value that is not a positive whole number stops
+/// the boot rather than silently running with the default.
+fn push_deadline(raw: Option<String>) -> std::time::Duration {
+    match raw {
+        None => PUSH_DEADLINE,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(secs) if secs > 0 => std::time::Duration::from_secs(secs),
+            _ => panic!("NXF_RELAY_PUSH_DEADLINE_SECS must be a whole number of seconds above 0, got {raw:?}"),
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let addr = std::env::var("NXF_RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
@@ -168,7 +184,9 @@ async fn main() {
         .await
         .expect("bind relay address");
     eprintln!("nxf-relay listening on http://{addr}");
-    axum::serve(listener, app(ops, registry))
+    let push_deadline = push_deadline(std::env::var("NXF_RELAY_PUSH_DEADLINE_SECS").ok());
+    let router = app_with_push_deadline(ops, registry, system_clock(), push_deadline);
+    axum::serve(listener, router)
         .await
         .expect("relay server error");
 }
@@ -176,6 +194,19 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_push_deadline_defaults_and_takes_whole_seconds() {
+        assert_eq!(push_deadline(None), PUSH_DEADLINE);
+        assert_eq!(
+            push_deadline(Some(" 8 ".into())),
+            std::time::Duration::from_secs(8)
+        );
+        for bad in ["0", "-1", "2.5", "soon"] {
+            let caught = std::panic::catch_unwind(|| push_deadline(Some(bad.into())));
+            assert!(caught.is_err(), "{bad:?} must stop the boot");
+        }
+    }
 
     /// The default build (this test's own features are the crate's defaults) must never
     /// recommend a feature it already carries — the regression 6j6v.0hjs describes.
