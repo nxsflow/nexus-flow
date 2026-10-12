@@ -148,8 +148,9 @@ push/pull therefore converges without double-counting.
 The relay keeps the same union on its side: every backend appends idempotently by `op_id`, so a
 re-pushed op answers with the cursor it already has and the log does not grow. SQLite and Postgres
 do it with `UNIQUE (stream_id, op_id)`; DynamoDB, which has no secondary unique constraint, with a
-claim item per op written in the same transaction (`6j6v.tm4k`, contract in `store_ddb.rs`). There
-a re-push burns the seq it allocated, so the sequence gaps where SQLite's does not; nothing reads
+claim item per op written in the same transaction (`6j6v.tm4k`, contract in `store_ddb.rs`). Since
+`6j6v.r3jf` that transaction also takes the seq, conditioned on the stream's counter, so on every
+backend a seq becomes visible only after every lower one, and a re-push consumes none; nothing reads
 density.
 
 ### 4.4.1 Opaque chunks (added 2026-10-08, `6j6v.c0kn`)

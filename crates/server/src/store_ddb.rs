@@ -19,7 +19,7 @@
 //!
 //! | `seq`  | item                         | attributes                                               |
 //! |--------|------------------------------|----------------------------------------------------------|
-//! | `0`    | the per-stream counter       | `next_seq` (N) — the highest seq handed out              |
+//! | `0`    | the per-stream counter       | `next_seq` (N) — the highest seq taken                   |
 //! | `>= 1` | one op                       | one attribute per [`WireOp`] field (see below)           |
 //! | `< 0`  | one op's claim (`6j6v.tm4k`) | `op_id` (S), `op_seq` (N) — the seq that op is stored at |
 //!
@@ -68,8 +68,8 @@
 //! envelope attributes, so item-to-`WireOp` conversion fails on them. A reader must constrain
 //! the query to `seq > 0`, as [`DynamoDbOpStore::read_since`] does. The same holds for a
 //! consumer of a DynamoDB stream on this table: an item with `seq <= 0` is bookkeeping, never
-//! an op. Sequence numbers are unique and monotone but **not** dense: see the allocation
-//! section below.
+//! an op. Sequence numbers are unique and monotone, and a seq is visible only once every
+//! lower seq is; they are **not** guaranteed dense: see the allocation section below.
 //!
 //! # Design notes
 //!
@@ -85,25 +85,47 @@
 //! from inside an axum handler; see `block_on`'s doc for why that specific shape (channel
 //! handoff, not a second `Runtime::block_on`) is required.
 //!
-//! **Sequence allocation.** `append` allocates a stream's next seq with a single
-//! `UpdateItem` `ADD` on the counter item (`seq = 0`, attribute `next_seq`) — atomic and
-//! read-free, so two concurrent allocations can never observe the same value (an earlier
-//! read-then-`PutItem` shape did exactly that, racily). The op itself then goes in with a
-//! put conditioned on `attribute_not_exists(stream_id)` at that `(stream_id, seq)`:
-//! belt and braces, not redundant defenses of the same thing. The counter (the belt)
-//! already guarantees *uniqueness* — no other allocation call can ever be handed this same
-//! value again. The condition (the braces) guarantees *safety of the write*: if a seq were
-//! ever computed twice anyway (a bug in the allocation path, a replayed request), the
-//! second put fails loudly instead of silently overwriting the first writer's op. On
-//! `ConditionalCheckFailedException` the whole allocate-then-put is retried from scratch,
-//! bounded by [`APPEND_ATTEMPTS`].
+//! **Sequence allocation: a seq is taken by the write that commits it** (`6j6v.r3jf`). Each
+//! append round reads the counter item (`seq = 0`, attribute `next_seq`; absent counts as 0)
+//! and sends ONE `TransactWriteItems` that sets `next_seq` to the seq after it — conditioned on
+//! `next_seq` still holding the value read — and puts the op at that seq (and its claim, below).
+//! A round that finds the counter moved has lost to a concurrent append; it retries from the
+//! counter the failed check reports, after a short random pause ([`append_with_retry`]).
 //!
-//! `UpdateItem` + `ADD` is *not* idempotent, though, so **gaps in the sequence are normal in
-//! production**: any retry of that call — including one the SDK performs internally after a
-//! throttle or a lost response — burns a seq that no op will ever occupy. Nothing downstream
-//! depends on density (`read_since` is `seq > cursor` and the client follows the returned
-//! cursor), but do not read the acceptance suite's contiguity assertion as a contract: it
-//! holds only because DynamoDB Local never throttles.
+//! Why this shape and not an `UpdateItem` `ADD` ahead of the write, as before: an `ADD` hands
+//! out the seq before the op exists. Writer A got 10, writer B got 11, B committed first, and a
+//! reader at 9 was handed `[11]` and stored cursor 11 — so A, committed at 10 a moment later,
+//! sat below every cursor that reader would send again, missing for good, and a fold watermark
+//! moved past it too. Here seq `n + 1` cannot be written before the transaction that wrote `n`
+//! has committed, because its condition reads the counter that transaction set. So commit order
+//! is seq order, as on SQLite (a mutex) and Postgres (an advisory lock held to commit), and a
+//! strongly consistent `read_since` that returns seq `n` has every op below `n` that will ever
+//! exist. The op's own condition, `attribute_not_exists(stream_id)` at its `(stream_id, seq)`,
+//! stays as the brace: a seq occupied by an op the counter does not account for (a stream
+//! written before the counter existed, an item put there out of band) is stepped over, never
+//! overwritten.
+//!
+//! What it costs: one strongly consistent read of the counter and one transaction per append,
+//! the same two round-trips as the `ADD` and the transaction it replaces (the read is cheaper
+//! than the `ADD`'s write). Appends to ONE stream now serialise on the counter item, as they do
+//! on the other two backends; a lost round costs one more transaction, and its retry needs no
+//! read when DynamoDB returns the counter with the failed check. Rounds lost to concurrent
+//! appends are bounded by [`CONTENTION_ROUNDS`], rounds that fail for any other reason by
+//! [`APPEND_ATTEMPTS`]; either bound ends in a loud `StoreError`, and the client re-pushes,
+//! which the claims make safe. Appends to different streams never contend. No new table,
+//! index, attribute or IAM action: the counter is written with `UpdateItem` (as the `ADD` was)
+//! and read with `Query`.
+//!
+//! **Density.** A seq is taken only together with its op, so a stream written by this build has
+//! no gaps: neither a re-push nor a lost round nor the SDK's retry of a write whose response was
+//! lost consumes one (the retry finds the claim taken). Streams written before it carry the
+//! gaps the `ADD` left. Nothing downstream depends on density — `read_since` is `seq > cursor`
+//! and the client follows the returned cursor — so read it as a property, not a contract.
+//!
+//! **Rolling upgrade.** A relay of an earlier build still allocates with `ADD` and can still
+//! expose a seq ahead of an uncommitted one while it serves; mixed with this build nothing is
+//! overwritten (both condition the op's put), and the guarantee holds once every relay writing a
+//! table runs this build.
 //!
 //! **Per-item size ceiling.** DynamoDB rejects any item over **400 KB**, so a single op
 //! whose `value` exceeds roughly that is a hard `StoreError` here where SQLite and Postgres
@@ -123,11 +145,11 @@
 //!
 //! What it costs and where it differs from the other two backends:
 //!
-//! * **The re-push still burns a seq.** The seq is allocated before the transaction finds the
-//!   claim taken, so a duplicate leaves a gap where SQLite leaves none — and every round a writer
-//!   loses to a concurrent transaction burns one more, which is why such a round first reads the
-//!   claim and then backs off before it allocates again. Gaps are already normal here (above),
-//!   and nothing reads density.
+//! * **The claim rides the append's transaction.** It is item 1 of the same
+//!   `TransactWriteItems` that moves the counter and puts the op, so a re-push is turned back by
+//!   its taken claim before the counter moves: it consumes no seq, as on SQLite and Postgres.
+//!   A taken claim outranks a moved counter, so a re-push that also lost the counter race still
+//!   answers with its stored seq. Three items per transaction, far below DynamoDB's 100.
 //! * **Ops stored before the claim items existed have none.** Re-pushing such an op stores it
 //!   once more, with a claim this time; every later re-push is then absorbed.
 //! * **The claim key is a 63-bit hash, so two op ids can share it.** The claim records the op
@@ -135,17 +157,18 @@
 //!   the second op is then stored WITHOUT a claim, exactly as before this change, and only it
 //!   loses the dedupe. Nothing is ever lost or overwritten by a collision.
 //! * **No new table, index or IAM action.** The claim lives in the op table under the same key
-//!   schema, it is written with `PutItem` inside the transaction and read with `Query`, the two
-//!   actions the op table's role already has. Every op write now costs a transaction, which
-//!   DynamoDB bills at twice the plain write, for two items.
+//!   schema, it is written with `PutItem` inside the transaction and read with `Query`, actions
+//!   the op table's role already has. Every op write costs a transaction, which DynamoDB bills at
+//!   twice the plain write, for three items (counter, claim, op).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use aws_sdk_dynamodb::error::ProvideErrorMetadata;
-use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
-use aws_sdk_dynamodb::types::{AttributeValue, Put, ReturnValue, TransactWriteItem};
+use aws_sdk_dynamodb::types::{
+    AttributeValue, Put, ReturnValuesOnConditionCheckFailure, TransactWriteItem, Update,
+};
 use aws_sdk_dynamodb::Client;
 use nxs_sync::protocol::{Cursor, MachineHello, RegisterOutcome, StreamId};
 use nxs_sync::wire::WireOp;
@@ -334,108 +357,200 @@ pub fn claim_seq(op_id: &str) -> i64 {
     -((u64::from_be_bytes(head) >> 1) as i64) - 1
 }
 
-/// Bound on allocate-then-put retries after a `ConditionalCheckFailedException`. A named,
-/// finite bound rather than an unbounded loop: exhausting it means something is
-/// structurally wrong (e.g. a bug that keeps recomputing the same seq), and that must
-/// surface as a loud `StoreError`, never spin the caller's thread forever.
+/// Bound on the append rounds that end WITHOUT another append having committed in between: a
+/// taken seq, a throttled transaction, a claim key found taken by another op id or read back
+/// absent. Exhausting it means something is structurally wrong or the table is saturated, and
+/// that must surface as a loud `StoreError`, never spin the caller's thread forever.
 const APPEND_ATTEMPTS: u32 = 32;
 
-/// Outcome of one conditional-put attempt at an allocated seq. `Collided` means the
-/// caller should allocate a fresh seq and try again — never overwrite what is already
-/// there. `Existing` means the op was already stored, at the seq it carries: the append is
-/// done, and that seq is its answer. `Conflicted` means the transaction lost to a concurrent one
-/// or to capacity: wait ([`claim_backoff`]), then allocate afresh. `PartialEq`/`Debug` exist for
-/// [`classify_put_error`]'s unit tests.
-#[derive(Debug, PartialEq, Eq)]
-enum PutOutcome {
-    Written,
-    Collided,
-    Existing(i64),
-    Conflicted,
+/// Bound on the append rounds lost to a CONCURRENT append of the same stream — the counter
+/// moved under this round, or DynamoDB reported a `TransactionConflict` on it. Separate from
+/// [`APPEND_ATTEMPTS`], and larger, because every such round is another writer's commit: the
+/// stream as a whole is making progress, only this writer is losing the race for the next seq.
+/// With `n` writers racing, one wins each round, so a writer loses `k` rounds in a row with
+/// probability about `((n-1)/n)^k`; at 256 that is below 1e-14 for eight writers. Exhausting it
+/// means the stream took 256 other appends while this one waited, and the error says so.
+const CONTENTION_ROUNDS: u32 = 256;
+
+/// What one append round reads and writes: the counter value it expects to find (`0` when the
+/// stream has no counter yet) and the seq it moves the counter to and puts the op at, in ONE
+/// transaction. `PartialEq`/`Debug` exist for the unit tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Slot {
+    expected: i64,
+    seq: i64,
 }
 
-/// Classify a failed `PutItem` on the op table: a `ConditionalCheckFailedException` is the
-/// ONLY reason to retry (something already occupies this exact `(stream_id, seq)`, so the
-/// caller must allocate a fresh seq — never overwrite it); every other failure, from
-/// throttling to a missing table to an over-400 KB item, is a real fault that must surface.
-///
-/// Pulled out as a pure function over the typed error — the same move
-/// [`classify_cancellation`] makes for the registry — because this branch is *unreachable*
-/// against a live DynamoDB: `allocate_seq`'s atomic counter never hands two callers the same
-/// value, so no acceptance test can provoke a collision. A pure function can be handed one
-/// directly.
-///
-/// Matching the SDK's typed variant, never a substring of its `Display`, is what keeps a
-/// renamed or reworded service message from silently turning a hard error into a retry.
-fn classify_put_error(err: PutItemError) -> StoreResult<PutOutcome> {
-    match err {
-        PutItemError::ConditionalCheckFailedException(_) => Ok(PutOutcome::Collided),
-        other => Err(ddb_err(other)),
-    }
-}
-
-/// Drive one allocate-then-put cycle until it lands, at most [`APPEND_ATTEMPTS`] times.
-///
-/// Extracted from `append` and made generic over the cycle for the same reason
-/// [`classify_put_error`] is a free function: against a live DynamoDB the loop provably runs
-/// exactly once (the atomic counter guarantees a unique seq), so neither the retry branch nor
-/// the exhaustion error can be reached by an acceptance test. A stand-in cycle that collides
-/// on demand reaches both.
-async fn append_with_retry<F, Fut>(stream_id: &str, mut cycle: F) -> StoreResult<Cursor>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = StoreResult<(i64, PutOutcome)>>,
-{
-    for attempt in 0..APPEND_ATTEMPTS {
-        let (seq, outcome) = cycle().await?;
-        match outcome {
-            PutOutcome::Written => return Ok(Cursor(seq)),
-            PutOutcome::Existing(stored) => return Ok(Cursor(stored)),
-            PutOutcome::Collided => continue,
-            // Writers re-pushing the same op all contend on its one claim key; retrying in
-            // lockstep would burn a seq per round for each of them. Doubling, as the registry.
-            PutOutcome::Conflicted => tokio::time::sleep(claim_backoff(attempt)).await,
+impl Slot {
+    /// The slot after `counter`: one above it, or one above `floor` when that is higher. `floor`
+    /// is the highest seq an earlier round found occupied although the counter had not reached
+    /// it — a stream written before the counter existed, or an item put there out of band.
+    /// Stepping over such a seq is safe: it already holds a committed op.
+    fn after(counter: i64, floor: i64) -> Slot {
+        Slot {
+            expected: counter,
+            seq: counter.max(floor) + 1,
         }
     }
-    Err(StoreError(format!(
-        "append: exhausted {APPEND_ATTEMPTS} attempts allocating a seq for stream \
-         {stream_id:?} without a successful conditional put"
-    )))
 }
 
-/// Why an append's `TransactWriteItems` (index 0 = the claim, index 1 = the op — see
-/// [`DynamoDbOpStore::try_append_op`]) was cancelled, when the cancellation is an outcome
-/// rather than a fault.
+/// What the next round of [`append_with_retry`] starts from: the counter value to expect, when a
+/// lost round already learned it (`None`: read it first), the highest seq found occupied above the
+/// counter, and whether the op still goes in with its claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Round {
+    counter: Option<i64>,
+    floor: i64,
+    claimed: bool,
+}
+
+/// Outcome of one append round. `PartialEq`/`Debug` exist for the unit tests.
+#[derive(Debug, PartialEq, Eq)]
+enum PutOutcome {
+    /// The op is stored at this seq, and the counter stands at it.
+    Written(i64),
+    /// The op was already stored, at this seq: the append is done, and that is its answer.
+    Existing(i64),
+    /// Another append of this stream committed first (the counter moved), or is committing (a
+    /// `TransactionConflict`). Carries the counter value the failed check saw, when DynamoDB
+    /// handed it back, so the next round needs no read.
+    Lost(Option<i64>),
+    /// The counter held, but this seq is occupied by an op the counter does not account for.
+    SeqTaken(i64),
+    /// Throttled or over capacity: wait ([`claim_backoff`]), then try again.
+    Throttled,
+    /// The claim key belongs to another op id: store this op without a claim (module doc).
+    ClaimForeign,
+    /// The claim was reported taken and read back absent: try again.
+    ClaimVanished,
+}
+
+/// Drive append rounds until one settles, within [`APPEND_ATTEMPTS`] and [`CONTENTION_ROUNDS`].
+///
+/// Generic over the round so the retry policy — which outcome retries with what, after how long,
+/// within which budget — is unit-tested without a table: DynamoDB Local serialises transactions,
+/// so most of these branches never occur against it.
+async fn append_with_retry<F, Fut>(stream_id: &str, mut round: F) -> StoreResult<Cursor>
+where
+    F: FnMut(Round) -> Fut,
+    Fut: std::future::Future<Output = StoreResult<PutOutcome>>,
+{
+    let mut next = Round {
+        counter: None,
+        floor: 0,
+        claimed: true,
+    };
+    let (mut stalls, mut lost) = (0u32, 0u32);
+    loop {
+        let outcome = round(next).await?;
+        match outcome {
+            PutOutcome::Written(seq) | PutOutcome::Existing(seq) => return Ok(Cursor(seq)),
+            PutOutcome::Lost(seen) => {
+                lost += 1;
+                if lost >= CONTENTION_ROUNDS {
+                    return Err(StoreError(format!(
+                        "append: lost {CONTENTION_ROUNDS} rounds in a row to concurrent appends \
+                         of stream {stream_id:?}; the stream is under more write contention than \
+                         one append waits out, retry the push"
+                    )));
+                }
+                next.counter = seen;
+                tokio::time::sleep(contention_jitter(lost)).await;
+            }
+            PutOutcome::SeqTaken(_)
+            | PutOutcome::Throttled
+            | PutOutcome::ClaimForeign
+            | PutOutcome::ClaimVanished => {
+                stalls += 1;
+                if stalls >= APPEND_ATTEMPTS {
+                    return Err(StoreError(format!(
+                        "append: exhausted {APPEND_ATTEMPTS} attempts writing an op to stream \
+                         {stream_id:?} without a successful conditional write (last: {outcome:?})"
+                    )));
+                }
+                next.counter = None;
+                match outcome {
+                    PutOutcome::SeqTaken(seq) => next.floor = next.floor.max(seq),
+                    PutOutcome::ClaimForeign => next.claimed = false,
+                    PutOutcome::Throttled => {
+                        let base = claim_backoff(stalls - 1);
+                        tokio::time::sleep(base + jitter(base)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// A uniformly random duration in `[0, cap]`. Seeded from `RandomState`, whose keys `std` draws
+/// from the OS once per thread and steps per instance — enough to de-synchronise writers, which
+/// is all a backoff needs, without a `rand` dependency.
+fn jitter(cap: Duration) -> Duration {
+    use std::hash::BuildHasher;
+    let cap_us = cap.as_micros().max(1) as u64;
+    let draw = std::collections::hash_map::RandomState::new().hash_one(Instant::now());
+    Duration::from_micros(draw % (cap_us + 1))
+}
+
+/// The pause before the next round after losing one to a concurrent append: full jitter up to
+/// 1, 2, 4, 8, then 16 ms. Small and capped, unlike a throttle backoff, because a lost round means
+/// the stream moved on — waiting longer would only hand the next seq to whoever did not wait —
+/// and random, so the losers do not all come back for the same seq at the same instant.
+fn contention_jitter(lost: u32) -> Duration {
+    jitter(Duration::from_millis(1u64 << lost.min(4)))
+}
+
+/// Why an append's `TransactWriteItems` (index 0 = the counter, then the claim when the op
+/// carries one, last = the op — see [`DynamoDbOpStore::try_append_op`]) was cancelled, when the
+/// cancellation is an outcome rather than a fault.
 #[derive(Debug, PartialEq, Eq)]
 enum AppendCancellation {
     /// The claim's key is taken: this op — or one whose id shares the key — is stored.
     Claimed,
-    /// The op's seq is taken: allocate a fresh one.
+    /// The counter is not at the value this round expected: another append committed first.
+    CounterMoved,
+    /// The counter held but the op's seq is occupied: step over it.
     SeqTaken,
-    /// Lost to concurrency or capacity: try again, with a fresh seq.
-    Retryable,
+    /// A concurrent transaction on one of the items: another append is committing.
+    Conflict,
+    /// Throttled or over capacity.
+    Throttled,
 }
 
-/// Classify a cancelled append from its positional per-item codes. Pure for the same reason
-/// [`classify_cancellation`] is: DynamoDB Local serialises transactions, so the transient
-/// codes never reach an acceptance test. A taken claim outranks everything: it is definitive,
-/// and it means the op is already stored, so the seq question no longer matters.
+/// Classify a cancelled append from its positional per-item codes (`claim_code` is `None` for a
+/// round without a claim). Pure for the same reason [`classify_cancellation`] is: DynamoDB Local
+/// serialises transactions, so the transient codes never reach an acceptance test.
+///
+/// A taken claim outranks everything: it is definitive, and it means the op is already stored, so
+/// the seq question no longer matters. A moved counter outranks a taken seq: the next round reads
+/// the counter afresh and so picks another seq anyway.
 fn classify_append_cancellation(
+    counter_code: Option<&str>,
     claim_code: Option<&str>,
     op_code: Option<&str>,
 ) -> Result<AppendCancellation, String> {
-    if claim_code == Some("ConditionalCheckFailed") {
+    const CCF: Option<&str> = Some("ConditionalCheckFailed");
+    if claim_code == CCF {
         return Ok(AppendCancellation::Claimed);
     }
-    if op_code == Some("ConditionalCheckFailed") {
+    if counter_code == CCF {
+        return Ok(AppendCancellation::CounterMoved);
+    }
+    if op_code == CCF {
         return Ok(AppendCancellation::SeqTaken);
     }
-    if is_retryable_code(claim_code) || is_retryable_code(op_code) {
-        return Ok(AppendCancellation::Retryable);
+    let codes = [counter_code, claim_code, op_code];
+    if codes.contains(&Some("TransactionConflict")) {
+        return Ok(AppendCancellation::Conflict);
+    }
+    if codes.into_iter().any(is_retryable_code) {
+        return Ok(AppendCancellation::Throttled);
     }
     Err(format!(
-        "append transaction cancelled for a reason other than a taken claim or seq \
-         (claim item code: {claim_code:?}, op item code: {op_code:?})"
+        "append transaction cancelled for a reason other than a moved counter or a taken claim \
+         or seq (counter item code: {counter_code:?}, claim item code: {claim_code:?}, op item \
+         code: {op_code:?})"
     ))
 }
 
@@ -481,7 +596,11 @@ fn item_to_wire(item: &HashMap<String, AttributeValue>) -> StoreResult<WireOp> {
 pub struct DynamoDbOpStore {
     client: Client,
     table: String,
+    before_write: Option<BeforeWrite>,
 }
+
+/// A test seam, see [`DynamoDbOpStore::with_before_write`].
+type BeforeWrite = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 impl DynamoDbOpStore {
     /// See [`build_client`] for the constructor-argument rationale.
@@ -492,36 +611,64 @@ impl DynamoDbOpStore {
     ) -> DynamoDbOpStore {
         let table = table.into();
         let client = block_on(build_client(endpoint, region));
-        DynamoDbOpStore { client, table }
+        DynamoDbOpStore {
+            client,
+            table,
+            before_write: None,
+        }
     }
 
-    /// Atomically allocate the next seq for `stream_id`. A single `UpdateItem` `ADD` is an
-    /// uninterruptible read-modify-write inside DynamoDB itself — unlike an earlier
-    /// `GetItem` + `PutItem`, there is no window between reading and writing the counter
-    /// for a second allocation to observe the same value. `ADD` on a missing `next_seq`
-    /// attribute starts from 0, so a stream's first append needs no separate
-    /// initialisation step, and `ReturnValues::UpdatedNew` hands back the post-increment
-    /// value directly, so no follow-up `GetItem` is needed to learn what this call got.
-    async fn allocate_seq(client: &Client, table: &str, stream_id: &str) -> StoreResult<i64> {
-        let updated = client
-            .update_item()
+    /// Test seam (`6j6v.r3jf`): `hook` is called with the op id on every append attempt, after
+    /// the attempt has decided which seq it writes and before it sends the write. A test blocks
+    /// in it to hold one append between those two points while another append commits — the
+    /// interleaving that decides whether a reader can be handed a seq above one still in flight.
+    /// It runs on the bridge runtime inside `block_in_place`, so blocking in it is allowed.
+    #[doc(hidden)]
+    pub fn with_before_write(mut self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.before_write = Some(std::sync::Arc::new(hook));
+        self
+    }
+
+    /// Read the stream's counter: the highest seq written, `0` when the stream has none yet. A
+    /// strongly consistent `Query` on the counter's exact key rather than a `GetItem`, for the
+    /// reason [`Self::read_claim`] gives: the op table's role needs no action it did not have.
+    async fn read_counter(client: &Client, table: &str, stream_id: &str) -> StoreResult<i64> {
+        let resp = client
+            .query()
             .table_name(table)
-            .key("stream_id", AttributeValue::S(stream_id.to_string()))
-            .key("seq", AttributeValue::N(COUNTER_SEQ.to_string()))
-            .update_expression("ADD next_seq :one")
-            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
-            .return_values(ReturnValue::UpdatedNew)
+            .key_condition_expression("stream_id = :sid AND seq = :counter")
+            .expression_attribute_values(":sid", AttributeValue::S(stream_id.to_string()))
+            .expression_attribute_values(":counter", AttributeValue::N(COUNTER_SEQ.to_string()))
+            .consistent_read(true)
             .send()
             .await
             .map_err(ddb_err)?;
+        match resp.items().first() {
+            Some(item) if item.contains_key("next_seq") => parse_n(item, "next_seq"),
+            _ => Ok(0),
+        }
+    }
 
-        let attrs = updated.attributes().ok_or_else(|| {
-            StoreError(
-                "UpdateItem on the counter item returned no attributes for ReturnValues::UpdatedNew"
-                    .into(),
-            )
-        })?;
-        parse_n::<i64>(attrs, "next_seq")
+    /// The counter's half of an append transaction: move `next_seq` to `slot.seq`, on the
+    /// condition that it still stands at `slot.expected` (or, for `0`, that the stream has no
+    /// counter yet). This condition is what makes a seq visible only together with its op: no
+    /// round can take seq `n + 1` before the round that wrote `n` has committed. On a failed
+    /// check DynamoDB hands back the counter as it found it, so the next round needs no read.
+    fn counter_update(table: &str, stream_id: &str, slot: Slot) -> StoreResult<Update> {
+        let update = Update::builder()
+            .table_name(table)
+            .key("stream_id", AttributeValue::S(stream_id.to_string()))
+            .key("seq", AttributeValue::N(COUNTER_SEQ.to_string()))
+            .update_expression("SET next_seq = :seq")
+            .expression_attribute_values(":seq", AttributeValue::N(slot.seq.to_string()))
+            .expression_attribute_values(":expected", AttributeValue::N(slot.expected.to_string()))
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld);
+        let update = if slot.expected == 0 {
+            update.condition_expression("attribute_not_exists(next_seq) OR next_seq = :expected")
+        } else {
+            update.condition_expression("next_seq = :expected")
+        };
+        update.build().map_err(|e| StoreError(e.to_string()))
     }
 
     /// The op's item at `seq`: one attribute per [`WireOp`] field (see the module doc).
@@ -559,78 +706,55 @@ impl DynamoDbOpStore {
         item
     }
 
-    /// Put the op at `seq` WITHOUT a claim, conditioned on nothing already occupying this
-    /// exact `(stream_id, seq)`. On a composite key, `attribute_not_exists(stream_id)` is
-    /// evaluated against the item addressed by the request's own key — so it reads as "no
-    /// item at this stream_id+seq pair", not "stream_id is absent from the table" (which
-    /// would be true of every other seq in the same stream). A collision here means
-    /// `allocate_seq` must be called again for a fresh value — see `append`'s retry loop
-    /// for why both this condition and the atomic counter exist.
+    /// One append round: ONE `TransactWriteItems` that moves the counter to `slot.seq` (index 0,
+    /// see [`Self::counter_update`]), puts the op's claim at [`claim_seq`] when `claimed` (index
+    /// 1), and puts the op at `slot.seq` (last). The claim and the op are each conditioned on
+    /// their key being free — `attribute_not_exists(stream_id)`, which on a composite key reads
+    /// "no item at this exact key", not "the stream is absent". So a seq is taken by exactly the
+    /// transaction that also writes its op, and only once the seq below it is written: commit
+    /// order is seq order (`6j6v.r3jf`).
     ///
-    /// Only reached when the op's claim key belongs to a different op id (see the module
-    /// doc): such an op is stored as every op was before the claims existed.
-    async fn try_put_op(
-        client: &Client,
-        table: &str,
-        stream_id: &str,
-        seq: i64,
-        op: WireOp,
-    ) -> StoreResult<PutOutcome> {
-        let result = client
-            .put_item()
-            .table_name(table)
-            .set_item(Some(Self::op_item(stream_id, seq, op)))
-            .condition_expression("attribute_not_exists(stream_id)")
-            .send()
-            .await;
-
-        match result {
-            Ok(_) => Ok(PutOutcome::Written),
-            Err(err) => classify_put_error(err.into_service_error()),
-        }
-    }
-
-    /// Put the op at `seq` together with its claim, in one transaction: index 0 the claim at
-    /// [`claim_seq`], index 1 the op, each conditioned on its own key being free (the same
-    /// `attribute_not_exists(stream_id)` reading as [`Self::try_put_op`]). A taken claim means
-    /// the op is already stored, so this answers with the seq the claim recorded — unless the
-    /// claim was written for a different op id, in which case the op goes in unclaimed.
+    /// A taken claim means the op is already stored, so this answers with the seq the claim
+    /// recorded — unless the claim was written for a different op id, in which case the next
+    /// round stores the op without one.
     async fn try_append_op(
         client: &Client,
         table: &str,
         stream_id: &str,
-        seq: i64,
-        op: WireOp,
+        slot: Slot,
+        op: &WireOp,
+        claimed: bool,
     ) -> StoreResult<PutOutcome> {
         let claim = claim_seq(&op.op_id);
-        let op_id = op.op_id.clone();
-        // `build()` can only fail on a required field left unset, and every one is set here;
-        // mapped rather than unwrapped for the reason `try_claim` gives.
-        let claim_put = Put::builder()
-            .table_name(table)
-            .item("stream_id", AttributeValue::S(stream_id.to_string()))
-            .item("seq", AttributeValue::N(claim.to_string()))
-            .item("op_id", AttributeValue::S(op_id.clone()))
-            .item("op_seq", AttributeValue::N(seq.to_string()))
-            .condition_expression("attribute_not_exists(stream_id)")
-            .build()
-            .map_err(|e| StoreError(e.to_string()))?;
+        let mut tx = client.transact_write_items().transact_items(
+            TransactWriteItem::builder()
+                .update(Self::counter_update(table, stream_id, slot)?)
+                .build(),
+        );
+        if claimed {
+            // `build()` can only fail on a required field left unset, and every one is set here;
+            // mapped rather than unwrapped for the reason `try_claim` gives.
+            let claim_put = Put::builder()
+                .table_name(table)
+                .item("stream_id", AttributeValue::S(stream_id.to_string()))
+                .item("seq", AttributeValue::N(claim.to_string()))
+                .item("op_id", AttributeValue::S(op.op_id.clone()))
+                .item("op_seq", AttributeValue::N(slot.seq.to_string()))
+                .condition_expression("attribute_not_exists(stream_id)")
+                .build()
+                .map_err(|e| StoreError(e.to_string()))?;
+            tx = tx.transact_items(TransactWriteItem::builder().put(claim_put).build());
+        }
         let op_put = Put::builder()
             .table_name(table)
-            .set_item(Some(Self::op_item(stream_id, seq, op.clone())))
+            .set_item(Some(Self::op_item(stream_id, slot.seq, op.clone())))
             .condition_expression("attribute_not_exists(stream_id)")
             .build()
             .map_err(|e| StoreError(e.to_string()))?;
+        tx = tx.transact_items(TransactWriteItem::builder().put(op_put).build());
 
-        let result = client
-            .transact_write_items()
-            .transact_items(TransactWriteItem::builder().put(claim_put).build())
-            .transact_items(TransactWriteItem::builder().put(op_put).build())
-            .send()
-            .await;
-
-        let reasons = match result {
-            Ok(_) => return Ok(PutOutcome::Written),
+        let reasons = match tx.send().await {
+            Ok(_) => return Ok(PutOutcome::Written(slot.seq)),
             Err(err) => match err.into_service_error() {
                 TransactWriteItemsError::TransactionCanceledException(e) => {
                     e.cancellation_reasons().to_vec()
@@ -638,39 +762,51 @@ impl DynamoDbOpStore {
                 other => return Err(ddb_err(other)),
             },
         };
-        let claim_code = reasons.first().and_then(|r| r.code());
-        let op_code = reasons.get(1).and_then(|r| r.code());
-        match classify_append_cancellation(claim_code, op_code) {
+        let counter_code = reasons.first().and_then(|r| r.code());
+        let claim_code = if claimed {
+            reasons.get(1).and_then(|r| r.code())
+        } else {
+            None
+        };
+        let op_code = reasons
+            .get(if claimed { 2 } else { 1 })
+            .and_then(|r| r.code());
+        // The counter as the failed check found it, when DynamoDB returned it; absent item or
+        // attribute is a stream without a counter.
+        let counter_seen = || -> StoreResult<Option<i64>> {
+            match reasons.first().and_then(|r| r.item()) {
+                Some(item) if item.contains_key("next_seq") => Ok(Some(parse_n(item, "next_seq")?)),
+                Some(_) => Ok(Some(0)),
+                None => Ok(None),
+            }
+        };
+        match classify_append_cancellation(counter_code, claim_code, op_code) {
             Ok(AppendCancellation::Claimed) => {
                 match Self::read_claim(client, table, stream_id, claim).await? {
-                    Some((claimed_for, stored)) if claimed_for == op_id => {
+                    Some((claimed_for, stored)) if claimed_for == op.op_id => {
                         Ok(PutOutcome::Existing(stored))
                     }
-                    // The key is another op id's: store this op without a claim.
                     Some((claimed_for, _)) => {
                         eprintln!(
-                            "nxf-relay: op {op_id:?} shares its claim key {claim} with op \
+                            "nxf-relay: op {:?} shares its claim key {claim} with op \
                              {claimed_for:?} in stream {stream_id:?}; stored without a claim, \
-                             so a re-push of it is stored again"
+                             so a re-push of it is stored again",
+                            op.op_id
                         );
-                        Self::try_put_op(client, table, stream_id, seq, op).await
+                        Ok(PutOutcome::ClaimForeign)
                     }
                     // Reported taken, read back absent: nothing deletes a claim today, so this is
                     // a race with something that does. Try again rather than fail the push.
-                    None => Ok(PutOutcome::Collided),
+                    None => Ok(PutOutcome::ClaimVanished),
                 }
             }
-            Ok(AppendCancellation::SeqTaken) => Ok(PutOutcome::Collided),
-            // The transaction that won may have been this op's own re-push: if its claim now
-            // stands, that is the answer, and no further seq is burnt.
-            Ok(AppendCancellation::Retryable) => {
-                match Self::read_claim(client, table, stream_id, claim).await? {
-                    Some((claimed_for, stored)) if claimed_for == op_id => {
-                        Ok(PutOutcome::Existing(stored))
-                    }
-                    _ => Ok(PutOutcome::Conflicted),
-                }
-            }
+            Ok(AppendCancellation::CounterMoved) => Ok(PutOutcome::Lost(counter_seen()?)),
+            // Another transaction holds the counter (or the claim, for a racing re-push of this
+            // very op): it is committing. The next round reads the counter and, should that
+            // transaction have been this op's own, finds the claim taken.
+            Ok(AppendCancellation::Conflict) => Ok(PutOutcome::Lost(None)),
+            Ok(AppendCancellation::SeqTaken) => Ok(PutOutcome::SeqTaken(slot.seq)),
+            Ok(AppendCancellation::Throttled) => Ok(PutOutcome::Throttled),
             Err(msg) => {
                 // The service's own sentences (an item past 400 KB, say) are carried along:
                 // the codes alone do not say which validation failed.
@@ -718,23 +854,28 @@ impl OpStore for DynamoDbOpStore {
         let table = self.table.clone();
         let stream_id = stream.as_str().to_string();
         let op = op.clone();
+        let before_write = self.before_write.clone();
         block_on(async move {
-            // Belt and braces (see the module doc for the full reasoning): `allocate_seq`
-            // alone already guarantees no two calls are ever handed the same value, so in
-            // the overwhelmingly common case this cycle runs exactly once. The conditional
-            // put in `try_append_op` is what makes a seq collision — however it arose — a
-            // retried allocation instead of a silently overwritten op, and its claim is what
-            // makes a re-pushed op answer with the seq it already has.
-            append_with_retry(&stream_id, || {
+            // Each round reads the counter (unless the round before learned it), takes the seq
+            // after it, and writes counter, claim and op in one transaction conditioned on the
+            // counter not having moved (see `try_append_op` and the module doc). Uncontended, it
+            // runs once: one read and one transaction.
+            append_with_retry(&stream_id, |round| {
                 // Re-borrowing inside the closure (rather than capturing it) keeps the
                 // returned future borrowing the enclosing scope, not the closure itself —
-                // the shape `FnMut() -> impl Future` needs to type-check.
+                // the shape `FnMut(Round) -> impl Future` needs to type-check.
                 let (client, table, stream_id) = (&client, table.as_str(), stream_id.as_str());
-                let op = op.clone();
+                let (op, before_write) = (&op, before_write.clone());
                 async move {
-                    let seq = Self::allocate_seq(client, table, stream_id).await?;
-                    let outcome = Self::try_append_op(client, table, stream_id, seq, op).await?;
-                    Ok((seq, outcome))
+                    let counter = match round.counter {
+                        Some(counter) => counter,
+                        None => Self::read_counter(client, table, stream_id).await?,
+                    };
+                    let slot = Slot::after(counter, round.floor);
+                    if let Some(hook) = &before_write {
+                        tokio::task::block_in_place(|| hook(&op.op_id));
+                    }
+                    Self::try_append_op(client, table, stream_id, slot, op, round.claimed).await
                 }
             })
             .await
@@ -883,7 +1024,7 @@ fn is_retryable_code(code: Option<&str>) -> bool {
 /// self-race must never be treated as an ordinary collision. Only once neither condition
 /// failed does a transient code ([`is_retryable_code`]) make this a [`ClaimOutcome::Retryable`].
 /// Everything left over — a `ValidationError`, or no recognised code at all — is a hard
-/// error, matching `try_put_op`'s stricter pattern above: `register` must surface a real
+/// error, matching `classify_append_cancellation`'s stricter pattern above: `register` must surface a real
 /// fault rather than misread it as "try another candidate" or spin on it.
 fn classify_cancellation(
     prefix_item_code: Option<&str>,
@@ -999,7 +1140,7 @@ impl DynamoDbPrefixRegistry {
     /// would make `owned_prefix` miss it on the replica's very next (idempotent) register.
     /// Each `Put` is conditioned on `attribute_not_exists(stream_id)`, evaluated against the
     /// item at THAT put's own `(stream_id, sk)` key — "no item here yet", not "stream_id is
-    /// absent from the table" (mirrors `try_put_op` in the op store above).
+    /// absent from the table" (mirrors `try_append_op` in the op store above).
     ///
     /// A cancelled transaction MIGHT mean someone else won a race on one of the two keys — or
     /// it might be transient contention (a conflict, a throttle), or a genuine fault (a
@@ -1377,74 +1518,121 @@ mod tests {
             .block_on(fut)
     }
 
-    // ----- classify_put_error + append_with_retry ---------------------------------------
+    // ----- Slot + append_with_retry ------------------------------------------------------
     //
-    // Both are unreachable against a live DynamoDB: `allocate_seq`'s atomic counter never
-    // hands two callers the same seq, so no acceptance test can produce a conditional-check
-    // collision on the op table. These drive the branches directly.
+    // DynamoDB Local serialises transactions, so a throttle, a `TransactionConflict` or a
+    // contention budget running out never happen against it. These drive the policy directly.
 
     #[test]
-    fn a_conditional_check_failure_on_the_op_put_is_a_collision_not_an_error() {
-        let err = PutItemError::ConditionalCheckFailedException(
-            aws_sdk_dynamodb::types::error::ConditionalCheckFailedException::builder().build(),
+    fn a_slot_takes_the_seq_after_the_counter_and_steps_over_an_occupied_one() {
+        assert_eq!(
+            Slot::after(0, 0),
+            Slot {
+                expected: 0,
+                seq: 1
+            },
+            "a stream without a counter starts at 1"
         );
         assert_eq!(
-            classify_put_error(err).expect("a condition failure is an outcome, not an error"),
-            PutOutcome::Collided
-        );
-    }
-
-    #[test]
-    fn any_other_put_failure_is_a_hard_error_not_a_collision() {
-        // A missing table must never be mistaken for "that seq is taken" — that would spin
-        // the append loop 32 times and then report the wrong cause.
-        let err = PutItemError::ResourceNotFoundException(
-            aws_sdk_dynamodb::types::error::ResourceNotFoundException::builder()
-                .message("Requested resource not found")
-                .build(),
-        );
-        let outcome = classify_put_error(err);
-        assert!(outcome.is_err(), "expected a hard error, got {outcome:?}");
-    }
-
-    #[test]
-    fn append_retries_a_collided_put_with_a_freshly_allocated_seq() {
-        // The invariant the retry exists for: a collision must NOT re-put the same seq (that
-        // would livelock), it must take the next allocation. The stand-in hands out 1, 2, 3
-        // and only lets the third land.
-        let calls = std::cell::Cell::new(0i64);
-        let cursor = drive(append_with_retry("s", || {
-            let seq = calls.get() + 1;
-            calls.set(seq);
-            async move {
-                let outcome = if seq < 3 {
-                    PutOutcome::Collided
-                } else {
-                    PutOutcome::Written
-                };
-                Ok((seq, outcome))
+            Slot::after(9, 0),
+            Slot {
+                expected: 9,
+                seq: 10
             }
-        }))
-        .expect("the third attempt lands");
-        assert_eq!(cursor, Cursor(3), "the cursor is the seq that was written");
-        assert_eq!(calls.get(), 3, "exactly three allocate-then-put cycles ran");
+        );
+        assert_eq!(
+            Slot::after(0, 1),
+            Slot {
+                expected: 0,
+                seq: 2
+            },
+            "an op stored before the counter existed is stepped over, the counter still expected"
+        );
+        assert_eq!(
+            Slot::after(12, 3),
+            Slot {
+                expected: 12,
+                seq: 13
+            },
+            "a floor below the counter changes nothing"
+        );
+    }
+
+    /// The rounds a stand-in was asked for, and an answer per round from `script`.
+    fn scripted(
+        script: Vec<PutOutcome>,
+    ) -> (
+        std::rc::Rc<std::cell::RefCell<Vec<Round>>>,
+        impl FnMut(Round) -> std::future::Ready<StoreResult<PutOutcome>>,
+    ) {
+        let rounds = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&rounds);
+        let mut script = script.into_iter();
+        let round = move |r: Round| {
+            seen.borrow_mut().push(r);
+            std::future::ready(Ok(script.next().expect("the script covers every round")))
+        };
+        (rounds, round)
     }
 
     #[test]
-    fn append_gives_up_loudly_after_append_attempts_collisions() {
-        // Never an unbounded spin: a cycle that always collides is structurally broken, and
-        // the caller must be told so rather than have its thread held forever.
-        let calls = std::cell::Cell::new(0u32);
-        let err = drive(append_with_retry("s", || {
-            calls.set(calls.get() + 1);
-            async { Ok((1, PutOutcome::Collided)) }
-        }))
-        .expect_err("an always-colliding cycle must not loop forever");
+    fn a_round_lost_to_a_concurrent_append_retries_from_the_counter_it_saw() {
+        // The race this backend now settles inside the transaction (6j6v.r3jf): the loser does not
+        // keep a seq, it learns where the counter went and takes the seq after that.
+        let (rounds, round) = scripted(vec![
+            PutOutcome::Lost(Some(10)),
+            PutOutcome::Lost(None),
+            PutOutcome::Written(12),
+        ]);
+        let cursor = drive(append_with_retry("s", round)).expect("the third round lands");
+        assert_eq!(cursor, Cursor(12));
+        let counters: Vec<Option<i64>> = rounds.borrow().iter().map(|r| r.counter).collect();
         assert_eq!(
-            calls.get(),
-            APPEND_ATTEMPTS,
-            "the bound is APPEND_ATTEMPTS, not more"
+            counters,
+            [None, Some(10), None],
+            "read first; then the counter the failed check saw; read again when none came back"
         );
+    }
+
+    #[test]
+    fn a_taken_seq_raises_the_floor_and_a_foreign_claim_drops_the_claim() {
+        let (rounds, round) = scripted(vec![
+            PutOutcome::SeqTaken(1),
+            PutOutcome::ClaimForeign,
+            PutOutcome::Written(2),
+        ]);
+        assert_eq!(drive(append_with_retry("s", round)).unwrap(), Cursor(2));
+        let rounds = rounds.borrow();
+        assert_eq!(
+            rounds[1],
+            Round {
+                counter: None,
+                floor: 1,
+                claimed: true
+            }
+        );
+        assert_eq!(
+            rounds[2],
+            Round {
+                counter: None,
+                floor: 1,
+                claimed: false
+            },
+            "an op whose claim key is another op id's goes in unclaimed, as before the claims"
+        );
+    }
+
+    #[test]
+    fn append_gives_up_loudly_after_append_attempts_stalled_rounds() {
+        // Never an unbounded spin: rounds that keep failing with no other writer committing are
+        // structurally broken or saturated, and the caller must be told so.
+        let (rounds, round) = scripted(
+            (1..=i64::from(APPEND_ATTEMPTS))
+                .map(PutOutcome::SeqTaken)
+                .collect(),
+        );
+        let err = drive(append_with_retry("s", round)).expect_err("a stall must not loop forever");
+        assert_eq!(rounds.borrow().len() as u32, APPEND_ATTEMPTS);
         assert!(
             err.to_string().contains(&APPEND_ATTEMPTS.to_string()),
             "the error names the bound it hit: {err}"
@@ -1452,52 +1640,71 @@ mod tests {
     }
 
     #[test]
-    fn append_propagates_a_hard_error_from_the_cycle_immediately() {
-        // A real fault must not be retried 32 times: it is not a collision.
+    fn contention_has_its_own_larger_budget_and_a_clear_error_when_it_runs_out() {
+        // Lost rounds are other writers' commits, so they do not eat the stall budget: more of
+        // them than APPEND_ATTEMPTS still land...
+        let mut script: Vec<PutOutcome> = (0..APPEND_ATTEMPTS * 2)
+            .map(|_| PutOutcome::Lost(None))
+            .collect();
+        script.push(PutOutcome::Written(99));
+        let (_, round) = scripted(script);
+        assert_eq!(drive(append_with_retry("s", round)).unwrap(), Cursor(99));
+
+        // ...but they are bounded too, and the error says what happened.
+        let (rounds, round) = scripted(
+            (0..CONTENTION_ROUNDS)
+                .map(|_| PutOutcome::Lost(None))
+                .collect(),
+        );
+        let err = drive(append_with_retry("s", round)).expect_err("contention is bounded");
+        assert_eq!(rounds.borrow().len() as u32, CONTENTION_ROUNDS);
+        let err = err.to_string();
+        assert!(
+            err.contains("concurrent appends") && err.contains(&CONTENTION_ROUNDS.to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn append_propagates_a_hard_error_from_the_round_immediately() {
         let calls = std::cell::Cell::new(0u32);
-        let err = drive(append_with_retry("s", || {
+        let err = drive(append_with_retry("s", |_| {
             calls.set(calls.get() + 1);
             async { Err(StoreError("table gone".into())) }
         }))
         .expect_err("a hard error surfaces");
-        assert_eq!(calls.get(), 1, "no retry on a non-collision failure");
+        assert_eq!(calls.get(), 1, "no retry on a fault");
         assert!(err.to_string().contains("table gone"));
     }
 
     #[test]
-    fn a_conflicted_round_backs_off_and_then_allocates_afresh() {
-        // A lost transaction is retried after a pause, not in lockstep — and still with a fresh
-        // seq: the stand-in hands out 1, 2, 3 and lands the third.
-        let calls = std::cell::Cell::new(0i64);
-        let started = std::time::Instant::now();
-        let cursor = drive(append_with_retry("s", || {
-            let seq = calls.get() + 1;
-            calls.set(seq);
-            async move {
-                let outcome = if seq < 3 {
-                    PutOutcome::Conflicted
-                } else {
-                    PutOutcome::Written
-                };
-                Ok((seq, outcome))
-            }
-        }))
-        .expect("the third attempt lands");
-        assert_eq!(cursor, Cursor(3));
+    fn a_throttled_round_backs_off_before_the_next() {
+        let (_, round) = scripted(vec![
+            PutOutcome::Throttled,
+            PutOutcome::Throttled,
+            PutOutcome::Written(3),
+        ]);
+        let started = Instant::now();
+        assert_eq!(drive(append_with_retry("s", round)).unwrap(), Cursor(3));
         assert!(
             started.elapsed() >= claim_backoff(0) + claim_backoff(1),
-            "both conflicted rounds waited their backoff"
+            "both throttled rounds waited at least their backoff"
         );
     }
 
     #[test]
     fn append_answers_an_already_stored_op_with_its_existing_seq() {
-        // The allocated seq (7) is burned; the answer is the seq the op already has (3).
-        let cursor = drive(append_with_retry("s", || async {
-            Ok((7, PutOutcome::Existing(3)))
-        }))
-        .expect("an already stored op is an answer, not an error");
-        assert_eq!(cursor, Cursor(3));
+        let (_, round) = scripted(vec![PutOutcome::Existing(3)]);
+        assert_eq!(drive(append_with_retry("s", round)).unwrap(), Cursor(3));
+    }
+
+    #[test]
+    fn the_jitter_stays_inside_its_cap() {
+        for lost in 0..40 {
+            assert!(contention_jitter(lost) <= Duration::from_millis(16));
+        }
+        assert!(jitter(Duration::ZERO) <= Duration::from_micros(1));
+        assert!(jitter(Duration::from_millis(5)) <= Duration::from_millis(5));
     }
 
     // ----- claim_seq + classify_append_cancellation --------------------------------------
@@ -1523,36 +1730,56 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_claim_outranks_a_taken_seq_and_a_conflict() {
+    fn a_taken_claim_outranks_a_moved_counter_which_outranks_a_taken_seq() {
         let ccf = Some("ConditionalCheckFailed");
+        let none = Some("None");
         assert_eq!(
-            classify_append_cancellation(ccf, ccf),
+            classify_append_cancellation(ccf, ccf, ccf),
+            Ok(AppendCancellation::Claimed),
+            "a re-push that lost the counter race still answers with its stored seq"
+        );
+        assert_eq!(
+            classify_append_cancellation(Some("TransactionConflict"), ccf, none),
             Ok(AppendCancellation::Claimed)
         );
         assert_eq!(
-            classify_append_cancellation(ccf, Some("TransactionConflict")),
-            Ok(AppendCancellation::Claimed)
+            classify_append_cancellation(ccf, none, ccf),
+            Ok(AppendCancellation::CounterMoved)
         );
         assert_eq!(
-            classify_append_cancellation(Some("None"), ccf),
+            classify_append_cancellation(ccf, None, none),
+            Ok(AppendCancellation::CounterMoved),
+            "an unclaimed round"
+        );
+        assert_eq!(
+            classify_append_cancellation(none, none, ccf),
             Ok(AppendCancellation::SeqTaken)
         );
         assert_eq!(
-            classify_append_cancellation(Some("TransactionConflict"), Some("None")),
-            Ok(AppendCancellation::Retryable)
+            classify_append_cancellation(Some("TransactionConflict"), none, none),
+            Ok(AppendCancellation::Conflict)
         );
         assert_eq!(
-            classify_append_cancellation(None, Some("ThrottlingError")),
-            Ok(AppendCancellation::Retryable)
+            classify_append_cancellation(
+                none,
+                Some("ThrottlingError"),
+                Some("TransactionConflict")
+            ),
+            Ok(AppendCancellation::Conflict),
+            "a conflict means another append is committing: contention, not a stall"
+        );
+        assert_eq!(
+            classify_append_cancellation(None, None, Some("ProvisionedThroughputExceeded")),
+            Ok(AppendCancellation::Throttled)
         );
     }
 
     #[test]
     fn any_other_append_cancellation_is_a_hard_error() {
-        let err = classify_append_cancellation(Some("None"), Some("ValidationError"))
+        let err = classify_append_cancellation(Some("None"), Some("None"), Some("ValidationError"))
             .expect_err("a validation failure is a fault, never a retry");
         assert!(err.contains("ValidationError"), "{err}");
-        assert!(classify_append_cancellation(None, None).is_err());
+        assert!(classify_append_cancellation(None, None, None).is_err());
     }
 
     // ----- retry_claim -------------------------------------------------------------------

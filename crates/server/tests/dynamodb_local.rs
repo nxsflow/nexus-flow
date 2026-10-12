@@ -295,12 +295,13 @@ fn append_read_since_round_trips_a_batch_in_order() {
 
 #[test]
 fn dynamodb_appends_idempotently_by_op_id() {
-    // 6j6v.tm4k: the contract SQLite and Postgres keep (spec §4.4), run from the same script. The
-    // one documented difference: a re-push burns the seq it allocated, so the stream is not dense.
+    // 6j6v.tm4k: the contract SQLite and Postgres keep (spec §4.4), run from the same script.
+    // Since 6j6v.r3jf the seq is taken inside the transaction the claim turns back, so a re-push
+    // consumes no seq here either: dense, like the other two.
     let Some(ep) = endpoint("dynamodb_appends_idempotently_by_op_id") else {
         return;
     };
-    idempotence::assert_idempotent_append(&opstore(&ep), wire, false);
+    idempotence::assert_idempotent_append(&opstore(&ep), wire, true);
 }
 
 /// Put an item straight into the op table, as the store writes an op — without its claim. What a
@@ -520,9 +521,8 @@ fn an_op_over_dynamodbs_400kb_item_ceiling_fails_loudly() {
 
     // The failure is confined to the oversized op: the stream still works afterwards, and the
     // failed transaction left no claim behind that would answer a retry with a seq nothing
-    // occupies. (The seq it consumed is gone — allocate_seq runs before the put — which is
-    // exactly the "gaps are normal in production" property the module doc documents.)
-    store.append(&s, &wire("after")).unwrap();
+    // occupies — nor a moved counter: the seq it tried is taken by the next op (6j6v.r3jf).
+    assert_eq!(store.append(&s, &wire("after")).unwrap(), Cursor(1));
     store.append(&s, &wire("huge")).unwrap();
     let (ops, _) = store.read_since(&s, Cursor::BEGINNING, 10).unwrap();
     assert_eq!(
@@ -789,14 +789,10 @@ fn concurrent_appends_get_unique_contiguous_sequences() {
         .collect();
     all.sort_unstable();
     let expected: Vec<i64> = (1..=THREADS * PER).collect();
-    // CONTIGUITY IS NOT A BACKEND GUARANTEE — do not read this assertion as a contract. The
-    // backend guarantees uniqueness and monotonicity; density is a happy accident of the test
-    // environment. `allocate_seq`'s `UpdateItem` + `ADD` is not idempotent, so any retry of
-    // that call — including one the SDK performs internally after a throttle or a lost
-    // response — burns a seq that no op will ever occupy. Gaps are therefore normal against
-    // real AWS. This holds here only because DynamoDB Local never throttles, and asserting
-    // the stronger property is deliberate: it is the sharpest available detector of the
-    // duplicate/overwrite bug this test exists for.
+    // Contiguity is a property of this build, not a contract (module doc, "Density"): since
+    // 6j6v.r3jf a seq is taken only by the transaction that writes its op, so neither a lost
+    // round nor a retry consumes one. Asserting it is deliberate: it is the sharpest available
+    // detector of the duplicate/overwrite bug this test exists for.
     assert_eq!(
         all, expected,
         "sequences are unique and contiguous under contention"
@@ -842,7 +838,7 @@ fn concurrent_appends_get_unique_contiguous_sequences() {
 #[test]
 fn concurrent_appends_to_different_streams_keep_independent_sequences() {
     // Independent per-stream state: hammering two DIFFERENT streams concurrently must not
-    // let one stream's allocations bleed into the other's — each still reaches a
+    // let one stream's seqs bleed into the other's — each still reaches a
     // contiguous, gap-free 1..=N of its own.
     let Some(ep) = endpoint("concurrent_appends_to_different_streams_keep_independent_sequences")
     else {
@@ -897,6 +893,171 @@ fn concurrent_appends_to_different_streams_keep_independent_sequences() {
         expected,
         "stream b reaches its own contiguous 1..=N, independent of stream a"
     );
+}
+
+// ----- seq order is visibility order (6j6v.r3jf) --------------------------------------
+
+#[test]
+fn a_reader_is_never_handed_a_seq_above_an_append_still_in_flight() {
+    // 6j6v.r3jf, the reproduction. Append A decides its seq and is held right there, before its
+    // write goes out; append B then runs start to finish; a reader pulls between the two
+    // commits, exactly as the sync engine does, storing the cursor it is handed; then A is let
+    // go. Before the fix A held seq 10 from an `ADD`, B committed 11, the reader stored cursor 11
+    // — and A, committed at 10 afterwards, was below every cursor that reader would ever send
+    // again: missing for good. Now a seq is taken only by the write that commits it, so B lands
+    // at 10, A is turned back by the counter and lands at 11, and the reader gets both.
+    let Some(ep) = endpoint("a_reader_is_never_handed_a_seq_above_an_append_still_in_flight")
+    else {
+        return;
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(Some((held_tx, release_rx)));
+    let store = Arc::new(opstore(&ep).with_before_write(move |op_id| {
+        if op_id != "a" {
+            return;
+        }
+        // Held once, on A's first attempt only; any later attempt of A runs straight through.
+        let taken = gate.lock().unwrap().take();
+        if let Some((held, release)) = taken {
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        }
+    }));
+    let s = StreamId("s".into());
+    for i in 1..=9 {
+        store.append(&s, &wire(&format!("o{i}"))).unwrap();
+    }
+    let reader_cursor = Cursor(9);
+
+    let writer_a = {
+        let (store, s) = (Arc::clone(&store), s.clone());
+        thread::spawn(move || store.append(&s, &wire("a")).unwrap())
+    };
+    held_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("A reaches the point between choosing its seq and writing");
+    let b = store.append(&s, &wire("b")).unwrap();
+
+    // The reader polls while A is still in flight and keeps the cursor it is handed.
+    let (first, reader_cursor) = store.read_since(&s, reader_cursor, 100).unwrap();
+    assert_eq!(
+        first.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
+        ["b"],
+        "only the committed append is visible"
+    );
+    assert_eq!(reader_cursor, b, "the cursor is B's seq");
+
+    release_tx.send(()).unwrap();
+    let a = writer_a.join().unwrap();
+
+    let (second, _) = store.read_since(&s, reader_cursor, 100).unwrap();
+    assert_eq!(
+        second.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>(),
+        ["a"],
+        "the reader's next pull, from the cursor it stored, still gets A: nothing was skipped"
+    );
+    assert_eq!(
+        (b, a),
+        (Cursor(10), Cursor(11)),
+        "seq order is commit order, with no seq burned"
+    );
+}
+
+#[test]
+fn concurrent_writers_and_pullers_see_every_op_once_in_gap_free_seq_order() {
+    // N writers push in parallel while pullers follow the stream the way the sync engine does —
+    // `since` is the cursor of the previous answer, stored unconditionally. Every puller must end
+    // up with every op exactly once, and the one-op-per-page puller sees the seqs themselves:
+    // strictly increasing by one, no seq skipped. Under the `ADD`-then-write allocation a puller
+    // could step over an op still in flight and never see it.
+    let Some(ep) =
+        endpoint("concurrent_writers_and_pullers_see_every_op_once_in_gap_free_seq_order")
+    else {
+        return;
+    };
+    let store = Arc::new(opstore(&ep));
+    let s = StreamId("s".into());
+    const WRITERS: usize = 6;
+    const PER: usize = 30;
+    const TOTAL: usize = WRITERS * PER;
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let pullers: Vec<_> = [1usize, 7, 64]
+        .into_iter()
+        .map(|page| {
+            let (store, s, done) = (Arc::clone(&store), s.clone(), Arc::clone(&done));
+            thread::spawn(move || {
+                let mut cursor = Cursor::BEGINNING;
+                let mut seen: Vec<(String, Cursor)> = Vec::new();
+                loop {
+                    // Read the flag BEFORE the pull: once it is set, a pull that comes back empty
+                    // has seen everything every writer committed.
+                    let finished = done.load(Ordering::SeqCst);
+                    let (ops, next) = store.read_since(&s, cursor, page).unwrap();
+                    let empty = ops.is_empty();
+                    seen.extend(ops.into_iter().map(|o| (o.op_id, next)));
+                    cursor = next.max(cursor);
+                    if empty && finished {
+                        return (page, seen);
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let (store, s) = (Arc::clone(&store), s.clone());
+            thread::spawn(move || {
+                (0..PER)
+                    .map(|i| store.append(&s, &wire(&format!("w{w}-{i}"))).unwrap().0)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut answered: Vec<i64> = writers
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    done.store(true, Ordering::SeqCst);
+    answered.sort_unstable();
+    assert_eq!(
+        answered,
+        (1..=TOTAL as i64).collect::<Vec<_>>(),
+        "every append is answered with its own seq, none burned"
+    );
+
+    let mut expected: Vec<String> = (0..WRITERS)
+        .flat_map(|w| (0..PER).map(move |i| format!("w{w}-{i}")))
+        .collect();
+    expected.sort();
+    for puller in pullers {
+        let (page, seen) = puller.join().unwrap();
+        let mut ids: Vec<&str> = seen.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        let missing: Vec<&String> = expected
+            .iter()
+            .filter(|id| ids.binary_search(&id.as_str()).is_err())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the page-{page} puller never received {missing:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            TOTAL,
+            "the page-{page} puller received an op more than once"
+        );
+        if page == 1 {
+            let seqs: Vec<i64> = seen.iter().map(|(_, at)| at.0).collect();
+            assert_eq!(
+                seqs,
+                (1..=TOTAL as i64).collect::<Vec<_>>(),
+                "one op per page: the seqs arrive strictly increasing, none skipped"
+            );
+        }
+    }
 }
 
 // ----- DynamoDB PrefixRegistry — claim-if-free ---------------------------------------
