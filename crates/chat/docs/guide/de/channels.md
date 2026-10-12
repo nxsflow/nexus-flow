@@ -349,7 +349,7 @@ abgewiesen, als es das Gespräch *lesen* wollte, auf das man es gesetzt hatte.
 - **`task`** sagt, was das Ziel *hier* tun soll, und wird zu einer vierten Ebene seines Prompts,
   unter dem der Persona (`nxc guide personas`). Siehe unten.
 - **`stage`** lässt das Ziel auf einer anderen Stufe laufen als der, die es selbst deklariert hat —
-  `junior | senior | principal`, das Vokabular der Personas (`nxc guide personas`). Siehe unten.
+  `intern | junior | senior | principal`, das Vokabular der Personas (`nxc guide personas`). Siehe unten.
 - **`input`** sagt, was dieser Schritt aus dem Durchgang mitbekommt: den Auftrag, die Antwort eines
   benannten Schritts, beides oder nichts. Ohne Angabe gelten die Vorgaben, und die sind fast immer
   das, was man will — siehe unten.

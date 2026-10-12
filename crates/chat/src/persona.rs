@@ -521,6 +521,7 @@ fn display_name(title: Option<&str>, handle: &str) -> String {
 /// they would write in the file.
 fn stage_label(stage: Stage) -> &'static str {
     match stage {
+        Stage::Intern => "intern",
         Stage::Junior => "junior",
         Stage::Senior => "senior",
         Stage::Principal => "principal",

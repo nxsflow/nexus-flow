@@ -1172,7 +1172,7 @@ pub fn validate_channel_for_use(channel: &ChannelDecl) -> Option<ValidationError
                 file: CHANNELS_FILE.to_string(),
                 what: format!(
                     "channel {:?}: step {:?} declares `model:` — a step may not name a model. \
-                     Declare `stage: junior | senior | principal` instead: the band says what this \
+                     Declare `stage: intern | junior | senior | principal` instead: the band says what this \
                      step's thinking is worth without naming a product, and it overrides the stage \
                      declared on the step's target. A persona that must always run on one named \
                      model declares `model:` on ITSELF, and no step overrides it",
@@ -3407,7 +3407,12 @@ mod tests {
         // three-value type of its own, so a fourth band added to that ladder is declarable on a step
         // the day it exists — with no change here. Held by walking the ladder itself rather than by
         // a literal list, which is what makes the claim survive the fourth band.
-        for band in [Stage::Junior, Stage::Senior, Stage::Principal] {
+        for band in [
+            Stage::Intern,
+            Stage::Junior,
+            Stage::Senior,
+            Stage::Principal,
+        ] {
             let spelling = serde_yaml::to_string(&band).unwrap();
             let yaml = format!(
                 "- name: coding\n  members: [coder]\n  steps:\n    \
@@ -3420,7 +3425,7 @@ mod tests {
         // …and a band nobody declared is refused where the persona's own is, rather than read as
         // "no override".
         let yaml = "- name: coding\n  members: [coder]\n  steps:\n    \
-                    - id: build\n      target: coder\n      stage: intern\n";
+                    - id: build\n      target: coder\n      stage: staff\n";
         assert!(serde_yaml::from_str::<Vec<ChannelDecl>>(yaml).is_err());
     }
 

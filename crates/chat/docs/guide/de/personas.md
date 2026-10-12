@@ -192,14 +192,14 @@ sicherstellt, ist genau der Fehler, den diese Regel verhindert.
 name: coder
 allowed-tools: Bash Read Write
 nxs:
-  stage: senior          # junior | senior | principal
-  model: opus            # fable | opus | sonnet — schlägt `stage`, wenn beides dasteht
+  stage: senior          # intern | junior | senior | principal
+  model: opus            # fable | opus | sonnet | haiku — schlägt `stage`, wenn beides dasteht
   permissions: acceptEdits
 ---
 ```
 
 **`stage` ist ein Vokabular, das kein Modellname ist.** Sie entscheiden, wie viel Denken eine Aufgabe
-wert ist, ohne wissen zu müssen, welche Modelle es diesen Monat gibt: `junior` → Sonnet, `senior` →
+wert ist, ohne wissen zu müssen, welche Modelle es diesen Monat gibt: `intern` → Haiku, `junior` → Sonnet, `senior` →
 Opus, `principal` → Fable. Eine Tabelle verbindet beides, damit die Schreibweise der Deklaration und
 die Wahl der Engine nicht auseinanderlaufen können. Greifen Sie zu `model:` nur, wenn Sie etwas
 meinen, das die Stufe nicht ausdrücken kann — und beachten Sie die bewusste Vorrangregel: die Stufe
