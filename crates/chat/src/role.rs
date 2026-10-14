@@ -136,7 +136,7 @@ pub enum Model {
     ///
     /// Declarable like the other three, and that is a consequence rather than the purpose: the
     /// alias namespace IS this enum, so a model the engine can pick is a model a role author can
-    /// name. The [`Stage`] ladder below is untouched — no band resolves here.
+    /// name. Since nxf 6j6v.vkw3 the [`Stage`] ladder's lowest band, `intern`, resolves here.
     Haiku,
 }
 
@@ -144,16 +144,16 @@ impl Model {
     /// The Claude Agent SDK `options.model` string for this alias.
     pub fn sdk_id(self) -> &'static str {
         match self {
-            Model::Fable => "claude-fable-5",
-            Model::Opus => "claude-opus-5",
-            Model::Sonnet => "claude-sonnet-5",
-            Model::Haiku => "claude-haiku-4-5-20251001",
+            Model::Fable => "claude-fable-5-1",
+            Model::Opus => "claude-opus-5-5",
+            Model::Sonnet => "claude-sonnet-5-5",
+            Model::Haiku => "claude-haiku-5-5",
         }
     }
 }
 
-/// The persona's seniority band (nxf 6j6v.p6m1, surface draft §3.1) — `junior` / `senior` /
-/// `principal`, mapped to the model classes by [`Stage::model`].
+/// The persona's seniority band (nxf 6j6v.p6m1, surface draft §3.1) — `intern` / `junior` /
+/// `senior` / `principal`, mapped to the model classes by [`Stage::model`].
 ///
 /// **It exists to give the user a vocabulary that is not a model name.** A role author decides how
 /// much thinking a job is worth without knowing which models exist this month, and the cost question
@@ -168,6 +168,8 @@ impl Model {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Stage {
+    /// The lowest band (nxf 6j6v.vkw3): small, fast, well-specified jobs.
+    Intern,
     Junior,
     Senior,
     Principal,
@@ -175,10 +177,12 @@ pub enum Stage {
 
 impl Stage {
     /// The model class this band resolves to, ordered by capability (and by cost, which is the same
-    /// ladder): `junior` → [`Model::Sonnet`], `senior` → [`Model::Opus`], `principal` →
+    /// ladder): `intern` → [`Model::Haiku`], `junior` → [`Model::Sonnet`], `senior` →
+    /// [`Model::Opus`], `principal` →
     /// [`Model::Fable`].
     pub fn model(self) -> Model {
         match self {
+            Stage::Intern => Model::Haiku,
             Stage::Junior => Model::Sonnet,
             Stage::Senior => Model::Opus,
             Stage::Principal => Model::Fable,
@@ -1835,9 +1839,9 @@ it, got:\n{}",
         // The declaration's wire form is the bare alias; the SDK id is what reaches
         // `options.model` in the sidecar. One table, in the engine.
         for (alias, sdk_id) in [
-            ("fable", "claude-fable-5"),
-            ("opus", "claude-opus-5"),
-            ("sonnet", "claude-sonnet-5"),
+            ("fable", "claude-fable-5-1"),
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-5-5"),
         ] {
             let role: RoleDecl =
                 serde_yaml::from_str(&format!("handle: a\nsystem_prompt: A\nmodel: {alias}\n"))
@@ -1907,6 +1911,7 @@ it, got:\n{}",
     #[test]
     fn stage_maps_each_band_to_its_model_class() {
         for (band, model) in [
+            ("intern", Model::Haiku),
             ("junior", Model::Sonnet),
             ("senior", Model::Opus),
             ("principal", Model::Fable),
@@ -1979,7 +1984,7 @@ it, got:\n{}",
     #[test]
     fn stage_rejects_an_unknown_band() {
         assert!(
-            serde_yaml::from_str::<RoleDecl>("handle: a\nsystem_prompt: A\nstage: intern\n")
+            serde_yaml::from_str::<RoleDecl>("handle: a\nsystem_prompt: A\nstage: staff\n")
                 .is_err(),
             "an undeclared band must not silently parse"
         );

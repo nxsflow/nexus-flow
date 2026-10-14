@@ -183,14 +183,14 @@ prevent.
 name: coder
 allowed-tools: Bash Read Write
 nxs:
-  stage: senior          # junior | senior | principal
-  model: opus            # fable | opus | sonnet — beats `stage` when both are given
+  stage: senior          # intern | junior | senior | principal
+  model: opus            # fable | opus | sonnet | haiku — beats `stage` when both are given
   permissions: acceptEdits
 ---
 ```
 
 **`stage` is a vocabulary that is not a model name.** You decide how much thinking a job is worth
-without knowing which models exist this month: `junior` → Sonnet, `senior` → Opus, `principal` →
+without knowing which models exist this month: `intern` → Haiku, `junior` → Sonnet, `senior` → Opus, `principal` →
 Fable. One table joins the two, so the declaration's spelling and the engine's choice cannot drift
 apart. Reach for `model:` only when you mean something the band cannot express — and note the
 precedence is deliberate: the band is the coarse, discussable choice, a named model is you

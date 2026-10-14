@@ -207,9 +207,9 @@ fn spec_json_carries_the_resolved_sdk_id_when_a_model_is_declared() {
     // The alias->id resolution happens HERE, in Rust, not in the sidecar: the spec carries a
     // finished SDK model string.
     for (model, sdk_id) in [
-        (Model::Fable, "claude-fable-5"),
-        (Model::Opus, "claude-opus-5"),
-        (Model::Sonnet, "claude-sonnet-5"),
+        (Model::Fable, "claude-fable-5-1"),
+        (Model::Opus, "claude-opus-5-5"),
+        (Model::Sonnet, "claude-sonnet-5-5"),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let session = format!("s-{sdk_id}");
