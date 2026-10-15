@@ -37,7 +37,9 @@ pub use nexus_flow_core::graph::{Board, Edge, Ticket};
 /// `nexus-flow-facade` alone — never `nexus-flow-core`. Without this they would appear in the
 /// public signature without being writable in the caller's own, which is the same as not being
 /// there: a bridge cannot declare `fn links(…) -> Vec<ThreadLink>` for a type it cannot name.
-pub use nexus_flow_core::model::{Chunk, LinkRelation, LinkWeight, ThreadLink, MAX_CHUNK_BYTES};
+pub use nexus_flow_core::model::{
+    Chunk, FieldEntry, LinkRelation, LinkWeight, ThreadLink, MAX_CHUNK_BYTES,
+};
 pub mod engine;
 pub mod error;
 /// The agent-file Manifest contract (spec §6.2), owned by the foundation and re-exported here.

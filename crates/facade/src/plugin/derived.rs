@@ -240,6 +240,15 @@ impl Ranking {
                             crate::record::RANKABLE_FIELDS.join(", ")
                         ));
                     }
+                    // A list field holds several entries, not one value a key could compare
+                    // (6j6v.4g6r): refused, rather than ranking by an arbitrary entry.
+                    Some(decl) if decl.list => {
+                        return Err(format!(
+                            "{scope}ranking key {desc} reads `of` field '{}', which is a list \
+                             field — a list holds several entries, so it cannot rank",
+                            of.field
+                        ));
+                    }
                     Some(decl) => {
                         if let Some(ty) = &key.item_type {
                             if !decl.on.is_empty() && !decl.on.contains(ty) {

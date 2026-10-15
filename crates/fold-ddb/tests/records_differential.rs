@@ -52,6 +52,10 @@ fn cfg_with_fields() -> PluginConfig {
         [fields.estimate]
         type = "text"
         on = ["task"]
+
+        [fields.emails]
+        type = "text"
+        list = true
         "#,
     )
     .expect("the fixture parses")
@@ -171,6 +175,16 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
             seen.add(
                 "tickets with custom values",
                 usize::from(!ticket.custom.is_empty()),
+            );
+            seen.add(
+                "tickets with list entries",
+                usize::from(!ticket.custom_lists.is_empty()),
+            );
+            seen.add(
+                "tickets with a labelled and an unlabelled entry",
+                usize::from(ticket.custom_lists.values().any(|es| {
+                    es.iter().any(|e| e.label.is_some()) && es.iter().any(|e| e.label.is_none())
+                })),
             );
             seen.add(
                 "tickets with conversations",
@@ -326,6 +340,8 @@ fn the_server_answers_next_blocked_and_deferred_as_the_replica_does() {
         "deferred rows",
         "labelled tickets",
         "tickets with custom values",
+        "tickets with list entries",
+        "tickets with a labelled and an unlabelled entry",
         "tickets with conversations",
         "tickets with a parent",
         "tickets whose parent is not active",
@@ -407,6 +423,39 @@ fn a_ticket_reads_only_its_own_labels_custom_values_and_links() {
 }
 
 #[test]
+fn a_datetime_custom_value_reaches_the_server_as_the_utc_instant_the_replica_holds() {
+    // vbp6: the write seam stores a `datetime` value in its canonical UTC form, so the op log carries
+    // that form and a hosted fold holds the same instant the replica does — nothing type-aware on
+    // the server side.
+    let mut cfg = cfg_with_fields();
+    cfg.fields.insert(
+        "occurred_on".into(),
+        toml::from_str("type = \"datetime\"").expect("a datetime declaration parses"),
+    );
+    let mut s = nexus_flow_core::store::Store::open_in_memory(1);
+    s.create_item("ab12.0001", "task", "T", "u");
+    nexus_flow_facade::write::update(
+        &mut s,
+        &cfg,
+        NOW,
+        "u",
+        "ab12.0001",
+        &["occurred_on=2026-10-12T10:30:00.5+02:00".to_string()],
+    )
+    .unwrap();
+    let folder = Folder::platform().unwrap();
+    let served = served_board(&serve(&s, 3, &folder));
+    assert_eq!(
+        served.tickets["ab12.0001"]
+            .custom
+            .get("occurred_on")
+            .map(String::as_str),
+        Some("2026-10-12T08:30:00Z")
+    );
+    assert_eq!(served.tickets, read::active_board(&s).unwrap().tickets);
+}
+
+#[test]
 fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_labels() {
     // A stream an older release folded: the same rows, no entries under its tickets, and a
     // watermark that names no index revision.
@@ -432,7 +481,10 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
         // Read as it is, it would answer without labels or conversations — so it is refused.
         let selection = ready(board::select(&t)).unwrap();
         match ready(records::active_board(&t, selection)) {
-            Err(records::RecordsError::NotCurrent { found: None }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: None,
+            }) => {}
             other => panic!("seed {seed}: an old stream must be refused, got {other:?}"),
         }
 
@@ -464,7 +516,7 @@ fn a_stream_folded_before_the_entries_is_refused_then_refolded_and_reads_its_lab
 }
 
 #[test]
-fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent() {
+fn reading_the_records_costs_five_requests_per_ticket_and_one_per_outside_parent() {
     // Every label toggled many times and many thread links: the read does not grow with history.
     use nexus_flow_core::model::{LinkRelation, LinkWeight};
     let folder = Folder::platform().unwrap();
@@ -492,6 +544,13 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
             s.set_field(&id, "status", Some("in_progress".into()), "u");
             s.add_edge(&id, "ab12.p000", EdgeKind::Parent, "u");
         }
+        // List entries added and removed many times (6j6v.4g6r): still one Query.
+        for round in 0..10 {
+            s.add_field_entry(&id, "emails", &format!("e{round}@x"), Some("work"), "u");
+            if round < 9 {
+                s.remove_field_entry(&id, "emails", &format!("e{round}@x"), "u");
+            }
+        }
         for round in 0..5 {
             s.add_edge(&id, "ab12.p000", EdgeKind::ContributesTo, "u");
             if round < 4 {
@@ -509,8 +568,13 @@ fn reading_the_records_costs_four_requests_per_ticket_and_one_per_outside_parent
     assert!(served.tickets.values().all(|t| t.conversations == 10));
     // The watermark, a timestamps read per ticket, and the one parent outside the selection.
     assert_eq!(after.gets - before.gets, 1 + n + 1);
-    // Custom values, labels and links: one Query each per ticket.
-    assert_eq!(after.queries - before.queries, 3 * n);
+    // Custom values, list entries, labels and links: one Query each per ticket.
+    assert_eq!(after.queries - before.queries, 4 * n);
+    assert!(served.tickets.values().all(|t| t.custom_lists["emails"]
+        == [nexus_flow_core::model::FieldEntry {
+            value: "e9@x".into(),
+            label: Some("work".into())
+        }]));
     assert_eq!(after.index_queries, before.index_queries);
     assert_eq!(after.writes, before.writes);
     // The contributes-to targets, on request: one Query per ticket, nothing else (6j6v.15ed).
@@ -629,7 +693,10 @@ fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_co
 
         let selection = ready(board::select(&t)).unwrap();
         match ready(records::active_board(&t, selection)) {
-            Err(records::RecordsError::NotCurrent { found: Some(1) }) => {}
+            Err(records::RecordsError::NotCurrent {
+                domain: "index",
+                found: Some(1),
+            }) => {}
             other => panic!("seed {seed}: a revision-1 stream must be refused, got {other:?}"),
         }
         let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
@@ -650,4 +717,74 @@ fn a_stream_folded_by_index_revision_1_is_refused_then_refolded_and_reads_its_co
             .count();
     }
     assert!(seen > 0, "the refolded streams have contributing tickets");
+}
+
+#[test]
+fn a_stream_folded_by_task_revision_2_is_refused_then_refolded_and_reads_its_list_entries() {
+    // Review of PR #63, Code Quality #2. A server on task fold revision 2 stored the list-field
+    // entry ops without folding them: the same rows otherwise, no `field_entries#` rows, and a
+    // watermark naming task revision 2 beside the CURRENT index revision. Served as it is, every
+    // list would read empty — so it is refused, naming the task domain, and the fold run's rule
+    // (not current, clear, refold) brings the entries in.
+    let folder = Folder::platform().unwrap();
+    let mut seen = 0;
+    for seed in [3, 11, 27] {
+        let s = gen_board(seed);
+        let ops = delivered(&s, seed);
+        let t = serve(&s, seed, &folder);
+        for (sk, _) in t.rows() {
+            if sk.starts_with("field_entries#") {
+                ready(t.delete(&sk)).unwrap();
+            }
+        }
+        ready(t.write(&Write {
+            sk: WATERMARK_KEY.into(),
+            set: vec![("revision_task".to_string(), Cell::Int(2))],
+            remove: Vec::new(),
+            condition: Some(Cond::RowPresent),
+        }))
+        .unwrap();
+
+        let mark = ready(Folder::watermark(&t)).unwrap().unwrap();
+        assert_eq!(
+            mark.revisions.get(INDEX_DOMAIN),
+            folder.revisions().get(INDEX_DOMAIN),
+            "seed {seed}: only the task revision is older"
+        );
+        let selection = ready(board::select(&t)).unwrap();
+        match ready(records::active_board(&t, selection)) {
+            Err(records::RecordsError::NotCurrent {
+                domain: "task",
+                found: Some(2),
+            }) => {}
+            other => panic!("seed {seed}: a task-revision-2 stream must be refused, got {other:?}"),
+        }
+        let reads = read::list_reads(&cfg_with_fields(), &Default::default());
+        assert!(
+            matches!(
+                ready(records::list_board(&t, &reads)),
+                Err(records::RecordsError::NotCurrent { domain: "task", .. })
+            ),
+            "seed {seed}: a hosted list is refused too"
+        );
+        assert!(!folder.is_current(&mark), "seed {seed}");
+        ready(Folder::clear(&t, head(&ops))).unwrap();
+        ready(folder.fold_batch(&t, &ops)).unwrap();
+
+        let served = served_board(&t);
+        assert_eq!(
+            served.tickets,
+            read::active_board(&s).unwrap().tickets,
+            "seed {seed}"
+        );
+        seen += served
+            .tickets
+            .values()
+            .filter(|t| !t.custom_lists.is_empty())
+            .count();
+    }
+    assert!(
+        seen > 0,
+        "the refolded streams have tickets with list entries"
+    );
 }

@@ -40,6 +40,10 @@ This document contains the help content for the `nxf` command-line program.
 * [`nxf label add`↴](#nxf-label-add)
 * [`nxf label remove`↴](#nxf-label-remove)
 * [`nxf label list`↴](#nxf-label-list)
+* [`nxf entry`↴](#nxf-entry)
+* [`nxf entry add`↴](#nxf-entry-add)
+* [`nxf entry remove`↴](#nxf-entry-remove)
+* [`nxf entry list`↴](#nxf-entry-list)
 * [`nxf note`↴](#nxf-note)
 * [`nxf note add`↴](#nxf-note-add)
 * [`nxf note list`↴](#nxf-note-list)
@@ -78,6 +82,7 @@ nexus-flow agent CLI
 * `contributes` — Add, remove, or list contributes-to edges: `from` contributes to `to` (n:m). Like a mention it never blocks — it records a structural "feeds into" relation, not a dependency
 * `thread` — Link a chat thread to a board item, or list what a thread is about. This is how the conversation that did the work and the ticket it was about stop being two artefacts: a later reader of the item sees that there are conversations, without having to go looking
 * `label` — Add, remove, or list user labels (free-text tags) on an item. A label is user vocabulary, distinct from the plugin's display type; filter `list`/`next` with `--label`
+* `entry` — Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person's e-mail addresses). An entry is a value of the field's type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update --set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin's list fields
 * `note` — Add or list notes (the change/worklog stream) on an item
 * `search` — Search items by substring over title, description, design, DoD, and notes. Results are grouped by lane priority (next+in-progress → blocked → deferred → closed), each group in its natural order; archived items are excluded by default
 * `show` — Show one item with its dependencies and notes
@@ -597,6 +602,65 @@ List an item's labels (sorted)
 ###### **Arguments:**
 
 * `<ID>`
+
+
+
+## `nxf entry`
+
+Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person's e-mail addresses). An entry is a value of the field's type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update --set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin's list fields
+
+**Usage:** `nxf entry <COMMAND>`
+
+###### **Subcommands:**
+
+* `add` — Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
+* `remove` — Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed-remove; a value the field does not hold is a no-op)
+* `list` — List the entries of the list field `field` of item `id`, in order: each where its value was first added
+
+
+
+## `nxf entry add`
+
+Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
+
+**Usage:** `nxf entry add [OPTIONS] <ID> <FIELD> <VALUE>`
+
+###### **Arguments:**
+
+* `<ID>`
+* `<FIELD>`
+* `<VALUE>`
+
+###### **Options:**
+
+* `--label <LABEL>` — Label the entry (free text, e.g. `work` or `private`; trimmed, not blank)
+
+
+
+## `nxf entry remove`
+
+Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed-remove; a value the field does not hold is a no-op)
+
+**Usage:** `nxf entry remove <ID> <FIELD> <VALUE>`
+
+###### **Arguments:**
+
+* `<ID>`
+* `<FIELD>`
+* `<VALUE>`
+
+
+
+## `nxf entry list`
+
+List the entries of the list field `field` of item `id`, in order: each where its value was first added
+
+**Usage:** `nxf entry list <ID> <FIELD>`
+
+###### **Arguments:**
+
+* `<ID>`
+* `<FIELD>`
 
 
 

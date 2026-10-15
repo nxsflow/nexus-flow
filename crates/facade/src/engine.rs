@@ -356,6 +356,60 @@ impl Engine {
             .try_with_state(|s| read::chunks(&s.store, id, field))
     }
 
+    // ---- list-field entries (6j6v.4g6r) -------------------------------------
+    //
+    // A plugin list field (`[fields.<name>] list = true`) holds entries — a value of the field's
+    // type and an optional label — as an observed-remove set: concurrent adds and removes on two
+    // devices both survive, and an add the remover did not see wins. The value is the entry's
+    // identity. Records carry the entries under `custom` (`[{"value", "label"?}]`).
+
+    /// Add an entry to the list field `field` of item `id`, optionally labelled. Adding a value
+    /// the field already holds relabels that entry (or unlabels it, with `label = None`) instead
+    /// of adding a second one. Returns the entry as stored — a `datetime` as its UTC instant —
+    /// which [`write::entry_add_receipt`] spells as a receipt. `validation` for a field that is not
+    /// a declared list field of the item's type, or a value its type refuses; `not_found` for a
+    /// missing item.
+    pub fn field_entry_add(
+        &self,
+        now: &str,
+        actor: &str,
+        id: &str,
+        field: &str,
+        value: &str,
+        label: Option<&str>,
+    ) -> Result<crate::FieldEntry> {
+        self.handle.with_state_mut(|s| {
+            write::entry_add(&mut s.store, &self.cfg, now, actor, id, field, value, label)
+        })
+    }
+
+    /// Remove the entry `value` from the list field `field` of item `id`, whatever its label
+    /// (observed-remove; removing a value the field does not hold is a no-op). The field's `on`
+    /// scope does not apply, so every entry on show stays removable. Returns the value as matched
+    /// (a `datetime` as its UTC instant), which [`write::entry_remove_receipt`] spells.
+    /// `validation` for a field that is not a declared list field, or a blank value; `not_found`
+    /// for a missing item.
+    pub fn field_entry_remove(
+        &self,
+        now: &str,
+        actor: &str,
+        id: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<String> {
+        self.handle.with_state_mut(|s| {
+            write::entry_remove(&mut s.store, &self.cfg, now, actor, id, field, value)
+        })
+    }
+
+    /// The present entries of the list field `field` of item `id`, in order (each entry where its
+    /// value was first added). `not_found` for a missing item, `validation` for a field that is not
+    /// a declared list field.
+    pub fn field_entries(&self, id: &str, field: &str) -> Result<Vec<crate::FieldEntry>> {
+        self.handle
+            .try_with_state(|s| read::field_entries(&self.cfg, &s.store, id, field))
+    }
+
     /// Archive a batch of roots, cascading DOWN each fully-closed subtree (C5 #916.5). Partial:
     /// atomic per root, independent between roots; the result reports each root's outcome plus the
     /// full set of ids actually archived (incl. cascaded).

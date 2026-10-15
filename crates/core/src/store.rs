@@ -413,6 +413,139 @@ impl Store {
         );
     }
 
+    // ---- plugin list fields (6j6v.4g6r): an observed-remove OR-set of entries per (item, field) --
+
+    /// Add an entry to a plugin list field (OR-set add; the add tag is the op id). Adding a value
+    /// the field already holds is not an error: it is still one entry, and the latest add's label
+    /// wins — this is how an entry is relabelled (or unlabelled, with `label = None`). The facade
+    /// validates the field, the value and the label first; a separator in either, or an empty
+    /// value or label, is a programming error here.
+    pub fn add_field_entry(
+        &mut self,
+        item_id: &str,
+        field: &str,
+        value: &str,
+        label: Option<&str>,
+        author: &str,
+    ) -> String {
+        use crate::model::ENTRY_SEP;
+        assert!(
+            !value.is_empty()
+                && !value.contains(ENTRY_SEP)
+                && label.is_none_or(|l| !l.is_empty() && !l.contains(ENTRY_SEP)),
+            "a list entry is a non-empty, separator-free value with an optional non-empty, \
+             separator-free label: {value:?} / {label:?}"
+        );
+        let raw = crate::model::entry_value(value, label);
+        self.emit_task("field", item_id, field, "add", Some(raw), author)
+    }
+
+    /// Remove `value` from a plugin list field = tombstone every add tag of that value this replica
+    /// sees (observed-remove), whatever its label. An add it has not seen — a concurrent add on
+    /// another device — survives: add wins. A no-op when the field does not hold the value.
+    pub fn remove_field_entry(&mut self, item_id: &str, field: &str, value: &str, author: &str) {
+        let tags = self.live_entry_tags(item_id, field, Some(value));
+        self.emit_entry_removes(item_id, field, &tags, author);
+    }
+
+    /// Clear a plugin list field = remove every entry this replica sees (observed-remove, as
+    /// [`remove_field_entry`](Self::remove_field_entry) for each value). A concurrent add survives.
+    pub fn clear_field_entries(&mut self, item_id: &str, field: &str, author: &str) {
+        let tags = self.live_entry_tags(item_id, field, None);
+        self.emit_entry_removes(item_id, field, &tags, author);
+    }
+
+    /// The live (untombstoned) add tags of one list field, of one value or of all. A tag holding
+    /// [`ENTRY_SEP`](crate::model::ENTRY_SEP) is skipped: a remove naming it would split it into
+    /// other tags (review of PR #63, Integrity #1). The reducer never folds such an add, so this is
+    /// the backstop for a row folded by anything else.
+    fn live_entry_tags(&self, item_id: &str, field: &str, value: Option<&str>) -> Vec<String> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT tag FROM field_entries
+                 WHERE item_id=?1 AND field=?2 AND (?3 IS NULL OR value=?3)
+                   AND value IS NOT NULL AND COALESCE(removed, 0) = 0
+                 ORDER BY tag",
+            )
+            .unwrap();
+        stmt.query_map(params![item_id, field, value], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|tag| !tag.contains(crate::model::ENTRY_SEP))
+            .collect()
+    }
+
+    /// One remove op per [`MAX_ENTRY_TAGS`](crate::model::MAX_ENTRY_TAGS) tags (the fold refuses a
+    /// larger one); nothing when there is nothing to remove.
+    fn emit_entry_removes(&mut self, item_id: &str, field: &str, tags: &[String], author: &str) {
+        for chunk in tags.chunks(crate::model::MAX_ENTRY_TAGS) {
+            let joined = chunk.join(&crate::model::ENTRY_SEP.to_string());
+            self.emit_task("field", item_id, field, "remove", Some(joined), author);
+        }
+    }
+
+    /// The present entries of every list field of `item_id`, by field — foreign fields included;
+    /// narrowing to the active plugin's declared list fields is the facade's job, as for
+    /// [`custom_fields_of`](Self::custom_fields_of). A field with no present entry is absent.
+    pub fn field_entries_of(
+        &self,
+        item_id: &str,
+    ) -> rusqlite::Result<BTreeMap<String, Vec<crate::model::FieldEntry>>> {
+        Ok(self
+            .field_entries_of_bulk(&[item_id])?
+            .remove(item_id)
+            .unwrap_or_default())
+    }
+
+    /// [`field_entries_of`](Self::field_entries_of) for many items in ONE query per 500 ids — the
+    /// lane join, as [`custom_fields_of_bulk`](Self::custom_fields_of_bulk). `item_id → field →
+    /// entries` (in [`present_entries`](crate::model::present_entries) order); an id with no
+    /// present entry is absent. The primary key leads with `item_id`, so `item_id IN (…)` searches.
+    pub fn field_entries_of_bulk(
+        &self,
+        item_ids: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, BTreeMap<String, Vec<crate::model::FieldEntry>>>> {
+        use crate::model::{present_entries, EntryAdd};
+        const CHUNK: usize = 500;
+        let mut adds: BTreeMap<(String, String), Vec<EntryAdd>> = BTreeMap::new();
+        for chunk in item_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT item_id, field, value, label, lamport, site, tag FROM field_entries
+                 WHERE item_id IN ({placeholders})
+                   AND value IS NOT NULL AND COALESCE(removed, 0) = 0"
+            );
+            let mut stmt = self.conn().prepare(&sql)?;
+            self.count_edge_read(|c| c.bulk += 1);
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    EntryAdd {
+                        value: r.get(2)?,
+                        label: r.get(3)?,
+                        lamport: r.get::<_, Option<i64>>(4)?.unwrap_or(-1),
+                        site: r.get::<_, Option<i64>>(5)?.unwrap_or(-1),
+                        tag: r.get(6)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, field, add) = row?;
+                adds.entry((id, field)).or_default().push(add);
+            }
+        }
+        let mut out: BTreeMap<String, BTreeMap<String, Vec<crate::model::FieldEntry>>> =
+            BTreeMap::new();
+        for ((id, field), adds) in adds {
+            out.entry(id)
+                .or_default()
+                .insert(field, present_entries(adds));
+        }
+        Ok(out)
+    }
+
     pub fn delete_item(&mut self, id: &str, author: &str) {
         self.emit_task("item", id, "deleted", "set", Some("1".into()), author);
     }
@@ -3567,6 +3700,8 @@ mod tests {
         s.remove_thread_link("t-1", "c1.A", "x");
         let chunk = s.append_chunk("c1.A", "doc", "c", "x");
         s.supersede_chunks("c1.A", "doc", &[&chunk], "c2", "x");
+        s.add_field_entry("c1.A", "email", "a@x", Some("work"), "x");
+        s.remove_field_entry("c1.A", "email", "a@x", "x");
 
         let tables: Vec<String> = s
             .connection()

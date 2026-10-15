@@ -24,7 +24,7 @@ use crate::plugin::{Dir, Nulls, PluginConfig, RankKey, RankSpec, Verb};
 use crate::record::{item_value, items_value, raw_field};
 use nexus_flow_core::derive;
 use nexus_flow_core::graph::Board;
-use nexus_flow_core::model::{EdgeKind, ItemRow, LinkWeight, ThreadLink};
+use nexus_flow_core::model::{EdgeKind, FieldEntry, ItemRow, LinkWeight, ThreadLink};
 use nexus_flow_core::store::Store;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -220,10 +220,14 @@ fn titleise(name: &str) -> String {
         .join(" ")
 }
 
-/// One field entry in the schema report.
+/// One field entry in the schema report. `#[non_exhaustive]` since 6j6v.4g6r, so the next
+/// attribute is an additive change.
+#[non_exhaustive]
 pub struct SchemaField {
     pub field: String,
     pub label: String,
+    /// How the value is interpreted: a canonical field's kind, or a custom field's declared type
+    /// (`text | longtext | date | datetime | enum`, [`FieldType::as_str`](crate::plugin::FieldType::as_str)).
     pub kind: String,
     pub required: bool,
     pub settable: bool,
@@ -241,6 +245,9 @@ pub struct SchemaField {
     pub on: Vec<String>,
     /// The accepted values of a custom `enum` field. `Some` only for a custom enum; `None` otherwise.
     pub values: Option<Vec<String>>,
+    /// `true` for a custom LIST field (6j6v.4g6r): its value is a list of entries of `kind`, each
+    /// with an optional label, written with `nxf entry add`/`remove`. Emitted only when `true`.
+    pub list: bool,
 }
 
 impl SchemaField {
@@ -272,6 +279,9 @@ impl SchemaField {
             o["on"] = json!(self.on);
             if let Some(v) = &self.values {
                 o["values"] = json!(v);
+            }
+            if self.list {
+                o["list"] = json!(true);
             }
         }
         o
@@ -404,6 +414,7 @@ pub fn schema(cfg: &PluginConfig) -> SchemaReport {
             custom: false,
             on: Vec::new(),
             values: None,
+            list: false,
         })
         .collect();
     // Append the plugin's declared custom fields (plugin-custom-fields §6) AFTER the canonical
@@ -427,6 +438,7 @@ pub fn schema(cfg: &PluginConfig) -> SchemaReport {
             custom: true,
             on: decl.on.clone(),
             values: is_enum.then(|| decl.values.clone()),
+            list: decl.list,
         }
     }));
     let hierarchy_types: Vec<TypeContainment> = cfg
@@ -2003,21 +2015,45 @@ fn next_records(cfg: Option<&PluginConfig>, store: &Store, items: &[ItemRow]) ->
     Ok(Value::Array(out))
 }
 
-/// The timestamps of a lane's items, and their custom values — what [`lane_joins`] reads in bulk.
+/// The timestamps of a lane's items, their custom values and their list-field entries — what
+/// [`lane_joins`] reads in bulk.
 type LaneJoinMaps = (
     BTreeMap<String, nexus_flow_core::store::ItemTimestamps>,
     BTreeMap<String, BTreeMap<String, String>>,
+    BTreeMap<String, BTreeMap<String, Vec<FieldEntry>>>,
 );
 
+/// Whether the plugin declares a list field (6j6v.4g6r) — no list field, no entry read.
+fn declares_lists(cfg: &PluginConfig) -> bool {
+    cfg.fields.values().any(|d| d.list)
+}
+
+/// The list-field entries of `ids` (6j6v.4g6r), read only when the plugin declares a list field.
+fn declared_entries_bulk(
+    cfg: &PluginConfig,
+    store: &Store,
+    ids: &[&str],
+) -> Result<BTreeMap<String, BTreeMap<String, Vec<FieldEntry>>>> {
+    Ok(if declares_lists(cfg) {
+        store.field_entries_of_bulk(ids)?
+    } else {
+        BTreeMap::new()
+    })
+}
+
 /// The bulk reads every lane record carries beside its own joins: the timestamps (2kjy, always)
-/// and the custom values (only when `cfg` is given — no declared fields, no read, ky26).
+/// and the custom values and list entries (only when `cfg` is given — no declared fields, no
+/// read, ky26).
 fn lane_joins(cfg: Option<&PluginConfig>, store: &Store, ids: &[&str]) -> Result<LaneJoinMaps> {
     let ts = store.item_timestamps_of_bulk(ids)?;
-    let custom = match cfg {
-        Some(_) => store.custom_fields_of_bulk(ids)?,
-        None => BTreeMap::new(),
+    let (custom, lists) = match cfg {
+        Some(cfg) => (
+            store.custom_fields_of_bulk(ids)?,
+            declared_entries_bulk(cfg, store, ids)?,
+        ),
+        None => (BTreeMap::new(), BTreeMap::new()),
     };
-    Ok((ts, custom))
+    Ok((ts, custom, lists))
 }
 
 /// The read-layer joins of ONE lane record, however they were read — in bulk from a store, or per
@@ -2035,12 +2071,14 @@ struct RecordJoins<'a> {
     updated_at: Option<&'a str>,
     /// Every non-empty custom value; [`declared_custom_value`] narrows it to the plugin's fields.
     custom: Option<&'a BTreeMap<String, String>>,
+    /// Every list field's present entries (6j6v.4g6r), narrowed the same way.
+    custom_lists: Option<&'a BTreeMap<String, Vec<FieldEntry>>>,
 }
 
 impl<'a> RecordJoins<'a> {
     /// The timestamps and custom values of `id` out of the bulk maps [`lane_joins`] read.
     fn lane(id: &str, maps: &'a LaneJoinMaps) -> RecordJoins<'a> {
-        let (ts, custom) = maps;
+        let (ts, custom, lists) = maps;
         let (created_at, updated_at) = ts
             .get(id)
             .map(|(c, u)| (c.as_deref(), u.as_deref()))
@@ -2049,6 +2087,7 @@ impl<'a> RecordJoins<'a> {
             created_at,
             updated_at,
             custom: custom.get(id),
+            custom_lists: lists.get(id),
             ..RecordJoins::default()
         }
     }
@@ -2063,8 +2102,8 @@ fn put_lane_joins(cfg: Option<&PluginConfig>, rec: &mut Value, j: &RecordJoins) 
     if let Some(u) = j.updated_at {
         rec["updated_at"] = json!(u);
     }
-    if let (Some(cfg), Some(fields)) = (cfg, j.custom) {
-        if let Some(custom) = declared_custom_value(cfg, fields) {
+    if let Some(cfg) = cfg {
+        if let Some(custom) = declared_custom_value(cfg, j.custom, j.custom_lists) {
             rec["custom"] = custom;
         }
     }
@@ -2159,17 +2198,68 @@ pub fn list_to_value(store: &Store, items: &[ItemRow]) -> Result<Value> {
 // (`next_to_value`/`list_to_value`/`show_value`) and the facade SemVer surface stay untouched
 // (spec §8: additive, `facade changed` — not breaking).
 
-/// The declared `custom` map for one item's set field→value pairs, or `None` when nothing declared
-/// remains. Intersects the item's non-empty custom values (the core already excludes empties) with
-/// `cfg.fields`, so an undeclared/foreign field is dropped. `None` ⇒ the caller omits the sparse
-/// `custom` key entirely (exactly like a label-less item omits `labels`).
-fn declared_custom_value(cfg: &PluginConfig, fields: &BTreeMap<String, String>) -> Option<Value> {
-    let declared: serde_json::Map<String, Value> = fields
-        .iter()
-        .filter(|(name, _)| cfg.fields.contains_key(name.as_str()))
-        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
-        .collect();
+/// The declared `custom` map for one item, or `None` when nothing declared remains. A single-value
+/// field reads the item's non-empty custom values (the core already excludes empties), a list field
+/// (6j6v.4g6r) its present entries as [`field_entries_to_value`] spells them — each only under the
+/// kind the active plugin declares, so an undeclared/foreign field, or a value of the other kind
+/// under a declared name, is dropped. A list with no present entry is absent, like an unset value.
+/// `None` ⇒ the caller omits the sparse `custom` key entirely (exactly like a label-less item omits
+/// `labels`).
+fn declared_custom_value(
+    cfg: &PluginConfig,
+    fields: Option<&BTreeMap<String, String>>,
+    lists: Option<&BTreeMap<String, Vec<FieldEntry>>>,
+) -> Option<Value> {
+    let mut declared = serde_json::Map::new();
+    for (name, decl) in &cfg.fields {
+        if decl.list {
+            if let Some(entries) = lists.and_then(|l| l.get(name)).filter(|e| !e.is_empty()) {
+                declared.insert(name.clone(), field_entries_to_value(entries));
+            }
+        } else if let Some(value) = fields.and_then(|f| f.get(name)) {
+            declared.insert(name.clone(), Value::String(value.clone()));
+        }
+    }
     (!declared.is_empty()).then_some(Value::Object(declared))
+}
+
+/// The JSON of a list field's entries (6j6v.4g6r): `[{"value": …, "label": …}, …]` in their order,
+/// `label` present only on a labelled entry. The shape under `custom` on every record and the
+/// `nxf entry list --json` / `flow_entry_list` answer.
+pub fn field_entries_to_value(entries: &[FieldEntry]) -> Value {
+    Value::Array(
+        entries
+            .iter()
+            .map(|e| {
+                let mut o = json!({ "value": e.value });
+                if let Some(label) = &e.label {
+                    o["label"] = json!(label);
+                }
+                o
+            })
+            .collect(),
+    )
+}
+
+/// The present entries of the list field `field` of item `id` (6j6v.4g6r), in order. `not_found`
+/// if the item is missing/deleted; `validation` if `field` is not a list field the active plugin
+/// declares. A list with no entry is empty.
+pub fn field_entries(
+    cfg: &PluginConfig,
+    store: &Store,
+    id: &str,
+    field: &str,
+) -> Result<Vec<FieldEntry>> {
+    require_item(store, id)?;
+    if !cfg.fields.get(field).is_some_and(|d| d.list) {
+        return Err(NxfError::validation(format!(
+            "'{field}' is not a list field of the active plugin"
+        )));
+    }
+    Ok(store
+        .field_entries_of(id)?
+        .remove(field)
+        .unwrap_or_default())
 }
 
 /// Attach the sparse, declared `custom` map to each record of a lane `--json` array, in place, via a
@@ -2198,6 +2288,7 @@ fn attach_declared_custom(
     records: &mut Value,
 ) -> Result<()> {
     let custom_by_id = store.custom_fields_of_bulk(ids)?;
+    let lists_by_id = declared_entries_bulk(cfg, store, ids)?;
     if let Some(rows) = records.as_array_mut() {
         // Index-alignment invariant: the caller passes `records` as the projection of the SAME
         // items in the SAME order as `ids`, so `zip` pairs each record with its own id. Assert it
@@ -2211,10 +2302,9 @@ fn attach_declared_custom(
             ids.len(),
         );
         for (rec, id) in rows.iter_mut().zip(ids.iter()) {
-            if let Some(fields) = custom_by_id.get(*id) {
-                if let Some(custom) = declared_custom_value(cfg, fields) {
-                    rec["custom"] = custom;
-                }
+            let (fields, lists) = (custom_by_id.get(*id), lists_by_id.get(*id));
+            if let Some(custom) = declared_custom_value(cfg, fields, lists) {
+                rec["custom"] = custom;
             }
         }
     }
@@ -2327,11 +2417,11 @@ pub fn declared_custom_by_id(
         return Ok(out);
     }
     let custom_by_id = store.custom_fields_of_bulk(ids)?;
+    let lists_by_id = declared_entries_bulk(cfg, store, ids)?;
     for id in ids {
-        if let Some(fields) = custom_by_id.get(*id) {
-            if let Some(custom) = declared_custom_value(cfg, fields) {
-                out.insert((*id).to_string(), custom);
-            }
+        let (fields, lists) = (custom_by_id.get(*id), lists_by_id.get(*id));
+        if let Some(custom) = declared_custom_value(cfg, fields, lists) {
+            out.insert((*id).to_string(), custom);
         }
     }
     Ok(out)
@@ -2701,6 +2791,9 @@ pub struct ActiveTicket {
     pub item: ItemRow,
     pub labels: Vec<String>,
     pub custom: BTreeMap<String, String>,
+    /// Every list field's present entries, by field (6j6v.4g6r) — declared or not, as `custom`;
+    /// the projection narrows it to the plugin's list fields.
+    pub custom_lists: BTreeMap<String, Vec<FieldEntry>>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub conversations: usize,
@@ -2719,6 +2812,7 @@ impl ActiveTicket {
             item,
             labels: Vec::new(),
             custom: BTreeMap::new(),
+            custom_lists: BTreeMap::new(),
             created_at: None,
             updated_at: None,
             conversations: 0,
@@ -2740,6 +2834,7 @@ impl ActiveTicket {
             created_at: self.created_at.as_deref(),
             updated_at: self.updated_at.as_deref(),
             custom: Some(&self.custom),
+            custom_lists: Some(&self.custom_lists),
         }
     }
 }
@@ -3027,6 +3122,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
     let items = store.get_items(&ids)?;
     let mut labels = store.labels_of_bulk(&ids)?;
     let mut custom = store.custom_fields_of_bulk(&ids)?;
+    let mut lists = store.field_entries_of_bulk(&ids)?;
     let mut ts = store.item_timestamps_of_bulk(&ids)?;
     let conversations = store.bearing_thread_counts(&ids)?;
     let mut contributes = store.contributes_to_of_bulk(&ids)?;
@@ -3038,6 +3134,7 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
         let mut t = ActiveTicket::new(item);
         t.labels = labels.remove(&id).unwrap_or_default();
         t.custom = custom.remove(&id).unwrap_or_default();
+        t.custom_lists = lists.remove(&id).unwrap_or_default();
         t.created_at = created_at;
         t.updated_at = updated_at;
         t.conversations = conversations.get(&id).copied().unwrap_or(0);
@@ -3329,6 +3426,8 @@ pub struct ListItem {
     pub item: ItemRow,
     pub labels: Vec<String>,
     pub custom: BTreeMap<String, String>,
+    /// Every list field's present entries, by field (6j6v.4g6r), as [`ActiveTicket::custom_lists`].
+    pub custom_lists: BTreeMap<String, Vec<FieldEntry>>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub contributes_to: Vec<String>,
@@ -3342,6 +3441,7 @@ impl ListItem {
             item,
             labels: Vec::new(),
             custom: BTreeMap::new(),
+            custom_lists: BTreeMap::new(),
             created_at: None,
             updated_at: None,
             contributes_to: Vec::new(),
@@ -3356,6 +3456,7 @@ impl ListItem {
             created_at: self.created_at.as_deref(),
             updated_at: self.updated_at.as_deref(),
             custom: Some(&self.custom),
+            custom_lists: Some(&self.custom_lists),
             ..RecordJoins::default()
         }
     }
@@ -3423,6 +3524,7 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
     let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
     let mut labels = store.labels_of_bulk(&ids)?;
     let mut custom = store.custom_fields_of_bulk(&ids)?;
+    let mut lists = store.field_entries_of_bulk(&ids)?;
     let mut ts = store.item_timestamps_of_bulk(&ids)?;
     let mut contributes = store.contributes_to_of_bulk(&ids)?;
     let mut listed = Vec::with_capacity(items.len());
@@ -3432,6 +3534,7 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
         let mut i = ListItem::new(item);
         i.labels = labels.remove(&id).unwrap_or_default();
         i.custom = custom.remove(&id).unwrap_or_default();
+        i.custom_lists = lists.remove(&id).unwrap_or_default();
         i.created_at = created_at;
         i.updated_at = updated_at;
         i.contributes_to = contributes.remove(&id).unwrap_or_default();
@@ -3979,7 +4082,12 @@ pub fn show_value_with_custom(cfg: &PluginConfig, store: &Store, id: &str) -> Re
         return Ok(v);
     }
     let fields = store.custom_fields_of(id)?;
-    if let Some(custom) = declared_custom_value(cfg, &fields) {
+    let lists = if declares_lists(cfg) {
+        store.field_entries_of(id)?
+    } else {
+        BTreeMap::new()
+    };
+    if let Some(custom) = declared_custom_value(cfg, Some(&fields), Some(&lists)) {
         v["custom"] = custom;
     }
     Ok(v)

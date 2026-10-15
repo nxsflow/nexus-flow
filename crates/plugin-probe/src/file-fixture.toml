@@ -47,3 +47,20 @@ type = "text"
 on = ["file"]
 required = true
 label = "File URI"
+
+# When the linked file was produced (6j6v.vbp6): an optional `datetime` field, so the consumer
+# path also proves the one type stored in a canonical form — an RFC 3339 instant with a time zone,
+# stored in UTC at whole seconds.
+[fields.produced_at]
+type = "datetime"
+on = ["file"]
+label = "Produced at"
+
+# Where else the linked file lives (6j6v.4g6r): a `text` LIST field, so the consumer path also
+# proves list fields — entries added and removed with `nxf entry`, each with an optional label
+# (`backup`, `cdn`, …), merged as an observed-remove set and read back under `custom`.
+[fields.mirrors]
+type = "text"
+on = ["file"]
+list = true
+label = "Mirrors"

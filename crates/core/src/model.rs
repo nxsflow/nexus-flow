@@ -276,6 +276,106 @@ pub struct Chunk {
     pub created_at: Option<String>,
 }
 
+/// The largest op `value` a list-field entry add may carry, in bytes (6j6v.4g6r): the entry value
+/// and its label together. Generous for what a list field holds — an address, a number, a date —
+/// and far below what a server stores per folded row. The write seam refuses a larger entry; the
+/// reducer leaves a larger one unfolded on every replica alike. Fold semantics, as
+/// [`MAX_CHUNK_BYTES`].
+pub const MAX_FIELD_ENTRY_BYTES: usize = 16 * 1024;
+
+/// The most add tags one list-field entry remove may tombstone (6j6v.4g6r): each is one row the
+/// fold writes, so the bound is what one op may cost a server, as [`MAX_SUPERSEDED`]. A writer with
+/// more tags to remove emits several removes. Fold semantics, as [`MAX_CHUNK_BYTES`].
+pub const MAX_ENTRY_TAGS: usize = 1024;
+
+/// The one separator of the list-field entry ops (6j6v.4g6r), U+001F: it separates an add's entry
+/// value from its label (no separator: the entry has no label), and the add tags a remove names.
+/// So neither a value, a label nor an add's op id — the tag a remove names it by — may contain it:
+/// the write seam refuses it in a value or label, and the reducer leaves an add whose op id holds
+/// it unfolded, since no remove could name that add. Every entry path spells it by this name.
+pub const ENTRY_SEP: char = '\u{1f}';
+
+/// An entry add op's `value`: the entry value, then [`ENTRY_SEP`] and the label when there
+/// is one. The one place the layout is written; [`parse_entry_value`] reads it back.
+pub fn entry_value(value: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{value}{ENTRY_SEP}{label}"),
+        None => value.to_string(),
+    }
+}
+
+/// The entry value and label an entry add op's `value` carries, or `None` for a malformed one: an
+/// empty value, an empty label after the separator, or a second separator.
+pub fn parse_entry_value(raw: &str) -> Option<(&str, Option<&str>)> {
+    let (value, label) = match raw.split_once(ENTRY_SEP) {
+        Some((value, label)) => (value, Some(label)),
+        None => (raw, None),
+    };
+    let label_ok = label.is_none_or(|l| !l.is_empty() && !l.contains(ENTRY_SEP));
+    (!value.is_empty() && label_ok).then_some((value, label))
+}
+
+/// One present entry of a plugin list field (6j6v.4g6r): its value and, optionally, a label such
+/// as `work` or `private`. The value is the entry's identity within its field; the label is an
+/// attribute of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldEntry {
+    pub value: String,
+    pub label: Option<String>,
+}
+
+/// One present (not tombstoned) add of a list-field entry, as folded — the input of
+/// [`present_entries`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryAdd {
+    pub value: String,
+    pub label: Option<String>,
+    pub lamport: i64,
+    pub site: i64,
+    /// The add's op id.
+    pub tag: String,
+}
+
+/// The entries of one list field from its present adds (6j6v.4g6r) — the projection a replica and a
+/// server both apply, so they answer the same list. Pure over the add SET: the order of `adds` does
+/// not matter.
+///
+/// - **One entry per value.** Several present adds of the same value — the same address added on
+///   two devices, or an address re-added to change its label — are one entry.
+/// - **Its label** is the label of the add with the highest `(lamport, site, tag)`: a later add of
+///   the same value relabels the entry (or, without a label, unlabels it).
+/// - **Its position** is that of its earliest present add, so relabelling an entry keeps its place;
+///   entries come in that order (an add's tag is its unique op id, so there are no ties). An entry
+///   removed and added again is new and comes last.
+pub fn present_entries(adds: impl IntoIterator<Item = EntryAdd>) -> Vec<FieldEntry> {
+    type Coordinate = (i64, i64, String);
+    let mut by_value: std::collections::BTreeMap<String, (Coordinate, Coordinate, Option<String>)> =
+        std::collections::BTreeMap::new();
+    for add in adds {
+        let at = (add.lamport, add.site, add.tag);
+        match by_value.get_mut(&add.value) {
+            None => {
+                by_value.insert(add.value, (at.clone(), at, add.label));
+            }
+            Some((first, latest, label)) => {
+                if at < *first {
+                    *first = at.clone();
+                }
+                if at > *latest {
+                    *latest = at;
+                    *label = add.label;
+                }
+            }
+        }
+    }
+    let mut entries: Vec<(Coordinate, FieldEntry)> = by_value
+        .into_iter()
+        .map(|(value, (first, _, label))| (first, FieldEntry { value, label }))
+        .collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.into_iter().map(|(_, e)| e).collect()
+}
+
 /// A materialized item row, as read back from the `items` view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemRow {

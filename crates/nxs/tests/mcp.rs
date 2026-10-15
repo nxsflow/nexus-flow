@@ -55,6 +55,10 @@ const FLOW_TOOLS: &[&str] = &[
     "flow_label_add",
     "flow_label_remove",
     "flow_label_list",
+    // list-field entries (6j6v.4g6r)
+    "flow_entry_add",
+    "flow_entry_remove",
+    "flow_entry_list",
 ];
 
 /// The always-on UMBRELLA tools (0jq8) — not flow ops, but part of the base surface on every
@@ -1605,6 +1609,9 @@ async fn write_tools_advertise_mutation_annotations_per_op() {
         // labels (h89s.3)
         ("flow_label_add", false, true), // additive label; idempotent
         ("flow_label_remove", true, true), // removes a label; idempotent
+        // list-field entries (6j6v.4g6r)
+        ("flow_entry_add", false, true), // additive entry (a held value relabels); idempotent
+        ("flow_entry_remove", true, true), // removes an entry; idempotent
     ];
     for (name, destructive, idempotent) in expected {
         let tool = tools

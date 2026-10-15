@@ -778,6 +778,8 @@ fn kinds_cfg(order: &str) -> PluginConfig {
         columns = ["id"]
         [fields.stage]
         type = "text"
+        [fields.met]
+        type = "datetime"
         "#
     ))
     .unwrap()
@@ -872,6 +874,38 @@ fn related_honours_its_type_filter_a_precedence_and_a_custom_field() {
         ranked_items(&stage, &s),
         ["zz12.i2", "zz12.i1", "zz12.i3", "zz12.i4"],
         "the custom field's precedence position: early before late; no neighbour → null"
+    );
+}
+
+#[test]
+fn related_reads_a_datetime_custom_field_in_chronological_order() {
+    // vbp6: a `datetime` value is stored as the UTC instant, so `pick` and `dir` compare instants,
+    // not the text as typed. As typed, b1's "09:00Z" sorts before n1's "10:00+02:00"; as instants
+    // n1 (08:00Z) is earlier.
+    let mut s = kinds_board();
+    let cfg = kinds_cfg(r#"[ { related = "mentions", of = { field = "met" } } ]"#);
+    let set = |s: &mut Store, id: &str, v: &str| {
+        nexus_flow_facade::write::update(s, &cfg, NOW, "t", id, &[format!("met={v}")]).unwrap();
+    };
+    set(&mut s, "zz12.n1", "2026-10-12T10:00:00+02:00");
+    set(&mut s, "zz12.b1", "2026-10-12T09:00:00Z");
+    set(&mut s, "zz12.b2", "2026-10-12T07:59:59.900-00:00");
+    edge(&mut s, "zz12.i1", "zz12.b1", EdgeKind::Mentions); // 09:00Z
+    edge(&mut s, "zz12.i2", "zz12.n1", EdgeKind::Mentions); // 08:00Z
+    edge(&mut s, "zz12.i3", "zz12.b1", EdgeKind::Mentions); // 09:00Z and
+    edge(&mut s, "zz12.i3", "zz12.b2", EdgeKind::Mentions); // 07:59:59Z
+    assert_eq!(
+        ranked_items(&cfg, &s),
+        ["zz12.i3", "zz12.i2", "zz12.i1", "zz12.i4"],
+        "min, ascending: the earliest instant first; no neighbour → null, last"
+    );
+    let latest = kinds_cfg(
+        r#"[ { related = "mentions", of = { field = "met" }, pick = "max", dir = "desc" } ]"#,
+    );
+    assert_eq!(
+        ranked_items(&latest, &s),
+        ["zz12.i1", "zz12.i3", "zz12.i2", "zz12.i4"],
+        "max, descending: i1 and i3 both read 09:00Z and fall to the id"
     );
 }
 

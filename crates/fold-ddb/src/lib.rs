@@ -82,15 +82,15 @@
 //! A flip of a ticket's activity adds one Query and, per edge touching it, at most three reads and
 //! one write. A label or thread link add, or its remove, adds two `GetItem`s and at most one write
 //! for the entry under the ticket (`board`, "Who owns a label or a thread link"). Reading the
-//! active tickets' records costs `4n + 1` requests for `n` tickets, plus one per parent outside
+//! active tickets' records costs `5n + 1` requests for `n` tickets, plus one per parent outside
 //! the selection, at most [`records::READ_CONCURRENCY`] tickets at a time ([`records`]). Folding an
 //! edge remove reads the add and the remove and rewrites the entry under each end. The graph the
 //! derived ranking keys read ([`records::with_ranking`]) costs one Query per active ticket and, per
 //! inactive neighbour, up to three Queries, their rows read by `BatchGetItem` (100 keys a request).
 //! A hosted `list` ([`records::list_board`]) costs one `typed` Query per listed type; one that is
-//! not ranked keeps and cuts its rows first and reads three Queries per row of its page plus one
+//! not ranked keeps and cuts its rows first and reads four Queries per row of its page plus one
 //! `BatchGetItem` for their timestamps, however many items the stream holds; a ranked one reads
-//! three Queries per live item of its types — the scope its rank is computed over — and its point
+//! four Queries per live item of its types — the scope its rank is computed over — and its point
 //! reads by `BatchGetItem`. No read caps its own requests: a server bounds one request by the
 //! table it hands in (E4 spec §5.1). The `typed` index costs a fold at most one write per item
 //! op, and only when the op gains, changes or loses the item's partition — a create, a retype, a

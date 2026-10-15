@@ -8,8 +8,9 @@
 //! foundation — the reducer is exactly the seam that makes that split clean.)
 
 use crate::model::{
-    is_valid_chunk_field, is_valid_chunk_id, EdgeKind, LinkRelation, LinkWeight, MergeStrategy, Op,
-    CHUNK_PAYLOAD_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES, MAX_SUPERSEDED,
+    is_valid_chunk_field, is_valid_chunk_id, parse_entry_value, EdgeKind, LinkRelation, LinkWeight,
+    MergeStrategy, Op, CHUNK_PAYLOAD_SEP, ENTRY_SEP, MAX_CHUNK_BYTES, MAX_CHUNK_ID_BYTES,
+    MAX_ENTRY_TAGS, MAX_FIELD_ENTRY_BYTES, MAX_SUPERSEDED,
 };
 use crate::reducer::Reducer;
 use crate::schema;
@@ -117,6 +118,106 @@ impl TaskReducer {
             version(op),
             Wins::Higher,
         )
+    }
+
+    /// Whether a list-field entry op (6j6v.4g6r) names a foldable place: a non-empty item within
+    /// [`MAX_CHUNK_ID_BYTES`] and free of the separator — as every id that becomes a key cell of a
+    /// server row — and a field name of the chunk-field grammar ([`is_valid_chunk_field`]: at most
+    /// 64 plain ASCII characters, which a plugin's list field name always is). The grammar keeps a
+    /// server's sort key `field_entries#<item>#<field>#<tag>` under its 1 KiB limit even when the
+    /// item and the tag escape every byte, so a server folds every op a replica folds (review of
+    /// PR #63, Integrity #4). Shared by the add and the remove.
+    fn entry_place_ok(op: &Op) -> bool {
+        !op.target_id.is_empty()
+            && op.target_id.len() <= MAX_CHUNK_ID_BYTES
+            && !op.target_id.contains(ENTRY_SEP)
+            && is_valid_chunk_field(&op.field)
+    }
+
+    /// A list-field entry add's value and label (6j6v.4g6r), or `None` when the op does not fold:
+    /// a malformed place or value ([`parse_entry_value`]), a value over [`MAX_FIELD_ENTRY_BYTES`],
+    /// or an op id a server could not key or a remove could not name. The op id is the add's tag,
+    /// and a remove joins the tags it observed with [`ENTRY_SEP`]: a tag holding the separator
+    /// would split into other tags there — an entry nobody can remove, and a clear dropped whole
+    /// for an empty piece (review of PR #63, Integrity #1). Only a peer that skipped the store
+    /// mints such an id; its add is stored and not folded, the same on every replica.
+    fn parse_entry_add(op: &Op) -> Option<(&str, Option<&str>)> {
+        let raw = op.value.as_deref()?;
+        if !Self::entry_place_ok(op)
+            || raw.len() > MAX_FIELD_ENTRY_BYTES
+            || op.op_id.is_empty()
+            || op.op_id.len() > MAX_CHUNK_ID_BYTES
+            || op.op_id.contains(ENTRY_SEP)
+        {
+            return None;
+        }
+        parse_entry_value(raw)
+    }
+
+    /// The add tags a list-field entry remove tombstones (6j6v.4g6r), or `None` when it does not
+    /// fold: a malformed place, no tag, more than [`MAX_ENTRY_TAGS`], or a tag that is empty or past
+    /// [`MAX_CHUNK_ID_BYTES`].
+    fn parse_entry_remove(op: &Op) -> Option<Vec<&str>> {
+        let raw = op.value.as_deref()?;
+        if !Self::entry_place_ok(op) {
+            return None;
+        }
+        let tags: Vec<&str> = raw.split(ENTRY_SEP).collect();
+        (tags.len() <= MAX_ENTRY_TAGS
+            && tags
+                .iter()
+                .all(|t| !t.is_empty() && t.len() <= MAX_CHUNK_ID_BYTES))
+        .then_some(tags)
+    }
+
+    /// A list-field entry add (6j6v.4g6r): one row per add op, tagged with its op id
+    /// (observed-remove) and carrying its coordinate, which [`present_entries`] picks the label and
+    /// the position by. A label-less entry writes no `label` cell.
+    ///
+    /// [`present_entries`]: crate::model::present_entries
+    fn entry_add(op: &Op) -> Vec<Change> {
+        let Some((value, label)) = Self::parse_entry_add(op) else {
+            return Vec::new();
+        };
+        let mut row = vec![
+            ("value".to_string(), value.into()),
+            ("lamport".to_string(), op.lamport.into()),
+            ("site".to_string(), op.site.into()),
+        ];
+        if let Some(label) = label {
+            row.push(("label".to_string(), label.into()));
+        }
+        vec![Change::put(
+            "field_entries",
+            cells([
+                ("item_id", op.target_id.as_str().into()),
+                ("field", op.field.as_str().into()),
+                ("tag", op.op_id.as_str().into()),
+            ]),
+            row,
+        )]
+    }
+
+    /// A list-field entry remove (6j6v.4g6r): each observed add's row of the same item and field
+    /// gets `removed = 1` — its own cell only, so a remove folded before its add still hides it,
+    /// and the add, folded later, fills in the rest of the row.
+    fn entry_remove(op: &Op) -> Vec<Change> {
+        let Some(tags) = Self::parse_entry_remove(op) else {
+            return Vec::new();
+        };
+        tags.into_iter()
+            .map(|tag| {
+                Change::put(
+                    "field_entries",
+                    cells([
+                        ("item_id", op.target_id.as_str().into()),
+                        ("field", op.field.as_str().into()),
+                        ("tag", tag.into()),
+                    ]),
+                    cells([("removed", 1_i64.into())]),
+                )
+            })
+            .collect()
     }
 
     /// An item's creation and last change (6j6v.2kjy), folded instead of read off the log
@@ -338,10 +439,19 @@ impl Reducer for TaskReducer {
         // merge strategy (encoded in the op_type) — with NON-EMPTY `target_id` (the item id) and
         // `field` (the custom field name). The non-empty guards mirror `parse_edge`/`parse_label`:
         // a degenerate `field` op store-don't-folds instead of folding a junk (item_id, field) row.
+        // A list-field entry add or remove (6j6v.4g6r) shares the `field` kind: the target is still
+        // one custom field of one item. An older binary knows only the `set*` op types here, so it
+        // stores these without folding them (§7).
         if op.target_kind == "field" {
-            return MergeStrategy::from_item_set_op_type(&op.op_type).is_some()
-                && !op.target_id.is_empty()
-                && !op.field.is_empty();
+            return match op.op_type.as_str() {
+                "add" => Self::parse_entry_add(op).is_some(),
+                "remove" => Self::parse_entry_remove(op).is_some(),
+                set => {
+                    MergeStrategy::from_item_set_op_type(set).is_some()
+                        && !op.target_id.is_empty()
+                        && !op.field.is_empty()
+                }
+            };
         }
         match (op.target_kind.as_str(), op.op_type.as_str()) {
             ("edge", "add") | ("edge", "remove") => Self::parse_edge(op).is_some(),
@@ -368,8 +478,13 @@ impl Reducer for TaskReducer {
                 .expect("is_foldable vetted the strategy");
             Self::item_changes(op, strategy)
         } else if op.target_kind == "field" {
-            // A plugin custom field `set` folds into `custom_fields` (is_foldable vetted the shape).
-            vec![Self::field_change(op)]
+            // A plugin custom field `set` folds into `custom_fields`, a list-field entry add or
+            // remove into the entry OR-set (is_foldable vetted the shape).
+            match op.op_type.as_str() {
+                "add" => Self::entry_add(op),
+                "remove" => Self::entry_remove(op),
+                _ => vec![Self::field_change(op)],
+            }
         } else {
             match (op.target_kind.as_str(), op.op_type.as_str()) {
                 ("edge", "add") => Self::edge_add(op),
@@ -398,8 +513,9 @@ impl Reducer for TaskReducer {
     /// 1 (6j6v.vvw6): the OR-set adds and the notes carry their op's coordinate, and an item's
     /// instants are folded — all filled only by folding the log again.
     /// 2 (6j6v.c0kn): chunk ops fold, and a store that held them unfolded folds them once.
+    /// 3 (6j6v.4g6r): list-field entry adds and removes fold, likewise.
     fn fold_revision(&self) -> i64 {
-        2
+        3
     }
 
     fn view_tables(&self) -> &'static [&'static str] {
@@ -414,6 +530,7 @@ impl Reducer for TaskReducer {
             "chunks",
             "chunk_superseded",
             "custom_fields",
+            "field_entries",
             "thread_link_adds",
             "thread_link_removes",
             "item_timestamps",

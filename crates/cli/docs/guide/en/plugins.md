@@ -147,6 +147,74 @@ That doubling is not redundancy — it *is* the explanation. The `--json` is the
 plugin is how a particular audience reads and ranks it. Picking a plugin at `init` is therefore
 a real choice; run `nxf init --help` to see the options before you commit.
 
+## Declaring custom fields
+
+A plugin can give its types fields of their own under `[fields.<name>]`. `nxf schema --json` lists
+them with `"custom": true` and their `kind`; `create` and `update` set them with
+`--set <name>=<value>`; `show --json` and the lists return the set ones under `custom`. An empty
+value clears a field.
+
+```toml
+[fields.stage]
+type = "enum"
+values = ["backlog", "active", "done"]
+on = ["project"]          # the types it applies to; omit it for every type
+
+[fields.occurred_on]
+type = "datetime"
+label = "Occurred on"
+```
+
+The `type` decides what a value may be:
+
+- `text` and `longtext`: any text.
+- `date`: a date (`2026-10-12`) or an RFC 3339 timestamp, stored as given.
+- `datetime`: a moment, as an RFC 3339 timestamp **with a time zone** — `Z` or an offset such as
+  `+02:00`. It is stored as the same moment in UTC at whole seconds:
+  `--set occurred_on=2026-10-12T10:30:00+02:00` stores `2026-10-12T08:30:00Z`. A plain date or a
+  time without a zone is refused. Because every value has the same shape, `datetime` values sort
+  in time order wherever a field is read, such as a ranking key's `of = { field = "..." }`. The
+  offset you typed is not kept.
+- `enum`: one of the declared `values`.
+
+### List fields
+
+`list = true` makes a field hold several entries instead of one value — a person's e-mail
+addresses, say. Each entry is a value of the field's `type` (`text`, `date`, `datetime` or `enum`,
+checked as above) and may carry a label of your own, such as `work` or `private`:
+
+```toml
+[fields.email]
+type = "text"
+list = true
+on = ["person"]
+```
+
+```
+nxf entry add <id> email ada@work.example --label work
+nxf entry add <id> email ada@home.example
+nxf entry list <id> email
+nxf entry remove <id> email ada@home.example
+nxf update <id> --set email=          # clears the list
+```
+
+`show --json` and the lists return the entries under `custom`, in the order their values were
+first added: `"email": [{"value": "ada@work.example", "label": "work"}, ...]`, `label` only where
+there is one. `nxf schema --json` marks the field `"list": true`. Over MCP the verbs are
+`flow_entry_add`, `flow_entry_remove` and `flow_entry_list`.
+
+The value is the entry: adding a value the list already holds gives that entry the new label
+(or none, without `--label`) instead of adding it twice, and removing a value removes it
+whatever its label. Two devices may add and remove at the same time: an address added on one
+survives a remove on the other that never saw it, and both end with the same list. `--set` only
+clears a list field; a list field cannot be `required`, a `longtext`, take a `merge`, or rank.
+
+`entry add` and `entry remove` print the entry as stored, so a `datetime` entry given as
+`10:30:00+02:00` reads back as `08:30:00Z`, and a `datetime` entry is removed by the same moment at
+any offset. Every entry you can see can be removed: `entry remove` checks neither the value against
+the field's type (an enum value since dropped) nor `on` (a type the plugin has since left out). A
+list field's name is at most 64 characters.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under

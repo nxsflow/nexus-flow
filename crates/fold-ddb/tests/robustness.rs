@@ -547,7 +547,10 @@ fn a_snapshot_that_does_not_fit_is_refused_before_anything_is_written() {
     assert!(mark.revisions.is_empty() && !folder.is_current(&mark));
     assert!(matches!(
         ready(records::list_board(&t, &read::ListReads::default())),
-        Err(RecordsError::NotCurrent { found: None })
+        Err(RecordsError::NotCurrent {
+            domain: "index",
+            found: None
+        })
     ));
     ready(snapshot::import(&t, &folder, &good)).unwrap();
     let whole = MemTable::new("stream-1");
@@ -598,7 +601,13 @@ fn a_refolding_stream_is_refused_from_its_clear_until_the_refold_reaches_the_hea
     assert!(ready(Folder::clear(&Failing::new(&t, 1), head(&ops))).is_err());
     for answer in served(&t, &plain) {
         assert!(
-            matches!(answer, Err(RecordsError::NotCurrent { found: None })),
+            matches!(
+                answer,
+                Err(RecordsError::NotCurrent {
+                    domain: "index",
+                    found: None
+                })
+            ),
             "{answer:?}"
         );
     }
@@ -607,7 +616,13 @@ fn a_refolding_stream_is_refused_from_its_clear_until_the_refold_reaches_the_hea
     ready(Folder::clear(&t, head(&ops))).unwrap();
     for answer in served(&t, &plain) {
         assert!(
-            matches!(answer, Err(RecordsError::NotCurrent { found: None })),
+            matches!(
+                answer,
+                Err(RecordsError::NotCurrent {
+                    domain: "index",
+                    found: None
+                })
+            ),
             "{answer:?}"
         );
     }

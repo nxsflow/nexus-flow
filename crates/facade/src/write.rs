@@ -26,7 +26,7 @@ use crate::plugin::{FieldType, MergeStrategy, PluginConfig};
 use crate::validate;
 use nexus_flow_core::id::ReplicaIds;
 use nexus_flow_core::model::{
-    EdgeKind, ItemRow, LinkRelation, LinkWeight, MergeStrategy as CoreMergeStrategy,
+    EdgeKind, FieldEntry, ItemRow, LinkRelation, LinkWeight, MergeStrategy as CoreMergeStrategy,
 };
 use nexus_flow_core::store::Store;
 use std::collections::{HashMap, HashSet};
@@ -503,48 +503,108 @@ fn custom_merge_strategy(merge: MergeStrategy) -> CoreMergeStrategy {
     }
 }
 
-/// Validate one `--set name=value` assignment against a DECLARED custom field (plugin-custom-fields
-/// §5). The caller guarantees `name` names a declared field (`cfg.fields[name]` exists); this
-/// enforces the field's `on`-scope against `item_type` and validates `value` against the declared
-/// data type, returning the canonical value to store + the core merge strategy the `field set` op
-/// carries. An **empty** value is always accepted as a CLEAR (§4.2) — it bypasses type validation so
-/// a `date`/`enum` field can be cleared. `required` is NOT enforced here: it is a create-time-only
-/// guard (§5, TB-CF-7) applied in [`create`], never on `update`.
-fn prepare_custom_set(
-    cfg: &PluginConfig,
+/// One staged custom-field write of a `--set` batch (plugin-custom-fields §5).
+enum CustomWrite {
+    /// A single-value field: its canonical value (empty = clear, §4.2) and merge strategy.
+    Set(String, String, CoreMergeStrategy),
+    /// `--set <list>=` on a list field (6j6v.4g6r, §5.2): remove every entry this replica sees.
+    ClearList(String),
+}
+
+impl CustomWrite {
+    fn name(&self) -> &str {
+        match self {
+            CustomWrite::Set(name, _, _) | CustomWrite::ClearList(name) => name,
+        }
+    }
+
+    fn apply(&self, store: &mut Store, id: &str, actor: &str) {
+        match self {
+            CustomWrite::Set(name, value, strategy) => {
+                store.set_custom_field_merge(id, name, Some(value.clone()), actor, *strategy)
+            }
+            CustomWrite::ClearList(name) => store.clear_field_entries(id, name, actor),
+        }
+    }
+}
+
+/// The declaration of custom field `name`, which must apply to `item_type` (TB-CF-2: `on` empty ⇒
+/// global). The caller guarantees `name` is declared.
+fn applicable_decl<'c>(
+    cfg: &'c PluginConfig,
     item_type: &str,
     name: &str,
-    value: &str,
-) -> Result<(String, CoreMergeStrategy)> {
+) -> Result<&'c crate::plugin::FieldDecl> {
     let decl = cfg
         .fields
         .get(name)
-        .expect("prepare_custom_set is only called for a declared custom field");
-    // Type scope (TB-CF-2): `on` empty ⇒ global; else `item_type` must be listed.
+        .expect("only called for a declared custom field");
     if !decl.on.is_empty() && !decl.on.iter().any(|t| t == item_type) {
         return Err(NxfError::validation(format!(
             "custom field '{name}' does not apply to type '{item_type}'; it applies to {:?}",
             decl.on
         )));
     }
-    // Per-type value validation — skipped for an empty value, which is the clear sentinel (§4.2).
-    if !value.is_empty() {
-        match decl.field_type {
-            FieldType::Date => {
-                validate::iso_date(value)?;
+    Ok(decl)
+}
+
+/// Validate a non-empty `value` against custom field `name`'s declared type, returning the form to
+/// store: as given, except a `datetime`, stored as the UTC instant (vbp6). For a list field this is
+/// the check every entry passes (6j6v.4g6r).
+fn typed_custom_value(decl: &crate::plugin::FieldDecl, name: &str, value: &str) -> Result<String> {
+    match decl.field_type {
+        FieldType::Date => validate::iso_date(value),
+        FieldType::Datetime => validate::datetime(value)
+            .map_err(|e| NxfError::validation(format!("custom field '{name}': {}", e.msg))),
+        FieldType::Enum => {
+            if !decl.values.iter().any(|v| v == value) {
+                return Err(NxfError::validation(format!(
+                    "'{value}' is not a valid '{name}' value; expected one of {:?}",
+                    decl.values
+                )));
             }
-            FieldType::Enum => {
-                if !decl.values.iter().any(|v| v == value) {
-                    return Err(NxfError::validation(format!(
-                        "'{value}' is not a valid '{name}' value; expected one of {:?}",
-                        decl.values
-                    )));
-                }
-            }
-            FieldType::Text | FieldType::Longtext => {}
+            Ok(value.to_string())
         }
+        FieldType::Text | FieldType::Longtext => Ok(value.to_string()),
     }
-    Ok((value.to_string(), custom_merge_strategy(decl.merge)))
+}
+
+/// Validate one `--set name=value` assignment against a DECLARED custom field (plugin-custom-fields
+/// §5). The caller guarantees `name` names a declared field (`cfg.fields[name]` exists); this
+/// enforces the field's `on`-scope against `item_type` and validates `value` against the declared
+/// data type, returning the staged write. An **empty** value is always accepted as a CLEAR (§4.2)
+/// — it bypasses type validation so a `date`/`enum` field can be cleared; on a LIST field it is the
+/// only value `--set` takes (6j6v.4g6r): entries are added and removed with `nxf entry`. `required`
+/// is NOT enforced here: it is a create-time-only guard (§5, TB-CF-7) applied in [`create`], never
+/// on `update`.
+fn prepare_custom_set(
+    cfg: &PluginConfig,
+    item_type: &str,
+    name: &str,
+    value: &str,
+) -> Result<CustomWrite> {
+    let decl = applicable_decl(cfg, item_type, name)?;
+    if decl.list {
+        if !value.is_empty() {
+            return Err(NxfError::validation(format!(
+                "custom field '{name}' is a list — add an entry with `nxf entry add <id> {name} \
+                 <value> [--label <label>]` (MCP flow_entry_add) and remove one with `nxf entry \
+                 remove`; `--set {name}=` (empty) clears it"
+            )));
+        }
+        return Ok(CustomWrite::ClearList(name.to_string()));
+    }
+    // Per-type value validation — skipped for an empty value, which is the clear sentinel (§4.2).
+    let canonical = if value.is_empty() {
+        String::new()
+    } else {
+        typed_custom_value(decl, name, value)?
+    };
+    Ok(CustomWrite::Set(
+        name.to_string(),
+        canonical,
+        custom_merge_strategy(decl.merge),
+    ))
 }
 
 /// Parse + validate the create/update custom-field `--set name=value` pairs (plugin-custom-fields
@@ -556,7 +616,7 @@ fn prepare_custom_sets(
     cfg: &PluginConfig,
     item_type: &str,
     pairs: &[(String, String)],
-) -> Result<Vec<(String, String, CoreMergeStrategy)>> {
+) -> Result<Vec<CustomWrite>> {
     let mut writes = Vec::with_capacity(pairs.len());
     for (name, value) in pairs {
         if !cfg.fields.contains_key(name) {
@@ -566,8 +626,7 @@ fn prepare_custom_sets(
                  canonical fields have their own create flags"
             )));
         }
-        let (canonical, strategy) = prepare_custom_set(cfg, item_type, name, value)?;
-        writes.push((name.clone(), canonical, strategy));
+        writes.push(prepare_custom_set(cfg, item_type, name, value)?);
     }
     Ok(writes)
 }
@@ -674,7 +733,7 @@ pub fn create(
     // all BEFORE minting/writing, so a rejected create writes nothing.
     let custom_pairs = split_custom_pairs(new.custom)?;
     let custom_writes = prepare_custom_sets(cfg, &item_type, &custom_pairs)?;
-    let supplied: HashSet<&str> = custom_writes.iter().map(|(n, _, _)| n.as_str()).collect();
+    let supplied: HashSet<&str> = custom_writes.iter().map(CustomWrite::name).collect();
     check_required_custom_fields(cfg, &item_type, &supplied)?;
 
     // Every dependency target must exist (and be live) before we mint anything — a dangling
@@ -744,8 +803,8 @@ pub fn create(
     }
     // Custom fields (validated above): each rides a strategy-tagged `field set` op — the first
     // writer through the now-live w213 path, folding into the `custom_fields` view (§4).
-    for (name, value, strategy) in &custom_writes {
-        store.set_custom_field_merge(&id, name, Some(value.clone()), actor, *strategy);
+    for write in &custom_writes {
+        write.apply(store, &id, actor);
     }
 
     read_back(store, &id)
@@ -849,9 +908,10 @@ pub fn update(
         store.set_field(id, field, value, actor);
     }
     // Custom fields (validated above): each rides a strategy-tagged `field set` op (§4). An empty
-    // value is a clear (§4.2) — stored as an empty-value set, read back as unset.
-    for (name, value, strategy) in &custom_writes {
-        store.set_custom_field_merge(id, name, Some(value.clone()), actor, *strategy);
+    // value is a clear (§4.2) — stored as an empty-value set, read back as unset; on a list field,
+    // an observed remove of every entry (4g6r).
+    for write in &custom_writes {
+        write.apply(store, id, actor);
     }
     if let Some((parent, mode)) = parent_write {
         // sp6.3/sp6.6: `parent` writes the OR-set parent edge; the matrix chose re-point vs add.
@@ -1089,6 +1149,151 @@ pub fn label_remove(
     stamp_now(store, now)?;
     store.remove_label(id, &label, actor);
     Ok(())
+}
+
+// ---- list-field entries (6j6v.4g6r) -------------------------------------------
+//
+// A plugin list field (`[fields.<name>] list = true`) holds entries, each a value of the field's
+// type with an optional label, as an observed-remove set (plugin-custom-fields §5.2). The value is
+// the entry's identity: adding a value the field holds relabels it, removing a value removes it
+// whatever its label, and an add another device made concurrently survives a remove (add wins).
+
+/// The declared LIST field `field` of the live item `id` — the shared check of [`entry_add`] and
+/// [`entry_remove`], which returns the item's type too, so the add can apply the field's `on`
+/// scope (the remove does not, see there).
+fn require_list_field<'c>(
+    store: &Store,
+    cfg: &'c PluginConfig,
+    id: &str,
+    field: &str,
+) -> Result<(&'c crate::plugin::FieldDecl, String)> {
+    let item = require_item(store, id)?;
+    match cfg.fields.get(field) {
+        Some(decl) if decl.list => {}
+        Some(_) => {
+            return Err(NxfError::validation(format!(
+                "custom field '{field}' holds a single value, not a list — set it with `--set \
+                 {field}=<value>`"
+            )))
+        }
+        None => {
+            let lists: Vec<&str> = cfg
+                .fields
+                .iter()
+                .filter(|(_, d)| d.list)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            return Err(NxfError::validation(format!(
+                "'{field}' is not a list field of the active plugin (list fields: {lists:?})"
+            )));
+        }
+    }
+    Ok((&cfg.fields[field], item.item_type.unwrap_or_default()))
+}
+
+/// An entry value as the caller gave it, trimmed: non-blank and free of U+001F
+/// ([`ENTRY_SEP`](nexus_flow_core::model::ENTRY_SEP), the separator the entry op uses).
+fn entry_text<'v>(field: &str, value: &'v str) -> Result<&'v str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(NxfError::validation(format!(
+            "an entry of '{field}' must not be blank"
+        )));
+    }
+    if trimmed.contains(nexus_flow_core::model::ENTRY_SEP) {
+        return Err(NxfError::validation(format!(
+            "an entry of '{field}' must not contain the U+001F control character"
+        )));
+    }
+    Ok(trimmed)
+}
+
+/// Add an entry to the list field `field` of item `id` (6j6v.4g6r). The value is trimmed and
+/// validated against the field's type (a `datetime` is stored as the UTC instant, as a single
+/// `datetime` field is); the optional label is trimmed and non-blank (free text, like an item
+/// label). Adding a value the field already holds is not an error: the entry stays one entry and
+/// takes this label — how an entry is relabelled, or unlabelled with `label = None`. The field's
+/// `on` scope applies, as for `--set`. Returns the entry as stored — what a receipt reports
+/// ([`entry_add_receipt`]), so a `datetime` entry given with an offset reads back in UTC.
+// The write seam's shape (store, cfg, now, actor, target) plus the entry's three parts.
+#[allow(clippy::too_many_arguments)]
+pub fn entry_add(
+    store: &mut Store,
+    cfg: &PluginConfig,
+    now: &str,
+    actor: &str,
+    id: &str,
+    field: &str,
+    value: &str,
+    label: Option<&str>,
+) -> Result<FieldEntry> {
+    let actor = validate::actor(actor)?;
+    let (_, item_type) = require_list_field(store, cfg, id, field)?;
+    let decl = applicable_decl(cfg, &item_type, field)?;
+    let value = typed_custom_value(decl, field, entry_text(field, value)?)?;
+    let label = label.map(validate::label).transpose()?;
+    let size = nexus_flow_core::model::entry_value(&value, label.as_deref()).len();
+    if size > nexus_flow_core::model::MAX_FIELD_ENTRY_BYTES {
+        return Err(NxfError::validation(format!(
+            "an entry of '{field}' is {size} bytes with its label; the limit is {}",
+            nexus_flow_core::model::MAX_FIELD_ENTRY_BYTES
+        )));
+    }
+    stamp_now(store, now)?;
+    store.add_field_entry(id, field, &value, label.as_deref(), actor);
+    Ok(FieldEntry { value, label })
+}
+
+/// Remove the entry `value` from the list field `field` of item `id` (observed-remove), whatever
+/// its label. Removing a value the field does not hold is a no-op.
+///
+/// What every entry on show can be removed by: the value is matched as [`entry_add`] stores it —
+/// trimmed, a `datetime` as its UTC instant — but not re-validated otherwise, so an entry the
+/// plugin no longer accepts (an enum member since dropped) can still be removed. For the same
+/// reason the field's `on` scope does not apply here: a plugin that narrows `on` leaves the entries
+/// of the other types on show (records show every declared field's entries), and they stay
+/// removable (review of PR #63, Code Quality #5). A `datetime` value removes the entries of its UTC
+/// instant AND of its text as given, so an entry a peer stored without normalizing it
+/// (`…+02:00`) is removable by that text too (Integrity #5). Returns the value as matched — the
+/// stored form a receipt reports ([`entry_remove_receipt`]).
+pub fn entry_remove(
+    store: &mut Store,
+    cfg: &PluginConfig,
+    now: &str,
+    actor: &str,
+    id: &str,
+    field: &str,
+    value: &str,
+) -> Result<String> {
+    let actor = validate::actor(actor)?;
+    let (decl, _) = require_list_field(store, cfg, id, field)?;
+    let text = entry_text(field, value)?;
+    let value = match decl.field_type {
+        FieldType::Datetime => validate::datetime(text).unwrap_or_else(|_| text.to_string()),
+        _ => text.to_string(),
+    };
+    stamp_now(store, now)?;
+    store.remove_field_entry(id, field, &value, actor);
+    if value != text {
+        store.remove_field_entry(id, field, text, actor);
+    }
+    Ok(value)
+}
+
+/// The receipt message of an entry add — `<id> <field> + <value> (<label>)`, the label part only
+/// for a labelled entry — from the entry as [`entry_add`] stored it. The one spelling the CLI and
+/// the MCP server share; `id` is whichever form the surface shows.
+pub fn entry_add_receipt(id: &str, field: &str, entry: &FieldEntry) -> String {
+    match &entry.label {
+        Some(label) => format!("{id} {field} + {} ({label})", entry.value),
+        None => format!("{id} {field} + {}", entry.value),
+    }
+}
+
+/// The receipt message of an entry remove — `<id> <field> - <value>` — from the value as
+/// [`entry_remove`] matched it.
+pub fn entry_remove_receipt(id: &str, field: &str, value: &str) -> String {
+    format!("{id} {field} - {value}")
 }
 
 // ---- thread links (nxf 6j6v.8dbe) -------------------------------------------

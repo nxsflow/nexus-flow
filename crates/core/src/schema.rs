@@ -158,6 +158,23 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
              PRIMARY KEY(item_id, field)
          );
 
+         -- Plugin list fields (6j6v.4g6r): an observed-remove OR-set of entries per (item, list
+         -- field), adds and tombstones in ONE table. A row is one add, keyed by its op id (`tag`):
+         -- the add writes `value`/`label`/`lamport`/`site`, a remove that observed it writes
+         -- `removed = 1` — each only its own cells, so whichever arrives first, the row ends the
+         -- same. A row a remove wrote before its add arrived has no `value` and is no entry. The
+         -- present entries are the rows with a value and no tombstone, one entry per `value`,
+         -- labelled by its latest add (`model::present_entries`). Keyed with the item and field
+         -- leftmost, so one item's entries are one range — here and on a server, which reads them,
+         -- tombstones included, with one Query.
+         CREATE TABLE IF NOT EXISTS field_entries(
+             item_id TEXT NOT NULL, field TEXT NOT NULL, tag TEXT NOT NULL,
+             value TEXT, label TEXT,
+             lamport INTEGER, site INTEGER,
+             removed INTEGER DEFAULT 0,
+             PRIMARY KEY(item_id, field, tag)
+         );
+
          -- An item's creation and last change (6j6v.2kjy), folded (6j6v.vvw6): the `wall_clock` of
          -- the lowest and of the highest `(lamport, site)` among the ops that target the item. Its
          -- own table so a note or a custom field arriving before the item's own ops puts nothing
@@ -356,6 +373,7 @@ mod tests {
             "chunks",
             "chunk_superseded",
             "custom_fields",
+            "field_entries",
             "thread_link_adds",
             "thread_link_removes",
             "present_edges",

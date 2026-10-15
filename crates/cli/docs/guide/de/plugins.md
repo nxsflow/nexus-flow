@@ -151,6 +151,76 @@ das Plugin ist, wie ein bestimmtes Publikum sie liest und rankt. Ein Plugin bei 
 ist daher eine echte Entscheidung; führen Sie `nxf init --help` aus, um die Optionen zu sehen,
 bevor Sie sich festlegen.
 
+## Eigene Felder deklarieren
+
+Ein Plugin kann seinen Typen unter `[fields.<name>]` eigene Felder geben. `nxf schema --json`
+listet sie mit `"custom": true` und ihrer `kind`; `create` und `update` setzen sie mit
+`--set <name>=<wert>`; `show --json` und die Listen geben die gesetzten unter `custom` zurück. Ein
+leerer Wert löscht ein Feld.
+
+```toml
+[fields.stage]
+type = "enum"
+values = ["backlog", "active", "done"]
+on = ["project"]          # die Typen, für die es gilt; weglassen heißt: für jeden Typ
+
+[fields.occurred_on]
+type = "datetime"
+label = "Occurred on"
+```
+
+Der `type` entscheidet, was ein Wert sein darf:
+
+- `text` und `longtext`: beliebiger Text.
+- `date`: ein Datum (`2026-10-12`) oder ein RFC-3339-Zeitstempel, gespeichert wie angegeben.
+- `datetime`: ein Zeitpunkt, als RFC-3339-Zeitstempel **mit Zeitzone** — `Z` oder ein Offset wie
+  `+02:00`. Gespeichert wird derselbe Zeitpunkt in UTC auf ganze Sekunden:
+  `--set occurred_on=2026-10-12T10:30:00+02:00` speichert `2026-10-12T08:30:00Z`. Ein reines Datum
+  oder eine Uhrzeit ohne Zone wird abgelehnt. Weil jeder Wert dieselbe Form hat, sortieren
+  `datetime`-Werte überall zeitlich, wo ein Feld gelesen wird, etwa im `of = { field = "..." }`
+  eines Ranking-Schlüssels. Der eingegebene Offset bleibt nicht erhalten.
+- `enum`: einer der deklarierten `values`.
+
+### Listenfelder
+
+`list = true` lässt ein Feld mehrere Einträge statt eines Werts halten — etwa die E-Mail-Adressen
+einer Person. Jeder Eintrag ist ein Wert des `type` des Felds (`text`, `date`, `datetime` oder
+`enum`, geprüft wie oben) und kann eine eigene Kennzeichnung tragen, etwa `work` oder `private`:
+
+```toml
+[fields.email]
+type = "text"
+list = true
+on = ["person"]
+```
+
+```
+nxf entry add <id> email ada@work.example --label work
+nxf entry add <id> email ada@home.example
+nxf entry list <id> email
+nxf entry remove <id> email ada@home.example
+nxf update <id> --set email=          # leert die Liste
+```
+
+`show --json` und die Listen geben die Einträge unter `custom` zurück, in der Reihenfolge, in der
+ihre Werte zuerst hinzugefügt wurden: `"email": [{"value": "ada@work.example", "label": "work"},
+...]`, `label` nur, wo es eine gibt. `nxf schema --json` markiert das Feld mit `"list": true`. Über
+MCP heißen die Verben `flow_entry_add`, `flow_entry_remove` und `flow_entry_list`.
+
+Der Wert ist der Eintrag: Wer einen Wert hinzufügt, den die Liste schon hat, gibt diesem Eintrag
+die neue Kennzeichnung (oder keine, ohne `--label`), statt ihn doppelt anzulegen; wer einen Wert
+entfernt, entfernt ihn mit jeder Kennzeichnung. Zwei Geräte dürfen gleichzeitig hinzufügen und
+entfernen: Eine Adresse, die auf dem einen hinzukommt, übersteht ein Entfernen auf dem anderen, das
+sie nie gesehen hat, und beide enden mit derselben Liste. `--set` leert ein Listenfeld nur; ein
+Listenfeld kann weder `required` noch `longtext` sein, kein `merge` haben und nicht ranken.
+
+`entry add` und `entry remove` geben den Eintrag so aus, wie er gespeichert ist: Ein
+`datetime`-Eintrag, eingegeben als `10:30:00+02:00`, erscheint als `08:30:00Z`, und ein
+`datetime`-Eintrag lässt sich mit demselben Zeitpunkt in jedem Offset entfernen. Jeder Eintrag, den
+du siehst, lässt sich entfernen: `entry remove` prüft weder den Wert gegen den Typ des Felds (einen
+inzwischen gestrichenen Enum-Wert) noch `on` (einen Typ, den das Plugin inzwischen ausnimmt). Der
+Name eines Listenfelds hat höchstens 64 Zeichen.
+
 ## Ein Ranking deklarieren
 
 Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie

@@ -85,6 +85,9 @@ Link a chat thread to a board item, or list what a thread is about. This is how 
 nxf\-label(1)
 Add, remove, or list user labels (free\-text tags) on an item. A label is user vocabulary, distinct from the plugin\*(Aqs display type; filter `list`/`next` with `\-\-label`
 .TP
+nxf\-entry(1)
+Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[fields]` declaration, e.g. a person\*(Aqs e\-mail addresses). An entry is a value of the field\*(Aqs type with an optional label (`work`, `private`, …); the value is its identity. Entries merge as an observed\-remove set: adds and removes made concurrently on two devices both survive, and an add the remover had not seen wins. `update \-\-set <field>=` (empty) clears the list. Run `nxf schema` for the active plugin\*(Aqs list fields
+.TP
 nxf\-note(1)
 Add or list notes (the change/worklog stream) on an item
 .TP

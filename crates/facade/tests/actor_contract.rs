@@ -66,6 +66,15 @@ fn fixture(n: usize) -> (Store, PluginConfig, Vec<String>) {
     (s, cfg, ids)
 }
 
+/// The issue-tracker config with one list field, `mirrors` (6j6v.4g6r) — what the entry writes
+/// need beyond a bundled plugin, which declares no fields.
+fn list_cfg() -> PluginConfig {
+    let mut cfg = cfg();
+    let decl: plugin::FieldDecl = toml::from_str("type = \"text\"\nlist = true").unwrap();
+    cfg.fields.insert("mirrors".into(), decl);
+    cfg
+}
+
 /// A fresh store holding one CLOSED issue — the precondition `archive` needs to write anything.
 fn closed_fixture() -> (Store, PluginConfig, String) {
     let (mut s, cfg, ids) = fixture(1);
@@ -224,6 +233,27 @@ fn cases() -> Vec<Case> {
                 write::label_add(&mut s, NOW, SEEDER, &ids[0], "urgent").unwrap();
                 let before = s.export().len();
                 let r = write::label_remove(&mut s, NOW, b.actor, &ids[0], "urgent");
+                outcome(&s, before, r)
+            }),
+        ),
+        (
+            "entry_add",
+            Box::new(|b: &Boundary| {
+                let (mut s, _, ids) = fixture(1);
+                let cfg = list_cfg();
+                let before = s.export().len();
+                let r = write::entry_add(&mut s, &cfg, NOW, b.actor, &ids[0], "mirrors", "m", None);
+                outcome(&s, before, r)
+            }),
+        ),
+        (
+            "entry_remove",
+            Box::new(|b: &Boundary| {
+                let (mut s, _, ids) = fixture(1);
+                let cfg = list_cfg();
+                write::entry_add(&mut s, &cfg, NOW, SEEDER, &ids[0], "mirrors", "m", None).unwrap();
+                let before = s.export().len();
+                let r = write::entry_remove(&mut s, &cfg, NOW, b.actor, &ids[0], "mirrors", "m");
                 outcome(&s, before, r)
             }),
         ),

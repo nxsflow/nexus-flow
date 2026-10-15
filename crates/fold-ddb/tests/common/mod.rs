@@ -47,6 +47,19 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
         if step % 9 == 4 {
             s.set_field(&a, "type", Some(TYPES[step % TYPES.len()].into()), "u");
         }
+        // List-field entries (6j6v.4g6r), on the step alone as the retype above: adds of three
+        // values, labelled or not — a re-add relabels — removes of one value, and now and then a
+        // clear, so the two replicas add and remove the same entries concurrently.
+        match step % 7 {
+            1 | 3 => {
+                let label = ["work", "home"][step % 2];
+                let label = (step % 3 != 0).then_some(label);
+                s.add_field_entry(&a, "emails", &format!("e{}@x", step % 3), label, "u");
+            }
+            5 if step % 3 == 2 => s.clear_field_entries(&a, "emails", "u"),
+            5 => s.remove_field_entry(&a, "emails", &format!("e{}@x", step % 3), "u"),
+            _ => {}
+        }
         match r.next(16) {
             0 => s.create_item(&a, "task", "T", "u"),
             1 => s.set_field(&a, "status", Some("in_progress".into()), "u"),
