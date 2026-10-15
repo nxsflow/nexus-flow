@@ -620,6 +620,100 @@ them **off every path a sync pass, a hydration or the cap sees.**
 
 ## 7. Hand-over: what app-foundations' engine-server must change (it is paused)
 
+### 7.0 The format-2 contract, as BUILT (6j6v.0cfa, slice 1's smallest cut)
+
+**Status: built and merged in nexus-flow.** This subsection is the normative one for
+app-foundations — §7.1 onwards is the original plan, and where the two differ, this one is what the
+code does. Everything here is `cargo doc`-visible on the named items.
+
+**The seam is still `nxs_sync::snapshot`.** Two functions, one envelope, and format 1 stays
+readable by every build:
+
+```rust
+// Take one (the local service, or the hosted engine for a hosted stream):
+nxs_sync::snapshot::export_based(
+    &store, local_site, &stream, &marks, &transport,
+    nxs_sync::snapshot::PLATFORM,          // the ONE product list; see below
+) -> Result<Vec<u8>, SnapshotError>
+
+// Start a replica from one — UNCHANGED signature, so `start_from_snapshot` keeps its call:
+nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport) -> Result<Imported, SnapshotError>
+
+// Size one without loading it (what `Capped` needs):
+nxs_sync::snapshot::peek(&bytes) -> Result<Header, SnapshotError>
+
+// The envelope opened, for the board fold rather than a replica:
+nxs_sync::snapshot::unpack_image(&bytes) -> Result<(Header, nxs_foundation::image::Image), SnapshotError>
+nxs_fold_ddb::snapshot::from_image(&image, stream_id) -> Result<Snapshot, FromImageError>
+```
+
+**Three things the hosted engine MUST do that it does not do today.**
+
+1. **Register every platform reducer on the store before importing.** One database holds all three
+   products, and a based snapshot carries all three products' views with no log to fold them from.
+   A store that registers only flow's task reducer is refused by name
+   (`SnapshotError::NeedsRevision { ours: None, domain: "message" }`) rather than silently dropping
+   chat's and memory's state. The two lines:
+
+   ```rust
+   store.register_reducer(Box::new(nexus_chat::message_reducer::MessageReducer));
+   store.register_reducer(Box::new(nexus_memory::fact_reducer::FactReducer));
+   ```
+
+   Only for a based snapshot. On the format-1 path they would change the store's summed fold
+   revision and make every format-1 import refold what it could have taken.
+
+2. **Count `header.base`, not `header.ops`.** `Capped` starts from what the FILE carries — the
+   residue plus the kept domains, which is `header.ops` of a format-2 file — and the snapshot's
+   unpacked bytes. `header.base.residue` says how many of those ops no reducer could fold, and
+   `header.base.ops_through_p` how many ops the writer held below the position (what was NOT
+   carried). The budget then counts the tail as today. Update `AGENTS.md` "Limits".
+
+3. **Branch the fallback chain on these names.** Each one means "this snapshot cannot start this
+   replica, nothing was written, try the next source":
+
+   | `SnapshotError` variant | what it means |
+   |---|---|
+   | `NeedsRevision { of, domain, snapshot, ours }` | a product's views were folded by other rules than this build's (`ours: Some`), or this store registers no reducer for a product the snapshot carries (`ours: None`). A based snapshot's views are TAKEN or refused — there is no log to fold instead. |
+   | `MissingViews { domain }` | the snapshot carries no views for a product THIS build folds. |
+   | `AnchorMismatch { position }` | the relay does not hold the op the snapshot names at its position. A format-1 snapshot answers this by pulling from 0; a based one cannot, so it refuses. |
+   | `FormatTooNew { found, supported }` | a newer nxs wrote it. |
+   | `Corrupt(String)` | the header and the body disagree, or the bytes are not a snapshot. |
+   | `Unpushed`, `Unbacked`, `NotFolded` | export-side refusals, for the publish step. |
+
+   `Untrusted` and `Incomplete` are NOT in this cut: the trust list (D2) and the relay's
+   count-and-digest route (§4.3) are out of its scope. The digest IS carried
+   (`header.base.digest_through_p`, `ops_through_p`), so the check can be added without a format
+   change.
+
+**What the format carries, and what it does not.** `nxs_sync::snapshot::Header` gains
+`revisions: BTreeMap<String, i64>` (per-domain fold revision) and `base: Option<Base>`;
+`Base` is `{ clock, ops_through_p, digest_through_p, residue, kept_domains }`. The body's
+`nxs_foundation::image::Image` gains `base: Option<Base>` with
+`{ relay_position, clock, residue, kept_domains, view_bases }`, and the two halves are checked
+against each other at import. `base: None` is format-1 semantics in both. Hidden-payload elision
+(D10) is NOT in this cut (owner, 2026-10-14): a based snapshot still carries superseded chunk
+bodies, removed add rows and redacted note bodies. That is the one size lever still unpulled, and
+it is tracked separately.
+
+**The three substrate consequences, which an embedder must know about:**
+
+- **The clock travels in the snapshot.** `log_base.clock` is a term of `high_water_mark`, so a
+  based replica's first write mints above the state it imported. Without it every first write would
+  lose, silently (§3, L1).
+- **A based database carries its OWN compatibility floor** (`schema::BASED_MIN_COMPATIBLE = 9`,
+  stamped into that file's `application_id` by the import). A binary that cannot read `log_base`
+  refuses the file instead of minting against a clock of zero. The GLOBAL floor stays at 4, so no
+  ordinary workspace is affected.
+- **Rebuilding a based store's views is refused, by name.** `refold_if_behind` and `force_refold`
+  now return `Result<(), nxs_foundation::image::NeedsHistory>`, and the three product `open`s
+  surface it as a handled sqlite error (as the skew gate does). A rebuild's first act is to EMPTY
+  the views it would re-derive from the whole log; a based store has no such log, so the honest
+  answer is a re-bootstrap from a snapshot at this build's revisions. `remap_prefix` is the other
+  path, and it is why a replica registers its id prefix BEFORE importing, not after.
+
+### 7.1 The rest of the hand-over (plan, unchanged)
+
 **engine-server** (`crates/engine-server`):
 
 1. **Pin** the nexus-flow release that ships format 2 (today it pins `v0.209.0`,

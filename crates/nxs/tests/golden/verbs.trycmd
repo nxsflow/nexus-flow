@@ -20,7 +20,7 @@ Cross-module diagnosis of the shared workspace (foundation-only):
 
 ```console
 $ nxs doctor --json
-{"workspace":"[CWD]/.nxs","site_id":1,"prefix":"ab12","active_modules":["flow","memory"],"schema_version":8,"schema_supported":8,"schema_status":"current","sync_bound":false,"op_count":0,"duplicate_coordinates":0,"integrity_ok":true,"beads_residue":false}
+{"workspace":"[CWD]/.nxs","site_id":1,"prefix":"ab12","active_modules":["flow","memory"],"schema_version":9,"schema_supported":9,"schema_status":"current","sync_bound":false,"op_count":0,"duplicate_coordinates":0,"integrity_ok":true,"beads_residue":false}
 
 ```
 

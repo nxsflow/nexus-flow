@@ -1657,4 +1657,347 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    // ── Format 2: a snapshot with a BASE instead of the ops below its position (6j6v.0cfa) ──
+
+    /// The one product a flow store folds. The platform's three are [`PLATFORM`]; a store with only
+    /// the task reducer can carry only this one, and saying so is what [`export_based`] checks.
+    const FLOW_ONLY: &[Product] = &[Product {
+        of: "flow",
+        domain: "task",
+        keep_log: false,
+    }];
+
+    /// A writer that pulled `ops` of the relay and nothing of its own.
+    fn caught_up(relay: &dyn Transport, site: i64) -> (Store, Watermarks) {
+        let mut store = Store::open_in_memory(site);
+        let mut marks = Watermarks::default();
+        loop {
+            let before = marks.pulled_through;
+            engine::sync(&mut store, site, &stream(), &mut marks, relay, 500, &Unbounded).unwrap();
+            if marks.pulled_through == before {
+                return (store, marks);
+            }
+        }
+    }
+
+    /// A small stream on the relay double, written by one replica and pushed.
+    fn written(relay: &Relay, items: usize) -> i64 {
+        let mut w = Store::open_in_memory(11);
+        let mut marks = Watermarks::default();
+        for n in 0..items {
+            w.create_item(&format!("wa.{n}"), "task", "t", "wa");
+            w.set_field(&format!("wa.{n}"), "status", Some("open".into()), "wa");
+        }
+        pass(&mut w, 11, &mut marks, relay);
+        marks.pulled_through
+    }
+
+    /// Unpack a snapshot's JSON, hand it to `tamper`, and pack it again — for the checks that must
+    /// refuse a file whose halves disagree, which no honest writer produces.
+    fn retamper(bytes: &[u8], tamper: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        let json = unpack(bytes, MAX_UNPACKED_BYTES).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        tamper(&mut value);
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        serde_json::to_writer(&mut gz, &value).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// A based snapshot carries the state and NOT the ops the state stands in for — and its header
+    /// says exactly that, readable without unpacking the body.
+    #[test]
+    fn a_based_snapshot_carries_the_state_and_not_the_log_below_its_position() {
+        let relay = Relay::new(1, 0);
+        let p = written(&relay, 20);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes =
+            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let header = peek(&bytes).unwrap();
+        assert_eq!(header.format, FORMAT_BASED);
+        assert_eq!(header.pulled_through, p);
+        assert_eq!(header.ops, 0, "every op was folded, so none is carried");
+        let base = header.base.unwrap();
+        assert_eq!(base.ops_through_p, writer.op_count() as usize);
+        assert_eq!(base.residue, 0);
+        assert!(base.kept_domains.is_empty());
+        assert_eq!(base.clock, writer.clock());
+        assert_eq!(header.revisions, BTreeMap::from([("task".to_string(), 0)]));
+        // And a with-log snapshot of the same replica still carries all of it.
+        let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
+        assert_eq!(peek(&with_log).unwrap().ops, writer.op_count() as usize);
+        assert!(bytes.len() < with_log.len());
+    }
+
+    /// A based snapshot plus the tail equals the whole history — held here on the smallest stream
+    /// that has a tail at all. The acceptance-scale differential across three products lives in
+    /// `nxs-fold-ddb`'s `based_differential`, which is where the generator and the server half are.
+    #[test]
+    fn a_based_snapshot_plus_the_tail_folds_to_exactly_the_whole_history() {
+        let relay = Relay::new(2, 0);
+        let p = written(&relay, 12);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes =
+            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        // The stream grows past the snapshot.
+        let mut later = Store::open_in_memory(13);
+        let mut later_marks = Watermarks::default();
+        pass(&mut later, 13, &mut later_marks, &relay);
+        later.create_item("wb.1", "task", "after", "wb");
+        later.set_field("wa.3", "status", Some("closed".into()), "wb");
+        later.add_edge("wb.1", "wa.3", EdgeKind::Dep, "wb");
+        pass(&mut later, 13, &mut later_marks, &relay);
+        assert!(relay.len() as i64 > p);
+
+        let mut based = Store::open_in_memory(14);
+        let imported = import(&mut based, &bytes, &stream(), &relay).unwrap();
+        assert_eq!(imported.anchor, Anchor::Confirmed);
+        assert_eq!(imported.marks.pulled_through, p);
+        let mut marks = imported.marks;
+        pass(&mut based, 14, &mut marks, &relay);
+
+        let (replayed, _) = caught_up(&relay, 15);
+        assert_eq!(state(&based), state(&replayed));
+    }
+
+    /// A based replica's first write beats the state it imported (spec §3, L1) — the clock floor
+    /// travels in the snapshot, and the local store has no ops to read it off.
+    #[test]
+    fn a_based_replica_mints_above_the_clock_the_snapshot_carried() {
+        let relay = Relay::new(3, 0);
+        written(&relay, 8);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes =
+            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let mut based = Store::open_in_memory(14);
+        import(&mut based, &bytes, &stream(), &relay).unwrap();
+        assert_eq!(based.op_count(), 0, "no log to read a clock off");
+        let before: String = based
+            .connection()
+            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, "open", "the snapshot brought the register");
+        based.set_field("wa.1", "status", Some("closed".into()), "me");
+        let after: String = based
+            .connection()
+            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, "closed",
+            "the local write won, so it was minted above the register the snapshot brought"
+        );
+        assert!(based.clock() >= writer.clock());
+    }
+
+    /// A position the relay does not confirm: a with-log snapshot pulls from the start instead, a
+    /// based one cannot — it holds nothing below its position — so it refuses by name and the
+    /// caller falls back.
+    #[test]
+    fn a_based_import_refuses_a_position_the_relay_does_not_confirm() {
+        let relay = Relay::new(4, 0);
+        written(&relay, 6);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes =
+            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+
+        // Another relay, holding another stream's ops at the same positions.
+        let other = Relay::new(5, 0);
+        written(&other, 6);
+        let mut based = Store::open_in_memory(14);
+        let err = import(&mut based, &bytes, &stream(), &other).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::AnchorMismatch { .. }),
+            "{err}"
+        );
+        assert_eq!(based.op_count(), 0, "a refusal writes nothing");
+        assert!(based.list_items().unwrap().is_empty());
+
+        // The with-log snapshot of the same replica takes the other road, unchanged.
+        let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
+        let mut fallback = Store::open_in_memory(15);
+        let imported = import(&mut fallback, &with_log, &stream(), &other).unwrap();
+        assert_eq!(imported.anchor, Anchor::Mismatch);
+        assert_eq!(imported.marks.pulled_through, 0);
+    }
+
+    /// A product whose reducer is not registered has no views in the image to carry, so the export
+    /// refuses rather than writing a snapshot that leaves a product out.
+    #[test]
+    fn export_based_refuses_a_product_whose_reducer_is_not_registered() {
+        let relay = Relay::new(6, 0);
+        written(&relay, 4);
+        let (writer, marks) = caught_up(&relay, 12);
+        let err = export_based(&writer, 12, &stream(), &marks, &relay, PLATFORM).unwrap_err();
+        assert!(
+            matches!(&err, SnapshotError::NotFolded { domain } if domain == "message"),
+            "{err}"
+        );
+    }
+
+    /// Everything [`export`] refuses, [`export_based`] refuses too.
+    #[test]
+    fn export_based_refuses_unpushed_ops_and_a_position_this_relay_does_not_back() {
+        let relay = Relay::new(7, 0);
+        written(&relay, 4);
+        let (mut writer, marks) = caught_up(&relay, 12);
+        writer.create_item("mine.1", "task", "t", "me");
+        let err = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap_err();
+        assert!(matches!(err, SnapshotError::Unpushed { ops: 1 }), "{err}");
+
+        let (clean, mut marks) = caught_up(&relay, 13);
+        marks.pulled_through += 5; // a position this relay does not hold
+        let err = export_based(&clean, 13, &stream(), &marks, &relay, FLOW_ONLY).unwrap_err();
+        assert!(matches!(err, SnapshotError::Unbacked { .. }), "{err}");
+    }
+
+    /// A snapshot whose header and body disagree about its base is refused, not believed in
+    /// whichever half a reader happens to look at.
+    #[test]
+    fn a_snapshot_whose_halves_disagree_about_its_base_is_refused() {
+        let relay = Relay::new(8, 0);
+        written(&relay, 6);
+        let (writer, marks) = caught_up(&relay, 12);
+        let good = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+
+        let tampered: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "a header clock the base does not carry",
+                retamper(&good, |v| v["base"]["clock"] = serde_json::json!(1)),
+            ),
+            (
+                "a residue count the base does not carry",
+                retamper(&good, |v| v["base"]["residue"] = serde_json::json!(3)),
+            ),
+            (
+                "kept domains the base does not carry",
+                retamper(&good, |v| {
+                    v["base"]["kept_domains"] = serde_json::json!(["message"])
+                }),
+            ),
+            (
+                "a revision the views were not folded at",
+                retamper(&good, |v| {
+                    v["revisions"] = serde_json::json!({ "task": 9 })
+                }),
+            ),
+            (
+                "a base position its header does not claim",
+                retamper(&good, |v| {
+                    v["image"]["base"]["relay_position"] = serde_json::json!(2)
+                }),
+            ),
+            (
+                "format 2 with no base at all",
+                retamper(&good, |v| {
+                    v.as_object_mut().unwrap().remove("base");
+                    v["image"].as_object_mut().unwrap().remove("base");
+                }),
+            ),
+            (
+                "a base under a format-1 header",
+                retamper(&good, |v| v["format"] = serde_json::json!(1)),
+            ),
+        ];
+        for (what, bytes) in tampered {
+            let mut store = Store::open_in_memory(14);
+            let err = import(&mut store, &bytes, &stream(), &relay).unwrap_err();
+            assert!(
+                matches!(err, SnapshotError::Corrupt(_)),
+                "{what}: {err}"
+            );
+            assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
+        }
+        // The untampered one still loads, so the tampering is what the refusals are about.
+        let mut store = Store::open_in_memory(15);
+        import(&mut store, &good, &stream(), &relay).unwrap();
+    }
+
+    /// A format newer than this build reads is refused as NEWER, from the header alone — the base
+    /// does not change that, and a reader must not try to interpret a shape it does not know.
+    #[test]
+    fn a_format_newer_than_this_build_is_refused_as_newer() {
+        let relay = Relay::new(9, 0);
+        written(&relay, 4);
+        let (writer, marks) = caught_up(&relay, 12);
+        let good = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let newer = retamper(&good, |v| v["format"] = serde_json::json!(FORMAT + 1));
+        let mut store = Store::open_in_memory(14);
+        assert!(matches!(
+            import(&mut store, &newer, &stream(), &relay).unwrap_err(),
+            SnapshotError::FormatTooNew { found, supported }
+                if found == FORMAT + 1 && supported == FORMAT
+        ));
+        assert!(matches!(
+            peek(&newer).unwrap_err(),
+            SnapshotError::FormatTooNew { .. }
+        ));
+    }
+
+    /// The digest over the dropped prefix is order-free (the two sides enumerate differently) and
+    /// changes when the set does (a missing op is what it exists to catch).
+    #[test]
+    fn the_digest_is_order_free_and_notices_a_missing_op() {
+        let relay = Relay::new(10, 0);
+        written(&relay, 10);
+        let (full, _) = caught_up(&relay, 12);
+        let (count, whole) = digest(&full).unwrap();
+        assert_eq!(count, full.op_count() as usize);
+
+        // The same ops, taken in in another order: the same digest.
+        let mut other = Store::open_in_memory(13);
+        let mut ops = full.export();
+        ops.reverse();
+        other.apply(&ops);
+        assert_eq!(digest(&other).unwrap(), (count, whole.clone()));
+
+        // One op short: a different digest.
+        let mut short = Store::open_in_memory(14);
+        short.apply(&ops[1..]);
+        let (fewer, missing_one) = digest(&short).unwrap();
+        assert_eq!(fewer, count - 1);
+        assert_ne!(missing_one, whole);
+    }
+
+    /// The envelope opened for a reader that folds the views elsewhere — with the same refusals as
+    /// an import, so the two readers of one format cannot disagree about what a snapshot is.
+    #[test]
+    fn unpack_image_hands_back_the_header_and_the_image_it_describes() {
+        let relay = Relay::new(11, 0);
+        let p = written(&relay, 7);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let (header, image) = unpack_image(&bytes).unwrap();
+        assert_eq!(header.pulled_through, p);
+        assert!(image.based());
+        assert_eq!(image.base.as_ref().unwrap().relay_position, p);
+        use nxs_foundation::reducer::Reducer;
+        assert_eq!(
+            image.views.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            nexus_flow_core::task_reducer::TaskReducer
+                .view_tables()
+                .to_vec()
+        );
+        let broken = retamper(&bytes, |v| v["base"]["clock"] = serde_json::json!(7));
+        assert!(matches!(
+            unpack_image(&broken).unwrap_err(),
+            SnapshotError::Corrupt(_)
+        ));
+    }
+
+    /// The platform list is the one description of the platform, and chat is the one product that
+    /// keeps its log (spec D9).
+    #[test]
+    fn the_platform_list_keeps_chats_log_and_drops_the_others() {
+        assert_eq!(
+            PLATFORM
+                .iter()
+                .map(|p| (p.of, p.domain, p.keep_log))
+                .collect::<Vec<_>>(),
+            vec![
+                ("flow", "task", false),
+                ("chat", "message", true),
+                ("memory", "fact", false),
+            ]
+        );
+    }
 }
