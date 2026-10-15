@@ -583,3 +583,76 @@ fn a_new_machine_whose_prefix_is_taken_is_reassigned_before_the_import_and_the_s
         "the source's items keep their ids"
     );
 }
+
+/// **A based snapshot is taken only from a signer the bind names** (6j6v.0cfa, spec D2). Without
+/// `--trust-signer` it is refused by name — the refusal names the key that signed it — and the
+/// workspace is left as found; with it, the new machine starts from the state and pulls only what
+/// came after, and its board is the source's.
+#[test]
+fn a_based_snapshot_starts_a_new_machine_only_from_a_signer_the_bind_names() {
+    let relay = relay();
+    let source = machine();
+    let (h, w) = (source.home.path(), source.ws.as_path());
+    json(
+        "nxs",
+        h,
+        w,
+        &["sync", "bind", "--create", "--endpoint", &relay, "--no-daemon", "--json"],
+    );
+    let a = create(&source, "one");
+    let b = create(&source, "two");
+    json("nxf", h, w, &["dep", "add", &b, &a, "--json"]);
+    json("nxs", h, w, &["sync", "run", "--json"]);
+    let file = source.ws.join("based.snapshot");
+    let file = file.to_str().unwrap();
+    let taken = json("nxs", h, w, &["sync", "snapshot", file, "--based", "--json"]);
+    assert_eq!(taken["format"], 2, "{taken}");
+    let signer = taken["signer"].as_str().unwrap().to_string();
+    assert!(signer.starts_with("ed25519:"), "{taken}");
+
+    json("nxf", h, w, &["close", &a, "--reason", "done", "--json"]);
+    let rest = json("nxs", h, w, &["sync", "run", "--json"])["pushed"]
+        .as_u64()
+        .unwrap();
+
+    let fresh = machine();
+    let (fh, fw) = (fresh.home.path(), fresh.ws.as_path());
+    let refused = run(
+        "nxs",
+        fh,
+        fw,
+        &["sync", "bind", "--snapshot", file, "--endpoint", &relay, "--no-daemon", "--json"],
+    );
+    assert!(!refused.status.success());
+    let said = String::from_utf8_lossy(&refused.stderr).to_string()
+        + &String::from_utf8_lossy(&refused.stdout);
+    assert!(said.contains(&signer), "the refusal names the signer: {said}");
+    assert!(!fw.join(".nxs/sync.toml").exists(), "and leaves it unbound");
+    assert_eq!(board(fh, fw, &["list", "--json"]), serde_json::json!([]));
+
+    let bound = json(
+        "nxs",
+        fh,
+        fw,
+        &[
+            "sync",
+            "bind",
+            "--snapshot",
+            file,
+            "--trust-signer",
+            &signer,
+            "--endpoint",
+            &relay,
+            "--no-daemon",
+            "--json",
+        ],
+    );
+    assert_eq!(bound["snapshot"]["format"], 2, "{bound}");
+    assert_eq!(bound["snapshot"]["signer"], signer.as_str(), "{bound}");
+    assert_eq!(bound["snapshot"]["views"], "taken", "{bound}");
+    let pass = json("nxs", fh, fw, &["sync", "run", "--json"]);
+    assert_eq!(pass["pulled"].as_u64().unwrap(), rest, "only the rest: {pass}");
+    for args in [&["next", "--json"][..], &["list", "--json"][..]] {
+        assert_eq!(board(fh, fw, args), board(h, w, args), "nxf {}", args.join(" "));
+    }
+}

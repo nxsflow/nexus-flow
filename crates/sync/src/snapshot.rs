@@ -109,6 +109,25 @@ pub struct Header {
     /// whole log rides along.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<Base>,
+    /// Who took it, and their signature over the header and the body (format 2 only; 6j6v.0cfa,
+    /// spec §4.3). A based snapshot replaces ops, so for the first time somebody else decides a
+    /// replica's STATE — [`import`] believes it only from a signer on the list it is handed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<Signer>,
+}
+
+/// The signer of a format-2 snapshot: the replica key (`.nxs/signing.key`) of the replica that took
+/// it, and its signature (6j6v.0cfa).
+///
+/// **What is signed** is one SHA-256 over the header — with this field present and `sig` empty, so
+/// the key id is covered too — and the body, each in its JSON form, under the domain tag
+/// `nxs-snapshot/1` (see `nxs_foundation::signing::snapshot_message`), so the signature can never
+/// be read as an op's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signer {
+    /// `ed25519:<base64url public key>` — what an importer's signer list names.
+    pub key_id: String,
+    pub sig: String,
 }
 
 /// What a format-2 snapshot says about its base, readable from the header alone (spec §4.2).
@@ -152,9 +171,17 @@ pub struct Imported {
     /// `0` when the relay did not confirm it ([`Anchor::Mismatch`]).
     pub marks: Watermarks,
     pub header: Header,
-    /// Whether the views were taken as they came or folded again from the log.
+    /// Whether the views were taken as they came or folded again from the log. A based snapshot
+    /// answers [`Loaded::Views`] or is refused — never [`Loaded::Refolded`].
     pub loaded: Loaded,
     pub anchor: Anchor,
+    /// How many of the ops the import wrote are RESIDUE — ops the writer stored but could not fold
+    /// (spec L5/L6) — and how many are KEPT: every other op it carried (a kept domain's log in a
+    /// based snapshot, the whole log in a format-1 one). **The store holds exactly
+    /// `residue + kept` ops after the import** — it was empty before — so a caller that budgets
+    /// ops (the hosted engine's cap) can count what it was handed without re-reading the store.
+    pub residue: usize,
+    pub kept: usize,
 }
 
 /// Whether the relay confirmed the snapshot's position (see the module doc).
@@ -194,13 +221,24 @@ pub enum SnapshotError {
     /// The bytes are not a snapshot.
     Corrupt(String),
     /// A BASED snapshot whose views this build cannot take as they are, and whose log it does not
-    /// carry to fold instead (6j6v.0cfa, spec §4.5). The caller falls back: another snapshot, or a
-    /// full replay. `ours` is `None` when this store registers no reducer for that domain at all.
-    NeedsRevision {
-        of: String,
-        domain: String,
-        snapshot: i64,
-        ours: Option<i64>,
+    /// carry to fold instead (6j6v.0cfa, spec §4.5) — whichever dimension differs ([`Mismatch`]).
+    /// A based snapshot is TAKEN or REFUSED, never folded again. The caller falls back: another
+    /// snapshot, or a full replay.
+    NeedsRevision(Mismatch),
+    /// A format-2 snapshot that no signer on the importer's list vouches for (spec D2): unsigned, a
+    /// signature that does not hold over these bytes, or a key the list does not name. `signer` is
+    /// the key id the file claims, when it claims one — what a caller shows before trusting it.
+    Untrusted {
+        signer: Option<String>,
+        why: String,
+    },
+    /// A format-2 snapshot whose body does not account for what its header claims: the carried log
+    /// is not residue plus the kept domains, or the count and digest of every op the writer held
+    /// do not come out of the dropped and the carried ops. Checked after the signature, so it means
+    /// a writer that was itself incomplete, not a file that was tampered with. (The relay-side
+    /// count-and-digest check of spec §4.3 will answer with this name too; it is not built yet.)
+    Incomplete {
+        why: String,
     },
     /// A product named for a based snapshot has no reducer on the exporting store, so its views are
     /// not in the image to carry — the snapshot would leave that product out. Register every
@@ -208,11 +246,11 @@ pub enum SnapshotError {
     NotFolded {
         domain: String,
     },
-    /// A BASED snapshot that carries no views for a product THIS build folds — so taking it would
-    /// leave that product with no state and no log to fold one from. Reachable when a build folds a
-    /// product the writer did not carry; the caller falls back, as for a revision mismatch.
-    MissingViews {
-        domain: String,
+    /// A path that needs the whole log, asked of a replica that started from a based snapshot at
+    /// relay position `base` and holds no ops below it (6j6v.0cfa) — today: a format-1 export,
+    /// which promises the whole log. Take a based snapshot instead.
+    NeedsHistory {
+        base: i64,
     },
     /// A BASED snapshot whose position the relay does not confirm (spec §4.5 step 7). A format-1
     /// snapshot answers this by pulling from 0, which costs a full pull and no ops; a based one
@@ -224,6 +262,76 @@ pub enum SnapshotError {
     Image(ImageError),
     Storage(String),
     Transport(String),
+}
+
+/// Which dimension of a based snapshot's views this build cannot take (6j6v.0cfa) — each one a
+/// reason an ordinary snapshot would be folded again from its log, which a based one does not carry.
+///
+/// **The engine version is deliberately NOT one of them.** A format-1 snapshot compares it because
+/// its views could change without the schema moving and the version was the only proxy; a based
+/// snapshot carries each product's fold revision, which says exactly that (spec §4.2). Refusing on
+/// the version would refuse every snapshot across every release — a hosted stream past the replay
+/// cap could then not be started at all after an upgrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mismatch {
+    /// A product's views were folded at another revision than this build folds that domain at
+    /// (`ours: Some`), or this store registers no reducer for a domain the snapshot carries
+    /// (`ours: None`).
+    FoldRevision {
+        of: String,
+        domain: String,
+        snapshot: i64,
+        ours: Option<i64>,
+    },
+    /// The views come from another schema version than this build folds into.
+    Schema { snapshot: i64, ours: i64 },
+    /// The set of view tables differs: the snapshot carries none for a domain this build folds
+    /// (`domain`), or not every table or column this store folds into.
+    Views {
+        domain: Option<String>,
+        carried: Vec<String>,
+        folded: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mismatch::FoldRevision {
+                of,
+                domain,
+                snapshot,
+                ours: Some(ours),
+            } => write!(
+                f,
+                "the snapshot carries {of}'s views folded at revision {snapshot} and this nxs folds \
+                 {domain} at {ours}"
+            ),
+            Mismatch::FoldRevision { of, domain, .. } => write!(
+                f,
+                "the snapshot carries {of}'s views and this replica registers no reducer for the \
+                 {domain} domain — it would take that product's state and never fold another of \
+                 its ops"
+            ),
+            Mismatch::Schema { snapshot, ours } => write!(
+                f,
+                "the snapshot's views come from schema v{snapshot} and this nxs folds into v{ours}"
+            ),
+            Mismatch::Views {
+                domain: Some(domain),
+                ..
+            } => write!(
+                f,
+                "the snapshot carries no views for the {domain} domain, which this nxs folds"
+            ),
+            Mismatch::Views {
+                carried, folded, ..
+            } => write!(
+                f,
+                "the snapshot carries the views {carried:?} and this replica folds {folded:?}"
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -250,32 +358,37 @@ impl std::fmt::Display for SnapshotError {
                  upgrade nxs to start from it"
             ),
             SnapshotError::Corrupt(why) => write!(f, "not a readable snapshot: {why}"),
-            SnapshotError::NeedsRevision {
-                of,
-                domain,
-                snapshot,
-                ours: Some(ours),
+            SnapshotError::NeedsRevision(mismatch) => write!(
+                f,
+                "{mismatch}; a snapshot without the log below its position is taken as it is or \
+                 not at all, so start from one taken by this nxs's rules or replay the stream"
+            ),
+            SnapshotError::Untrusted {
+                signer: Some(signer),
+                why,
             } => write!(
                 f,
-                "the snapshot carries {of}'s views folded at revision {snapshot} and this nxs folds \
-                 {domain} at {ours}; it holds no ops below its position to fold again, so start \
-                 from a snapshot taken at revision {ours} or replay the stream"
+                "the snapshot is signed by {signer}, which is not trusted here ({why}) — check that \
+                 key and pass it as a trusted signer to start from this snapshot"
             ),
-            SnapshotError::NeedsRevision { of, domain, .. } => write!(
+            SnapshotError::Untrusted { signer: None, why } => {
+                write!(f, "the snapshot is not trusted here: {why}")
+            }
+            SnapshotError::Incomplete { why } => write!(
                 f,
-                "the snapshot carries {of}'s views and this replica registers no reducer for the \
-                 {domain} domain — it would take that product's state and never fold another of \
-                 its ops"
+                "the snapshot does not hold what it claims: {why} — take a new one from a replica \
+                 that pulled the whole stream"
             ),
             SnapshotError::NotFolded { domain } => write!(
                 f,
                 "this replica registers no reducer for the {domain} domain, so a based snapshot \
                  taken here would carry none of that product's state"
             ),
-            SnapshotError::MissingViews { domain } => write!(
+            SnapshotError::NeedsHistory { base } => write!(
                 f,
-                "the snapshot carries no views for the {domain} domain, which this nxs folds — and \
-                 no ops below its position to fold them from"
+                "this replica started from a snapshot at relay position {base} and holds no ops \
+                 below it, so it cannot write a snapshot that carries the whole log — take a \
+                 based one (`--based`) instead"
             ),
             SnapshotError::AnchorMismatch { position } => write!(
                 f,
@@ -293,7 +406,7 @@ impl std::fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {}
 
 impl From<ImageError> for SnapshotError {
-    /// The substrate's two based refusals get names of their own on this seam (spec §7): a hosted
+    /// The substrate's based refusals get names of their own on this seam (spec §7): a hosted
     /// caller branches on them to pick its next source, and reaching through `Image(..)` for that
     /// would make the fallback chain depend on the substrate's error shape.
     fn from(e: ImageError) -> SnapshotError {
@@ -303,13 +416,30 @@ impl From<ImageError> for SnapshotError {
                 domain,
                 snapshot,
                 ours,
-            } => SnapshotError::NeedsRevision {
+            } => SnapshotError::NeedsRevision(Mismatch::FoldRevision {
                 of,
                 domain,
                 snapshot,
                 ours,
-            },
-            ImageError::MissingViewBase { domain } => SnapshotError::MissingViews { domain },
+            }),
+            ImageError::NeedsSchema { written_at, ours } => {
+                SnapshotError::NeedsRevision(Mismatch::Schema {
+                    snapshot: written_at,
+                    ours,
+                })
+            }
+            ImageError::MissingViewBase { domain } => SnapshotError::NeedsRevision(Mismatch::Views {
+                domain: Some(domain),
+                carried: Vec::new(),
+                folded: Vec::new(),
+            }),
+            ImageError::ViewsDiffer { carried, folded } => {
+                SnapshotError::NeedsRevision(Mismatch::Views {
+                    domain: None,
+                    carried,
+                    folded,
+                })
+            }
             other => SnapshotError::Image(other),
         }
     }
@@ -360,6 +490,13 @@ pub fn export(
     if unpushed > 0 {
         return Err(SnapshotError::Unpushed { ops: unpushed });
     }
+    // A format-1 snapshot promises the WHOLE log. A replica that started from a based snapshot
+    // does not hold it, so what it would write is a short log under a promise of a whole one.
+    if let Some(base) = store.log_base() {
+        return Err(SnapshotError::NeedsHistory {
+            base: base.relay_position,
+        });
+    }
     let anchor = anchor_at(store, stream, marks, transport)?;
     let image = store.image()?;
     let envelope = Envelope {
@@ -372,6 +509,7 @@ pub fn export(
             ops: image.op_count(),
             revisions: BTreeMap::new(),
             base: None,
+            writer: None,
         },
         image,
     };
@@ -477,35 +615,80 @@ pub fn export_based(
         }
     }
     // Over the WHOLE log, before the image drops any of it, and streamed rather than materialized:
-    // a stream at the cap holds tens of thousands of ids.
-    let (ops_through_p, digest_through_p) = digest(store)?;
+    // a stream at the cap holds tens of thousands of ids. On a store that itself started from a
+    // based snapshot the log is not everything it knows: what ITS image dropped is carried in its
+    // base, and adds in — the digest is an XOR, so the halves combine without the ids.
+    let (logged, logged_digest) = digest(store)?;
+    let (before, before_digest) = match store.log_base() {
+        Some(b) => (b.dropped as usize, unhex(&b.dropped_digest)?),
+        None => (0, [0u8; 32]),
+    };
+    let ops_through_p = logged + before;
+    let whole = xor(logged_digest, before_digest);
     let anchor = anchor_at(store, stream, marks, transport)?;
-    let image = store.based_image(marks.pulled_through, &kept, view_bases)?;
-    let base = image
-        .base
-        .as_ref()
-        .expect("based_image carries a base")
-        .clone();
-    let envelope = Envelope {
+    let mut image = store.based_image(marks.pulled_through, &kept, view_bases)?;
+    let carried = image.op_count();
+    let carried_digest = digest_of(image.op_ids().into_iter());
+    let base = image.base.as_mut().expect("based_image carries a base");
+    base.anchor = anchor.clone();
+    base.dropped = ops_through_p - carried;
+    base.dropped_digest = hex(xor(whole, carried_digest));
+    let base = base.clone();
+    let mut envelope = Envelope {
         header: Header {
             format: FORMAT_BASED,
             stream_id: stream.as_str().to_string(),
             pulled_through: marks.pulled_through,
             anchor,
             engine: image.engine.clone(),
-            ops: image.op_count(),
+            ops: carried,
             revisions,
             base: Some(Base {
                 clock: base.clock,
                 ops_through_p,
-                digest_through_p,
+                digest_through_p: hex(whole),
                 residue: base.residue,
                 kept_domains: base.kept_domains.clone(),
             }),
+            writer: None,
         },
         image,
     };
+    envelope.header.writer = Some(Signer {
+        key_id: store.key_id().to_string(),
+        sig: String::new(),
+    });
+    let (_, sig) = store.sign_snapshot(&signed_digest(&envelope)?);
+    if let Some(w) = envelope.header.writer.as_mut() {
+        w.sig = sig;
+    }
     pack(&envelope)
+}
+
+/// The one digest a snapshot signature covers (6j6v.0cfa): SHA-256 over the header's JSON — with
+/// the writer's `sig` blanked, so the key id is covered and the signature is not — then the body's.
+/// Each half is length-prefixed, so no byte can move from one to the other.
+///
+/// Computed from the parsed structs on both sides, never from the bytes as they arrived: a body
+/// that parses and serializes back to other bytes than the writer's (a REAL cell holding an
+/// infinity, which JSON cannot spell) fails the signature and is refused, never believed.
+fn signed_digest(envelope: &Envelope) -> Result<[u8; 32], SnapshotError> {
+    use sha2::{Digest, Sha256};
+    let mut header = envelope.header.clone();
+    if let Some(w) = header.writer.as_mut() {
+        w.sig = String::new();
+    }
+    let encode = |what: &str, r: serde_json::Result<Vec<u8>>| {
+        r.map_err(|e| SnapshotError::Storage(format!("encoding the snapshot {what}: {e}")))
+    };
+    let header = encode("header", serde_json::to_vec(&header))?;
+    let body = encode("body", serde_json::to_vec(&envelope.image))?;
+    let mut h = Sha256::new();
+    h.update((header.len() as u64).to_be_bytes());
+    h.update(&header);
+    h.update((body.len() as u64).to_be_bytes());
+    h.update(&body);
+    Ok(h.finalize().into())
 }
 
 /// How many ops `store` holds and a commutative digest over their ids: the XOR of each id's
@@ -516,8 +699,7 @@ pub fn export_based(
 /// that reason alone and say nothing about completeness, which is the only question being asked.
 /// What XOR gives up is duplicate detection — a set is the right model here, and the log's primary
 /// key makes an op id unique anyway.
-fn digest(store: &Store) -> Result<(usize, String), SnapshotError> {
-    use sha2::{Digest, Sha256};
+fn digest(store: &Store) -> Result<(usize, [u8; 32]), SnapshotError> {
     let conn = store.connection();
     let mut stmt = conn.prepare("SELECT op_id FROM ops")?;
     let mut rows = stmt.query([])?;
@@ -525,17 +707,48 @@ fn digest(store: &Store) -> Result<(usize, String), SnapshotError> {
     let mut count = 0usize;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        for (a, b) in acc.iter_mut().zip(Sha256::digest(id.as_bytes())) {
-            *a ^= b;
-        }
+        acc = xor(acc, digest_of(std::iter::once(id.as_str())));
         count += 1;
     }
-    let hex = acc.iter().fold(String::with_capacity(64), |mut out, b| {
+    Ok((count, acc))
+}
+
+/// The XOR of each id's SHA-256 — the digest [`digest`] takes of a store, over any set of ids.
+fn digest_of<'a>(ids: impl Iterator<Item = &'a str>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    ids.fold([0u8; 32], |acc, id| xor(acc, Sha256::digest(id.as_bytes()).into()))
+}
+
+fn xor(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    let mut out = a;
+    for (o, b) in out.iter_mut().zip(b) {
+        *o ^= b;
+    }
+    out
+}
+
+fn hex(bytes: [u8; 32]) -> String {
+    bytes.iter().fold(String::with_capacity(64), |mut out, b| {
         use std::fmt::Write;
         let _ = write!(out, "{b:02x}");
         out
-    });
-    Ok((count, hex))
+    })
+}
+
+/// A digest as [`hex`] wrote it — the empty string is the digest of nothing.
+fn unhex(text: &str) -> Result<[u8; 32], SnapshotError> {
+    if text.is_empty() {
+        return Ok([0u8; 32]);
+    }
+    let bad = || SnapshotError::Corrupt(format!("'{text}' is not a digest"));
+    if text.len() != 64 || !text.is_ascii() {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(out)
 }
 
 /// The op the relay holds at `marks.pulled_through`, as the snapshot's anchor — refusing when this
@@ -557,8 +770,18 @@ fn anchor_at(
                 r.get(0)
             })
     };
+    // A replica that started from a based snapshot holds no op at its base position — the import
+    // dropped it with everything else below — so with an empty tail it would never be able to take
+    // a snapshot again (the hosted engine writes one after every start). What it does hold is the
+    // anchor that import confirmed against the relay; the same op still standing there is the same
+    // confirmation the held op gives.
+    let based_on = |id: &str| {
+        store.log_base().is_some_and(|b| {
+            b.relay_position == marks.pulled_through && b.anchor.as_deref() == Some(id)
+        })
+    };
     match op_at(transport, stream, marks.pulled_through)? {
-        Some(id) if held(&id)? => Ok(Some(id)),
+        Some(id) if held(&id)? || based_on(&id) => Ok(Some(id)),
         _ => Err(SnapshotError::Unbacked {
             position: marks.pulled_through,
         }),
@@ -636,7 +859,13 @@ pub fn peek(bytes: &[u8]) -> Result<Header, SnapshotError> {
 /// table, so it needs the image rather than a loaded store — and it must not re-derive the format
 /// to get at it, or there would be two readers of one format and one of them would rot. The format
 /// is this module's; what is done with the views is the caller's.
-pub fn unpack_image(bytes: &[u8]) -> Result<(Header, Image), SnapshotError> {
+///
+/// `trusted_signers` is the same list [`import`] takes, with the same meaning: a format-2 snapshot
+/// signed by none of them is refused ([`SnapshotError::Untrusted`]).
+pub fn unpack_image(
+    bytes: &[u8],
+    trusted_signers: &[String],
+) -> Result<(Header, Image), SnapshotError> {
     let json = unpack(bytes, MAX_UNPACKED_BYTES)?;
     check_format(&json)?;
     let envelope: Envelope = serde_json::from_slice(&json)
@@ -649,6 +878,8 @@ pub fn unpack_image(bytes: &[u8]) -> Result<(Header, Image), SnapshotError> {
         )));
     }
     check_base(&envelope)?;
+    check_signer(&envelope, trusted_signers)?;
+    account(&envelope)?;
     envelope.image.check()?;
     Ok((envelope.header, envelope.image))
 }
@@ -673,8 +904,16 @@ pub fn import(
     bytes: &[u8],
     stream: &StreamId,
     transport: &dyn Transport,
+    trusted_signers: &[String],
 ) -> Result<Imported, SnapshotError> {
-    import_bounded(store, bytes, stream, transport, MAX_UNPACKED_BYTES)
+    import_bounded(
+        store,
+        bytes,
+        stream,
+        transport,
+        trusted_signers,
+        MAX_UNPACKED_BYTES,
+    )
 }
 
 fn import_bounded(
@@ -682,6 +921,7 @@ fn import_bounded(
     bytes: &[u8],
     stream: &StreamId,
     transport: &dyn Transport,
+    trusted_signers: &[String],
     cap: u64,
 ) -> Result<Imported, SnapshotError> {
     let json = unpack(bytes, cap)?;
@@ -723,6 +963,8 @@ fn import_bounded(
         }
     }
     check_base(&envelope)?;
+    check_signer(&envelope, trusted_signers)?;
+    let (residue, kept) = account(&envelope)?;
     // Every refusal that needs no network, before the one call that does.
     envelope.image.check()?;
     let held = store.op_count();
@@ -760,7 +1002,98 @@ fn import_bounded(
         header: envelope.header,
         loaded,
         anchor,
+        residue,
+        kept,
     })
+}
+
+/// Whether a signer on `trusted` vouches for this snapshot (6j6v.0cfa, spec D2) — format 2 only.
+///
+/// **The list is the caller's, not the workspace's trust list.** That list says whose OPS this
+/// replica acts on; this one says whose STATE it takes in place of ops. Mixing them would make
+/// every snapshot signer a vouching op identity, and every op signer a state authority.
+///
+/// A format-1 snapshot is unsigned and stays readable as it always was: it carries the whole log,
+/// every op with its own signature, and is folded or taken as before.
+fn check_signer(envelope: &Envelope, trusted: &[String]) -> Result<(), SnapshotError> {
+    if envelope.header.format < FORMAT_BASED {
+        return Ok(());
+    }
+    let Some(writer) = &envelope.header.writer else {
+        return Err(SnapshotError::Untrusted {
+            signer: None,
+            why: "it carries no signature".to_string(),
+        });
+    };
+    let untrusted = |why: &str| SnapshotError::Untrusted {
+        signer: Some(writer.key_id.clone()),
+        why: why.to_string(),
+    };
+    if !trusted.iter().any(|k| k == &writer.key_id) {
+        return Err(untrusted("not on the signer list this import was given"));
+    }
+    let digest = signed_digest(envelope)?;
+    if !nxs_foundation::signing::verify_snapshot(&writer.key_id, &writer.sig, &digest) {
+        return Err(untrusted("its signature does not hold over this snapshot"));
+    }
+    Ok(())
+}
+
+/// What the import will write, as `(residue, kept)` — and, for a based snapshot, the refusal
+/// ([`SnapshotError::Incomplete`]) when the body does not account for what the header claims.
+///
+/// Three accounts must balance:
+/// - the carried log is the residue plus the kept domains' ops — an op of a domain the snapshot
+///   does not keep may only ride along as residue;
+/// - the ops the writer held are the ones its image dropped plus the ones it carries, by count;
+/// - and by digest.
+fn account(envelope: &Envelope) -> Result<(usize, usize), SnapshotError> {
+    let carried = envelope.image.op_count();
+    let (Some(header), Some(base)) = (&envelope.header.base, &envelope.image.base) else {
+        return Ok((0, carried));
+    };
+    let incomplete = |why: String| SnapshotError::Incomplete { why };
+    if header.residue > carried {
+        return Err(incomplete(format!(
+            "it counts {} residue ops and carries {carried} ops in all",
+            header.residue
+        )));
+    }
+    let ops = &envelope.image.ops;
+    let domain_at = ops.columns.iter().position(|c| c == "domain");
+    let outside = ops
+        .rows
+        .iter()
+        .filter(|row| {
+            let domain = domain_at.and_then(|i| match row.get(i) {
+                Some(nxs_foundation::image::Cell::Text(d)) => Some(d.as_str()),
+                _ => None,
+            });
+            !domain.is_some_and(|d| header.kept_domains.iter().any(|k| k == d))
+        })
+        .count();
+    if outside > header.residue {
+        return Err(incomplete(format!(
+            "it carries {outside} ops of domains it does not keep and counts only {} as residue",
+            header.residue
+        )));
+    }
+    if header.ops_through_p != base.dropped + carried {
+        return Err(incomplete(format!(
+            "its writer held {} ops, and it dropped {} and carries {carried}",
+            header.ops_through_p, base.dropped
+        )));
+    }
+    let digest = xor(
+        unhex(&base.dropped_digest)?,
+        digest_of(envelope.image.op_ids().into_iter()),
+    );
+    if hex(digest) != header.digest_through_p {
+        return Err(incomplete(
+            "the ops it dropped and the ops it carries are not the ops its writer held".to_string(),
+        ));
+    }
+    Ok((header.residue, carried - header.residue))
 }
 
 /// What the header says about the base must be what the body is (6j6v.0cfa) — the same rule the
@@ -827,11 +1160,10 @@ fn check_base(envelope: &Envelope) -> Result<(), SnapshotError> {
                     envelope.header.revisions, theirs
                 )));
             }
-            if header.residue > envelope.image.op_count() {
+            if image.anchor != envelope.header.anchor {
                 return Err(bad(format!(
-                    "it counts {} residue ops and carries {} ops in all",
-                    header.residue,
-                    envelope.image.op_count()
+                    "its header names anchor {:?} and its base {:?}",
+                    envelope.header.anchor, image.anchor
                 )));
             }
         }
@@ -1006,7 +1338,7 @@ mod tests {
         }
         let mut ids: Vec<String> = s.export().into_iter().map(|o| o.op_id).collect();
         ids.sort();
-        out.push(format!("ops = {ids:?}"));
+        out.push(format!("{OPS}{ids:?}"));
         let c = s.connection();
         out.push(format!("ready = {:?}", derive::ready(c, NOW).unwrap()));
         out.push(format!("blocked = {:?}", derive::blocked(c).unwrap()));
@@ -1019,6 +1351,17 @@ mod tests {
             derive::next_candidates(c, NOW).unwrap()
         ));
         out
+    }
+
+    const OPS: &str = "ops = ";
+
+    /// [`state`] without the log — what a BASED replica must share with a replaying one. Its log is
+    /// the tail and whatever rode along, by design; that half is compared on its own.
+    fn board(s: &Store) -> Vec<String> {
+        state(s)
+            .into_iter()
+            .filter(|line| !line.starts_with(OPS))
+            .collect()
     }
 
     struct Writer {
@@ -1203,7 +1546,7 @@ mod tests {
                         bytes.clone()
                     };
                     let mut fresh = Store::open_in_memory(99);
-                    let imported = import(&mut fresh, &bytes, &stream(), &relay)
+                    let imported = import(&mut fresh, &bytes, &stream(), &relay, &[])
                         .unwrap_or_else(|e| panic!("seed {seed}, {taken_by}: {e}"));
                     assert_ne!(imported.anchor, Anchor::Mismatch, "seed {seed}, {taken_by}");
                     match (&imported.loaded, other_engine) {
@@ -1293,7 +1636,7 @@ mod tests {
         );
 
         let mut fresh = Store::open_in_memory(99);
-        let imported = import(&mut fresh, &snapshot, &stream(), &rebuilt).unwrap();
+        let imported = import(&mut fresh, &snapshot, &stream(), &rebuilt, &[]).unwrap();
         assert_eq!(imported.anchor, Anchor::Mismatch);
         assert_eq!(
             imported.marks.pulled_through, 0,
@@ -1311,7 +1654,7 @@ mod tests {
 
         // Against the relay it was taken from, the same snapshot is confirmed and resumes.
         let mut fresh = Store::open_in_memory(97);
-        let imported = import(&mut fresh, &snapshot, &stream(), &doubled).unwrap();
+        let imported = import(&mut fresh, &snapshot, &stream(), &doubled, &[]).unwrap();
         assert_eq!(imported.anchor, Anchor::Confirmed);
         assert_eq!(imported.marks.pulled_through as usize, 2 * first_ops);
     }
@@ -1342,7 +1685,7 @@ mod tests {
 
         let refused = |bytes: &[u8], stream: &StreamId| {
             let mut fresh = Store::open_in_memory(99);
-            let err = import(&mut fresh, bytes, stream, &relay).unwrap_err();
+            let err = import(&mut fresh, bytes, stream, &relay, &[]).unwrap_err();
             assert_eq!(fresh.op_count(), 0, "nothing written for: {err}");
             err
         };
@@ -1368,7 +1711,7 @@ mod tests {
 
         let mut busy = Store::open_in_memory(99);
         busy.create_item("mine.1", "task", "t", "me");
-        let err = import(&mut busy, &good, &stream(), &relay).unwrap_err();
+        let err = import(&mut busy, &good, &stream(), &relay, &[]).unwrap_err();
         assert!(err.to_string().contains("fresh replica"), "{err}");
     }
 
@@ -1395,6 +1738,7 @@ mod tests {
                 ops: w.op_count() as usize,
                 revisions: BTreeMap::new(),
                 base: None,
+                writer: None,
             },
             "the with-log export still writes format 1, with no base and no revisions"
         );
@@ -1439,7 +1783,7 @@ mod tests {
         ]);
 
         let mut fresh = Store::open_in_memory(99);
-        let mut m = import(&mut fresh, &snapshot, &stream(), &relay)
+        let mut m = import(&mut fresh, &snapshot, &stream(), &relay, &[])
             .unwrap()
             .marks;
         pass(&mut fresh, 99, &mut m, &relay);
@@ -1465,7 +1809,7 @@ mod tests {
         let on_relay = relay.len();
 
         let mut fresh = Store::open_in_memory(99);
-        let imported = import(&mut fresh, &snapshot, &stream(), &relay).unwrap();
+        let imported = import(&mut fresh, &snapshot, &stream(), &relay, &[]).unwrap();
         assert_eq!(imported.marks.pushed_through, fresh.op_count());
         let mut m = imported.marks;
         fresh.set_field(
@@ -1511,7 +1855,7 @@ mod tests {
             op("d", 4, 2, "x.1", "description", "d"),
         ]);
         let mut fresh = Store::open_in_memory(99);
-        let imported = import(&mut fresh, &snapshot, &stream(), &reordered).unwrap();
+        let imported = import(&mut fresh, &snapshot, &stream(), &reordered, &[]).unwrap();
         assert_eq!(
             imported.anchor,
             Anchor::Mismatch,
@@ -1526,7 +1870,7 @@ mod tests {
             .borrow_mut()
             .push(op("a", 1, 2, "x.1", "type", "task"));
         let mut fresh = Store::open_in_memory(97);
-        let imported = import(&mut fresh, &snapshot, &stream(), &short).unwrap();
+        let imported = import(&mut fresh, &snapshot, &stream(), &short, &[]).unwrap();
         assert_eq!(imported.anchor, Anchor::Mismatch);
     }
 
@@ -1567,7 +1911,7 @@ mod tests {
         let snapshot = export(&w, 11, &stream(), &wm, &relay).unwrap();
 
         let mut fresh = Store::open_in_memory(99);
-        let err = import(&mut fresh, &snapshot, &stream(), &Down).unwrap_err();
+        let err = import(&mut fresh, &snapshot, &stream(), &Down, &[]).unwrap_err();
         assert!(matches!(err, SnapshotError::Transport(_)), "{err}");
         assert_eq!(fresh.op_count(), 0);
 
@@ -1605,12 +1949,12 @@ mod tests {
             ),
         ] {
             let mut fresh = Store::open_in_memory(99);
-            let err = import(&mut fresh, &bytes, &stream(), &relay).expect_err(what);
+            let err = import(&mut fresh, &bytes, &stream(), &relay, &[]).expect_err(what);
             assert!(matches!(err, SnapshotError::Corrupt(_)), "{what}: {err}");
             assert_eq!(fresh.op_count(), 0);
         }
         let mut fresh = Store::open_in_memory(99);
-        let err = import_bounded(&mut fresh, &good, &stream(), &relay, 64).unwrap_err();
+        let err = import_bounded(&mut fresh, &good, &stream(), &relay, &[], 64).unwrap_err();
         assert!(err.to_string().contains("more than 64 bytes"), "{err}");
     }
 
@@ -1630,7 +1974,7 @@ mod tests {
         ));
         let mut fresh = Store::open_in_memory(99);
         assert!(matches!(
-            import(&mut fresh, &bytes, &stream(), &Relay::new(14, 0)),
+            import(&mut fresh, &bytes, &stream(), &Relay::new(14, 0), &[]),
             Err(SnapshotError::FormatTooNew { .. })
         ));
     }
@@ -1668,6 +2012,26 @@ mod tests {
         keep_log: false,
     }];
 
+    /// The signer list that trusts `writer` and nobody else.
+    fn signers(writer: &Store) -> Vec<String> {
+        vec![writer.key_id().to_string()]
+    }
+
+    /// Open a snapshot, hand its envelope to `change`, and sign it again with `signer`'s key — for
+    /// the refusals that must come from what a SIGNED file says, not from a broken signature.
+    fn resigned(bytes: &[u8], signer: &Store, change: impl FnOnce(&mut Envelope)) -> Vec<u8> {
+        let json = unpack(bytes, MAX_UNPACKED_BYTES).unwrap();
+        let mut envelope: Envelope = serde_json::from_slice(&json).unwrap();
+        change(&mut envelope);
+        envelope.header.writer = Some(Signer {
+            key_id: signer.key_id().to_string(),
+            sig: String::new(),
+        });
+        let (_, sig) = signer.sign_snapshot(&signed_digest(&envelope).unwrap());
+        envelope.header.writer.as_mut().unwrap().sig = sig;
+        pack(&envelope).unwrap()
+    }
+
     /// A writer that pulled `ops` of the relay and nothing of its own.
     fn caught_up(relay: &dyn Transport, site: i64) -> (Store, Watermarks) {
         let mut store = Store::open_in_memory(site);
@@ -1691,6 +2055,11 @@ mod tests {
         }
         pass(&mut w, 11, &mut marks, relay);
         marks.pulled_through
+    }
+
+    /// How many ops the relay double holds.
+    fn written_ops(relay: &Relay) -> i64 {
+        relay.len() as i64
     }
 
     /// Unpack a snapshot's JSON, hand it to `tamper`, and pack it again — for the checks that must
@@ -1722,7 +2091,11 @@ mod tests {
         assert_eq!(base.residue, 0);
         assert!(base.kept_domains.is_empty());
         assert_eq!(base.clock, writer.clock());
-        assert_eq!(header.revisions, BTreeMap::from([("task".to_string(), 0)]));
+        assert_eq!(
+            header.revisions,
+            BTreeMap::from([("task".to_string(), writer.fold_revision_of("task").unwrap())]),
+            "the revision the writer's own reducer folds at"
+        );
         // And a with-log snapshot of the same replica still carries all of it.
         let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
         assert_eq!(peek(&with_log).unwrap().ops, writer.op_count() as usize);
@@ -1750,14 +2123,14 @@ mod tests {
         assert!(relay.len() as i64 > p);
 
         let mut based = Store::open_in_memory(14);
-        let imported = import(&mut based, &bytes, &stream(), &relay).unwrap();
+        let imported = import(&mut based, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
         assert_eq!(imported.anchor, Anchor::Confirmed);
         assert_eq!(imported.marks.pulled_through, p);
         let mut marks = imported.marks;
         pass(&mut based, 14, &mut marks, &relay);
 
         let (replayed, _) = caught_up(&relay, 15);
-        assert_eq!(state(&based), state(&replayed));
+        assert_eq!(board(&based), board(&replayed));
     }
 
     /// A based replica's first write beats the state it imported (spec §3, L1) — the clock floor
@@ -1770,7 +2143,7 @@ mod tests {
         let bytes =
             export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
         let mut based = Store::open_in_memory(14);
-        import(&mut based, &bytes, &stream(), &relay).unwrap();
+        import(&mut based, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
         assert_eq!(based.op_count(), 0, "no log to read a clock off");
         let before: String = based
             .connection()
@@ -1804,7 +2177,7 @@ mod tests {
         let other = Relay::new(5, 0);
         written(&other, 6);
         let mut based = Store::open_in_memory(14);
-        let err = import(&mut based, &bytes, &stream(), &other).unwrap_err();
+        let err = import(&mut based, &bytes, &stream(), &other, &signers(&writer)).unwrap_err();
         assert!(
             matches!(err, SnapshotError::AnchorMismatch { .. }),
             "{err}"
@@ -1815,7 +2188,7 @@ mod tests {
         // The with-log snapshot of the same replica takes the other road, unchanged.
         let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
         let mut fallback = Store::open_in_memory(15);
-        let imported = import(&mut fallback, &with_log, &stream(), &other).unwrap();
+        let imported = import(&mut fallback, &with_log, &stream(), &other, &signers(&writer)).unwrap();
         assert_eq!(imported.anchor, Anchor::Mismatch);
         assert_eq!(imported.marks.pulled_through, 0);
     }
@@ -1841,8 +2214,9 @@ mod tests {
         written(&relay, 4);
         let (mut writer, marks) = caught_up(&relay, 12);
         writer.create_item("mine.1", "task", "t", "me");
+        let mine = writer.op_count() - written_ops(&relay);
         let err = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap_err();
-        assert!(matches!(err, SnapshotError::Unpushed { ops: 1 }), "{err}");
+        assert!(matches!(err, SnapshotError::Unpushed { ops } if ops == mine), "{err}");
 
         let (clean, mut marks) = caught_up(&relay, 13);
         marks.pulled_through += 5; // a position this relay does not hold
@@ -1900,7 +2274,7 @@ mod tests {
         ];
         for (what, bytes) in tampered {
             let mut store = Store::open_in_memory(14);
-            let err = import(&mut store, &bytes, &stream(), &relay).unwrap_err();
+            let err = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap_err();
             assert!(
                 matches!(err, SnapshotError::Corrupt(_)),
                 "{what}: {err}"
@@ -1909,7 +2283,7 @@ mod tests {
         }
         // The untampered one still loads, so the tampering is what the refusals are about.
         let mut store = Store::open_in_memory(15);
-        import(&mut store, &good, &stream(), &relay).unwrap();
+        import(&mut store, &good, &stream(), &relay, &signers(&writer)).unwrap();
     }
 
     /// A format newer than this build reads is refused as NEWER, from the header alone — the base
@@ -1923,7 +2297,7 @@ mod tests {
         let newer = retamper(&good, |v| v["format"] = serde_json::json!(FORMAT + 1));
         let mut store = Store::open_in_memory(14);
         assert!(matches!(
-            import(&mut store, &newer, &stream(), &relay).unwrap_err(),
+            import(&mut store, &newer, &stream(), &relay, &signers(&writer)).unwrap_err(),
             SnapshotError::FormatTooNew { found, supported }
                 if found == FORMAT + 1 && supported == FORMAT
         ));
@@ -1966,7 +2340,7 @@ mod tests {
         let p = written(&relay, 7);
         let (writer, marks) = caught_up(&relay, 12);
         let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
-        let (header, image) = unpack_image(&bytes).unwrap();
+        let (header, image) = unpack_image(&bytes, &signers(&writer)).unwrap();
         assert_eq!(header.pulled_through, p);
         assert!(image.based());
         assert_eq!(image.base.as_ref().unwrap().relay_position, p);
@@ -1979,7 +2353,7 @@ mod tests {
         );
         let broken = retamper(&bytes, |v| v["base"]["clock"] = serde_json::json!(7));
         assert!(matches!(
-            unpack_image(&broken).unwrap_err(),
+            unpack_image(&broken, &signers(&writer)).unwrap_err(),
             SnapshotError::Corrupt(_)
         ));
     }
@@ -1999,5 +2373,255 @@ mod tests {
                 ("memory", "fact", false),
             ]
         );
+    }
+
+    // ── The seam app-foundations' engine-server starts from (owner, 2026-10-15) ─────────────
+
+    /// A based snapshot is believed only from a signer on the list the import is HANDED — not
+    /// unsigned, not from another key, not over bytes its signature does not cover — and a refusal
+    /// writes nothing (spec D2; owner 2026-10-15 point 2).
+    #[test]
+    fn a_based_import_believes_only_a_signer_on_the_list_it_was_handed() {
+        let relay = Relay::new(21, 0);
+        written(&relay, 6);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        assert_eq!(
+            peek(&bytes).unwrap().writer.unwrap().key_id,
+            writer.key_id(),
+            "signed by the replica that took it"
+        );
+        let stranger = Store::open_in_memory(30);
+        let unsigned = retamper(&bytes, |v| {
+            v.as_object_mut().unwrap().remove("writer");
+        });
+        let forged_body = retamper(&bytes, |v| {
+            v["image"]["views"][0]["rows"][0][1] = serde_json::json!("forged")
+        });
+        let cases: Vec<(&str, &[u8], Vec<String>, Option<&str>)> = vec![
+            ("an empty list", &bytes, vec![], Some(writer.key_id())),
+            ("another key", &bytes, signers(&stranger), Some(writer.key_id())),
+            ("no signature", &unsigned, signers(&writer), None),
+            ("a body the signature does not cover", &forged_body, signers(&writer), Some(writer.key_id())),
+        ];
+        for (what, file, list, claimed) in cases {
+            let mut store = Store::open_in_memory(14);
+            let err = import(&mut store, file, &stream(), &relay, &list).unwrap_err();
+            assert!(
+                matches!(&err, SnapshotError::Untrusted { signer, .. } if signer.as_deref() == claimed),
+                "{what}: {err}"
+            );
+            assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
+            assert!(store.list_items().unwrap().is_empty(), "{what}");
+            assert!(
+                matches!(unpack_image(file, &list), Err(SnapshotError::Untrusted { .. })),
+                "{what}: the fold's reader refuses it too"
+            );
+        }
+        let mut store = Store::open_in_memory(15);
+        import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
+        assert!(!store.list_items().unwrap().is_empty());
+    }
+
+    /// The import says how many of the ops it wrote are residue and how many kept, and the store
+    /// holds exactly their sum (owner, 2026-10-15 point 2) — what a host that budgets ops counts.
+    #[test]
+    fn a_based_import_reports_residue_and_kept_and_the_store_holds_exactly_their_sum() {
+        let relay = Relay::new(22, 0);
+        written(&relay, 5);
+        // Two ops of a domain this flow store folds nothing for: residue at the writer.
+        let mut residue = op("r1", 50, 9, "f.1", "body", "x");
+        residue.domain = "fact".into();
+        let mut residue2 = op("r2", 51, 9, "f.2", "body", "y");
+        residue2.domain = "fact".into();
+        relay.log.borrow_mut().extend([residue, residue2]);
+        let (writer, marks) = caught_up(&relay, 12);
+        const FLOW_KEPT: &[Product] = &[Product {
+            of: "flow",
+            domain: "task",
+            keep_log: true,
+        }];
+        for (products, kept) in [(FLOW_ONLY, 0), (FLOW_KEPT, writer.op_count() as usize - 2)] {
+            let bytes = export_based(&writer, 12, &stream(), &marks, &relay, products).unwrap();
+            let mut store = Store::open_in_memory(14);
+            let imported = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
+            assert_eq!((imported.residue, imported.kept), (2, kept));
+            assert_eq!(
+                store.op_count() as usize,
+                imported.residue + imported.kept,
+                "the store holds exactly what the import reported"
+            );
+        }
+        // A format-1 snapshot keeps its whole log and has no residue to report.
+        let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
+        let mut store = Store::open_in_memory(16);
+        let imported = import(&mut store, &with_log, &stream(), &relay, &[]).unwrap();
+        assert_eq!((imported.residue, imported.kept), (0, writer.op_count() as usize));
+        assert_eq!(store.op_count() as usize, imported.kept);
+    }
+
+    /// A SIGNED snapshot whose body does not account for what its header claims is refused as
+    /// incomplete (owner, 2026-10-15 point 2): a writer that lost an op, or miscounted, cannot hand
+    /// the loss on.
+    #[test]
+    fn a_signed_snapshot_that_does_not_account_for_its_header_is_incomplete() {
+        let relay = Relay::new(23, 0);
+        written(&relay, 6);
+        let mut odd = op("r1", 50, 9, "f.1", "body", "x");
+        odd.domain = "fact".into();
+        relay.log.borrow_mut().push(odd);
+        let (writer, marks) = caught_up(&relay, 12);
+        let good = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "a writer that claims one op more than it dropped and carries",
+                resigned(&good, &writer, |e| {
+                    e.header.base.as_mut().unwrap().ops_through_p += 1
+                }),
+            ),
+            (
+                "a digest the dropped and carried ops do not make up",
+                resigned(&good, &writer, |e| {
+                    e.header.base.as_mut().unwrap().digest_through_p = hex([1u8; 32])
+                }),
+            ),
+            (
+                "an op of a domain it does not keep, not counted as residue",
+                resigned(&good, &writer, |e| {
+                    e.header.base.as_mut().unwrap().residue = 0;
+                    e.image.base.as_mut().unwrap().residue = 0;
+                }),
+            ),
+        ];
+        for (what, bytes) in cases {
+            let mut store = Store::open_in_memory(14);
+            let err = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap_err();
+            assert!(matches!(err, SnapshotError::Incomplete { .. }), "{what}: {err}");
+            assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
+        }
+        let mut store = Store::open_in_memory(15);
+        import(&mut store, &good, &stream(), &relay, &signers(&writer)).unwrap();
+    }
+
+    /// **A replica started from a based snapshot can take the next one itself** — with nothing
+    /// pulled since, so it holds no op at its position (owner, 2026-10-15 point 3). The anchor the
+    /// import confirmed is the anchor; the count and digest still cover what was dropped below it.
+    #[test]
+    fn a_based_replica_takes_the_next_based_snapshot_with_an_empty_tail() {
+        let relay = Relay::new(24, 0);
+        written(&relay, 9);
+        let (writer, marks) = caught_up(&relay, 12);
+        let first = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let mut based = Store::open_in_memory(14);
+        let imported = import(&mut based, &first, &stream(), &relay, &signers(&writer)).unwrap();
+        assert_eq!(based.op_count(), 0, "no op at the position, nor below it");
+
+        let second =
+            export_based(&based, 14, &stream(), &imported.marks, &relay, FLOW_ONLY).unwrap();
+        let (a, b) = (peek(&first).unwrap(), peek(&second).unwrap());
+        assert_eq!(b.pulled_through, a.pulled_through);
+        assert_eq!(b.anchor, a.anchor);
+        let (ba, bb) = (a.base.unwrap(), b.base.unwrap());
+        assert_eq!(
+            (bb.ops_through_p, &bb.digest_through_p),
+            (ba.ops_through_p, &ba.digest_through_p),
+            "what the first writer held is still accounted for"
+        );
+        assert_eq!(bb.clock, ba.clock);
+
+        let mut third = Store::open_in_memory(15);
+        import(&mut third, &second, &stream(), &relay, &signers(&based)).unwrap();
+        assert_eq!(board(&third), board(&writer));
+    }
+
+    /// A format-1 snapshot promises the whole log; a based replica does not hold it, so it refuses
+    /// to write one by name instead of writing a short log under that promise.
+    #[test]
+    fn a_based_replica_refuses_to_write_a_with_log_snapshot() {
+        let relay = Relay::new(25, 0);
+        let p = written(&relay, 4);
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let mut based = Store::open_in_memory(14);
+        let imported = import(&mut based, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
+        let err = export(&based, 14, &stream(), &imported.marks, &relay).unwrap_err();
+        assert!(matches!(err, SnapshotError::NeedsHistory { base } if base == p), "{err}");
+    }
+
+    /// **No refold for format 2** (owner, 2026-10-15 point 4): every dimension an ordinary snapshot
+    /// would fold again over — fold revision, schema, the set of view tables — is a named
+    /// NeedsRevision on a based one, and nothing is written. The engine version alone is not a
+    /// dimension (see [`Mismatch`]): the views are TAKEN, never refolded.
+    #[test]
+    fn every_mismatch_of_a_based_snapshot_is_needs_revision_and_never_a_refold() {
+        let relay = Relay::new(26, 0);
+        written(&relay, 5);
+        let (writer, marks) = caught_up(&relay, 12);
+        let good = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let cases: Vec<(&str, Vec<u8>, fn(&Mismatch) -> bool)> = vec![
+            (
+                "another fold revision",
+                resigned(&good, &writer, |e| {
+                    e.header.revisions.insert("task".into(), 7);
+                    e.image.base.as_mut().unwrap().view_bases[0].fold_revision = 7;
+                }),
+                |m| matches!(m, Mismatch::FoldRevision { snapshot: 7, ours: Some(_), .. }),
+            ),
+            (
+                "another schema",
+                resigned(&good, &writer, |e| e.image.schema_version -= 1),
+                |m| matches!(m, Mismatch::Schema { .. }),
+            ),
+            (
+                "a view table missing",
+                resigned(&good, &writer, |e| {
+                    e.image.views.pop();
+                }),
+                |m| matches!(m, Mismatch::Views { domain: None, .. }),
+            ),
+        ];
+        for (what, bytes, expected) in cases {
+            let mut store = Store::open_in_memory(14);
+            let err = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap_err();
+            assert!(
+                matches!(&err, SnapshotError::NeedsRevision(m) if expected(m)),
+                "{what}: {err}"
+            );
+            assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
+            assert!(store.list_items().unwrap().is_empty(), "{what}");
+        }
+        let other_engine = resigned(&good, &writer, |e| {
+            e.header.engine = "0.0.1".into();
+            e.image.engine = "0.0.1".into();
+        });
+        let mut store = Store::open_in_memory(15);
+        let imported =
+            import(&mut store, &other_engine, &stream(), &relay, &signers(&writer)).unwrap();
+        assert_eq!(imported.loaded, Loaded::Views, "taken, never refolded");
+    }
+
+    /// The hosted engine places a stable key file before the first open (owner, 2026-10-15): the
+    /// snapshot is signed with THAT key, and the file is left exactly as it was.
+    #[test]
+    fn a_snapshot_is_signed_with_the_key_file_a_host_placed_before_the_first_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("db.sqlite");
+        let key = {
+            let s = Store::open(first.to_str().unwrap(), 12).unwrap();
+            s.key_id().to_string()
+        };
+        let placed = std::fs::read(dir.path().join("signing.key")).unwrap();
+        // A second workspace on another machine, handed the same key file before its first open.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("signing.key"), &placed).unwrap();
+        let relay = Relay::new(27, 0);
+        written(&relay, 3);
+        let path = other.path().join("db.sqlite");
+        let mut writer = Store::open(path.to_str().unwrap(), 12).unwrap();
+        let mut marks = Watermarks::default();
+        pass(&mut writer, 12, &mut marks, &relay);
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        assert_eq!(peek(&bytes).unwrap().writer.unwrap().key_id, key);
+        assert_eq!(std::fs::read(other.path().join("signing.key")).unwrap(), placed);
     }
 }

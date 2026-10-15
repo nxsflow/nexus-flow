@@ -622,40 +622,63 @@ them **off every path a sync pass, a hydration or the cap sees.**
 
 ### 7.0 The format-2 contract, as BUILT (6j6v.0cfa, slice 1's smallest cut)
 
-**Status: built and merged in nexus-flow.** This subsection is the normative one for
-app-foundations — §7.1 onwards is the original plan, and where the two differ, this one is what the
-code does. Everything here is `cargo doc`-visible on the named items.
+**Status: built in nexus-flow, branch `feat/based-snapshot-format-2`.** This subsection is the
+normative one for app-foundations — §7.1 onwards is the original plan, and where the two differ,
+this one is what the code does. It includes the owner's decisions of 2026-10-15 on app-foundations'
+seam requirements (`41j0.aga8`). Everything here is `cargo doc`-visible on the named items.
 
-**The seam is still `nxs_sync::snapshot`.** Two functions, one envelope, and format 1 stays
-readable by every build:
+**The seam is still `nxs_sync::snapshot`.** One envelope, two formats, and format 1 stays readable
+by every build:
 
 ```rust
-// Take one (the local service, or the hosted engine for a hosted stream):
+// Take one (the local service, or the hosted engine for a hosted stream). Signed with the store's
+// replica key — `.nxs/signing.key` beside the db:
 nxs_sync::snapshot::export_based(
     &store, local_site, &stream, &marks, &transport,
     nxs_sync::snapshot::PLATFORM,          // the ONE product list; see below
 ) -> Result<Vec<u8>, SnapshotError>
 
-// Start a replica from one — UNCHANGED signature, so `start_from_snapshot` keeps its call:
-nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport) -> Result<Imported, SnapshotError>
+// Start a replica from one. `trusted_signers` is NEW and is the caller's own list of key ids
+// (`ed25519:<base64url public key>`) — NOT the workspace trust list, which carries op vouching:
+nxs_sync::snapshot::import(
+    &mut store, &bytes, &stream, &transport,
+    &trusted_signers,                      // &[String]
+) -> Result<Imported, SnapshotError>
+// Imported { marks, header, loaded, anchor, residue, kept }:
+//   after Ok, store.op_count() == residue + kept (the store was empty before).
 
-// Size one without loading it (what `Capped` needs):
+// Size one without loading it (what `Capped` needs) — the header alone, no signature check:
 nxs_sync::snapshot::peek(&bytes) -> Result<Header, SnapshotError>
 
-// The envelope opened, for the board fold rather than a replica:
-nxs_sync::snapshot::unpack_image(&bytes) -> Result<(Header, nxs_foundation::image::Image), SnapshotError>
+// The envelope opened, for the board fold rather than a replica — same signer list, same checks:
+nxs_sync::snapshot::unpack_image(&bytes, &trusted_signers)
+    -> Result<(Header, nxs_foundation::image::Image), SnapshotError>
 nxs_fold_ddb::snapshot::from_image(&image, stream_id) -> Result<Snapshot, FromImageError>
 ```
+
+**The signer (owner, 2026-10-15, point 1).** A format-2 file is signed by the replica key of the
+store that took it: `header.writer = { key_id, sig }`, an Ed25519 signature under the domain tag
+`nxs-snapshot/1` over one SHA-256 of the header (with `sig` blank, so the key id is covered) and the
+body. There is no separate snapshot key and no seam argument for one: the host makes the signer
+stable by placing a seed-derived key file at `.nxs/signing.key` BEFORE the first store open. The
+file format is one line, `nxs-signing-key/1 <seed>`, where `<seed>` is the 32-byte Ed25519 seed in
+base64url without padding (43 characters). An existing file is used as it is and never replaced
+(tested: `a_key_file_placed_before_the_first_open_is_the_key_and_stays_as_it_was`,
+`a_snapshot_is_signed_with_the_key_file_a_host_placed_before_the_first_open`). Consequence the owner
+accepted: every hosted replica holding that file also signs the ops it MINTS with it; their sites
+stay distinct.
 
 **Three things the hosted engine MUST do that it does not do today.**
 
 1. **Register every platform reducer on the store before importing.** One database holds all three
    products, and a based snapshot carries all three products' views with no log to fold them from.
    A store that registers only flow's task reducer is refused by name
-   (`SnapshotError::NeedsRevision { ours: None, domain: "message" }`) rather than silently dropping
-   chat's and memory's state. The two lines:
+   (`NeedsRevision(Mismatch::FoldRevision { ours: None, domain: "message", .. })`) rather than
+   silently dropping chat's and memory's state. The view tables must exist too:
 
    ```rust
+   nexus_chat::schema::try_apply_chat_views(store.connection())?;
+   nexus_memory::schema::try_apply_memory_views(store.connection())?;
    store.register_reducer(Box::new(nexus_chat::message_reducer::MessageReducer));
    store.register_reducer(Box::new(nexus_memory::fact_reducer::FactReducer));
    ```
@@ -663,38 +686,51 @@ nxs_fold_ddb::snapshot::from_image(&image, stream_id) -> Result<Snapshot, FromIm
    Only for a based snapshot. On the format-1 path they would change the store's summed fold
    revision and make every format-1 import refold what it could have taken.
 
-2. **Count `header.base`, not `header.ops`.** `Capped` starts from what the FILE carries — the
-   residue plus the kept domains, which is `header.ops` of a format-2 file — and the snapshot's
-   unpacked bytes. `header.base.residue` says how many of those ops no reducer could fold, and
-   `header.base.ops_through_p` how many ops the writer held below the position (what was NOT
-   carried). The budget then counts the tail as today. Update `AGENTS.md` "Limits".
+2. **Count what the import reports.** `Capped` starts from `imported.residue + imported.kept` —
+   every op the file carried, which is what the store now holds — plus the snapshot's unpacked
+   bytes, then counts the tail as today. Before unpacking, `peek(&bytes)?.ops` is the same number.
+   `header.base.ops_through_p` is how many ops the writer held (what was NOT carried is
+   `ops_through_p − ops`). Update `AGENTS.md` "Limits".
 
 3. **Branch the fallback chain on these names.** Each one means "this snapshot cannot start this
    replica, nothing was written, try the next source":
 
    | `SnapshotError` variant | what it means |
    |---|---|
-   | `NeedsRevision { of, domain, snapshot, ours }` | a product's views were folded by other rules than this build's (`ours: Some`), or this store registers no reducer for a product the snapshot carries (`ours: None`). A based snapshot's views are TAKEN or refused — there is no log to fold instead. |
-   | `MissingViews { domain }` | the snapshot carries no views for a product THIS build folds. |
-   | `AnchorMismatch { position }` | the relay does not hold the op the snapshot names at its position. A format-1 snapshot answers this by pulling from 0; a based one cannot, so it refuses. |
+   | `NeedsRevision(Mismatch)` | the views cannot be TAKEN by this build, and a based snapshot is never folded again (owner point 4: a based import answers `Loaded::Views` or refuses — never `Loaded::Refolded`). `Mismatch::FoldRevision { of, domain, snapshot, ours }`: a product was folded at another revision (`ours: Some`), or this store registers no reducer for it (`ours: None`). `Mismatch::Schema { snapshot, ours }`: another schema version. `Mismatch::Views { domain, carried, folded }`: the set of view tables differs (no views for a domain this build folds, or a table/column missing). |
+   | `Untrusted { signer, why }` | no key on `trusted_signers` vouches for it: unsigned, a signature that does not hold over these bytes, or a key the list does not name. `signer` is the key id the file claims. Checked before anything is believed. |
+   | `AnchorMismatch { position }` | the relay does not hold the op the snapshot names at its position. Format 1 answers this by pulling from 0; a based snapshot REFUSES (owner point 2: on a log-free base a full pull would count folded ops twice, silently). |
+   | `Incomplete { why }` | a signed file whose body does not account for its header: the carried log is not residue plus the kept domains, or the dropped and carried ops do not make up the count and digest of every op the writer held. The relay-side count-and-digest check (§4.3) is NOT in this cut (owner point 5); when it comes it answers with this name too. |
    | `FormatTooNew { found, supported }` | a newer nxs wrote it. |
    | `Corrupt(String)` | the header and the body disagree, or the bytes are not a snapshot. |
-   | `Unpushed`, `Unbacked`, `NotFolded` | export-side refusals, for the publish step. |
+   | `Unpushed`, `Unbacked`, `NotFolded`, `NeedsHistory` | export-side refusals, for the publish step. `NeedsHistory { base }`: a format-1 (with-log) export asked of a based replica, which does not hold the log it would promise. |
 
-   `Untrusted` and `Incomplete` are NOT in this cut: the trust list (D2) and the relay's
-   count-and-digest route (§4.3) are out of its scope. The digest IS carried
-   (`header.base.digest_through_p`, `ops_through_p`), so the check can be added without a format
-   change.
+**The engine version is NOT a refold dimension for format 2** (decision of this cut, flagged to
+the owner): app-foundations' point 6 lists engine, schema, view set and fold revision. Schema, view
+set and fold revision are refused as `NeedsRevision`. The engine version is not compared, as §4.2
+decided: a based snapshot carries each product's fold revision, which says exactly what the engine
+version only approximates, and refusing on the version would refuse every snapshot across every
+release — a hosted stream past the replay cap could then not be started at all after an upgrade.
+It is never refolded either way.
+
+**Export over a based store (owner point 3).** A replica that started from a based snapshot holds no
+op at its base position. Its next `export_based` still finds the anchor: the import records the
+anchor it confirmed in `log_base`, and `export_based` accepts the relay's op at
+`marks.pulled_through` when the replica holds it OR when it is that recorded anchor at the base
+position. The count and digest carry forward through `log_base` too, so a snapshot of a snapshot
+still accounts for every op the first writer held (tested:
+`a_based_replica_takes_the_next_based_snapshot_with_an_empty_tail`). A format-1 export of a based
+store refuses with `NeedsHistory`.
 
 **What the format carries, and what it does not.** `nxs_sync::snapshot::Header` gains
-`revisions: BTreeMap<String, i64>` (per-domain fold revision) and `base: Option<Base>`;
-`Base` is `{ clock, ops_through_p, digest_through_p, residue, kept_domains }`. The body's
-`nxs_foundation::image::Image` gains `base: Option<Base>` with
-`{ relay_position, clock, residue, kept_domains, view_bases }`, and the two halves are checked
-against each other at import. `base: None` is format-1 semantics in both. Hidden-payload elision
-(D10) is NOT in this cut (owner, 2026-10-14): a based snapshot still carries superseded chunk
-bodies, removed add rows and redacted note bodies. That is the one size lever still unpulled, and
-it is tracked separately.
+`revisions: BTreeMap<String, i64>` (per-domain fold revision), `base: Option<Base>` and
+`writer: Option<Signer>`; `Base` is `{ clock, ops_through_p, digest_through_p, residue,
+kept_domains }`. The body's `nxs_foundation::image::Image` gains `base: Option<Base>` with
+`{ relay_position, clock, residue, kept_domains, view_bases, anchor, dropped, dropped_digest }`,
+and the two halves are checked against each other at import. `base: None` is format-1 semantics in
+both. Hidden-payload elision (D10) is NOT in this cut (owner, 2026-10-14): a based snapshot still
+carries superseded chunk bodies, removed add rows and redacted note bodies. That is the one size
+lever still unpulled, and it is tracked separately.
 
 **The three substrate consequences, which an embedder must know about:**
 
@@ -711,6 +747,11 @@ it is tracked separately.
   the views it would re-derive from the whole log; a based store has no such log, so the honest
   answer is a re-bootstrap from a snapshot at this build's revisions. `remap_prefix` is the other
   path, and it is why a replica registers its id prefix BEFORE importing, not after.
+
+**Locally:** `nxs sync snapshot <file> --based` writes format 2 and prints its signer;
+`nxs sync bind --snapshot <file> --trust-signer <key_id>` (repeatable) starts a fresh workspace
+from it. Without a matching `--trust-signer` the bind refuses, names the signer, and leaves the
+workspace as it found it.
 
 ### 7.1 The rest of the hand-over (plan, unchanged)
 

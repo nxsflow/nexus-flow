@@ -245,6 +245,9 @@ pub struct BindOptions<'a> {
     pub no_daemon: bool,
     /// Start this fresh workspace from a snapshot file (6j6v.mxt2) — see [`bind_from_snapshot`].
     pub snapshot: Option<&'a std::path::Path>,
+    /// The key ids whose BASED snapshots this bind believes (6j6v.0cfa, spec D2) — handed to the
+    /// import as its own list, never taken from the workspace's trust list.
+    pub trusted_signers: &'a [String],
 }
 
 /// Starts the sync daemon as the best-effort side effect of a successful bind (task 13, `x1c2`
@@ -460,6 +463,10 @@ impl StartedFrom {
             "refold_reason": refold_reason,
             "position": self.anchor(),
             "reassigned_prefix": self.reassigned_prefix,
+            "format": h.format,
+            "signer": h.writer.as_ref().map(|w| w.key_id.as_str()),
+            "residue": self.imported.residue,
+            "kept": self.imported.kept,
         })
     }
 
@@ -546,6 +553,10 @@ fn bind_from_snapshot(
         }
     }
     ensure_valid_stream_id(&header.stream_id)?;
+    // Every refusal the file itself earns — an untrusted signer, a body that does not account for
+    // its header — before anything touches the relay or the store (6j6v.0cfa): the prefix
+    // registration below already writes, locally and remotely.
+    nxs_sync::snapshot::unpack_image(&bytes, opts.trusted_signers).map_err(snapshot_error)?;
     let path = ws.db_path_str()?;
     let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
@@ -554,7 +565,7 @@ fn bind_from_snapshot(
     // (6j6v.0cfa). Only for a based one: a format-1 import compares the summed fold revision, and
     // three reducers instead of one would make it refold what it could have taken.
     if header.base.is_some() {
-        register_platform_reducers(&mut store);
+        register_platform_reducers(&mut store)?;
     }
     let held = store.op_count();
     if held > 0 {
@@ -597,8 +608,9 @@ fn bind_from_snapshot(
     if let Some(new_prefix) = &reassigned_prefix {
         workspace::adopt_prefix(ws, new_prefix)?;
     }
-    let imported = nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport)
-        .map_err(snapshot_error)?;
+    let imported =
+        nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport, opts.trusted_signers)
+            .map_err(snapshot_error)?;
     drop(store);
     let meta = SyncMeta {
         stream_id: header.stream_id,
@@ -631,6 +643,7 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
         SnapshotError::Unpushed { .. }
         | SnapshotError::Unbacked { .. }
         | SnapshotError::AnchorMismatch { .. }
+        | SnapshotError::NeedsHistory { .. }
         | SnapshotError::Image(ImageError::NotEmpty { .. }) => ErrorKind::Conflict,
         SnapshotError::Storage(_)
         | SnapshotError::Transport(_)
@@ -651,9 +664,17 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
 /// the store's summed fold revision, and a format-1 image's views are taken only when that number
 /// matches — so a store with three reducers would refold every format-1 snapshot it imports instead
 /// of taking it.
-fn register_platform_reducers(store: &mut Store) {
+///
+/// Their view tables are created first: a workspace initialised for flow alone has never had `nxc`
+/// or `nxm` open it, and a reducer whose tables are missing has nothing to carry or take. The DDL
+/// is the products' own, additive and idempotent — what their first open would run anyway.
+fn register_platform_reducers(store: &mut Store) -> Result<()> {
+    let tables = |e: rusqlite::Error| NxfError::io(format!("creating the platform's views: {e}"));
+    nexus_chat::schema::try_apply_chat_views(store.connection()).map_err(tables)?;
+    nexus_memory::schema::try_apply_memory_views(store.connection()).map_err(tables)?;
     store.register_reducer(Box::new(nexus_chat::message_reducer::MessageReducer));
     store.register_reducer(Box::new(nexus_memory::fact_reducer::FactReducer));
+    Ok(())
 }
 
 /// `nxs sync snapshot <file>` (6j6v.mxt2): write this workspace's snapshot — the whole log, the
@@ -675,7 +696,7 @@ pub fn snapshot_verb(
     let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
     if based {
-        register_platform_reducers(&mut store);
+        register_platform_reducers(&mut store)?;
     }
     let marks = Watermarks {
         pushed_through: meta.pushed_through,
@@ -721,13 +742,15 @@ pub fn snapshot_verb(
                 "kept_domains": base.kept_domains,
             });
             out["revisions"] = serde_json::json!(header.revisions);
+            out["signer"] = serde_json::json!(header.writer.as_ref().map(|w| w.key_id.as_str()));
         }
         println!("{out}");
     } else if let Some(base) = &header.base {
         println!(
             "wrote {} ({} bytes): the state of stream {} at relay position {}, with {ops} op(s) \
              below it — {} of {} the views cannot stand in for, the rest {}'s. A new machine starts \
-             from it with `nxs sync bind --snapshot {}` and pulls only what came after.",
+             from it with `nxs sync bind --snapshot {} --trust-signer {}` and pulls only what came \
+             after.",
             file.display(),
             bytes.len(),
             meta.stream_id,
@@ -735,7 +758,8 @@ pub fn snapshot_verb(
             base.residue,
             base.ops_through_p,
             base.kept_domains.join(", "),
-            file.display()
+            file.display(),
+            store.key_id()
         );
     } else {
         println!(
@@ -1928,6 +1952,7 @@ mod tests {
                 // on top of the spy never touching anything real either way.
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1947,6 +1972,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true, // CRITICAL: never touch the real launchd session from a test
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1963,6 +1989,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1991,6 +2018,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -2067,6 +2095,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -2287,6 +2316,7 @@ mod tests {
                 rebind: true,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),

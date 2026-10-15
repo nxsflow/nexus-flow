@@ -188,6 +188,19 @@ pub struct Base {
     pub kept_domains: Vec<String>,
     /// One entry per product whose views the image carries.
     pub view_bases: Vec<ViewBase>,
+    /// The id of the op the relay held at [`relay_position`](Base::relay_position) — the snapshot's
+    /// anchor, recorded so a replica started here can confirm that same position again when IT
+    /// takes the next snapshot, holding no op there of its own. Set by the snapshot writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// How many ops the image DROPPED — the ones below the position its views stand in for — and
+    /// an order-free digest over their ids (the snapshot format defines it; the substrate only
+    /// carries it). With the carried log they make up everything the writer held, which is what the
+    /// header's count and digest claim. Set by the snapshot writer.
+    #[serde(default)]
+    pub dropped: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dropped_digest: String,
 }
 
 /// One product's views in a based image: whose they are, which domain's reducer folded them, and at
@@ -208,11 +221,17 @@ pub struct ViewBase {
 }
 
 /// What a store that started from a based image stands on — the `log_base` row (6j6v.0cfa).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogBase {
     pub relay_position: i64,
     pub clock: i64,
     pub residue_count: i64,
+    /// The op the relay held at `relay_position` (see [`Base::anchor`]).
+    pub anchor: Option<String>,
+    /// How many ops this store never held because its image dropped them, and their digest (see
+    /// [`Base::dropped`]) — what a snapshot taken from THIS store adds to its own log's count.
+    pub dropped: i64,
+    pub dropped_digest: String,
 }
 
 /// A path that cannot run on a BASED store, because it needs the log below the base (6j6v.0cfa,
@@ -410,6 +429,12 @@ pub enum ImageError {
     MissingViewBase {
         domain: String,
     },
+    /// A BASED image whose view tables are not the set this store folds into, or lack a column it
+    /// reads (6j6v.0cfa). An ordinary image is refolded in that case; a based one cannot be.
+    ViewsDiffer {
+        carried: Vec<String>,
+        folded: Vec<String>,
+    },
     /// A BASED image whose schema is not the one this build folds into. An ordinary image is
     /// refolded in that case; a based one cannot be.
     NeedsSchema {
@@ -462,6 +487,11 @@ impl std::fmt::Display for ImageError {
                 f,
                 "the snapshot carries no views for the {domain} domain, which this store folds — \
                  and no ops below its position to fold them from"
+            ),
+            ImageError::ViewsDiffer { carried, folded } => write!(
+                f,
+                "the snapshot carries the views {carried:?} and this store folds {folded:?} — it \
+                 holds no ops below its position to fold the difference from"
             ),
             ImageError::NeedsSchema { written_at, ours } => write!(
                 f,

@@ -266,6 +266,16 @@ impl Store {
         self.key.key_id()
     }
 
+    /// This replica's signature over a snapshot's `digest` (6j6v.0cfa): `(key_id, sig)`. The key is
+    /// the replica's own — the one in `.nxs/signing.key` beside the db, so a host that places a
+    /// stable key file there before the first open signs every snapshot with that key.
+    pub fn sign_snapshot(&self, digest: &[u8; 32]) -> (String, String) {
+        (
+            self.key.key_id().to_string(),
+            self.key.sign_snapshot(digest),
+        )
+    }
+
     /// Build + persist + materialize one LOCAL op in `domain`. Public so a product's write layer
     /// appends its domain's ops through the substrate (flow passes its `task` domain). Returns the
     /// minted op id.
@@ -1046,6 +1056,11 @@ impl Store {
             residue,
             kept_domains: kept_domains.iter().map(|d| d.to_string()).collect(),
             view_bases,
+            // The snapshot writer's to fill: the anchor is the relay's, and the dropped digest is
+            // defined by the snapshot format, not by the substrate.
+            anchor: None,
+            dropped: 0,
+            dropped_digest: String::new(),
         });
         // A based image may only be loaded by a build that reads `log_base`: its clock lives there
         // and nowhere else (see `schema::BASED_MIN_COMPATIBLE`).
@@ -1262,19 +1277,15 @@ impl Store {
         }
         // And every table THIS store folds into must be carried, with every column it reads.
         if !ours.is_subset(theirs) || !self.views_cover_every_column(image)? {
-            return Err(ImageError::Malformed(format!(
-                "a based image carrying {:?} cannot start a store that folds {:?}",
-                {
-                    let mut t: Vec<&str> = theirs.iter().copied().collect();
-                    t.sort();
-                    t
-                },
-                {
-                    let mut o: Vec<&str> = ours.iter().copied().collect();
-                    o.sort();
-                    o
-                }
-            )));
+            let sorted = |set: &HashSet<&str>| {
+                let mut v: Vec<String> = set.iter().map(|t| t.to_string()).collect();
+                v.sort();
+                v
+            };
+            return Err(ImageError::ViewsDiffer {
+                carried: sorted(theirs),
+                folded: sorted(ours),
+            });
         }
         let boundary = image.max_rowid();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -1296,11 +1307,16 @@ impl Store {
             // Capped as any RECEIVED coordinate is (6j6v.m19v): an image is received, and a clock
             // floor from outside must not be able to park this replica at the top of the range.
             s.conn.execute(
-                "INSERT INTO log_base(id, relay_position, clock, residue_count) VALUES(1, ?1, ?2, ?3)",
+                "INSERT INTO log_base(id, relay_position, clock, residue_count, anchor, dropped,
+                     dropped_digest)
+                 VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     base.relay_position,
                     base.clock.min(crate::model::CLOCK_CEILING),
-                    base.residue as i64
+                    base.residue as i64,
+                    base.anchor,
+                    base.dropped as i64,
+                    base.dropped_digest
                 ],
             )?;
             Ok(())
@@ -1481,13 +1497,17 @@ fn high_water_mark(conn: &Connection) -> rusqlite::Result<i64> {
 /// table predates the row — the table is baseline DDL, so every store this build opens has it.
 fn log_base(conn: &Connection) -> rusqlite::Result<Option<crate::image::LogBase>> {
     conn.query_row(
-        "SELECT relay_position, clock, residue_count FROM log_base WHERE id = 1",
+        "SELECT relay_position, clock, residue_count, anchor, dropped, dropped_digest
+         FROM log_base WHERE id = 1",
         [],
         |r| {
             Ok(crate::image::LogBase {
                 relay_position: r.get(0)?,
                 clock: r.get(1)?,
                 residue_count: r.get(2)?,
+                anchor: r.get(3)?,
+                dropped: r.get(4)?,
+                dropped_digest: r.get(5)?,
             })
         },
     )
@@ -3496,7 +3516,10 @@ mod tests {
             crate::image::LogBase {
                 relay_position: 90,
                 clock: 900,
-                residue_count: 0
+                residue_count: 0,
+                anchor: None,
+                dropped: 0,
+                dropped_digest: String::new(),
             }
         );
         assert!(sibling.is_based());

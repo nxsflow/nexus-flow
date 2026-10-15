@@ -36,6 +36,11 @@ pub const KEY_ID_PREFIX: &str = "ed25519:";
 /// The first word of the key file: its format, so a later one can be told apart.
 const KEY_FILE_TAG: &str = "nxs-signing-key/1";
 
+/// What a snapshot signature is made over, before the digest it vouches for (6j6v.0cfa, spec §4.3):
+/// a domain tag of its own, so a snapshot signature can never be read as an op's — an op's
+/// canonical bytes begin with [`CANONICAL_FORM`](crate::model::CANONICAL_FORM) instead.
+pub const SNAPSHOT_FORM: &[u8] = b"nxs-snapshot/1";
+
 /// A replica's signing key. The secret never leaves this struct: no accessor returns it, `Debug`
 /// prints the key id only, and `ed25519-dalek` wipes it on drop.
 pub struct ReplicaKey {
@@ -74,6 +79,13 @@ impl ReplicaKey {
     /// The signature over `bytes`, base64url.
     pub fn sign(&self, bytes: &[u8]) -> String {
         URL_SAFE_NO_PAD.encode(self.signing.sign(bytes).to_bytes())
+    }
+
+    /// The signature over a snapshot's `digest` (6j6v.0cfa) — over [`snapshot_message`], never the
+    /// bare digest, so it cannot stand for anything but a snapshot. What the digest covers is the
+    /// snapshot format's business (`nxs_sync::snapshot`); this key only vouches for it.
+    pub fn sign_snapshot(&self, digest: &[u8; 32]) -> String {
+        self.sign(&snapshot_message(digest))
     }
 
     /// Sign `op` in place: its [`key_id`](Op::key_id) becomes this key's and its [`sig`](Op::sig)
@@ -214,6 +226,21 @@ pub fn verify(key_id: &str, sig: &str, bytes: &[u8]) -> bool {
     };
     key.verify_strict(bytes, &Signature::from_bytes(&sig))
         .is_ok()
+}
+
+/// The bytes a snapshot signature is made over: [`SNAPSHOT_FORM`], then the digest (6j6v.0cfa).
+pub fn snapshot_message(digest: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SNAPSHOT_FORM.len() + 1 + digest.len());
+    out.extend_from_slice(SNAPSHOT_FORM);
+    out.push(0);
+    out.extend_from_slice(digest);
+    out
+}
+
+/// Whether `sig` is the key `key_id`'s snapshot signature over `digest` (6j6v.0cfa). Whether that
+/// key is BELIEVED is the importer's question, asked against the signer list it was handed.
+pub fn verify_snapshot(key_id: &str, sig: &str, digest: &[u8; 32]) -> bool {
+    verify(key_id, sig, &snapshot_message(digest))
 }
 
 /// What a replica knows about where an op came from — the verdict stored beside every op in the
@@ -453,6 +480,40 @@ mod tests {
             std::fs::read_to_string(dir.path().join(KEY_FILE)).unwrap(),
             "not a key\n",
             "and left as it was"
+        );
+    }
+
+    /// A snapshot signature verifies over the digest it was made for, and over nothing else — not
+    /// another digest, not under another key, and never as an op's signature (6j6v.0cfa).
+    #[test]
+    fn a_snapshot_signature_verifies_only_for_its_digest_and_never_as_an_op() {
+        let key = ReplicaKey::generate();
+        let digest = [7u8; 32];
+        let sig = key.sign_snapshot(&digest);
+        assert!(verify_snapshot(key.key_id(), &sig, &digest));
+        assert!(!verify_snapshot(key.key_id(), &sig, &[8u8; 32]), "another digest");
+        let other = ReplicaKey::generate();
+        assert!(!verify_snapshot(other.key_id(), &sig, &digest), "another key");
+        assert!(
+            !verify(key.key_id(), &sig, &digest),
+            "the bare digest is not what was signed: the domain tag is part of the message"
+        );
+        assert!(!snapshot_message(&digest).starts_with(crate::model::CANONICAL_FORM));
+    }
+
+    /// The hosted engine places a seed-derived key file before the first open (owner, 2026-10-15):
+    /// that file is the key, used as it is and never replaced.
+    #[test]
+    fn a_key_file_placed_before_the_first_open_is_the_key_and_stays_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = [42u8; 32];
+        let placed = format!("{KEY_FILE_TAG} {}\n", URL_SAFE_NO_PAD.encode(seed));
+        std::fs::write(dir.path().join(KEY_FILE), &placed).unwrap();
+        let key = ReplicaKey::load_or_create(dir.path()).unwrap();
+        assert_eq!(key.key_id(), ReplicaKey::from_seed(seed).key_id());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(KEY_FILE)).unwrap(),
+            placed
         );
     }
 }

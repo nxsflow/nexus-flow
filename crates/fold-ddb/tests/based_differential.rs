@@ -60,7 +60,7 @@ struct Relay {
 impl Relay {
     fn holding(ops: &[Op]) -> Relay {
         Relay {
-            log: ops.iter().map(nxs_sync::wire::to_wire).collect(),
+            log: ops.iter().map(WireOp::from).collect(),
             pulls: RefCell::new(Vec::new()),
             visible: ops.len(),
         }
@@ -82,10 +82,12 @@ impl Relay {
 }
 
 impl Transport for Relay {
-    fn push(&self, _: &StreamId, _: &[WireOp]) -> Result<(), TransportError> {
-        // Every replica in this test reads. A push would mean the test generated an op itself,
-        // which would put it outside the stream both sides are being compared on.
-        unreachable!("no replica in this differential writes")
+    fn push(&self, _: &StreamId, ops: &[WireOp]) -> Result<(), TransportError> {
+        // Every replica in this test reads. A non-empty push would mean the test generated an op
+        // itself, which would put it outside the stream both sides are being compared on. (A pass
+        // offers its — empty — batch on every round.)
+        assert!(ops.is_empty(), "no replica in this differential writes");
+        Ok(())
     }
     fn pull(
         &self,
@@ -100,7 +102,8 @@ impl Transport for Relay {
             .take(limit)
             .cloned()
             .collect();
-        Ok((page, Cursor((start + page.len()) as i64)))
+        let next = Cursor((start + page.len()) as i64);
+        Ok((page, next))
     }
     fn register(&self, _: &StreamId, _: &str, _: &str) -> Result<RegisterOutcome, TransportError> {
         Ok(RegisterOutcome::Registered)
@@ -119,6 +122,10 @@ fn sync_through(store: &mut Store, site: i64, marks: &mut Watermarks, relay: &Re
 }
 
 /// A replica that pulled everything — the reference every based replica is compared against.
+///
+/// Every replica in this file sits at a site of its own (11 and up): the generated stream's writers
+/// are sites 1 to 3, and a replica sharing a writer's site would take that writer's ops for its own
+/// and push them back.
 fn full_replay(ops: &[Op], site: i64) -> Store {
     let relay = Relay::holding(ops);
     let mut store = platform_store(site);
@@ -127,8 +134,9 @@ fn full_replay(ops: &[Op], site: i64) -> Store {
     store
 }
 
-/// A based snapshot of the stream at position `p`, taken by a replica that synced to exactly there.
-fn snapshot_at(ops: &[Op], p: usize, site: i64) -> Vec<u8> {
+/// A based snapshot of the stream at position `p`, taken by a replica that synced to exactly there —
+/// and the signer list that believes it: that replica's own key.
+fn snapshot_at(ops: &[Op], p: usize, site: i64) -> (Vec<u8>, Vec<String>) {
     let relay = Relay::holding(ops);
     let prefix = relay.at(p);
     let mut writer = platform_store(site);
@@ -138,7 +146,7 @@ fn snapshot_at(ops: &[Op], p: usize, site: i64) -> Vec<u8> {
         marks.pulled_through, p as i64,
         "the writer stands exactly at the position it claims"
     );
-    snapshot::export_based(
+    let bytes = snapshot::export_based(
         &writer,
         site,
         &stream(),
@@ -146,7 +154,8 @@ fn snapshot_at(ops: &[Op], p: usize, site: i64) -> Vec<u8> {
         &prefix,
         snapshot::PLATFORM,
     )
-    .unwrap()
+    .unwrap();
+    (bytes, vec![writer.key_id().to_string()])
 }
 
 /// Everything about a store that two replicas of one stream must agree on: every view table of all
@@ -225,7 +234,7 @@ fn assert_same_state(based: &Store, replayed: &Store, ctx: &str) {
 /// from the snapshot at P plus the tail is indistinguishable from one that replayed all of it.
 #[test]
 fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
-    let ops = platform_log(0xacce_9742, 3, 8_000);
+    let ops = platform_log(0xacce_9742, 3, 10_000);
     assert!(
         ops.len() >= ACCEPTANCE_OPS,
         "the generated stream is {} ops, below the {ACCEPTANCE_OPS} the acceptance asks for",
@@ -233,7 +242,7 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
     );
     // Every product and the residue are really in it — a differential over a stream that holds
     // only tickets would pass while saying nothing about chat, memory or unfoldable ops.
-    let replayed = full_replay(&ops, 1);
+    let replayed = full_replay(&ops, 11);
     let held = op_ids_by_domain(&replayed);
     for domain in ["task", "message", "fact", "no-reducer-here"] {
         assert!(
@@ -245,7 +254,7 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
 
     // Mid-stream, with every site's writing still in flight on both sides of the cut.
     let p = ops.len() / 2;
-    let bytes = snapshot_at(&ops, p, 2);
+    let (bytes, signers) = snapshot_at(&ops, p, 12);
     let header = snapshot::peek(&bytes).unwrap();
     assert_eq!(header.format, snapshot::FORMAT_BASED);
     assert_eq!(header.pulled_through, p as i64);
@@ -253,8 +262,8 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
     assert_eq!(base.ops_through_p, p, "the writer held every op below P");
 
     let relay = Relay::holding(&ops);
-    let mut based = platform_store(3);
-    let imported = snapshot::import(&mut based, &bytes, &stream(), &relay).unwrap();
+    let mut based = platform_store(13);
+    let imported = snapshot::import(&mut based, &bytes, &stream(), &relay, &signers).unwrap();
     assert_eq!(imported.marks.pulled_through, p as i64);
     assert_eq!(
         imported.loaded,
@@ -262,7 +271,7 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
         "a based snapshot's views are taken, never folded again"
     );
     let mut marks = imported.marks;
-    sync_through(&mut based, 3, &mut marks, &relay);
+    sync_through(&mut based, 13, &mut marks, &relay);
     assert_eq!(marks.pulled_through, ops.len() as i64);
 
     // THE claim: a snapshot at P plus the tail is a full replay.
@@ -325,27 +334,27 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
 /// them over. Smaller, so the positions can be swept.
 #[test]
 fn the_differential_holds_at_every_position_and_in_any_arrival_order() {
-    for seed in [0x51ice_u64 ^ 0x11, 0x51ice ^ 0x22] {
+    for seed in [0x511ce_u64 ^ 0x11, 0x511ce ^ 0x22] {
         let ops = platform_log(seed, 3, 900);
         assert!(ops.len() > 2_000, "{} ops", ops.len());
-        let replayed = full_replay(&ops, 1);
+        let replayed = full_replay(&ops, 11);
         for fraction in [10, 35, 50, 77, 95] {
             let p = ops.len() * fraction / 100;
             let ctx = format!("seed {seed:#x}, P at {fraction}% ({p} of {})", ops.len());
-            let bytes = snapshot_at(&ops, p, 2);
+            let (bytes, signers) = snapshot_at(&ops, p, 12);
             let relay = Relay::holding(&ops);
 
             // In order, through the pull loop.
-            let mut based = platform_store(3);
-            let imported = snapshot::import(&mut based, &bytes, &stream(), &relay).unwrap();
+            let mut based = platform_store(13);
+            let imported = snapshot::import(&mut based, &bytes, &stream(), &relay, &signers).unwrap();
             let mut marks = imported.marks;
-            sync_through(&mut based, 3, &mut marks, &relay);
+            sync_through(&mut based, 13, &mut marks, &relay);
             assert_same_state(&based, &replayed, &ctx);
 
             // Out of order, with duplicates — applied straight to the store, because a cursor
             // cannot deliver a page it has already passed.
-            let mut shuffled = platform_store(4);
-            snapshot::import(&mut shuffled, &bytes, &stream(), &relay).unwrap();
+            let mut shuffled = platform_store(14);
+            snapshot::import(&mut shuffled, &bytes, &stream(), &relay, &signers).unwrap();
             let mut tail: Vec<Op> = ops[p..].to_vec();
             let mut r = Lcg(seed ^ p as u64);
             for i in (1..tail.len()).rev() {
@@ -366,8 +375,8 @@ fn a_fold_table_started_from_the_same_bytes_holds_what_the_replica_holds() {
     let folder = Folder::platform().unwrap();
     let ops = platform_log(0xf01d, 3, 700);
     let p = ops.len() * 60 / 100;
-    let bytes = snapshot_at(&ops, p, 2);
-    let (_, image) = snapshot::unpack_image(&bytes).unwrap();
+    let (bytes, signers) = snapshot_at(&ops, p, 12);
+    let (_, image) = snapshot::unpack_image(&bytes, &signers).unwrap();
     let projected = nxs_fold_ddb::snapshot::from_image(&image, "based-differential").unwrap();
     assert_eq!(projected.folded_through, p as i64);
 
@@ -390,7 +399,7 @@ fn a_fold_table_started_from_the_same_bytes_holds_what_the_replica_holds() {
     tail.extend(twice);
     ready(folder.fold_batch(&table, &tail)).unwrap();
 
-    let replayed = full_replay(&ops, 1);
+    let replayed = full_replay(&ops, 11);
     for view in platform_view_tables() {
         assert_eq!(
             served_rows(&table, &folder, view),
@@ -406,11 +415,11 @@ fn a_fold_table_started_from_the_same_bytes_holds_what_the_replica_holds() {
 fn the_fold_projection_refuses_a_with_log_snapshot() {
     let ops = platform_log(0xf01e, 2, 120);
     let relay = Relay::holding(&ops);
-    let mut writer = platform_store(1);
+    let mut writer = platform_store(11);
     let mut marks = Watermarks::default();
-    sync_through(&mut writer, 1, &mut marks, &relay);
-    let bytes = snapshot::export(&writer, 1, &stream(), &marks, &relay).unwrap();
-    let (_, image) = snapshot::unpack_image(&bytes).unwrap();
+    sync_through(&mut writer, 11, &mut marks, &relay);
+    let bytes = snapshot::export(&writer, 11, &stream(), &marks, &relay).unwrap();
+    let (_, image) = snapshot::unpack_image(&bytes, &[]).unwrap();
     let err = nxs_fold_ddb::snapshot::from_image(&image, "based-differential").unwrap_err();
     assert!(
         matches!(err, nxs_fold_ddb::snapshot::FromImageError::NotBased),
@@ -431,8 +440,8 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
         cap: usize,
     }
     impl Transport for Capped<'_> {
-        fn push(&self, _: &StreamId, _: &[WireOp]) -> Result<(), TransportError> {
-            unreachable!()
+        fn push(&self, s: &StreamId, ops: &[WireOp]) -> Result<(), TransportError> {
+            self.inner.push(s, ops)
         }
         fn pull(
             &self,
@@ -464,18 +473,18 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
     }
 
     const CAP: usize = 30_000;
-    let ops = platform_log(0xcapp, 3, 4_700);
+    let ops = platform_log(0xca99, 3, 6_000);
     assert!(
         ops.len() > 35_000,
         "the stream must be past the size the engine refuses today: {} ops",
         ops.len()
     );
     let p = ops.len() - 2_000;
-    let bytes = snapshot_at(&ops, p, 2);
+    let (bytes, signers) = snapshot_at(&ops, p, 12);
     let relay = Relay::holding(&ops);
 
     // Replaying it is refused, exactly as the hosted engine refuses it today.
-    let mut replaying = platform_store(3);
+    let mut replaying = platform_store(13);
     let mut marks = Watermarks::default();
     let capped = Capped {
         inner: &relay,
@@ -484,7 +493,7 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
     };
     let refused = engine::sync(
         &mut replaying,
-        3,
+        13,
         &stream(),
         &mut marks,
         &capped,
@@ -500,9 +509,13 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
     // Starting from the snapshot, what is counted is the residue, the kept log and the tail.
     let header = snapshot::peek(&bytes).unwrap();
     let base = header.base.clone().unwrap();
-    let mut based = platform_store(4);
-    let imported = snapshot::import(&mut based, &bytes, &stream(), &relay).unwrap();
-    let counted_at_start = base.residue + header.ops - base.residue; // every op the file carries
+    let mut based = platform_store(14);
+    let imported = snapshot::import(&mut based, &bytes, &stream(), &relay, &signers).unwrap();
+    // Every op the import wrote, as the seam reports it — what the hosted engine counts at start.
+    assert_eq!(imported.residue + imported.kept, header.ops);
+    assert_eq!(imported.residue, base.residue);
+    assert_eq!(based.op_count() as usize, imported.residue + imported.kept);
+    let counted_at_start = imported.residue + imported.kept;
     let capped = Capped {
         inner: &relay,
         counted: RefCell::new(counted_at_start),
@@ -511,7 +524,7 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
     let mut marks = imported.marks;
     loop {
         let before = marks.pulled_through;
-        engine::sync(&mut based, 4, &stream(), &mut marks, &capped, 5_000, &Unbounded)
+        engine::sync(&mut based, 14, &stream(), &mut marks, &capped, 5_000, &Unbounded)
             .unwrap_or_else(|e| panic!("a based start must stay inside the budget: {e}"));
         if marks.pulled_through == before {
             break;
@@ -523,5 +536,5 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
         "{} ops counted against a cap of {CAP}",
         capped.counted.borrow()
     );
-    assert_same_state(&based, &full_replay(&ops, 1), "at the cap");
+    assert_same_state(&based, &full_replay(&ops, 11), "at the cap");
 }

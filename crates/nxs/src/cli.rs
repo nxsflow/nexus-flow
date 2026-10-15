@@ -320,6 +320,12 @@ enum SyncAction {
         /// position is confirmed against it first.
         #[arg(long, value_name = "FILE")]
         snapshot: Option<String>,
+        /// Believe a BASED snapshot (`nxs sync snapshot --based`) signed by this key — the key id
+        /// `nxs sync key` prints on the machine that took it. Repeat for several. A based snapshot
+        /// replaces the history it was folded from, so it is taken only from a signer named here;
+        /// a refusal names the key that signed it. Not needed for a with-log snapshot.
+        #[arg(long = "trust-signer", value_name = "KEY_ID", requires = "snapshot")]
+        trust_signer: Vec<String>,
     },
     /// Write a snapshot of this workspace to FILE: the whole op log, the folded board, and the
     /// relay position they reach. A new machine starts from it with `nxs sync bind --snapshot
@@ -785,6 +791,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 rebind,
                 no_daemon,
                 snapshot,
+                trust_signer,
             } => {
                 let ws = resolve(db)?;
                 sync::bind(
@@ -797,6 +804,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                         rebind: *rebind,
                         no_daemon: *no_daemon,
                         snapshot: snapshot.as_deref().map(std::path::Path::new),
+                        trusted_signers: trust_signer,
                     },
                 )
             }

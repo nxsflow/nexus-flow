@@ -45,3 +45,6 @@ engine = [
 
 [dev-dependencies]
 nexus-flow-core = { path = "../core" }
+# A snapshot is signed with the key file beside the db (nxf 6j6v.0cfa); the test that a host-placed
+# key file is the one used needs a real directory.
+tempfile = "3"

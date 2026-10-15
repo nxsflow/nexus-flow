@@ -656,7 +656,10 @@ pub fn try_apply(conn: &Connection) -> rusqlite::Result<()> {
              id INTEGER PRIMARY KEY CHECK(id = 1),
              relay_position INTEGER NOT NULL,
              clock INTEGER NOT NULL,
-             residue_count INTEGER NOT NULL DEFAULT 0
+             residue_count INTEGER NOT NULL DEFAULT 0,
+             anchor TEXT,
+             dropped INTEGER NOT NULL DEFAULT 0,
+             dropped_digest TEXT NOT NULL DEFAULT ''
          );",
     )?;
     conn.execute_batch(crate::trust::TRUST_TABLES)

@@ -262,6 +262,11 @@ impl Store {
         self.inner.key_id()
     }
 
+    /// This replica's signature over a snapshot's digest, `(key_id, sig)` (6j6v.0cfa).
+    pub fn sign_snapshot(&self, digest: &[u8; 32]) -> (String, String) {
+        self.inner.sign_snapshot(digest)
+    }
+
     /// The trust list, this replica's own key first.
     pub fn trusted_keys(&self) -> Vec<nxs_foundation::trust::TrustedKey> {
         self.inner.trusted_keys()
@@ -732,8 +737,14 @@ impl Store {
     ///   [`rewrite_refs`], so a cited short-id stays resolvable.
     ///
     /// Precondition: `p_old` is THIS replica's prefix, so every `p_old`-prefixed id is local.
+    /// Refused ([`NeedsHistory::Remap`](nxs_foundation::image::NeedsHistory::Remap)) on a replica
+    /// started from a based snapshot that holds ids to remap — the rebuild needs the whole log.
     /// Idempotent: once no `p_old` id remains it is a no-op, so a crash-retried remap converges.
-    pub fn remap_prefix(&mut self, p_old: &str, p_new: &str) {
+    pub fn remap_prefix(
+        &mut self,
+        p_old: &str,
+        p_new: &str,
+    ) -> Result<(), nxs_foundation::image::NeedsHistory> {
         let ops = self.export();
 
         // Build the exact id map: every local item id `p_old.suffix → p_new.suffix`.
@@ -749,7 +760,16 @@ impl Store {
             }
         }
         if map.is_empty() {
-            return; // nothing of ours to remap (fresh, or already remapped) — idempotent
+            return Ok(()); // nothing of ours to remap (fresh, or already remapped) — idempotent
+        }
+        // A remap rebuilds flow's views from the log; a replica started from a based snapshot holds
+        // no log below its base, so the rebuild would empty the board down to the tail (6j6v.0cfa).
+        if let Some(base) = self.inner.log_base() {
+            return Err(nxs_foundation::image::NeedsHistory::Remap {
+                from: p_old.to_string(),
+                to: p_new.to_string(),
+                base: base.relay_position,
+            });
         }
 
         // Compute the rewritten op for each log entry (op_id is stable — it is the dedup key and
@@ -793,6 +813,7 @@ impl Store {
             }
         }
         conn.execute_batch("COMMIT").unwrap();
+        Ok(())
     }
 
     /// Remap an op's `target_id` under the id map: edge composites move each endpoint; a label
@@ -3631,6 +3652,37 @@ mod tests {
         );
     }
 
+    /// A remap rewrites the log and rebuilds flow's views from it — so on a replica started from a
+    /// based snapshot, which holds no ops below its base, it would empty the board down to the
+    /// tail. It refuses by name instead and leaves the board as it was (6j6v.0cfa, spec §4.5).
+    #[test]
+    fn a_based_store_refuses_a_prefix_remap_instead_of_emptying_its_board() {
+        use nxs_foundation::reducer::Reducer as _;
+        let mut source = Store::open_in_memory(1);
+        source.create_item("old.A", "task", "imported", "a");
+        let based = source
+            .based_image(
+                5,
+                &[],
+                vec![nxs_foundation::image::ViewBase {
+                    of: "flow".into(),
+                    domain: "task".into(),
+                    fold_revision: TaskReducer.fold_revision(),
+                }],
+            )
+            .unwrap();
+        let mut s = Store::open_in_memory(2);
+        s.load_image(&based).unwrap();
+        s.create_item("old.B", "task", "mine", "a");
+        let err = s.remap_prefix("old", "new").unwrap_err();
+        assert!(
+            matches!(&err, nxs_foundation::image::NeedsHistory::Remap { base: 5, .. }),
+            "{err}"
+        );
+        assert!(s.get_item("old.A").unwrap().is_some(), "the imported item stays");
+        assert!(s.get_item("old.B").unwrap().is_some(), "and so does the local one");
+    }
+
     #[test]
     fn remap_prefix_rewrites_label_item_ids() {
         // §8 prefix remap: a label's composite target_id carries the item short-id, so the remap
@@ -3639,7 +3691,7 @@ mod tests {
         let mut s = Store::open_in_memory(1);
         s.create_item("old.X", "task", "X", "a");
         s.add_label("old.X", "urgent", "a");
-        s.remap_prefix("old", "new");
+        s.remap_prefix("old", "new").unwrap();
         assert!(s.get_item("old.X").unwrap().is_none(), "the old id is gone");
         assert_eq!(
             s.labels_of("new.X").unwrap(),
@@ -3878,7 +3930,7 @@ mod tests {
         s.migrate_belongs_to_to_parent_edges();
         step("the belongs_to migration", &s, &mut seen);
         assert_eq!(s.parents_of("aaaa.2"), vec!["aaaa.1".to_string()]);
-        s.remap_prefix("aaaa", "bbbb");
+        s.remap_prefix("aaaa", "bbbb").unwrap();
         step("the prefix remap", &s, &mut seen);
         assert!(s.get_item("bbbb.2").unwrap().is_some(), "the remap did run");
     }
@@ -4260,7 +4312,7 @@ mod tests {
         let ops_before = s.op_count();
         let clock_before = s.clock();
 
-        s.remap_prefix("aaaa", "kp3z");
+        s.remap_prefix("aaaa", "kp3z").unwrap();
 
         assert!(
             s.get_item("aaaa.0001").unwrap().is_none()
@@ -4366,7 +4418,7 @@ mod tests {
         s.apply(&peer.export());
         s.trust_key(peer.key_id(), "peer", "").unwrap();
 
-        s.remap_prefix("aaaa", "kp3z");
+        s.remap_prefix("aaaa", "kp3z").unwrap();
 
         for op in s.export() {
             let seen = s.op_provenance(&op.op_id).unwrap();
@@ -4398,12 +4450,12 @@ mod tests {
     fn remap_prefix_is_idempotent_and_a_noop_when_no_local_prefix_present() {
         let mut s = Store::open_in_memory(1);
         s.create_item("aaaa.0001", "task", "T", "x");
-        s.remap_prefix("aaaa", "kp3z");
+        s.remap_prefix("aaaa", "kp3z").unwrap();
         let after_first = s.get_item("kp3z.0001").unwrap();
-        s.remap_prefix("aaaa", "kp3z");
+        s.remap_prefix("aaaa", "kp3z").unwrap();
         assert_eq!(s.get_item("kp3z.0001").unwrap(), after_first);
         let snapshot = s.get_item("kp3z.0001").unwrap();
-        s.remap_prefix("qqqq", "rrrr");
+        s.remap_prefix("qqqq", "rrrr").unwrap();
         assert_eq!(s.get_item("kp3z.0001").unwrap(), snapshot);
     }
 
@@ -4612,7 +4664,7 @@ mod tests {
             Some("supersedes aaaa.0001".into()),
             "x",
         );
-        s.remap_prefix("aaaa", "kp3z");
+        s.remap_prefix("aaaa", "kp3z").unwrap();
         let item = s.get_item("kp3z.0002").unwrap().unwrap();
         assert_eq!(
             item.design.as_deref(),

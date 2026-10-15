@@ -702,7 +702,9 @@ pub fn register_prefix(
                     "relay reassigned a malformed prefix {new_prefix:?}; refusing to remap"
                 )));
             }
-            store.remap_prefix(prefix, &new_prefix);
+            store
+                .remap_prefix(prefix, &new_prefix)
+                .map_err(|e| SyncError::Storage(e.to_string()))?;
             Ok(Some(new_prefix))
         }
     }
