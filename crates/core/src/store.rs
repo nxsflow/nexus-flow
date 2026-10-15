@@ -125,7 +125,8 @@ impl Store {
         // (aye.36). A fresh in-memory log is empty and `upgraded` is always false (both views are
         // installed together), so this only binds the key here; the file-backed `open` is where a
         // multi-device pull or a pre-custom-fields upgrade actually triggers the refold.
-        Self::materialize_views(&mut inner, upgraded);
+        // A fresh in-memory log has no base, so the based refusal is unreachable here.
+        Self::materialize_views(&mut inner, upgraded).expect("a fresh in-memory store has no base");
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
@@ -142,7 +143,7 @@ impl Store {
         let mut inner = Substrate::open(path, site)?;
         let upgraded = schema::try_apply_flow_views(inner.connection())?;
         inner.register_reducer(Box::new(TaskReducer));
-        Self::materialize_views(&mut inner, upgraded);
+        Self::materialize_views(&mut inner, upgraded)?;
         let mut store = Store {
             inner,
             item_reads: std::cell::Cell::default(),
@@ -160,11 +161,19 @@ impl Store {
     /// spec §7), [`force_refold`](Substrate::force_refold) instead — a `field set` op the pre-CF
     /// binary store-don't-folded sits BELOW the advanced watermark, so only an unconditional refold
     /// resurfaces it (mirrors `ChatStore::materialize_views`).
-    fn materialize_views(inner: &mut Substrate, upgraded: bool) {
+    /// **Both paths can REFUSE on a based replica** (6j6v.0cfa): each one may rebuild the views
+    /// from the whole log, and a replica started from a snapshot at a relay position holds no ops
+    /// below it. The refusal is named and surfaces as the open's error, exactly as the skew gate's
+    /// does — the answer is a snapshot taken at this build's fold revision, which only the caller
+    /// can fetch.
+    fn materialize_views(
+        inner: &mut Substrate,
+        upgraded: bool,
+    ) -> Result<(), nxs_foundation::image::NeedsHistory> {
         if upgraded {
-            inner.force_refold(FLOW_VIEWS);
+            inner.force_refold(FLOW_VIEWS)
         } else {
-            inner.refold_if_behind(FLOW_VIEWS);
+            inner.refold_if_behind(FLOW_VIEWS)
         }
     }
 
@@ -292,6 +301,34 @@ impl Store {
     /// [`nxs_foundation::image`].
     pub fn image(&self) -> rusqlite::Result<nxs_foundation::image::Image> {
         self.inner.image()
+    }
+
+    /// This store's BASED image (6j6v.0cfa): its state, and instead of the ops below
+    /// `relay_position` only what the state cannot stand in for. See
+    /// [`nxs_foundation::store::Store::based_image`].
+    pub fn based_image(
+        &self,
+        relay_position: i64,
+        kept_domains: &[&str],
+        view_bases: Vec<nxs_foundation::image::ViewBase>,
+    ) -> Result<nxs_foundation::image::Image, nxs_foundation::image::ImageError> {
+        self.inner
+            .based_image(relay_position, kept_domains, view_bases)
+    }
+
+    /// The fold revision of the reducer registered for `domain`, or `None` when none is (6j6v.0cfa).
+    pub fn fold_revision_of(&self, domain: &str) -> Option<i64> {
+        self.inner.fold_revision_of(domain)
+    }
+
+    /// The base this replica stands on, when it started from a based snapshot (6j6v.0cfa).
+    pub fn log_base(&self) -> Option<nxs_foundation::image::LogBase> {
+        self.inner.log_base()
+    }
+
+    /// Whether this replica holds no ops below a relay position (6j6v.0cfa).
+    pub fn is_based(&self) -> bool {
+        self.inner.is_based()
     }
 
     /// Start this EMPTY store from an image (6j6v.mxt2): its log, and flow's views when this engine

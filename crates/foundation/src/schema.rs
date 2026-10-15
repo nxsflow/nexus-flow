@@ -43,7 +43,17 @@ use rusqlite::{Connection, OptionalExtension};
 /// Every new column is NULLable or DEFAULTed and the two views answer what they answered before,
 /// so the floor stays at 4. A row an older binary adds without the coordinate is filled the next
 /// time this one opens the file — see `Store::refold_if_behind`.
-pub const SCHEMA_VERSION: i64 = 8;
+///
+/// v9 (6j6v.0cfa) gives the substrate `log_base`: the one row a store that started from a BASED
+/// image carries instead of the log below a relay position — the position, the Lamport clock floor,
+/// and how many unapplied ops rode along. A new TABLE, so additive (checklist rules 1–2) and the
+/// GLOBAL floor stays at 4: a store without the row is every store that exists today, and an older
+/// binary that never reads the table loses nothing on one. The one database an older binary must
+/// NOT touch is a based one — its clock lives in that row, and a binary reading 0 instead would
+/// mint losing ops — so [`Store::load_image`](crate::store::Store::load_image) raises THAT FILE's
+/// own floor to [`BASED_MIN_COMPATIBLE`] when it writes the row. Per database, not per build: the
+/// floor mechanism applied to the one shape that needs it.
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// The lowest schema version a peer must speak to safely touch a DB this binary writes — the
 /// **compatibility floor** (spec §4.3). Persisted into the DB header (`PRAGMA application_id`,
@@ -57,6 +67,18 @@ pub const SCHEMA_VERSION: i64 = 8;
 /// (checklist rule 4). flow and memory ship in one binary and fold the same op-log, so they upgrade
 /// together — there is no flow-vs-memory skew, only the intended "use a v4+ nxs" gate.
 pub const MIN_COMPATIBLE_SCHEMA_VERSION: i64 = 4;
+
+/// The floor a BASED database carries in its own header (6j6v.0cfa) — the schema version that
+/// introduced [`log_base`](SUBSTRATE_TABLES).
+///
+/// A based store is the one shape where an older binary is genuinely unsafe rather than merely
+/// degraded: the Lamport clock floor sits in `log_base` and nothing else holds it, so a binary that
+/// does not read the table seeds its clock from a log that starts above the base and mints ops that
+/// lose every compare, silently. That is checklist rule 4's case — but only for this database, so
+/// the raise is written into this file's header by the import that makes it based, never into
+/// [`MIN_COMPATIBLE_SCHEMA_VERSION`], which would lock older binaries out of every ordinary
+/// workspace for a shape none of them has.
+pub const BASED_MIN_COMPATIBLE: i64 = 9;
 
 // ── ALT-BINARY-SAFE MIGRATION CHECKLIST (spec §4.3) ─────────────────────────────────────
 // CLI (`nxf`) and the embedding app share ONE SQLite file, so an older binary must keep
@@ -81,7 +103,13 @@ pub const MIN_COMPATIBLE_SCHEMA_VERSION: i64 = 4;
 /// signing (6j6v.pzkb) the local trust list and the small local facts beside it. Everything else
 /// in the file belongs to a product: its views, or its declared machine-local tables. One list, so
 /// the products' "every table is classified" tests cannot each keep a copy that drifts.
-pub const SUBSTRATE_TABLES: &[&str] = &["ops", "view_watermarks", "trusted_keys", "replica_meta"];
+pub const SUBSTRATE_TABLES: &[&str] = &[
+    "ops",
+    "view_watermarks",
+    "trusted_keys",
+    "replica_meta",
+    "log_base",
+];
 
 /// The PRAGMA user_version this database is stamped at (0 for a pre-spine legacy DB).
 pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -617,6 +645,18 @@ pub fn try_apply(conn: &Connection) -> rusqlite::Result<()> {
              folded_through INTEGER NOT NULL DEFAULT 0,
              fold_revision INTEGER NOT NULL DEFAULT 0,
              revision_through INTEGER NOT NULL DEFAULT 0
+         );
+         -- The BASE of a store that started from a based image (6j6v.0cfa, schema v9): the one row
+         -- that stands in for the log below a relay position. Machine-local — it describes THIS
+         -- replica's start, not the stream — so it is a substrate table, never a view, and it never
+         -- rides in an image's views. Absent on every ordinary store, which is what `is_based`
+         -- reads. Additive baseline DDL like `view_watermarks`; the import that writes the row also
+         -- raises this file's own compatibility floor (see `BASED_MIN_COMPATIBLE`).
+         CREATE TABLE IF NOT EXISTS log_base(
+             id INTEGER PRIMARY KEY CHECK(id = 1),
+             relay_position INTEGER NOT NULL,
+             clock INTEGER NOT NULL,
+             residue_count INTEGER NOT NULL DEFAULT 0
          );",
     )?;
     conn.execute_batch(crate::trust::TRUST_TABLES)

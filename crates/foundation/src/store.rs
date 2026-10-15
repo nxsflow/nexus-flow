@@ -766,6 +766,16 @@ impl Store {
         self.reducers.iter().map(|r| r.fold_revision()).sum()
     }
 
+    /// The fold revision of the reducer registered for `domain`, or `None` when none is — the ONE
+    /// revision a based image may claim for a product (6j6v.0cfa). Read off the store rather than
+    /// passed in, so a snapshot cannot name a revision its views were not folded at.
+    pub fn fold_revision_of(&self, domain: &str) -> Option<i64> {
+        self.reducers
+            .iter()
+            .find(|r| r.domain() == domain)
+            .map(|r| r.fold_revision())
+    }
+
     /// What `view_watermarks` records for `store_id` beside `folded_through`: the fold revision the
     /// views were folded at, and how far a binary AT that revision has folded (`(0, 0)` when there
     /// is no row). An older binary writing the same file advances `folded_through` only — it does
@@ -795,7 +805,13 @@ impl Store {
     /// ops over it again. Decided again under the write lock, so two processes opening one file do
     /// not both rebuild. A store at an older revision than the file's leaves it alone — the newer
     /// binary catches up after it. Returns whether it rebuilt.
-    fn bind_views(&mut self, store_id: &str) -> bool {
+    ///
+    /// **A BASED store refuses instead** (6j6v.0cfa): the rebuild's first act is to EMPTY the views
+    /// it is about to re-derive from the whole log, and a based store holds no log below its base —
+    /// so the rebuild would not produce worse views, it would produce none. The refusal is named
+    /// ([`NeedsHistory`](crate::image::NeedsHistory)) and writes nothing, and the answer to it is a
+    /// snapshot taken at this build's revisions, which only the caller can fetch.
+    fn bind_views(&mut self, store_id: &str) -> Result<bool, crate::image::NeedsHistory> {
         self.views_key = Some(store_id.to_string());
         let ours = self.fold_revision();
         let needs_rebuild = |s: &Self| {
@@ -803,7 +819,16 @@ impl Store {
             recorded < ours || (recorded == ours && revision_through < s.max_op_rowid())
         };
         if !needs_rebuild(self) {
-            return false;
+            return Ok(false);
+        }
+        if let Some(base) = self.log_base() {
+            let (recorded, _) = self.recorded_revision(store_id);
+            return Err(crate::image::NeedsHistory::Rebuild {
+                of: store_id.to_string(),
+                recorded,
+                ours,
+                base: base.relay_position,
+            });
         }
         self.begin_immediate_patiently();
         let rebuilt = needs_rebuild(self);
@@ -825,7 +850,7 @@ impl Store {
                 .unwrap();
         }
         self.conn.execute_batch("COMMIT").unwrap();
-        rebuilt
+        Ok(rebuilt)
     }
 
     /// `BEGIN IMMEDIATE` for a rebuild, waiting as long as another process holds the write lock —
@@ -930,15 +955,19 @@ impl Store {
     /// First (6j6v.y3r4) the views are rebuilt when this binary's fold revision cannot vouch for
     /// them — see [`bind_views`](Self::bind_views); a rebuild folds the whole log, so nothing is
     /// left to catch up after it.
-    pub fn refold_if_behind(&mut self, store_id: &str) {
-        if self.bind_views(store_id) {
-            return;
+    pub fn refold_if_behind(
+        &mut self,
+        store_id: &str,
+    ) -> Result<(), crate::image::NeedsHistory> {
+        if self.bind_views(store_id)? {
+            return Ok(());
         }
         let boundary = self.max_op_rowid();
         if boundary > self.folded_through(store_id) {
             self.refold();
             self.advance_watermark(boundary);
         }
+        Ok(())
     }
 
     /// This store's IMAGE (6j6v.mxt2): the whole log, the views of every registered reducer, and
@@ -972,7 +1001,66 @@ impl Store {
             folded_through,
             fold_revision: self.fold_revision(),
             views,
+            base: None,
         })
+    }
+
+    /// This store's BASED image (6j6v.0cfa): the same views, and instead of the log below
+    /// `relay_position` only what the views cannot stand in for — the residue, the ops of
+    /// `kept_domains`, and the [`Base`](crate::image::Base) that carries the rest.
+    ///
+    /// **An op is dropped only when a registered reducer folded it.** The views hold what a fold
+    /// produced; an op no reducer here could fold produced nothing and would be lost, so it rides
+    /// along as residue. That rule is what makes a half-registered exporter safe rather than
+    /// lossy: a store with only the task reducer keeps every `message` and `fact` op in full,
+    /// because nothing here folded them — the image is merely bigger, never short. It is also why
+    /// an exporter that MEANS to drop a product's log must register that product's reducer, and why
+    /// the import refuses an image whose `view_bases` name a reducer the loader lacks.
+    ///
+    /// `relay_position` is the sync layer's: the position the whole log reaches, which the caller
+    /// has already established against the relay. This store only records it.
+    pub fn based_image(
+        &self,
+        relay_position: i64,
+        kept_domains: &[&str],
+        view_bases: Vec<crate::image::ViewBase>,
+    ) -> Result<crate::image::Image, crate::image::ImageError> {
+        let mut image = self.image()?;
+        let clock = high_water_mark(&self.conn)?;
+        let log = crate::image::typed_log(&image.ops)?;
+        let mut residue = 0usize;
+        let mut keep = Vec::with_capacity(log.len());
+        for (row, cells) in log.iter().zip(image.ops.rows.iter()) {
+            let folded = self.folder_for(&row.op()).is_some();
+            if !folded {
+                residue += 1;
+            }
+            if !folded || kept_domains.contains(&row.domain.as_str()) {
+                keep.push(cells.clone());
+            }
+        }
+        image.ops.rows = keep;
+        image.base = Some(crate::image::Base {
+            relay_position,
+            clock,
+            residue,
+            kept_domains: kept_domains.iter().map(|d| d.to_string()).collect(),
+            view_bases,
+        });
+        // A based image may only be loaded by a build that reads `log_base`: its clock lives there
+        // and nowhere else (see `schema::BASED_MIN_COMPATIBLE`).
+        image.min_compatible = image.min_compatible.max(schema::BASED_MIN_COMPATIBLE);
+        Ok(image)
+    }
+
+    /// The base this store stands on, when it started from a based image (6j6v.0cfa).
+    pub fn log_base(&self) -> Option<crate::image::LogBase> {
+        log_base(&self.conn).unwrap_or(None)
+    }
+
+    /// Whether this store holds no ops below a relay position — see [`log_base`](Self::log_base).
+    pub fn is_based(&self) -> bool {
+        self.log_base().is_some()
     }
 
     /// Start this store from `image` (6j6v.mxt2): take its log, and take its views as they are when
@@ -1019,6 +1107,9 @@ impl Store {
             .flat_map(|r| r.view_tables().iter().copied())
             .collect();
         let theirs: HashSet<&str> = image.views.iter().map(|t| t.name.as_str()).collect();
+        if let Some(base) = &image.base {
+            return self.load_based_image(image, base, &log, &verdicts, &ours, &theirs);
+        }
         let verdict = if image.views.is_empty() || image.views_of.is_none() {
             Err(RefoldReason::NoViews)
         } else if image.engine != image::ENGINE_VERSION {
@@ -1085,6 +1176,165 @@ impl Store {
                 Ok(Loaded::Refolded(reason))
             }
         }
+    }
+
+    /// The BASED half of [`load_image`](Self::load_image) (6j6v.0cfa, spec §4.5): an image that
+    /// carries its state without the ops below its relay position.
+    ///
+    /// **The views are TAKEN or the image is REFUSED — there is no third answer.** That is the one
+    /// structural difference from an ordinary image, and it is not a policy choice: an ordinary
+    /// image that this build would fold differently is folded again from the log it brought, and a
+    /// based image has no such log. So every mismatch becomes a named refusal that writes nothing
+    /// ([`NeedsRevision`], [`NeedsSchema`]), and the caller's answer is a snapshot taken at this
+    /// build's own revisions — never a local repair.
+    ///
+    /// **The engine version is not the key here; the fold revision is.** An ordinary image compares
+    /// `ENGINE_VERSION`, because a reducer can change what it produces without the schema moving
+    /// and the version is the only honest proxy. A based image carries each product's fold revision
+    /// (6j6v.y3r4), which says that same thing exactly rather than by proxy — so two builds of the
+    /// same revisions may exchange based snapshots, which is what makes them useful across a
+    /// release at all.
+    ///
+    /// Four things are written beyond the views and the carried log:
+    ///
+    /// 1. the `log_base` row — the position, the clock floor, the residue count;
+    /// 2. this file's own compatibility floor, raised to [`schema::BASED_MIN_COMPATIBLE`], so a
+    ///    binary that does not read that row refuses the file instead of minting against a clock of
+    ///    zero;
+    /// 3. one `view_watermarks` row per carried product, at THIS build's revision and at the
+    ///    carried log's own boundary — not at the source's, which stands above every rowid this
+    ///    store holds and would hide a later unfolded op from `refold_if_behind` for good;
+    /// 4. the residue's fold, afterwards: an op the source could not fold and this build can folds
+    ///    now, which is additive over taken views because every effect is a join (spec §4.5 step 6).
+    ///
+    /// [`NeedsRevision`]: crate::image::ImageError::NeedsRevision
+    /// [`NeedsSchema`]: crate::image::ImageError::NeedsSchema
+    fn load_based_image(
+        &mut self,
+        image: &crate::image::Image,
+        base: &crate::image::Base,
+        log: &[crate::image::LogRow],
+        verdicts: &[Provenance],
+        ours: &HashSet<&str>,
+        theirs: &HashSet<&str>,
+    ) -> Result<crate::image::Loaded, crate::image::ImageError> {
+        use crate::image::{ImageError, Loaded};
+        if base.relay_position < 0 || base.clock < 0 {
+            return Err(ImageError::Malformed(format!(
+                "a base at position {} with clock {}",
+                base.relay_position, base.clock
+            )));
+        }
+        if image.schema_version != schema::SCHEMA_VERSION {
+            return Err(ImageError::NeedsSchema {
+                written_at: image.schema_version,
+                ours: schema::SCHEMA_VERSION,
+            });
+        }
+        // Every product whose views ride along must have a reducer HERE, folding at the same
+        // revision — else this store would serve rows it can never fold another op into.
+        for vb in &base.view_bases {
+            let mine = self
+                .reducers
+                .iter()
+                .find(|r| r.domain() == vb.domain)
+                .map(|r| r.fold_revision());
+            if mine != Some(vb.fold_revision) {
+                return Err(ImageError::NeedsRevision {
+                    of: vb.of.clone(),
+                    domain: vb.domain.clone(),
+                    snapshot: vb.fold_revision,
+                    ours: mine,
+                });
+            }
+        }
+        // And every product THIS store folds must be carried: taking an image that has no views
+        // for one would leave it with no state and no log to fold one from.
+        for reducer in &self.reducers {
+            if reducer.view_tables().is_empty() {
+                continue;
+            }
+            if !base.view_bases.iter().any(|v| v.domain == reducer.domain()) {
+                return Err(ImageError::MissingViewBase {
+                    domain: reducer.domain().to_string(),
+                });
+            }
+        }
+        // And every table THIS store folds into must be carried, with every column it reads.
+        if !ours.is_subset(theirs) || !self.views_cover_every_column(image)? {
+            return Err(ImageError::Malformed(format!(
+                "a based image carrying {:?} cannot start a store that folds {:?}",
+                {
+                    let mut t: Vec<&str> = theirs.iter().copied().collect();
+                    t.sort();
+                    t
+                },
+                {
+                    let mut o: Vec<&str> = ours.iter().copied().collect();
+                    o.sort();
+                    o
+                }
+            )));
+        }
+        let boundary = image.max_rowid();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let write = |s: &Self| -> Result<(), ImageError> {
+            s.write_image(image, log, verdicts, false)?;
+            for table in &image.views {
+                crate::image::insert_view(&s.conn, &table.name, table)?;
+            }
+            for vb in &base.view_bases {
+                s.conn.execute(
+                    "INSERT INTO view_watermarks(store_id, folded_through, fold_revision, revision_through)
+                     VALUES(?1, ?2, ?3, ?2)
+                     ON CONFLICT(store_id) DO UPDATE SET folded_through = excluded.folded_through,
+                         fold_revision = excluded.fold_revision,
+                         revision_through = excluded.revision_through",
+                    params![vb.of, boundary, vb.fold_revision],
+                )?;
+            }
+            // Capped as any RECEIVED coordinate is (6j6v.m19v): an image is received, and a clock
+            // floor from outside must not be able to park this replica at the top of the range.
+            s.conn.execute(
+                "INSERT INTO log_base(id, relay_position, clock, residue_count) VALUES(1, ?1, ?2, ?3)",
+                params![
+                    base.relay_position,
+                    base.clock.min(crate::model::CLOCK_CEILING),
+                    base.residue as i64
+                ],
+            )?;
+            Ok(())
+        };
+        match write(self) {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        // After the commit, so a refused import leaves the header as it found it. Raise-only, the
+        // same no-downgrade discipline `migrate` keeps.
+        let floor = schema::db_min_compatible(&self.conn)?.max(schema::BASED_MIN_COMPATIBLE);
+        self.conn
+            .pragma_update(None, "application_id", floor)
+            .map_err(ImageError::Storage)?;
+        self.clock = self
+            .clock
+            .max(base.clock.min(crate::model::CLOCK_CEILING))
+            .max(
+                log.iter()
+                    .map(|r| r.lamport)
+                    .filter(|&l| l <= crate::model::MAX_LAMPORT)
+                    .max()
+                    .unwrap_or(0)
+                    .min(crate::model::CLOCK_CEILING),
+            );
+        // The residue, for a shape this build understands and the source did not (spec step 6).
+        // Additive over taken views: every effect is a join, so an op already folded folds to
+        // itself. NOT `refold_if_behind` — that one would REBUILD, which is the very thing a based
+        // store cannot do.
+        self.refold();
+        Ok(Loaded::Views)
     }
 
     /// The writing half of [`load_image`](Self::load_image), inside the transaction it holds: the
@@ -1160,12 +1410,13 @@ impl Store {
     /// op stays unfolded forever. The caller gates this on an actual schema change (a migration that
     /// added a column), so steady-state reopens still take the O(1) [`refold_if_behind`] path.
     /// Idempotent: the fold is keep-if-beats, so forcing a refold never changes a converged value.
-    pub fn force_refold(&mut self, store_id: &str) {
-        if self.bind_views(store_id) {
-            return;
+    pub fn force_refold(&mut self, store_id: &str) -> Result<(), crate::image::NeedsHistory> {
+        if self.bind_views(store_id)? {
+            return Ok(());
         }
         self.refold();
         self.advance_watermark(self.max_op_rowid());
+        Ok(())
     }
 }
 
@@ -1208,14 +1459,39 @@ fn first_free_coordinate(conn: &Connection, site: i64, taken: i64) -> rusqlite::
 /// rather than `site`, because a received op can claim this replica's site but never its
 /// provenance, which only a local append records (6j6v.pzkb). Both terms are index lookups: a
 /// range on the leading column of `ops_lamport_site`, and the partial `ops_own_lamport`.
+/// The third term is the BASE's clock floor (6j6v.0cfa): a replica that started from a based image
+/// holds no ops below its position, so the log cannot tell it where the clock stood — and a clock
+/// seeded at 0 beside a register at 900 makes every first write lose, silently, which spec §3 calls
+/// a correctness bug rather than a slow start. The floor is written capped (see
+/// [`Store::load_image`]), so reading it needs no second bound. It sits HERE, in the one function a
+/// clock is seeded and refreshed from, so the open seed and the per-write refresh cannot drift
+/// apart — and it reads as 0 on every store that has no base.
 fn high_water_mark(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT MAX(
              COALESCE((SELECT MIN(MAX(lamport), ?2) FROM ops WHERE lamport <= ?1), 0),
-             COALESCE((SELECT MAX(lamport) FROM ops WHERE provenance = 'own' AND lamport <= ?1), 0))",
+             COALESCE((SELECT MAX(lamport) FROM ops WHERE provenance = 'own' AND lamport <= ?1), 0),
+             COALESCE((SELECT clock FROM log_base WHERE id = 1), 0))",
         [crate::model::MAX_LAMPORT, crate::model::CLOCK_CEILING],
         |r| r.get(0),
     )
+}
+
+/// The `log_base` row, when this database has one (6j6v.0cfa). `Ok(None)` also for a database whose
+/// table predates the row — the table is baseline DDL, so every store this build opens has it.
+fn log_base(conn: &Connection) -> rusqlite::Result<Option<crate::image::LogBase>> {
+    conn.query_row(
+        "SELECT relay_position, clock, residue_count FROM log_base WHERE id = 1",
+        [],
+        |r| {
+            Ok(crate::image::LogBase {
+                relay_position: r.get(0)?,
+                clock: r.get(1)?,
+                residue_count: r.get(2)?,
+            })
+        },
+    )
+    .optional()
 }
 
 impl Drop for Store {
@@ -1892,13 +2168,13 @@ mod tests {
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
-        s.refold_if_behind("demo"); // bind the views key; an empty log has nothing to refold
+        s.refold_if_behind("demo").unwrap(); // bind the views key; an empty log has nothing to refold
         assert_eq!(s.folded_through("demo"), 0, "fresh log → watermark at 0");
 
         append_out_of_band(&s, "o1", "d.1");
         assert_eq!(demo_count(&s), 0, "the out-of-band op is not yet folded");
 
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             demo_count(&s),
             1,
@@ -1926,7 +2202,7 @@ mod tests {
         // Phase 1 — "prior binary": no reducer registered, so the op is unfoldable. The out-of-band
         // op lands, then refold_if_behind advances the watermark to the log boundary WITHOUT folding.
         append_out_of_band(&s, "o1", "d.1");
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             s.folded_through("demo"),
             1,
@@ -1944,14 +2220,14 @@ mod tests {
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             demo_count(&s),
             0,
             "refold_if_behind is a no-op — max rowid == folded_through, the bug M2 §7 warns about"
         );
 
-        s.force_refold("demo");
+        s.force_refold("demo").unwrap();
         assert_eq!(
             demo_count(&s),
             1,
@@ -2027,11 +2303,11 @@ mod tests {
             folds: folds.clone(),
         }));
         append_out_of_band(&s, "o1", "d.1");
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(folds.load(Ordering::SeqCst), 1, "first open catches up");
 
-        s.refold_if_behind("demo");
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             folds.load(Ordering::SeqCst),
             1,
@@ -2051,13 +2327,13 @@ mod tests {
         }));
         append_out_of_band(&s, "o1", "d.1");
 
-        s.refold_if_behind("flow");
+        s.refold_if_behind("flow").unwrap();
         let after_flow = folds.load(Ordering::SeqCst);
         assert_eq!(
             after_flow, 1,
             "the first store id refolds the out-of-band op"
         );
-        s.refold_if_behind("flow");
+        s.refold_if_behind("flow").unwrap();
         assert_eq!(
             folds.load(Ordering::SeqCst),
             after_flow,
@@ -2065,7 +2341,7 @@ mod tests {
         );
 
         // A DIFFERENT store id carries its own (still-zero) watermark → it is behind and refolds.
-        s.refold_if_behind("memory");
+        s.refold_if_behind("memory").unwrap();
         assert!(
             folds.load(Ordering::SeqCst) > after_flow,
             "a second store id tracks its own watermark, independent of the first"
@@ -2087,7 +2363,7 @@ mod tests {
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
-        s.refold_if_behind("demo"); // bind
+        s.refold_if_behind("demo").unwrap(); // bind
         s.emit("demo", "demo", "d.1", "x", "set", None, "u");
         s.emit("demo", "demo", "d.2", "x", "set", None, "u");
         assert_eq!(
@@ -2101,7 +2377,7 @@ mod tests {
             "the watermark tracks the local appends"
         );
 
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             folds.load(Ordering::SeqCst),
             2,
@@ -2119,7 +2395,7 @@ mod tests {
         s.register_reducer(Box::new(DemoReducer {
             folds: folds.clone(),
         }));
-        s.refold_if_behind("demo"); // bind
+        s.refold_if_behind("demo").unwrap(); // bind
         s.apply(std::slice::from_ref(&demo_op("o1", "demo", "demo")));
         assert_eq!(
             folds.load(Ordering::SeqCst),
@@ -2127,7 +2403,7 @@ mod tests {
             "the applied op folded inline"
         );
 
-        s.refold_if_behind("demo");
+        s.refold_if_behind("demo").unwrap();
         assert_eq!(
             folds.load(Ordering::SeqCst),
             1,
@@ -2468,7 +2744,7 @@ mod tests {
         s.register_reducer(Box::new(TallyReducer {
             folds: folds.clone(),
         }));
-        s.refold_if_behind("tally");
+        s.refold_if_behind("tally").unwrap();
         (s, folds)
     }
 
@@ -2945,7 +3221,7 @@ mod tests {
             )
             .unwrap();
         s.register_reducer(Box::new(Revised(revision)));
-        s.refold_if_behind("tally");
+        s.refold_if_behind("tally").unwrap();
         s
     }
 
@@ -3118,6 +3394,446 @@ mod tests {
             crate::image::Loaded::Refolded(crate::image::RefoldReason::OtherRevision {
                 written_at: 3
             })
+        );
+    }
+
+    // ── Based images: state without the ops below a relay position (6j6v.0cfa) ──────────────
+
+    /// A store with the tally views and nothing folded yet — what a based image starts.
+    fn empty_tally_store(site: i64) -> (Store, Arc<AtomicUsize>) {
+        let mut s = Store::open_in_memory(site);
+        s.connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        let folds = Arc::new(AtomicUsize::new(0));
+        s.register_reducer(Box::new(TallyReducer {
+            folds: folds.clone(),
+        }));
+        (s, folds)
+    }
+
+    fn tally_base() -> Vec<crate::image::ViewBase> {
+        vec![crate::image::ViewBase {
+            of: "tally".to_string(),
+            domain: "tally".to_string(),
+            fold_revision: 0,
+        }]
+    }
+
+    /// The dropped prefix is exactly what the views stand in for: an op a registered reducer folded
+    /// is gone from the image, and the row it folded into is still there.
+    #[test]
+    fn a_based_image_drops_the_ops_its_views_already_stand_in_for() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[
+            tally_op("a", "t.1", "x", 3, 2),
+            tally_op("b", "t.2", "y", 4, 2),
+        ]);
+        let whole = s.image().unwrap();
+        assert_eq!(whole.op_count(), 2, "the whole log, as format 1 carries it");
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        assert_eq!(based.op_count(), 0, "every op was folded, so none is carried");
+        assert_eq!(based.base.as_ref().unwrap().residue, 0);
+        assert_eq!(based.base.as_ref().unwrap().relay_position, 90);
+        let rows: Vec<&crate::image::Table> =
+            based.views.iter().filter(|t| t.name == "tally").collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rows.len(), 2, "both folded rows ride along");
+    }
+
+    /// **The correctness bug spec §3 names (L1).** A fresh replica started from a based image holds
+    /// no ops to read a clock off, so without the carried floor its first write would mint at 1 and
+    /// lose every compare against the state it just imported.
+    #[test]
+    fn a_replica_started_from_a_based_image_mints_above_the_clock_it_carries() {
+        let (mut source, _) = tally_store(1);
+        source.apply(&[tally_op("high", "t.1", "x", 900, 7)]);
+        let based = source.based_image(90, &[], tally_base()).unwrap();
+        assert_eq!(based.op_count(), 0, "no log to read a clock off");
+
+        let (mut fresh, _) = empty_tally_store(2);
+        fresh.load_image(&based).unwrap();
+        assert_eq!(fresh.clock(), 900, "the clock stands at the carried floor");
+        fresh.emit("tally", "tally", "t.1", "v", "set", Some("mine".into()), "u");
+        let mine = fresh.export().into_iter().next().unwrap();
+        assert_eq!(
+            mine.lamport, 901,
+            "the first local write beats the register the snapshot brought"
+        );
+        assert_eq!(tally_rows(&fresh), vec![("t.1".into(), "mine".into(), 901, 2)]);
+    }
+
+    /// A sibling process that only opens the file reads the same floor — the clock is seeded from
+    /// `high_water_mark`, and the base is one of its terms.
+    #[test]
+    fn a_sibling_handle_on_a_based_file_seeds_its_clock_from_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let path = path.to_str().unwrap();
+        let (mut source, _) = tally_store(1);
+        source.apply(&[tally_op("high", "t.1", "x", 900, 7)]);
+        let based = source.based_image(90, &[], tally_base()).unwrap();
+
+        let mut fresh = Store::open(path, 2).unwrap();
+        fresh
+            .connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        fresh.register_reducer(Box::new(TallyReducer {
+            folds: Arc::new(AtomicUsize::new(0)),
+        }));
+        fresh.load_image(&based).unwrap();
+        drop(fresh);
+
+        let sibling = Store::open(path, 2).unwrap();
+        assert_eq!(sibling.clock(), 900);
+        assert_eq!(
+            sibling.log_base().unwrap(),
+            crate::image::LogBase {
+                relay_position: 90,
+                clock: 900,
+                residue_count: 0
+            }
+        );
+        assert!(sibling.is_based());
+    }
+
+    /// An op no registered reducer folded is the residue: it rides along verbatim, because nothing
+    /// in the views stands in for it.
+    #[test]
+    fn a_based_image_carries_the_ops_no_reducer_could_fold() {
+        let (mut s, _) = tally_store(1);
+        let mut unknown = tally_op("odd", "t.9", "z", 5, 2);
+        unknown.target_kind = "something-else".into();
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2), unknown]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        assert_eq!(based.op_count(), 1, "the unfoldable op stays");
+        assert_eq!(based.base.as_ref().unwrap().residue, 1);
+        assert!(based.op_ids().contains("odd"));
+        assert!(!based.op_ids().contains("a"));
+    }
+
+    /// A domain whose reducer is NOT registered keeps its whole log — nothing here folded it, so
+    /// nothing here may drop it. That is what makes a half-registered exporter bigger, never lossy.
+    #[test]
+    fn a_based_image_keeps_every_op_of_a_domain_no_reducer_is_registered_for() {
+        let (mut s, _) = tally_store(1);
+        let mut foreign = tally_op("foreign", "t.7", "f", 6, 2);
+        foreign.domain = "other".into();
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2), foreign]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        assert!(based.op_ids().contains("foreign"));
+        assert_eq!(based.base.as_ref().unwrap().residue, 1);
+    }
+
+    /// A KEPT domain's ops ride along even though a reducer folded them (spec D9) — its product
+    /// reads per-op provenance, not only its views.
+    #[test]
+    fn a_based_image_keeps_every_op_of_a_kept_domain() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[
+            tally_op("a", "t.1", "x", 3, 2),
+            tally_op("b", "t.2", "y", 4, 2),
+        ]);
+        let based = s.based_image(90, &["tally"], tally_base()).unwrap();
+        assert_eq!(based.op_count(), 2, "a kept domain keeps its log");
+        assert_eq!(
+            based.base.as_ref().unwrap().residue, 0,
+            "kept is not the same as residue"
+        );
+        assert_eq!(
+            based.base.as_ref().unwrap().kept_domains,
+            vec!["tally".to_string()]
+        );
+    }
+
+    /// The views of a based image are TAKEN, never folded again — so a reducer at another revision
+    /// is a named refusal that writes nothing, not a refold of a log that is not there.
+    #[test]
+    fn a_based_import_refuses_views_folded_at_another_revision() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+
+        let mut fresh = Store::open_in_memory(2);
+        fresh
+            .connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        fresh.register_reducer(Box::new(RevisedTally));
+        let err = fresh.load_image(&based).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::image::ImageError::NeedsRevision { of, domain, snapshot: 0, ours: Some(2) }
+                    if of == "tally" && domain == "tally"
+            ),
+            "{err}"
+        );
+        assert_eq!(fresh.op_count(), 0, "a refusal writes nothing");
+        assert!(tally_rows(&fresh).is_empty());
+        assert!(!fresh.is_based());
+    }
+
+    /// A store that registers no reducer for a domain whose views the image carries would serve
+    /// those rows and never fold another of that domain's ops. It is refused by name — which is how
+    /// an importer that forgot a product's reducer finds out before the state is on the floor.
+    #[test]
+    fn a_based_import_refuses_a_store_that_registers_no_reducer_for_a_carried_product() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        let mut bare = Store::open_in_memory(2);
+        bare.connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        let err = bare.load_image(&based).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::image::ImageError::NeedsRevision { ours: None, domain, .. }
+                    if domain == "tally"
+            ),
+            "{err}"
+        );
+    }
+
+    /// The paths that would REBUILD a based store's views refuse by name instead of emptying them —
+    /// the rebuild's first act is a DELETE of what only the missing log could re-derive.
+    #[test]
+    fn a_based_store_refuses_a_view_rebuild_instead_of_emptying_its_views() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        let (mut fresh, _) = empty_tally_store(2);
+        fresh.load_image(&based).unwrap();
+        assert_eq!(tally_rows(&fresh).len(), 1);
+
+        // The next release folds `tally` differently. On an ordinary store this rebuilds; here it
+        // must refuse — and leave the row it would otherwise have deleted.
+        fresh.reducers.clear();
+        fresh.register_reducer(Box::new(RevisedTally));
+        let err = fresh.refold_if_behind("tally").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::image::NeedsHistory::Rebuild { of, recorded: 0, ours: 2, base: 90 }
+                    if of == "tally"
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            tally_rows(&fresh).len(),
+            1,
+            "the refusal left the views as they were"
+        );
+        assert!(matches!(
+            fresh.force_refold("tally").unwrap_err(),
+            crate::image::NeedsHistory::Rebuild { .. }
+        ));
+        assert_eq!(tally_rows(&fresh).len(), 1);
+    }
+
+    /// A reducer at a revision above 0 that folds `tally`, with a view table of its own.
+    struct RevisedTally;
+    impl Reducer for RevisedTally {
+        fn domain(&self) -> &'static str {
+            "tally"
+        }
+        fn is_foldable(&self, op: &Op) -> bool {
+            op.target_kind == "tally"
+        }
+        fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
+            vec![tally_change(op)]
+        }
+        fn fold_revision(&self) -> i64 {
+            2
+        }
+        fn view_tables(&self) -> &'static [&'static str] {
+            &["tally"]
+        }
+    }
+
+    fn revised_tally_store(site: i64) -> Store {
+        let mut s = Store::open_in_memory(site);
+        s.connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        s.register_reducer(Box::new(RevisedTally));
+        s
+    }
+
+    /// An ordinary reopen of a based store is NOT a rebuild: the import recorded this build's
+    /// revision at the carried log's own boundary, so the open finds itself current.
+    ///
+    /// Held at a revision ABOVE zero, and with an op in the carried log, on purpose: at revision 0
+    /// over an empty carried log every term of the rebuild test is zero, and a store that recorded
+    /// no watermark at all would pass. Both numbers are what make the recorded row load-bearing.
+    #[test]
+    fn reopening_a_based_store_rebuilds_nothing() {
+        let mut source = revised_tally_store(1);
+        let mut unknown = tally_op("odd", "t.9", "z", 9, 2);
+        unknown.target_kind = "something-else".into();
+        source.apply(&[tally_op("a", "t.1", "x", 3, 2), unknown]);
+        let based = source
+            .based_image(
+                90,
+                &[],
+                vec![crate::image::ViewBase {
+                    of: "tally".to_string(),
+                    domain: "tally".to_string(),
+                    fold_revision: 2,
+                }],
+            )
+            .unwrap();
+        assert_eq!(based.op_count(), 1, "the residue rides along");
+
+        let mut fresh = revised_tally_store(2);
+        fresh.load_image(&based).unwrap();
+        let boundary = based.max_rowid();
+        assert!(boundary > 0);
+        assert_eq!(
+            fresh.recorded_revision("tally"),
+            (2, boundary),
+            "this build's revision, at the carried log's own boundary"
+        );
+        assert_eq!(fresh.folded_through("tally"), boundary);
+        fresh.refold_if_behind("tally").unwrap();
+        assert_eq!(tally_rows(&fresh), vec![("t.1".into(), "x".into(), 3, 2)]);
+    }
+
+    /// The other direction of the revision check: an image that carries no views for a product THIS
+    /// build folds would leave it with no state and no log to fold one from.
+    #[test]
+    fn a_based_import_refuses_an_image_carrying_no_views_for_a_product_it_folds() {
+        struct Ledger;
+        impl Reducer for Ledger {
+            fn domain(&self) -> &'static str {
+                "ledger"
+            }
+            fn is_foldable(&self, _: &Op) -> bool {
+                true
+            }
+            fn changes(&self, _: &Op) -> Vec<crate::change::Change> {
+                Vec::new()
+            }
+            fn view_tables(&self) -> &'static [&'static str] {
+                &["ledger"]
+            }
+        }
+        let ledger_table = "CREATE TABLE ledger(id TEXT PRIMARY KEY)";
+        let (mut source, _) = tally_store(1);
+        source.connection().execute_batch(ledger_table).unwrap();
+        source.register_reducer(Box::new(Ledger));
+        source.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        // The image carries BOTH view tables — the exporter folds both — but is told about one
+        // product only, which is how an omission in that list looks from the reading side.
+        let based = source.based_image(90, &[], tally_base()).unwrap();
+        assert!(based.views.iter().any(|t| t.name == "ledger"));
+
+        let (mut fresh, _) = empty_tally_store(2);
+        fresh.connection().execute_batch(ledger_table).unwrap();
+        fresh.register_reducer(Box::new(Ledger));
+        let err = fresh.load_image(&based).unwrap_err();
+        assert!(
+            matches!(&err, crate::image::ImageError::MissingViewBase { domain } if domain == "ledger"),
+            "{err}"
+        );
+        assert!(tally_rows(&fresh).is_empty(), "a refusal writes nothing");
+    }
+
+    /// The residue folds once a build understands its shape (spec §4.5 step 6) — additively, over
+    /// views that were taken rather than rebuilt.
+    #[test]
+    fn a_based_import_folds_a_residue_op_this_build_understands() {
+        struct Wider;
+        impl Reducer for Wider {
+            fn domain(&self) -> &'static str {
+                "tally"
+            }
+            fn is_foldable(&self, _: &Op) -> bool {
+                true
+            }
+            fn changes(&self, op: &Op) -> Vec<crate::change::Change> {
+                vec![tally_change(op)]
+            }
+            fn view_tables(&self) -> &'static [&'static str] {
+                &["tally"]
+            }
+        }
+        let (mut s, _) = tally_store(1);
+        let mut unknown = tally_op("odd", "t.9", "z", 5, 2);
+        unknown.target_kind = "something-else".into();
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2), unknown]);
+        let based = s.based_image(90, &[], tally_base()).unwrap();
+        assert_eq!(based.base.as_ref().unwrap().residue, 1);
+
+        let mut fresh = Store::open_in_memory(2);
+        fresh
+            .connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        fresh.register_reducer(Box::new(Wider));
+        fresh.load_image(&based).unwrap();
+        let mut rows = tally_rows(&fresh);
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("t.1".to_string(), "x".to_string(), 3, 2),
+                ("t.9".to_string(), "z".to_string(), 5, 2),
+            ],
+            "the taken row stands, and the residue folded beside it"
+        );
+    }
+
+    /// A based database carries its own compatibility floor, so a binary that cannot read
+    /// `log_base` — and would therefore mint against a clock of zero — refuses the file.
+    #[test]
+    fn a_based_import_raises_that_files_own_compatibility_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let path = path.to_str().unwrap();
+        let (mut source, _) = tally_store(1);
+        source.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        let based = source.based_image(90, &[], tally_base()).unwrap();
+        assert_eq!(
+            based.min_compatible,
+            schema::BASED_MIN_COMPATIBLE,
+            "and the image says so too, for a reader that checks before loading"
+        );
+
+        let mut fresh = Store::open(path, 2).unwrap();
+        assert_eq!(
+            schema::db_min_compatible(fresh.connection()).unwrap(),
+            schema::MIN_COMPATIBLE_SCHEMA_VERSION,
+            "an ordinary workspace keeps the baseline floor"
+        );
+        fresh
+            .connection()
+            .execute_batch(
+                "CREATE TABLE tally(id TEXT PRIMARY KEY, v TEXT, v_l INTEGER, v_s INTEGER)",
+            )
+            .unwrap();
+        fresh.register_reducer(Box::new(TallyReducer {
+            folds: Arc::new(AtomicUsize::new(0)),
+        }));
+        fresh.load_image(&based).unwrap();
+        assert_eq!(
+            schema::db_min_compatible(fresh.connection()).unwrap(),
+            schema::BASED_MIN_COMPATIBLE
         );
     }
 }

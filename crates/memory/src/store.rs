@@ -36,7 +36,10 @@ impl MemoryStore {
         // Bind memory's folded-through watermark and refold if the shared log advanced out-of-band
         // (aye.36). A fresh in-memory log is empty, so this only binds the key here; the file-backed
         // `open` is where a multi-device pull actually triggers the refold.
-        inner.refold_if_behind(MEMORY_VIEWS);
+        // A fresh in-memory log has no base, so the based refusal is unreachable here.
+        inner
+            .refold_if_behind(MEMORY_VIEWS)
+            .expect("a fresh in-memory store has no base");
         MemoryStore { inner }
     }
 
@@ -47,7 +50,7 @@ impl MemoryStore {
         let mut inner = Substrate::open(path, site)?;
         schema::try_apply_memory_views(inner.connection())?;
         inner.register_reducer(Box::new(FactReducer));
-        Self::materialize_views(&mut inner);
+        Self::materialize_views(&mut inner)?;
         Ok(MemoryStore { inner })
     }
 
@@ -70,11 +73,14 @@ impl MemoryStore {
     /// Gated on the version the FILE carried, not on the presence of a column: `Substrate::open`
     /// migrates before it returns, so the column is already there by the time this runs — see
     /// [`Substrate::migrated_from`].
-    fn materialize_views(inner: &mut Substrate) {
+    /// **Both paths can REFUSE on a based replica** (6j6v.0cfa): each may rebuild the view from the
+    /// whole log, which a replica started from a snapshot at a relay position does not hold below
+    /// it. Surfaced as the open's error, like the skew gate's refusal.
+    fn materialize_views(inner: &mut Substrate) -> Result<(), nxs_foundation::image::NeedsHistory> {
         if inner.migrated_from() < nxs_foundation::schema::SCHEMA_VERSION {
-            inner.force_refold(MEMORY_VIEWS);
+            inner.force_refold(MEMORY_VIEWS)
         } else {
-            inner.refold_if_behind(MEMORY_VIEWS);
+            inner.refold_if_behind(MEMORY_VIEWS)
         }
     }
 

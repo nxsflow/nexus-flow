@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 
 pub const NOW: &str = "2026-10-08T12:00:00Z";
 
+/// A generated PLATFORM stream — all three products in one log — and the store that folds it
+/// (6j6v.0cfa). Its own module because it is the only generator that speaks chat and memory.
+pub mod platform;
+
 pub struct Lcg(pub u64);
 impl Lcg {
     pub fn next(&mut self, n: u64) -> u64 {

@@ -65,10 +65,19 @@ use flate2::Compression;
 use nexus_flow_core::store::Store;
 use nxs_foundation::image::{Image, ImageError, Loaded};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Read;
 
-/// The snapshot format this build writes, and the newest it reads.
-pub const FORMAT: u32 = 1;
+/// The newest snapshot format this build reads. **Every build reads every older format**, which is
+/// the compatibility promise a stored snapshot rests on (spec D3).
+pub const FORMAT: u32 = 2;
+
+/// The format [`export`] writes: the whole log, and the views folded from it (6j6v.mxt2).
+pub const FORMAT_WITH_LOG: u32 = 1;
+
+/// The format [`export_based`] writes: the state, and a [`Base`] instead of the ops below its
+/// relay position (6j6v.0cfa).
+pub const FORMAT_BASED: u32 = 2;
 
 /// The most a snapshot may unpack to. A snapshot comes from storage its reader trusts, but a file
 /// handed to `nxs sync bind --snapshot` could be anything, gzip packs a lot into little, and the
@@ -90,6 +99,42 @@ pub struct Header {
     pub engine: String,
     /// How many ops it carries.
     pub ops: usize,
+    /// Each carried product's fold revision, by domain (6j6v.y3r4) — readable without the body, so
+    /// a reader can tell whether this snapshot is one it could take at all before it unpacks it.
+    /// Empty in format 1, which compares engine versions and refolds from its log instead.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub revisions: BTreeMap<String, i64>,
+    /// The BASE, in format 2 and only there (6j6v.0cfa): what the snapshot carries instead of the
+    /// ops below [`pulled_through`](Header::pulled_through). `None` means format-1 semantics — the
+    /// whole log rides along.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Base>,
+}
+
+/// What a format-2 snapshot says about its base, readable from the header alone (spec §4.2).
+///
+/// It is the header's half of [`nxs_foundation::image::Base`]; the body carries the same facts and
+/// [`import`] checks the two against each other, as it has always checked `ops` against the log.
+/// The duplication is the point: a reader that only needs to SIZE the snapshot — the hosted
+/// engine's op budget is the one that does (spec §4.6) — reads [`peek`] and never unpacks the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Base {
+    /// The Lamport clock the dropped prefix reached — the floor a replica started from it mints
+    /// above. Without it a fresh replica would mint at 1 against registers in the hundreds, and
+    /// every first write would lose in silence (spec §3, L1).
+    pub clock: i64,
+    /// How many distinct op ids the writer held at or below the position — with
+    /// [`digest_through_p`](Base::digest_through_p), what a relay's own count and digest are
+    /// compared against before a snapshot is published, so a replica that skipped a seq cannot pass
+    /// the miss on (spec §4.3). Carried by this cut; the relay side of the comparison is slice 2's.
+    pub ops_through_p: usize,
+    /// A commutative digest over those op ids: the XOR of each id's SHA-256, hex-encoded. Order-free
+    /// on purpose — the two sides enumerate the same set in different orders.
+    pub digest_through_p: String,
+    /// How many of the carried ops are residue: stored-not-folded at the writer (spec L5/L6).
+    pub residue: usize,
+    /// The domains whose ops below the position ride along in full (spec D9).
+    pub kept_domains: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,6 +193,33 @@ pub enum SnapshotError {
     },
     /// The bytes are not a snapshot.
     Corrupt(String),
+    /// A BASED snapshot whose views this build cannot take as they are, and whose log it does not
+    /// carry to fold instead (6j6v.0cfa, spec §4.5). The caller falls back: another snapshot, or a
+    /// full replay. `ours` is `None` when this store registers no reducer for that domain at all.
+    NeedsRevision {
+        of: String,
+        domain: String,
+        snapshot: i64,
+        ours: Option<i64>,
+    },
+    /// A product named for a based snapshot has no reducer on the exporting store, so its views are
+    /// not in the image to carry — the snapshot would leave that product out. Register every
+    /// platform reducer before taking one.
+    NotFolded {
+        domain: String,
+    },
+    /// A BASED snapshot that carries no views for a product THIS build folds — so taking it would
+    /// leave that product with no state and no log to fold one from. Reachable when a build folds a
+    /// product the writer did not carry; the caller falls back, as for a revision mismatch.
+    MissingViews {
+        domain: String,
+    },
+    /// A BASED snapshot whose position the relay does not confirm (spec §4.5 step 7). A format-1
+    /// snapshot answers this by pulling from 0, which costs a full pull and no ops; a based one
+    /// cannot — it holds nothing below its position — so it refuses and the caller falls back.
+    AnchorMismatch {
+        position: i64,
+    },
     /// The substrate refused the image (a store that is not empty, a floor above this engine…).
     Image(ImageError),
     Storage(String),
@@ -178,6 +250,39 @@ impl std::fmt::Display for SnapshotError {
                  upgrade nxs to start from it"
             ),
             SnapshotError::Corrupt(why) => write!(f, "not a readable snapshot: {why}"),
+            SnapshotError::NeedsRevision {
+                of,
+                domain,
+                snapshot,
+                ours: Some(ours),
+            } => write!(
+                f,
+                "the snapshot carries {of}'s views folded at revision {snapshot} and this nxs folds \
+                 {domain} at {ours}; it holds no ops below its position to fold again, so start \
+                 from a snapshot taken at revision {ours} or replay the stream"
+            ),
+            SnapshotError::NeedsRevision { of, domain, .. } => write!(
+                f,
+                "the snapshot carries {of}'s views and this replica registers no reducer for the \
+                 {domain} domain — it would take that product's state and never fold another of \
+                 its ops"
+            ),
+            SnapshotError::NotFolded { domain } => write!(
+                f,
+                "this replica registers no reducer for the {domain} domain, so a based snapshot \
+                 taken here would carry none of that product's state"
+            ),
+            SnapshotError::MissingViews { domain } => write!(
+                f,
+                "the snapshot carries no views for the {domain} domain, which this nxs folds — and \
+                 no ops below its position to fold them from"
+            ),
+            SnapshotError::AnchorMismatch { position } => write!(
+                f,
+                "the relay does not hold what the snapshot says sits at position {position} — \
+                 another relay, or a log rebuilt since. A snapshot that carries no ops below its \
+                 position cannot fall back to pulling from the start, so this one is refused"
+            ),
             SnapshotError::Image(e) => write!(f, "{e}"),
             SnapshotError::Storage(m) => write!(f, "snapshot storage: {m}"),
             SnapshotError::Transport(m) => write!(f, "snapshot transport: {m}"),
@@ -188,8 +293,25 @@ impl std::fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {}
 
 impl From<ImageError> for SnapshotError {
+    /// The substrate's two based refusals get names of their own on this seam (spec §7): a hosted
+    /// caller branches on them to pick its next source, and reaching through `Image(..)` for that
+    /// would make the fallback chain depend on the substrate's error shape.
     fn from(e: ImageError) -> SnapshotError {
-        SnapshotError::Image(e)
+        match e {
+            ImageError::NeedsRevision {
+                of,
+                domain,
+                snapshot,
+                ours,
+            } => SnapshotError::NeedsRevision {
+                of,
+                domain,
+                snapshot,
+                ours,
+            },
+            ImageError::MissingViewBase { domain } => SnapshotError::MissingViews { domain },
+            other => SnapshotError::Image(other),
+        }
     }
 }
 
@@ -238,32 +360,215 @@ pub fn export(
     if unpushed > 0 {
         return Err(SnapshotError::Unpushed { ops: unpushed });
     }
+    let anchor = anchor_at(store, stream, marks, transport)?;
     let image = store.image()?;
-    let anchor = if marks.pulled_through > 0 {
-        match op_at(transport, stream, marks.pulled_through)? {
-            Some(id) if image.op_ids().contains(id.as_str()) => Some(id),
-            _ => {
-                return Err(SnapshotError::Unbacked {
-                    position: marks.pulled_through,
-                })
-            }
-        }
-    } else {
-        None
-    };
     let envelope = Envelope {
         header: Header {
-            format: FORMAT,
+            format: FORMAT_WITH_LOG,
             stream_id: stream.as_str().to_string(),
             pulled_through: marks.pulled_through,
             anchor,
             engine: image.engine.clone(),
             ops: image.op_count(),
+            revisions: BTreeMap::new(),
+            base: None,
         },
         image,
     };
+    pack(&envelope)
+}
+
+/// One product in a based snapshot (6j6v.0cfa): the key it records its fold under, the domain whose
+/// reducer folds it, and whether its ops below the position ride along in full.
+///
+/// **One entry per product, and it is the whole description.** The fold revision is NOT in here —
+/// it is read off the store's own registered reducer, so a snapshot can never claim a revision the
+/// views were not folded at. `keep_log` is spec D9: a product whose actions read per-op provenance
+/// rather than only its views keeps its log, or every thread opened below the position would read
+/// as held on a replica that starts here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Product {
+    /// The `view_watermarks.store_id` the product records its fold under — `flow`, `chat`, `memory`.
+    pub of: &'static str,
+    /// The op domain its reducer folds — `task`, `message`, `fact`.
+    pub domain: &'static str,
+    /// Whether its ops below the position ride along in full (spec D9: `message` does).
+    pub keep_log: bool,
+}
+
+/// The platform's products, as a based snapshot carries them (6j6v.0cfa) — **the one list**, so the
+/// CLI that writes a snapshot and the hosted engine that reads one cannot describe the platform
+/// differently.
+///
+/// `message` keeps its log (spec D9). chat's views are a self-contained state like the others, but
+/// its ACTIONS read per-op provenance — whether the op that opened a thread may act — and E4-auth
+/// forbids taking a verdict from outside, so the verdicts have to stay re-derivable. Dropping them
+/// would not corrupt the board; it would hold every thread opened below the position, for ever.
+/// `task` and `fact` keep nothing: everything a reader of theirs asks is in the views.
+///
+/// What a caller still owes: registering each of these reducers on the store before exporting, so
+/// the views are in the image to carry. [`export_based`] refuses by name when one is missing.
+pub const PLATFORM: &[Product] = &[
+    Product {
+        of: "flow",
+        domain: "task",
+        keep_log: false,
+    },
+    Product {
+        of: "chat",
+        domain: "message",
+        keep_log: true,
+    },
+    Product {
+        of: "memory",
+        domain: "fact",
+        keep_log: false,
+    },
+];
+
+/// Take a BASED snapshot of `store` (6j6v.0cfa): its state, and instead of the ops below
+/// `marks.pulled_through` only the [`Base`] and what the views cannot stand in for.
+///
+/// This is the format a reader starts from WITHOUT replaying history, and the reason the hosted
+/// engine's op budget stops counting a stream's lifetime (spec §4.6). Everything [`export`] refuses
+/// it refuses too, for the same reasons — unpushed ops, a position this relay does not back — plus
+/// one of its own: a product in `products` whose reducer this store does not register
+/// ([`SnapshotError::NotFolded`]), because its views would not be in the image to carry.
+///
+/// **Register every platform reducer on `store` first.** Not for size: for state. A domain whose
+/// reducer is absent is a domain nothing here folded, so [`Store::based_image`] keeps its whole log
+/// rather than dropping it — the snapshot stays complete either way. What an absent reducer DOES
+/// cost is the point of the exercise: that product's log is exactly what was supposed to go away.
+///
+/// [`Store::based_image`]: nxs_foundation::store::Store::based_image
+pub fn export_based(
+    store: &Store,
+    local_site: i64,
+    stream: &StreamId,
+    marks: &Watermarks,
+    transport: &dyn Transport,
+    products: &[Product],
+) -> Result<Vec<u8>, SnapshotError> {
+    let unpushed: i64 = store.connection().query_row(
+        "SELECT COUNT(*) FROM ops WHERE rowid > ?1 AND site = ?2",
+        [marks.pushed_through, local_site],
+        |r| r.get(0),
+    )?;
+    if unpushed > 0 {
+        return Err(SnapshotError::Unpushed { ops: unpushed });
+    }
+    let mut view_bases = Vec::with_capacity(products.len());
+    let mut revisions = BTreeMap::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for p in products {
+        let Some(fold_revision) = store.fold_revision_of(p.domain) else {
+            return Err(SnapshotError::NotFolded {
+                domain: p.domain.to_string(),
+            });
+        };
+        revisions.insert(p.domain.to_string(), fold_revision);
+        view_bases.push(nxs_foundation::image::ViewBase {
+            of: p.of.to_string(),
+            domain: p.domain.to_string(),
+            fold_revision,
+        });
+        if p.keep_log {
+            kept.push(p.domain);
+        }
+    }
+    // Over the WHOLE log, before the image drops any of it, and streamed rather than materialized:
+    // a stream at the cap holds tens of thousands of ids.
+    let (ops_through_p, digest_through_p) = digest(store)?;
+    let anchor = anchor_at(store, stream, marks, transport)?;
+    let image = store.based_image(marks.pulled_through, &kept, view_bases)?;
+    let base = image
+        .base
+        .as_ref()
+        .expect("based_image carries a base")
+        .clone();
+    let envelope = Envelope {
+        header: Header {
+            format: FORMAT_BASED,
+            stream_id: stream.as_str().to_string(),
+            pulled_through: marks.pulled_through,
+            anchor,
+            engine: image.engine.clone(),
+            ops: image.op_count(),
+            revisions,
+            base: Some(Base {
+                clock: base.clock,
+                ops_through_p,
+                digest_through_p,
+                residue: base.residue,
+                kept_domains: base.kept_domains.clone(),
+            }),
+        },
+        image,
+    };
+    pack(&envelope)
+}
+
+/// How many ops `store` holds and a commutative digest over their ids: the XOR of each id's
+/// SHA-256, hex-encoded (spec §4.3).
+///
+/// **XOR, not a running hash, because the two sides enumerate in different orders.** The writer
+/// reads its own log; the relay scans a partition. An order-dependent digest would disagree for
+/// that reason alone and say nothing about completeness, which is the only question being asked.
+/// What XOR gives up is duplicate detection — a set is the right model here, and the log's primary
+/// key makes an op id unique anyway.
+fn digest(store: &Store) -> Result<(usize, String), SnapshotError> {
+    use sha2::{Digest, Sha256};
+    let conn = store.connection();
+    let mut stmt = conn.prepare("SELECT op_id FROM ops")?;
+    let mut rows = stmt.query([])?;
+    let mut acc = [0u8; 32];
+    let mut count = 0usize;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        for (a, b) in acc.iter_mut().zip(Sha256::digest(id.as_bytes())) {
+            *a ^= b;
+        }
+        count += 1;
+    }
+    let hex = acc.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+        out
+    });
+    Ok((count, hex))
+}
+
+/// The op the relay holds at `marks.pulled_through`, as the snapshot's anchor — refusing when this
+/// replica does not have it, because then the marks do not describe this relay. Shared by both
+/// exports.
+fn anchor_at(
+    store: &Store,
+    stream: &StreamId,
+    marks: &Watermarks,
+    transport: &dyn Transport,
+) -> Result<Option<String>, SnapshotError> {
+    if marks.pulled_through <= 0 {
+        return Ok(None);
+    }
+    let held = |id: &str| -> rusqlite::Result<bool> {
+        store
+            .connection()
+            .query_row("SELECT EXISTS(SELECT 1 FROM ops WHERE op_id = ?1)", [id], |r| {
+                r.get(0)
+            })
+    };
+    match op_at(transport, stream, marks.pulled_through)? {
+        Some(id) if held(&id)? => Ok(Some(id)),
+        _ => Err(SnapshotError::Unbacked {
+            position: marks.pulled_through,
+        }),
+    }
+}
+
+/// Gzipped JSON, the one encoding a snapshot has.
+fn pack(envelope: &Envelope) -> Result<Vec<u8>, SnapshotError> {
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    serde_json::to_writer(&mut gz, &envelope)
+    serde_json::to_writer(&mut gz, envelope)
         .map_err(|e| SnapshotError::Storage(format!("encoding the snapshot: {e}")))?;
     gz.finish()
         .map_err(|e| SnapshotError::Storage(format!("compressing the snapshot: {e}")))
@@ -321,6 +626,31 @@ pub fn peek(bytes: &[u8]) -> Result<Header, SnapshotError> {
     check_format(&json)?;
     serde_json::from_slice(&json)
         .map_err(|e| SnapshotError::Corrupt(format!("no snapshot header: {e}")))
+}
+
+/// The envelope opened: its header and the substrate image it carries, with every check [`import`]
+/// makes that needs no store and no network (6j6v.0cfa).
+///
+/// **For a reader that folds the views somewhere other than a SQLite replica.** The hosted board
+/// fold starts a stream from the same bytes a replica does (spec §4.5) and writes them into its own
+/// table, so it needs the image rather than a loaded store — and it must not re-derive the format
+/// to get at it, or there would be two readers of one format and one of them would rot. The format
+/// is this module's; what is done with the views is the caller's.
+pub fn unpack_image(bytes: &[u8]) -> Result<(Header, Image), SnapshotError> {
+    let json = unpack(bytes, MAX_UNPACKED_BYTES)?;
+    check_format(&json)?;
+    let envelope: Envelope = serde_json::from_slice(&json)
+        .map_err(|e| SnapshotError::Corrupt(format!("the snapshot body: {e}")))?;
+    if envelope.header.ops != envelope.image.op_count() {
+        return Err(SnapshotError::Corrupt(format!(
+            "the header counts {} ops and the log holds {}",
+            envelope.header.ops,
+            envelope.image.op_count()
+        )));
+    }
+    check_base(&envelope)?;
+    envelope.image.check()?;
+    Ok((envelope.header, envelope.image))
 }
 
 /// Start the EMPTY `store` from a snapshot of `stream`, confirming its position against the relay
@@ -381,6 +711,10 @@ fn import_bounded(
     }
     match (&header.anchor, header.pulled_through) {
         (None, 0) => {}
+        // A based snapshot drops the ops below its position, the one at it included, so the anchor
+        // is not in the log it carries. What the relay holds there is checked by `confirm`; the
+        // anchor's own presence is a format-1 self-consistency check and stays one.
+        (Some(_), p) if p > 0 && envelope.image.based() => {}
         (Some(anchor), p) if p > 0 && envelope.image.op_ids().contains(anchor.as_str()) => {}
         _ => {
             return Err(SnapshotError::Corrupt(
@@ -388,6 +722,7 @@ fn import_bounded(
             ))
         }
     }
+    check_base(&envelope)?;
     // Every refusal that needs no network, before the one call that does.
     envelope.image.check()?;
     let held = store.op_count();
@@ -402,6 +737,15 @@ fn import_bounded(
         .into());
     }
     let anchor = confirm(&envelope, stream, transport)?;
+    // A format-1 snapshot answers an unconfirmed position by pulling from 0: it carries every op,
+    // so the fallback costs a full pull and loses nothing. A based one holds nothing below its
+    // position, so pulling from 0 would leave the gap between 0 and P forever empty while the
+    // watermarks claimed otherwise. It refuses instead, and the caller falls back (spec §4.5).
+    if envelope.image.based() && anchor == Anchor::Mismatch {
+        return Err(SnapshotError::AnchorMismatch {
+            position: envelope.header.pulled_through,
+        });
+    }
     let loaded = store.load_image(&envelope.image)?;
     Ok(Imported {
         marks: Watermarks {
@@ -417,6 +761,82 @@ fn import_bounded(
         loaded,
         anchor,
     })
+}
+
+/// What the header says about the base must be what the body is (6j6v.0cfa) — the same rule the
+/// `ops` count has always been held to.
+///
+/// **Why the two halves exist at all.** The header is read alone by [`peek`], and the hosted
+/// engine's op budget is sized off it without ever unpacking the body (spec §4.6). So the facts a
+/// sizer needs are in both places, and a snapshot whose halves disagree is refused rather than
+/// believed in the half that happens to be read first.
+fn check_base(envelope: &Envelope) -> Result<(), SnapshotError> {
+    let bad = |why: String| SnapshotError::Corrupt(why);
+    match (&envelope.header.base, &envelope.image.base) {
+        (None, None) => {
+            if envelope.header.format >= FORMAT_BASED {
+                return Err(bad(format!(
+                    "it declares format {} and carries no base",
+                    envelope.header.format
+                )));
+            }
+            return Ok(());
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(bad("only one of its halves carries a base".to_string()))
+        }
+        (Some(header), Some(image)) => {
+            if envelope.header.format < FORMAT_BASED {
+                return Err(bad(format!(
+                    "it carries a base and declares format {}",
+                    envelope.header.format
+                )));
+            }
+            if image.relay_position != envelope.header.pulled_through {
+                return Err(bad(format!(
+                    "its base stands at position {} and its header at {}",
+                    image.relay_position, envelope.header.pulled_through
+                )));
+            }
+            if header.clock != image.clock {
+                return Err(bad(format!(
+                    "its header carries clock {} and its base {}",
+                    header.clock, image.clock
+                )));
+            }
+            if header.residue != image.residue {
+                return Err(bad(format!(
+                    "its header counts {} residue ops and its base {}",
+                    header.residue, image.residue
+                )));
+            }
+            if header.kept_domains != image.kept_domains {
+                return Err(bad(format!(
+                    "its header keeps {:?} and its base {:?}",
+                    header.kept_domains, image.kept_domains
+                )));
+            }
+            let theirs: std::collections::BTreeMap<String, i64> = image
+                .view_bases
+                .iter()
+                .map(|v| (v.domain.clone(), v.fold_revision))
+                .collect();
+            if envelope.header.revisions != theirs {
+                return Err(bad(format!(
+                    "its header names revisions {:?} and its views {:?}",
+                    envelope.header.revisions, theirs
+                )));
+            }
+            if header.residue > envelope.image.op_count() {
+                return Err(bad(format!(
+                    "it counts {} residue ops and carries {} ops in all",
+                    header.residue,
+                    envelope.image.op_count()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Ask the relay for the op at the snapshot's position and compare it with the anchor.
@@ -967,13 +1387,16 @@ mod tests {
         assert_eq!(
             header,
             Header {
-                format: FORMAT,
+                format: FORMAT_WITH_LOG,
                 stream_id: "s".into(),
                 pulled_through: marks.pulled_through,
                 anchor: header.anchor.clone(),
                 engine: nxs_foundation::image::ENGINE_VERSION.into(),
                 ops: w.op_count() as usize,
-            }
+                revisions: BTreeMap::new(),
+                base: None,
+            },
+            "the with-log export still writes format 1, with no base and no revisions"
         );
     }
 

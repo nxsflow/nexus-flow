@@ -549,6 +549,13 @@ fn bind_from_snapshot(
     let path = ws.db_path_str()?;
     let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
+    // A based snapshot carries every product's views and no log to fold them from, so every
+    // product's reducer has to be here to take them — the import refuses by name otherwise
+    // (6j6v.0cfa). Only for a based one: a format-1 import compares the summed fold revision, and
+    // three reducers instead of one would make it refold what it could have taken.
+    if header.base.is_some() {
+        register_platform_reducers(&mut store);
+    }
     let held = store.op_count();
     if held > 0 {
         return Err(NxfError::new(
@@ -623,6 +630,7 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
     let kind = match &e {
         SnapshotError::Unpushed { .. }
         | SnapshotError::Unbacked { .. }
+        | SnapshotError::AnchorMismatch { .. }
         | SnapshotError::Image(ImageError::NotEmpty { .. }) => ErrorKind::Conflict,
         SnapshotError::Storage(_)
         | SnapshotError::Transport(_)
@@ -632,45 +640,102 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
     NxfError::new(kind, e.to_string())
 }
 
+/// Register the platform's OTHER reducers on a flow store — chat's and memory's (6j6v.0cfa).
+///
+/// **One database holds all three products**, and a based snapshot has to carry all three: a
+/// product whose reducer is not registered keeps its whole log instead, which is exactly the growth
+/// the format exists to stop. The flow store registers its own task reducer at open; this adds the
+/// two that make the image a platform image rather than a board image.
+///
+/// Harmless on the with-log path and deliberately not used there: registering more reducers changes
+/// the store's summed fold revision, and a format-1 image's views are taken only when that number
+/// matches — so a store with three reducers would refold every format-1 snapshot it imports instead
+/// of taking it.
+fn register_platform_reducers(store: &mut Store) {
+    store.register_reducer(Box::new(nexus_chat::message_reducer::MessageReducer));
+    store.register_reducer(Box::new(nexus_memory::fact_reducer::FactReducer));
+}
+
 /// `nxs sync snapshot <file>` (6j6v.mxt2): write this workspace's snapshot — the whole log, the
 /// folded board and the relay position they reach — for a new machine to start from.
-pub fn snapshot_verb(json: bool, ws: &Workspace, file: &std::path::Path) -> Result<()> {
+///
+/// With `based` (6j6v.0cfa) it writes format 2 instead: the same state, and no ops below that
+/// position except what the state cannot stand in for. The two are one verb because they are one
+/// format family and one envelope; which one a file is, is in its header.
+pub fn snapshot_verb(
+    json: bool,
+    ws: &Workspace,
+    file: &std::path::Path,
+    based: bool,
+) -> Result<()> {
     let meta = load(ws)?.ok_or_else(|| {
         NxfError::validation("workspace is not bound to a stream; run `nxs sync bind` first")
     })?;
     let path = ws.db_path_str()?;
-    let store = Store::open(&path, ws.replica.site_id)
+    let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
+    if based {
+        register_platform_reducers(&mut store);
+    }
     let marks = Watermarks {
         pushed_through: meta.pushed_through,
         pulled_through: meta.pulled_through,
     };
     let remote = resolve_endpoint(None, &meta)?;
-    let bytes = nxs_sync::snapshot::export(
-        &store,
-        ws.replica.site_id,
-        &StreamId(meta.stream_id.clone()),
-        &marks,
-        &HttpTransport::new(&remote),
-    )
+    let transport = HttpTransport::new(&remote);
+    let stream = StreamId(meta.stream_id.clone());
+    let bytes = if based {
+        nxs_sync::snapshot::export_based(
+            &store,
+            ws.replica.site_id,
+            &stream,
+            &marks,
+            &transport,
+            nxs_sync::snapshot::PLATFORM,
+        )
+    } else {
+        nxs_sync::snapshot::export(&store, ws.replica.site_id, &stream, &marks, &transport)
+    }
     .map_err(snapshot_error)?;
     // Owner-only: it carries the whole log (review of PR #487, Code Quality #7).
     crate::workspaces::write_atomic_private(file, &bytes)?;
-    let ops = nxs_sync::snapshot::peek(&bytes)
-        .map_err(snapshot_error)?
-        .ops;
+    let header = nxs_sync::snapshot::peek(&bytes).map_err(snapshot_error)?;
+    let ops = header.ops;
     if json {
+        let mut out = serde_json::json!({
+            "ok": true,
+            "file": file.display().to_string(),
+            "bytes": bytes.len(),
+            "ops": ops,
+            "stream_id": meta.stream_id,
+            "snapshot_through": meta.pulled_through,
+            "taken_by": nxs_foundation::image::ENGINE_VERSION,
+            "format": header.format,
+        });
+        if let Some(base) = &header.base {
+            out["base"] = serde_json::json!({
+                "clock": base.clock,
+                "ops_through_p": base.ops_through_p,
+                "digest_through_p": base.digest_through_p,
+                "residue": base.residue,
+                "kept_domains": base.kept_domains,
+            });
+            out["revisions"] = serde_json::json!(header.revisions);
+        }
+        println!("{out}");
+    } else if let Some(base) = &header.base {
         println!(
-            "{}",
-            serde_json::json!({
-                "ok": true,
-                "file": file.display().to_string(),
-                "bytes": bytes.len(),
-                "ops": ops,
-                "stream_id": meta.stream_id,
-                "snapshot_through": meta.pulled_through,
-                "taken_by": nxs_foundation::image::ENGINE_VERSION,
-            })
+            "wrote {} ({} bytes): the state of stream {} at relay position {}, with {ops} op(s) \
+             below it — {} of {} the views cannot stand in for, the rest {}'s. A new machine starts \
+             from it with `nxs sync bind --snapshot {}` and pulls only what came after.",
+            file.display(),
+            bytes.len(),
+            meta.stream_id,
+            meta.pulled_through,
+            base.residue,
+            base.ops_through_p,
+            base.kept_domains.join(", "),
+            file.display()
         );
     } else {
         println!(

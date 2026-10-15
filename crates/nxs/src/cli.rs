@@ -328,6 +328,13 @@ enum SyncAction {
     Snapshot {
         /// Where to write it. Overwritten if it exists.
         file: String,
+        /// Write a BASED snapshot instead: the state, and NO ops below the relay position it
+        /// reaches — so the file, and the replica that starts from it, stop growing with the
+        /// stream's history. Carries what the folded state cannot stand in for (the chat log, ops
+        /// no reducer could fold, the Lamport clock). An older nxs cannot read it, and only an nxs
+        /// whose fold rules match can take its state.
+        #[arg(long)]
+        based: bool,
     },
     /// Take a workspace back off the list this service instance attends
     /// (`~/.nexusflow/workspaces.toml`, or `~/.nexusflow-<name>/` for a development BUILD that
@@ -801,9 +808,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 let ws = resolve(db)?;
                 sync::run(cli.json, &ws, remote.as_deref())
             }
-            SyncAction::Snapshot { file } => {
+            SyncAction::Snapshot { file, based } => {
                 let ws = resolve(db)?;
-                sync::snapshot_verb(cli.json, &ws, std::path::Path::new(file))
+                sync::snapshot_verb(cli.json, &ws, std::path::Path::new(file), *based)
             }
             SyncAction::Endpoint { url } => sync::endpoint_verb(cli.json, url.as_deref()),
             // Machine-wide like `endpoint`: this machine is the service home's, not the cwd's

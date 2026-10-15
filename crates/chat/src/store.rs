@@ -739,7 +739,8 @@ impl ChatStore {
         let mut inner = Substrate::open_in_memory(site);
         let upgraded = schema::try_apply_chat_views(inner.connection()).expect("chat views");
         inner.register_reducer(Box::new(MessageReducer));
-        Self::materialize_views(&mut inner, upgraded);
+        // A fresh in-memory log has no base, so the based refusal is unreachable here.
+        Self::materialize_views(&mut inner, upgraded).expect("a fresh in-memory store has no base");
         ChatStore { inner }
     }
 
@@ -747,7 +748,7 @@ impl ChatStore {
         let mut inner = Substrate::open(path, site)?;
         let upgraded = schema::try_apply_chat_views(inner.connection())?;
         inner.register_reducer(Box::new(MessageReducer));
-        Self::materialize_views(&mut inner, upgraded);
+        Self::materialize_views(&mut inner, upgraded)?;
         Ok(ChatStore { inner })
     }
 
@@ -756,11 +757,17 @@ impl ChatStore {
     /// open UPGRADED a pre-M2 `threads` table (the sparse-key deadline minor, spec §7),
     /// [`force_refold`](Substrate::force_refold) instead — the deferred `set deadline` ops sit BELOW
     /// the advanced watermark, so only an unconditional refold resurfaces them.
-    fn materialize_views(inner: &mut Substrate, upgraded: bool) {
+    /// **Both paths can REFUSE on a based replica** (6j6v.0cfa): each may rebuild the views from the
+    /// whole log, which a replica started from a snapshot at a relay position does not hold below
+    /// it. Surfaced as the open's error, like the skew gate's refusal.
+    fn materialize_views(
+        inner: &mut Substrate,
+        upgraded: bool,
+    ) -> Result<(), nxs_foundation::image::NeedsHistory> {
         if upgraded {
-            inner.force_refold(CHAT_VIEWS);
+            inner.force_refold(CHAT_VIEWS)
         } else {
-            inner.refold_if_behind(CHAT_VIEWS);
+            inner.refold_if_behind(CHAT_VIEWS)
         }
     }
 
