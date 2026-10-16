@@ -230,7 +230,7 @@ fn chat(s: &mut ChatStore, r: &mut Lcg, steps: usize) {
     let mut threads: Vec<String> = Vec::new();
     for step in 0..steps {
         match r.next(8) {
-            0 | 1 | 2 => {
+            0..=2 => {
                 let thread = (!threads.is_empty() && r.next(2) == 0)
                     .then(|| threads[r.next(threads.len() as u64) as usize].clone());
                 s.post_message(&env("c-1", &format!("b{step}"), thread));
