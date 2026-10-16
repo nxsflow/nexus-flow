@@ -2346,7 +2346,7 @@ mod tests {
         let mut ops = full.export();
         ops.reverse();
         other.apply(&ops);
-        assert_eq!(digest(&other).unwrap(), (count, whole.clone()));
+        assert_eq!(digest(&other).unwrap(), (count, whole));
 
         // One op short: a different digest.
         let mut short = Store::open_in_memory(14);
@@ -2426,7 +2426,9 @@ mod tests {
         let forged_body = retamper(&bytes, |v| {
             v["image"]["views"][0]["rows"][0][1] = serde_json::json!("forged")
         });
-        let cases: Vec<(&str, &[u8], Vec<String>, Option<&str>)> = vec![
+        /// What the case is, the bytes, the signer list, and the key the refusal names.
+        type Case<'a> = (&'a str, &'a [u8], Vec<String>, Option<&'a str>);
+        let cases: Vec<Case> = vec![
             ("an empty list", &bytes, vec![], Some(writer.key_id())),
             (
                 "another key",
@@ -2609,7 +2611,9 @@ mod tests {
         written(&relay, 5);
         let (writer, marks) = caught_up(&relay, 12);
         let good = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
-        let cases: Vec<(&str, Vec<u8>, fn(&Mismatch) -> bool)> = vec![
+        /// What the case is, the bytes, and which mismatch the refusal must name.
+        type Case<'a> = (&'a str, Vec<u8>, fn(&Mismatch) -> bool);
+        let cases: Vec<Case> = vec![
             (
                 "another fold revision",
                 resigned(&good, &writer, |e| {
