@@ -2,6 +2,26 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Quality gates: CI is the gate
+
+The full suite and clippy take hours on the development machine and minutes in CI, so **the
+project's gate is the CI workflow, not a local run.** Never run `cargo clippy`, `cargo test --all`
+or `cargo test --workspace` locally.
+
+Locally, run only `cargo fmt --all -- --check` and the test files your change touched
+(`cargo test -p <crate> --test <file>`). Then the gate is:
+
+```
+git push origin HEAD
+gh workflow run ci.yml --ref "$(git branch --show-current)"
+run=$(gh run list --workflow ci.yml --branch "$(git branch --show-current)" --limit 1 --json databaseId -q '.[0].databaseId')
+gh run watch "$run" --exit-status
+```
+
+Check that the run's `headSha` is `git rev-parse HEAD` before you trust it: a run proves only the
+commit it ran on. If you hand over a gate result, give that commit and the run URL. If a job is
+red, the failing job's log (`gh run view "$run" --log-failed`) is the evidence.
+
 ## Removing a verb, a flag or a path
 
 A removal leaves **no identifier to grep for**. `cargo check` and every gate stay green while the
