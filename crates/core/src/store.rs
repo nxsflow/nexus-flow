@@ -3676,11 +3676,20 @@ mod tests {
         s.create_item("old.B", "task", "mine", "a");
         let err = s.remap_prefix("old", "new").unwrap_err();
         assert!(
-            matches!(&err, nxs_foundation::image::NeedsHistory::Remap { base: 5, .. }),
+            matches!(
+                &err,
+                nxs_foundation::image::NeedsHistory::Remap { base: 5, .. }
+            ),
             "{err}"
         );
-        assert!(s.get_item("old.A").unwrap().is_some(), "the imported item stays");
-        assert!(s.get_item("old.B").unwrap().is_some(), "and so does the local one");
+        assert!(
+            s.get_item("old.A").unwrap().is_some(),
+            "the imported item stays"
+        );
+        assert!(
+            s.get_item("old.B").unwrap().is_some(),
+            "and so does the local one"
+        );
     }
 
     #[test]

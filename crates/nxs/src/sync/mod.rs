@@ -608,9 +608,14 @@ fn bind_from_snapshot(
     if let Some(new_prefix) = &reassigned_prefix {
         workspace::adopt_prefix(ws, new_prefix)?;
     }
-    let imported =
-        nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport, opts.trusted_signers)
-            .map_err(snapshot_error)?;
+    let imported = nxs_sync::snapshot::import(
+        &mut store,
+        &bytes,
+        &stream,
+        &transport,
+        opts.trusted_signers,
+    )
+    .map_err(snapshot_error)?;
     drop(store);
     let meta = SyncMeta {
         stream_id: header.stream_id,

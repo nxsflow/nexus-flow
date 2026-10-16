@@ -77,7 +77,12 @@ impl Relay {
 
     /// The lowest position any pull asked for — the proof that a prefix was never re-fetched.
     fn lowest_pull(&self) -> i64 {
-        self.pulls.borrow().iter().copied().min().unwrap_or(i64::MAX)
+        self.pulls
+            .borrow()
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(i64::MAX)
     }
 }
 
@@ -166,8 +171,14 @@ fn state(s: &Store) -> BTreeMap<String, String> {
         .map(|(table, rows)| (format!("view:{table}"), format!("{rows:?}")))
         .collect();
     let c = s.connection();
-    out.insert("ready".into(), format!("{:?}", derive::ready(c, NOW).unwrap()));
-    out.insert("blocked".into(), format!("{:?}", derive::blocked(c).unwrap()));
+    out.insert(
+        "ready".into(),
+        format!("{:?}", derive::ready(c, NOW).unwrap()),
+    );
+    out.insert(
+        "blocked".into(),
+        format!("{:?}", derive::blocked(c).unwrap()),
+    );
     out.insert(
         "in_progress".into(),
         format!("{:?}", derive::in_progress(c, NOW).unwrap()),
@@ -258,7 +269,10 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
     let header = snapshot::peek(&bytes).unwrap();
     assert_eq!(header.format, snapshot::FORMAT_BASED);
     assert_eq!(header.pulled_through, p as i64);
-    let base = header.base.clone().expect("a based snapshot carries a base");
+    let base = header
+        .base
+        .clone()
+        .expect("a based snapshot carries a base");
     assert_eq!(base.ops_through_p, p, "the writer held every op below P");
 
     let relay = Relay::holding(&ops);
@@ -285,7 +299,13 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
         "the based replica asked for a position below P"
     );
     assert!(
-        relay.pulls.borrow().iter().filter(|&&s| s < p as i64).count() == 1,
+        relay
+            .pulls
+            .borrow()
+            .iter()
+            .filter(|&&s| s < p as i64)
+            .count()
+            == 1,
         "the anchor check is the only read below P: {:?}",
         &relay.pulls.borrow()[..relay.pulls.borrow().len().min(20)]
     );
@@ -304,17 +324,32 @@ fn a_based_replica_plus_the_tail_is_identical_to_a_full_replay() {
             "the based replica is missing {domain} ops from above P"
         );
     }
-    let dropped: BTreeSet<&String> = below
+    // The residue (`residue_ops`: an unknown shape or a Lamport number past the bound, in the
+    // task domain or one no reducer folds) is the one exception: nothing folded it, so it MUST
+    // ride along — and nothing else of task or fact may.
+    let residue = |id: &str| id.starts_with("residue-");
+    let carried_below: BTreeSet<&String> = below
+        .iter()
+        .filter(|id| mine.values().any(|s| s.contains(*id)))
+        .collect();
+    let dropped: Vec<&&String> = carried_below
         .iter()
         .filter(|id| {
-            mine.get("task").is_some_and(|s| s.contains(*id))
-                || mine.get("fact").is_some_and(|s| s.contains(*id))
+            !residue(id)
+                && (mine.get("task").is_some_and(|s| s.contains(**id))
+                    || mine.get("fact").is_some_and(|s| s.contains(**id)))
         })
         .collect();
     assert!(
         dropped.is_empty(),
-        "{} task/fact ops below P rode along after all",
-        dropped.len()
+        "{} task/fact ops below P rode along after all: {:?}",
+        dropped.len(),
+        &dropped[..dropped.len().min(5)]
+    );
+    let residue_below: BTreeSet<&String> = below.iter().filter(|id| residue(id)).collect();
+    assert!(
+        !residue_below.is_empty() && residue_below.is_subset(&carried_below),
+        "every residue op below P must ride along: {residue_below:?}"
     );
     let chat_below: BTreeSet<String> = theirs["message"].intersection(&below).cloned().collect();
     assert!(
@@ -346,7 +381,8 @@ fn the_differential_holds_at_every_position_and_in_any_arrival_order() {
 
             // In order, through the pull loop.
             let mut based = platform_store(13);
-            let imported = snapshot::import(&mut based, &bytes, &stream(), &relay, &signers).unwrap();
+            let imported =
+                snapshot::import(&mut based, &bytes, &stream(), &relay, &signers).unwrap();
             let mut marks = imported.marks;
             sync_through(&mut based, 13, &mut marks, &relay);
             assert_same_state(&based, &replayed, &ctx);
@@ -381,10 +417,7 @@ fn a_fold_table_started_from_the_same_bytes_holds_what_the_replica_holds() {
     assert_eq!(projected.folded_through, p as i64);
 
     let table = MemTable::new("based-differential");
-    ready(nxs_fold_ddb::snapshot::import(
-        &table, &folder, &projected,
-    ))
-    .unwrap();
+    ready(nxs_fold_ddb::snapshot::import(&table, &folder, &projected)).unwrap();
     // The tail, shuffled and doubled, as a relay hands it over.
     let mut r = Lcg(0xf01d);
     let mut tail: Vec<(i64, Op)> = ops[p..]
@@ -524,8 +557,16 @@ fn a_based_start_meets_the_hosted_cap_a_full_replay_exceeds() {
     let mut marks = imported.marks;
     loop {
         let before = marks.pulled_through;
-        engine::sync(&mut based, 14, &stream(), &mut marks, &capped, 5_000, &Unbounded)
-            .unwrap_or_else(|e| panic!("a based start must stay inside the budget: {e}"));
+        engine::sync(
+            &mut based,
+            14,
+            &stream(),
+            &mut marks,
+            &capped,
+            5_000,
+            &Unbounded,
+        )
+        .unwrap_or_else(|e| panic!("a based start must stay inside the budget: {e}"));
         if marks.pulled_through == before {
             break;
         }

@@ -28,6 +28,6 @@ Raise the workspace to the current schema (a clean no-op when already current):
 
 ```console
 $ nxs migrate --json
-{"from":8,"to":8,"changed":false,"hook_rewritten":false,"hook_commands":[],"modules_registered":[]}
+{"from":9,"to":9,"changed":false,"hook_rewritten":false,"hook_commands":[],"modules_registered":[]}
 
 ```

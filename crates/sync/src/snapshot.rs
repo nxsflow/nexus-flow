@@ -56,6 +56,15 @@
 //! from. The import refuses what it could not read back (a log whose types or bounds are wrong, a
 //! view cell of the wrong type), so a bad file cannot break the store; it does not re-derive a board
 //! from the log, because that would not add trust: a crafted file can forge ops as easily as views.
+//!
+//! # Format 2: the state without the log below its position (6j6v.0cfa)
+//!
+//! [`export_based`] writes the views and a [`Base`] instead of the ops the views stand in for, so
+//! there is no log to check the views against. That is why format 2 — and only format 2 — is
+//! SIGNED by the replica that took it ([`Signer`]) and is believed only from a signer on the list
+//! the caller hands [`import`]; why its views are taken or refused, never folded again
+//! ([`SnapshotError::NeedsRevision`]); and why a position the relay does not confirm is a refusal
+//! rather than a pull from 0 ([`SnapshotError::AnchorMismatch`]).
 
 use crate::engine::{SyncError, Transport, Watermarks};
 use crate::protocol::{Cursor, StreamId};
@@ -428,11 +437,13 @@ impl From<ImageError> for SnapshotError {
                     ours,
                 })
             }
-            ImageError::MissingViewBase { domain } => SnapshotError::NeedsRevision(Mismatch::Views {
-                domain: Some(domain),
-                carried: Vec::new(),
-                folded: Vec::new(),
-            }),
+            ImageError::MissingViewBase { domain } => {
+                SnapshotError::NeedsRevision(Mismatch::Views {
+                    domain: Some(domain),
+                    carried: Vec::new(),
+                    folded: Vec::new(),
+                })
+            }
             ImageError::ViewsDiffer { carried, folded } => {
                 SnapshotError::NeedsRevision(Mismatch::Views {
                     domain: None,
@@ -716,7 +727,9 @@ fn digest(store: &Store) -> Result<(usize, [u8; 32]), SnapshotError> {
 /// The XOR of each id's SHA-256 — the digest [`digest`] takes of a store, over any set of ids.
 fn digest_of<'a>(ids: impl Iterator<Item = &'a str>) -> [u8; 32] {
     use sha2::{Digest, Sha256};
-    ids.fold([0u8; 32], |acc, id| xor(acc, Sha256::digest(id.as_bytes()).into()))
+    ids.fold([0u8; 32], |acc, id| {
+        xor(acc, Sha256::digest(id.as_bytes()).into())
+    })
 }
 
 fn xor(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
@@ -764,11 +777,11 @@ fn anchor_at(
         return Ok(None);
     }
     let held = |id: &str| -> rusqlite::Result<bool> {
-        store
-            .connection()
-            .query_row("SELECT EXISTS(SELECT 1 FROM ops WHERE op_id = ?1)", [id], |r| {
-                r.get(0)
-            })
+        store.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE op_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )
     };
     // A replica that started from a based snapshot holds no op at its base position — the import
     // dropped it with everything else below — so with an empty tail it would never be able to take
@@ -2038,7 +2051,16 @@ mod tests {
         let mut marks = Watermarks::default();
         loop {
             let before = marks.pulled_through;
-            engine::sync(&mut store, site, &stream(), &mut marks, relay, 500, &Unbounded).unwrap();
+            engine::sync(
+                &mut store,
+                site,
+                &stream(),
+                &mut marks,
+                relay,
+                500,
+                &Unbounded,
+            )
+            .unwrap();
             if marks.pulled_through == before {
                 return (store, marks);
             }
@@ -2080,8 +2102,7 @@ mod tests {
         let relay = Relay::new(1, 0);
         let p = written(&relay, 20);
         let (writer, marks) = caught_up(&relay, 12);
-        let bytes =
-            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
         let header = peek(&bytes).unwrap();
         assert_eq!(header.format, FORMAT_BASED);
         assert_eq!(header.pulled_through, p);
@@ -2110,8 +2131,7 @@ mod tests {
         let relay = Relay::new(2, 0);
         let p = written(&relay, 12);
         let (writer, marks) = caught_up(&relay, 12);
-        let bytes =
-            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
         // The stream grows past the snapshot.
         let mut later = Store::open_in_memory(13);
         let mut later_marks = Watermarks::default();
@@ -2140,20 +2160,23 @@ mod tests {
         let relay = Relay::new(3, 0);
         written(&relay, 8);
         let (writer, marks) = caught_up(&relay, 12);
-        let bytes =
-            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
         let mut based = Store::open_in_memory(14);
         import(&mut based, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
         assert_eq!(based.op_count(), 0, "no log to read a clock off");
         let before: String = based
             .connection()
-            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(before, "open", "the snapshot brought the register");
         based.set_field("wa.1", "status", Some("closed".into()), "me");
         let after: String = based
             .connection()
-            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM items WHERE id = 'wa.1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             after, "closed",
@@ -2170,25 +2193,28 @@ mod tests {
         let relay = Relay::new(4, 0);
         written(&relay, 6);
         let (writer, marks) = caught_up(&relay, 12);
-        let bytes =
-            export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
 
         // Another relay, holding another stream's ops at the same positions.
         let other = Relay::new(5, 0);
         written(&other, 6);
         let mut based = Store::open_in_memory(14);
         let err = import(&mut based, &bytes, &stream(), &other, &signers(&writer)).unwrap_err();
-        assert!(
-            matches!(err, SnapshotError::AnchorMismatch { .. }),
-            "{err}"
-        );
+        assert!(matches!(err, SnapshotError::AnchorMismatch { .. }), "{err}");
         assert_eq!(based.op_count(), 0, "a refusal writes nothing");
         assert!(based.list_items().unwrap().is_empty());
 
         // The with-log snapshot of the same replica takes the other road, unchanged.
         let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
         let mut fallback = Store::open_in_memory(15);
-        let imported = import(&mut fallback, &with_log, &stream(), &other, &signers(&writer)).unwrap();
+        let imported = import(
+            &mut fallback,
+            &with_log,
+            &stream(),
+            &other,
+            &signers(&writer),
+        )
+        .unwrap();
         assert_eq!(imported.anchor, Anchor::Mismatch);
         assert_eq!(imported.marks.pulled_through, 0);
     }
@@ -2216,7 +2242,10 @@ mod tests {
         writer.create_item("mine.1", "task", "t", "me");
         let mine = writer.op_count() - written_ops(&relay);
         let err = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap_err();
-        assert!(matches!(err, SnapshotError::Unpushed { ops } if ops == mine), "{err}");
+        assert!(
+            matches!(err, SnapshotError::Unpushed { ops } if ops == mine),
+            "{err}"
+        );
 
         let (clean, mut marks) = caught_up(&relay, 13);
         marks.pulled_through += 5; // a position this relay does not hold
@@ -2250,9 +2279,7 @@ mod tests {
             ),
             (
                 "a revision the views were not folded at",
-                retamper(&good, |v| {
-                    v["revisions"] = serde_json::json!({ "task": 9 })
-                }),
+                retamper(&good, |v| v["revisions"] = serde_json::json!({ "task": 9 })),
             ),
             (
                 "a base position its header does not claim",
@@ -2275,10 +2302,7 @@ mod tests {
         for (what, bytes) in tampered {
             let mut store = Store::open_in_memory(14);
             let err = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap_err();
-            assert!(
-                matches!(err, SnapshotError::Corrupt(_)),
-                "{what}: {err}"
-            );
+            assert!(matches!(err, SnapshotError::Corrupt(_)), "{what}: {err}");
             assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
         }
         // The untampered one still loads, so the tampering is what the refusals are about.
@@ -2346,7 +2370,11 @@ mod tests {
         assert_eq!(image.base.as_ref().unwrap().relay_position, p);
         use nxs_foundation::reducer::Reducer;
         assert_eq!(
-            image.views.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            image
+                .views
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
             nexus_flow_core::task_reducer::TaskReducer
                 .view_tables()
                 .to_vec()
@@ -2400,9 +2428,19 @@ mod tests {
         });
         let cases: Vec<(&str, &[u8], Vec<String>, Option<&str>)> = vec![
             ("an empty list", &bytes, vec![], Some(writer.key_id())),
-            ("another key", &bytes, signers(&stranger), Some(writer.key_id())),
+            (
+                "another key",
+                &bytes,
+                signers(&stranger),
+                Some(writer.key_id()),
+            ),
             ("no signature", &unsigned, signers(&writer), None),
-            ("a body the signature does not cover", &forged_body, signers(&writer), Some(writer.key_id())),
+            (
+                "a body the signature does not cover",
+                &forged_body,
+                signers(&writer),
+                Some(writer.key_id()),
+            ),
         ];
         for (what, file, list, claimed) in cases {
             let mut store = Store::open_in_memory(14);
@@ -2414,7 +2452,10 @@ mod tests {
             assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
             assert!(store.list_items().unwrap().is_empty(), "{what}");
             assert!(
-                matches!(unpack_image(file, &list), Err(SnapshotError::Untrusted { .. })),
+                matches!(
+                    unpack_image(file, &list),
+                    Err(SnapshotError::Untrusted { .. })
+                ),
                 "{what}: the fold's reader refuses it too"
             );
         }
@@ -2444,7 +2485,8 @@ mod tests {
         for (products, kept) in [(FLOW_ONLY, 0), (FLOW_KEPT, writer.op_count() as usize - 2)] {
             let bytes = export_based(&writer, 12, &stream(), &marks, &relay, products).unwrap();
             let mut store = Store::open_in_memory(14);
-            let imported = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
+            let imported =
+                import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
             assert_eq!((imported.residue, imported.kept), (2, kept));
             assert_eq!(
                 store.op_count() as usize,
@@ -2456,7 +2498,10 @@ mod tests {
         let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
         let mut store = Store::open_in_memory(16);
         let imported = import(&mut store, &with_log, &stream(), &relay, &[]).unwrap();
-        assert_eq!((imported.residue, imported.kept), (0, writer.op_count() as usize));
+        assert_eq!(
+            (imported.residue, imported.kept),
+            (0, writer.op_count() as usize)
+        );
         assert_eq!(store.op_count() as usize, imported.kept);
     }
 
@@ -2496,7 +2541,10 @@ mod tests {
         for (what, bytes) in cases {
             let mut store = Store::open_in_memory(14);
             let err = import(&mut store, &bytes, &stream(), &relay, &signers(&writer)).unwrap_err();
-            assert!(matches!(err, SnapshotError::Incomplete { .. }), "{what}: {err}");
+            assert!(
+                matches!(err, SnapshotError::Incomplete { .. }),
+                "{what}: {err}"
+            );
             assert_eq!(store.op_count(), 0, "{what}: a refusal writes nothing");
         }
         let mut store = Store::open_in_memory(15);
@@ -2545,7 +2593,10 @@ mod tests {
         let mut based = Store::open_in_memory(14);
         let imported = import(&mut based, &bytes, &stream(), &relay, &signers(&writer)).unwrap();
         let err = export(&based, 14, &stream(), &imported.marks, &relay).unwrap_err();
-        assert!(matches!(err, SnapshotError::NeedsHistory { base } if base == p), "{err}");
+        assert!(
+            matches!(err, SnapshotError::NeedsHistory { base } if base == p),
+            "{err}"
+        );
     }
 
     /// **No refold for format 2** (owner, 2026-10-15 point 4): every dimension an ordinary snapshot
@@ -2565,7 +2616,16 @@ mod tests {
                     e.header.revisions.insert("task".into(), 7);
                     e.image.base.as_mut().unwrap().view_bases[0].fold_revision = 7;
                 }),
-                |m| matches!(m, Mismatch::FoldRevision { snapshot: 7, ours: Some(_), .. }),
+                |m| {
+                    matches!(
+                        m,
+                        Mismatch::FoldRevision {
+                            snapshot: 7,
+                            ours: Some(_),
+                            ..
+                        }
+                    )
+                },
             ),
             (
                 "another schema",
@@ -2595,8 +2655,14 @@ mod tests {
             e.image.engine = "0.0.1".into();
         });
         let mut store = Store::open_in_memory(15);
-        let imported =
-            import(&mut store, &other_engine, &stream(), &relay, &signers(&writer)).unwrap();
+        let imported = import(
+            &mut store,
+            &other_engine,
+            &stream(),
+            &relay,
+            &signers(&writer),
+        )
+        .unwrap();
         assert_eq!(imported.loaded, Loaded::Views, "taken, never refolded");
     }
 
@@ -2622,6 +2688,9 @@ mod tests {
         pass(&mut writer, 12, &mut marks, &relay);
         let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
         assert_eq!(peek(&bytes).unwrap().writer.unwrap().key_id, key);
-        assert_eq!(std::fs::read(other.path().join("signing.key")).unwrap(), placed);
+        assert_eq!(
+            std::fs::read(other.path().join("signing.key")).unwrap(),
+            placed
+        );
     }
 }

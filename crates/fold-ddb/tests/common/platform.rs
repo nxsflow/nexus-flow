@@ -25,8 +25,9 @@ use super::Lcg;
 
 /// Every view table of the three platform reducers, in a stable order.
 pub fn platform_view_tables() -> Vec<&'static str> {
-    let mut tables: Vec<&'static str> =
-        nexus_flow_core::task_reducer::TaskReducer.view_tables().to_vec();
+    let mut tables: Vec<&'static str> = nexus_flow_core::task_reducer::TaskReducer
+        .view_tables()
+        .to_vec();
     tables.extend(nexus_chat::message_reducer::MessageReducer.view_tables());
     tables.extend(nexus_memory::fact_reducer::FactReducer.view_tables());
     tables.sort();
@@ -86,7 +87,12 @@ fn board(s: &mut Store, r: &mut Lcg, items: u64, steps: usize) {
         let (a, b) = (id(r.next(items)), id(r.next(items)));
         match step % 11 {
             // A retype, so the `typed` partition sees a type gained, lost and changed.
-            4 => s.set_field(&a, "type", Some(["task", "epic", "note"][step % 3].into()), "u"),
+            4 => s.set_field(
+                &a,
+                "type",
+                Some(["task", "epic", "note"][step % 3].into()),
+                "u",
+            ),
             // List-field entries (6j6v.4g6r): adds labelled and not, removes, and a clear — the
             // sites add and remove the same entries concurrently.
             1 | 3 => {
@@ -100,7 +106,11 @@ fn board(s: &mut Store, r: &mut Lcg, items: u64, steps: usize) {
             7 => s.set_custom_field_merge(
                 &a,
                 "due_at",
-                Some(format!("2026-11-{:02}T{:02}:30:00Z", 1 + r.next(28), r.next(24))),
+                Some(format!(
+                    "2026-11-{:02}T{:02}:30:00Z",
+                    1 + r.next(28),
+                    r.next(24)
+                )),
                 "u",
                 MergeStrategy::Lww,
             ),
@@ -317,14 +327,17 @@ pub fn platform_log(seed: u64, sites: i64, steps_per_site: usize) -> Vec<Op> {
         let mut board_store = Store::open_in_memory(site);
         let items = 40 + r.next(60);
         board(&mut board_store, &mut r, items, steps_per_site);
-        let mut chat_store = ChatStore::open_in_memory(site);
+        // Each product writes from a store of its own, so each gets a site of its own: three logs
+        // minted at one site would reuse each other's (lamport, site) coordinates, and a receiver
+        // keeps only the first op at a coordinate — the rest would never reach any replica.
+        let mut chat_store = ChatStore::open_in_memory(site + 100);
         chat(&mut chat_store, &mut r, steps_per_site / 3);
-        let mut memory_store = MemoryStore::open_in_memory(site);
+        let mut memory_store = MemoryStore::open_in_memory(site + 200);
         memory(&mut memory_store, &mut r, steps_per_site / 4);
         let mut ops = board_store.export();
         ops.extend(chat_store.export());
         ops.extend(memory_store.export());
-        ops.extend(residue_ops(site, 4));
+        ops.extend(residue_ops(site + 300, 4));
         // Per site, causal order: the log as that site appended it.
         ops.sort_by_key(|o| (o.lamport, o.site, o.op_id.clone()));
         per_site.push(ops);

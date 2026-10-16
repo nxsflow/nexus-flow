@@ -597,7 +597,15 @@ fn a_based_snapshot_starts_a_new_machine_only_from_a_signer_the_bind_names() {
         "nxs",
         h,
         w,
-        &["sync", "bind", "--create", "--endpoint", &relay, "--no-daemon", "--json"],
+        &[
+            "sync",
+            "bind",
+            "--create",
+            "--endpoint",
+            &relay,
+            "--no-daemon",
+            "--json",
+        ],
     );
     let a = create(&source, "one");
     let b = create(&source, "two");
@@ -605,7 +613,12 @@ fn a_based_snapshot_starts_a_new_machine_only_from_a_signer_the_bind_names() {
     json("nxs", h, w, &["sync", "run", "--json"]);
     let file = source.ws.join("based.snapshot");
     let file = file.to_str().unwrap();
-    let taken = json("nxs", h, w, &["sync", "snapshot", file, "--based", "--json"]);
+    let taken = json(
+        "nxs",
+        h,
+        w,
+        &["sync", "snapshot", file, "--based", "--json"],
+    );
     assert_eq!(taken["format"], 2, "{taken}");
     let signer = taken["signer"].as_str().unwrap().to_string();
     assert!(signer.starts_with("ed25519:"), "{taken}");
@@ -621,12 +634,24 @@ fn a_based_snapshot_starts_a_new_machine_only_from_a_signer_the_bind_names() {
         "nxs",
         fh,
         fw,
-        &["sync", "bind", "--snapshot", file, "--endpoint", &relay, "--no-daemon", "--json"],
+        &[
+            "sync",
+            "bind",
+            "--snapshot",
+            file,
+            "--endpoint",
+            &relay,
+            "--no-daemon",
+            "--json",
+        ],
     );
     assert!(!refused.status.success());
     let said = String::from_utf8_lossy(&refused.stderr).to_string()
         + &String::from_utf8_lossy(&refused.stdout);
-    assert!(said.contains(&signer), "the refusal names the signer: {said}");
+    assert!(
+        said.contains(&signer),
+        "the refusal names the signer: {said}"
+    );
     assert!(!fw.join(".nxs/sync.toml").exists(), "and leaves it unbound");
     assert_eq!(board(fh, fw, &["list", "--json"]), serde_json::json!([]));
 
@@ -651,8 +676,17 @@ fn a_based_snapshot_starts_a_new_machine_only_from_a_signer_the_bind_names() {
     assert_eq!(bound["snapshot"]["signer"], signer.as_str(), "{bound}");
     assert_eq!(bound["snapshot"]["views"], "taken", "{bound}");
     let pass = json("nxs", fh, fw, &["sync", "run", "--json"]);
-    assert_eq!(pass["pulled"].as_u64().unwrap(), rest, "only the rest: {pass}");
+    assert_eq!(
+        pass["pulled"].as_u64().unwrap(),
+        rest,
+        "only the rest: {pass}"
+    );
     for args in [&["next", "--json"][..], &["list", "--json"][..]] {
-        assert_eq!(board(fh, fw, args), board(h, w, args), "nxf {}", args.join(" "));
+        assert_eq!(
+            board(fh, fw, args),
+            board(h, w, args),
+            "nxf {}",
+            args.join(" ")
+        );
     }
 }

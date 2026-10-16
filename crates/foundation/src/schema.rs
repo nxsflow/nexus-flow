@@ -765,13 +765,13 @@ mod tests {
             SCHEMA_VERSION,
             "version brought current"
         );
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
         assert_eq!(
             MIN_COMPATIBLE_SCHEMA_VERSION, 4,
             "the v4 breaking migration (parenthood → OR-set parent edge) raised the floor; the \
              additive v5 step (memory's classification + order), the additive v6 step (its \
-             written introduction), the additive v7 step (the signed log) and the additive v8 step \
-             (the log-free views) left it exactly there"
+             written introduction), the additive v7 step (the signed log), the additive v8 step \
+             (the log-free views) and the additive v9 table (`log_base`) left it exactly there"
         );
         let cols = columns(&conn, "items");
         for expected in [
@@ -830,10 +830,10 @@ mod tests {
             SCHEMA_VERSION,
             "version brought current (the v2→v3 closed_at ALTER + the v4 breaking step)"
         );
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
         assert_eq!(
             MIN_COMPATIBLE_SCHEMA_VERSION, 4,
-            "the v4 breaking migration raised the floor; the additive v5, v6 and v7 steps left it there"
+            "the v4 breaking migration raised the floor; the additive v5 to v9 steps left it there"
         );
         let cols = columns(&conn, "items");
         for expected in ["closed_at", "closed_at_v", "closed_at_site"] {

@@ -491,9 +491,15 @@ mod tests {
         let digest = [7u8; 32];
         let sig = key.sign_snapshot(&digest);
         assert!(verify_snapshot(key.key_id(), &sig, &digest));
-        assert!(!verify_snapshot(key.key_id(), &sig, &[8u8; 32]), "another digest");
+        assert!(
+            !verify_snapshot(key.key_id(), &sig, &[8u8; 32]),
+            "another digest"
+        );
         let other = ReplicaKey::generate();
-        assert!(!verify_snapshot(other.key_id(), &sig, &digest), "another key");
+        assert!(
+            !verify_snapshot(other.key_id(), &sig, &digest),
+            "another key"
+        );
         assert!(
             !verify(key.key_id(), &sig, &digest),
             "the bare digest is not what was signed: the domain tag is part of the message"

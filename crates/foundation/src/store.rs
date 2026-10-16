@@ -965,10 +965,7 @@ impl Store {
     /// First (6j6v.y3r4) the views are rebuilt when this binary's fold revision cannot vouch for
     /// them — see [`bind_views`](Self::bind_views); a rebuild folds the whole log, so nothing is
     /// left to catch up after it.
-    pub fn refold_if_behind(
-        &mut self,
-        store_id: &str,
-    ) -> Result<(), crate::image::NeedsHistory> {
+    pub fn refold_if_behind(&mut self, store_id: &str) -> Result<(), crate::image::NeedsHistory> {
         if self.bind_views(store_id)? {
             return Ok(());
         }
@@ -3454,7 +3451,11 @@ mod tests {
         let whole = s.image().unwrap();
         assert_eq!(whole.op_count(), 2, "the whole log, as format 1 carries it");
         let based = s.based_image(90, &[], tally_base()).unwrap();
-        assert_eq!(based.op_count(), 0, "every op was folded, so none is carried");
+        assert_eq!(
+            based.op_count(),
+            0,
+            "every op was folded, so none is carried"
+        );
         assert_eq!(based.base.as_ref().unwrap().residue, 0);
         assert_eq!(based.base.as_ref().unwrap().relay_position, 90);
         let rows: Vec<&crate::image::Table> =
@@ -3476,13 +3477,24 @@ mod tests {
         let (mut fresh, _) = empty_tally_store(2);
         fresh.load_image(&based).unwrap();
         assert_eq!(fresh.clock(), 900, "the clock stands at the carried floor");
-        fresh.emit("tally", "tally", "t.1", "v", "set", Some("mine".into()), "u");
+        fresh.emit(
+            "tally",
+            "tally",
+            "t.1",
+            "v",
+            "set",
+            Some("mine".into()),
+            "u",
+        );
         let mine = fresh.export().into_iter().next().unwrap();
         assert_eq!(
             mine.lamport, 901,
             "the first local write beats the register the snapshot brought"
         );
-        assert_eq!(tally_rows(&fresh), vec![("t.1".into(), "mine".into(), 901, 2)]);
+        assert_eq!(
+            tally_rows(&fresh),
+            vec![("t.1".into(), "mine".into(), 901, 2)]
+        );
     }
 
     /// A sibling process that only opens the file reads the same floor — the clock is seeded from
@@ -3565,7 +3577,8 @@ mod tests {
         let based = s.based_image(90, &["tally"], tally_base()).unwrap();
         assert_eq!(based.op_count(), 2, "a kept domain keeps its log");
         assert_eq!(
-            based.base.as_ref().unwrap().residue, 0,
+            based.base.as_ref().unwrap().residue,
+            0,
             "kept is not the same as residue"
         );
         assert_eq!(
