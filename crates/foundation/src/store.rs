@@ -1066,8 +1066,11 @@ impl Store {
     }
 
     /// The base this store stands on, when it started from a based image (6j6v.0cfa).
+    ///
+    /// Panics when the row cannot be read, as [`op_count`](Self::op_count) does: an error read as
+    /// "not based" would let a view rebuild empty what only the missing log could re-derive.
     pub fn log_base(&self) -> Option<crate::image::LogBase> {
-        log_base(&self.conn).unwrap_or(None)
+        log_base(&self.conn).expect("reading log_base")
     }
 
     /// Whether this store holds no ops below a relay position — see [`log_base`](Self::log_base).
@@ -1272,8 +1275,11 @@ impl Store {
                 });
             }
         }
-        // And every table THIS store folds into must be carried, with every column it reads.
-        if !ours.is_subset(theirs) || !self.views_cover_every_column(image)? {
+        // And the tables carried must be EXACTLY the ones this store folds into, with every column
+        // it reads. Not a superset: the views are written as they are, so a table no reducer here
+        // folds into — `ops`, `log_base`, `view_watermarks` — would be written past the typed log,
+        // the verdicts and the account. An ordinary image is held to the same equality above.
+        if ours != theirs || !self.views_cover_every_column(image)? {
             let sorted = |set: &HashSet<&str>| {
                 let mut v: Vec<String> = set.iter().map(|t| t.to_string()).collect();
                 v.sort();
@@ -3615,6 +3621,65 @@ mod tests {
         assert_eq!(fresh.op_count(), 0, "a refusal writes nothing");
         assert!(tally_rows(&fresh).is_empty());
         assert!(!fresh.is_based());
+    }
+
+    /// A based image writes its views as they are, so the tables it names must be EXACTLY the ones
+    /// this store folds into. One that also names a bookkeeping table — `view_watermarks` here, but
+    /// `ops` or `log_base` the same way — would write past the typed log, the verdicts and the
+    /// account. It is refused, and the store is left as it was.
+    #[test]
+    fn a_based_import_refuses_an_image_that_names_a_table_no_reducer_folds_into() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[tally_op("a", "t.1", "x", 3, 2)]);
+        let mut based = s.based_image(90, &[], tally_base()).unwrap();
+        let cell = |t: &str| crate::image::Cell::Text(t.to_string());
+        based.views.push(crate::image::Table {
+            name: "view_watermarks".to_string(),
+            columns: [
+                "store_id",
+                "folded_through",
+                "fold_revision",
+                "revision_through",
+            ]
+            .map(String::from)
+            .to_vec(),
+            rows: vec![vec![
+                cell("forged"),
+                crate::image::Cell::Integer(1 << 40),
+                crate::image::Cell::Integer(0),
+                crate::image::Cell::Integer(1 << 40),
+            ]],
+        });
+
+        let (mut fresh, _) = empty_tally_store(2);
+        let err = fresh.load_image(&based).unwrap_err();
+        assert!(
+            matches!(&err, crate::image::ImageError::ViewsDiffer { carried, folded }
+                if carried.contains(&"view_watermarks".to_string()) && folded == &["tally"]),
+            "{err}"
+        );
+        let forged: i64 = fresh
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM view_watermarks WHERE store_id = 'forged'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(forged, 0, "a refusal writes nothing");
+        assert_eq!(fresh.op_count(), 0);
+        assert!(tally_rows(&fresh).is_empty());
+        assert!(!fresh.is_based());
+    }
+
+    /// A `log_base` that cannot be read is not a store that has none: answering "not based" would
+    /// let a view rebuild empty what only the missing log could re-derive.
+    #[test]
+    #[should_panic(expected = "reading log_base")]
+    fn an_unreadable_log_base_is_not_read_as_no_base() {
+        let (s, _) = empty_tally_store(1);
+        s.connection().execute_batch("DROP TABLE log_base").unwrap();
+        let _ = s.log_base();
     }
 
     /// A store that registers no reducer for a domain whose views the image carries would serve

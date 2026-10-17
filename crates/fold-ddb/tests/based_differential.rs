@@ -460,6 +460,28 @@ fn the_fold_projection_refuses_a_with_log_snapshot() {
     );
 }
 
+/// A view cell the fold table has no type for is refused by the cell's name — a REAL, which no
+/// reducer writes — rather than projected as something it is not.
+#[test]
+fn the_fold_projection_refuses_a_cell_it_has_no_type_for() {
+    let ops = platform_log(0xf01f, 2, 120);
+    let (bytes, signers) = snapshot_at(&ops, ops.len() / 2, 12);
+    let (_, mut image) = snapshot::unpack_image(&bytes, &signers).unwrap();
+    let table = image
+        .views
+        .iter_mut()
+        .find(|t| !t.rows.is_empty())
+        .expect("a view with a row");
+    table.rows[0][0] = nxs_foundation::image::Cell::Real(0.5);
+    let (name, column) = (table.name.clone(), table.columns[0].clone());
+    let err = nxs_fold_ddb::snapshot::from_image(&image, "based-differential").unwrap_err();
+    assert!(
+        matches!(&err, nxs_fold_ddb::snapshot::FromImageError::BadCell { table, column: c }
+            if table == &name && c == &column),
+        "{err}"
+    );
+}
+
 /// **The cap** (spec §4.6, §8): the hosted engine counts every op it pulls since hydration against
 /// 30,000, and today a snapshot does not lower that count because it carries the whole log. A based
 /// start does — so a stream the engine refuses today is served inside the budget.

@@ -430,6 +430,36 @@ mod tests {
     use crate::model::{DOMAIN_FACT, FACT_FIELD, FACT_KIND, OP_SET};
     use nxs_foundation::model::Op;
 
+    /// A based replica's file (6j6v.0cfa) holds no ops below its relay position, so an open that
+    /// would rebuild the views — here, because the file records an older fold revision — REFUSES
+    /// rather than emptying them, and the refusal is the open's error. A matching based file opens
+    /// as any other does, with nothing to rebuild.
+    #[test]
+    fn opening_a_based_file_that_needs_a_rebuild_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("based.db");
+        let p = path.to_str().unwrap();
+        drop(MemoryStore::open(p, 1).unwrap());
+        let raw = rusqlite::Connection::open(p).unwrap();
+        raw.execute(
+            "INSERT INTO log_base(id, relay_position, clock, residue_count, anchor, dropped,
+                 dropped_digest) VALUES(1, 10, 5, 0, 'op-10', 10, '')",
+            [],
+        )
+        .unwrap();
+        MemoryStore::open(p, 1).expect("a based file at this build's revision opens");
+
+        raw.execute(
+            "UPDATE view_watermarks SET fold_revision = fold_revision - 1 WHERE store_id = 'memory'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            MemoryStore::open(p, 1).is_err(),
+            "a rebuild on a based file is refused"
+        );
+    }
+
     /// The migration mark is read straight off the log, newest `(lamport, site)` first — a fold of a
     /// register with no view — so an op past the Lamport bound is no mark (6j6v.m19v; review of PR
     /// #489, Test Quality #3): a planted "somebody already ran it" cannot stop this device's run.

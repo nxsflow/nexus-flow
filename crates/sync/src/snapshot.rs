@@ -879,22 +879,60 @@ pub fn unpack_image(
     bytes: &[u8],
     trusted_signers: &[String],
 ) -> Result<(Header, Image), SnapshotError> {
-    let json = unpack(bytes, MAX_UNPACKED_BYTES)?;
+    let envelope = open(bytes, MAX_UNPACKED_BYTES)?;
+    check_envelope(&envelope, trusted_signers)?;
+    Ok((envelope.header, envelope.image))
+}
+
+/// The envelope's bytes read as an envelope, refusing more than `cap` unpacked and a format newer
+/// than this build reads — and nothing else: what it says is [`check_envelope`]'s to judge.
+fn open(bytes: &[u8], cap: u64) -> Result<Envelope, SnapshotError> {
+    let json = unpack(bytes, cap)?;
     check_format(&json)?;
-    let envelope: Envelope = serde_json::from_slice(&json)
-        .map_err(|e| SnapshotError::Corrupt(format!("the snapshot body: {e}")))?;
-    if envelope.header.ops != envelope.image.op_count() {
+    serde_json::from_slice(&json)
+        .map_err(|e| SnapshotError::Corrupt(format!("the snapshot body: {e}")))
+}
+
+/// Every refusal an envelope earns on its own — no store, no network — as `(residue, kept)` when it
+/// earns none ([`account`]). **Both readers of the format call this one function** ([`import`] and
+/// [`unpack_image`]): a check kept by one of them alone is a file the other one believes.
+fn check_envelope(
+    envelope: &Envelope,
+    trusted_signers: &[String],
+) -> Result<(usize, usize), SnapshotError> {
+    let header = &envelope.header;
+    // What the header promises must be what the body is.
+    if header.pulled_through < 0 {
+        return Err(SnapshotError::Corrupt(format!(
+            "a negative position ({})",
+            header.pulled_through
+        )));
+    }
+    if header.ops != envelope.image.op_count() {
         return Err(SnapshotError::Corrupt(format!(
             "the header counts {} ops and the log holds {}",
-            envelope.header.ops,
+            header.ops,
             envelope.image.op_count()
         )));
     }
-    check_base(&envelope)?;
-    check_signer(&envelope, trusted_signers)?;
-    account(&envelope)?;
+    match (&header.anchor, header.pulled_through) {
+        (None, 0) => {}
+        // A based snapshot drops the ops below its position, the one at it included, so the anchor
+        // is not in the log it carries. What the relay holds there is checked by `confirm`; the
+        // anchor's own presence is a format-1 self-consistency check and stays one.
+        (Some(_), p) if p > 0 && envelope.image.based() => {}
+        (Some(anchor), p) if p > 0 && envelope.image.op_ids().contains(anchor.as_str()) => {}
+        _ => {
+            return Err(SnapshotError::Corrupt(
+                "its anchor does not match its position and log".to_string(),
+            ))
+        }
+    }
+    check_base(envelope)?;
+    check_signer(envelope, trusted_signers)?;
+    let counts = account(envelope)?;
     envelope.image.check()?;
-    Ok((envelope.header, envelope.image))
+    Ok(counts)
 }
 
 /// Start the EMPTY `store` from a snapshot of `stream`, confirming its position against the relay
@@ -937,49 +975,15 @@ fn import_bounded(
     trusted_signers: &[String],
     cap: u64,
 ) -> Result<Imported, SnapshotError> {
-    let json = unpack(bytes, cap)?;
-    check_format(&json)?;
-    let envelope: Envelope = serde_json::from_slice(&json)
-        .map_err(|e| SnapshotError::Corrupt(format!("the snapshot body: {e}")))?;
-    let header = &envelope.header;
-    if header.stream_id != stream.as_str() {
+    let envelope = open(bytes, cap)?;
+    if envelope.header.stream_id != stream.as_str() {
         return Err(SnapshotError::WrongStream {
-            snapshot: header.stream_id.clone(),
+            snapshot: envelope.header.stream_id.clone(),
             bound: stream.as_str().to_string(),
         });
     }
-    // What the header promises must be what the body is.
-    if header.pulled_through < 0 {
-        return Err(SnapshotError::Corrupt(format!(
-            "a negative position ({})",
-            header.pulled_through
-        )));
-    }
-    if header.ops != envelope.image.op_count() {
-        return Err(SnapshotError::Corrupt(format!(
-            "the header counts {} ops and the log holds {}",
-            header.ops,
-            envelope.image.op_count()
-        )));
-    }
-    match (&header.anchor, header.pulled_through) {
-        (None, 0) => {}
-        // A based snapshot drops the ops below its position, the one at it included, so the anchor
-        // is not in the log it carries. What the relay holds there is checked by `confirm`; the
-        // anchor's own presence is a format-1 self-consistency check and stays one.
-        (Some(_), p) if p > 0 && envelope.image.based() => {}
-        (Some(anchor), p) if p > 0 && envelope.image.op_ids().contains(anchor.as_str()) => {}
-        _ => {
-            return Err(SnapshotError::Corrupt(
-                "its anchor does not match its position and log".to_string(),
-            ))
-        }
-    }
-    check_base(&envelope)?;
-    check_signer(&envelope, trusted_signers)?;
-    let (residue, kept) = account(&envelope)?;
     // Every refusal that needs no network, before the one call that does.
-    envelope.image.check()?;
+    let (residue, kept) = check_envelope(&envelope, trusted_signers)?;
     let held = store.op_count();
     if held > 0 {
         return Err(ImageError::NotEmpty { ops: held }.into());
@@ -1091,7 +1095,8 @@ fn account(envelope: &Envelope) -> Result<(usize, usize), SnapshotError> {
             header.residue
         )));
     }
-    if header.ops_through_p != base.dropped + carried {
+    // Checked: the counts are the file's, and a sum that overflows accounts for nothing.
+    if base.dropped.checked_add(carried) != Some(header.ops_through_p) {
         return Err(incomplete(format!(
             "its writer held {} ops, and it dropped {} and carries {carried}",
             header.ops_through_p, base.dropped
@@ -1965,6 +1970,13 @@ mod tests {
             let err = import(&mut fresh, &bytes, &stream(), &relay, &[]).expect_err(what);
             assert!(matches!(err, SnapshotError::Corrupt(_)), "{what}: {err}");
             assert_eq!(fresh.op_count(), 0);
+            // The other reader of the format refuses the same file the same way: a format-1
+            // snapshot is unsigned, so nothing else would stop it there.
+            let err = unpack_image(&bytes, &[]).map(|_| ()).expect_err(what);
+            assert!(
+                matches!(err, SnapshotError::Corrupt(_)),
+                "unpack_image, {what}: {err}"
+            );
         }
         let mut fresh = Store::open_in_memory(99);
         let err = import_bounded(&mut fresh, &good, &stream(), &relay, &[], 64).unwrap_err();
@@ -2537,6 +2549,12 @@ mod tests {
                 resigned(&good, &writer, |e| {
                     e.header.base.as_mut().unwrap().residue = 0;
                     e.image.base.as_mut().unwrap().residue = 0;
+                }),
+            ),
+            (
+                "a dropped count that no carried count can be added to",
+                resigned(&good, &writer, |e| {
+                    e.image.base.as_mut().unwrap().dropped = usize::MAX
                 }),
             ),
         ];

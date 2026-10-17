@@ -552,7 +552,7 @@ pub(crate) fn columns_of(
     conn: &Connection,
     table: &str,
 ) -> rusqlite::Result<std::collections::HashMap<String, String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quoted(table)))?;
     let mut columns: std::collections::HashMap<String, String> = stmt
         .query_map([], |r| {
             Ok((
@@ -563,6 +563,12 @@ pub(crate) fn columns_of(
         .collect::<rusqlite::Result<_>>()?;
     columns.insert("rowid".to_string(), "INTEGER".to_string());
     Ok(columns)
+}
+
+/// `name` as a quoted SQL identifier. A table name reaches a statement from an image — input, not
+/// code — so it is quoted where it is spliced in, whatever check stood before it.
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Whether `cell` fits a column declared `declared`. SQLite would store almost anything almost
@@ -595,11 +601,12 @@ pub(crate) fn insert_view(
         .collect();
     let names: Vec<String> = keep
         .iter()
-        .map(|&(i, _)| format!("\"{}\"", table.columns[i]))
+        .map(|&(i, _)| quoted(&table.columns[i]))
         .collect();
     let slots: Vec<String> = (1..=keep.len()).map(|n| format!("?{n}")).collect();
     let mut stmt = conn.prepare(&format!(
-        "INSERT INTO {target} ({}) VALUES ({})",
+        "INSERT INTO {} ({}) VALUES ({})",
+        quoted(target),
         names.join(", "),
         slots.join(", ")
     ))?;

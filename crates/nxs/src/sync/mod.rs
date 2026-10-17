@@ -723,18 +723,33 @@ pub fn snapshot_verb(
         nxs_sync::snapshot::export(&store, ws.replica.site_id, &stream, &marks, &transport)
     }
     .map_err(snapshot_error)?;
-    // Owner-only: it carries the whole log (review of PR #487, Code Quality #7).
+    // Owner-only: the state it carries is the workspace's own, whether or not the log rides along
+    // (review of PR #487, Code Quality #7).
     crate::workspaces::write_atomic_private(file, &bytes)?;
     let header = nxs_sync::snapshot::peek(&bytes).map_err(snapshot_error)?;
+    println!("{}", snapshot_report(json, file, bytes.len(), &header));
+    Ok(())
+}
+
+/// What `nxs sync snapshot` says it wrote — `--json`, or a sentence. A based snapshot's sentence
+/// counts what the file carries, split into residue and kept-domain ops, and what it dropped, each
+/// on its own (6j6v.0cfa).
+fn snapshot_report(
+    json: bool,
+    file: &std::path::Path,
+    size: usize,
+    header: &nxs_sync::snapshot::Header,
+) -> String {
     let ops = header.ops;
+    let signer = header.writer.as_ref().map(|w| w.key_id.as_str());
     if json {
         let mut out = serde_json::json!({
             "ok": true,
             "file": file.display().to_string(),
-            "bytes": bytes.len(),
+            "bytes": size,
             "ops": ops,
-            "stream_id": meta.stream_id,
-            "snapshot_through": meta.pulled_through,
+            "stream_id": header.stream_id,
+            "snapshot_through": header.pulled_through,
             "taken_by": nxs_foundation::image::ENGINE_VERSION,
             "format": header.format,
         });
@@ -747,37 +762,36 @@ pub fn snapshot_verb(
                 "kept_domains": base.kept_domains,
             });
             out["revisions"] = serde_json::json!(header.revisions);
-            out["signer"] = serde_json::json!(header.writer.as_ref().map(|w| w.key_id.as_str()));
+            out["signer"] = serde_json::json!(signer);
         }
-        println!("{out}");
-    } else if let Some(base) = &header.base {
-        println!(
-            "wrote {} ({} bytes): the state of stream {} at relay position {}, with {ops} op(s) \
-             below it — {} of {} the views cannot stand in for, the rest {}'s. A new machine starts \
+        return out.to_string();
+    }
+    match &header.base {
+        Some(base) => format!(
+            "wrote {} ({size} bytes): the state of stream {} at relay position {}. It carries \
+             {ops} op(s): {} residue the views cannot stand in for, and {} of the kept domain(s) \
+             {}; the other {} op(s) dropped, the state stands in for them. A new machine starts \
              from it with `nxs sync bind --snapshot {} --trust-signer {}` and pulls only what came \
              after.",
             file.display(),
-            bytes.len(),
-            meta.stream_id,
-            meta.pulled_through,
+            header.stream_id,
+            header.pulled_through,
             base.residue,
-            base.ops_through_p,
+            ops.saturating_sub(base.residue),
             base.kept_domains.join(", "),
+            base.ops_through_p.saturating_sub(ops),
             file.display(),
-            store.key_id()
-        );
-    } else {
-        println!(
-            "wrote {} ({} bytes): {ops} ops of stream {} through relay position {} — a new machine \
-             starts from it with `nxs sync bind --snapshot {}`",
+            signer.unwrap_or("<the signer>"),
+        ),
+        None => format!(
+            "wrote {} ({size} bytes): {ops} ops of stream {} through relay position {} — a new \
+             machine starts from it with `nxs sync bind --snapshot {}`",
             file.display(),
-            bytes.len(),
-            meta.stream_id,
-            meta.pulled_through,
+            header.stream_id,
+            header.pulled_through,
             file.display()
-        );
+        ),
     }
-    Ok(())
 }
 
 /// Loud stderr note for the default (derived) bind path — review Integrity #2 (PR #263). The
@@ -1737,6 +1751,53 @@ mod tests {
     use super::*;
     use nxs_foundation::workspace::WorkspaceConfig;
     use tempfile::TempDir;
+
+    /// What `nxs sync snapshot --based` says it wrote: what the file carries and what it dropped,
+    /// each counted on its own — never a count of one set "of" another, and never "below" a
+    /// position it holds no ops below.
+    #[test]
+    fn a_based_snapshot_report_says_what_it_carries_and_what_it_dropped() {
+        let header = nxs_sync::snapshot::Header {
+            format: 2,
+            stream_id: "s-1".into(),
+            pulled_through: 40,
+            anchor: Some("op-40".into()),
+            engine: "0.0.0".into(),
+            ops: 7,
+            revisions: Default::default(),
+            base: Some(nxs_sync::snapshot::Base {
+                clock: 90,
+                ops_through_p: 40,
+                digest_through_p: String::new(),
+                residue: 2,
+                kept_domains: vec!["message".into()],
+            }),
+            writer: Some(nxs_sync::snapshot::Signer {
+                key_id: "ed25519:k".into(),
+                sig: String::new(),
+            }),
+        };
+        let text = snapshot_report(false, std::path::Path::new("s.nxsnap"), 512, &header);
+        assert!(text.contains("relay position 40"), "{text}");
+        assert!(text.contains("7 op(s)"), "{text}");
+        assert!(text.contains("2 residue"), "{text}");
+        assert!(text.contains("5 of the kept domain(s) message"), "{text}");
+        assert!(text.contains("33 op(s) dropped"), "{text}");
+        assert!(text.contains("--trust-signer ed25519:k"), "{text}");
+        assert!(!text.contains("below it"), "{text}");
+
+        let json: serde_json::Value = serde_json::from_str(&snapshot_report(
+            true,
+            std::path::Path::new("s.nxsnap"),
+            512,
+            &header,
+        ))
+        .unwrap();
+        assert_eq!(json["ops"], 7);
+        assert_eq!(json["snapshot_through"], 40);
+        assert_eq!(json["base"]["residue"], 2);
+        assert_eq!(json["signer"], "ed25519:k");
+    }
 
     fn workspace() -> (TempDir, Workspace) {
         let tmp = TempDir::new().unwrap();
