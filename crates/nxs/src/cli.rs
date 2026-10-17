@@ -320,6 +320,12 @@ enum SyncAction {
         /// position is confirmed against it first.
         #[arg(long, value_name = "FILE")]
         snapshot: Option<String>,
+        /// Believe a BASED snapshot (`nxs sync snapshot --based`) signed by this key — the key id
+        /// `nxs sync key` prints on the machine that took it. Repeat for several. A based snapshot
+        /// replaces the history it was folded from, so it is taken only from a signer named here;
+        /// a refusal names the key that signed it. Not needed for a with-log snapshot.
+        #[arg(long = "trust-signer", value_name = "KEY_ID", requires = "snapshot")]
+        trust_signer: Vec<String>,
     },
     /// Write a snapshot of this workspace to FILE: the whole op log, the folded board, and the
     /// relay position they reach. A new machine starts from it with `nxs sync bind --snapshot
@@ -328,6 +334,13 @@ enum SyncAction {
     Snapshot {
         /// Where to write it. Overwritten if it exists.
         file: String,
+        /// Write a BASED snapshot instead: the state, and NO ops below the relay position it
+        /// reaches — so the file, and the replica that starts from it, stop growing with the
+        /// stream's history. Carries what the folded state cannot stand in for (the chat log, ops
+        /// no reducer could fold, the Lamport clock). An older nxs cannot read it, and only an nxs
+        /// whose fold rules match can take its state.
+        #[arg(long)]
+        based: bool,
     },
     /// Take a workspace back off the list this service instance attends
     /// (`~/.nexusflow/workspaces.toml`, or `~/.nexusflow-<name>/` for a development BUILD that
@@ -778,6 +791,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 rebind,
                 no_daemon,
                 snapshot,
+                trust_signer,
             } => {
                 let ws = resolve(db)?;
                 sync::bind(
@@ -790,6 +804,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                         rebind: *rebind,
                         no_daemon: *no_daemon,
                         snapshot: snapshot.as_deref().map(std::path::Path::new),
+                        trusted_signers: trust_signer,
                     },
                 )
             }
@@ -801,9 +816,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 let ws = resolve(db)?;
                 sync::run(cli.json, &ws, remote.as_deref())
             }
-            SyncAction::Snapshot { file } => {
+            SyncAction::Snapshot { file, based } => {
                 let ws = resolve(db)?;
-                sync::snapshot_verb(cli.json, &ws, std::path::Path::new(file))
+                sync::snapshot_verb(cli.json, &ws, std::path::Path::new(file), *based)
             }
             SyncAction::Endpoint { url } => sync::endpoint_verb(cli.json, url.as_deref()),
             // Machine-wide like `endpoint`: this machine is the service home's, not the cwd's

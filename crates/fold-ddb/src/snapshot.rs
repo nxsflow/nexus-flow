@@ -317,6 +317,93 @@ pub fn from_sqlite(
     })
 }
 
+/// Why a based image could not be projected onto this crate's snapshot (6j6v.0cfa).
+#[derive(Debug)]
+pub enum FromImageError {
+    /// The image carries its whole log instead of a base, so it names no per-domain fold revision —
+    /// there is nothing to compare this build's rules against. A fold run starts from a BASED
+    /// snapshot or from the relay; a with-log image is a replica's business, not a server's.
+    NotBased,
+    /// A view cell that is neither text, an integer nor null.
+    BadCell { table: String, column: String },
+}
+
+impl std::fmt::Display for FromImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FromImageError::NotBased => write!(
+                f,
+                "the snapshot carries its whole log and no base, so it names no fold revision per \
+                 domain — start the fold from the relay instead"
+            ),
+            FromImageError::BadCell { table, column } => write!(
+                f,
+                "{table}.{column} holds a value that is no text, integer or null"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FromImageError {}
+
+/// This crate's snapshot, projected from a BASED substrate image (6j6v.0cfa, spec D3) — tables plus
+/// the position they reach, which is what [`import`] has always taken.
+///
+/// **One format, two readers.** The bytes a replica starts from and the bytes a fold run starts
+/// from are the same bytes: `nxs_sync::snapshot` owns the envelope and opens it
+/// (`unpack_image`), this projects the views it carries onto a server table, and nothing here reads
+/// gzip or JSON. So a snapshot published once serves both, and neither reader can drift from the
+/// format while the other stays right.
+///
+/// **The log is dropped on the floor, deliberately.** A based image carries a residue and, for a
+/// kept domain, its ops — a REPLICA needs both. A fold run does not: it folds from the relay from
+/// the position on, and the relay still holds every op below it. What it would do with carried ops
+/// is fold them again, which is a no-op.
+///
+/// `revisions` comes from the image's view bases, not from this build: `import` compares them with
+/// its own and refuses a mismatch, which is the check that must not be bypassed by stamping the
+/// reader's own numbers onto the writer's rows.
+pub fn from_image(
+    image: &nxs_foundation::image::Image,
+    stream_id: &str,
+) -> Result<Snapshot, FromImageError> {
+    let base = image.base.as_ref().ok_or(FromImageError::NotBased)?;
+    let mut tables = BTreeMap::new();
+    for table in &image.views {
+        let mut rows = Vec::with_capacity(table.rows.len());
+        for row in &table.rows {
+            let mut cells = BTreeMap::new();
+            for (column, cell) in table.columns.iter().zip(row) {
+                let value = match cell {
+                    nxs_foundation::image::Cell::Null => Value::Null,
+                    nxs_foundation::image::Cell::Integer(v) => Value::from(*v),
+                    nxs_foundation::image::Cell::Text(t) => Value::String(t.clone()),
+                    nxs_foundation::image::Cell::Real(_) => {
+                        return Err(FromImageError::BadCell {
+                            table: table.name.clone(),
+                            column: column.clone(),
+                        })
+                    }
+                };
+                cells.insert(column.clone(), value);
+            }
+            rows.push(cells);
+        }
+        tables.insert(table.name.clone(), rows);
+    }
+    Ok(Snapshot {
+        format: FORMAT,
+        stream_id: stream_id.to_string(),
+        folded_through: base.relay_position,
+        revisions: base
+            .view_bases
+            .iter()
+            .map(|v| (v.domain.clone(), v.fold_revision))
+            .collect(),
+        tables,
+    })
+}
+
 /// The watermark a snapshot starts a stream at.
 pub fn watermark(snapshot: &Snapshot) -> Watermark {
     Watermark {

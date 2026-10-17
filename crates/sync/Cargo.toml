@@ -22,6 +22,10 @@ base64 = { version = "0.22", optional = true }
 # already in the graph through ureq's gzip support, on its pure-Rust backend (miniz_oxide).
 nxs-foundation = { path = "../foundation", optional = true }
 flate2 = { version = "1", optional = true }
+# A based snapshot (nxf 6j6v.0cfa) carries a digest over the op ids it drops, so a writer's
+# completeness can be compared against the relay's own count. SHA-256, XORed into one value;
+# already in the workspace tree through memory and chat, pure Rust.
+sha2 = { version = "0.10", optional = true }
 # Same version as core's so `Store::connection()` hands back a unifiable Connection;
 # the engine reads the stable `ops` substrate table (rowid-scoped) read-only.
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
@@ -35,8 +39,12 @@ engine = [
     "dep:url",
     "dep:base64",
     "dep:nxs-foundation",
+    "dep:sha2",
     "dep:flate2",
 ]
 
 [dev-dependencies]
 nexus-flow-core = { path = "../core" }
+# A snapshot is signed with the key file beside the db (nxf 6j6v.0cfa); the test that a host-placed
+# key file is the one used needs a real directory.
+tempfile = "3"

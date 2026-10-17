@@ -2448,6 +2448,7 @@ dependencies = [
  "nexus-flow-facade",
  "nexus-memory",
  "nxs-foundation",
+ "nxs-sync",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2546,6 +2547,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "ureq",
  "url",
 ]

@@ -35,6 +35,12 @@ aws-sdk-dynamodb = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# The based-snapshot differential (nxf 6j6v.0cfa) takes ONE format-2 snapshot and starts both a
+# SQLite replica and this crate's table from it, so it must speak the envelope the sync crate owns.
+# DEV-only, and the edge points this way on purpose: the format belongs to `nxs-sync`, the
+# projection of its views onto a server table belongs here (`snapshot::from_image`), and the library
+# needs nothing of the envelope to do that.
+nxs-sync = { path = "../sync", features = ["engine"] }
 # The records differential test (6j6v.t1ym) parses a plugin fixture that declares a custom field.
 toml = "0.8"
 # The derived-keys differential test (6j6v.1c5s) registers its plugin fixture, so `plugin::load`

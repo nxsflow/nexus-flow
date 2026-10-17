@@ -146,6 +146,152 @@ pub struct Image {
     pub fold_revision: i64,
     /// Every table the store's registered reducers declare as views.
     pub views: Vec<Table>,
+    /// The BASE, when this image carries its state WITHOUT the log it was folded from (6j6v.0cfa).
+    /// `None` — and omitted from the bytes — for every image that carries its whole log, which is
+    /// what an older build reads and what [`Store::image`](crate::store::Store::image) still takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Base>,
+}
+
+/// What a BASED image carries instead of the ops below its position (6j6v.0cfa, spec D3).
+///
+/// **The views already are a self-contained CRDT state** — every register carries its
+/// `(lamport, site)`, every OR-set add is keyed by its add op's id, every remove is a tombstone —
+/// so dropping the log below the position loses nothing a fold would have produced. What it DOES
+/// lose is the handful of things that read the log rather than the views, and this is the list of
+/// them (spec §3):
+///
+/// - the **Lamport clock**, which `MAX(ops.lamport)` can no longer tell: a replica starting from
+///   the views alone would mint at 1 and lose every compare against a register at 900. [`clock`]
+///   carries the floor, and `high_water_mark` reads it beside the log for good.
+/// - the **residue**: ops the store took in but could not fold — an unknown shape, an oversized
+///   chunk, a Lamport number past the bound. They ride along verbatim and fold once a later build
+///   understands them, which is why they are not droppable state.
+/// - the ops of a **kept domain** (spec D9): a domain whose product reads per-op provenance rather
+///   than only its views keeps its whole log, so its actions keep reading their own verdicts.
+/// - the **fold revision per product**, in [`view_bases`]: a based image's views are TAKEN, never
+///   folded again, so an importer whose rules differ has to refuse rather than fold an empty log.
+///
+/// [`clock`]: Base::clock
+/// [`view_bases`]: Base::view_bases
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Base {
+    /// The relay position the dropped prefix reaches — P. Carried so the store itself can say where
+    /// its log begins, without the sync layer that knows the number's meaning.
+    pub relay_position: i64,
+    /// The Lamport high-water mark of the WHOLE log the image was taken from, the dropped ops
+    /// included — the floor a replica started from this image mints above.
+    pub clock: i64,
+    /// How many of the carried ops are residue: stored-not-folded at the source.
+    pub residue: usize,
+    /// The domains whose ops ≤ P ride along in full rather than being dropped (spec D9).
+    pub kept_domains: Vec<String>,
+    /// One entry per product whose views the image carries.
+    pub view_bases: Vec<ViewBase>,
+    /// The id of the op the relay held at [`relay_position`](Base::relay_position) — the snapshot's
+    /// anchor, recorded so a replica started here can confirm that same position again when IT
+    /// takes the next snapshot, holding no op there of its own. Set by the snapshot writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// How many ops the image DROPPED — the ones below the position its views stand in for — and
+    /// an order-free digest over their ids (the snapshot format defines it; the substrate only
+    /// carries it). With the carried log they make up everything the writer held, which is what the
+    /// header's count and digest claim. Set by the snapshot writer.
+    #[serde(default)]
+    pub dropped: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dropped_digest: String,
+}
+
+/// One product's views in a based image: whose they are, which domain's reducer folded them, and at
+/// which [fold revision](crate::reducer::Reducer::fold_revision) (6j6v.0cfa).
+///
+/// The revision is the whole compatibility check for a based image. An ordinary image compares
+/// ENGINE VERSIONS and folds again from its log when they differ; a based image has no log to fold,
+/// so the only question that can be asked is whether THIS build's reducer for that domain produces
+/// what the source's did — and the answer has to be a refusal, not a refold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewBase {
+    /// The `view_watermarks.store_id` the product records its fold under (`flow`, `chat`, `memory`).
+    pub of: String,
+    /// The domain of the reducer that folds them (`task`, `message`, `fact`).
+    pub domain: String,
+    /// That reducer's fold revision at the source.
+    pub fold_revision: i64,
+}
+
+/// What a store that started from a based image stands on — the `log_base` row (6j6v.0cfa).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogBase {
+    pub relay_position: i64,
+    pub clock: i64,
+    pub residue_count: i64,
+    /// The op the relay held at `relay_position` (see [`Base::anchor`]).
+    pub anchor: Option<String>,
+    /// How many ops this store never held because its image dropped them, and their digest (see
+    /// [`Base::dropped`]) — what a snapshot taken from THIS store adds to its own log's count.
+    pub dropped: i64,
+    pub dropped_digest: String,
+}
+
+/// A path that cannot run on a BASED store, because it needs the log below the base (6j6v.0cfa,
+/// spec §4.5 step 5).
+///
+/// **Named rather than silent, and refused rather than attempted.** Every one of these paths is a
+/// REBUILD: it clears what it is about to re-derive from the whole log. On a based store the whole
+/// log is not there, so attempting it does not degrade the views — it empties them, and the replica
+/// then converges on nothing. The answer is never local; it is a re-bootstrap from a snapshot taken
+/// at this build's own revisions, which only the caller can arrange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeedsHistory {
+    /// A product's views would be rebuilt because this build's fold revision cannot vouch for them.
+    Rebuild {
+        of: String,
+        recorded: i64,
+        ours: i64,
+        base: i64,
+    },
+    /// An id prefix would be remapped, which rewrites every op carrying the old one.
+    Remap { from: String, to: String, base: i64 },
+}
+
+impl std::fmt::Display for NeedsHistory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NeedsHistory::Rebuild {
+                of,
+                recorded,
+                ours,
+                base,
+            } => write!(
+                f,
+                "this replica started from a snapshot at relay position {base} and holds no ops \
+                 below it, so {of}'s views cannot be folded again — they were folded at revision \
+                 {recorded} and this nxs folds at {ours}; start from a snapshot taken at revision \
+                 {ours} instead"
+            ),
+            NeedsHistory::Remap { from, to, base } => write!(
+                f,
+                "this replica started from a snapshot at relay position {base} and holds no ops \
+                 below it, so the ids carrying prefix '{from}' cannot be remapped to '{to}' — \
+                 register a prefix before importing a snapshot, not after"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NeedsHistory {}
+
+impl From<NeedsHistory> for rusqlite::Error {
+    /// A product's `open` surfaces this the way it surfaces the skew gate's refusal (see
+    /// `Store::open`): as a handled sqlite failure carrying the message, so a refused open writes
+    /// nothing and the caller — the CLI, an embedding host — reports it instead of panicking.
+    fn from(e: NeedsHistory) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(e.to_string()),
+        )
+    }
 }
 
 impl Image {
@@ -176,6 +322,11 @@ impl Image {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    /// Whether this image carries its state WITHOUT the log below a relay position (6j6v.0cfa).
+    pub fn based(&self) -> bool {
+        self.base.is_some()
     }
 
     /// The id of every op the image carries.
@@ -259,6 +410,37 @@ pub enum ImageError {
     },
     /// The image is not shaped the way an image is.
     Malformed(String),
+    /// A BASED image whose views this build cannot take as they are (6j6v.0cfa, spec §4.2): its
+    /// source folded a domain at another revision, or this store registers no reducer for a domain
+    /// whose views it carries. Either way there is no log to fold instead, so the only answer is a
+    /// snapshot taken at this build's own revisions. `ours` is `None` when the reducer is missing
+    /// altogether — which is how a store that forgot to register a product's reducer finds out
+    /// before it drops that product's state on the floor.
+    NeedsRevision {
+        of: String,
+        domain: String,
+        snapshot: i64,
+        ours: Option<i64>,
+    },
+    /// A BASED image that carries no views for a product this store folds (6j6v.0cfa) — so taking
+    /// it would leave that product with no state and nothing to fold one from. The other direction
+    /// of [`NeedsRevision`](ImageError::NeedsRevision), and reachable the same way: a build that
+    /// folds a product the writer did not carry.
+    MissingViewBase {
+        domain: String,
+    },
+    /// A BASED image whose view tables are not the set this store folds into, or lack a column it
+    /// reads (6j6v.0cfa). An ordinary image is refolded in that case; a based one cannot be.
+    ViewsDiffer {
+        carried: Vec<String>,
+        folded: Vec<String>,
+    },
+    /// A BASED image whose schema is not the one this build folds into. An ordinary image is
+    /// refolded in that case; a based one cannot be.
+    NeedsSchema {
+        written_at: i64,
+        ours: i64,
+    },
     Storage(rusqlite::Error),
 }
 
@@ -279,6 +461,43 @@ impl std::fmt::Display for ImageError {
                  speaks v{ours} — upgrade nxs to start from it"
             ),
             ImageError::Malformed(why) => write!(f, "the snapshot is malformed: {why}"),
+            ImageError::NeedsRevision {
+                of,
+                domain,
+                snapshot,
+                ours: Some(ours),
+            } => write!(
+                f,
+                "the snapshot carries {of}'s views folded at revision {snapshot} and this nxs folds \
+                 {domain} at {ours} — it holds no ops below its position to fold again, so start \
+                 from one taken at revision {ours}"
+            ),
+            ImageError::NeedsRevision {
+                of,
+                domain,
+                ours: None,
+                ..
+            } => write!(
+                f,
+                "the snapshot carries {of}'s views and this store registers no reducer for the \
+                 {domain} domain — it would take that product's state and never fold another of \
+                 its ops; register every platform reducer before importing"
+            ),
+            ImageError::MissingViewBase { domain } => write!(
+                f,
+                "the snapshot carries no views for the {domain} domain, which this store folds — \
+                 and no ops below its position to fold them from"
+            ),
+            ImageError::ViewsDiffer { carried, folded } => write!(
+                f,
+                "the snapshot carries the views {carried:?} and this store folds {folded:?} — it \
+                 holds no ops below its position to fold the difference from"
+            ),
+            ImageError::NeedsSchema { written_at, ours } => write!(
+                f,
+                "the snapshot's views come from schema v{written_at} and this nxs folds into v{ours} \
+                 — it holds no ops below its position to fold again"
+            ),
             ImageError::Storage(e) => write!(f, "loading the snapshot: {e}"),
         }
     }
@@ -333,7 +552,7 @@ pub(crate) fn columns_of(
     conn: &Connection,
     table: &str,
 ) -> rusqlite::Result<std::collections::HashMap<String, String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quoted(table)))?;
     let mut columns: std::collections::HashMap<String, String> = stmt
         .query_map([], |r| {
             Ok((
@@ -344,6 +563,12 @@ pub(crate) fn columns_of(
         .collect::<rusqlite::Result<_>>()?;
     columns.insert("rowid".to_string(), "INTEGER".to_string());
     Ok(columns)
+}
+
+/// `name` as a quoted SQL identifier. A table name reaches a statement from an image — input, not
+/// code — so it is quoted where it is spliced in, whatever check stood before it.
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Whether `cell` fits a column declared `declared`. SQLite would store almost anything almost
@@ -376,11 +601,12 @@ pub(crate) fn insert_view(
         .collect();
     let names: Vec<String> = keep
         .iter()
-        .map(|&(i, _)| format!("\"{}\"", table.columns[i]))
+        .map(|&(i, _)| quoted(&table.columns[i]))
         .collect();
     let slots: Vec<String> = (1..=keep.len()).map(|n| format!("?{n}")).collect();
     let mut stmt = conn.prepare(&format!(
-        "INSERT INTO {target} ({}) VALUES ({})",
+        "INSERT INTO {} ({}) VALUES ({})",
+        quoted(target),
         names.join(", "),
         slots.join(", ")
     ))?;

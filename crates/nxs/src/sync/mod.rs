@@ -245,6 +245,9 @@ pub struct BindOptions<'a> {
     pub no_daemon: bool,
     /// Start this fresh workspace from a snapshot file (6j6v.mxt2) — see [`bind_from_snapshot`].
     pub snapshot: Option<&'a std::path::Path>,
+    /// The key ids whose BASED snapshots this bind believes (6j6v.0cfa, spec D2) — handed to the
+    /// import as its own list, never taken from the workspace's trust list.
+    pub trusted_signers: &'a [String],
 }
 
 /// Starts the sync daemon as the best-effort side effect of a successful bind (task 13, `x1c2`
@@ -460,6 +463,10 @@ impl StartedFrom {
             "refold_reason": refold_reason,
             "position": self.anchor(),
             "reassigned_prefix": self.reassigned_prefix,
+            "format": h.format,
+            "signer": h.writer.as_ref().map(|w| w.key_id.as_str()),
+            "residue": self.imported.residue,
+            "kept": self.imported.kept,
         })
     }
 
@@ -546,9 +553,20 @@ fn bind_from_snapshot(
         }
     }
     ensure_valid_stream_id(&header.stream_id)?;
+    // Every refusal the file itself earns — an untrusted signer, a body that does not account for
+    // its header — before anything touches the relay or the store (6j6v.0cfa): the prefix
+    // registration below already writes, locally and remotely.
+    nxs_sync::snapshot::unpack_image(&bytes, opts.trusted_signers).map_err(snapshot_error)?;
     let path = ws.db_path_str()?;
     let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
+    // A based snapshot carries every product's views and no log to fold them from, so every
+    // product's reducer has to be here to take them — the import refuses by name otherwise
+    // (6j6v.0cfa). Only for a based one: a format-1 import compares the summed fold revision, and
+    // three reducers instead of one would make it refold what it could have taken.
+    if header.base.is_some() {
+        register_platform_reducers(&mut store)?;
+    }
     let held = store.op_count();
     if held > 0 {
         return Err(NxfError::new(
@@ -590,8 +608,14 @@ fn bind_from_snapshot(
     if let Some(new_prefix) = &reassigned_prefix {
         workspace::adopt_prefix(ws, new_prefix)?;
     }
-    let imported = nxs_sync::snapshot::import(&mut store, &bytes, &stream, &transport)
-        .map_err(snapshot_error)?;
+    let imported = nxs_sync::snapshot::import(
+        &mut store,
+        &bytes,
+        &stream,
+        &transport,
+        opts.trusted_signers,
+    )
+    .map_err(snapshot_error)?;
     drop(store);
     let meta = SyncMeta {
         stream_id: header.stream_id,
@@ -623,6 +647,8 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
     let kind = match &e {
         SnapshotError::Unpushed { .. }
         | SnapshotError::Unbacked { .. }
+        | SnapshotError::AnchorMismatch { .. }
+        | SnapshotError::NeedsHistory { .. }
         | SnapshotError::Image(ImageError::NotEmpty { .. }) => ErrorKind::Conflict,
         SnapshotError::Storage(_)
         | SnapshotError::Transport(_)
@@ -632,58 +658,140 @@ fn snapshot_error(e: nxs_sync::snapshot::SnapshotError) -> NxfError {
     NxfError::new(kind, e.to_string())
 }
 
+/// Register the platform's OTHER reducers on a flow store — chat's and memory's (6j6v.0cfa).
+///
+/// **One database holds all three products**, and a based snapshot has to carry all three: a
+/// product whose reducer is not registered keeps its whole log instead, which is exactly the growth
+/// the format exists to stop. The flow store registers its own task reducer at open; this adds the
+/// two that make the image a platform image rather than a board image.
+///
+/// Harmless on the with-log path and deliberately not used there: registering more reducers changes
+/// the store's summed fold revision, and a format-1 image's views are taken only when that number
+/// matches — so a store with three reducers would refold every format-1 snapshot it imports instead
+/// of taking it.
+///
+/// Their view tables are created first: a workspace initialised for flow alone has never had `nxc`
+/// or `nxm` open it, and a reducer whose tables are missing has nothing to carry or take. The DDL
+/// is the products' own, additive and idempotent — what their first open would run anyway.
+fn register_platform_reducers(store: &mut Store) -> Result<()> {
+    let tables = |e: rusqlite::Error| NxfError::io(format!("creating the platform's views: {e}"));
+    nexus_chat::schema::try_apply_chat_views(store.connection()).map_err(tables)?;
+    nexus_memory::schema::try_apply_memory_views(store.connection()).map_err(tables)?;
+    store.register_reducer(Box::new(nexus_chat::message_reducer::MessageReducer));
+    store.register_reducer(Box::new(nexus_memory::fact_reducer::FactReducer));
+    Ok(())
+}
+
 /// `nxs sync snapshot <file>` (6j6v.mxt2): write this workspace's snapshot — the whole log, the
 /// folded board and the relay position they reach — for a new machine to start from.
-pub fn snapshot_verb(json: bool, ws: &Workspace, file: &std::path::Path) -> Result<()> {
+///
+/// With `based` (6j6v.0cfa) it writes format 2 instead: the same state, and no ops below that
+/// position except what the state cannot stand in for. The two are one verb because they are one
+/// format family and one envelope; which one a file is, is in its header.
+pub fn snapshot_verb(
+    json: bool,
+    ws: &Workspace,
+    file: &std::path::Path,
+    based: bool,
+) -> Result<()> {
     let meta = load(ws)?.ok_or_else(|| {
         NxfError::validation("workspace is not bound to a stream; run `nxs sync bind` first")
     })?;
     let path = ws.db_path_str()?;
-    let store = Store::open(&path, ws.replica.site_id)
+    let mut store = Store::open(&path, ws.replica.site_id)
         .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
+    if based {
+        register_platform_reducers(&mut store)?;
+    }
     let marks = Watermarks {
         pushed_through: meta.pushed_through,
         pulled_through: meta.pulled_through,
     };
     let remote = resolve_endpoint(None, &meta)?;
-    let bytes = nxs_sync::snapshot::export(
-        &store,
-        ws.replica.site_id,
-        &StreamId(meta.stream_id.clone()),
-        &marks,
-        &HttpTransport::new(&remote),
-    )
-    .map_err(snapshot_error)?;
-    // Owner-only: it carries the whole log (review of PR #487, Code Quality #7).
-    crate::workspaces::write_atomic_private(file, &bytes)?;
-    let ops = nxs_sync::snapshot::peek(&bytes)
-        .map_err(snapshot_error)?
-        .ops;
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "ok": true,
-                "file": file.display().to_string(),
-                "bytes": bytes.len(),
-                "ops": ops,
-                "stream_id": meta.stream_id,
-                "snapshot_through": meta.pulled_through,
-                "taken_by": nxs_foundation::image::ENGINE_VERSION,
-            })
-        );
+    let transport = HttpTransport::new(&remote);
+    let stream = StreamId(meta.stream_id.clone());
+    let bytes = if based {
+        nxs_sync::snapshot::export_based(
+            &store,
+            ws.replica.site_id,
+            &stream,
+            &marks,
+            &transport,
+            nxs_sync::snapshot::PLATFORM,
+        )
     } else {
-        println!(
-            "wrote {} ({} bytes): {ops} ops of stream {} through relay position {} — a new machine \
-             starts from it with `nxs sync bind --snapshot {}`",
-            file.display(),
-            bytes.len(),
-            meta.stream_id,
-            meta.pulled_through,
-            file.display()
-        );
+        nxs_sync::snapshot::export(&store, ws.replica.site_id, &stream, &marks, &transport)
     }
+    .map_err(snapshot_error)?;
+    // Owner-only: the state it carries is the workspace's own, whether or not the log rides along
+    // (review of PR #487, Code Quality #7).
+    crate::workspaces::write_atomic_private(file, &bytes)?;
+    let header = nxs_sync::snapshot::peek(&bytes).map_err(snapshot_error)?;
+    println!("{}", snapshot_report(json, file, bytes.len(), &header));
     Ok(())
+}
+
+/// What `nxs sync snapshot` says it wrote — `--json`, or a sentence. A based snapshot's sentence
+/// counts what the file carries, split into residue and kept-domain ops, and what it dropped, each
+/// on its own (6j6v.0cfa).
+fn snapshot_report(
+    json: bool,
+    file: &std::path::Path,
+    size: usize,
+    header: &nxs_sync::snapshot::Header,
+) -> String {
+    let ops = header.ops;
+    let signer = header.writer.as_ref().map(|w| w.key_id.as_str());
+    if json {
+        let mut out = serde_json::json!({
+            "ok": true,
+            "file": file.display().to_string(),
+            "bytes": size,
+            "ops": ops,
+            "stream_id": header.stream_id,
+            "snapshot_through": header.pulled_through,
+            "taken_by": nxs_foundation::image::ENGINE_VERSION,
+            "format": header.format,
+        });
+        if let Some(base) = &header.base {
+            out["base"] = serde_json::json!({
+                "clock": base.clock,
+                "ops_through_p": base.ops_through_p,
+                "digest_through_p": base.digest_through_p,
+                "residue": base.residue,
+                "kept_domains": base.kept_domains,
+            });
+            out["revisions"] = serde_json::json!(header.revisions);
+            out["signer"] = serde_json::json!(signer);
+        }
+        return out.to_string();
+    }
+    match &header.base {
+        Some(base) => format!(
+            "wrote {} ({size} bytes): the state of stream {} at relay position {}. It carries \
+             {ops} op(s): {} residue the views cannot stand in for, and {} of the kept domain(s) \
+             {}; the other {} op(s) dropped, the state stands in for them. A new machine starts \
+             from it with `nxs sync bind --snapshot {} --trust-signer {}` and pulls only what came \
+             after.",
+            file.display(),
+            header.stream_id,
+            header.pulled_through,
+            base.residue,
+            ops.saturating_sub(base.residue),
+            base.kept_domains.join(", "),
+            base.ops_through_p.saturating_sub(ops),
+            file.display(),
+            signer.unwrap_or("<the signer>"),
+        ),
+        None => format!(
+            "wrote {} ({size} bytes): {ops} ops of stream {} through relay position {} — a new \
+             machine starts from it with `nxs sync bind --snapshot {}`",
+            file.display(),
+            header.stream_id,
+            header.pulled_through,
+            file.display()
+        ),
+    }
 }
 
 /// Loud stderr note for the default (derived) bind path — review Integrity #2 (PR #263). The
@@ -1644,6 +1752,53 @@ mod tests {
     use nxs_foundation::workspace::WorkspaceConfig;
     use tempfile::TempDir;
 
+    /// What `nxs sync snapshot --based` says it wrote: what the file carries and what it dropped,
+    /// each counted on its own — never a count of one set "of" another, and never "below" a
+    /// position it holds no ops below.
+    #[test]
+    fn a_based_snapshot_report_says_what_it_carries_and_what_it_dropped() {
+        let header = nxs_sync::snapshot::Header {
+            format: 2,
+            stream_id: "s-1".into(),
+            pulled_through: 40,
+            anchor: Some("op-40".into()),
+            engine: "0.0.0".into(),
+            ops: 7,
+            revisions: Default::default(),
+            base: Some(nxs_sync::snapshot::Base {
+                clock: 90,
+                ops_through_p: 40,
+                digest_through_p: String::new(),
+                residue: 2,
+                kept_domains: vec!["message".into()],
+            }),
+            writer: Some(nxs_sync::snapshot::Signer {
+                key_id: "ed25519:k".into(),
+                sig: String::new(),
+            }),
+        };
+        let text = snapshot_report(false, std::path::Path::new("s.nxsnap"), 512, &header);
+        assert!(text.contains("relay position 40"), "{text}");
+        assert!(text.contains("7 op(s)"), "{text}");
+        assert!(text.contains("2 residue"), "{text}");
+        assert!(text.contains("5 of the kept domain(s) message"), "{text}");
+        assert!(text.contains("33 op(s) dropped"), "{text}");
+        assert!(text.contains("--trust-signer ed25519:k"), "{text}");
+        assert!(!text.contains("below it"), "{text}");
+
+        let json: serde_json::Value = serde_json::from_str(&snapshot_report(
+            true,
+            std::path::Path::new("s.nxsnap"),
+            512,
+            &header,
+        ))
+        .unwrap();
+        assert_eq!(json["ops"], 7);
+        assert_eq!(json["snapshot_through"], 40);
+        assert_eq!(json["base"]["residue"], 2);
+        assert_eq!(json["signer"], "ed25519:k");
+    }
+
     fn workspace() -> (TempDir, Workspace) {
         let tmp = TempDir::new().unwrap();
         let ws = workspace::setup(tmp.path(), &WorkspaceConfig::default()).unwrap();
@@ -1863,6 +2018,7 @@ mod tests {
                 // on top of the spy never touching anything real either way.
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1882,6 +2038,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true, // CRITICAL: never touch the real launchd session from a test
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1898,6 +2055,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -1926,6 +2084,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -2002,6 +2161,7 @@ mod tests {
                 rebind: false,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),
@@ -2222,6 +2382,7 @@ mod tests {
                 rebind: true,
                 no_daemon: true,
                 snapshot: None,
+                trusted_signers: &[],
             },
             &SpyAutostart::new(),
             &SpyRegistrar::new(),

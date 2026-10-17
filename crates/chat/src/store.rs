@@ -739,7 +739,8 @@ impl ChatStore {
         let mut inner = Substrate::open_in_memory(site);
         let upgraded = schema::try_apply_chat_views(inner.connection()).expect("chat views");
         inner.register_reducer(Box::new(MessageReducer));
-        Self::materialize_views(&mut inner, upgraded);
+        // A fresh in-memory log has no base, so the based refusal is unreachable here.
+        Self::materialize_views(&mut inner, upgraded).expect("a fresh in-memory store has no base");
         ChatStore { inner }
     }
 
@@ -747,7 +748,7 @@ impl ChatStore {
         let mut inner = Substrate::open(path, site)?;
         let upgraded = schema::try_apply_chat_views(inner.connection())?;
         inner.register_reducer(Box::new(MessageReducer));
-        Self::materialize_views(&mut inner, upgraded);
+        Self::materialize_views(&mut inner, upgraded)?;
         Ok(ChatStore { inner })
     }
 
@@ -756,11 +757,17 @@ impl ChatStore {
     /// open UPGRADED a pre-M2 `threads` table (the sparse-key deadline minor, spec §7),
     /// [`force_refold`](Substrate::force_refold) instead — the deferred `set deadline` ops sit BELOW
     /// the advanced watermark, so only an unconditional refold resurfaces them.
-    fn materialize_views(inner: &mut Substrate, upgraded: bool) {
+    /// **Both paths can REFUSE on a based replica** (6j6v.0cfa): each may rebuild the views from the
+    /// whole log, which a replica started from a snapshot at a relay position does not hold below
+    /// it. Surfaced as the open's error, like the skew gate's refusal.
+    fn materialize_views(
+        inner: &mut Substrate,
+        upgraded: bool,
+    ) -> Result<(), nxs_foundation::image::NeedsHistory> {
         if upgraded {
-            inner.force_refold(CHAT_VIEWS);
+            inner.force_refold(CHAT_VIEWS)
         } else {
-            inner.refold_if_behind(CHAT_VIEWS);
+            inner.refold_if_behind(CHAT_VIEWS)
         }
     }
 
@@ -2939,6 +2946,36 @@ impl ChatStore {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A based replica's file (6j6v.0cfa) holds no ops below its relay position, so an open that
+    /// would rebuild the views — here, because the file records an older fold revision — REFUSES
+    /// rather than emptying them, and the refusal is the open's error. A matching based file opens
+    /// as any other does, with nothing to rebuild.
+    #[test]
+    fn opening_a_based_file_that_needs_a_rebuild_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("based.db");
+        let p = path.to_str().unwrap();
+        drop(ChatStore::open(p, 1).unwrap());
+        let raw = rusqlite::Connection::open(p).unwrap();
+        raw.execute(
+            "INSERT INTO log_base(id, relay_position, clock, residue_count, anchor, dropped,
+                 dropped_digest) VALUES(1, 10, 5, 0, 'op-10', 10, '')",
+            [],
+        )
+        .unwrap();
+        ChatStore::open(p, 1).expect("a based file at this build's revision opens");
+
+        raw.execute(
+            "UPDATE view_watermarks SET fold_revision = fold_revision - 1 WHERE store_id = 'chat'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            ChatStore::open(p, 1).is_err(),
+            "a rebuild on a based file is refused"
+        );
+    }
 
     /// Every table a chat store keeps is either one of `MessageReducer`'s views — which a snapshot
     /// carries and `clear_views` empties — or declared here as this machine's own, which must never

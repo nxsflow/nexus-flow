@@ -151,7 +151,7 @@ fn start_from_a_snapshot_against_a_full_fold_on_a_real_board() {
         relay.bytes.set(0);
         let started = Instant::now();
         let mut fresh = open("fresh");
-        let imported = snapshot::import(&mut fresh, &bytes, &stream, &relay).unwrap();
+        let imported = snapshot::import(&mut fresh, &bytes, &stream, &relay, &[]).unwrap();
         let mut resume = imported.marks;
         let rest =
             engine::sync(&mut fresh, 7, &stream, &mut resume, &relay, 500, &Unbounded).unwrap();

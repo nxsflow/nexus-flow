@@ -36,7 +36,10 @@ impl MemoryStore {
         // Bind memory's folded-through watermark and refold if the shared log advanced out-of-band
         // (aye.36). A fresh in-memory log is empty, so this only binds the key here; the file-backed
         // `open` is where a multi-device pull actually triggers the refold.
-        inner.refold_if_behind(MEMORY_VIEWS);
+        // A fresh in-memory log has no base, so the based refusal is unreachable here.
+        inner
+            .refold_if_behind(MEMORY_VIEWS)
+            .expect("a fresh in-memory store has no base");
         MemoryStore { inner }
     }
 
@@ -47,7 +50,7 @@ impl MemoryStore {
         let mut inner = Substrate::open(path, site)?;
         schema::try_apply_memory_views(inner.connection())?;
         inner.register_reducer(Box::new(FactReducer));
-        Self::materialize_views(&mut inner);
+        Self::materialize_views(&mut inner)?;
         Ok(MemoryStore { inner })
     }
 
@@ -70,11 +73,14 @@ impl MemoryStore {
     /// Gated on the version the FILE carried, not on the presence of a column: `Substrate::open`
     /// migrates before it returns, so the column is already there by the time this runs — see
     /// [`Substrate::migrated_from`].
-    fn materialize_views(inner: &mut Substrate) {
+    /// **Both paths can REFUSE on a based replica** (6j6v.0cfa): each may rebuild the view from the
+    /// whole log, which a replica started from a snapshot at a relay position does not hold below
+    /// it. Surfaced as the open's error, like the skew gate's refusal.
+    fn materialize_views(inner: &mut Substrate) -> Result<(), nxs_foundation::image::NeedsHistory> {
         if inner.migrated_from() < nxs_foundation::schema::SCHEMA_VERSION {
-            inner.force_refold(MEMORY_VIEWS);
+            inner.force_refold(MEMORY_VIEWS)
         } else {
-            inner.refold_if_behind(MEMORY_VIEWS);
+            inner.refold_if_behind(MEMORY_VIEWS)
         }
     }
 
@@ -423,6 +429,36 @@ mod tests {
     use super::*;
     use crate::model::{DOMAIN_FACT, FACT_FIELD, FACT_KIND, OP_SET};
     use nxs_foundation::model::Op;
+
+    /// A based replica's file (6j6v.0cfa) holds no ops below its relay position, so an open that
+    /// would rebuild the views — here, because the file records an older fold revision — REFUSES
+    /// rather than emptying them, and the refusal is the open's error. A matching based file opens
+    /// as any other does, with nothing to rebuild.
+    #[test]
+    fn opening_a_based_file_that_needs_a_rebuild_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("based.db");
+        let p = path.to_str().unwrap();
+        drop(MemoryStore::open(p, 1).unwrap());
+        let raw = rusqlite::Connection::open(p).unwrap();
+        raw.execute(
+            "INSERT INTO log_base(id, relay_position, clock, residue_count, anchor, dropped,
+                 dropped_digest) VALUES(1, 10, 5, 0, 'op-10', 10, '')",
+            [],
+        )
+        .unwrap();
+        MemoryStore::open(p, 1).expect("a based file at this build's revision opens");
+
+        raw.execute(
+            "UPDATE view_watermarks SET fold_revision = fold_revision - 1 WHERE store_id = 'memory'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            MemoryStore::open(p, 1).is_err(),
+            "a rebuild on a based file is refused"
+        );
+    }
 
     /// The migration mark is read straight off the log, newest `(lamport, site)` first — a fold of a
     /// register with no view — so an op past the Lamport bound is no mark (6j6v.m19v; review of PR
