@@ -132,7 +132,7 @@ const MAX_REASON_BYTES: u64 = 512;
 /// form [`redact_userinfo`](crate::redact::redact_userinfo) cannot see (review of PR #487,
 /// Integrity #2). A form shorter than four characters is left out: masking every `u` in a message
 /// would say nothing and hide everything.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Secret {
     forms: Vec<String>,
 }
@@ -152,6 +152,22 @@ impl Secret {
         .filter(|form| form.chars().count() >= 4)
         .collect();
         // Longest first, so a pair is masked whole before either half is looked for inside it.
+        forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
+        forms.dedup();
+        Secret { forms }
+    }
+
+    /// These forms and a bearer `token`'s (6j6v.pb9y): the token whole and each of its
+    /// `.`-separated segments on its own — a gateway that quotes only a JWT's signature must not
+    /// hand back the part that makes it a credential. The same four-character floor.
+    fn with_bearer(&self, token: &str) -> Secret {
+        let mut forms = self.forms.clone();
+        forms.extend(
+            std::iter::once(token)
+                .chain(token.split('.'))
+                .filter(|form| form.chars().count() >= 4)
+                .map(str::to_string),
+        );
         forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
         forms.dedup();
         Secret { forms }
@@ -218,6 +234,58 @@ impl TransportError {
     /// Whether this is the relay's refusal of a push body as too large.
     pub fn is_too_large(&self) -> bool {
         self.0 == PUSH_TOO_LARGE
+    }
+
+    /// The relay's refusal of the request's credential (6j6v.pb9y) — `status` is the HTTP status
+    /// it answered with: `401` (the credential is missing, expired or not accepted) or `403` (it is
+    /// accepted, but may not do this). [`HttpTransport`] answers every route's 401 and 403 with it;
+    /// a wrapper around a transport of its own may too. See [`TransportError::is_refused`].
+    pub fn refused(status: u16) -> TransportError {
+        TransportError(format!("{REFUSED}{status})"))
+    }
+
+    /// Whether the relay refused the request's credential. Nothing is retried and nothing older is
+    /// served in its place: a host that sees this answers its own caller with a refusal, and a
+    /// new credential is the caller's to get.
+    pub fn is_refused(&self) -> bool {
+        self.refused_status().is_some()
+    }
+
+    /// The HTTP status of a refusal ([`TransportError::refused`]), `None` for any other failure.
+    pub fn refused_status(&self) -> Option<u16> {
+        refused_status_of(&self.0)
+    }
+}
+
+/// How a refusal of the credential reads; the status and a `)` follow. Recognised only as the WHOLE
+/// message [`TransportError::refused`] builds, never as a part of one — a relay's own reason that
+/// quotes these words is not a refusal.
+const REFUSED: &str = "the relay refused this request's credential (HTTP ";
+
+/// The status of `message` if it is exactly a refusal's text — see [`TransportError::refused`].
+/// Shared by [`SyncError`] and the snapshot errors, which carry a transport failure as its text.
+pub(crate) fn refused_status_of(message: &str) -> Option<u16> {
+    let status: u16 = message
+        .strip_prefix(REFUSED)?
+        .strip_suffix(')')?
+        .parse()
+        .ok()?;
+    (TransportError::refused(status).0 == message).then_some(status)
+}
+
+impl SyncError {
+    /// Whether the pass failed because the relay refused the credential — the
+    /// [`TransportError::is_refused`] of the transport failure behind it (6j6v.pb9y).
+    pub fn is_refused(&self) -> bool {
+        self.refused_status().is_some()
+    }
+
+    /// The HTTP status of the relay's refusal (`401`/`403`), `None` for any other failure.
+    pub fn refused_status(&self) -> Option<u16> {
+        match self {
+            SyncError::Transport(message) => refused_status_of(message),
+            SyncError::Storage(_) | SyncError::OpTooLarge { .. } => None,
+        }
     }
 }
 
@@ -802,10 +870,19 @@ fn encode_segment(s: &str) -> String {
 /// and a redirect to the same host still carries the credential (`RedirectAuthHeaders::SameHost` —
 /// ureq drops an explicit header on every redirect by default, where it re-derived the userinfo of a
 /// relative `Location`). Never to another host, and never from https down to http.
+///
+/// **A bearer token instead** (6j6v.pb9y): [`with_bearer`](Self::with_bearer) makes, from a
+/// transport, one that sends `Authorization: Bearer <token>` on every route, over the same
+/// connection pool. The token is a secret under the same rules as the userinfo — scrubbed from
+/// every error, never in `Debug`, carried on a redirect to the same host only.
+///
+/// **A refused credential is typed**: a `401` or `403` on any route is
+/// [`TransportError::refused`], never retried — see [`TransportError::is_refused`].
 pub struct HttpTransport {
     /// The relay's base URL WITHOUT its userinfo — the only form any message may quote.
     base: String,
-    /// `Basic <base64(user:password)>` when the configured URL carried a credential.
+    /// `Basic <base64(user:password)>` when the configured URL carried a credential, or
+    /// `Bearer <token>` on a transport made by [`with_bearer`](Self::with_bearer).
     authorization: Option<String>,
     secret: Secret,
     agent: ureq::Agent,
@@ -831,13 +908,44 @@ impl HttpTransport {
     /// rules on its way out — whatever produced it: ureq's own message, a decode error, a relay's
     /// refusal. The userinfo never reaches a URL ureq formats in the first place; this also catches
     /// the forms a relay's own words can carry (see [`Secret`]).
+    /// This transport, sending `Authorization: Bearer <token>` on every route (6j6v.pb9y) — for a
+    /// host that reads a relay on a person's behalf with that person's token. Made per request and
+    /// cheap: the relay, the timeouts, the redirect rule and the connection pool are this
+    /// transport's (`ureq::Agent` is a shared handle), so a transport per token opens no pool of
+    /// its own. `self` keeps its own credential.
+    ///
+    /// **The bearer replaces a Basic credential**, never joins it: a request carries one
+    /// `Authorization` header, and the token is the one that names the person. The userinfo's forms
+    /// are still scrubbed from every message, beside the token's.
+    ///
+    /// The token is used as given — renewing it before it expires is the caller's — and a relay
+    /// that refuses it answers [`TransportError::refused`], with no retry.
+    pub fn with_bearer(&self, token: &str) -> HttpTransport {
+        HttpTransport {
+            base: self.base.clone(),
+            authorization: Some(format!("Bearer {token}")),
+            secret: self.secret.with_bearer(token),
+            agent: self.agent.clone(),
+        }
+    }
+
     fn failed(&self, message: impl std::fmt::Display) -> TransportError {
         TransportError(self.secret.scrub(&message.to_string()))
     }
 
+    /// A failed request as the error it is: a `401`/`403` is the typed refusal of the credential
+    /// ([`TransportError::refused`]) on every route; anything else passes the credential rules
+    /// ([`failed`](Self::failed)).
+    fn request_failed(&self, e: ureq::Error) -> TransportError {
+        match e {
+            ureq::Error::Status(status @ (401 | 403), _) => TransportError::refused(status),
+            e => self.failed(e),
+        }
+    }
+
     /// A non-2xx presence answer as an error that keeps the relay's own reason (a `400` names which
     /// bound the announcement broke), not only ureq's "status code 400".
-    fn refused(&self, url: &str, status: u16, resp: ureq::Response) -> TransportError {
+    fn rejected(&self, url: &str, status: u16, resp: ureq::Response) -> TransportError {
         let mut reason = String::new();
         let _ = std::io::Read::read_to_string(
             &mut std::io::Read::take(resp.into_reader(), MAX_REASON_BYTES),
@@ -889,7 +997,7 @@ impl Transport for HttpTransport {
         {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(413, _)) => Err(TransportError::too_large()),
-            Err(e) => Err(self.failed(e)),
+            Err(e) => Err(self.request_failed(e)),
         }
     }
 
@@ -905,7 +1013,7 @@ impl Transport for HttpTransport {
             .query("since", &since.0.to_string())
             .query("limit", &limit.to_string())
             .call()
-            .map_err(|e| self.failed(e))?;
+            .map_err(|e| self.request_failed(e))?;
         let page: crate::protocol::PullResponse = resp.into_json().map_err(|e| self.failed(e))?;
         Ok((page.ops, page.next))
     }
@@ -930,7 +1038,7 @@ impl Transport for HttpTransport {
             // mirrors the op-shape store-then-skip tolerance: an older peer must not hard-fail
             // the whole sync. Any other status is a real transport error.
             Err(ureq::Error::Status(404, _)) => Ok(RegisterOutcome::Registered),
-            Err(e) => Err(self.failed(e)),
+            Err(e) => Err(self.request_failed(e)),
         }
     }
 
@@ -946,8 +1054,9 @@ impl Transport for HttpTransport {
             Err(ureq::Error::Status(status, _)) if route_absent(status) => {
                 Ok(Announced::Unsupported)
             }
-            Err(ureq::Error::Status(status, resp)) => Err(self.refused(&url, status, resp)),
-            Err(e) => Err(self.failed(e)),
+            Err(e @ ureq::Error::Status(401 | 403, _)) => Err(self.request_failed(e)),
+            Err(ureq::Error::Status(status, resp)) => Err(self.rejected(&url, status, resp)),
+            Err(e) => Err(self.request_failed(e)),
         }
     }
 
@@ -961,9 +1070,26 @@ impl Transport for HttpTransport {
             .map(Some)
             .map_err(|e| self.failed(format!("{url}: {e}"))),
             Err(ureq::Error::Status(status, _)) if route_absent(status) => Ok(None),
-            Err(ureq::Error::Status(status, resp)) => Err(self.refused(&url, status, resp)),
-            Err(e) => Err(self.failed(e)),
+            Err(e @ ureq::Error::Status(401 | 403, _)) => Err(self.request_failed(e)),
+            Err(ureq::Error::Status(status, resp)) => Err(self.rejected(&url, status, resp)),
+            Err(e) => Err(self.request_failed(e)),
         }
+    }
+}
+
+/// The relay and which kind of credential the transport sends — never the credential: a host keeps
+/// a transport in state it may print, and the token or userinfo is the key (6j6v.pb9y).
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let credential = match self.authorization.as_deref() {
+            None => "none",
+            Some(value) if value.starts_with("Bearer ") => "bearer",
+            Some(_) => "basic",
+        };
+        f.debug_struct("HttpTransport")
+            .field("base", &self.secret.scrub(&self.base))
+            .field("credential", &credential)
+            .finish_non_exhaustive()
     }
 }
 
@@ -2979,6 +3105,18 @@ mod tests {
                     }
                     head.push_str(&line);
                 }
+                // Read the body before answering: closing on unread bytes resets the connection
+                // under a client that is still writing them, and a push then fails as a network
+                // error instead of reading the answer.
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                std::io::Read::read_exact(&mut reader, &mut vec![0; length]).unwrap();
                 stream.write_all(response.as_bytes()).unwrap();
                 heads.push(head);
             }
@@ -3177,5 +3315,343 @@ mod tests {
                 .any(|l| l.to_ascii_lowercase().starts_with("authorization: basic ")),
             "the redirected request is authenticated too: {heads:?}"
         );
+    }
+
+    /// The value of a request head's `Authorization` header, if it has one.
+    fn authorization_of(head: &str) -> Option<String> {
+        head.lines().find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    fn status_response(status: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    fn a_hello() -> MachineHello {
+        MachineHello {
+            machine_id: "m".into(),
+            name: "n".into(),
+            interval_secs: 300,
+        }
+    }
+
+    /// The hosted engine's route (6j6v.pb9y): a transport made for one request's person sends that
+    /// person's token as `Authorization: Bearer` — on every route the transport has.
+    #[test]
+    fn with_bearer_sends_the_token_as_the_bearer_header_on_every_route() {
+        let (addr, relay) = stub_relay(vec![
+            json_response("200 OK", r#"{"ops":[],"next":0}"#),
+            json_response("200 OK", r#"{"accepted":0}"#),
+            json_response("200 OK", r#"{"prefix":"abcd"}"#),
+            json_response("200 OK", "{}"),
+            json_response("200 OK", r#"{"machines":[]}"#),
+        ]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer("person-token-1");
+        let stream = StreamId("s".into());
+        t.pull(&stream, Cursor(0), 10).unwrap();
+        t.push(&stream, &[]).unwrap();
+        let _ = t.register(&stream, "abcd", "u");
+        t.announce(&stream, &a_hello()).unwrap();
+        let _ = t.machines(&stream);
+        let heads = relay.join().unwrap();
+        assert_eq!(heads.len(), 5);
+        for head in &heads {
+            assert_eq!(
+                authorization_of(head).as_deref(),
+                Some("Bearer person-token-1"),
+                "{head}"
+            );
+            assert!(!head.lines().next().unwrap().contains("person-token-1"));
+        }
+    }
+
+    /// One credential per request, never two: a bearer made from a transport whose URL carried a
+    /// userinfo REPLACES the Basic header — the relay sees the person, not the shared key.
+    #[test]
+    fn with_bearer_replaces_the_basic_credential_of_the_url() {
+        let (addr, relay) = one_request_relay(r#"{"ops":[],"next":0}"#);
+        let t = HttpTransport::new(format!("http://relay-user:s3cret-key@{addr}"))
+            .with_bearer("person-token-2");
+        t.pull(&StreamId("s".into()), Cursor(0), 10).unwrap();
+        let head = relay.join().unwrap();
+        let auth: Vec<&str> = head
+            .lines()
+            .filter(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .collect();
+        assert_eq!(auth, ["Authorization: Bearer person-token-2"], "{head}");
+    }
+
+    /// `with_bearer` leaves the transport it was made from as it was: the base keeps its own
+    /// credential (here, none) for the requests it sends itself.
+    #[test]
+    fn with_bearer_does_not_change_the_base_transport() {
+        let (addr, relay) = one_request_relay(r#"{"ops":[],"next":0}"#);
+        let base = HttpTransport::new(format!("http://{addr}"));
+        let _per_request = base.with_bearer("person-token-3");
+        base.pull(&StreamId("s".into()), Cursor(0), 10).unwrap();
+        assert_eq!(authorization_of(&relay.join().unwrap()), None);
+    }
+
+    /// The engine-server makes one transport per request, so the connection pool must be the
+    /// base's: a request through the bearer transport reuses the connection the base opened.
+    #[test]
+    fn with_bearer_shares_the_base_transports_connection_pool() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let server = std::thread::spawn(move || {
+            let mut connections = 0;
+            let mut workers = Vec::new();
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        connections += 1;
+                        stream.set_nonblocking(false).unwrap();
+                        workers.push(std::thread::spawn(move || {
+                            let mut reader = BufReader::new(stream.try_clone().unwrap());
+                            let mut stream = stream;
+                            loop {
+                                let mut line = String::new();
+                                loop {
+                                    line.clear();
+                                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                        return;
+                                    }
+                                    if line == "\r\n" {
+                                        break;
+                                    }
+                                }
+                                let body = r#"{"ops":[],"next":0}"#;
+                                let _ = stream.write_all(
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                         Content-Length: {}\r\n\r\n{body}",
+                                        body.len()
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                        }));
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                }
+            }
+            connections
+        });
+        let base = HttpTransport::new(format!("http://{addr}"));
+        base.pull(&StreamId("s".into()), Cursor(0), 10).unwrap();
+        base.with_bearer("person-token-4")
+            .pull(&StreamId("s".into()), Cursor(0), 10)
+            .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "one connection for both requests"
+        );
+    }
+
+    /// The bearer token is the person's key: an error that quotes it — a gateway echoing the
+    /// `Authorization` header into its refusal — hands back neither the token nor any of a JWT's
+    /// segments, in its Display or its Debug.
+    #[test]
+    fn a_gateway_error_echoing_the_bearer_header_does_not_leak_the_token() {
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJwZXJzb24ifQ.c2lnbmF0dXJlLWJ5dGVz";
+        let (addr, relay) = stub_relay(vec![json_response(
+            "400 Bad Request",
+            &format!(
+                "rejected Authorization: Bearer {jwt}; signature c2lnbmF0dXJlLWJ5dGVz invalid"
+            ),
+        )]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer(jwt);
+        let err = t
+            .announce(&StreamId("s".into()), &a_hello())
+            .expect_err("the stand-in refuses");
+        relay.join().unwrap();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            for segment in jwt.split('.') {
+                assert!(!shown.contains(segment), "{segment} in: {shown}");
+            }
+            assert!(shown.contains("status code 400"), "{shown}");
+        }
+    }
+
+    /// The transport itself may be printed — it sits in an engine-server's request state — and
+    /// that prints the relay, not the token, nor the userinfo of the base it was made from.
+    #[test]
+    fn a_transport_with_a_bearer_debug_prints_neither_token_nor_userinfo() {
+        let base = HttpTransport::new("http://relay-user:s3cret-key@relay.example");
+        let t = base.with_bearer("person-token-5");
+        for shown in [format!("{base:?}"), format!("{t:?}")] {
+            for leaked in ["person-token-5", "relay-user", "s3cret-key"] {
+                assert!(!shown.contains(leaked), "{leaked} in: {shown}");
+            }
+            assert!(shown.contains("relay.example"), "{shown}");
+        }
+    }
+
+    /// The bearer follows a redirect to the SAME host, as the Basic header does...
+    #[test]
+    fn a_redirect_to_the_same_host_still_carries_the_bearer_token() {
+        let (addr, relay) = stub_relay(vec![
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: /moved/streams/s/ops?since=0&limit=10\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            json_response("200 OK", r#"{"ops":[],"next":0}"#),
+        ]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer("person-token-6");
+        t.pull(&StreamId("s".into()), Cursor(0), 10)
+            .expect("followed");
+        let heads = relay.join().unwrap();
+        assert!(heads[1].starts_with("GET /moved/"), "{heads:?}");
+        assert_eq!(
+            authorization_of(&heads[1]).as_deref(),
+            Some("Bearer person-token-6")
+        );
+    }
+
+    /// ...and never to another host: the token is dropped from the redirected request.
+    #[test]
+    fn a_redirect_to_another_host_drops_the_bearer_token() {
+        let (other, elsewhere) =
+            stub_relay(vec![json_response("200 OK", r#"{"ops":[],"next":0}"#)]);
+        let other_port = other.rsplit(':').next().unwrap().to_string();
+        let (addr, relay) = stub_relay(vec![format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: \
+             http://localhost:{other_port}/streams/s/ops?since=0&limit=10\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer("person-token-7");
+        t.pull(&StreamId("s".into()), Cursor(0), 10)
+            .expect("followed");
+        relay.join().unwrap();
+        let head = elsewhere.join().unwrap().remove(0);
+        assert_eq!(authorization_of(&head), None, "{head}");
+    }
+
+    /// A relay that does not take the credential (401) or does not let it do this (403) answers
+    /// with a TYPED refusal on every route, so a host can answer "refused" without reading text.
+    #[test]
+    fn a_401_or_403_is_a_typed_refusal_on_every_route() {
+        for (status, line) in [(401, "401 Unauthorized"), (403, "403 Forbidden")] {
+            let (addr, relay) = stub_relay(vec![status_response(line); 5]);
+            let t = HttpTransport::new(format!("http://{addr}")).with_bearer("expired-token");
+            let stream = StreamId("s".into());
+            let errors = [
+                ("pull", t.pull(&stream, Cursor(0), 10).err()),
+                ("push", t.push(&stream, &[]).err()),
+                ("register", t.register(&stream, "abcd", "u").err()),
+                ("announce", t.announce(&stream, &a_hello()).err()),
+                ("machines", t.machines(&stream).err()),
+            ];
+            relay.join().unwrap();
+            for (route, err) in errors {
+                let err = err.unwrap_or_else(|| panic!("{route} was not refused"));
+                assert!(err.is_refused(), "{route} {status}: {err}");
+                assert_eq!(err.refused_status(), Some(status), "{route}: {err}");
+                assert!(!err.to_string().contains("expired-token"), "{err}");
+            }
+        }
+    }
+
+    /// A Basic credential the relay refuses is the same typed refusal — the rule is the relay's
+    /// answer, not which credential was sent.
+    #[test]
+    fn a_401_under_basic_is_a_typed_refusal_too() {
+        let (addr, relay) = stub_relay(vec![status_response("401 Unauthorized")]);
+        let t = HttpTransport::new(format!("http://relay-user:s3cret-key@{addr}"));
+        let err = t.pull(&StreamId("s".into()), Cursor(0), 10).unwrap_err();
+        relay.join().unwrap();
+        assert_eq!(err.refused_status(), Some(401), "{err}");
+    }
+
+    /// Only 401 and 403 are refusals: a relay that fails (500) or rejects the request itself
+    /// (400) is something else, and says so.
+    #[test]
+    fn a_500_or_a_400_is_not_a_refusal() {
+        let (addr, relay) = stub_relay(vec![
+            status_response("500 Internal Server Error"),
+            status_response("400 Bad Request"),
+        ]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer("person-token-8");
+        let stream = StreamId("s".into());
+        let server = t.pull(&stream, Cursor(0), 10).unwrap_err();
+        let bad = t.announce(&stream, &a_hello()).unwrap_err();
+        relay.join().unwrap();
+        for err in [server, bad] {
+            assert!(!err.is_refused(), "{err}");
+            assert_eq!(err.refused_status(), None, "{err}");
+        }
+    }
+
+    /// The refusal is recognised by what it IS, never by a text that looks like it: a relay whose
+    /// own reason quotes the refusal's words is still not a refusal.
+    #[test]
+    fn a_relay_reason_that_quotes_the_refusal_text_is_not_a_refusal() {
+        let quoted = TransportError::refused(401).0;
+        let (addr, relay) = stub_relay(vec![json_response("400 Bad Request", &quoted)]);
+        let t = HttpTransport::new(format!("http://{addr}"));
+        let err = t.announce(&StreamId("s".into()), &a_hello()).unwrap_err();
+        relay.join().unwrap();
+        assert!(err.to_string().contains(&quoted), "{err}");
+        assert!(!err.is_refused(), "{err}");
+    }
+
+    /// The refusal reaches the caller of the engine as itself: a pass and a presence read that the
+    /// relay refuses are a `SyncError` that says `is_refused`, with the status.
+    #[test]
+    fn a_refusal_is_carried_through_sync_error() {
+        let (addr, relay) = stub_relay(vec![
+            status_response("403 Forbidden"),
+            status_response("401 Unauthorized"),
+            status_response("500 Internal Server Error"),
+        ]);
+        let t = HttpTransport::new(format!("http://{addr}")).with_bearer("person-token-9");
+        let stream = StreamId("s".into());
+        let mut store = Store::open_in_memory(1);
+        let mut marks = Watermarks::default();
+        let pass = sync(&mut store, 1, &stream, &mut marks, &t, 100, &Unbounded).unwrap_err();
+        let presence = machines(&t, &stream).unwrap_err();
+        let failed = machines(&t, &stream).unwrap_err();
+        relay.join().unwrap();
+        assert!(pass.is_refused(), "{pass}");
+        assert_eq!(pass.refused_status(), Some(403), "{pass}");
+        assert_eq!(presence.refused_status(), Some(401), "{presence}");
+        assert!(!failed.is_refused(), "{failed}");
+        assert_eq!(failed.refused_status(), None, "{failed}");
+    }
+
+    /// Only the text `refused` builds is a refusal — a status written another way (`0401`, `+401`)
+    /// is not, so no message can pass for one by a number that merely parses.
+    #[test]
+    fn only_the_exact_refusal_text_is_a_refusal() {
+        let canonical = TransportError::refused(401).0;
+        for forged in [
+            canonical.replace("401", "0401"),
+            canonical.replace("401", "+401"),
+            format!("{canonical} "),
+        ] {
+            assert_eq!(
+                TransportError(forged.clone()).refused_status(),
+                None,
+                "{forged}"
+            );
+        }
+        assert_eq!(TransportError(canonical).refused_status(), Some(401));
+    }
+
+    /// A refusal is not a too-large push, nor the other way round — the engine acts on the one and
+    /// passes the other on.
+    #[test]
+    fn a_refusal_and_a_too_large_push_are_told_apart() {
+        assert!(!TransportError::refused(401).is_too_large());
+        assert!(!TransportError::too_large().is_refused());
+        assert!(!SyncError::from(TransportError::too_large()).is_refused());
     }
 }

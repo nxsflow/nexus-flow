@@ -456,6 +456,23 @@ impl From<ImageError> for SnapshotError {
     }
 }
 
+impl SnapshotError {
+    /// Whether the relay refused the credential while the snapshot was confirmed against it — the
+    /// anchor check asks through the transport (6j6v.pb9y). See
+    /// [`TransportError::is_refused`](crate::engine::TransportError::is_refused).
+    pub fn is_refused(&self) -> bool {
+        self.refused_status().is_some()
+    }
+
+    /// The HTTP status of the relay's refusal (`401`/`403`), `None` for any other failure.
+    pub fn refused_status(&self) -> Option<u16> {
+        match self {
+            SnapshotError::Transport(message) => crate::engine::refused_status_of(message),
+            _ => None,
+        }
+    }
+}
+
 impl From<rusqlite::Error> for SnapshotError {
     fn from(e: rusqlite::Error) -> SnapshotError {
         SnapshotError::Storage(e.to_string())
@@ -1914,6 +1931,65 @@ mod tests {
         ) -> Result<RegisterOutcome, TransportError> {
             Err(TransportError("down".into()))
         }
+    }
+
+    /// A relay that refuses the credential (6j6v.pb9y): every route answers 401 or 403.
+    struct Refusing(u16);
+    impl Transport for Refusing {
+        fn push(&self, _: &StreamId, _: &[WireOp]) -> Result<(), TransportError> {
+            Err(TransportError::refused(self.0))
+        }
+        fn pull(
+            &self,
+            _: &StreamId,
+            _: Cursor,
+            _: usize,
+        ) -> Result<(Vec<WireOp>, Cursor), TransportError> {
+            Err(TransportError::refused(self.0))
+        }
+        fn register(
+            &self,
+            _: &StreamId,
+            _: &str,
+            _: &str,
+        ) -> Result<RegisterOutcome, TransportError> {
+            Err(TransportError::refused(self.0))
+        }
+    }
+
+    /// The anchor check asks the relay through the transport, so a relay that refuses the
+    /// credential there makes `export` and `import` fail as a REFUSAL the caller can tell from a
+    /// relay that is down — never as an `Unbacked` or a mismatch, and never by its text.
+    #[test]
+    fn a_refused_anchor_check_is_a_refusal_through_export_and_import() {
+        let relay = Relay::new(11, 0);
+        let mut w = Store::open_in_memory(11);
+        let mut wm = Watermarks::default();
+        w.create_item("wa.1", "task", "t", "wa");
+        pass(&mut w, 11, &mut wm, &relay);
+        let snapshot = export(&w, 11, &stream(), &wm, &relay).unwrap();
+
+        let refused = export(&w, 11, &stream(), &wm, &Refusing(403)).unwrap_err();
+        assert!(refused.is_refused(), "{refused}");
+        assert_eq!(refused.refused_status(), Some(403), "{refused}");
+
+        let mut fresh = Store::open_in_memory(99);
+        let refused = import(&mut fresh, &snapshot, &stream(), &Refusing(401), &[]).unwrap_err();
+        assert_eq!(refused.refused_status(), Some(401), "{refused}");
+        assert_eq!(fresh.op_count(), 0);
+
+        let down = export(&w, 11, &stream(), &wm, &Down).unwrap_err();
+        assert!(!down.is_refused(), "{down}");
+        assert_eq!(down.refused_status(), None, "{down}");
+    }
+
+    /// A pass that the relay refused stays a refusal when a snapshot start passes it on.
+    #[test]
+    fn a_refused_sync_error_stays_a_refusal_as_a_snapshot_error() {
+        let refused = SnapshotError::from(SyncError::from(TransportError::refused(401)));
+        assert_eq!(refused.refused_status(), Some(401), "{refused}");
+        let failed = SnapshotError::from(SyncError::Transport("down".into()));
+        assert!(!failed.is_refused(), "{failed}");
     }
 
     /// The position is confirmed before a single row is written: a relay that cannot be asked
