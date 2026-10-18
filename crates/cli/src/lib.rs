@@ -144,7 +144,8 @@ enum Command {
         depends_on: Vec<String>,
         /// Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own
         /// flags above; `--set` carries the active plugin's declared custom fields (run `nxf schema`
-        /// for the set). Validated against the field's type; a value of `-` reads STDIN.
+        /// for the set). Validated against the field's type; a value of `-` reads STDIN. A `ref`
+        /// field takes an item id of one of its `targets`; a bare local id is resolved.
         #[arg(long = "set")]
         set: Vec<String>,
         /// Set a custom field from a file: `name=path` (UTF-8, verbatim); `path` of `-` reads STDIN.
@@ -180,7 +181,8 @@ enum Command {
         /// A `field=value` assignment; repeat for multiple fields. An unknown field is rejected
         /// with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to,
         /// `defer`→defer_until. A value of `-` reads that field from STDIN (escaping-free,
-        /// multi-line); at most one field per call may read STDIN.
+        /// multi-line); at most one field per call may read STDIN. A custom `ref` field takes an
+        /// item id of one of its `targets`; a bare local id is resolved.
         #[arg(long = "set")]
         set: Vec<String>,
         /// A `field=path` assignment that reads the field's value from a file (UTF-8, verbatim);
@@ -584,8 +586,9 @@ enum LabelAction {
 #[derive(Subcommand, Debug)]
 enum EntryAction {
     /// Add `value` to the list field `field` of item `id`. The value is trimmed and validated
-    /// against the field's type. Adding a value the field already holds does not add a second
-    /// entry: it gives that entry this label (or none, without `--label`).
+    /// against the field's type — on a `ref` field it is an item id of one of the field's
+    /// `targets`, and a bare local id is resolved. Adding a value the field already holds does not
+    /// add a second entry: it gives that entry this label (or none, without `--label`).
     Add {
         id: String,
         field: String,

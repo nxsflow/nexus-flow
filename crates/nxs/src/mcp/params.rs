@@ -62,7 +62,8 @@ pub struct FlowCreateParams {
     /// `nxf create --set name=value`. Canonical fields use the dedicated params above; `set` carries
     /// the active plugin's declared custom fields, validated against the resolved type at write time.
     /// `flow_schema` names each custom field's `kind`; a `datetime` value needs a time zone
-    /// (`2026-10-12T10:30:00+02:00`) and is stored as the UTC instant (`2026-10-12T08:30:00Z`).
+    /// (`2026-10-12T10:30:00+02:00`) and is stored as the UTC instant (`2026-10-12T08:30:00Z`); a
+    /// `ref` value is an item id of one of the field's `targets` (a bare local suffix is resolved).
     #[serde(default)]
     pub set: Vec<String>,
     /// Reference time (ISO-8601 / RFC3339) stamped on the emitted ops.
@@ -84,7 +85,8 @@ pub struct FlowUpdateParams {
     /// Item id (a bare local suffix or a full `<prefix>.<suffix>`).
     pub id: String,
     /// Field assignments as `field=value` strings (e.g. `status=in_progress`, `priority=P0`). A
-    /// custom `datetime` field needs a time zone and is stored as the UTC instant.
+    /// custom `datetime` field needs a time zone and is stored as the UTC instant; a custom `ref`
+    /// field takes an item id of one of its `targets` (a bare local suffix is resolved).
     pub set: Vec<String>,
     /// Reference time (ISO-8601 / RFC3339) stamped on the emitted ops.
     #[serde(default)]
@@ -184,8 +186,9 @@ pub struct FlowEntryParams {
     /// The list field's name (a custom field the active plugin declares with `list = true`).
     pub field: String,
     /// The entry value, validated against the field's type (a `datetime` needs a time zone and is
-    /// stored as the UTC instant). It is the entry's identity: adding a value the field holds
-    /// relabels that entry, removing a value removes it whatever its label.
+    /// stored as the UTC instant; a `ref` entry is an item id of one of the field's `targets`, a bare
+    /// local suffix resolved). It is the entry's identity: adding a value the field holds relabels
+    /// that entry, removing a value removes it whatever its label.
     pub value: String,
     /// `flow_entry_add` only: label the entry (free text, e.g. `work`, `private`). Omitted on an
     /// add of a value the field holds, the entry loses its label. Ignored by `flow_entry_remove`.

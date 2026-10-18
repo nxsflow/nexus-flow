@@ -14,7 +14,7 @@ Print help
 .SH SUBCOMMANDS
 .TP
 entry\-add(1)
-Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field\*(Aqs type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `\-\-label`)
+Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field\*(Aqs type — on a `ref` field it is an item id of one of the field\*(Aqs `targets`, and a bare local id is resolved. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `\-\-label`)
 .TP
 entry\-remove(1)
 Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed\-remove; a value the field does not hold is a no\-op)

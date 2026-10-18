@@ -144,7 +144,7 @@ Create a new item — a complete item in one call. Title, description, and prior
 * `--defer <DEFER>` — Defer-until date (ISO-8601 / RFC3339)
 * `--parent <PARENT>` — Parent item id (sets belongs-to); must exist
 * `--depends-on <DEPENDS_ON>` — This item depends on <id> (repeatable): <id> must exist and blocks this item until it closes. Same direction as `dep add <this> <id>`
-* `--set <SET>` — Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `--set` carries the active plugin's declared custom fields (run `nxf schema` for the set). Validated against the field's type; a value of `-` reads STDIN
+* `--set <SET>` — Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `--set` carries the active plugin's declared custom fields (run `nxf schema` for the set). Validated against the field's type; a value of `-` reads STDIN. A `ref` field takes an item id of one of its `targets`; a bare local id is resolved
 * `--set-file <SET_FILE>` — Set a custom field from a file: `name=path` (UTF-8, verbatim); `path` of `-` reads STDIN. Repeatable. A field may be set by `--set` or `--set-file`, not both
 * `-q`, `--id-only` — Print ONLY the new item's id — one line, no JSON, no output framing — so it can be captured straight into the next command (`id=$(nxf create … -q)`) without parsing JSON. Takes precedence over `--json` (the id wins; `--json` is ignored, not an error)
 
@@ -163,7 +163,7 @@ Update item fields via `--set field=value` (repeatable). The long-form `descript
 
 ###### **Options:**
 
-* `--set <SET>` — A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `-` reads that field from STDIN (escaping-free, multi-line); at most one field per call may read STDIN
+* `--set <SET>` — A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `-` reads that field from STDIN (escaping-free, multi-line); at most one field per call may read STDIN. A custom `ref` field takes an item id of one of its `targets`; a bare local id is resolved
 * `--set-file <SET_FILE>` — A `field=path` assignment that reads the field's value from a file (UTF-8, verbatim); `path` of `-` reads STDIN. Repeatable; lets several long-text fields each come from their own file in one call. A field may be set by `--set` or `--set-file`, not both
 
 
@@ -613,7 +613,7 @@ Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[
 
 ###### **Subcommands:**
 
-* `add` — Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
+* `add` — Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type — on a `ref` field it is an item id of one of the field's `targets`, and a bare local id is resolved. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
 * `remove` — Remove the entry `value` from the list field `field` of item `id`, whatever its label (observed-remove; a value the field does not hold is a no-op)
 * `list` — List the entries of the list field `field` of item `id`, in order: each where its value was first added
 
@@ -621,7 +621,7 @@ Add, remove, or list the entries of a plugin LIST field (`list = true` in its `[
 
 ## `nxf entry add`
 
-Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
+Add `value` to the list field `field` of item `id`. The value is trimmed and validated against the field's type — on a `ref` field it is an item id of one of the field's `targets`, and a bare local id is resolved. Adding a value the field already holds does not add a second entry: it gives that entry this label (or none, without `--label`)
 
 **Usage:** `nxf entry add [OPTIONS] <ID> <FIELD> <VALUE>`
 
