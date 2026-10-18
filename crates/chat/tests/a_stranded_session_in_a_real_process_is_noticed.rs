@@ -440,9 +440,16 @@ fn the_owed_row_to_spawn_latency_is_far_inside_the_grace() {
     let tmp = workspace();
     let root = tmp.path();
     let started = std::time::Instant::now();
-    commission(root, "review");
+    let (thread, _, _) = commission(root, "review");
     let took = started.elapsed();
     eprintln!("owed row → spawn upper bound (whole `nxc send`): {took:?}");
+    // …and what one look costs as a process (build item 17): a cold `nxc tick` of the channel.
+    let look = std::time::Instant::now();
+    tick(root, &at(30), &thread);
+    eprintln!(
+        "one cold `nxc tick` of a channel thread: {:?}",
+        look.elapsed()
+    );
     assert!(
         took.as_secs() < nexus_chat::orchestration::STRANDED_GRACE_SECS as u64,
         "{took:?}"

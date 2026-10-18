@@ -1909,3 +1909,74 @@ fn false_positive_a_way_back_wake_of_one_pm_never_re_owns_another_pms_slot() {
     team.answer(&at(300), "pm", &p1, &r1, "plan A done");
     assert!(team.messages(&r1).iter().all(|m| m.1 != "escalation"));
 }
+
+// ---- the cost, as data (pass-1 IR #11, build item 17) -------------------------------------------
+
+/// **The sweep's cost, measured, not gated** — the median of a tick over a workspace of about two
+/// hundred threads, twenty of which owe an answer from a session that is running (so every one of
+/// them is a candidate the sweep has to look at), plus one cold tick. Run by hand:
+/// `cargo test -p nexus-chat --test a_stranded_session_is_recorded_and_escalated -- --ignored
+/// --nocapture the_sweeps_cost`.
+#[test]
+#[ignore = "a stopwatch: data, not a gate"]
+fn the_sweeps_cost_over_two_hundred_threads_with_twenty_owed_sessions() {
+    let team = team(&[REVIEW]);
+    let mut roots = Vec::new();
+    for n in 0..20 {
+        let root = team
+            .commission(T0, "review", &format!("verify {n}"))
+            .thread_id;
+        let (s, _) = team.last("verifier");
+        team.worker.mark_running(&s);
+        roots.push(root);
+    }
+    for n in 0..80 {
+        let thread = team.commission(T0, "coder", &format!("task {n}")).thread_id;
+        let (s, owed) = team.last("coder");
+        assert_eq!(owed, thread);
+        team.answer(&at(1), "coder", &s, &thread, "done");
+    }
+    let cold = std::time::Instant::now();
+    team.tick(&at(10), &roots[0]);
+    let cold = cold.elapsed();
+    let mut runs: Vec<std::time::Duration> = (0..15)
+        .map(|n| {
+            let t = std::time::Instant::now();
+            team.tick(&at(20 + n), &roots[0]);
+            t.elapsed()
+        })
+        .collect();
+    runs.sort();
+    eprintln!(
+        "one tick over ~200 threads with 20 owed running sessions: median {:?}, cold {cold:?}",
+        runs[runs.len() / 2]
+    );
+}
+
+/// **AC 5 (c)** — a round queued for the working copy behind another operation's lease. Its slot
+/// owes an answer and its session never ran — and it is not stranded: its start is still to come.
+#[test]
+fn false_positive_a_round_queued_for_the_working_copy() {
+    let exclusive = "name: guarded\nmembers: [verifier]\nflow: sequential\ntimeout: 2m\nworking_tree: exclusive\n";
+    let team = team(&[exclusive]);
+    let first = team.commission(T0, "guarded", "first").thread_id;
+    let (holder, _) = team.last("verifier");
+    team.worker.mark_running(&holder);
+    let second = team
+        .commission_by(T0, "carsten", "guarded", "second")
+        .thread_id;
+    assert_eq!(
+        team.worker.started("verifier"),
+        1,
+        "the second round waits for the copy"
+    );
+    let queued_slot: String = team
+        .store()
+        .connection()
+        .query_row("SELECT thread FROM working_tree_queue", [], |r| r.get(0))
+        .expect("the second round's step is queued");
+    team.two_looks(T0, &second);
+    team.tick(&at(300), &first);
+    assert_eq!(team.suspect(&queued_slot), None);
+    assert!(team.records().is_empty(), "{:?}", team.records());
+}

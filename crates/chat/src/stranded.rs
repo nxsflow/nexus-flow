@@ -1883,4 +1883,20 @@ mod tests {
         assert_eq!(row.escalation, Some(Escalation::GivenUp));
         assert_eq!(row.escalation_attempts, 1);
     }
+
+    /// **AC 1 (h)**: the synthesizer answers for the engine, so no obligation is recorded for it —
+    /// rule 1 would exclude it anyway, and keeping it out of the table keeps the work list to what
+    /// can strand.
+    #[test]
+    fn an_engine_identity_is_never_recorded_as_owing() {
+        let mut scene = scene();
+        let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+        let synth = format!("{}/{}", scene.origin, crate::channel::SYNTHESIS_HANDLE);
+        let findings = {
+            let ctx = scene.ctx(T0, "service", None);
+            owe(&ctx, &mut store, "m-board", &synth, "m-synth-session", true)
+        };
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(store.owed_start("m-board", &synth).unwrap(), None);
+    }
 }
