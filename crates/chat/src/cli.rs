@@ -4598,6 +4598,110 @@ mod tests {
 
     use super::*;
 
+    // ---- the STRANDED clause (nxf 6j6v.ccvy, AC 9) -------------------------------------------
+
+    fn open_row(
+        session_state: crate::orchestration::SessionState,
+        stranded: Option<crate::facade::StrandedStatus>,
+    ) -> crate::facade::StatusThread {
+        crate::facade::StatusThread {
+            thread_id: "m-slot".into(),
+            name: None,
+            channel_id: Some("decl:review".into()),
+            parent: Some("m-root".into()),
+            depth: 1,
+            state: crate::facade::ThreadState::Open,
+            awaiting_human: false,
+            escalated: false,
+            substituted: false,
+            opener: None,
+            session: Some("m-s".into()),
+            session_state: Some(session_state),
+            expects: vec!["ws/verifier".into()],
+            outstanding: vec!["ws/verifier".into()],
+            stale: false,
+            deadline: None,
+            working_tree: None,
+            working_tree_queue_position: None,
+            waiting_on_sub_round: Vec::new(),
+            working_copy: None,
+            interrupted: None,
+            border: None,
+            stranded,
+        }
+    }
+
+    fn stranded(
+        observed: u8,
+        detail: &str,
+        escalation: crate::facade::StrandedEscalation,
+    ) -> crate::facade::StrandedStatus {
+        crate::facade::StrandedStatus {
+            session: "m-s".into(),
+            recorded_at: "2026-10-18T10:03:00Z".into(),
+            observed,
+            detail: detail.into(),
+            escalated: escalation == crate::facade::StrandedEscalation::Posted,
+            escalation,
+            escalation_error: Some("io: locked".into()),
+        }
+    }
+
+    /// **AC 9**: a never-bound, an ended and a never-triggered stranded slot each render the
+    /// STRANDED clause with their own observation — and NOT "ITS SESSION HAS ENDED, nothing is
+    /// coming", which the stranded line replaces with the reason and what was done about it.
+    #[test]
+    fn a_stranded_slot_says_so_instead_of_nothing_is_coming() {
+        use crate::facade::StrandedEscalation as E;
+        use crate::orchestration::SessionState;
+        for (state, observed, detail) in [
+            (
+                SessionState::Unknown,
+                2,
+                "no live process across two looks since 2026-10-18T10:02:00Z; it never bound",
+            ),
+            (
+                SessionState::Ended,
+                3,
+                "its process ended at 2026-10-18T10:01:00Z without answering, and no substitute \
+                 was posted for it",
+            ),
+            (
+                SessionState::Unknown,
+                1,
+                "a slot was opened for it at 2026-10-18T10:00:00Z and no start ever ran",
+            ),
+        ] {
+            let line = session_suffix(&open_row(
+                state,
+                Some(stranded(observed, detail, E::Posted)),
+            ));
+            assert_eq!(
+                line,
+                format!(
+                    " — STRANDED: {detail}; recorded 2026-10-18T10:03:00Z, escalated to the \
+                     commissioner"
+                )
+            );
+            assert!(!line.contains("nothing is coming"), "{line}");
+        }
+        // The other three outcomes of the escalation, each in its own words.
+        let says = |e| session_suffix(&open_row(SessionState::Ended, Some(stranded(3, "x", e))));
+        assert!(says(E::AlreadyAnswered).ends_with("already answered by somebody else"));
+        assert!(says(E::Pending).ends_with("the escalation could not be posted yet"));
+        assert!(says(E::GivenUp).ends_with("could not be escalated: io: locked — withdraw it"));
+        // After a re-trigger the record is history: neither line, only what the session is doing.
+        assert_eq!(
+            session_suffix(&open_row(SessionState::Running, None)),
+            " (its session is running)"
+        );
+        assert_eq!(
+            session_suffix(&open_row(SessionState::Ended, None)),
+            " — ITS SESSION HAS ENDED, nothing is coming",
+            "unchanged for a session that ended with nothing recorded"
+        );
+    }
+
     /// **The `START FAILED` detail line says who, how often, what, and what next** (nxf 6j6v.br25;
     /// review of PR #32, Test Quality #7) — both next steps, each naming the withdrawal.
     #[test]

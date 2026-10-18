@@ -37,6 +37,9 @@ use tempfile::TempDir;
 
 const T0: &str = "2026-10-18T10:00:00Z";
 
+/// The `pm` persona's own session, for the rounds a persona commissions.
+const PM_SESSION: &str = "s-pm";
+
 /// `T0` plus `secs` seconds, in the canonical form every stored instant uses.
 fn at(secs: i64) -> String {
     at_from(T0, secs)
@@ -279,6 +282,29 @@ impl Team {
     /// A human commissions `to` (a channel or a persona) at `now`.
     fn commission(&self, now: &str, to: &str, body: &str) -> surface::SendToReceipt {
         self.with(now, "pm", None, |ctx, store| {
+            surface::send_to(
+                ctx,
+                store,
+                SendToRequest {
+                    machine: None,
+                    to,
+                    body,
+                    refs: SendToRefs::ExplicitlyNone,
+                },
+            )
+        })
+        .expect("the commission is accepted")
+    }
+
+    /// The `pm` PERSONA's session commissions `to` at `now` — so the round has a commissioner the
+    /// escalation can wake, and the worker's log shows what it was woken with.
+    fn commission_as_pm(&self, now: &str, to: &str, body: &str) -> surface::SendToReceipt {
+        let mut store = self.store();
+        if store.session_role(PM_SESSION).unwrap().is_none() {
+            store.create_pending_session(PM_SESSION, "pm").unwrap();
+        }
+        drop(store);
+        self.with(now, "pm", Some(PM_SESSION), |ctx, store| {
             surface::send_to(
                 ctx,
                 store,
@@ -538,4 +564,877 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
         Some(StrandedEscalation::Posted),
         "the STRANDED record outlives the owed row"
     );
+}
+
+// ---- more channels ----------------------------------------------------------------------------
+
+/// Two ordered steps with a two-minute window — the shape where the window and the stranded rule
+/// meet on the same tick.
+const REVIEW_2M: &str =
+    "name: review2\nmembers: [verifier, finisher]\nflow: sequential\ntimeout: 2m\n";
+
+/// Two reviewers at once, two hours long.
+const PANEL: &str = "name: panel\nmembers: [verifier, reviewer]\nflow: parallel\ntimeout: 2h\n";
+
+impl Team {
+    /// The session behind the last start of `handle`, and the thread it owes.
+    fn last(&self, handle: &str) -> (String, String) {
+        let req = self.worker.last_for(handle);
+        (req.internal_session.clone(), slot_of(&req))
+    }
+
+    /// `session` of `role` announces its end at `now`.
+    fn end(&self, now: &str, role: &str, session: &str) -> orchestration::SessionEndedReceipt {
+        self.with(now, role, Some(session), |ctx, store| {
+            orchestration::session_ended(ctx, store, session)
+        })
+        .expect("session ended")
+    }
+
+    /// Walk a never-running owed session through its two looks, ticking `look` at `clock + 120 s`
+    /// and `clock + 180 s`. Returns the second receipt.
+    fn two_looks(&self, clock: &str, look: &str) -> TickReceipt {
+        self.tick(&at_from(clock, STRANDED_GRACE_SECS), look);
+        self.tick(&at_from(clock, STRANDED_GRACE_SECS + 60), look)
+    }
+}
+
+// ---- AC 1 (b)-(g) ---------------------------------------------------------------------------------
+
+/// **AC 1 (b)** — a parallel round: A never binds, B answers at +60. The round is NOT consolidated
+/// at B's answer (A has not settled), A's look still stands, and A is recorded at +180 — at which
+/// point the round consolidates with the escalation, carrying B's answer.
+#[test]
+fn a_silent_member_of_a_parallel_round_is_recorded_while_its_sibling_answered() {
+    let team = team(&[PANEL]);
+    let root = team.commission(T0, "panel", "review the build").thread_id;
+    let (a, a_slot) = team.last("verifier");
+    let (b, b_slot) = team.last("reviewer");
+
+    team.answer(&at(60), "reviewer", &b, &b_slot, "LGTM");
+    assert!(
+        !team.needs_decision(&at(60), &root),
+        "one answer of two does not end the round"
+    );
+    assert_eq!(
+        team.messages(&root).len(),
+        1,
+        "nothing consolidated at B's answer"
+    );
+    assert_eq!(
+        team.book.standing_look(&a).map(|l| (l.thread, l.due)),
+        Some((root.clone(), at(STRANDED_GRACE_SECS))),
+        "A's look still stands after the channel's window was re-armed"
+    );
+
+    team.two_looks(T0, &root);
+    assert_eq!(
+        team.records(),
+        vec![(a_slot.clone(), a.clone(), 2, Some("posted".to_string()))]
+    );
+    assert!(team.needs_decision(&at(180), &root));
+    assert_eq!(team.worker.starts(), vec!["verifier", "reviewer"]);
+    let consolidated = team.messages(&root);
+    assert_eq!(consolidated.len(), 2, "{consolidated:?}");
+    assert_eq!(consolidated[1].1, "escalation");
+}
+
+/// **AC 1 (c)** — a direct commission (`send --to <persona>`): the look names the thread ITSELF
+/// (there is no channel above it), the record is made, and the escalation lands there, where its
+/// opener reads it.
+#[test]
+fn a_persona_commissioned_directly_that_never_starts_is_escalated_on_its_own_thread() {
+    let team = team(&[]);
+    let thread = team
+        .commission(T0, "verifier", "verify the build")
+        .thread_id;
+    let (s, owed) = team.last("verifier");
+    assert_eq!(owed, thread);
+    assert_eq!(
+        team.owed(&thread, "verifier"),
+        Some((s.clone(), at(0), true))
+    );
+    assert_eq!(team.book.standing_look(&s).unwrap().thread, thread);
+
+    team.two_looks(T0, &thread);
+    assert_eq!(
+        team.records(),
+        vec![(thread.clone(), s.clone(), 2, Some("posted".to_string()))]
+    );
+    assert!(team.needs_decision(&at(180), &thread));
+    assert_eq!(
+        team.messages(&thread),
+        vec![
+            ("pm".to_string(), "info".to_string(), false),
+            ("verifier".to_string(), "escalation".to_string(), true),
+        ]
+    );
+    assert_eq!(team.worker.starts(), vec!["verifier"]);
+}
+
+/// **AC 1 (d)** — the look cannot be armed. The commission's receipt says so; the sweep is
+/// workspace-wide, so a tick by hand looks anyway; and the channel's own tick at the window's end
+/// does NOT advance past the slot.
+#[test]
+fn a_look_that_cannot_be_armed_is_reported_and_the_next_tick_looks_anyway() {
+    let team = team(&[REVIEW_2M]);
+    team.book.refuse_looks(true);
+    let sent = team.commission(T0, "review2", "verify the build");
+    let root = sent.thread_id.clone();
+    let (s, slot) = team.last("verifier");
+    // The commission's receipt carries the finding — the first step's start is part of it.
+    let unarmed: Vec<&FailedConsequence> = sent
+        .warnings
+        .iter()
+        .filter(|f| {
+            f.class == ConsequenceClass::TickUnscheduled && f.session.as_deref() == Some(&s)
+        })
+        .collect();
+    assert!(!unarmed.is_empty(), "{:?}", classes(&sent.warnings));
+
+    // Just past +120 s: the window has ended AND the first look falls. The suspect is written, the
+    // second arm fails and says so, and the flow does not move past the step.
+    let r = team.tick(&at(121), &root);
+    assert_eq!(team.suspect(&slot).map(|s| s.1), Some(at(121)));
+    assert!(
+        has(&r.warnings, ConsequenceClass::TickUnscheduled),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert!(
+        has(&r.warnings, ConsequenceClass::StepNotRunning),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert_eq!(
+        team.worker.started("finisher"),
+        0,
+        "never advanced past the dead step"
+    );
+
+    let r = team.tick(&at(181), &root);
+    assert!(has(&r.warnings, ConsequenceClass::SessionStranded));
+    assert_eq!(team.records().len(), 1);
+    assert!(team.needs_decision(&at(181), &root));
+    assert_eq!(team.worker.started("finisher"), 0);
+}
+
+/// **AC 1 (e)** — a slot that was opened and whose trigger never ran (`triggered = 0`, seeded
+/// through the store: the kill between the two writes cannot be staged through the seam). The look
+/// was booked at the mint; two looks from the clock record observation 1.
+#[test]
+fn a_slot_whose_trigger_never_ran_is_recorded_as_never_started() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify the build").thread_id;
+    let (s, slot) = team.last("verifier");
+    assert!(
+        team.book.looks_for(&s).len() >= 2,
+        "one look at the mint, one before the spawn: {:?}",
+        team.book.looks_for(&s)
+    );
+    team.sql("UPDATE owed_starts SET triggered = 0");
+    team.two_looks(T0, &root);
+    assert_eq!(
+        team.records(),
+        vec![(slot, s, 1, Some("posted".to_string()))]
+    );
+}
+
+/// **AC 1 (f)** — a re-trigger ends the record's currency. The commissioner answers the escalation
+/// with a new round; the new slot shows no STRANDED line while it runs; it strands again → a SECOND
+/// record and a SECOND escalation.
+#[test]
+fn a_new_round_after_the_escalation_is_judged_afresh_and_can_strand_again() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify the build").thread_id;
+    team.two_looks(T0, &root);
+    assert_eq!(team.records().len(), 1);
+
+    // The commissioner (a human) answers the escalation with a reply into the root.
+    let again = at(600);
+    team.with(&again, "pm", None, |ctx, store| {
+        surface::reply_in_thread(
+            ctx,
+            store,
+            ReplyThreadRequest {
+                machine: None,
+                thread: &root,
+                body: "try again",
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+    })
+    .expect("the commissioner answers");
+    assert_eq!(
+        team.worker.started("verifier"),
+        2,
+        "{:?}",
+        team.worker.starts()
+    );
+    let (s2, slot2) = team.last("verifier");
+    assert_eq!(
+        team.owed(&slot2, "verifier").map(|o| o.1),
+        Some(again.clone())
+    );
+    assert!(
+        team.status_of(&again, &slot2).stranded.is_none(),
+        "no STRANDED line while the new round runs"
+    );
+
+    team.two_looks(&again, &root);
+    let records = team.records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[1].0, slot2);
+    assert_eq!(records[1].1, s2);
+    let escalations = team
+        .messages(&slot2)
+        .into_iter()
+        .filter(|m| m.1 == "escalation")
+        .count();
+    assert_eq!(escalations, 1, "a second escalation, on the new slot");
+}
+
+/// **AC 1 (g)** — a start that failed and was given up (`retry_at` NULL) is recorded with
+/// observation 5 at its last attempt plus the grace, and the slot was never advanced past.
+#[test]
+fn a_start_given_up_is_recorded_and_escalated() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify the build").thread_id;
+    let (s, slot) = team.last("verifier");
+    let last = at(10);
+    team.sql(&format!(
+        "INSERT INTO failed_starts(session, scope_key, role, thread, message, model, depth, \
+         priority, enqueued_at, first_failed_at, last_failed_at, attempts, error, retry_at) \
+         VALUES ('{s}', 'k', 'verifier', '{slot}', 'verify', NULL, 1, 1, '{T0}', '{T0}', \
+         '{last}', 3, 'io: timed out', NULL)"
+    ));
+    team.tick(&at(10 + STRANDED_GRACE_SECS - 1), &root);
+    assert!(
+        team.records().is_empty(),
+        "not before the grace on the last attempt"
+    );
+    team.tick(&at(10 + STRANDED_GRACE_SECS), &root);
+    assert_eq!(
+        team.records(),
+        vec![(slot, s, 5, Some("posted".to_string()))]
+    );
+    assert_eq!(team.worker.started("finisher"), 0);
+}
+
+// ---- AC 4: a held member does not lapse -----------------------------------------------------------
+
+/// **AC 4 (a), (e)** — a `five_hour` hold with a known instant. The window (two minutes) runs out
+/// while the session is on hold: the tick does not advance, does not consolidate, and arms the next
+/// look for the instant the hold lifts. Resumed, the session's obligation clock moves to the resume
+/// — the sweep 90 s later suspects nothing although the session holds no claim — and its answer
+/// starts the next step ONCE.
+#[test]
+fn a_member_on_hold_is_paused_past_its_window_and_its_clock_moves_on_resume() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify the build").thread_id;
+    let (s, slot) = team.last("verifier");
+    let until = at(600);
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", Some(&until), "limit")
+    })
+    .expect("the hold is recorded");
+
+    let r = team.tick(&at(180), &root);
+    assert_eq!(
+        team.worker.started("finisher"),
+        0,
+        "not advanced past a held step"
+    );
+    assert!(!team.needs_decision(&at(180), &root));
+    assert!(team.records().is_empty(), "a hold is not stranded");
+    assert!(
+        has(&r.warnings, ConsequenceClass::StepStillWaiting),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert!(
+        team.book
+            .windows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(t, due)| *t == root && *due == until),
+        "the next look is armed for the instant the hold lifts: {:?}",
+        team.book.windows.lock().unwrap()
+    );
+
+    let resumed = at(660);
+    team.with(&resumed, "service", None, |ctx, store| {
+        orchestration::resume_interrupted(
+            ctx,
+            store,
+            orchestration::ResumeRequest {
+                scope: orchestration::ResumeScope::Session(&s),
+                force: false,
+            },
+        )
+    })
+    .expect("resume");
+    assert_eq!(
+        team.worker.started("verifier"),
+        2,
+        "{:?}",
+        team.worker.starts()
+    );
+    assert_eq!(
+        team.owed(&slot, "verifier").map(|o| o.1),
+        Some(resumed.clone())
+    );
+    // AC 4 (e), build item 12: no claim at +90 — only the moved clock keeps it from a suspect.
+    team.tick(&at_from(&resumed, 90), &root);
+    assert_eq!(team.suspect(&slot), None);
+
+    team.answer(&at(700), "verifier", &s, &slot, "verified");
+    assert_eq!(
+        team.worker.started("finisher"),
+        1,
+        "the next step starts once"
+    );
+    team.tick(&at(800), &root);
+    assert_eq!(team.worker.started("finisher"), 1);
+    assert!(team.records().is_empty());
+}
+
+/// **AC 4 (d)** — a hold with NO instant arms nothing for it on decline, and the member stays
+/// paused — not lapsed, not recorded.
+#[test]
+fn a_hold_with_no_instant_arms_nothing_and_stays_paused() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify the build").thread_id;
+    let (s, _slot) = team.last("verifier");
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", None, "limit")
+    })
+    .expect("the hold is recorded");
+    let windows_before = team.book.windows.lock().unwrap().len();
+    team.tick(&at(300), &root);
+    let windows: Vec<(String, String)> =
+        team.book.windows.lock().unwrap()[windows_before..].to_vec();
+    assert!(
+        windows
+            .iter()
+            .all(|(_, due)| due.as_str() > at(300).as_str()),
+        "nothing armed for a past instant: {windows:?}"
+    );
+    assert_eq!(team.worker.started("finisher"), 0);
+    assert!(team.records().is_empty());
+}
+
+// ---- AC 5: false positives — each records NOTHING -------------------------------------------------
+
+/// Asserts the false-positive contract: no suspect kept, no record, no escalation on `slot`, and no
+/// start beyond `starts`.
+fn nothing_recorded(team: &Team, slot: &str, starts: &[&str]) {
+    assert_eq!(team.suspect(slot), None, "no suspect kept on {slot}");
+    assert!(team.records().is_empty(), "{:?}", team.records());
+    assert!(
+        team.messages(slot).iter().all(|m| m.1 != "escalation"),
+        "{:?}",
+        team.messages(slot)
+    );
+    assert_eq!(team.worker.starts(), starts);
+}
+
+/// **AC 5 (a)** — a session that holds a live claim from its trigger on is never suspected, and
+/// the look comes back one cadence out while it does.
+#[test]
+fn false_positive_a_running_session_is_never_suspected() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.worker.mark_running(&s);
+    team.two_looks(T0, &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+    assert_eq!(team.book.standing_look(&s).unwrap().due, at(240));
+}
+
+/// **AC 5 (b)** — a clean end after answering.
+#[test]
+fn false_positive_a_clean_end_after_answering() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.answer(&at(30), "verifier", &s, &slot, "verified");
+    team.end(&at(31), "verifier", &s);
+    team.two_looks(T0, &root);
+    team.tick(&at(400), &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+}
+
+/// **AC 5 (f)** — a standing quota hold, not due.
+#[test]
+fn false_positive_a_standing_hold() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", Some(&at(3600)), "x")
+    })
+    .unwrap();
+    team.two_looks(T0, &root);
+    team.tick(&at(400), &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+}
+
+/// **AC 5 (i)** — a worker that cannot look records nothing and says so ONCE per tick; the slot is
+/// settled as before (here: the two-minute window lapses and the flow advances, as it always did).
+#[test]
+fn false_positive_a_worker_that_cannot_look() {
+    let team = team(&[REVIEW_2M]);
+    team.worker.go_blind();
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (_s, slot) = team.last("verifier");
+    let r = team.tick(&at(180), &root);
+    let unknown = r
+        .warnings
+        .iter()
+        .filter(|f| f.class == ConsequenceClass::LivenessUnknown)
+        .count();
+    assert_eq!(unknown, 1, "{:?}", classes(&r.warnings));
+    assert_eq!(team.suspect(&slot), None);
+    assert!(team.records().is_empty());
+    assert_eq!(
+        team.worker.started("finisher"),
+        1,
+        "settled by its window, as before"
+    );
+}
+
+/// **AC 5 (m)** — the claim appears between the looks: the suspect goes, nothing is recorded.
+#[test]
+fn false_positive_a_claim_that_appears_between_the_looks() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.tick(&at(120), &root);
+    assert!(team.suspect(&slot).is_some());
+    team.worker.mark_running(&s);
+    team.tick(&at(180), &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+}
+
+/// **AC 5 (p)** — a slot opened BEFORE this version has no obligation record: no look, no record,
+/// and its window lapses and advances exactly as it did.
+#[test]
+fn false_positive_a_slot_from_before_this_version_lapses_as_before() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (_s, slot) = team.last("verifier");
+    team.sql("DELETE FROM owed_starts");
+    let r = team.tick(&at(180), &root);
+    assert_eq!(team.suspect(&slot), None);
+    assert!(team.records().is_empty());
+    assert_eq!(
+        team.worker.started("finisher"),
+        1,
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert!(has(&r.warnings, ConsequenceClass::StepUnanswered));
+}
+
+/// **AC 5 (r), build item 2** — the evidence tuple is load-bearing: the transcript grows between the
+/// looks, so nothing is recorded; the suspect is RESET to the new count, and the look re-armed one
+/// cadence out. Red when the comparison is deleted.
+#[test]
+fn false_positive_a_transcript_that_grows_between_the_looks_resets_the_suspect() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.tick(&at(120), &root);
+    assert_eq!(team.suspect(&slot).map(|x| x.1), Some(at(120)));
+    team.sql(&format!(
+        "INSERT INTO agent_transcript(internal_session, seq, kind, data) \
+         VALUES ('{s}', 1, 'assistant', '{{}}')"
+    ));
+    team.tick(&at(180), &root);
+    assert!(team.records().is_empty(), "{:?}", team.records());
+    assert_eq!(
+        team.suspect(&slot).map(|x| x.1),
+        Some(at(180)),
+        "reset, not deleted"
+    );
+    assert_eq!(team.book.standing_look(&s).unwrap().due, at(240));
+}
+
+/// **AC 5 (l)** — a slot of a round the supervisor is finished with. A hung reviewer lapsed and the
+/// parallel round was consolidated past it; its process then goes. Nothing is recorded: nothing
+/// would be woken by an answer there.
+#[test]
+fn false_positive_a_slot_of_a_consolidated_round() {
+    let team =
+        team(&["name: panel2m\nmembers: [verifier, reviewer]\nflow: parallel\ntimeout: 2m\n"]);
+    let root = team.commission(T0, "panel2m", "review").thread_id;
+    let (a, a_slot) = team.last("verifier");
+    let (b, b_slot) = team.last("reviewer");
+    team.worker.mark_running(&a);
+    // The hung verifier's window lapses (it is running, so it is settled as before); the reviewer's
+    // late answer then completes the set and the round is consolidated past the hung member.
+    team.tick(&at(180), &root);
+    team.answer(&at(190), "reviewer", &b, &b_slot, "LGTM");
+    assert_ne!(
+        team.messages(&root).len(),
+        1,
+        "the round was consolidated past the hung member"
+    );
+    team.worker.mark_gone(&a);
+    team.tick(&at(300), &root);
+    team.tick(&at(400), &root);
+    assert!(team.records().is_empty(), "{:?}", team.records());
+    assert_eq!(team.suspect(&a_slot), None);
+}
+
+// ---- AC 6: exactly one escalation, decided from the evidence ------------------------------------
+
+/// **AC 6 (b)** — the post LANDED and the stamp failed (an injected SQL trigger, the br25
+/// precedent). Exactly one escalation is on the slot, the record reads "not posted yet", and the
+/// next sweep finds the substituted escalation sent as the member, stamps it — and posts NOTHING.
+#[test]
+fn a_post_that_landed_while_its_stamp_failed_is_stamped_from_the_evidence_and_not_repeated() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (_s, slot) = team.last("verifier");
+    team.sql(
+        "CREATE TRIGGER inj_stamp BEFORE UPDATE OF escalation ON stranded_sessions \
+         WHEN NEW.escalation = 'posted' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    );
+    let r = team.two_looks(T0, &root);
+    assert!(
+        has(&r.warnings, ConsequenceClass::StrandedNotEscalated),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    let escalations = |team: &Team| {
+        team.messages(&slot)
+            .into_iter()
+            .filter(|m| m.1 == "escalation")
+            .count()
+    };
+    assert_eq!(escalations(&team), 1);
+    assert_eq!(team.records()[0].3, None);
+    assert_eq!(
+        team.status_of(&at(180), &slot)
+            .stranded
+            .map(|s| s.escalation),
+        Some(StrandedEscalation::Pending)
+    );
+
+    team.sql("DROP TRIGGER inj_stamp;");
+    team.tick(&at(240), &root);
+    assert_eq!(team.records()[0].3.as_deref(), Some("posted"));
+    assert_eq!(escalations(&team), 1, "posted NOTHING a second time");
+}
+
+/// **AC 6 (c) and the transient half of (d)** — a post that fails transiently, and a slot answered
+/// meanwhile — are proven in `stranded.rs`'s unit tests through an injected post: the op-log insert
+/// a SQL trigger could break here unwraps, so an injected failure there panics instead of returning
+/// the error the sweep handles. The PERMANENT half of (d) is a real refusal, end to end: the depth
+/// guard refuses a session past its cap (`validation`), and the escalation is given up at once.
+#[test]
+fn a_post_the_engine_refuses_for_good_is_given_up_on_the_first_attempt() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.sql(&format!(
+        "UPDATE session_map SET depth = 99 WHERE internal_id = '{s}'"
+    ));
+    let r = team.two_looks(T0, &root);
+    let finding = r
+        .warnings
+        .iter()
+        .find(|f| f.class == ConsequenceClass::StrandedNotEscalated)
+        .expect("the refusal is a finding");
+    assert!(finding.detail.contains("given up"), "{}", finding.detail);
+    assert_eq!(team.records()[0].3.as_deref(), Some("given_up"));
+    let row = team.status_of(&at(180), &slot).stranded.unwrap();
+    assert_eq!(row.escalation, StrandedEscalation::GivenUp);
+    let looks = team.book.looks_for(&s).len();
+    team.tick(&at(300), &root);
+    assert_eq!(
+        team.book.looks_for(&s).len(),
+        looks,
+        "nothing armed after giving up"
+    );
+    assert!(team.messages(&slot).iter().all(|m| m.1 != "escalation"));
+}
+
+// ---- AC 7: a pinned past clock -----------------------------------------------------------------
+
+/// **AC 7** — there is no cutover clock to predate: a whole scenario under a clock in 2024 records
+/// and escalates like any other.
+#[test]
+fn a_scenario_under_a_past_clock_records_like_any_other() {
+    let team = team(&[REVIEW]);
+    let past = "2024-03-01T08:00:00Z";
+    let root = team.commission(past, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.two_looks(past, &root);
+    assert_eq!(
+        team.records(),
+        vec![(slot, s, 2, Some("posted".to_string()))]
+    );
+}
+
+// ---- AC 8: order and arming -----------------------------------------------------------------------
+
+/// **AC 8 (a)** — the sweep runs BEFORE the thread's own move: at the tick where the window ends and
+/// the second look falls, the step is recorded and escalated, never advanced past.
+#[test]
+fn the_sweep_runs_before_the_window_is_read_on_the_same_tick() {
+    let team =
+        team(&["name: review3\nmembers: [verifier, finisher]\nflow: sequential\ntimeout: 3m\n"]);
+    let root = team.commission(T0, "review3", "verify").thread_id;
+    team.tick(&at(120), &root);
+    team.tick(&at(180), &root);
+    assert_eq!(team.records().len(), 1);
+    assert_eq!(
+        team.worker.started("finisher"),
+        0,
+        "{:?}",
+        team.worker.starts()
+    );
+    assert!(team.needs_decision(&at(180), &root));
+}
+
+/// **AC 8 (c)** — a session that ends still owing its thread arms the look at `ended + 120 s`; one
+/// that answered first arms nothing.
+#[test]
+fn a_session_end_arms_a_look_only_while_its_thread_is_still_owed() {
+    let team = team(&[PANEL]);
+    team.commission(T0, "panel", "review");
+    let (a, _a_slot) = team.last("verifier");
+    let (b, b_slot) = team.last("reviewer");
+    let before_b = team.book.looks_for(&b).len();
+    team.answer(&at(30), "reviewer", &b, &b_slot, "LGTM");
+    team.end(&at(31), "reviewer", &b);
+    assert_eq!(
+        team.book.looks_for(&b).len(),
+        before_b,
+        "an answered end arms nothing"
+    );
+
+    let ended = at(40);
+    let r = team.end(&ended, "verifier", &a);
+    assert!(r.warnings.is_empty(), "{:?}", classes(&r.warnings));
+    assert_eq!(
+        team.book.standing_look(&a).unwrap().due,
+        at_from(&ended, STRANDED_GRACE_SECS)
+    );
+}
+
+/// **AC 8 (d)** — the look's tick on a channel whose window is two hours away changes nothing but
+/// the suspect row.
+#[test]
+fn the_looks_tick_on_a_long_window_changes_nothing_but_the_suspect() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (_s, slot) = team.last("verifier");
+    let before = (team.messages(&root), team.messages(&slot));
+    let r = team.tick(&at(120), &root);
+    assert!(!r.acted);
+    assert_eq!(r.reason, "not_due");
+    assert_eq!((team.messages(&root), team.messages(&slot)), before);
+    assert!(team.suspect(&slot).is_some());
+}
+
+/// **AC 8 (e)** — retention: a stranded record older than thirty days is gone.
+#[test]
+fn a_stranded_record_older_than_a_month_is_dropped() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    team.two_looks(T0, &root);
+    assert_eq!(team.records().len(), 1);
+    team.tick(&at(31 * 24 * 3600), &root);
+    assert!(team.records().is_empty());
+}
+
+// ---- AC 3: no step past a dead step, no step on a missing declared input -----------------------
+
+/// The pb9y shape: `build -> verify -> judge -> finish`, `finish` reads the verify report and the
+/// verdict, every step two minutes long.
+const PB9Y: &str =
+    "name: coding\nmembers: [coder, verifier, judge, finisher]\ntimeout: 2m\nsteps:\n  \
+                    - id: build\n    target: coder\n    next: verify\n  \
+                    - id: verify\n    target: verifier\n    next: judge\n  \
+                    - id: judge\n    target: judge\n    next: finish\n  \
+                    - id: finish\n    target: finisher\n    input: [verify, judge]\n";
+
+/// [`PB9Y`] without the declared input — the shape where a hung verifier is advanced past as
+/// before (nxf 6j6v.rs9k).
+const PB9Y_NO_INPUT: &str =
+    "name: coding\nmembers: [coder, verifier, judge, finisher]\ntimeout: 2m\nsteps:\n  \
+                             - id: build\n    target: coder\n    next: verify\n  \
+                             - id: verify\n    target: verifier\n    next: judge\n  \
+                             - id: judge\n    target: judge\n    next: finish\n  \
+                             - id: finish\n    target: finisher\n";
+
+impl Team {
+    /// Commission the coding run and let the coder answer at `+10 s`; returns the root and the
+    /// instant the verify step started.
+    fn built(&self) -> (String, String) {
+        let root = self.commission(T0, "coding", "build T5").thread_id;
+        let (coder, coder_slot) = self.last("coder");
+        let started = at(10);
+        self.answer(&started, "coder", &coder, &coder_slot, "built");
+        assert_eq!(
+            self.worker.started("verifier"),
+            1,
+            "{:?}",
+            self.worker.starts()
+        );
+        (root, started)
+    }
+
+    /// [`built`](Self::built), commissioned by the `pm` persona's session.
+    fn built_for_pm(&self) -> (String, String) {
+        let root = self.commission_as_pm(T0, "coding", "build T5").thread_id;
+        let (coder, coder_slot) = self.last("coder");
+        let started = at(10);
+        self.answer(&started, "coder", &coder, &coder_slot, "built");
+        assert_eq!(
+            self.worker.started("verifier"),
+            1,
+            "{:?}",
+            self.worker.starts()
+        );
+        (root, started)
+    }
+
+    fn counts(&self) -> [usize; 4] {
+        ["coder", "verifier", "judge", "finisher"].map(|h| self.worker.started(h))
+    }
+}
+
+/// **AC 3 (a)** — `verify` never starts. At its window's end (BEFORE the record) the tick answers
+/// `Waiting` with `StepNotRunning` and `judge` is not opened; at the record, the round escalates.
+#[test]
+fn a_dead_step_is_not_advanced_past_and_the_round_escalates_at_the_record() {
+    let team = team(&[PB9Y]);
+    let (root, started) = team.built();
+    let (_v, v_slot) = team.last("verifier");
+
+    let window_end = at_from(&started, 121);
+    let r = team.tick(&window_end, &root);
+    assert!(!r.acted);
+    assert!(
+        has(&r.warnings, ConsequenceClass::StepNotRunning),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert_eq!(
+        team.counts(),
+        [1, 1, 0, 0],
+        "judge is not opened past a dead step"
+    );
+
+    team.tick(&at_from(&window_end, 60), &root);
+    assert_eq!(team.records().len(), 1, "{:?}", team.records());
+    assert_eq!(team.records()[0].0, v_slot);
+    assert!(team.needs_decision(&at(300), &root));
+    assert_eq!(team.counts(), [1, 1, 0, 0]);
+    assert_eq!(
+        team.messages(&v_slot),
+        vec![
+            ("__channel__".to_string(), "task".to_string(), false),
+            ("verifier".to_string(), "escalation".to_string(), true),
+        ]
+    );
+}
+
+/// **AC 3 (b)** — the hung case is KEPT (nxf 6j6v.rs9k): a verifier still RUNNING past its window,
+/// with no declared-input consumer behind it, is advanced past exactly as before, finding unchanged.
+#[test]
+fn a_hung_step_with_a_live_process_is_still_advanced_past() {
+    let team = team(&[PB9Y_NO_INPUT]);
+    let (root, started) = team.built();
+    let (v, _v_slot) = team.last("verifier");
+    team.worker.mark_running(&v);
+    let r = team.tick(&at_from(&started, 121), &root);
+    assert_eq!(r.reason, "advanced", "{:?}", classes(&r.warnings));
+    assert_eq!(team.counts(), [1, 1, 1, 0]);
+    let lapse = r
+        .warnings
+        .iter()
+        .find(|f| f.class == ConsequenceClass::StepUnanswered)
+        .expect("the lapse is a finding");
+    assert_eq!(
+        lapse.detail,
+        "step \"verify\" gave no answer inside its declared window; the flow advanced to step \
+         \"judge\" without it"
+    );
+    assert!(team.records().is_empty());
+}
+
+/// **AC 3 (c)** — as (b), but `finish` declares `input: [verify, judge]`: `judge` answers, and
+/// `finish` is NOT opened — the round escalates, naming `finish`, `verify`, verify's slot and its
+/// session's state.
+#[test]
+fn a_step_whose_declared_input_stayed_silent_is_not_opened() {
+    let team = team(&[PB9Y]);
+    let (root, started) = team.built_for_pm();
+    let (v, v_slot) = team.last("verifier");
+    team.worker.mark_running(&v);
+    team.tick(&at_from(&started, 121), &root);
+    assert_eq!(team.counts(), [1, 1, 1, 0]);
+    let (j, j_slot) = team.last("judge");
+    team.answer(&at(200), "judge", &j, &j_slot, "approved");
+
+    assert_eq!(team.counts(), [1, 1, 1, 0], "finish is never opened");
+    assert!(team.needs_decision(&at(200), &root));
+    // The commissioner is woken ONCE, with the escalation and its note.
+    assert_eq!(team.worker.started("pm"), 1, "{:?}", team.worker.starts());
+    let note = team.worker.last_for("pm").message;
+    for named in [
+        "\"finish\"",
+        "\"verify\"",
+        v_slot.as_str(),
+        v.as_str(),
+        "still running",
+    ] {
+        assert!(note.contains(named), "the note names {named}: {note}");
+    }
+}
+
+/// **AC 3 (e)** — a substitute is not an answer: verify's session ends and the runtime's teardown
+/// posts a substituted, non-escalating reply that discharges its slot. `judge` opens on it (the
+/// default edge, unchanged) — and `finish`, which declares verify's report, does NOT.
+#[test]
+fn a_step_whose_declared_input_was_answered_only_by_a_substitute_is_not_opened() {
+    let team = team(&[PB9Y]);
+    let (root, _started) = team.built();
+    let (v, v_slot) = team.last("verifier");
+    team.with(&at(20), "verifier", Some(&v), |ctx, store| {
+        surface::settle_if_unanswered(
+            ctx,
+            store,
+            ReplyThreadRequest {
+                machine: None,
+                thread: &v_slot,
+                body: "the session ended without answering",
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+    })
+    .expect("the teardown's substitute");
+    assert_eq!(team.counts(), [1, 1, 1, 0]);
+    let (j, j_slot) = team.last("judge");
+    team.answer(&at(30), "judge", &j, &j_slot, "approved");
+    assert_eq!(
+        team.counts(),
+        [1, 1, 1, 0],
+        "finish is not opened on a substitute"
+    );
+    assert!(team.needs_decision(&at(30), &root));
 }

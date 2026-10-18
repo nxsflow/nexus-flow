@@ -8081,6 +8081,21 @@ fn open_flow_step(
         Coordinator::Channel,
         SpawnFailure::Propagated,
     )?;
+    // **The stranded look this step's start could not arm travels up** (nxf 6j6v.ccvy) — onto the
+    // receipt of whoever opened the step, the only receipt a caller of a channel reads. Only those
+    // findings: everything else this commission noticed is already reported where it always was.
+    findings.extend(
+        started
+            .warnings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.class,
+                    ConsequenceClass::TickUnscheduled | ConsequenceClass::StepNotRunning
+                ) && f.session.as_deref() == Some(started.session.as_str())
+            })
+            .cloned(),
+    );
     // Arm this member's clock (nxf 6j6v.nf38). AFTER the trigger, because the session it names
     // is the one the trigger minted — the single session standing on this thread, and therefore
     // the only transcript whose writes are a sign of life FROM THIS MEMBER.

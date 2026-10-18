@@ -458,6 +458,21 @@ impl ChatStore {
         Ok(n > 0)
     }
 
+    /// Whether `(thread, role)` was already recorded against `trigger_clock`.
+    pub(crate) fn stranded_recorded(
+        &self,
+        thread: &str,
+        role: &str,
+        trigger_clock: &str,
+    ) -> Result<bool> {
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM stranded_sessions
+                WHERE thread = ?1 AND role = ?2 AND trigger_clock = ?3)",
+            params![thread, role, trigger_clock],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The records whose escalation is still to be settled — NULL and not superseded. The stamp
     /// retry iterates THIS, never the sweep's candidates (which need the role still outstanding,
     /// and a posted escalation is exactly what discharges it).
@@ -979,6 +994,12 @@ fn judge(
     if q.held || crate::orchestration::is_engine_identity(h) {
         return not_now(store);
     }
+    // Already recorded against THIS clock: the record and its escalation are the sweep's answer
+    // until a later trigger moves the clock. Judging it again would re-suspect it and re-arm a look
+    // on every tick — for ever, after an escalation that was given up.
+    if store.stranded_recorded(t, h, &row.trigger_clock)? {
+        return not_now(store);
+    }
     if store
         .round_is_finished_with(t, ctx.origin, ctx.now)?
         .is_some()
@@ -1232,6 +1253,43 @@ fn settle_escalation(
     store: &mut ChatStore,
     rec: &StrandedRecord,
 ) -> Vec<FailedConsequence> {
+    settle_escalation_with(ctx, store, rec, &mut post_as_the_member)
+}
+
+/// The escalation's one way out: posted AS the member, by the runtime, through the door the
+/// sidecar's teardown uses (`surface::settle_if_unanswered`'s body). `Some(message id)` when it was
+/// posted, `None` when nothing was owed any more.
+fn post_as_the_member(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    rec: &StrandedRecord,
+    body: &str,
+) -> Result<Option<String>> {
+    let bare = rec
+        .role
+        .rsplit_once('/')
+        .map_or(rec.role.as_str(), |(_, b)| b)
+        .to_string();
+    let as_member = Ctx {
+        actor: &bare,
+        session: Some(&rec.session),
+        ..*ctx
+    };
+    let receipt =
+        crate::surface::reply_as_the_runtime_for(&as_member, store, &rec.thread, body, true)?;
+    Ok(receipt.message_id.filter(|_| receipt.posted))
+}
+
+/// How [`settle_escalation_with`] posts — the seam its tests inject a failing post through.
+type Poster<'p> =
+    dyn FnMut(&Ctx, &mut ChatStore, &StrandedRecord, &str) -> Result<Option<String>> + 'p;
+
+fn settle_escalation_with(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    rec: &StrandedRecord,
+    post: &mut Poster<'_>,
+) -> Vec<FailedConsequence> {
     let mut findings = Vec::new();
     // The evidence FIRST: a post an earlier sweep made, whose stamp did not land, is not posted
     // again.
@@ -1251,23 +1309,14 @@ fn settle_escalation(
         }
     }
     let body = escalation_body(store, rec);
-    let bare = rec
-        .role
-        .rsplit_once('/')
-        .map_or(rec.role.as_str(), |(_, b)| b)
-        .to_string();
-    let as_member = Ctx {
-        actor: &bare,
-        session: Some(&rec.session),
-        ..*ctx
-    };
-    match crate::surface::reply_as_the_runtime_for(&as_member, store, &rec.thread, &body, true) {
-        Ok(receipt) if receipt.posted && receipt.message_id.is_some() => {
+    match post(ctx, store, rec, &body) {
+        // Posted, and the receipt names the message: that IS the evidence (build item 15).
+        Ok(Some(_message)) => {
             stamp(store, rec, Escalation::Posted, Some(ctx.now), &mut findings);
         }
         outcome => {
-            // Not posted, or an error: the evidence decides — and only after an error is it read
-            // again, since a post that DID land is the one case a receipt can get wrong.
+            // Not posted, or an error: the evidence decides — read again only now, since a post
+            // that DID land is the one case a receipt can get wrong.
             if let Some(at) = posted_evidence(store, rec) {
                 stamp(store, rec, Escalation::Posted, Some(&at), &mut findings);
                 return findings;
@@ -1595,5 +1644,240 @@ mod tests {
             .unwrap();
         s.forget_owed_start("m-t", "ws/verifier").unwrap();
         assert_eq!(s.stranded_suspect("m-t", "ws/verifier").unwrap(), None);
+    }
+
+    // ---- the escalation's bounded retry, through an injected post (AC 6 c, d) -------------------
+
+    /// A worker that accepts every start and runs nothing.
+    struct Accepts;
+    impl crate::worker::Worker for Accepts {
+        fn trigger(&self, _req: crate::worker::TriggerRequest) -> crate::worker::TriggerResult {
+            Ok(crate::worker::TriggerOutcome::Accepted)
+        }
+        fn answers_liveness(&self) -> bool {
+            true
+        }
+    }
+
+    /// A timer that counts the looks it was asked to arm.
+    #[derive(Default)]
+    struct Looks(std::sync::Mutex<Vec<String>>);
+    impl crate::timer::Timer for Looks {
+        fn schedule(
+            &self,
+            thread: &str,
+            _deadline: &str,
+            _command: &str,
+        ) -> Result<crate::timer::TimerHandle> {
+            Ok(crate::timer::TimerHandle(thread.to_string()))
+        }
+        fn schedule_stranded_look(
+            &self,
+            session: &str,
+            _thread: &str,
+            deadline: &str,
+        ) -> Result<crate::timer::TimerHandle> {
+            self.0.lock().unwrap().push(format!("{session}@{deadline}"));
+            Ok(crate::timer::TimerHandle(session.to_string()))
+        }
+        fn cancel(&self, _handle: &crate::timer::TimerHandle) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Scene {
+        _tmp: tempfile::TempDir,
+        store: ChatStore,
+        defs: crate::definitions::Definitions,
+        origin: String,
+        db: String,
+        looks: Looks,
+        rec: StrandedRecord,
+    }
+
+    impl Scene {
+        fn ctx<'a>(&'a self, now: &'a str, actor: &'a str, session: Option<&'a str>) -> Ctx<'a> {
+            Ctx {
+                now,
+                origin: &self.origin,
+                actor,
+                session,
+                hop: 0,
+                defs: &self.defs,
+                worker: &Accepts,
+                timer: &self.looks,
+                namer: &crate::naming::DryNamer,
+                db_path: &self.db,
+                project_claude_md: None,
+                module_primes: None,
+                machines: None,
+                peers: None,
+            }
+        }
+
+        fn escalations(&self) -> usize {
+            self.store
+                .acting_messages_in_thread(&self.rec.thread)
+                .unwrap()
+                .iter()
+                .filter(|m| m.kind == "escalation")
+                .count()
+        }
+
+        fn row(&self) -> StrandedRecord {
+            self.store.stranded_records().unwrap().remove(0)
+        }
+    }
+
+    /// A human commissions `verifier` directly; its session never starts, and the record is written.
+    fn scene() -> Scene {
+        use crate::workspace::ChatWorkspaceExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::workspace::setup(tmp.path(), &crate::workspace::chat_config()).unwrap();
+        let ws = crate::workspace::Workspace::resolve(None, tmp.path()).unwrap();
+        let origin = crate::workspace::origin_of(&ws).to_string();
+        let db = ws.db_path_str().unwrap();
+        let store = ws.open_chat_store().unwrap();
+        let role = |h: &str| -> crate::role::RoleDecl {
+            serde_yaml::from_str(&format!("handle: {h}\nsystem_prompt: You are {h}.\n")).unwrap()
+        };
+        let defs = crate::definitions::Definitions::new(vec![role("pm"), role("verifier")], vec![])
+            .unwrap();
+        let mut scene = Scene {
+            _tmp: tmp,
+            store,
+            defs,
+            origin,
+            db,
+            looks: Looks::default(),
+            rec: record(T0),
+        };
+        let sent = {
+            let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+            let ctx = scene.ctx(T0, "pm", None);
+            let sent = crate::surface::send_to(
+                &ctx,
+                &mut store,
+                crate::surface::SendToRequest {
+                    machine: None,
+                    to: "verifier",
+                    body: "verify",
+                    refs: crate::surface::SendToRefs::ExplicitlyNone,
+                },
+            )
+            .unwrap();
+            scene.store = store;
+            sent
+        };
+        scene.rec = StrandedRecord {
+            thread: sent.thread_id.clone(),
+            role: format!("{}/verifier", scene.origin),
+            session: sent.session.clone().unwrap(),
+            ..record(T0)
+        };
+        assert!(scene.store.record_stranded(&scene.rec).unwrap());
+        scene
+    }
+
+    fn settle(scene: &mut Scene, now: &str, post: &mut Poster<'_>) -> Vec<FailedConsequence> {
+        let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+        let rec = scene.rec.clone();
+        let findings = {
+            let ctx = scene.ctx(now, "service", None);
+            settle_escalation_with(&ctx, &mut store, &rec, post)
+        };
+        scene.store = store;
+        findings
+    }
+
+    fn io(_: &Ctx, _: &mut ChatStore, _: &StrandedRecord, _: &str) -> Result<Option<String>> {
+        Err(crate::error::NxfError::io("database is locked (injected)"))
+    }
+
+    /// **AC 6 (d), build item 5**: a transient error is retried on at most three sweeps, a further
+    /// look is armed after each failed attempt, and then the escalation is given up — and nothing is
+    /// armed after that.
+    #[test]
+    fn a_transient_post_failure_is_retried_three_times_with_a_look_each_then_given_up() {
+        let mut scene = scene();
+        let looks_before = scene.looks.0.lock().unwrap().len();
+        for (n, now) in [(1, "2026-10-18T10:03:00Z"), (2, "2026-10-18T10:04:00Z")] {
+            let findings = settle(&mut scene, now, &mut io);
+            assert!(findings
+                .iter()
+                .any(|f| f.class == ConsequenceClass::StrandedNotEscalated));
+            let row = scene.row();
+            assert_eq!(row.escalation, None);
+            assert_eq!(row.escalation_attempts, n);
+            assert_eq!(
+                scene.looks.0.lock().unwrap().len(),
+                looks_before + n as usize,
+                "a look after each failed attempt"
+            );
+        }
+        let findings = settle(&mut scene, "2026-10-18T10:05:00Z", &mut io);
+        let last = findings
+            .iter()
+            .find(|f| f.class == ConsequenceClass::StrandedNotEscalated)
+            .expect("the final finding");
+        assert!(last.detail.contains("given up"), "{}", last.detail);
+        assert_eq!(scene.row().escalation, Some(Escalation::GivenUp));
+        assert_eq!(
+            scene.looks.0.lock().unwrap().len(),
+            looks_before + 2,
+            "nothing armed after giving up"
+        );
+        assert_eq!(scene.escalations(), 0);
+    }
+
+    /// **AC 6 (c)**: the post failed, and then the member answered for real. The next sweep reads
+    /// the slot as answered and does NOT post: `already_answered`, with its finding, and zero
+    /// escalations on the thread.
+    #[test]
+    fn a_failed_post_followed_by_a_real_answer_is_already_answered_and_posts_nothing() {
+        let mut scene = scene();
+        settle(&mut scene, "2026-10-18T10:03:00Z", &mut io);
+        assert_eq!(scene.row().escalation, None);
+        {
+            let rec = scene.rec.clone();
+            let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+            let ctx = scene.ctx("2026-10-18T10:03:30Z", "verifier", Some(&rec.session));
+            crate::surface::reply_in_thread(
+                &ctx,
+                &mut store,
+                crate::surface::ReplyThreadRequest {
+                    machine: None,
+                    thread: &rec.thread,
+                    body: "verified after all",
+                    escalate: false,
+                    needs_rework: false,
+                    accept: false,
+                },
+            )
+            .unwrap();
+            scene.store = store;
+        }
+        let mut must_not_post = |_: &Ctx, _: &mut ChatStore, _: &StrandedRecord, _: &str| {
+            panic!("a slot that was answered is not escalated")
+        };
+        let findings = settle(&mut scene, "2026-10-18T10:04:00Z", &mut must_not_post);
+        assert!(findings
+            .iter()
+            .any(|f| f.class == ConsequenceClass::StrandedEscalationSkipped));
+        assert_eq!(scene.row().escalation, Some(Escalation::AlreadyAnswered));
+        assert_eq!(scene.escalations(), 0);
+    }
+
+    /// **AC 6 (d)'s other half**: a PERMANENT refusal gives up on the first attempt.
+    #[test]
+    fn a_permanent_refusal_gives_up_at_once() {
+        let mut scene = scene();
+        let mut refused = |_: &Ctx, _: &mut ChatStore, _: &StrandedRecord, _: &str| {
+            Err(crate::error::NxfError::forbidden("refused (injected)"))
+        };
+        settle(&mut scene, "2026-10-18T10:03:00Z", &mut refused);
+        let row = scene.row();
+        assert_eq!(row.escalation, Some(Escalation::GivenUp));
+        assert_eq!(row.escalation_attempts, 1);
     }
 }
