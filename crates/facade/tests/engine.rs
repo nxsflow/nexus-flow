@@ -773,6 +773,13 @@ type = "datetime"
 [fields.emails]
 type = "text"
 list = true
+[fields.blocker_of]
+type = "ref"
+targets = ["task"]
+[fields.watchers]
+type = "ref"
+targets = ["task"]
+list = true
 "#,
     order: 101,
 });
@@ -1223,6 +1230,74 @@ fn engine_update_stores_a_datetime_custom_value_in_utc_and_reads_it_back() {
         .expect("schema lists the datetime field");
     assert_eq!(field.kind, "datetime");
     assert!(field.custom && field.settable);
+}
+
+// ---- ref fields at the Engine seam (6j6v.9tx3) --------------------------------------------------
+
+#[test]
+fn engine_update_sets_a_ref_and_show_value_resolves_it() {
+    // The embedding seam app-foundations drives: `Engine::update --set <ref>=<id>` and
+    // `field_entry_add` on a list ref, read back by `Engine::show_value` under `custom` and `refs`.
+    let tmp = seeded_fields_workspace();
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    engine
+        .update(
+            NOW,
+            "tester",
+            "cf12.0004",
+            &["blocker_of=cf12.0005".to_string()],
+        )
+        .unwrap();
+    engine
+        .field_entry_add(
+            NOW,
+            "tester",
+            "cf12.0004",
+            "watchers",
+            "cf12.0001",
+            Some("lead"),
+        )
+        .unwrap();
+    let v = engine.show_value("cf12.0004").unwrap();
+    assert_eq!(v["custom"]["blocker_of"], "cf12.0005");
+    assert_eq!(
+        v["custom"]["watchers"],
+        serde_json::json!([{ "value": "cf12.0001", "label": "lead" }])
+    );
+    assert_eq!(v["refs"]["blocker_of"][0]["id"], "cf12.0005");
+    assert_eq!(v["refs"]["blocker_of"][0]["found"], serde_json::json!(true));
+    assert_eq!(v["refs"]["blocker_of"][0]["type"], "task");
+    assert_eq!(
+        v["refs"]["watchers"][0]["status"], "closed",
+        "a closed target is a valid target"
+    );
+    // The seam refuses what the facade refuses, and writes nothing.
+    let err = engine
+        .update(
+            NOW,
+            "tester",
+            "cf12.0004",
+            &["blocker_of=cf12.0004".to_string()],
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(err.msg.contains("cannot reference itself"), "{}", err.msg);
+    let err = engine
+        .field_entry_add(NOW, "tester", "cf12.0004", "watchers", "cf12.9999", None)
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotFound);
+    assert_eq!(
+        engine.show_value("cf12.0004").unwrap()["custom"]["blocker_of"],
+        "cf12.0005"
+    );
+    let schema = read::schema(&engine.plugin_config());
+    let field = schema
+        .fields
+        .iter()
+        .find(|f| f.field == "watchers")
+        .unwrap();
+    assert_eq!(field.kind, "ref");
+    assert_eq!(field.targets.as_deref(), Some(&["task".to_string()][..]));
 }
 
 // ---- list fields at the Engine seam (6j6v.4g6r) -------------------------------------------------

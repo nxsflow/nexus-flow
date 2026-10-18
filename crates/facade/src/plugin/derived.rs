@@ -249,6 +249,14 @@ impl Ranking {
                             of.field
                         ));
                     }
+                    // A ref holds an item id (6j6v.9tx3): comparing ids ranks by nothing.
+                    Some(decl) if decl.field_type == crate::plugin::FieldType::Ref => {
+                        return Err(format!(
+                            "{scope}ranking key {desc} reads `of` field '{}', which is a ref \
+                             field — a ref holds an id, not a value to rank by",
+                            of.field
+                        ));
+                    }
                     Some(decl) => {
                         if let Some(ty) = &key.item_type {
                             if !decl.on.is_empty() && !decl.on.contains(ty) {
