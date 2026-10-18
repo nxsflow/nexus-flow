@@ -215,6 +215,12 @@ pub fn try_apply_flow_views(conn: &Connection) -> rusqlite::Result<bool> {
          -- full scan — same reasoning as `label_adds_item` above.
          CREATE INDEX IF NOT EXISTS thread_link_adds_item ON thread_link_adds(item_id);
          CREATE INDEX IF NOT EXISTS thread_link_adds_thread ON thread_link_adds(thread_id);
+         -- The reverse reference lookup (6j6v.9tx3, `Store::referenced_by_bulk`): which items hold
+         -- value X in field F, over a field's single values and its list entries. Indexes, not
+         -- columns: derived, gained at the next open by every existing workspace — a based one
+         -- included — with no refold and no fold-revision move; an image carries rows, not indexes.
+         CREATE INDEX IF NOT EXISTS custom_fields_by_value ON custom_fields(field, value);
+         CREATE INDEX IF NOT EXISTS field_entries_by_value ON field_entries(field, value);
 
          -- The snapshots `next --paginate` hands out pages from (6j6v.15ed). MACHINE-LOCAL: not a
          -- view, folded from nothing, never in `TaskReducer::view_tables`, so no snapshot image and
