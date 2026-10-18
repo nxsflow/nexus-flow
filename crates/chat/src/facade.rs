@@ -770,6 +770,8 @@ pub struct StatusThread {
     pub stranded: Option<StrandedStatus>,
 }
 
+pub use crate::stranded::Observation;
+
 /// **A stranded session as a status row shows it** (nxf 6j6v.ccvy).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -778,9 +780,10 @@ pub struct StrandedStatus {
     pub session: String,
     /// When the sweep recorded it.
     pub recorded_at: String,
-    /// Which of the five observations it was recorded on, by the number the design gives them:
-    /// 1 never started, 2 never bound, 3 ended without answering, 4 no live process, 5 start given up.
-    pub observed: u8,
+    /// Which of the five observations it was recorded on (`never_started`, `never_bound`,
+    /// `ended_without_answer`, `no_live_process`, `start_given_up` — numbered 1-5 in the design, in
+    /// that order; [`Observation::number`]).
+    pub observed: Observation,
     /// The observation in words, with its instants.
     pub detail: String,
     /// Whether the escalation in the member's name is on the thread.
@@ -820,7 +823,7 @@ impl StrandedStatus {
         StrandedStatus {
             session: r.session.clone(),
             recorded_at: r.recorded_at.clone(),
-            observed: r.observed.number(),
+            observed: r.observed,
             detail: r.detail.clone(),
             escalated: escalation == StrandedEscalation::Posted,
             escalation,
@@ -4754,8 +4757,6 @@ fn last_replies_for(store: &ChatStore, ids: &[&str], total: usize) -> Result<Las
     Ok(marks)
 }
 
-/// [`quorums_for`]'s twin for "where did the working copy stand at this thread's newest handover?"
-/// (nxf 6j6v.2af2). Same ceiling, same fallback as its three siblings above.
 /// The CURRENT stranded record of each of `ids`, by thread (nxf 6j6v.ccvy) — one statement, under
 /// [`MAX_BOUND_IDS`] like its siblings, and the whole (small) table above it.
 fn stranded_for(
@@ -4774,6 +4775,8 @@ fn stranded_for(
     store.current_stranded_by_threads(ids)
 }
 
+/// [`quorums_for`]'s twin for "where did the working copy stand at this thread's newest handover?"
+/// (nxf 6j6v.2af2). Same ceiling, same fallback as its three siblings above.
 fn anchors_for(
     store: &ChatStore,
     ids: &[&str],

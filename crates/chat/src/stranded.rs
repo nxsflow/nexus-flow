@@ -111,7 +111,7 @@ pub const STRANDED_RETENTION_DAYS: i64 = 30;
 
 /// **The obligation record** — thread `thread` owes an answer from `role`, and `session` owes it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct OwedStart {
+pub(crate) struct OwedStart {
     pub thread: String,
     /// The qualified handle, as the thread register names it.
     pub role: String,
@@ -249,12 +249,18 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
         trigger_clock: r.get(3)?,
         judged_from: r.get(4)?,
         recorded_at: r.get(5)?,
-        // A number this build does not know is a record a newer build wrote; reading it as the
-        // nearest thing it could mean would put words in its mouth, and dropping the row would hide
-        // it. "No live process" is the most general of the five and is never wrong about a stranded
-        // session.
+        // A number this build does not know is a record a newer build wrote. Dropping the row would
+        // hide it; so it reads as "no live process" — the most general of the five, never wrong about
+        // a stranded session — and its detail SAYS which number it carried, so nothing shows a
+        // newer observation as if it were that one.
         observed: Observation::from_number(observed).unwrap_or(Observation::NoLiveProcess),
-        detail: r.get(7)?,
+        detail: match Observation::from_number(observed) {
+            Some(_) => r.get(7)?,
+            None => format!(
+                "{} (recorded as observation {observed}, which this build does not know)",
+                r.get::<_, String>(7)?
+            ),
+        },
         escalation: escalation.as_deref().and_then(Escalation::parse),
         escalation_attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
         escalated_at: r.get(10)?,
@@ -326,7 +332,7 @@ impl ChatStore {
     }
 
     /// The obligation record for `(thread, role)`, if one was written.
-    pub fn owed_start(&self, thread: &str, role: &str) -> Result<Option<OwedStart>> {
+    pub(crate) fn owed_start(&self, thread: &str, role: &str) -> Result<Option<OwedStart>> {
         Ok(self
             .connection()
             .query_row(
@@ -340,7 +346,7 @@ impl ChatStore {
 
     /// Every obligation record, in `(thread, role)` order — the sweep's work list. Bounded by what is
     /// open: the sweep deletes a row one look after its thread stops owing the role.
-    pub fn owed_starts(&self) -> Result<Vec<OwedStart>> {
+    pub(crate) fn owed_starts(&self) -> Result<Vec<OwedStart>> {
         let conn = self.connection();
         let mut st = conn.prepare(
             "SELECT thread, role, session, trigger_clock, triggered FROM owed_starts
@@ -585,12 +591,23 @@ impl ChatStore {
         Ok(rows)
     }
 
-    /// **Retention**: drop the records written before `cutoff`. Returns how many went.
+    /// **Retention**: drop the records written before `cutoff`. Returns how many went. Compared as
+    /// instants, for [`supersede_older`]'s reason; the table holds what was stranded in a month.
     pub(crate) fn forget_stranded_before(&mut self, cutoff: &str) -> Result<usize> {
-        Ok(self.connection().execute(
-            "DELETE FROM stranded_sessions WHERE recorded_at < ?1",
-            params![cutoff],
-        )?)
+        let conn = self.connection();
+        let stamps: Vec<String> = {
+            let mut st = conn.prepare("SELECT DISTINCT recorded_at FROM stranded_sessions")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut gone = 0;
+        for stamp in stamps.iter().filter(|s| earlier(s, cutoff)) {
+            gone += conn.execute(
+                "DELETE FROM stranded_sessions WHERE recorded_at = ?1",
+                params![stamp],
+            )?;
+        }
+        Ok(gone)
     }
 
     /// How many transcript entries `session` has written — half of the first look's evidence.
@@ -627,18 +644,187 @@ impl ChatStore {
 
 /// Stamp every current record of `(thread, role)` judged against a clock OLDER than `clock` as
 /// superseded — a later trigger of the obligation ended them.
+///
+/// Compared as INSTANTS in Rust, never as text in SQL: a fractional second and a whole one, or two
+/// offsets, do not sort as strings the way they do as time. The rows are one obligation's records,
+/// a handful at most.
 fn supersede_older(
     conn: &rusqlite::Connection,
     thread: &str,
     role: &str,
     clock: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE stranded_sessions SET superseded_at = ?3
-          WHERE thread = ?1 AND role = ?2 AND superseded_at IS NULL AND trigger_clock < ?3",
-        params![thread, role, clock],
-    )?;
+    let clocks: Vec<String> = {
+        let mut st = conn.prepare(
+            "SELECT trigger_clock FROM stranded_sessions
+              WHERE thread = ?1 AND role = ?2 AND superseded_at IS NULL",
+        )?;
+        let rows = st.query_map(params![thread, role], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for older in clocks.iter().filter(|c| earlier(c, clock)) {
+        conn.execute(
+            "UPDATE stranded_sessions SET superseded_at = ?4
+              WHERE thread = ?1 AND role = ?2 AND trigger_clock = ?3",
+            params![thread, role, older, clock],
+        )?;
+    }
     Ok(())
+}
+
+/// Whether instant `a` is strictly before instant `b`. An instant that does not parse is never
+/// earlier — the fail-safe direction for both callers is "leave the row as it is".
+fn earlier(a: &str, b: &str) -> bool {
+    use time::format_description::well_known::Rfc3339;
+    match (
+        time::OffsetDateTime::parse(a, &Rfc3339),
+        time::OffsetDateTime::parse(b, &Rfc3339),
+    ) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => false,
+    }
+}
+
+// ---- what is still coming ------------------------------------------------------------------
+
+/// **"This member's answer is still coming"** — the one predicate over a member's OWED session
+/// (nxf 6j6v.ccvy). Each reason pauses the member's window, unbounded in this cut by decision: each
+/// is recorded and visible, and each has its own exit (6j6v.21xy owns what a due hold nothing takes
+/// up should become).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StillComing {
+    /// In the working-copy queue (nxf 6j6v.1wep).
+    Queued,
+    /// A failed start whose retry is due (nxf 6j6v.br25).
+    RetryDue,
+    /// The owed session has a standing hold — the model went away (5dzm (a), 0990). `until` is the
+    /// instant the runtime named, when it named one.
+    OnHold {
+        limit: String,
+        until: Option<String>,
+    },
+    /// The member opened a sub-round of its own and that round is still in flight (its own window,
+    /// its own slots — if IT strands, the sweep escalates it there).
+    SubRoundInFlight,
+    /// An answer is held for the owed session, to be handed over when its turn ends — from a thread
+    /// that is not a child of this slot (a consultation the session opened from where it stood
+    /// before, since a session's position moves). A held answer to a sub-round of THIS slot is
+    /// [`SubRoundInFlight`](StillComing::SubRoundInFlight) already (build item 8).
+    HeldDelivery,
+}
+
+impl StillComing {
+    /// The reason in words, for the receipt.
+    pub(crate) fn says(&self) -> String {
+        match self {
+            StillComing::Queued => "its start still waits for the working copy".to_string(),
+            StillComing::RetryDue => "its start failed and a retry is due".to_string(),
+            StillComing::OnHold { limit, until } => match until {
+                Some(until) => format!("its session is on hold ({limit}) until {until}"),
+                None => format!("its session is on hold ({limit}) with no instant named"),
+            },
+            StillComing::SubRoundInFlight => {
+                "it is waiting for a round it commissioned itself".to_string()
+            }
+            StillComing::HeldDelivery => {
+                "an answer is held for its session, to be handed over when its turn ends"
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// **What the "still coming" predicate reads in bulk** — taken once per call that walks a set, so
+/// both readers ([`crate::orchestration`]'s member set and this module's sweep) hand the same facts
+/// to the same predicate.
+pub(crate) struct PauseFacts {
+    /// Threads whose trigger waits in the working-copy queue.
+    queued: std::collections::HashSet<String>,
+    /// Every failed start on record.
+    failed: Vec<crate::working_tree::FailedStart>,
+    /// Threads whose answer is held for a commissioner still mid-turn.
+    held_answers: std::collections::HashSet<String>,
+}
+
+impl PauseFacts {
+    pub(crate) fn read(store: &ChatStore) -> Result<PauseFacts> {
+        Ok(PauseFacts {
+            queued: store
+                .list_working_tree_queue()?
+                .into_iter()
+                .filter_map(|q| q.thread)
+                .collect(),
+            failed: store.failed_starts()?,
+            held_answers: store.threads_holding_wakes()?,
+        })
+    }
+
+    /// The failed start that belongs to this slot: recorded against its THREAD (the queue's own
+    /// key, and the only one a slot without an obligation record has) or against its OWED SESSION.
+    /// One keying for both readers.
+    fn failed_start(
+        &self,
+        thread: &str,
+        owed: Option<&str>,
+    ) -> Option<&crate::working_tree::FailedStart> {
+        self.failed
+            .iter()
+            .find(|f| f.thread.as_deref() == Some(thread) || owed.is_some_and(|s| f.session == s))
+    }
+
+    /// A start of this slot that failed and will NOT be retried — the sweep's observation 5.
+    pub(crate) fn given_up(
+        &self,
+        thread: &str,
+        owed: &str,
+    ) -> Option<&crate::working_tree::FailedStart> {
+        self.failed_start(thread, Some(owed))
+            .filter(|f| f.retry_at.is_none())
+    }
+}
+
+/// **"This member's answer is still coming"** — THE predicate (nxf 6j6v.ccvy, A), asked by the
+/// member-set read that decides settledness and by the stranded sweep's rules 2-4 alike, so what
+/// "paused" means is written once. `owed` is the slot's owed session (`None` for a slot with no
+/// obligation record, where only the queue and a retry can say anything). `None` when its answer is
+/// not coming by any of the five routes.
+pub(crate) fn member_answer_is_still_coming(
+    now: &str,
+    store: &ChatStore,
+    member: &crate::store::ThreadQuorum,
+    owed: Option<&str>,
+    facts: &PauseFacts,
+) -> Result<Option<StillComing>> {
+    if facts.queued.contains(&member.thread_id) {
+        return Ok(Some(StillComing::Queued));
+    }
+    if facts
+        .failed_start(&member.thread_id, owed)
+        .is_some_and(|f| f.retry_at.is_some())
+    {
+        return Ok(Some(StillComing::RetryDue));
+    }
+    let Some(session) = owed else {
+        return Ok(None);
+    };
+    if let Some(hold) = store.current_interruption(session)? {
+        return Ok(Some(StillComing::OnHold {
+            limit: hold.limit,
+            until: hold.until,
+        }));
+    }
+    let children = store.thread_children(&member.thread_id)?;
+    let child_ids: Vec<&str> = children.iter().map(String::as_str).collect();
+    let kids = store.thread_quorums(&child_ids, now)?;
+    if !crate::awaiting::own_sub_round_in_flight(member, kids.iter(), &facts.held_answers)
+        .is_empty()
+    {
+        return Ok(Some(StillComing::SubRoundInFlight));
+    }
+    if store.has_pending_wake(session)? {
+        return Ok(Some(StillComing::HeldDelivery));
+    }
+    Ok(None)
 }
 
 // ---- the sweep ---------------------------------------------------------------------------------
@@ -662,6 +848,9 @@ fn reached(now: &str, at: &str) -> bool {
     }
 }
 
+/// The instant handed to a quorum read that only wants a thread's OPENER, which no clock changes.
+const ANY_INSTANT: &str = "1970-01-01T00:00:00Z";
+
 /// **The thread a look at an obligation of `thread` ticks** — a supervised slot's CHANNEL thread,
 /// and the thread itself for anything else (a direct commission, a served chat, a border order).
 ///
@@ -671,7 +860,7 @@ fn reached(now: &str, at: &str) -> bool {
 pub(crate) fn look_thread(store: &ChatStore, origin: &str, thread: &str) -> Result<String> {
     let supervisor = crate::orchestration::supervisor_qualified(origin);
     let opened_by_the_supervisor = store
-        .thread_quorum(thread, "1970-01-01T00:00:00Z")?
+        .thread_quorum(thread, ANY_INSTANT)?
         .is_some_and(|q| q.opener.as_deref() == Some(supervisor.as_str()));
     if opened_by_the_supervisor {
         if let Some(parent) = store.thread_parent(thread)? {
@@ -703,7 +892,8 @@ pub(crate) fn arm_look(
         // add already says that nothing attends the workspace. A breadcrumb stays.
         Err(e) if ctx.timer.service_fault().is_some() => {
             eprintln!(
-                "warning: the look at session {session} is booked for {at}, and nothing attends                  this workspace to honour it yet: {e}"
+                "warning: the look at session {session} is booked for {at}, and nothing attends \
+                 this workspace to honour it yet: {e}"
             );
             None
         }
@@ -765,7 +955,7 @@ pub(crate) fn owe(
         );
         eprintln!("warning: {detail}");
         return vec![FailedConsequence::stranded(
-            ConsequenceClass::StepNotRunning,
+            ConsequenceClass::StrandedNotJudged,
             Some(thread),
             Some(session),
             detail,
@@ -874,7 +1064,7 @@ pub(crate) fn reconcile_stranded_sessions(
     match judge_candidates(ctx, store, &mut findings) {
         Ok(()) => {}
         Err(e) => findings.push(FailedConsequence::stranded(
-            ConsequenceClass::StepNotRunning,
+            ConsequenceClass::StrandedNotJudged,
             None,
             None,
             format!(
@@ -942,56 +1132,45 @@ fn judge_candidates(
         ));
         return Ok(());
     }
-    let sessions: Vec<&str> = live.iter().map(|o| o.session.as_str()).collect();
-    let holds = store.interruptions_among(&sessions)?;
-    let failed: std::collections::BTreeMap<String, crate::working_tree::FailedStart> = store
-        .failed_starts()?
-        .into_iter()
-        .map(|f| (f.session.clone(), f))
-        .collect();
-    let queued: std::collections::HashSet<String> = store
-        .list_working_tree_queue()?
-        .into_iter()
-        .filter_map(|q| q.thread)
-        .collect();
-    let held_answers = store.threads_holding_wakes()?;
+    let facts = PauseFacts::read(store)?;
     for row in live {
         let Some(q) = quorums.get(&row.thread) else {
             continue;
         };
-        match judge(
-            ctx,
-            store,
-            &row,
-            q,
-            &holds,
-            &failed,
-            &queued,
-            &held_answers,
-            findings,
-        )? {
-            Judgement::Nothing => {}
+        // A failure on ONE obligation is a finding about that obligation; the walk goes on, so one
+        // bad row cannot stop every later one from being judged on every tick.
+        let judged = judge(ctx, store, &row, q, &facts, findings).and_then(|j| match j {
+            Judgement::Nothing => Ok(Vec::new()),
             Judgement::Record {
                 observed,
                 judged_from,
                 detail,
-            } => findings.extend(record(ctx, store, &row, observed, judged_from, detail)?),
+            } => record(ctx, store, &row, observed, judged_from, detail),
+        });
+        match judged {
+            Ok(more) => findings.extend(more),
+            Err(e) => findings.push(FailedConsequence::stranded(
+                ConsequenceClass::StrandedNotJudged,
+                Some(&row.thread),
+                Some(&row.session),
+                format!(
+                    "the owed session {} on thread {} could not be judged: {e}; the next tick \
+                     looks again",
+                    row.session, row.thread
+                ),
+            )),
         }
     }
     Ok(())
 }
 
 /// Rules 1-6 for one obligation. Drops the first look whenever the evidence no longer holds.
-#[allow(clippy::too_many_arguments)]
 fn judge(
     ctx: &Ctx,
     store: &mut ChatStore,
     row: &OwedStart,
     q: &crate::store::ThreadQuorum,
-    holds: &std::collections::BTreeMap<String, crate::interruption::Interruption>,
-    failed: &std::collections::BTreeMap<String, crate::working_tree::FailedStart>,
-    queued: &std::collections::HashSet<String>,
-    held_answers: &std::collections::HashSet<String>,
+    facts: &PauseFacts,
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<Judgement> {
     let (t, h, s) = (row.thread.as_str(), row.role.as_str(), row.session.as_str());
@@ -1016,24 +1195,13 @@ fn judge(
     {
         return not_now(store);
     }
-    // Rule 2: any standing hold excludes the session — it is paused, not stranded.
-    if holds.contains_key(s) {
+    // Rules 2-4: its answer is still coming — a standing hold, a start still to come (the queue, a
+    // retry due), its own sub-round in flight, or a delivery held for it. The ONE predicate the
+    // member-set read uses too, so "paused" cannot mean two things.
+    if member_answer_is_still_coming(ctx.now, store, q, Some(s), facts)?.is_some() {
         return not_now(store);
     }
-    // Rule 3: a start still to come — a retry due, or the working-copy queue.
-    let failed_start = failed.get(s);
-    if failed_start.is_some_and(|f| f.retry_at.is_some()) || queued.contains(t) {
-        return not_now(store);
-    }
-    // Rule 4: its own sub-round in flight, or a delivery held for it.
-    let children = store.thread_children(t)?;
-    let child_ids: Vec<&str> = children.iter().map(String::as_str).collect();
-    let kids = store.thread_quorums(&child_ids, ctx.now)?;
-    if !crate::awaiting::own_sub_round_in_flight(q, kids.iter(), held_answers).is_empty()
-        || store.has_pending_wake(s)?
-    {
-        return not_now(store);
-    }
+    let failed_start = facts.given_up(t, s);
     // Rule 5: no claim a session still holds. While it holds one, the look comes back one cadence
     // out — a session killed after a healthy look needs a further look.
     if ctx.worker.session_is_running(s) {
@@ -1230,9 +1398,7 @@ fn posted_evidence(store: &ChatStore, rec: &StrandedRecord) -> Option<String> {
     rows.into_iter()
         .rev()
         .filter(|m| m.kind == "escalation")
-        .filter(|m| {
-            crate::facade::same_identity(Some(&m.sender), &rec.role) || m.sender == rec.role
-        })
+        .filter(|m| crate::facade::same_identity(Some(&m.sender), &rec.role))
         .filter(|m| {
             m.refs
                 .as_deref()
@@ -1898,5 +2064,60 @@ mod tests {
         };
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(store.owed_start("m-board", &synth).unwrap(), None);
+    }
+    /// **IR #1**: supersession and retention compare instants, not text. A clock with fractional
+    /// seconds or another offset sorts as text the wrong way round.
+    #[test]
+    fn supersession_and_retention_compare_instants_not_text() {
+        let mut s = ChatStore::open_in_memory(1);
+        // As text "…10:00:00.5Z" < "…10:00:00Z"; as time it is later.
+        let older = "2026-10-18T10:00:00Z";
+        let later_fractional = "2026-10-18T10:00:00.5Z";
+        s.record_stranded(&record(older)).unwrap();
+        s.record_owed_start("m-t", "ws/verifier", "m-s", later_fractional, true)
+            .unwrap();
+        assert!(
+            s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty(),
+            "a later fractional clock supersedes"
+        );
+        let mut s = ChatStore::open_in_memory(1);
+        // An offset: 12:00+02:00 is 10:00Z — not later than 10:00:00Z.
+        s.record_stranded(&record(older)).unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            "2026-10-18T12:00:00+02:00",
+            true,
+        )
+        .unwrap();
+        assert_eq!(s.current_stranded_by_threads(&["m-t"]).unwrap().len(), 1);
+        // Retention: recorded at 10:03Z; a cutoff of 11:00+02:00 (= 09:00Z) keeps it.
+        assert_eq!(
+            s.forget_stranded_before("2026-10-18T11:00:00+02:00")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.forget_stranded_before("2026-10-18T13:00:00+02:00")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_observation_this_build_does_not_know_says_which_number_it_was() {
+        let s = ChatStore::open_in_memory(1);
+        s.connection()
+            .execute(
+                "INSERT INTO stranded_sessions(thread, role, session, trigger_clock, judged_from,
+                     recorded_at, observed, detail)
+                 VALUES ('m-t', 'ws/verifier', 'm-s', 'c', 'c', '2026-10-18T10:03:00Z', 9, 'x')",
+                [],
+            )
+            .unwrap();
+        let rec = s.stranded_records().unwrap().remove(0);
+        assert_eq!(rec.observed, Observation::NoLiveProcess);
+        assert!(rec.detail.contains("observation 9"), "{}", rec.detail);
     }
 }

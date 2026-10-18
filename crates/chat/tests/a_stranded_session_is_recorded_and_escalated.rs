@@ -552,7 +552,7 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
     assert!(row.escalated, "the slot carries the escalation");
     assert!(row.substituted, "the runtime spoke for the member");
     let stranded = row.stranded.expect("the slot shows its record");
-    assert_eq!(stranded.observed, 2);
+    assert_eq!(stranded.observed, facade::Observation::NeverBound);
     assert_eq!(stranded.session, s);
     assert_eq!(stranded.escalation, StrandedEscalation::Posted);
     assert!(stranded.escalated);
@@ -1913,43 +1913,93 @@ fn false_positive_a_way_back_wake_of_one_pm_never_re_owns_another_pms_slot() {
 // ---- the cost, as data (pass-1 IR #11, build item 17) -------------------------------------------
 
 /// **The sweep's cost, measured, not gated** — the median of a tick over a workspace of about two
-/// hundred threads, twenty of which owe an answer from a session that is running (so every one of
-/// them is a candidate the sweep has to look at), plus one cold tick. Run by hand:
+/// hundred threads, with 20 and then 200 owed sessions that are running (so every one of them is a
+/// candidate the sweep has to look at), plus one cold tick. Run by hand:
 /// `cargo test -p nexus-chat --test a_stranded_session_is_recorded_and_escalated -- --ignored
 /// --nocapture the_sweeps_cost`.
 #[test]
 #[ignore = "a stopwatch: data, not a gate"]
-fn the_sweeps_cost_over_two_hundred_threads_with_twenty_owed_sessions() {
+fn the_sweeps_cost_over_two_hundred_threads_with_twenty_and_two_hundred_owed_sessions() {
+    for owed in [20, 200] {
+        let team = team(&[REVIEW]);
+        let mut roots = Vec::new();
+        for n in 0..owed {
+            let root = team
+                .commission(T0, "review", &format!("verify {n}"))
+                .thread_id;
+            let (s, _) = team.last("verifier");
+            team.worker.mark_running(&s);
+            roots.push(root);
+        }
+        // Answered direct commissions fill the workspace up to about two hundred threads.
+        for n in 0..(200usize.saturating_sub(2 * owed)) {
+            let thread = team.commission(T0, "coder", &format!("task {n}")).thread_id;
+            let (s, _) = team.last("coder");
+            team.answer(&at(1), "coder", &s, &thread, "done");
+        }
+        let cold = std::time::Instant::now();
+        team.tick(&at(10), &roots[0]);
+        let cold = cold.elapsed();
+        let mut runs: Vec<std::time::Duration> = (0..15)
+            .map(|n| {
+                let t = std::time::Instant::now();
+                team.tick(&at(20 + n), &roots[0]);
+                t.elapsed()
+            })
+            .collect();
+        runs.sort();
+        eprintln!(
+            "one tick with {owed} owed running sessions: median {:?}, cold {cold:?}",
+            runs[runs.len() / 2]
+        );
+    }
+}
+
+/// **Review finding CQ #1**: "a retry is due" means the same to the sweep as to the member-set read
+/// — a failed start recorded against the slot's THREAD counts, whichever session it names. Before
+/// the predicate was shared, the sweep keyed it by session alone and would record this slot.
+#[test]
+fn false_positive_a_retry_due_on_the_slots_thread_under_another_session() {
     let team = team(&[REVIEW]);
-    let mut roots = Vec::new();
-    for n in 0..20 {
-        let root = team
-            .commission(T0, "review", &format!("verify {n}"))
-            .thread_id;
-        let (s, _) = team.last("verifier");
-        team.worker.mark_running(&s);
-        roots.push(root);
-    }
-    for n in 0..80 {
-        let thread = team.commission(T0, "coder", &format!("task {n}")).thread_id;
-        let (s, owed) = team.last("coder");
-        assert_eq!(owed, thread);
-        team.answer(&at(1), "coder", &s, &thread, "done");
-    }
-    let cold = std::time::Instant::now();
-    team.tick(&at(10), &roots[0]);
-    let cold = cold.elapsed();
-    let mut runs: Vec<std::time::Duration> = (0..15)
-        .map(|n| {
-            let t = std::time::Instant::now();
-            team.tick(&at(20 + n), &roots[0]);
-            t.elapsed()
-        })
-        .collect();
-    runs.sort();
-    eprintln!(
-        "one tick over ~200 threads with 20 owed running sessions: median {:?}, cold {cold:?}",
-        runs[runs.len() / 2]
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (_s, slot) = team.last("verifier");
+    team.sql(&format!(
+        "INSERT INTO failed_starts(session, scope_key, role, thread, message, model, depth, \
+         priority, enqueued_at, first_failed_at, last_failed_at, attempts, error, retry_at) \
+         VALUES ('m-another-session', 'k', 'verifier', '{slot}', 'verify', NULL, 1, 1, '{T0}', \
+         '{T0}', '{T0}', 1, 'io: timed out', '{}')",
+        at(3600)
+    ));
+    team.two_looks(T0, &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+}
+
+/// **Review finding CQ #6**: one obligation that cannot be judged (here: an unreadable clock) is a
+/// finding about THAT obligation, and every other owed session is still judged on the same tick.
+#[test]
+fn one_obligation_that_cannot_be_judged_does_not_stop_the_others() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify A").thread_id;
+    let (_a, a_slot) = team.last("verifier");
+    team.commission(T0, "review", "verify B");
+    let (b, b_slot) = team.last("verifier");
+    team.sql(&format!(
+        "UPDATE owed_starts SET trigger_clock = 'not an instant' WHERE thread = '{a_slot}'"
+    ));
+    team.tick(&at(120), &root);
+    let r = team.tick(&at(180), &root);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|f| f.class == ConsequenceClass::StrandedNotJudged
+                && f.thread.as_deref() == Some(a_slot.as_str())),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert_eq!(
+        team.records(),
+        vec![(b_slot, b, 2, Some("posted".to_string()))],
+        "the later obligation was still judged and recorded"
     );
 }
 

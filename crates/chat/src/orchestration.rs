@@ -8472,53 +8472,6 @@ pub(crate) enum Unsettled {
     NotRunning { session: String },
 }
 
-/// **"This member's answer is still coming"** — the one predicate over a member's OWED session
-/// (nxf 6j6v.ccvy). Each reason pauses the member's window, unbounded in this cut by decision: each
-/// is recorded and visible, and each has its own exit (6j6v.21xy owns what a due hold nothing takes
-/// up should become).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StillComing {
-    /// In the working-copy queue (nxf 6j6v.1wep).
-    Queued,
-    /// A failed start whose retry is due (nxf 6j6v.br25).
-    RetryDue,
-    /// The owed session has a standing hold — the model went away (5dzm (a), 0990). `until` is the
-    /// instant the runtime named, when it named one.
-    OnHold {
-        limit: String,
-        until: Option<String>,
-    },
-    /// The member opened a sub-round of its own and that round is still in flight (its own window,
-    /// its own slots — if IT strands, the sweep escalates it there).
-    SubRoundInFlight,
-    /// An answer is held for the owed session, to be handed over when its turn ends — from a thread
-    /// that is not a child of this slot (a consultation the session opened from where it stood
-    /// before, since a session's position moves). A held answer to a sub-round of THIS slot is
-    /// [`SubRoundInFlight`](StillComing::SubRoundInFlight) already (build item 8).
-    HeldDelivery,
-}
-
-impl StillComing {
-    /// The reason in words, for the receipt.
-    fn says(&self) -> String {
-        match self {
-            StillComing::Queued => "its start still waits for the working copy".to_string(),
-            StillComing::RetryDue => "its start failed and a retry is due".to_string(),
-            StillComing::OnHold { limit, until } => match until {
-                Some(until) => format!("its session is on hold ({limit}) until {until}"),
-                None => format!("its session is on hold ({limit}) with no instant named"),
-            },
-            StillComing::SubRoundInFlight => {
-                "it is waiting for a round it commissioned itself".to_string()
-            }
-            StillComing::HeldDelivery => {
-                "an answer is held for its session, to be handed over when its turn ends"
-                    .to_string()
-            }
-        }
-    }
-}
-
 /// A channel's member slots, and the ones among them that are NOT settled although their window has
 /// passed, each with its reason — what [`members_and_the_ones_still_waiting`] answers.
 type MemberSet = (Vec<ThreadQuorum>, Vec<(String, Unsettled)>);
@@ -8552,29 +8505,18 @@ fn members_and_the_ones_still_waiting(
     if !members.iter().any(|m| m.stale) {
         return Ok((members, unsettled));
     }
-    let queued: HashSet<String> = store
-        .list_working_tree_queue()?
-        .into_iter()
-        .filter_map(|q| q.thread)
-        .collect();
-    let failed = store.failed_starts()?;
-    let held_answers = store.threads_holding_wakes()?;
+    let facts = PauseFacts::read(store)?;
     for member in &mut members {
         if !member.stale {
             continue;
         }
-        let reason = match member_answer_is_still_coming(
-            now,
-            store,
-            member,
-            &queued,
-            &failed,
-            &held_answers,
-        )? {
-            Some(coming) => Some(Unsettled::StillComing(coming)),
-            None => owed_session_not_running(store, member, worker)?
-                .map(|session| Unsettled::NotRunning { session }),
-        };
+        let owed = owed_session_of(store, member)?;
+        let reason =
+            match member_answer_is_still_coming(now, store, member, owed.as_deref(), &facts)? {
+                Some(coming) => Some(Unsettled::StillComing(coming)),
+                None => owed_session_not_running(store, member, worker)?
+                    .map(|session| Unsettled::NotRunning { session }),
+            };
         if let Some(reason) = reason {
             member.stale = false;
             unsettled.push((member.thread_id.clone(), reason));
@@ -8590,46 +8532,6 @@ fn owed_session_of(store: &ChatStore, member: &ThreadQuorum) -> Result<Option<St
         if let Some(row) = store.owed_start(&member.thread_id, handle)? {
             return Ok(Some(row.session));
         }
-    }
-    Ok(None)
-}
-
-/// **[`StillComing`], asked of one member** (nxf 6j6v.ccvy) — `None` when its answer is not coming
-/// by any of the five routes.
-fn member_answer_is_still_coming(
-    now: &str,
-    store: &ChatStore,
-    member: &ThreadQuorum,
-    queued: &HashSet<String>,
-    failed: &[crate::working_tree::FailedStart],
-    held_answers: &HashSet<String>,
-) -> Result<Option<StillComing>> {
-    let on_this = |f: &&crate::working_tree::FailedStart| {
-        f.thread.as_deref() == Some(member.thread_id.as_str())
-    };
-    if queued.contains(&member.thread_id) {
-        return Ok(Some(StillComing::Queued));
-    }
-    if failed.iter().filter(on_this).any(|f| f.retry_at.is_some()) {
-        return Ok(Some(StillComing::RetryDue));
-    }
-    let Some(session) = owed_session_of(store, member)? else {
-        return Ok(None);
-    };
-    if let Some(hold) = store.current_interruption(&session)? {
-        return Ok(Some(StillComing::OnHold {
-            limit: hold.limit,
-            until: hold.until,
-        }));
-    }
-    let children = store.thread_children(&member.thread_id)?;
-    let child_ids: Vec<&str> = children.iter().map(String::as_str).collect();
-    let kids = store.thread_quorums(&child_ids, now)?;
-    if !crate::awaiting::own_sub_round_in_flight(member, kids.iter(), held_answers).is_empty() {
-        return Ok(Some(StillComing::SubRoundInFlight));
-    }
-    if store.has_pending_wake(&session)? {
-        return Ok(Some(StillComing::HeldDelivery));
     }
     Ok(None)
 }
@@ -11762,6 +11664,12 @@ pub enum ConsequenceClass {
     /// (nxf 6j6v.ccvy) — a late reply, a human. Recorded so `status` never claims an escalation
     /// that did not happen.
     StrandedEscalationSkipped,
+    /// **The stranded rule could not judge an obligation** (nxf 6j6v.ccvy) — its record could not
+    /// be written when the session was started, the owed sessions could not be read, or one of them
+    /// could not be judged on this tick. Nothing is recorded for it then: a slot without a record
+    /// keeps the window-lapse behaviour it had before the rule, and an unjudged one is looked at
+    /// again by the next tick.
+    StrandedNotJudged,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -17122,26 +17030,26 @@ fn tick_reporting_its_own_failures(
     // **The sweep saves the holder's work too now** (nxf 6j6v.8bv9), so the order is no longer what
     // keeps a hand-off from losing it — it is what keeps two occasions from parking the same holder
     // twice in one tick, which is what `park.held` carries across.
-    let mut park_warnings = Vec::new();
-    let park = park_step(ctx, store, &mut park_warnings)?;
-    let sweep = sweep_expired_working_tree(ctx, store, park.held, &mut park_warnings)?;
+    let mut workspace_findings = Vec::new();
+    let park = park_step(ctx, store, &mut workspace_findings)?;
+    let sweep = sweep_expired_working_tree(ctx, store, park.held, &mut workspace_findings)?;
     // **And the third workspace-wide question, on the same terms** (nxf 6j6v.gn8b): is anybody
     // holding answers for a caller that has stopped running? The scheduled job armed by
     // `session ended` is the ordinary way that queue drains; this is the backstop for the caller
     // that was killed before it could announce anything, and it rides this verb for exactly the
     // reason the two sweeps above do — it is about the WORKSPACE, and it must not depend on how the
     // channel half below decides, including its refusals.
-    park_warnings.extend(sweep_held_deliveries(ctx, store));
+    workspace_findings.extend(sweep_held_deliveries(ctx, store));
     // **The fourth, on the same terms** (nxf 6j6v.br25): the queued triggers whose start failed on
     // something waiting can fix, once their instant has come. After the sweeps, so a copy they just
     // freed is there to be taken.
-    park_warnings.extend(retry_the_failed_starts(ctx, store));
+    workspace_findings.extend(retry_the_failed_starts(ctx, store));
     // **The fifth** (nxf 6j6v.9g8j): a later step of the holder's own ordered run that waits in
     // line for the step before it. A reply or a session end normally starts it; this is the backstop
     // for a step whose session died without announcing its end, for the reason the held deliveries
     // above have one.
     match start_the_steps_whose_turn_has_come(ctx, store) {
-        Ok(promotions) => park_warnings.extend(release_findings(promotions)),
+        Ok(promotions) => workspace_findings.extend(release_findings(promotions)),
         Err(e) => {
             let finding = FailedConsequence::lease_undecided(
                 req.thread_id,
@@ -17151,14 +17059,14 @@ fn tick_reporting_its_own_failures(
                 ),
             );
             eprintln!("warning: {finding}");
-            park_warnings.push(finding);
+            workspace_findings.push(finding);
         }
     }
     // **The sixth, after the five above and BEFORE [`tick_the_thread`]** (nxf 6j6v.ccvy): a member
     // session that will not answer is RECORDED as stranded and the round escalated to its
     // commissioner — so a stranded step at its window's end on this same tick is escalated, never
     // advanced past. It starts nothing; see [`crate::stranded::reconcile_stranded_sessions`].
-    park_warnings.extend(crate::stranded::reconcile_stranded_sessions(ctx, store));
+    workspace_findings.extend(crate::stranded::reconcile_stranded_sessions(ctx, store));
     let mut receipt = tick_the_thread(ctx, store, req)?;
     receipt.working_tree = sweep.swept;
     receipt.parked = park.parked;
@@ -17172,7 +17080,7 @@ fn tick_reporting_its_own_failures(
     // Same durability trade the sweep above documents: if `tick_the_thread` had failed, the park
     // would already be committed and this report lost with the error. Losing the REPORT of work that
     // happened is the acceptable half; refusing to park because a thread id was wrong is not.
-    receipt.warnings.extend(park_warnings);
+    receipt.warnings.extend(workspace_findings);
     Ok(receipt)
 }
 
@@ -17606,6 +17514,7 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
 pub const SESSION_LIVENESS_RECHECK_SECS: i64 = 60;
 
 pub use crate::stranded::STRANDED_GRACE_SECS;
+use crate::stranded::{member_answer_is_still_coming, PauseFacts, StillComing};
 
 /// When a board blocked on a live session must be looked at again — `now` plus
 /// [`SESSION_LIVENESS_RECHECK_SECS`] (nxf 6j6v.858n).

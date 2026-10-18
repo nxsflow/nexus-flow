@@ -4632,7 +4632,7 @@ mod tests {
     }
 
     fn stranded(
-        observed: u8,
+        observed: crate::facade::Observation,
         detail: &str,
         escalation: crate::facade::StrandedEscalation,
     ) -> crate::facade::StrandedStatus {
@@ -4657,18 +4657,18 @@ mod tests {
         for (state, observed, detail) in [
             (
                 SessionState::Unknown,
-                2,
+                crate::facade::Observation::NeverBound,
                 "no live process across two looks since 2026-10-18T10:02:00Z; it never bound",
             ),
             (
                 SessionState::Ended,
-                3,
+                crate::facade::Observation::EndedWithoutAnswer,
                 "its process ended at 2026-10-18T10:01:00Z without answering, and no substitute \
                  was posted for it",
             ),
             (
                 SessionState::Unknown,
-                1,
+                crate::facade::Observation::NeverStarted,
                 "a slot was opened for it at 2026-10-18T10:00:00Z and no start ever ran",
             ),
         ] {
@@ -4686,7 +4686,16 @@ mod tests {
             assert!(!line.contains("nothing is coming"), "{line}");
         }
         // The other three outcomes of the escalation, each in its own words.
-        let says = |e| session_suffix(&open_row(SessionState::Ended, Some(stranded(3, "x", e))));
+        let says = |e| {
+            session_suffix(&open_row(
+                SessionState::Ended,
+                Some(stranded(
+                    crate::facade::Observation::EndedWithoutAnswer,
+                    "x",
+                    e,
+                )),
+            ))
+        };
         assert!(says(E::AlreadyAnswered).ends_with("already answered by somebody else"));
         assert!(says(E::Pending).ends_with("the escalation could not be posted yet"));
         assert!(says(E::GivenUp).ends_with("could not be escalated: io: locked — withdraw it"));

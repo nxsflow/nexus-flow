@@ -144,15 +144,7 @@ pub trait Timer: Send + Sync {
         thread: &str,
         deadline: &str,
     ) -> Result<TimerHandle> {
-        for id in [session, thread] {
-            if !nxs_service::timers::valid_key(id) {
-                return Err(NxfError::validation(format!(
-                    "`{id}` is not a schedulable id: a look's parameters become part of the command \
-                     a timer backend runs, so an id outside [A-Za-z0-9_-] is refused rather than \
-                     spliced into a shell"
-                )));
-            }
-        }
+        look_ids_are_schedulable(session, thread)?;
         self.schedule(thread, deadline, &tick_command(thread))
     }
     /// Cancel a previously scheduled job. Only meaningful/tested within the SAME process that
@@ -219,14 +211,7 @@ impl Timer for DryTimer {
         thread: &str,
         deadline: &str,
     ) -> Result<TimerHandle> {
-        for id in [session, thread] {
-            if !nxs_service::timers::valid_key(id) {
-                return Err(NxfError::validation(format!(
-                    "`{id}` is not a schedulable id: a look's parameters become part of the \
-                     command a timer backend runs"
-                )));
-            }
-        }
+        look_ids_are_schedulable(session, thread)?;
         let handle = TimerHandle(format!("dry:stranded-look-{session}"));
         if let Ok(path) = std::env::var("NXC_TIMER_LOOK_LOG") {
             append_log(
@@ -235,6 +220,21 @@ impl Timer for DryTimer {
             )?;
         }
         Ok(handle)
+    }
+}
+
+/// The gate every non-service backend applies to a stranded look's two ids before it uses them
+/// (nxf 6j6v.ccvy): both become part of a command a timer backend runs.
+fn look_ids_are_schedulable(session: &str, thread: &str) -> Result<()> {
+    match [session, thread]
+        .into_iter()
+        .find(|id| !nxs_service::timers::valid_key(id))
+    {
+        Some(id) => Err(NxfError::validation(format!(
+            "`{id}` is not a schedulable id: a look's parameters become part of the command a timer \
+             backend runs, so an id outside [A-Za-z0-9_-] is refused rather than spliced into a shell"
+        ))),
+        None => Ok(()),
     }
 }
 
