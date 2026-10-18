@@ -230,6 +230,29 @@ impl Timer for ServiceTimer {
         Ok(TimerHandle(format!("{HANDLE_PREFIX}{key}")))
     }
 
+    /// Arm a look at `session` for `deadline`, ticking `thread` — filed under its own
+    /// `stranded-look-` key so the channel's window and the look cannot disarm each other (see
+    /// [`Job::StrandedLook`]).
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<TimerHandle> {
+        let job = Job::StrandedLook {
+            session: session.to_string(),
+            thread: thread.to_string(),
+        };
+        // Same order as its siblings, and for their reason: every refusal that needs no filesystem
+        // — both ids included — happens before the workspace is resolved.
+        timers::check(deadline, &job)?;
+        let key = job.key().unwrap_or_default().into_owned();
+        let nxs_dir = self.nxs_dir()?;
+        timers::arm(&timers::path_in(&nxs_dir), deadline, job)?;
+        self.attended(&nxs_dir)?;
+        Ok(TimerHandle(format!("{HANDLE_PREFIX}{key}")))
+    }
+
     /// Whether anything is attending this workspace at all (nxf 6j6v.0j12).
     ///
     /// The same reading [`ServiceTimer::attended`] makes at schedule time, asked WITHOUT scheduling

@@ -827,6 +827,26 @@ pub fn trigger_role(
         }
         _ => None,
     };
+    // **The obligation record** (nxf 6j6v.ccvy), from the CALLER's own `reply_thread` ONLY — never
+    // from the merged value below: `addressees::open_for` finds by HANDLE, so a way-back wake of one
+    // `pm` session would otherwise re-own another `pm` session's slot, and the sweep would later
+    // escalate it in `pm`'s name while its real owner is alive. On the way back the row is only
+    // TOUCHED, and only when this very session is the one that owes it. Before the spawn, beside the
+    // depth, so the look is armed before anything can go wrong. Best-effort: a finding here goes to
+    // stderr, and the commission's own look (armed at the mint) or the next tick stands in.
+    let owed_role = ctx.qualify(&decl.handle);
+    let owed_findings = match (reply_thread, owed_on_the_way_back.as_deref()) {
+        (Some(owed_on), _) => {
+            crate::stranded::owe(ctx, store, owed_on, &owed_role, &internal_session, true)
+        }
+        (None, Some(owed_on)) => {
+            crate::stranded::touch(ctx, store, owed_on, &owed_role, &internal_session)
+        }
+        (None, None) => Vec::new(),
+    };
+    for finding in &owed_findings {
+        eprintln!("warning: {finding}");
+    }
     let reply_thread = reply_thread.or(owed_on_the_way_back.as_deref());
     // ONE number, derived once, for both consumers: what is recorded against the session and what
     // the session is told in `NXC_HOP`. `resolve_hop` takes the larger of the two later, so letting
@@ -4844,6 +4864,10 @@ fn arm_the_park_retry(ctx: &Ctx, store: &ChatStore) -> Option<FailedConsequence>
 ///
 /// `Ok(None)` is "this occasion does not stand"; `Ok(Some(_))` is "it did, and here is what the
 /// tick reports" — which is nothing but the finding for a hold.
+///
+/// **Not the stranded SESSION record** (nxf 6j6v.ccvy): "stranded" here is a park occasion on an
+/// escalated lease HOLDER; a member session that will not answer is recorded by
+/// [`crate::stranded::reconcile_stranded_sessions`], which parks nothing.
 fn park_the_stranded_holder(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -6292,6 +6316,22 @@ fn coordinator_commission_in(
         }
     }
 
+    // **The obligation record, and its first look** (nxf 6j6v.ccvy) — written for a MINTED session
+    // that owes an answer, right after the register says so, so a slot whose trigger never runs
+    // still has a clock and a look. A continued session mints nothing here: the trigger funnel
+    // below writes its row with the trigger's own instant. Best-effort, reported on this receipt.
+    let owed_findings = match (declared_here, &req.continue_session) {
+        (Some(owed_on), None) => crate::stranded::owe(
+            ctx,
+            store,
+            owed_on,
+            &ctx.qualify(req.role),
+            &internal,
+            false,
+        ),
+        _ => Vec::new(),
+    };
+
     // **The task, as the role will read it** (nxf 6j6v.ntp9). The caller's own words are what was
     // POSTED; what the session is STARTED with additionally names the thread it must answer into —
     // composed in one place instead of at each entrance from its own literal.
@@ -6311,7 +6351,7 @@ fn coordinator_commission_in(
     // on BOTH seams and not merely "swallow the error": `warnings` is never omitted, so a `--json`
     // reader and a `Result`-matching Rust caller alike are forced to see it, and `nxc` (`cli.rs`)
     // still exits non-zero for a script that checks only the exit code.
-    match trigger_role(
+    let mut result = match trigger_role(
         ctx,
         store,
         RoleSpawn {
@@ -6396,7 +6436,11 @@ fn coordinator_commission_in(
                 thread,
             })
         }
+    };
+    if let Ok(receipt) = &mut result {
+        receipt.warnings.extend(owed_findings);
     }
+    result
 }
 
 /// **Which machine a NEW persona chat runs on** (nxf 6j6v.1c6k) — `None` when no machine is
@@ -6994,10 +7038,21 @@ pub fn role_resume(
             queued_since: None,
         },
     )?;
-    // `warnings` stays empty and the `?` above is untouched deliberately (nxf 6j6v.hpv8 scopes its
-    // fix to `coordinator_commission` — the persona summon — not to this resume path;
-    // see that function's own doc for the reasoning this one does not yet carry). `spawned` is
-    // overwritten by `with_admission`, exactly as `coordinator_commission`'s Ok arm.
+    // **The session is in motion again, so its obligation's clock moves** (nxf 6j6v.ccvy, build item
+    // 9) — after a SUCCESSFUL trigger, and here rather than only in `resume_interrupted`, so a push
+    // into a live 1:1 moves it too. The funnel above cannot: this path hands it no reply thread. By
+    // the thread this resume runs in AND by session, so it never moves another thread's obligation.
+    let owed_findings = match receipt.thread_id.as_deref() {
+        Some(thread) => {
+            crate::stranded::touch(ctx, store, thread, &ctx.qualify(&role_handle), req.session)
+        }
+        None => Vec::new(),
+    };
+    // The `?` above is untouched deliberately (nxf 6j6v.hpv8 scopes its fix to
+    // `coordinator_commission` — the persona summon — not to this resume path; see that function's
+    // own doc for the reasoning this one does not yet carry); the only findings this receipt carries
+    // are the look's (nxf 6j6v.ccvy). `spawned` is overwritten by `with_admission`, exactly as
+    // `coordinator_commission`'s Ok arm.
     Ok(TriggerReceipt {
         handed_to: None,
         message_id: receipt.message_id,
@@ -7014,7 +7069,7 @@ pub fn role_resume(
         queued_behind: None,
         queue_position: None,
         spawned: false,
-        warnings: Vec::new(),
+        warnings: owed_findings,
     }
     .with_admission(admission))
 }
@@ -8030,6 +8085,21 @@ fn open_flow_step(
         Coordinator::Channel,
         SpawnFailure::Propagated,
     )?;
+    // **The stranded look this step's start could not arm travels up** (nxf 6j6v.ccvy) — onto the
+    // receipt of whoever opened the step, the only receipt a caller of a channel reads. Only those
+    // findings: everything else this commission noticed is already reported where it always was.
+    findings.extend(
+        started
+            .warnings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.class,
+                    ConsequenceClass::TickUnscheduled | ConsequenceClass::StepNotRunning
+                ) && f.session.as_deref() == Some(started.session.as_str())
+            })
+            .cloned(),
+    );
     // Arm this member's clock (nxf 6j6v.nf38). AFTER the trigger, because the session it names
     // is the one the trigger minted — the single session standing on this thread, and therefore
     // the only transcript whose writes are a sign of life FROM THIS MEMBER.
@@ -8342,7 +8412,9 @@ struct SupervisorRun {
 /// #1). It is off the queue but not started, and the tick will start it: had its window lapsed in
 /// between, the flow would open the next step and the retry would then start the earlier step
 /// beside it. A failed start with NO retry due (the bound is reached, or waiting cannot fix the
-/// failure) will never start on its own, so it lapses as before. See
+/// failure) will never start on its own; it used to lapse here, and since nxf 6j6v.ccvy it waits
+/// instead — under the stranded rule's B.1 its owed session is not running, so the slot is not
+/// settled, and the stranded sweep records it (observation 5) and escalates the round. See
 /// [`members_and_the_ones_still_waiting`].
 ///
 /// **What ends such a wait, now that the lapse does not.** The copy coming free (the holder ends,
@@ -8359,15 +8431,22 @@ struct SupervisorRun {
 /// [`ThreadQuorum::stale`] is still computed exactly as M2 §4.3 states, and every reader outside
 /// the supervisor (`nxc threads`, `nxc status`, the opener's wake) sees it unchanged. What changes
 /// is that the set the supervisor waits for does not count a member that was never started as
-/// settled — the same kind of question the liveness gate of nxf 6j6v.10yb asks beside it. A step
-/// whose session DID start and then fell silent is not in the queue, so it lapses on its declared
-/// `timeout:` exactly as before.
+/// settled — the same kind of question the liveness gate of nxf 6j6v.10yb asks beside it.
+///
+/// **A step whose session DID start and then fell silent no longer simply lapses** (nxf
+/// 6j6v.ccvy). Its window still runs out; what the window running out MEANS now depends on the
+/// session behind it: still coming (a hold, its own sub-round, a held delivery) → it waits; not
+/// running → it waits for the stranded sweep, which records and escalates it; running (hung) → it
+/// lapses and the flow is advanced past it as before. A slot with no obligation record — opened
+/// before this version, or owed by a human — lapses exactly as before. This reader passes the
+/// context's worker; [`supervised_member_threads_at`] passes none, which settles the not-running
+/// case as before.
 fn supervised_member_threads(
     ctx: &Ctx,
     store: &ChatStore,
     channel_thread: &str,
 ) -> Result<Vec<ThreadQuorum>> {
-    supervised_member_threads_at(ctx.now, store, channel_thread)
+    Ok(members_and_the_ones_still_waiting(ctx.now, store, channel_thread, Some(ctx.worker))?.0)
 }
 
 /// [`supervised_member_threads`] with the clock alone, which is the whole of what it takes from a
@@ -8378,54 +8457,100 @@ fn supervised_member_threads_at(
     store: &ChatStore,
     channel_thread: &str,
 ) -> Result<Vec<ThreadQuorum>> {
-    Ok(members_and_the_ones_still_waiting(now, store, channel_thread)?.0)
+    Ok(members_and_the_ones_still_waiting(now, store, channel_thread, None)?.0)
 }
 
+/// **Why a member whose window has passed still counts as NOT settled** (nxf 6j6v.1wep, widened by
+/// nxf 6j6v.ccvy) — one reason per decision, each named on the tick's receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unsettled {
+    /// Its answer is still coming — the flow waits for it, and its window does not count.
+    StillComing(StillComing),
+    /// **Its owed session is not running and nothing has recorded it yet** (nxf 6j6v.ccvy). The flow
+    /// does not move past it: the stranded sweep records and escalates such a session within its
+    /// grace, which is what settles the slot the honest way.
+    NotRunning { session: String },
+}
+
+/// A channel's member slots, and the ones among them that are NOT settled although their window has
+/// passed, each with its reason — what [`members_and_the_ones_still_waiting`] answers.
+type MemberSet = (Vec<ThreadQuorum>, Vec<(String, Unsettled)>);
+
 /// [`supervised_member_threads_at`], plus the members it did NOT count as lapsed although their
-/// window has passed, because their start still waits ([`ConsequenceClass::StepStillWaiting`]).
-/// The tick reports those; everybody else only needs the set.
+/// window has passed ([`Unsettled`]). The tick reports those; everybody else only needs the set.
 ///
-/// **What "still waits" is**: a row in the working-copy queue, or a failed start on record whose
-/// retry is still due (`retry_at` set). A failed start with no retry due — the bound is reached, or
-/// the failure is not one waiting can fix — will never start on its own, so it lapses as before:
-/// holding it would stall the run with only a withdraw able to end the wait.
+/// **What "still waits" is**: a row in the working-copy queue, a failed start whose retry is still
+/// due, and — since nxf 6j6v.ccvy — a standing hold on the member's OWED session, its own sub-round
+/// in flight, or a delivery held for it. A failed start with no retry due will never start on its
+/// own; it is no longer settled for that (it used to lapse here), because the stranded sweep records
+/// and escalates it.
+///
+/// **And a stale member whose owed session is not running is not settled either** (nxf 6j6v.ccvy,
+/// B.1) — in BOTH flows, because both read this set. A stale slot IS settled, as before, when (i) it
+/// has no obligation record (a slot opened before this version, or a human-owed one), (ii) `worker`
+/// cannot look (`None`, or [`answers_liveness`](crate::worker::Worker::answers_liveness) false —
+/// fail-open, as the working-copy park is), or (iii) its owed session IS running: a hung process,
+/// nxf 6j6v.rs9k's own case, still advanced past. On a replica, which has no record for a session
+/// another device started, (i) settles the slot exactly as before.
 fn members_and_the_ones_still_waiting(
     now: &str,
     store: &ChatStore,
     channel_thread: &str,
-) -> Result<(Vec<ThreadQuorum>, Vec<String>)> {
+    worker: Option<&dyn crate::worker::Worker>,
+) -> Result<MemberSet> {
     let children = store.supervised_children(channel_thread)?;
     let ids: Vec<&str> = children.iter().map(String::as_str).collect();
     let mut members = store.thread_quorums(&ids, now)?;
-    let mut still_waiting = Vec::new();
-    if members.iter().any(|m| m.stale) {
-        let waiting = threads_whose_start_still_waits(store)?;
-        for member in &mut members {
-            if member.stale && waiting.contains(&member.thread_id) {
-                member.stale = false;
-                still_waiting.push(member.thread_id.clone());
-            }
+    let mut unsettled = Vec::new();
+    if !members.iter().any(|m| m.stale) {
+        return Ok((members, unsettled));
+    }
+    let facts = PauseFacts::read(store)?;
+    for member in &mut members {
+        if !member.stale {
+            continue;
+        }
+        let owed = owed_session_of(store, member)?;
+        let reason =
+            match member_answer_is_still_coming(now, store, member, owed.as_deref(), &facts)? {
+                Some(coming) => Some(Unsettled::StillComing(coming)),
+                None => owed_session_not_running(store, member, worker)?
+                    .map(|session| Unsettled::NotRunning { session }),
+            };
+        if let Some(reason) = reason {
+            member.stale = false;
+            unsettled.push((member.thread_id.clone(), reason));
         }
     }
-    Ok((members, still_waiting))
+    Ok((members, unsettled))
 }
 
-/// The threads whose start has not happened yet and still will: an entry in the working-copy
-/// queue, or a failed start with a retry due (nxf 6j6v.1wep).
-fn threads_whose_start_still_waits(store: &ChatStore) -> Result<HashSet<String>> {
-    let mut waiting: HashSet<String> = store
-        .list_working_tree_queue()?
-        .into_iter()
-        .filter_map(|q| q.thread)
-        .collect();
-    waiting.extend(
-        store
-            .failed_starts()?
-            .into_iter()
-            .filter(|f| f.retry_at.is_some())
-            .filter_map(|f| f.thread),
-    );
-    Ok(waiting)
+/// The OWED session of a member slot — the obligation record of the first outstanding handle that
+/// has one. `None` for a slot with no record, which keeps today's behaviour.
+fn owed_session_of(store: &ChatStore, member: &ThreadQuorum) -> Result<Option<String>> {
+    for handle in &member.outstanding {
+        if let Some(row) = store.owed_start(&member.thread_id, handle)? {
+            return Ok(Some(row.session));
+        }
+    }
+    Ok(None)
+}
+
+/// **The one read both flows share** (nxf 6j6v.ccvy, B.1): the owed session of a stale slot that is
+/// not still coming, when it is NOT running and `worker` can say so. `None` settles the slot as
+/// before — no record, no liveness, or a running (hung) session.
+fn owed_session_not_running(
+    store: &ChatStore,
+    member: &ThreadQuorum,
+    worker: Option<&dyn crate::worker::Worker>,
+) -> Result<Option<String>> {
+    let Some(worker) = worker.filter(|w| w.answers_liveness()) else {
+        return Ok(None);
+    };
+    let Some(session) = owed_session_of(store, member)? else {
+        return Ok(None);
+    };
+    Ok((!worker.session_is_running(&session)).then_some(session))
 }
 
 /// The declared channel a thread belongs to, by the `decl:<name>` convention
@@ -9336,7 +9461,8 @@ fn acceptance_target(
             channel.name
         )));
     };
-    let all = supervised_member_threads(ctx, store, thread)?;
+    let (all, unsettled) =
+        members_and_the_ones_still_waiting(ctx.now, store, thread, Some(ctx.worker))?;
     let members = run_slots(store, all, &run)?;
     // (5) **THE VERDICT IS WHAT THERE IS TO ACCEPT, and the LAST one is the one that stopped this
     // round.** A channel may declare more than one cycle, so "some step once said no" is not the
@@ -9446,9 +9572,25 @@ fn acceptance_target(
             .filter(|m| !m.complete && !m.stale)
             .map(|m| m.thread_id.as_str())
             .collect();
-        let waiting_on = match working.is_empty() {
-            true => "a session of this round is still writing".to_string(),
-            false => format!("thread(s) {} have not answered", working.join(", ")),
+        // **A slot whose session is not running is named as such** (nxf 6j6v.ccvy, build item 6):
+        // the acceptance WAITS for the stranded sweep to record it — "has not answered" would send
+        // the caller to wait for an answer nothing is going to give.
+        let not_running: Vec<String> = unsettled
+            .iter()
+            .filter(|(slot, _)| working.contains(&slot.as_str()))
+            .filter_map(|(slot, why)| match why {
+                Unsettled::NotRunning { session } => Some(format!("{slot} (session {session})")),
+                Unsettled::StillComing(_) => None,
+            })
+            .collect();
+        let waiting_on = match (working.is_empty(), not_running.is_empty()) {
+            (true, _) => "a session of this round is still writing".to_string(),
+            (false, false) => format!(
+                "the session of thread(s) {} is past its window and not running; the stranded \
+                 sweep records and escalates it within {STRANDED_GRACE_SECS} s of its clock",
+                not_running.join(", ")
+            ),
+            (false, true) => format!("thread(s) {} have not answered", working.join(", ")),
         };
         return Err(NxfError::forbidden(format!(
             "this round is still moving — {waiting_on}. Accepting now would open the step after \
@@ -9844,6 +9986,12 @@ fn slot_answer_row(
 /// A step whose newest slot is still running therefore contributes its previous pass's answer,
 /// which is what "its last answer" means and the only reading that is true while a run is in
 /// motion.
+///
+/// **A named source that was asked and stayed silent, or answered only by a substitute, refuses the
+/// step** (nxf 6j6v.ccvy) — decided before this is read, by [`missing_declared_inputs`] in
+/// [`supervisor_advance_flow`], so a step that would be handed a previous pass's answer in place of
+/// a newest slot that said nothing is never opened. What this carries is therefore, for every step
+/// that IS opened, the newest slot's real answer.
 fn run_answers(
     ctx: &Ctx,
     store: &ChatStore,
@@ -9932,6 +10080,137 @@ fn step_input_body(
         request.as_ref(),
         &carried,
     )))
+}
+
+/// **A declared source of a step that was asked in this run and has nothing to show for it** (nxf
+/// 6j6v.ccvy, B.2) — what [`supervisor_advance_flow`] refuses the step on.
+struct MissingInput {
+    /// The step id the step names in its `input:`.
+    source: String,
+    /// The source's NEWEST slot in this run.
+    slot: String,
+    /// Which pass of that step the slot is — the n-th slot of it in this run.
+    pass: usize,
+    /// The slot's owed session and its state, as far as this machine knows it.
+    session: String,
+    /// `true` when the slot's only answer is a substitute the runtime posted.
+    substituted: bool,
+}
+
+/// **Which named sources of `into` were asked in this run and stayed silent** (nxf 6j6v.ccvy, B.2).
+///
+/// A source with NO slot in this run — a later step, or the step itself — contributes nothing and
+/// the step opens: that is `input:`'s own contract ([`crate::channel::FlowStep::input`]). What is
+/// refused is narrower: a source whose NEWEST slot in this run carries no answer of its own — no
+/// message but the supervisor's, or only a `substituted` one (the runtime's teardown speaks for a
+/// session that ended owing an answer; that is not the step's answer). "Newest" is per step within
+/// the run, so an answer from before a back edge does not satisfy the pass after it.
+fn missing_declared_inputs(
+    ctx: &Ctx,
+    store: &ChatStore,
+    channel_thread: &str,
+    mark: &crate::store::FlowMark,
+    into: &crate::channel::FlowStep,
+) -> Result<Vec<MissingInput>> {
+    let Some(declared) = &into.input else {
+        return Ok(Vec::new());
+    };
+    let sources: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|s| *s != crate::channel::INPUT_REQUEST && *s != into.id)
+        .collect();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let all = supervised_member_threads(ctx, store, channel_thread)?;
+    let slots = run_slots(store, all, &mark.run)?;
+    let mut missing = Vec::new();
+    for source in sources {
+        let mut of_source = Vec::new();
+        for slot in &slots {
+            if store
+                .flow_mark(&slot.thread_id)?
+                .is_some_and(|m| m.step == source)
+            {
+                of_source.push(slot);
+            }
+        }
+        let Some(newest) = of_source.last() else {
+            continue;
+        };
+        let substituted = match slot_answer_row(ctx, store, &newest.thread_id)? {
+            None => false,
+            Some(row) => match row
+                .refs
+                .as_deref()
+                .and_then(|r| serde_json::from_str::<Refs>(r).ok())
+            {
+                Some(refs) if refs.substituted => true,
+                _ => continue,
+            },
+        };
+        missing.push(MissingInput {
+            source: source.to_string(),
+            slot: newest.thread_id.clone(),
+            pass: of_source.len(),
+            session: slot_session_state(ctx, store, newest)?,
+            substituted,
+        });
+    }
+    Ok(missing)
+}
+
+/// A slot's owed session and its state, for the note — "unknown" where no obligation was recorded.
+fn slot_session_state(ctx: &Ctx, store: &ChatStore, slot: &ThreadQuorum) -> Result<String> {
+    let mut session = None;
+    for handle in slot.expects.iter().chain(slot.outstanding.iter()) {
+        if let Some(row) = store.owed_start(&slot.thread_id, handle)? {
+            session = Some(row.session);
+            break;
+        }
+    }
+    let Some(session) = session else {
+        return Ok("no session recorded on this machine".to_string());
+    };
+    let state = if store.session_ended_at(&session)?.is_some() {
+        "ended"
+    } else if !ctx.worker.answers_liveness() {
+        "state unknown to this worker"
+    } else if ctx.worker.session_is_running(&session) {
+        "still running — it may still hold the working copy"
+    } else {
+        "not running"
+    };
+    Ok(format!("session {session}, {state}"))
+}
+
+/// The escalation note of a refused step (nxf 6j6v.ccvy, B.2).
+fn missing_input_note(step: &str, missing: &[MissingInput]) -> String {
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|m| {
+            format!(
+                "- {source:?}: its newest slot {slot} (pass {pass}; {session}) {what}",
+                source = m.source,
+                slot = m.slot,
+                pass = m.pass,
+                session = m.session,
+                what = if m.substituted {
+                    "was answered only by a substitute the runtime posted"
+                } else {
+                    "carries no answer"
+                },
+            )
+        })
+        .collect();
+    format!(
+        "Step {step:?} was NOT started: it declares `input:` from step(s) that were asked in this \
+         run and gave no answer of their own, and starting it would have handed it something other \
+         than what it declares.\n{}\nNothing was restarted. Replying here commissions the round \
+         again from its first step; `nxc withdraw` takes it back.",
+        lines.join("\n")
+    )
 }
 
 /// **The step [`supervisor_advance_flow`] is about to open**, and everything about it that is not
@@ -10038,6 +10317,20 @@ fn supervisor_advance_flow(
     next: &NextStep<'_>,
     hop: CheckedHop,
 ) -> Result<(SupervisorRun, bool)> {
+    // **No step starts on a declared input that was asked and stayed silent** (nxf 6j6v.ccvy, B.2).
+    // Both entrances reach here — a real reply and the tick's `Advance` — so this is the one place
+    // the refusal can stand. On a FORWARD edge only, which is where `input:` is honoured at all.
+    if let (None, Some(entry)) = (&next.body, &next.entry) {
+        if let Some(into) = channel.step(&entry.mark.step) {
+            let missing =
+                missing_declared_inputs(ctx, store, &channel_q.thread_id, &entry.mark, into)?;
+            if !missing.is_empty() {
+                let note = missing_input_note(&entry.mark.step, &missing);
+                let run = supervisor_consolidate(ctx, store, channel_q, true, Some(&note), hop)?;
+                return Ok((run, false));
+            }
+        }
+    }
     let target = next.target;
     let request = current_request(store, &channel_q.thread_id)?;
     // **A REWORK carries the verdict, not the request** (nxf 6j6v.553s (a)), and that is the one
@@ -11348,6 +11641,35 @@ pub enum ConsequenceClass {
     /// holds it), when the retry runs, or when `nxc withdraw` takes the operation back.
     /// [`FailedConsequence::thread`] is the step's slot; `session` and `reason` are `None`.
     StepStillWaiting,
+    /// **The worker cannot tell a live session from a dead one, so nothing was judged stranded**
+    /// (nxf 6j6v.ccvy). One per tick, on a workspace that has owed sessions to look at and a worker
+    /// whose [`answers_liveness`](crate::worker::Worker::answers_liveness) is `false`: the stranded
+    /// rule fails OPEN there, exactly as the working-copy park does, and a slot past its window is
+    /// settled as it was before the rule existed. `thread` and `session` are `None`.
+    LivenessUnknown,
+    /// **A step's window has passed, its session is not running, and nothing has recorded it yet**
+    /// (nxf 6j6v.ccvy). The flow does not move past it: the stranded sweep records and escalates
+    /// such a session within its grace, which is what settles the slot. `thread` is the slot,
+    /// `session` the session it owes.
+    StepNotRunning,
+    /// **A member session that will not answer was recorded as stranded** (nxf 6j6v.ccvy) — the
+    /// service-log line of the record. `thread` is the slot, `session` the session; the
+    /// [`detail`](FailedConsequence::detail) names the step, the observation and its instant.
+    SessionStranded,
+    /// **The escalation of a stranded session could not be posted** (nxf 6j6v.ccvy) — on this
+    /// sweep, or, once the bounded retry is spent, for good. The record stands; `status` says the
+    /// escalation is outstanding, and a further look is armed while it is retried.
+    StrandedNotEscalated,
+    /// **A stranded session's escalation was not posted because the slot was answered meanwhile**
+    /// (nxf 6j6v.ccvy) — a late reply, a human. Recorded so `status` never claims an escalation
+    /// that did not happen.
+    StrandedEscalationSkipped,
+    /// **The stranded rule could not judge an obligation** (nxf 6j6v.ccvy) — its record could not
+    /// be written when the session was started, the owed sessions could not be read, or one of them
+    /// could not be judged on this tick. Nothing is recorded for it then: a slot without a record
+    /// keeps the window-lapse behaviour it had before the rule, and an unjudged one is looked at
+    /// again by the next tick.
+    StrandedNotJudged,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -11428,6 +11750,25 @@ impl FailedConsequence {
             class: ConsequenceClass::StepStillWaiting,
             thread: Some(thread.to_string()),
             session: None,
+            reason: None,
+            detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
+    /// One of the stranded rule's findings (nxf 6j6v.ccvy) — see
+    /// [`ConsequenceClass::LivenessUnknown`] and the four classes after it.
+    pub(crate) fn stranded(
+        class: ConsequenceClass,
+        thread: Option<&str>,
+        session: Option<&str>,
+        detail: impl Into<String>,
+    ) -> Self {
+        FailedConsequence {
+            class,
+            thread: thread.map(str::to_string),
+            session: session.map(str::to_string),
             reason: None,
             detail: detail.into(),
             precondition: None,
@@ -13940,7 +14281,15 @@ pub fn session_ended(
     // Before the early returns below, all of which are ordinary outcomes of the CHANNEL question
     // this verb also answers: whether a held delivery is armed has nothing to do with whether the
     // ending session stood on a channel step.
-    let armed = arm_the_held_delivery(ctx, store, internal_session);
+    let mut armed = arm_the_held_delivery(ctx, store, internal_session);
+    // **An end that still owes an answer is looked at once the grace has passed** (nxf 6j6v.ccvy):
+    // the runtime's teardown normally posts a substitute before that, and one that did not is what
+    // the stranded sweep records. Nothing is armed for an obligation this session discharged.
+    armed.extend(crate::stranded::arm_after_an_end(
+        ctx,
+        store,
+        internal_session,
+    ));
     let receipt = |reason: &str, thread: Option<String>| SessionEndedReceipt {
         session: internal_session.to_string(),
         thread,
@@ -14690,6 +15039,18 @@ pub fn resume_interrupted(
     match started {
         Ok(r) => {
             warnings.extend(r.warnings);
+            // **The member's window restarts when it is actually put back to work** (nxf 6j6v.ccvy)
+            // — after the SUCCESSFUL trigger and before the stamp. The hold paused the window; once
+            // the stamp lifts the pause, a window that ran out meanwhile would make the slot `stale`
+            // at once, and a RUNNING session past its window is the one shape the flow still
+            // advances past. (The obligation's own clock moved inside `role_resume`.)
+            if let Err(e) = store.reset_member_deadlines_of_session(&session, ctx.now) {
+                eprintln!(
+                    "warning: session {session} was resumed, but its member window could not be \
+                     restarted: {e}; its slot may read past its window until its first transcript \
+                     flush"
+                );
+            }
             // Stamped AFTER the trigger, for `note_the_park_was_resumed`'s reason: what the stamp
             // records is that somebody was actually put back to work. A hold closed before a spawn
             // that then failed would be a hold nothing ever comes back to.
@@ -16669,26 +17030,26 @@ fn tick_reporting_its_own_failures(
     // **The sweep saves the holder's work too now** (nxf 6j6v.8bv9), so the order is no longer what
     // keeps a hand-off from losing it — it is what keeps two occasions from parking the same holder
     // twice in one tick, which is what `park.held` carries across.
-    let mut park_warnings = Vec::new();
-    let park = park_step(ctx, store, &mut park_warnings)?;
-    let sweep = sweep_expired_working_tree(ctx, store, park.held, &mut park_warnings)?;
+    let mut workspace_findings = Vec::new();
+    let park = park_step(ctx, store, &mut workspace_findings)?;
+    let sweep = sweep_expired_working_tree(ctx, store, park.held, &mut workspace_findings)?;
     // **And the third workspace-wide question, on the same terms** (nxf 6j6v.gn8b): is anybody
     // holding answers for a caller that has stopped running? The scheduled job armed by
     // `session ended` is the ordinary way that queue drains; this is the backstop for the caller
     // that was killed before it could announce anything, and it rides this verb for exactly the
     // reason the two sweeps above do — it is about the WORKSPACE, and it must not depend on how the
     // channel half below decides, including its refusals.
-    park_warnings.extend(sweep_held_deliveries(ctx, store));
+    workspace_findings.extend(sweep_held_deliveries(ctx, store));
     // **The fourth, on the same terms** (nxf 6j6v.br25): the queued triggers whose start failed on
     // something waiting can fix, once their instant has come. After the sweeps, so a copy they just
     // freed is there to be taken.
-    park_warnings.extend(retry_the_failed_starts(ctx, store));
+    workspace_findings.extend(retry_the_failed_starts(ctx, store));
     // **The fifth** (nxf 6j6v.9g8j): a later step of the holder's own ordered run that waits in
     // line for the step before it. A reply or a session end normally starts it; this is the backstop
     // for a step whose session died without announcing its end, for the reason the held deliveries
     // above have one.
     match start_the_steps_whose_turn_has_come(ctx, store) {
-        Ok(promotions) => park_warnings.extend(release_findings(promotions)),
+        Ok(promotions) => workspace_findings.extend(release_findings(promotions)),
         Err(e) => {
             let finding = FailedConsequence::lease_undecided(
                 req.thread_id,
@@ -16698,9 +17059,14 @@ fn tick_reporting_its_own_failures(
                 ),
             );
             eprintln!("warning: {finding}");
-            park_warnings.push(finding);
+            workspace_findings.push(finding);
         }
     }
+    // **The sixth, after the five above and BEFORE [`tick_the_thread`]** (nxf 6j6v.ccvy): a member
+    // session that will not answer is RECORDED as stranded and the round escalated to its
+    // commissioner — so a stranded step at its window's end on this same tick is escalated, never
+    // advanced past. It starts nothing; see [`crate::stranded::reconcile_stranded_sessions`].
+    workspace_findings.extend(crate::stranded::reconcile_stranded_sessions(ctx, store));
     let mut receipt = tick_the_thread(ctx, store, req)?;
     receipt.working_tree = sweep.swept;
     receipt.parked = park.parked;
@@ -16714,7 +17080,7 @@ fn tick_reporting_its_own_failures(
     // Same durability trade the sweep above documents: if `tick_the_thread` had failed, the park
     // would already be committed and this report lost with the error. Losing the REPORT of work that
     // happened is the acceptable half; refusing to park because a thread id was wrong is not.
-    receipt.warnings.extend(park_warnings);
+    receipt.warnings.extend(workspace_findings);
     Ok(receipt)
 }
 
@@ -16741,26 +17107,65 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // than merely intended: every receipt below reports it, `outstanding_for_report` derives from
     // it, and re-deriving it per branch is how the no-op arms and the acted arm would start
     // answering differently.
-    let (members, still_waiting) = members_and_the_ones_still_waiting(ctx.now, store, thread_id)?;
+    let (members, unsettled) =
+        members_and_the_ones_still_waiting(ctx.now, store, thread_id, Some(ctx.worker))?;
     let outstanding = outstanding_for_report(&q, &members);
+    // **A hold names the instant it lifts, when it names one** (nxf 6j6v.ccvy): a decline because
+    // of it arms the next look for that instant — only when it is in the future; with no instant
+    // nothing is armed, and the member stays paused until something else looks.
+    let hold_lifts: Option<String> = unsettled
+        .iter()
+        .filter_map(|(_, u)| match u {
+            Unsettled::StillComing(StillComing::OnHold {
+                until: Some(at), ..
+            }) => Some(at.clone()),
+            _ => None,
+        })
+        .filter(|at| at.as_str() > ctx.now)
+        .min();
     // **A wait that outlasts the window is said, not silent** (nxf 6j6v.1wep, review of PR #39,
     // Integrity & Robustness #1). A step whose start still waits does not lapse — but the lapse used
     // to be what ended such a wait, and nothing ends it now except the copy coming free, the retry
     // running or a withdraw. So a tick that declines because of one names it on its receipt (the
     // `Waiting` branch below, the only one a member that is not settled can lead to), and on stderr
     // for the reader with a terminal.
-    let still_waiting: Vec<FailedConsequence> = still_waiting
+    let still_waiting: Vec<FailedConsequence> = unsettled
         .iter()
-        .map(|slot| {
-            let finding = FailedConsequence::step_still_waiting(
-                slot,
-                format!(
-                    "the step on thread {slot} has not started: its start still waits for the \
-                     working copy or for a retry, so its declared window does not count and the \
-                     flow waits for it; `nxc status` shows what holds the copy, and `nxc withdraw \
-                     --thread {thread_id}` takes the operation back"
+        .map(|(slot, why)| {
+            let finding = match why {
+                Unsettled::StillComing(coming @ (StillComing::Queued | StillComing::RetryDue)) => {
+                    FailedConsequence::step_still_waiting(
+                        slot,
+                        format!(
+                            "the step on thread {slot} has not started: {}, so its declared \
+                             window does not count and the flow waits for it; `nxc status` shows \
+                             what holds the copy, and `nxc withdraw --thread {thread_id}` takes \
+                             the operation back",
+                            coming.says()
+                        ),
+                    )
+                }
+                Unsettled::StillComing(coming) => FailedConsequence::step_still_waiting(
+                    slot,
+                    format!(
+                        "the step on thread {slot} is paused: {}, so its declared window does not \
+                         count and the flow waits for it; `nxc withdraw --thread {thread_id}` \
+                         takes the operation back",
+                        coming.says()
+                    ),
                 ),
-            );
+                Unsettled::NotRunning { session } => FailedConsequence::stranded(
+                    ConsequenceClass::StepNotRunning,
+                    Some(slot),
+                    Some(session),
+                    format!(
+                        "the step on thread {slot} is past its window and its session {session} is \
+                         not running; the flow does not move past it — the stranded sweep records \
+                         and escalates such a session within {STRANDED_GRACE_SECS} s of its \
+                         clock, and `nxc withdraw --thread {thread_id}` takes the operation back"
+                    ),
+                ),
+            };
             eprintln!("warning: {finding}");
             finding
         })
@@ -16862,7 +17267,10 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
             true => Some(session_liveness_recheck(ctx.now)?),
             false => None,
         };
-        let unscheduled = rearm_window_with(ctx, thread_id, &members, recheck.as_deref());
+        // The earlier of the liveness re-check and the instant a hold lifts (nxf 6j6v.ccvy) — one
+        // arm, because arming replaces by thread.
+        let also = [recheck, hold_lifts].into_iter().flatten().min();
+        let unscheduled = rearm_window_with(ctx, thread_id, &members, also.as_deref());
         // **`not_due` and `waiting_for_a_session` are different answers, and the second one is the
         // only one a reader can act on** (review of PR #361, Code Quality #1). A board whose set is
         // settled and whose only remaining blocker is a live process is NOT "nothing to do": it is
@@ -17105,6 +17513,9 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
 /// indistinguishable from the stall it exists to end.
 pub const SESSION_LIVENESS_RECHECK_SECS: i64 = 60;
 
+pub use crate::stranded::STRANDED_GRACE_SECS;
+use crate::stranded::{member_answer_is_still_coming, PauseFacts, StillComing};
+
 /// When a board blocked on a live session must be looked at again — `now` plus
 /// [`SESSION_LIVENESS_RECHECK_SECS`] (nxf 6j6v.858n).
 ///
@@ -17319,6 +17730,14 @@ fn outstanding_for_report(q: &ThreadQuorum, members: &[ThreadQuorum]) -> Vec<Str
 /// hq71 §3's rule, and the SET the rebuilt quorum mechanic waits for: not a thread waiting for its
 /// replies, but the supervisor waiting for N threads. `false` for a thread with no member threads at
 /// all, which is not a supervised channel and has no set to be complete.
+///
+/// **"Past its own deadline" is no longer the whole of `stale` here** (nxf 6j6v.ccvy, B.1). The
+/// members handed in come from [`members_and_the_ones_still_waiting`], which un-stales a member
+/// whose answer is still coming and one whose owed session is not running — so a stale member that
+/// reaches this function is one with no obligation record (opened before that rule, or owed by a
+/// human), one a worker cannot look at, or one whose session is RUNNING past its window (the hung
+/// process nxf 6j6v.rs9k is about). Only those still settle by their window; the rest wait, for the
+/// thing that is still coming or for the stranded sweep to record and escalate them.
 fn member_set_is_settled(members: &[ThreadQuorum]) -> bool {
     !members.is_empty() && members.iter().all(|m| m.complete || m.stale)
 }

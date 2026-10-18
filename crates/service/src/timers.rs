@@ -107,6 +107,20 @@ pub enum Job {
     /// has lifted; the verb it runs checks that for itself, along with everything else it refuses
     /// to take on trust.
     ChatResume { session: String },
+    /// **Bring the stranded sweep to one owed session** (nxf 6j6v.ccvy) — what
+    /// `nxc tick --thread <thread>` does, filed under the SESSION it is a look at.
+    ///
+    /// Every tick runs the workspace-wide sweep that records a member session that will not answer,
+    /// so the job only has to make a tick HAPPEN at the instant that session can first be judged.
+    /// `thread` is the thread whose tick changes nothing but through the sweep: a supervised slot's
+    /// CHANNEL thread, or the slot itself for a direct commission that has no channel above it —
+    /// never a supervised slot, whose own tick would consolidate it.
+    ///
+    /// **Keyed per session, ticking a per-obligation thread** (build item 16): a second arm for the
+    /// same session replaces the first even when it names another thread. That is harmless because
+    /// the sweep is workspace-wide — whichever thread the surviving look ticks, it judges every owed
+    /// session there is.
+    StrandedLook { session: String, thread: String },
     /// A job this binary does not know. Never written; only produced by reading a book a newer
     /// binary wrote.
     #[serde(other)]
@@ -140,7 +154,30 @@ impl Job {
                 "--session".into(),
                 session.clone(),
             ]),
+            Job::StrandedLook { thread, .. } => Some(vec![
+                "chat".into(),
+                "tick".into(),
+                "--thread".into(),
+                thread.clone(),
+            ]),
             Job::Unknown => None,
+        }
+    }
+
+    /// **Every parameter this job puts into an argv or a key** — what [`check`] and [`take_due`]
+    /// run [`valid_key`] over (build item 4 of nxf 6j6v.ccvy).
+    ///
+    /// The key used to be the only thing gated, and for a job with ONE parameter the key is that
+    /// parameter, so nothing slipped through. [`Job::StrandedLook`] is the first job whose argv
+    /// carries a value its key does not: the thread it ticks. Gating the key alone would put that
+    /// thread — a foreign border thread, or anything a hand-written book says — into an argv
+    /// unchecked. So the gate is over the parameters, all of them.
+    pub fn params(&self) -> Vec<&str> {
+        match self {
+            Job::ChatTick { thread } => vec![thread],
+            Job::ChatDeliver { session } | Job::ChatResume { session } => vec![session],
+            Job::StrandedLook { session, thread } => vec![session, thread],
+            Job::Unknown => Vec::new(),
         }
     }
 
@@ -166,6 +203,11 @@ impl Job {
             // first, and which of the two survived would depend on the order two lines run in.
             Job::ChatResume { session } => {
                 Some(std::borrow::Cow::Owned(format!("resume-{session}")))
+            }
+            // Per SESSION, so the look armed at the mint, the one armed before the spawn and the
+            // ones the sweep re-arms all replace one another (see the variant's own doc).
+            Job::StrandedLook { session, .. } => {
+                Some(std::borrow::Cow::Owned(format!("stranded-look-{session}")))
             }
             Job::Unknown => None,
         }
@@ -308,6 +350,12 @@ pub fn check(due: &str, job: &Job) -> Result<()> {
              could collide with another board's"
         )));
     }
+    if let Some(bad) = job.params().into_iter().find(|p| !valid_key(p)) {
+        return Err(NxfError::validation(format!(
+            "`{bad}` is not a schedulable id: every parameter of a deadline becomes part of an argv \
+             the service runs, so a value outside [A-Za-z0-9_-] is refused"
+        )));
+    }
     Ok(())
 }
 
@@ -405,7 +453,8 @@ pub fn take_due(path: &Path, now: &str, room: usize) -> Result<Due> {
         // The SAME gate `arm` applies, applied to what was read. A book is a file inside a
         // workspace, and a workspace can come from anywhere — so the writer this binary controls is
         // not the only writer, and a check that only runs there checks the wrong path.
-        if !d.job.key().is_some_and(|k| valid_key(&k)) {
+        if !d.job.key().is_some_and(|k| valid_key(&k)) || !d.job.params().into_iter().all(valid_key)
+        {
             out.rejected += 1;
             pending.push(d);
             continue;
@@ -776,6 +825,83 @@ mod tests {
         assert_eq!(
             tick("m-abc").argv().unwrap(),
             vec!["chat", "tick", "--thread", "m-abc"]
+        );
+    }
+
+    // ---- the stranded look (nxf 6j6v.ccvy) -------------------------------------------------
+
+    fn look(session: &str, thread: &str) -> Job {
+        Job::StrandedLook {
+            session: session.into(),
+            thread: thread.into(),
+        }
+    }
+
+    /// The look ticks the thread it names, and files under the SESSION it is a look at — so a look
+    /// re-armed for another thread of the same session replaces the first (build item 16), and a
+    /// look never collides with the tick, the delivery or the resume of the same id.
+    #[test]
+    fn a_stranded_look_ticks_its_thread_under_a_key_of_its_session() {
+        let id = "m-00000000000000000000000002";
+        assert_eq!(
+            look(id, "m-chan").argv().unwrap(),
+            vec!["chat", "tick", "--thread", "m-chan"]
+        );
+        assert_eq!(
+            look(id, "m-chan").key().unwrap(),
+            format!("stranded-look-{id}")
+        );
+        for other in [
+            tick(id),
+            Job::ChatDeliver { session: id.into() },
+            Job::ChatResume { session: id.into() },
+        ] {
+            assert_ne!(look(id, id).key(), other.key());
+        }
+        let tmp = TempDir::new().unwrap();
+        let p = book(&tmp);
+        arm(&p, "2026-10-18T10:02:00Z", look(id, "m-chan")).unwrap();
+        arm(&p, "2026-10-18T10:03:00Z", look(id, "m-slot")).unwrap();
+        let got = read_from(&p).unwrap();
+        assert_eq!(got.len(), 1, "one look per session");
+        assert_eq!(got[0].job, look(id, "m-slot"));
+    }
+
+    /// **Build item 4**: the thread a look ticks is not its key, so gating the key alone would put
+    /// it into an argv unchecked. Refused at arm time, before anything is written.
+    #[test]
+    fn a_look_whose_thread_is_outside_the_charset_is_refused_at_arm_time() {
+        let tmp = TempDir::new().unwrap();
+        let p = book(&tmp);
+        let err = arm(&p, "2026-10-18T10:02:00Z", look("m-s1", "x; rm -rf ~")).unwrap_err();
+        assert_eq!(err.kind.as_str(), "validation");
+        assert!(
+            err.msg.contains("x; rm -rf ~"),
+            "names the value: {}",
+            err.msg
+        );
+        assert!(!p.exists(), "a refused arm leaves no book behind");
+    }
+
+    /// **…and at read time**, for a book written by hand: counted as `rejected`, left in place,
+    /// never fired.
+    #[test]
+    fn a_hand_written_look_with_a_bad_thread_is_rejected_when_it_falls_due() {
+        let tmp = TempDir::new().unwrap();
+        let p = book(&tmp);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"deadline":[{"due":"2026-10-18T10:02:00Z","job":"stranded_look","session":"m-s1","thread":"../../etc"}]}"#,
+        )
+        .unwrap();
+        let due = take_due(&p, "2026-10-18T10:05:00Z", ROOM).unwrap();
+        assert!(due.fired.is_empty());
+        assert_eq!(due.rejected, 1);
+        assert_eq!(
+            read_from(&p).unwrap().len(),
+            1,
+            "left in the book, not deleted"
         );
     }
 }

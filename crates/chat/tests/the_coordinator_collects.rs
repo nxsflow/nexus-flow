@@ -94,6 +94,16 @@ impl Timer for RecordingTimer {
     ) -> nexus_chat::error::Result<TimerHandle> {
         unreachable!("this bench arms no board windows")
     }
+    /// A stranded look (nxf 6j6v.ccvy) is armed by every commission; it is not this bench's subject,
+    /// so it is accepted and forgotten rather than falling through to `schedule` above.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        _thread: &str,
+        _deadline: &str,
+    ) -> nexus_chat::error::Result<TimerHandle> {
+        Ok(TimerHandle(format!("look:{session}")))
+    }
     fn schedule_delivery(
         &self,
         session: &str,

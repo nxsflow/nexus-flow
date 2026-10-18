@@ -31,7 +31,7 @@ use nexus_chat::timer::TimerConfig;
 use nexus_chat::worker::{
     Coordinator, TriggerOutcome, TriggerRequest, TriggerResult, Worker, WorkerConfig,
 };
-use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt};
+use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
 use tempfile::TempDir;
 
 const NOW: &str = "2026-10-03T10:00:00Z";
@@ -394,6 +394,25 @@ fn the_pm_of_one_workspace_asks_the_pm_of_another_and_is_woken_with_the_answer()
         "the persona is told who asks: {}",
         beta_pm.message
     );
+    // **The obligation is recorded on the EXECUTING side** (nxf 6j6v.ccvy, AC 1 h): the machine
+    // that started the persona owes the answer and is the one that can judge its session; the
+    // commissioning side, which started nothing, records none for the border thread.
+    let owed_on = |side: &Side| -> Vec<String> {
+        let store = Workspace::resolve(None, &side.root)
+            .unwrap()
+            .open_chat_store()
+            .unwrap();
+        let mut st = store
+            .connection()
+            .prepare("SELECT session FROM owed_starts WHERE thread = ?1")
+            .unwrap();
+        st.query_map([&receipt.thread_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(owed_on(&b), vec![beta_pm.internal_session.clone()]);
+    assert!(owed_on(&a).is_empty(), "{:?}", owed_on(&a));
 
     b.reply(
         &beta_pm.internal_session,

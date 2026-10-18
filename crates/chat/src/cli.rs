@@ -1355,6 +1355,17 @@ impl crate::timer::Timer for LazyTimer {
     fn schedule_resume(&self, session: &str, deadline: &str) -> Result<crate::timer::TimerHandle> {
         (self.resolve)()?.schedule_resume(session, deadline)
     }
+    /// Forwarded for [`schedule_delivery`](Self::schedule_delivery)'s reason (nxf 6j6v.ccvy): the
+    /// default books the look as the backend's plain tick, which the service files under the
+    /// thread and would let it replace the channel's own window.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<crate::timer::TimerHandle> {
+        (self.resolve)()?.schedule_stranded_look(session, thread, deadline)
+    }
     fn cancel(&self, handle: &crate::timer::TimerHandle) -> Result<()> {
         (self.resolve)()?.cancel(handle)
     }
@@ -3886,7 +3897,38 @@ fn says_why(t: &crate::facade::StatusThread) -> bool {
 /// teardown), so this was not an edge case but what every waiting caller would have rendered. The
 /// sub-round clause stands alone; whether that round is itself alive is a question about ITS thread,
 /// where this same suffix answers it.
-fn session_suffix(t: &crate::facade::StatusThread) -> &'static str {
+fn session_suffix(t: &crate::facade::StatusThread) -> String {
+    // **A STRANDED record is said FIRST, and instead of the session line** (nxf 6j6v.ccvy). It says
+    // why nothing is coming and what was done about it, so "ITS SESSION HAS ENDED, nothing is
+    // coming" beside it would be the same fact said worse — and it stays after the escalation
+    // answered the slot, for as long as the record is current.
+    if let Some(stranded) = &t.stranded {
+        return stranded_suffix(stranded);
+    }
+    session_line(t).to_string()
+}
+
+/// The STRANDED clause of a status row (nxf 6j6v.ccvy).
+fn stranded_suffix(s: &crate::facade::StrandedStatus) -> String {
+    use crate::facade::StrandedEscalation as E;
+    let outcome = match s.escalation {
+        E::Posted => "escalated to the commissioner".to_string(),
+        E::AlreadyAnswered => "already answered by somebody else".to_string(),
+        E::Pending => "the escalation could not be posted yet".to_string(),
+        E::GivenUp => format!(
+            "could not be escalated: {} — withdraw it",
+            s.escalation_error
+                .as_deref()
+                .unwrap_or("the post was refused")
+        ),
+    };
+    format!(
+        " — STRANDED: {}; recorded {}, {outcome}",
+        s.detail, s.recorded_at
+    )
+}
+
+fn session_line(t: &crate::facade::StatusThread) -> &'static str {
     if t.state != crate::facade::ThreadState::Open {
         return "";
     }
@@ -4519,6 +4561,15 @@ mod tests {
             SEEN.lock().unwrap().push("resume");
             Ok(crate::timer::TimerHandle("h".into()))
         }
+        fn schedule_stranded_look(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::timer::TimerHandle> {
+            SEEN.lock().unwrap().push("look");
+            Ok(crate::timer::TimerHandle("h".into()))
+        }
         fn cancel(&self, _: &crate::timer::TimerHandle) -> Result<()> {
             Ok(())
         }
@@ -4539,10 +4590,126 @@ mod tests {
         timer
             .schedule_resume("m-session", "2026-10-03T00:00:00Z")
             .unwrap();
-        assert_eq!(*SEEN.lock().unwrap(), vec!["delivery", "resume"]);
+        timer
+            .schedule_stranded_look("m-session", "m-thread", "2026-10-03T00:00:00Z")
+            .unwrap();
+        assert_eq!(*SEEN.lock().unwrap(), vec!["delivery", "resume", "look"]);
     }
 
     use super::*;
+
+    // ---- the STRANDED clause (nxf 6j6v.ccvy, AC 9) -------------------------------------------
+
+    fn open_row(
+        session_state: crate::orchestration::SessionState,
+        stranded: Option<crate::facade::StrandedStatus>,
+    ) -> crate::facade::StatusThread {
+        crate::facade::StatusThread {
+            thread_id: "m-slot".into(),
+            name: None,
+            channel_id: Some("decl:review".into()),
+            parent: Some("m-root".into()),
+            depth: 1,
+            state: crate::facade::ThreadState::Open,
+            awaiting_human: false,
+            escalated: false,
+            substituted: false,
+            opener: None,
+            session: Some("m-s".into()),
+            session_state: Some(session_state),
+            expects: vec!["ws/verifier".into()],
+            outstanding: vec!["ws/verifier".into()],
+            stale: false,
+            deadline: None,
+            working_tree: None,
+            working_tree_queue_position: None,
+            waiting_on_sub_round: Vec::new(),
+            working_copy: None,
+            interrupted: None,
+            border: None,
+            stranded,
+        }
+    }
+
+    fn stranded(
+        observed: crate::facade::Observation,
+        detail: &str,
+        escalation: crate::facade::StrandedEscalation,
+    ) -> crate::facade::StrandedStatus {
+        crate::facade::StrandedStatus {
+            session: "m-s".into(),
+            recorded_at: "2026-10-18T10:03:00Z".into(),
+            observed,
+            detail: detail.into(),
+            escalated: escalation == crate::facade::StrandedEscalation::Posted,
+            escalation,
+            escalation_error: Some("io: locked".into()),
+        }
+    }
+
+    /// **AC 9**: a never-bound, an ended and a never-triggered stranded slot each render the
+    /// STRANDED clause with their own observation — and NOT "ITS SESSION HAS ENDED, nothing is
+    /// coming", which the stranded line replaces with the reason and what was done about it.
+    #[test]
+    fn a_stranded_slot_says_so_instead_of_nothing_is_coming() {
+        use crate::facade::StrandedEscalation as E;
+        use crate::orchestration::SessionState;
+        for (state, observed, detail) in [
+            (
+                SessionState::Unknown,
+                crate::facade::Observation::NeverBound,
+                "no live process across two looks since 2026-10-18T10:02:00Z; it never bound",
+            ),
+            (
+                SessionState::Ended,
+                crate::facade::Observation::EndedWithoutAnswer,
+                "its process ended at 2026-10-18T10:01:00Z without answering, and no substitute \
+                 was posted for it",
+            ),
+            (
+                SessionState::Unknown,
+                crate::facade::Observation::NeverStarted,
+                "a slot was opened for it at 2026-10-18T10:00:00Z and no start ever ran",
+            ),
+        ] {
+            let line = session_suffix(&open_row(
+                state,
+                Some(stranded(observed, detail, E::Posted)),
+            ));
+            assert_eq!(
+                line,
+                format!(
+                    " — STRANDED: {detail}; recorded 2026-10-18T10:03:00Z, escalated to the \
+                     commissioner"
+                )
+            );
+            assert!(!line.contains("nothing is coming"), "{line}");
+        }
+        // The other three outcomes of the escalation, each in its own words.
+        let says = |e| {
+            session_suffix(&open_row(
+                SessionState::Ended,
+                Some(stranded(
+                    crate::facade::Observation::EndedWithoutAnswer,
+                    "x",
+                    e,
+                )),
+            ))
+        };
+        assert!(says(E::AlreadyAnswered).ends_with("already answered by somebody else"));
+        assert!(says(E::Pending).ends_with("the escalation could not be posted yet"));
+        assert!(says(E::GivenUp).ends_with("could not be escalated: io: locked — withdraw it"));
+        // After a re-trigger the record is history: neither line, only what the session is doing.
+        assert_eq!(
+            session_suffix(&open_row(SessionState::Running, None)),
+            " (its session is running)"
+        );
+        assert_eq!(
+            session_suffix(&open_row(SessionState::Ended, None)),
+            " — ITS SESSION HAS ENDED, nothing is coming",
+            "unchanged for a session that ended with nothing recorded"
+        );
+    }
 
     /// **The `START FAILED` detail line says who, how often, what, and what next** (nxf 6j6v.br25;
     /// review of PR #32, Test Quality #7) — both next steps, each naming the withdrawal.

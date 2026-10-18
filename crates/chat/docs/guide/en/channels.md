@@ -186,13 +186,36 @@ somebody opens by hand — and what a channel step contributes is its own consol
 **How a step moves on.** The member answers its slot thread with `nxc reply --thread <id>`. That
 reply is the whole mechanism: the supervisor runs inside that same write path, sees the set is
 settled, and opens the next step. There is no "step done" verb, no branching token, and nothing to
-poll. If a member ends its session without replying, the operation stands still until the declared
-`timeout` strikes.
+poll. If a member's session ends without replying — or never starts, or is killed — the round does
+not wait out its window: the session is recorded as **stranded** and the round is escalated to
+whoever commissioned it (see *A member that will not answer* below).
 
-**"Settled" means `complete || stale`** — a step that answered and a step whose window ran out with
-nothing in it both release the next one. A step that stayed silent is *reported*, never absorbed:
-the call that moved the flow past it carries a `step_unanswered` warning naming the silent thread,
-and so does the consolidation that carries no answer from it.
+**"Settled" means answered — or past the window with the session still running.** A step that
+answered releases the next one. A step whose window ran out releases it too, but only while its
+session is still running: a process that hangs is advanced past, and that is *reported*, never
+absorbed — the call that moved the flow past it carries a `step_unanswered` warning naming the
+silent thread, and so does the consolidation that carries no answer from it. A step whose window ran
+out while its session is NOT running releases nothing: it waits for the stranded record, which
+escalates the round within three minutes of the session's last start. And a step whose answer is
+still coming waits with its window paused: queued for the working copy, a retry due, on a quota
+hold, waiting on a round it commissioned itself, or with an answer held for it.
+
+**A member that will not answer is recorded as STRANDED.** Every tick looks at each session that
+owes an answer, two minutes after it was last started. A session that announced its end, or whose
+start was given up, is recorded at that look; one with no end at all needs a second look a minute
+later on unchanged evidence — still no process, the same transcript. The record is written in the
+member's slot, one escalation is posted there in the member's name (`substituted`, by the runtime),
+and the round reads `NEEDS DECISION`. Nothing is restarted. `nxc status` says so on the slot:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — STRANDED: no live process across two looks since 2026-10-18T10:02:00Z; it never bound; recorded 2026-10-18T10:03:00Z, escalated to the commissioner
+```
+
+The two ways on are the ones every escalation has: a reply into the root commissions the round
+again, and `nxc withdraw --thread <root>` takes it back. A session that is still running past its
+window is not stranded — it is the hung case above. A worker that cannot tell a live session from a
+dead one records nothing, and says so once per tick (`liveness_unknown`); a slot opened before this
+rule existed keeps the old behaviour.
 
 **A step that escalated releases nothing — it ends the chain.** `nxc reply --escalate` says "I
 cannot reach the result on my own — I need help, or a decision", and a task that did not reach its
@@ -503,6 +526,11 @@ input: []                     # nothing but this step's own instructions
   findings when it is reached that way — see the last bullet.
 - **A named step that ran more than once contributes its last answer.** A named step that has not run
   at all in this round contributes nothing — which is legitimate at step one and is not an error.
+- **A named step that WAS asked and stayed silent stops the round.** When the newest slot of a
+  named step in this run carries no answer of its own — nothing at all, or only the substitute the
+  runtime posts for a session that ended owing one — the step is not opened, and the round escalates
+  to its commissioner naming the step, the source, its slot and its pass. "Has not run yet" and "ran
+  and said nothing" are different facts; only the first is the legitimate absence above.
 - **`input` decides material, never the task.** The persona, and the step's own `task:`, arrive
   whatever `input:` says. A step that is given nothing is still a step with a job.
 - **Nothing runs in between.** The coordinator puts the answer together, it does not summarize it: no

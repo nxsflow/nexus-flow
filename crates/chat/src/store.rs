@@ -3007,6 +3007,11 @@ pub(crate) mod tests {
             // THIS machine, and what of it was handed to this side's party.
             "border_threads",
             "border_served",
+            // The stranded-session record (nxf 6j6v.ccvy): the obligation a session owes, the first
+            // look at it, and the record — all keyed by internal session ids of THIS machine.
+            "owed_starts",
+            "stranded_suspects",
+            "stranded_sessions",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store

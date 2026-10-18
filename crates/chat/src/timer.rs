@@ -129,6 +129,24 @@ pub trait Timer: Send + Sync {
         }
         self.schedule(session, deadline, &resume_command(session))
     }
+
+    /// **Arm a look at one owed session** (nxf 6j6v.ccvy): at `deadline`, tick `thread` so the
+    /// workspace-wide stranded sweep judges `session`.
+    ///
+    /// A method of its own for [`schedule_resume`](Timer::schedule_resume)'s reason — the service
+    /// backend files it under the SESSION (`stranded-look-<session>`), so it never replaces the
+    /// channel's own window and is not replaced by it. The default ticks `thread` through
+    /// [`schedule`](Timer::schedule), which is the job the look runs, and gates BOTH ids first: the
+    /// default builds a shell command string out of `thread`.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<TimerHandle> {
+        look_ids_are_schedulable(session, thread)?;
+        self.schedule(thread, deadline, &tick_command(thread))
+    }
     /// Cancel a previously scheduled job. Only meaningful/tested within the SAME process that
     /// received the `TimerHandle` — see this module's own doc on why the live wiring never
     /// attempts this across a process boundary.
@@ -181,6 +199,42 @@ impl Timer for DryTimer {
             append_log(&path, &format!("cancel handle={}\n", handle.0))?;
         }
         Ok(())
+    }
+
+    /// **A stranded look goes to a log of its own** (nxf 6j6v.ccvy): `NXC_TIMER_LOOK_LOG`, one line
+    /// per look, silently a no-op when unset. Not `NXC_TIMER_LOG`, which every suite that reads it
+    /// reads as "the channel windows that were armed" — a look is a different job, keyed by a
+    /// session, and mixing it in would make a window that was NOT armed look as if one had been.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<TimerHandle> {
+        look_ids_are_schedulable(session, thread)?;
+        let handle = TimerHandle(format!("dry:stranded-look-{session}"));
+        if let Ok(path) = std::env::var("NXC_TIMER_LOOK_LOG") {
+            append_log(
+                &path,
+                &format!("look session={session} thread={thread} deadline={deadline}\n"),
+            )?;
+        }
+        Ok(handle)
+    }
+}
+
+/// The gate every non-service backend applies to a stranded look's two ids before it uses them
+/// (nxf 6j6v.ccvy): both become part of a command a timer backend runs.
+fn look_ids_are_schedulable(session: &str, thread: &str) -> Result<()> {
+    match [session, thread]
+        .into_iter()
+        .find(|id| !nxs_service::timers::valid_key(id))
+    {
+        Some(id) => Err(NxfError::validation(format!(
+            "`{id}` is not a schedulable id: a look's parameters become part of the command a timer \
+             backend runs, so an id outside [A-Za-z0-9_-] is refused rather than spliced into a shell"
+        ))),
+        None => Ok(()),
     }
 }
 

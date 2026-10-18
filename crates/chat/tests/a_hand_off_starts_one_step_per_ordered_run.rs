@@ -391,6 +391,14 @@ fn a_round_queued_past_its_lapsed_first_step(
     assert!(store(tmp)
         .remove_working_tree_queue_entry(coder.id)
         .unwrap());
+    // …and a build before nxf 6j6v.ccvy wrote no obligation record either. With one, a lapsed
+    // slot whose session is not running is not settled (it waits for the stranded sweep), so the
+    // state this staging reconstructs — the flow moved past the lapsed coder — is only reachable for
+    // a slot from before that rule. Its record goes with its queue row.
+    store(tmp)
+        .connection()
+        .execute("DELETE FROM owed_starts WHERE thread = ?1", [&coder_slot])
+        .unwrap();
     tick(tmp, worker, LAPSED, &channel_thread);
     store(tmp).enqueue_working_tree(&coder, LAPSED).unwrap();
     assert_eq!(

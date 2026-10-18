@@ -626,6 +626,20 @@ cannot be asked at all: `worker_answers_liveness`. It reads `false` in the examp
 guide's worked session records its triggers instead of starting real sessions, so there is no
 process anywhere to ask about — and `true` under the shipped sidecar.
 
+**A slot whose session will not answer says STRANDED instead** — and why, and what was done about
+it. `stranded` names the observation (`observed`, 1–5: never started, never bound, ended without
+answering, no live process, start given up), when it was recorded, and what became of the
+escalation in the member's name:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — STRANDED: its process ended at 2026-10-18T10:01:00Z without answering, and no substitute was posted for it; recorded 2026-10-18T10:03:00Z, escalated to the commissioner
+```
+
+The clause ends `escalated to the commissioner` once the escalation is posted, `already answered by
+somebody else` when a late answer beat it, `the escalation could not be posted yet` while it is
+retried, and `could not be escalated: <error> — withdraw it` when the retry gave up. It stays on the
+slot until the slot is started again.
+
 **And a thread says when the party it is waiting for is itself waiting.** `waiting_on_sub_round`
 lists the rounds that party commissioned out of this thread and has not got back; the terminal reads
 

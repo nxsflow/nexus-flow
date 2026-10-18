@@ -142,6 +142,12 @@ pub enum Flow {
     /// `ConsequenceClass::StepUnanswered` on the receipt of the call that moved the flow past it,
     /// and again on the consolidation that carries no answer from it.
     ///
+    /// **Since nxf 6j6v.ccvy a `stale` step settles only while its session is still RUNNING** (the
+    /// hung process rs9k was written for). One whose session is not running waits for the stranded
+    /// sweep, which records it and escalates the round; one whose answer is still coming (queued, a
+    /// retry due, on hold, its own sub-round, a held delivery) waits with its window paused. A slot
+    /// opened before that rule existed — it has no obligation record — settles as it always did.
+    ///
     /// **A step that ESCALATED releases nothing — it ends the chain** (nxf 6j6v.ma7v). `--escalate`
     /// says "I cannot reach the result without help or a decision", and a task that did not reach
     /// its result must not commission the work that was to follow it: the round is consolidated
@@ -336,6 +342,12 @@ pub struct FlowStep {
     /// silent choice among several answers. A named step that has not run at all in this run — a
     /// first step naming a later one — contributes nothing rather than an error: it is legitimate
     /// on the first pass and says the truth, which is that there is no such answer yet.
+    ///
+    /// **A named source that was asked and stayed silent, or answered only by a substitute, refuses
+    /// the step** (nxf 6j6v.ccvy): when its NEWEST slot in this run carries no answer of its own,
+    /// the step is not opened and the round escalates to its commissioner, naming the step, the
+    /// source, its slot and its pass. "Not run in this run" and "asked and silent" are different
+    /// facts, and only the first is the legitimate absence above.
     ///
     /// **It regulates FORWARD edges only.** A step reached over
     /// [`on_needs_rework`](FlowStep::on_needs_rework) is woken with [`compose_rework_notice`],
