@@ -129,6 +129,32 @@ pub trait Timer: Send + Sync {
         }
         self.schedule(session, deadline, &resume_command(session))
     }
+
+    /// **Arm a look at one owed session** (nxf 6j6v.ccvy): at `deadline`, tick `thread` so the
+    /// workspace-wide stranded sweep judges `session`.
+    ///
+    /// A method of its own for [`schedule_resume`](Timer::schedule_resume)'s reason — the service
+    /// backend files it under the SESSION (`stranded-look-<session>`), so it never replaces the
+    /// channel's own window and is not replaced by it. The default ticks `thread` through
+    /// [`schedule`](Timer::schedule), which is the job the look runs, and gates BOTH ids first: the
+    /// default builds a shell command string out of `thread`.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<TimerHandle> {
+        for id in [session, thread] {
+            if !nxs_service::timers::valid_key(id) {
+                return Err(NxfError::validation(format!(
+                    "`{id}` is not a schedulable id: a look's parameters become part of the command \
+                     a timer backend runs, so an id outside [A-Za-z0-9_-] is refused rather than \
+                     spliced into a shell"
+                )));
+            }
+        }
+        self.schedule(thread, deadline, &tick_command(thread))
+    }
     /// Cancel a previously scheduled job. Only meaningful/tested within the SAME process that
     /// received the `TimerHandle` — see this module's own doc on why the live wiring never
     /// attempts this across a process boundary.

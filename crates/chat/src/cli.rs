@@ -1355,6 +1355,17 @@ impl crate::timer::Timer for LazyTimer {
     fn schedule_resume(&self, session: &str, deadline: &str) -> Result<crate::timer::TimerHandle> {
         (self.resolve)()?.schedule_resume(session, deadline)
     }
+    /// Forwarded for [`schedule_delivery`](Self::schedule_delivery)'s reason (nxf 6j6v.ccvy): the
+    /// default books the look as the backend's plain tick, which the service files under the
+    /// thread and would let it replace the channel's own window.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<crate::timer::TimerHandle> {
+        (self.resolve)()?.schedule_stranded_look(session, thread, deadline)
+    }
     fn cancel(&self, handle: &crate::timer::TimerHandle) -> Result<()> {
         (self.resolve)()?.cancel(handle)
     }
@@ -3886,7 +3897,38 @@ fn says_why(t: &crate::facade::StatusThread) -> bool {
 /// teardown), so this was not an edge case but what every waiting caller would have rendered. The
 /// sub-round clause stands alone; whether that round is itself alive is a question about ITS thread,
 /// where this same suffix answers it.
-fn session_suffix(t: &crate::facade::StatusThread) -> &'static str {
+fn session_suffix(t: &crate::facade::StatusThread) -> String {
+    // **A STRANDED record is said FIRST, and instead of the session line** (nxf 6j6v.ccvy). It says
+    // why nothing is coming and what was done about it, so "ITS SESSION HAS ENDED, nothing is
+    // coming" beside it would be the same fact said worse — and it stays after the escalation
+    // answered the slot, for as long as the record is current.
+    if let Some(stranded) = &t.stranded {
+        return stranded_suffix(stranded);
+    }
+    session_line(t).to_string()
+}
+
+/// The STRANDED clause of a status row (nxf 6j6v.ccvy).
+fn stranded_suffix(s: &crate::facade::StrandedStatus) -> String {
+    use crate::facade::StrandedEscalation as E;
+    let outcome = match s.escalation {
+        E::Posted => "escalated to the commissioner".to_string(),
+        E::AlreadyAnswered => "already answered by somebody else".to_string(),
+        E::Pending => "the escalation could not be posted yet".to_string(),
+        E::GivenUp => format!(
+            "could not be escalated: {} — withdraw it",
+            s.escalation_error
+                .as_deref()
+                .unwrap_or("the post was refused")
+        ),
+    };
+    format!(
+        " — STRANDED: {}; recorded {}, {outcome}",
+        s.detail, s.recorded_at
+    )
+}
+
+fn session_line(t: &crate::facade::StatusThread) -> &'static str {
     if t.state != crate::facade::ThreadState::Open {
         return "";
     }
@@ -4519,6 +4561,15 @@ mod tests {
             SEEN.lock().unwrap().push("resume");
             Ok(crate::timer::TimerHandle("h".into()))
         }
+        fn schedule_stranded_look(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::timer::TimerHandle> {
+            SEEN.lock().unwrap().push("look");
+            Ok(crate::timer::TimerHandle("h".into()))
+        }
         fn cancel(&self, _: &crate::timer::TimerHandle) -> Result<()> {
             Ok(())
         }
@@ -4539,7 +4590,10 @@ mod tests {
         timer
             .schedule_resume("m-session", "2026-10-03T00:00:00Z")
             .unwrap();
-        assert_eq!(*SEEN.lock().unwrap(), vec!["delivery", "resume"]);
+        timer
+            .schedule_stranded_look("m-session", "m-thread", "2026-10-03T00:00:00Z")
+            .unwrap();
+        assert_eq!(*SEEN.lock().unwrap(), vec!["delivery", "resume", "look"]);
     }
 
     use super::*;

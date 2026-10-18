@@ -1379,35 +1379,20 @@ fn refuse_a_reply_the_supervisor_is_finished_with(
     store: &ChatStore,
     thread: &str,
 ) -> Result<()> {
-    // No board at all — a plain conversation, or a thread this verb is about to reject as unknown.
+    // **The discriminator lives on the store** (nxf 6j6v.ccvy), because the stranded sweep asks the
+    // same question before it records a slot: a slot the supervisor opened for ONE real party,
+    // whose parent no longer expects the supervisor. `expects` being non-empty and free of the
+    // engine's own identities is what tells a member/step slot from the CHANNEL thread above it —
+    // the same discriminator `supervisor_after_reply` branches on, and exactly the shape
+    // `orchestration::reply` reads as a quorum board, which is what closes its direct resume. A
+    // slot whose parent this workspace has not folded decides nothing: refusing on an ancestry that
+    // is only half here would be deciding the set from less.
+    let Some(parent) = store.round_is_finished_with(thread, ctx.origin, ctx.now)? else {
+        return Ok(());
+    };
     let Some(q) = store.thread_quorum(thread, ctx.now)? else {
         return Ok(());
     };
-    let supervisor = orchestration::supervisor_qualified(ctx.origin);
-    // A slot the supervisor opened for one real party. `expects` being non-empty and free of the
-    // engine's own identities is what tells a member/step slot from the CHANNEL thread above it,
-    // the same discriminator `supervisor_after_reply` branches on — and it is also exactly the
-    // shape `orchestration::reply` reads as a quorum board, which is what closes its direct resume.
-    if q.opener.as_deref() != Some(supervisor.as_str())
-        || q.expects.is_empty()
-        || q.expects
-            .iter()
-            .any(|h| orchestration::is_engine_identity(h))
-    {
-        return Ok(());
-    }
-    // A slot whose parent this workspace has not folded decides nothing here: the supervisor itself
-    // does nothing with such a thread rather than deciding a set from one member, and refusing on
-    // an ancestry that is only half here would be deciding it from less.
-    let Some(parent) = store.thread_parent(thread)? else {
-        return Ok(());
-    };
-    let Some(parent_q) = store.thread_quorum(&parent, ctx.now)? else {
-        return Ok(());
-    };
-    if parent_q.expects == [supervisor] {
-        return Ok(());
-    }
     // **What the caller is sent to instead, named from the record rather than guessed.** The
     // DECLARED channel this slot lives in is the door that starts another round, and it is the one
     // piece of advice that is right whoever is asking: the parent thread's own next turn belongs to
@@ -1452,12 +1437,46 @@ fn refuse_a_reply_the_supervisor_is_finished_with(
 /// instead of a boolean on the request every app fills in. `Engine` deliberately does NOT expose it
 /// — held by `tests/seam_disposition.rs`'s `reply --if-unanswered` row — while the CLI flag stays,
 /// because the teardown reaches this binary and nothing else.
+///
+/// **It has a second caller since nxf 6j6v.ccvy, and it is the engine itself**: the stranded sweep
+/// escalates a session that will not answer in that session's own name, through
+/// [`reply_as_the_runtime_for`], which runs this same body — so `substituted` is decided in one
+/// place for the runtime's teardown and for the sweep alike.
 pub fn settle_if_unanswered(
     ctx: &Ctx,
     store: &mut ChatStore,
     req: ReplyThreadRequest,
 ) -> Result<ReplyReceipt> {
     reply_in_thread_inner(ctx, store, req, true)
+}
+
+/// **The runtime speaks for a session that owes an answer** (nxf 6j6v.ccvy) — the engine's own
+/// entrance to [`settle_if_unanswered`]'s body, for the stranded sweep.
+///
+/// `ctx` carries the member as its actor and the stranded session as its session, so the post is
+/// sent AS the member and stamped `substituted`, exactly as the teardown's is; it posts nothing when
+/// the member no longer owes `thread` (somebody answered meanwhile), which is what the sweep then
+/// reads as "already answered".
+pub(crate) fn reply_as_the_runtime_for(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    body: &str,
+    escalate: bool,
+) -> Result<ReplyReceipt> {
+    reply_in_thread_inner(
+        ctx,
+        store,
+        ReplyThreadRequest {
+            machine: None,
+            thread,
+            body,
+            escalate,
+            needs_rework: false,
+            accept: false,
+        },
+        true,
+    )
 }
 
 /// The one body both entrances run. `if_unanswered` is a parameter rather than a request field so

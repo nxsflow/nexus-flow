@@ -757,6 +757,76 @@ pub struct StatusThread {
     /// thread that stays in this workspace, which is skipped in `--json`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border: Option<BorderStatus>,
+    /// **This slot's session was recorded as STRANDED** (nxf 6j6v.ccvy): it will not answer — it
+    /// never started, never bound, ended without answering, or holds no live process — and the round
+    /// was escalated to its commissioner. Nothing was restarted.
+    ///
+    /// The CURRENT record only: a later trigger of the same obligation (the commissioner's new
+    /// round continuing the session) makes it history, and then this is `None` while the session
+    /// runs. It outlives the obligation the escalation discharged, so a row reads STRANDED for as
+    /// long as the record is current. `None` for every thread nothing was recorded on, which is
+    /// skipped in `--json`; device-local, so a replica shows `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stranded: Option<StrandedStatus>,
+}
+
+/// **A stranded session as a status row shows it** (nxf 6j6v.ccvy).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct StrandedStatus {
+    /// The session that will not answer.
+    pub session: String,
+    /// When the sweep recorded it.
+    pub recorded_at: String,
+    /// Which of the five observations it was recorded on, by the number the design gives them:
+    /// 1 never started, 2 never bound, 3 ended without answering, 4 no live process, 5 start given up.
+    pub observed: u8,
+    /// The observation in words, with its instants.
+    pub detail: String,
+    /// Whether the escalation in the member's name is on the thread.
+    pub escalated: bool,
+    /// What became of the escalation.
+    pub escalation: StrandedEscalation,
+    /// The last error a post attempt met, when the escalation is not posted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation_error: Option<String>,
+}
+
+/// **What became of a stranded session's escalation** (nxf 6j6v.ccvy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StrandedEscalation {
+    /// Not posted yet — the next sweep tries again.
+    Pending,
+    /// Posted: the round reads `needs_decision` at its commissioner.
+    Posted,
+    /// Not posted, because somebody else answered the slot meanwhile.
+    AlreadyAnswered,
+    /// Could not be posted, and the bounded retry is spent — withdraw the round.
+    GivenUp,
+}
+
+impl StrandedStatus {
+    fn from_record(r: &crate::stranded::StrandedRecord) -> StrandedStatus {
+        let escalation = match r.escalation {
+            None => StrandedEscalation::Pending,
+            Some(crate::stranded::Escalation::Posted) => StrandedEscalation::Posted,
+            Some(crate::stranded::Escalation::AlreadyAnswered) => {
+                StrandedEscalation::AlreadyAnswered
+            }
+            Some(crate::stranded::Escalation::GivenUp) => StrandedEscalation::GivenUp,
+        };
+        StrandedStatus {
+            session: r.session.clone(),
+            recorded_at: r.recorded_at.clone(),
+            observed: r.observed.number(),
+            detail: r.detail.clone(),
+            escalated: escalation == StrandedEscalation::Posted,
+            escalation,
+            escalation_error: r.escalation_error.clone(),
+        }
+    }
 }
 
 /// **A border thread as a status row shows it** (nxf 6j6v.szc5).
@@ -1962,7 +2032,7 @@ fn visible_under(
 /// `opener`) names the SAME participant as `as_handle`: either the identical string, or `as_handle`
 /// is that identity's BARE tail (the shape declared-channel membership is recorded in). See
 /// [`filter_board_messages`]'s own doc for why both shapes must be accepted here.
-fn same_identity(qualified: Option<&str>, as_handle: &str) -> bool {
+pub(crate) fn same_identity(qualified: Option<&str>, as_handle: &str) -> bool {
     match qualified {
         Some(q) => q == as_handle || q.rsplit_once('/').map(|(_, bare)| bare) == Some(as_handle),
         None => false,
@@ -4076,6 +4146,9 @@ pub fn status(
         .into_iter()
         .map(|r| (r.thread_id.clone(), r))
         .collect();
+    // The stranded records (nxf 6j6v.ccvy) — the fourteenth read, one statement over a device-local
+    // table that is empty unless a session was found that will not answer.
+    let stranded = stranded_for(store, &id_list, edges.len())?;
     // **One bundle, because these seven ARE one thing**: the bulk reads this report is assembled
     // from, taken once for the whole selection and then read per thread. Passing them
     // individually made the per-thread derivation an eight-argument call, and the argument list
@@ -4092,6 +4165,7 @@ pub fn status(
         interruptions: &interruptions,
         held_answers: &held_answers,
         borders: &borders,
+        stranded: &stranded,
     };
 
     let mut operations = Vec::new();
@@ -4271,6 +4345,8 @@ struct DerivedFacts<'a> {
     held_answers: &'a std::collections::HashSet<String>,
     /// The border record, per thread (nxf 6j6v.szc5).
     borders: &'a BTreeMap<String, crate::border::BorderRow>,
+    /// The current stranded record, per thread (nxf 6j6v.ccvy).
+    stranded: &'a BTreeMap<String, crate::stranded::StrandedRecord>,
 }
 
 /// **How many process questions ONE status read will ask** (review of PR #444, Integrity #1).
@@ -4680,6 +4756,24 @@ fn last_replies_for(store: &ChatStore, ids: &[&str], total: usize) -> Result<Las
 
 /// [`quorums_for`]'s twin for "where did the working copy stand at this thread's newest handover?"
 /// (nxf 6j6v.2af2). Same ceiling, same fallback as its three siblings above.
+/// The CURRENT stranded record of each of `ids`, by thread (nxf 6j6v.ccvy) — one statement, under
+/// [`MAX_BOUND_IDS`] like its siblings, and the whole (small) table above it.
+fn stranded_for(
+    store: &ChatStore,
+    ids: &[&str],
+    total: usize,
+) -> Result<BTreeMap<String, crate::stranded::StrandedRecord>> {
+    if ids.len() > MAX_BOUND_IDS || ids.len() == total {
+        let wanted: BTreeSet<&str> = ids.iter().copied().collect();
+        return Ok(store
+            .current_stranded_all()?
+            .into_iter()
+            .filter(|(thread, _)| wanted.contains(thread.as_str()))
+            .collect());
+    }
+    store.current_stranded_by_threads(ids)
+}
+
 fn anchors_for(
     store: &ChatStore,
     ids: &[&str],
@@ -4829,6 +4923,7 @@ impl<'a> Forest<'a> {
             interruptions,
             held_answers,
             borders,
+            stranded,
         } = facts;
         let q = by_id.get(id)?;
         let parent = self.declared.get(id).copied().flatten();
@@ -4913,6 +5008,7 @@ impl<'a> Forest<'a> {
                 state: r.state,
                 reason: r.reason.clone(),
             }),
+            stranded: stranded.get(id).map(StrandedStatus::from_record),
         })
     }
 }

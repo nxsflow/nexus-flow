@@ -768,6 +768,9 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     // The border record (nxf 6j6v.4gp2): device-local, like `session_map` — it names where the
     // other half of a conversation lives on THIS machine. See `crate::border`.
     conn.execute_batch(crate::border::BORDER_DDL)?;
+    // The stranded-session record (nxf 6j6v.ccvy): device-local, like `session_map` — it names
+    // sessions by their internal id, which is a process on THIS machine. See `crate::stranded`.
+    conn.execute_batch(crate::stranded::STRANDED_DDL)?;
     Ok(upgraded)
 }
 
@@ -1261,6 +1264,9 @@ mod tests {
             "withdrawn_holders",
             "withdrawn_sessions",
             "failed_starts",
+            "owed_starts",
+            "stranded_suspects",
+            "stranded_sessions",
         ] {
             let n: i64 = conn
                 .query_row(

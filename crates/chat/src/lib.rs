@@ -73,6 +73,10 @@ pub mod schema;
 pub mod session_map;
 pub mod skill;
 pub mod store;
+/// **A member session that will not answer is RECORDED as stranded** (nxf 6j6v.ccvy) — the
+/// obligation record, the first look and the record the tick's sweep keeps. Not `pub`: the record
+/// reaches a reader through [`facade::StatusThread::stranded`], and the tables are this machine's.
+pub(crate) mod stranded;
 pub mod stream;
 pub mod surface;
 pub mod timer;
