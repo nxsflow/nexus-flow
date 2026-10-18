@@ -903,6 +903,46 @@ fn a_member_on_hold_is_paused_past_its_window_and_its_clock_moves_on_resume() {
     assert!(team.records().is_empty());
 }
 
+/// **AC 2 (b), cn4p as the reporter saw it** — a `five_hour` hold taken up by the EXISTING resume,
+/// which continues the session; the continued session ends owing an answer with NO new hold and no
+/// substitute. Nothing is recorded while the hold stood; the record comes at the SECOND end plus the
+/// grace, judged from that end.
+#[test]
+fn a_resumed_session_that_ends_again_without_a_new_hold_is_recorded_from_its_second_end() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", Some(&at(600)), "limit")
+    })
+    .unwrap();
+    team.tick(&at(400), &root);
+    assert!(team.records().is_empty(), "never while the hold stands");
+
+    team.with(&at(660), "service", None, |ctx, store| {
+        orchestration::resume_interrupted(
+            ctx,
+            store,
+            orchestration::ResumeRequest {
+                scope: orchestration::ResumeScope::Session(&s),
+                force: false,
+            },
+        )
+    })
+    .expect("resume");
+    assert_eq!(team.worker.started("verifier"), 2, "continued");
+    let second_end = at(700);
+    team.end(&second_end, "verifier", &s);
+    team.tick(&at_from(&second_end, STRANDED_GRACE_SECS - 1), &root);
+    assert!(team.records().is_empty());
+    team.tick(&at_from(&second_end, STRANDED_GRACE_SECS), &root);
+    assert_eq!(
+        team.records(),
+        vec![(slot, s, 3, Some("posted".to_string()))]
+    );
+}
+
 /// **AC 4 (d)** — a hold with NO instant arms nothing for it on decline, and the member stays
 /// paused — not lapsed, not recorded.
 #[test]

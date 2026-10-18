@@ -208,6 +208,34 @@ impl Timer for DryTimer {
         }
         Ok(())
     }
+
+    /// **A stranded look goes to a log of its own** (nxf 6j6v.ccvy): `NXC_TIMER_LOOK_LOG`, one line
+    /// per look, silently a no-op when unset. Not `NXC_TIMER_LOG`, which every suite that reads it
+    /// reads as "the channel windows that were armed" — a look is a different job, keyed by a
+    /// session, and mixing it in would make a window that was NOT armed look as if one had been.
+    fn schedule_stranded_look(
+        &self,
+        session: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> Result<TimerHandle> {
+        for id in [session, thread] {
+            if !nxs_service::timers::valid_key(id) {
+                return Err(NxfError::validation(format!(
+                    "`{id}` is not a schedulable id: a look's parameters become part of the \
+                     command a timer backend runs"
+                )));
+            }
+        }
+        let handle = TimerHandle(format!("dry:stranded-look-{session}"));
+        if let Ok(path) = std::env::var("NXC_TIMER_LOOK_LOG") {
+            append_log(
+                &path,
+                &format!("look session={session} thread={thread} deadline={deadline}\n"),
+            )?;
+        }
+        Ok(handle)
+    }
 }
 
 fn append_log(path: &str, line: &str) -> Result<()> {
