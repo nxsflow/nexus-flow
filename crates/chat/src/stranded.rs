@@ -697,6 +697,16 @@ pub(crate) fn arm_look(
     };
     match ctx.timer.schedule_stranded_look(session, &target, at) {
         Ok(_) => None,
+        // **A service that is down is said once, by the call, not once per look** — the service
+        // backend writes the look into the book and THEN refuses, so the look is durable and will
+        // be honoured when a service starts; the `service_not_running` finding the outermost verbs
+        // add already says that nothing attends the workspace. A breadcrumb stays.
+        Err(e) if ctx.timer.service_fault().is_some() => {
+            eprintln!(
+                "warning: the look at session {session} is booked for {at}, and nothing attends                  this workspace to honour it yet: {e}"
+            );
+            None
+        }
         Err(e) => Some(look_unarmed(thread, session, at, &e.to_string())),
     }
 }
@@ -1648,16 +1658,7 @@ mod tests {
 
     // ---- the escalation's bounded retry, through an injected post (AC 6 c, d) -------------------
 
-    /// A worker that accepts every start and runs nothing.
-    struct Accepts;
-    impl crate::worker::Worker for Accepts {
-        fn trigger(&self, _req: crate::worker::TriggerRequest) -> crate::worker::TriggerResult {
-            Ok(crate::worker::TriggerOutcome::Accepted)
-        }
-        fn answers_liveness(&self) -> bool {
-            true
-        }
-    }
+    static DRY: crate::worker::DryWorker = crate::worker::DryWorker { log: None };
 
     /// A timer that counts the looks it was asked to arm.
     #[derive(Default)]
@@ -1704,7 +1705,9 @@ mod tests {
                 session,
                 hop: 0,
                 defs: &self.defs,
-                worker: &Accepts,
+                // The crate's own dry worker: it accepts every start and runs nothing, which is all
+                // these tests need — they drive the escalation, not the liveness question.
+                worker: &DRY,
                 timer: &self.looks,
                 namer: &crate::naming::DryNamer,
                 db_path: &self.db,

@@ -842,8 +842,15 @@ fn withdrawing_a_running_round_stops_its_session_and_parks_its_work() {
     assert_eq!(handed.occasion, ParkOccasion::Withdrawn);
     let parked = handed.parked.clone().expect("and parked its work first");
     assert!(parked.committed && parked.created_branch, "{parked:?}");
+    // The one finding this tick may carry is the stranded rule's own (nxf 6j6v.ccvy): this bench's
+    // worker cannot tell a live session from a dead one, so the sweep says once that it judged
+    // nothing, rather than judging.
     assert!(
-        handed.unparked.is_none() && ticked.warnings.is_empty(),
+        handed.unparked.is_none()
+            && ticked
+                .warnings
+                .iter()
+                .all(|w| w.class == nexus_chat::orchestration::ConsequenceClass::LivenessUnknown),
         "{:?}",
         ticked.warnings
     );

@@ -393,7 +393,8 @@ fn a_stranded_holder_keeps_the_working_copy_and_its_files_untouched() {
     std::fs::write(root.join("half-done.rs"), "fn half() {}\n").unwrap();
     nxc(root, &at(10), "dry")
         .args(["send", "--to", "rival", "--no-ref", "--json", "rival work"])
-        .assert();
+        .assert()
+        .success();
     let child = stand_in(root, &s);
     kill_hard(child);
     ended(root, &at(30), &s);

@@ -588,10 +588,13 @@ fn a_failed_start_with_a_retry_due_does_not_lapse_and_its_retry_runs_alone() {
 }
 
 /// A start that failed on something waiting cannot fix is not retried. Nothing will ever start
-/// it, so its window lapses as before and the flow moves on: holding it would stall the run with
-/// nothing able to end the wait but a withdraw.
+/// it — and since nxf 6j6v.ccvy that no longer means its window lapses and the flow moves on past a
+/// step that never ran: the stranded sweep records it (observation 5, "its start failed and was
+/// given up") at its last attempt plus the grace, and escalates the round to its commissioner.
+/// Holding it without that would stall the run with nothing able to end the wait but a withdraw;
+/// recording it is what ends the wait, with the round's commissioner deciding.
 #[test]
-fn a_failed_start_that_will_not_be_retried_still_lapses() {
+fn a_failed_start_that_will_not_be_retried_is_recorded_and_escalated() {
     let (tmp, engine, worker) = team_with(SHORT);
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
     let (_, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
@@ -606,9 +609,34 @@ fn a_failed_start_that_will_not_be_retried_still_lapses() {
     );
 
     let receipt = tick(&tmp, &worker, BEFORE_THE_RETRY, &channel_thread);
-    assert_eq!(
+    assert_ne!(
         receipt.reason, ADVANCED,
-        "a start nothing will retry lapses on its window: {receipt:?}"
+        "a start nothing will retry is not advanced past: {receipt:?}"
+    );
+    assert_eq!(worker.started("verifier"), 0);
+    // At its last attempt plus the grace, the sweep records it and escalates the round.
+    let last: String = failed[0].last_failed_at.clone();
+    let due = {
+        use time::format_description::well_known::Rfc3339;
+        let t = time::OffsetDateTime::parse(&last, &Rfc3339).unwrap()
+            + time::Duration::seconds(nexus_chat::orchestration::STRANDED_GRACE_SECS);
+        t.format(&Rfc3339).unwrap()
+    };
+    let receipt = tick(&tmp, &worker, &due, &channel_thread);
+    assert!(
+        findings(&receipt, ConsequenceClass::SessionStranded).len() == 1,
+        "recorded: {receipt:?}"
+    );
+    let observed: i64 = store(&tmp)
+        .connection()
+        .query_row("SELECT observed FROM stranded_sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(observed, 5, "its start failed and was given up");
+    assert_ne!(receipt.reason, ADVANCED, "{receipt:?}");
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "never advanced past a step that never ran"
     );
 }
 
@@ -658,6 +686,16 @@ fn a_later_step_put_back_in_line_does_not_lapse_while_it_waits() {
     assert!(store(&tmp)
         .remove_working_tree_queue_entry(coder.id)
         .unwrap());
+    // …and a build before nxf 6j6v.ccvy wrote no obligation record: with one, the lapsed coder
+    // (not running) would wait for the stranded sweep instead of moving the flow on, and the state
+    // this staging reconstructs is only reachable for a slot from before that rule.
+    store(&tmp)
+        .connection()
+        .execute(
+            "DELETE FROM owed_starts WHERE thread = ?1",
+            [coder.thread.as_deref().unwrap()],
+        )
+        .unwrap();
     tick(&tmp, &worker, VERIFIER_OPENED, &channel_thread);
     store(&tmp)
         .enqueue_working_tree(&coder, VERIFIER_OPENED)

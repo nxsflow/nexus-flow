@@ -102,6 +102,14 @@ impl Recorder {
 
 impl Worker for Recorder {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        // A live session refuses a second process, as the sidecar's single-process guard does —
+        // which is what makes the engine HOLD an answer for a caller that is still mid-turn.
+        if self.session_is_running(&req.internal_session) {
+            return Err(nexus_chat::worker::TriggerError::AlreadyRunning {
+                session: req.internal_session.clone(),
+                pid: 4242,
+            });
+        }
         self.seen.lock().unwrap().push(req);
         Ok(TriggerOutcome::Accepted)
     }
@@ -123,6 +131,7 @@ impl Worker for Recorder {
 struct Book {
     windows: Mutex<Vec<(String, String)>>,
     looks: Mutex<Vec<Look>>,
+    resumes: Mutex<Vec<String>>,
     refuse_looks: Mutex<bool>,
 }
 
@@ -165,6 +174,7 @@ impl Timer for Book {
     }
 
     fn schedule_resume(&self, session: &str, _deadline: &str) -> NxfResult<TimerHandle> {
+        self.resumes.lock().unwrap().push(session.to_string());
         Ok(TimerHandle(format!("resume:{session}")))
     }
 
@@ -282,6 +292,29 @@ impl Team {
     /// A human commissions `to` (a channel or a persona) at `now`.
     fn commission(&self, now: &str, to: &str, body: &str) -> surface::SendToReceipt {
         self.with(now, "pm", None, |ctx, store| {
+            surface::send_to(
+                ctx,
+                store,
+                SendToRequest {
+                    machine: None,
+                    to,
+                    body,
+                    refs: SendToRefs::ExplicitlyNone,
+                },
+            )
+        })
+        .expect("the commission is accepted")
+    }
+
+    /// A human named `actor` commissions `to` at `now`.
+    fn commission_by(
+        &self,
+        now: &str,
+        actor: &str,
+        to: &str,
+        body: &str,
+    ) -> surface::SendToReceipt {
+        self.with(now, actor, None, |ctx, store| {
             surface::send_to(
                 ctx,
                 store,
@@ -528,6 +561,10 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
         team.worker.starts(),
         vec!["verifier"],
         "exactly the round's own start — the sweep starts nothing"
+    );
+    assert!(
+        team.book.resumes.lock().unwrap().is_empty(),
+        "AC 6 (a): the sweep never arms a resume"
     );
     assert_eq!(
         team.messages(&slot),
@@ -1477,4 +1514,398 @@ fn a_step_whose_declared_input_was_answered_only_by_a_substitute_is_not_opened()
         "finish is not opened on a substitute"
     );
     assert!(team.needs_decision(&at(30), &root));
+}
+
+// ---- AC 6 (a): exactly zero starts, exactly one wake ---------------------------------------------
+
+/// **AC 6 (a)** with a PERSONA commissioner: the worker's log holds the round's own start and
+/// exactly ONE wake of the commissioner, carrying the escalation; no resume is ever armed.
+#[test]
+fn a_stranded_round_wakes_its_persona_commissioner_exactly_once() {
+    let team = team(&[REVIEW]);
+    let root = team.commission_as_pm(T0, "review", "verify").thread_id;
+    team.two_looks(T0, &root);
+    team.tick(&at(300), &root);
+    team.tick(&at(400), &root);
+    assert_eq!(
+        team.worker.starts(),
+        vec!["verifier", "pm"],
+        "one start, one wake"
+    );
+    assert!(team.worker.last_for("pm").message.contains("STRANDED"));
+    assert!(team.book.resumes.lock().unwrap().is_empty());
+}
+
+// ---- AC 3 (d): a back-edge pass ---------------------------------------------------------------
+
+/// [`PB9Y`] with a way back from the verdict to the build.
+const PB9Y_LOOP: &str = "name: coding\nmembers: [coder, verifier, judge, finisher]\ntimeout: 2m\nsteps:\n  \
+                         - id: build\n    target: coder\n    next: verify\n  \
+                         - id: verify\n    target: verifier\n    next: judge\n  \
+                         - id: judge\n    target: judge\n    next: finish\n    on_needs_rework: build\n    max_passes: 2\n  \
+                         - id: finish\n    target: finisher\n    input: [verify, judge]\n";
+
+impl Team {
+    fn rework(&self, now: &str, role: &str, session: &str, thread: &str, body: &str) {
+        self.with(now, role, Some(session), |ctx, store| {
+            surface::reply_in_thread(
+                ctx,
+                store,
+                ReplyThreadRequest {
+                    machine: None,
+                    thread,
+                    body,
+                    escalate: false,
+                    needs_rework: true,
+                    accept: false,
+                },
+            )
+        })
+        .expect("the verdict is posted");
+    }
+}
+
+/// **AC 3 (d), build item 11** — one run over a back edge. Pass 1 completes with verify answered;
+/// the judge sends the work back; on pass 2 verify hangs and is advanced past; the judge answers —
+/// and `finish` is NOT opened although verify's pass-1 answer exists: the newest slot is pass 2's.
+/// The note names pass 2.
+#[test]
+fn an_answer_from_before_a_back_edge_does_not_satisfy_the_pass_after_it() {
+    let team = team(&[PB9Y_LOOP]);
+    let root = team.commission_as_pm(T0, "coding", "build T5").thread_id;
+    let (c, c_slot) = team.last("coder");
+    team.answer(&at(10), "coder", &c, &c_slot, "built");
+    let (v, v_slot) = team.last("verifier");
+    team.answer(&at(20), "verifier", &v, &v_slot, "VERIFY REPORT pass 1");
+    let (j, j_slot) = team.last("judge");
+    team.rework(&at(30), "judge", &j, &j_slot, "send it back");
+    assert_eq!(
+        team.counts(),
+        [2, 1, 1, 0],
+        "back to the build: {:?}",
+        team.worker.starts()
+    );
+
+    let (c2, c2_slot) = team.last("coder");
+    team.answer(&at(40), "coder", &c2, &c2_slot, "built again");
+    assert_eq!(team.counts(), [2, 2, 1, 0]);
+    let (v2, v2_slot) = team.last("verifier");
+    assert_ne!(v2_slot, v_slot, "pass 2 has a slot of its own");
+    team.worker.mark_running(&v2);
+    team.tick(&at(40 + 121), &root);
+    assert_eq!(
+        team.counts(),
+        [2, 2, 2, 0],
+        "the hung verifier was advanced past"
+    );
+    let (j2, j2_slot) = team.last("judge");
+    team.answer(&at(200), "judge", &j2, &j2_slot, "approved");
+
+    assert_eq!(
+        team.counts(),
+        [2, 2, 2, 0],
+        "finish is not opened on pass 1's report"
+    );
+    let note = team.worker.last_for("pm").message;
+    assert!(note.contains(&v2_slot) && note.contains("pass 2"), "{note}");
+    assert!(!note.contains(&v_slot), "{note}");
+}
+
+// ---- AC 4 (b), (c), (f) ---------------------------------------------------------------------------
+
+/// **AC 4 (b)** — the gap: the window is long past when the resume stamps. A tick before the resumed
+/// session's first transcript flush answers `Waiting` — no lapse, no next step — because the window
+/// restarted with the resume. (Without the restart the slot is stale with a RUNNING session, the
+/// one shape still advanced past: this test is red then.)
+#[test]
+fn a_resume_restarts_the_window_so_the_running_session_is_not_advanced_past() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (s, _slot) = team.last("verifier");
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", Some(&at(600)), "x")
+    })
+    .unwrap();
+    team.with(&at(660), "service", None, |ctx, store| {
+        orchestration::resume_interrupted(
+            ctx,
+            store,
+            orchestration::ResumeRequest {
+                scope: orchestration::ResumeScope::Session(&s),
+                force: false,
+            },
+        )
+    })
+    .expect("resume");
+    team.worker.mark_running(&s);
+    let r = team.tick(&at(700), &root);
+    assert!(
+        !has(&r.warnings, ConsequenceClass::StepUnanswered),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert_eq!(team.worker.started("finisher"), 0);
+    assert!(!team.needs_decision(&at(700), &root));
+}
+
+/// **AC 4 (c)** — 0990: two of three reviewers on hold. No consolidation while they are held; after
+/// the resume and their answers, ONE consolidation carries all three.
+#[test]
+fn a_parallel_round_waits_for_its_held_members_and_consolidates_once() {
+    let team =
+        team(&["name: trio\nmembers: [verifier, reviewer, judge]\nflow: parallel\ntimeout: 2m\n"]);
+    let root = team.commission(T0, "trio", "review").thread_id;
+    let (a, a_slot) = team.last("verifier");
+    let (b, b_slot) = team.last("reviewer");
+    let (c, c_slot) = team.last("judge");
+    team.answer(&at(20), "verifier", &a, &a_slot, "A: fine");
+    for (role, s) in [("reviewer", &b), ("judge", &c)] {
+        team.end(&at(30), role, s);
+        team.with(&at(30), role, Some(s), |ctx, store| {
+            orchestration::session_interrupted(ctx, store, s, "five_hour", Some(&at(600)), "x")
+        })
+        .unwrap();
+    }
+    team.tick(&at(300), &root);
+    assert_eq!(
+        team.messages(&root).len(),
+        1,
+        "no consolidation while two are held"
+    );
+    for s in [&b, &c] {
+        team.with(&at(660), "service", None, |ctx, store| {
+            orchestration::resume_interrupted(
+                ctx,
+                store,
+                orchestration::ResumeRequest {
+                    scope: orchestration::ResumeScope::Session(s),
+                    force: false,
+                },
+            )
+        })
+        .expect("resume");
+    }
+    team.answer(&at(700), "reviewer", &b, &b_slot, "B: fine");
+    assert_eq!(team.messages(&root).len(), 1, "one answer still owed");
+    team.answer(&at(710), "judge", &c, &c_slot, "C: fine");
+    let consolidations: Vec<_> = team
+        .messages(&root)
+        .into_iter()
+        .filter(|m| m.0 != "pm")
+        .collect();
+    assert_eq!(consolidations.len(), 1, "{consolidations:?}");
+    assert_eq!(
+        consolidations[0].1, "info",
+        "a clean consolidation, not an escalation"
+    );
+    assert!(team.records().is_empty());
+}
+
+/// **AC 4 (f), AC 5 (g)** — a member that ended its turn to wait on a round it commissioned itself is
+/// PAUSED past its window: `Waiting` with the reason, no lapse, no record. When the round answers,
+/// the member is woken and its clock moves to the wake.
+#[test]
+fn a_member_waiting_on_its_own_sub_round_is_paused_and_its_clock_moves_on_the_wake() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (v, slot) = team.last("verifier");
+    team.with(&at(10), "verifier", Some(&v), |ctx, store| {
+        surface::send_to(
+            ctx,
+            store,
+            SendToRequest {
+                machine: None,
+                to: "coder",
+                body: "what does this do?",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+    })
+    .expect("the member consults");
+    let (c, sub) = team.last("coder");
+    team.worker.mark_running(&c);
+    team.end(&at(20), "verifier", &v);
+    let r = team.tick(&at(180), &root);
+    assert!(
+        has(&r.warnings, ConsequenceClass::StepStillWaiting),
+        "{:?}",
+        classes(&r.warnings)
+    );
+    assert!(!has(&r.warnings, ConsequenceClass::StepUnanswered));
+    assert_eq!(team.worker.started("finisher"), 0);
+    team.tick(&at(240), &root);
+    assert!(team.records().is_empty(), "a paused member is not stranded");
+
+    team.worker.mark_gone(&c);
+    team.answer(&at(300), "coder", &c, &sub, "it parses the book");
+    assert_eq!(team.worker.started("verifier"), 2, "woken with the answer");
+    assert_eq!(
+        team.owed(&slot, "verifier").map(|o| o.1),
+        Some(at(300)),
+        "the clock moved"
+    );
+}
+
+// ---- AC 5: more false positives ---------------------------------------------------------------
+
+/// **AC 5 (d)** — a failed start whose retry is due.
+#[test]
+fn false_positive_a_failed_start_with_a_retry_due() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.sql(&format!(
+        "INSERT INTO failed_starts(session, scope_key, role, thread, message, model, depth, \
+         priority, enqueued_at, first_failed_at, last_failed_at, attempts, error, retry_at) \
+         VALUES ('{s}', 'k', 'verifier', '{slot}', 'verify', NULL, 1, 1, '{T0}', '{T0}', '{T0}', \
+         1, 'io: timed out', '{}')",
+        at(3600)
+    ));
+    team.two_looks(T0, &root);
+    nothing_recorded(&team, &slot, &["verifier"]);
+}
+
+/// **AC 5 (e)** — a session running past its window, its claim alive across both looks: nothing is
+/// recorded, and the hung step is advanced past exactly as before (rs9k).
+#[test]
+fn false_positive_a_session_running_past_its_window() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.worker.mark_running(&s);
+    team.tick(&at(121), &root);
+    team.tick(&at(181), &root);
+    assert_eq!(team.suspect(&slot), None);
+    assert!(team.records().is_empty());
+    assert_eq!(
+        team.worker.started("finisher"),
+        1,
+        "advanced past as before"
+    );
+}
+
+/// **AC 5 (h)** — the member's sub-round answered while it was still mid-turn, so the answer is HELD
+/// for it; the member's process then ends. The tick hands the held answer over (the member is
+/// woken with it, its clock moving to the wake) — and at no point is the member recorded or the
+/// flow moved past it.
+#[test]
+fn false_positive_a_held_delivery_pending() {
+    let team = team(&[REVIEW_2M]);
+    let root = team.commission(T0, "review2", "verify").thread_id;
+    let (v, slot) = team.last("verifier");
+    team.worker.mark_running(&v);
+    team.with(&at(10), "verifier", Some(&v), |ctx, store| {
+        surface::send_to(
+            ctx,
+            store,
+            SendToRequest {
+                machine: None,
+                to: "coder",
+                body: "what does this do?",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+    })
+    .expect("the member consults");
+    let (c, sub) = team.last("coder");
+    team.answer(&at(20), "coder", &c, &sub, "it parses the book");
+    let held = |team: &Team| -> i64 {
+        team.store()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM pending_wakes", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(held(&team), 1, "held for the member, still mid-turn");
+    team.worker.mark_gone(&v);
+    team.end(&at(25), "verifier", &v);
+    team.tick(&at(181), &root);
+    assert_eq!(held(&team), 0, "the tick handed it over");
+    assert_eq!(team.worker.started("verifier"), 2, "woken with it");
+    team.tick(&at(241), &root);
+    assert_eq!(team.suspect(&slot), None);
+    assert!(
+        team.records().iter().all(|r| r.0 != slot),
+        "{:?}",
+        team.records()
+    );
+    assert_eq!(team.worker.started("finisher"), 0);
+}
+
+/// **AC 5 (n)** — a session re-triggered by the existing resume, whose claim appears 90 s after its
+/// (moved) clock: nothing is recorded.
+#[test]
+fn false_positive_a_resumed_session_whose_claim_appears_late() {
+    let team = team(&[REVIEW]);
+    let root = team.commission(T0, "review", "verify").thread_id;
+    let (s, slot) = team.last("verifier");
+    team.end(&at(30), "verifier", &s);
+    team.with(&at(30), "verifier", Some(&s), |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &s, "five_hour", Some(&at(600)), "x")
+    })
+    .unwrap();
+    let resumed = at(660);
+    team.with(&resumed, "service", None, |ctx, store| {
+        orchestration::resume_interrupted(
+            ctx,
+            store,
+            orchestration::ResumeRequest {
+                scope: orchestration::ResumeScope::Session(&s),
+                force: false,
+            },
+        )
+    })
+    .expect("resume");
+    team.tick(&at_from(&resumed, 60), &root);
+    team.worker.mark_running(&s);
+    team.tick(&at_from(&resumed, 120), &root);
+    team.tick(&at_from(&resumed, 180), &root);
+    nothing_recorded(&team, &slot, &["verifier", "verifier"]);
+}
+
+/// **AC 5 (q), pass-2 IR #1** — two live `pm` sessions. P1 owes R1; P2 owes R2, consults the coder,
+/// and is woken on the way back. R1's obligation still names P1, unmoved; nothing is recorded; P1
+/// answers R1 normally.
+#[test]
+fn false_positive_a_way_back_wake_of_one_pm_never_re_owns_another_pms_slot() {
+    let team = team(&[]);
+    let r1 = team.commission_by(T0, "carsten", "pm", "plan A").thread_id;
+    let (p1, _) = team.last("pm");
+    let r2 = team
+        .commission_by(&at(5), "carsten", "pm", "plan B")
+        .thread_id;
+    let (p2, _) = team.last("pm");
+    assert_ne!(p1, p2);
+    team.worker.mark_running(&p1);
+    team.with(&at(10), "pm", Some(&p2), |ctx, store| {
+        surface::send_to(
+            ctx,
+            store,
+            SendToRequest {
+                machine: None,
+                to: "coder",
+                body: "estimate this",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+    })
+    .expect("P2 consults");
+    team.end(&at(11), "pm", &p2);
+    let (c, sub) = team.last("coder");
+    team.answer(&at(20), "coder", &c, &sub, "two days");
+    assert_eq!(
+        team.owed(&r1, "pm"),
+        Some((p1.clone(), at(0), true)),
+        "R1 still names P1"
+    );
+    assert_eq!(team.owed(&r2, "pm").map(|o| o.0), Some(p2.clone()));
+    team.tick(&at(200), &r1);
+    team.tick(&at(260), &r1);
+    assert!(
+        team.records().iter().all(|r| r.0 != r1),
+        "nothing recorded for R1: {:?}",
+        team.records()
+    );
+    team.answer(&at(300), "pm", &p1, &r1, "plan A done");
+    assert!(team.messages(&r1).iter().all(|m| m.1 != "escalation"));
 }
