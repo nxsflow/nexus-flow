@@ -674,6 +674,20 @@ steht `false` — die durchgespielte Sitzung dieser Anleitung protokolliert ihre
 Sitzungen zu starten, es gibt also nirgends einen Prozess zu befragen — und unter dem ausgelieferten
 Sidecar steht `true`.
 
+**Ein Slot, dessen Sitzung nicht antworten wird, sagt stattdessen STRANDED** — und warum, und was
+daraufhin geschah. `stranded` nennt den Befund (`observed`, 1–5: nie gestartet, nie angebunden, ohne
+Antwort geendet, kein lebender Prozess, Start aufgegeben), wann er festgehalten wurde und was aus der
+Eskalation im Namen des Mitglieds wurde:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — STRANDED: its process ended at 2026-10-18T10:01:00Z without answering, and no substitute was posted for it; recorded 2026-10-18T10:03:00Z, escalated to the commissioner
+```
+
+Die Klausel endet auf `escalated to the commissioner`, sobald die Eskalation gepostet ist, auf
+`already answered by somebody else`, wenn eine späte Antwort ihr zuvorkam, auf `the escalation could
+not be posted yet`, solange sie wiederholt wird, und auf `could not be escalated: <error> — withdraw
+it`, wenn die Wiederholung aufgab. Sie bleibt am Slot, bis der Slot erneut gestartet wird.
+
 **Und ein Faden sagt, wenn die Partei, auf die er wartet, selbst wartet.** `waiting_on_sub_round`
 listet die Runden, die diese Partei aus diesem Faden heraus beauftragt und noch nicht zurück hat; im
 Terminal steht

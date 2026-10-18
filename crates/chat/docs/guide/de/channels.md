@@ -201,14 +201,41 @@ konsolidierte Antwort.
 **Wie ein Schritt weiterrückt.** Das Mitglied beantwortet seinen Platzfaden mit `nxc reply --thread
 <id>`. Diese Antwort ist der ganze Mechanismus: der Betreuer läuft im selben Schreibpfad mit, sieht,
 dass die Menge erledigt ist, und öffnet den nächsten Schritt. Es gibt kein „Schritt fertig"-Verb,
-kein Verzweigungswort und nichts abzufragen. Endet ein Mitglied seine Sitzung ohne zu antworten,
-steht der Vorgang still, bis das deklarierte `timeout` zuschlägt.
+kein Verzweigungswort und nichts abzufragen. Endet die Sitzung eines Mitglieds ohne Antwort — oder
+startet sie nie, oder wird sie getötet —, wartet die Runde nicht ihr Fenster ab: die Sitzung wird als
+**gestrandet** festgehalten und die Runde an den Auftraggeber eskaliert (siehe *Ein Mitglied, das
+nicht antworten wird* unten).
 
-**„Erledigt" heißt `complete || stale`** — ein Schritt, der geantwortet hat, und einer, dessen Fenster
-mit nichts darin ablief, geben beide den nächsten frei. Ein Schritt, der stumm blieb, wird
-*gemeldet*, nie geschluckt: der Aufruf, der den Ablauf an ihm vorbeibewegt hat, trägt eine Warnung
-`step_unanswered`, die den stummen Faden benennt, und die Konsolidierung, die keine Antwort von ihm
-trägt, tut es ebenso.
+**„Erledigt" heißt beantwortet — oder über das Fenster hinaus mit noch laufender Sitzung.** Ein
+Schritt, der geantwortet hat, gibt den nächsten frei. Ein Schritt, dessen Fenster ablief, gibt ihn
+ebenfalls frei, aber nur, solange seine Sitzung noch läuft: ein hängender Prozess wird übergangen,
+und das wird *gemeldet*, nie geschluckt — der Aufruf, der den Ablauf an ihm vorbeibewegt hat, trägt
+eine Warnung `step_unanswered`, die den stummen Faden benennt, und die Konsolidierung, die keine
+Antwort von ihm trägt, tut es ebenso. Ein Schritt, dessen Fenster ablief, während seine Sitzung NICHT
+läuft, gibt nichts frei: er wartet auf den Strandungs-Eintrag, der die Runde binnen drei Minuten nach
+dem letzten Start der Sitzung eskaliert. Und ein Schritt, dessen Antwort noch kommt, wartet mit
+angehaltenem Fenster: in der Warteschlange für die Arbeitskopie, mit fälligem Wiederholungsversuch,
+an einem Kontingent-Halt, wartend auf eine selbst beauftragte Runde oder mit einer für ihn
+zurückgehaltenen Antwort.
+
+**Ein Mitglied, das nicht antworten wird, wird als STRANDED festgehalten.** Jeder Tick sieht sich
+jede Sitzung, die eine Antwort schuldet, zwei Minuten nach ihrem letzten Start an. Eine Sitzung, die
+ihr Ende gemeldet hat oder deren Start aufgegeben wurde, wird bei diesem Blick festgehalten; eine
+ganz ohne Ende braucht eine Minute später einen zweiten Blick mit unverändertem Befund — weiterhin
+kein Prozess, dasselbe Transkript. Der Eintrag steht am Slot des Mitglieds, dort wird eine
+Eskalation im Namen des Mitglieds gepostet (`substituted`, vom Laufzeitsystem), und die Runde liest
+`NEEDS DECISION`. Nichts wird neu gestartet. `nxc status` sagt es am Slot:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — STRANDED: no live process across two looks since 2026-10-18T10:02:00Z; it never bound; recorded 2026-10-18T10:03:00Z, escalated to the commissioner
+```
+
+Die zwei Wege weiter sind die jeder Eskalation: eine Antwort in den Wurzel-Faden beauftragt die Runde
+neu, und `nxc withdraw --thread <Wurzel>` nimmt sie zurück. Eine Sitzung, die über ihr Fenster
+hinaus noch läuft, ist nicht gestrandet — das ist der hängende Fall oben. Ein Worker, der eine
+lebende nicht von einer toten Sitzung unterscheiden kann, hält nichts fest und sagt das einmal pro
+Tick (`liveness_unknown`); ein Slot, der geöffnet wurde, bevor es diese Regel gab, behält das alte
+Verhalten.
 
 **Ein Schritt, der eskaliert hat, gibt gar nichts frei — er beendet die Kette.** `nxc reply
 --escalate` sagt „allein komme ich nicht ans Ergebnis — ich brauche Hilfe oder eine Entscheidung",
@@ -542,6 +569,12 @@ input: []                     # nichts außer der eigenen Aufgabenbeschreibung d
   — siehe den letzten Punkt.
 - **Lief ein benannter Schritt mehrfach, kommt seine letzte Antwort.** Lief er in diesem Durchgang
   noch gar nicht, kommt nichts — was an Schritt eins zulässig ist und kein Fehler.
+- **Wurde ein benannter Schritt gefragt und schwieg, hält das die Runde an.** Trägt der neueste
+  Slot eines benannten Schritts in diesem Lauf keine eigene Antwort — gar nichts, oder nur die
+  Ersatz-Antwort, die das Laufzeitsystem für eine Sitzung postet, die mit offener Antwort endete —,
+  wird der Schritt nicht geöffnet, und die Runde eskaliert an den Auftraggeber und nennt den
+  Schritt, die Quelle, ihren Slot und Durchgang. „Lief noch nicht" und „lief und sagte nichts" sind
+  verschiedene Tatsachen; nur die erste ist die zulässige Lücke oben.
 - **`input` entscheidet über das Material, nie über die Aufgabe.** Die Persona und das `task:` des
   Schritts kommen an, was auch immer `input:` sagt. Ein Schritt ohne Eingabe ist immer noch ein
   Schritt mit einem Auftrag.

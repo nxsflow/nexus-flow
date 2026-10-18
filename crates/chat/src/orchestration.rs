@@ -4864,6 +4864,10 @@ fn arm_the_park_retry(ctx: &Ctx, store: &ChatStore) -> Option<FailedConsequence>
 ///
 /// `Ok(None)` is "this occasion does not stand"; `Ok(Some(_))` is "it did, and here is what the
 /// tick reports" — which is nothing but the finding for a hold.
+///
+/// **Not the stranded SESSION record** (nxf 6j6v.ccvy): "stranded" here is a park occasion on an
+/// escalated lease HOLDER; a member session that will not answer is recorded by
+/// [`crate::stranded::reconcile_stranded_sessions`], which parks nothing.
 fn park_the_stranded_holder(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -8515,6 +8519,10 @@ impl StillComing {
     }
 }
 
+/// A channel's member slots, and the ones among them that are NOT settled although their window has
+/// passed, each with its reason — what [`members_and_the_ones_still_waiting`] answers.
+type MemberSet = (Vec<ThreadQuorum>, Vec<(String, Unsettled)>);
+
 /// [`supervised_member_threads_at`], plus the members it did NOT count as lapsed although their
 /// window has passed ([`Unsettled`]). The tick reports those; everybody else only needs the set.
 ///
@@ -8536,7 +8544,7 @@ fn members_and_the_ones_still_waiting(
     store: &ChatStore,
     channel_thread: &str,
     worker: Option<&dyn crate::worker::Worker>,
-) -> Result<(Vec<ThreadQuorum>, Vec<(String, Unsettled)>)> {
+) -> Result<MemberSet> {
     let children = store.supervised_children(channel_thread)?;
     let ids: Vec<&str> = children.iter().map(String::as_str).collect();
     let mut members = store.thread_quorums(&ids, now)?;
@@ -17813,6 +17821,14 @@ fn outstanding_for_report(q: &ThreadQuorum, members: &[ThreadQuorum]) -> Vec<Str
 /// hq71 §3's rule, and the SET the rebuilt quorum mechanic waits for: not a thread waiting for its
 /// replies, but the supervisor waiting for N threads. `false` for a thread with no member threads at
 /// all, which is not a supervised channel and has no set to be complete.
+///
+/// **"Past its own deadline" is no longer the whole of `stale` here** (nxf 6j6v.ccvy, B.1). The
+/// members handed in come from [`members_and_the_ones_still_waiting`], which un-stales a member
+/// whose answer is still coming and one whose owed session is not running — so a stale member that
+/// reaches this function is one with no obligation record (opened before that rule, or owed by a
+/// human), one a worker cannot look at, or one whose session is RUNNING past its window (the hung
+/// process nxf 6j6v.rs9k is about). Only those still settle by their window; the rest wait, for the
+/// thing that is still coming or for the stranded sweep to record and escalate them.
 fn member_set_is_settled(members: &[ThreadQuorum]) -> bool {
     !members.is_empty() && members.iter().all(|m| m.complete || m.stale)
 }

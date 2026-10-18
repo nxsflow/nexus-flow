@@ -142,6 +142,12 @@ pub enum Flow {
     /// `ConsequenceClass::StepUnanswered` on the receipt of the call that moved the flow past it,
     /// and again on the consolidation that carries no answer from it.
     ///
+    /// **Since nxf 6j6v.ccvy a `stale` step settles only while its session is still RUNNING** (the
+    /// hung process rs9k was written for). One whose session is not running waits for the stranded
+    /// sweep, which records it and escalates the round; one whose answer is still coming (queued, a
+    /// retry due, on hold, its own sub-round, a held delivery) waits with its window paused. A slot
+    /// opened before that rule existed — it has no obligation record — settles as it always did.
+    ///
     /// **A step that ESCALATED releases nothing — it ends the chain** (nxf 6j6v.ma7v). `--escalate`
     /// says "I cannot reach the result without help or a decision", and a task that did not reach
     /// its result must not commission the work that was to follow it: the round is consolidated
