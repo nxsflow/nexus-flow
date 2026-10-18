@@ -215,6 +215,50 @@ any offset. Every entry you can see can be removed: `entry remove` checks neithe
 the field's type (an enum value since dropped) nor `on` (a type the plugin has since left out). A
 list field's name is at most 64 characters.
 
+### Ref fields
+
+`type = "ref"` makes a field a typed reference to another item — the organiser of a meeting, the
+company a person works at. Its value is an item id, and `targets` names the item types it may
+point at. A ref is a single value or, with `list = true`, a list of entries with optional labels:
+
+```toml
+[fields.organizer]
+type = "ref"
+targets = ["person"]
+on = ["meeting"]
+
+[fields.participants]
+type = "ref"
+targets = ["person"]
+list = true
+on = ["meeting"]
+```
+
+```
+nxf update <meeting> --set organizer=<person>
+nxf entry add <meeting> participants <person> --label host
+nxf entry remove <meeting> participants <person>
+nxf update <meeting> --set organizer=      # clears it
+```
+
+`--set` and `entry add` take a full id (`ab12.0007`, or a foreign `cd34.0001`) or a bare local
+one (`0007`), which is resolved as every id you type is. They check the target, in this order: the
+value is an id, the item exists and is not deleted, its type is one of `targets`, and it is not
+the item itself. A closed or archived item is a valid target. `entry remove` checks nothing, so a
+ref to an item since deleted can still be removed. The type and the self-reference are checked when
+the value is written, never after: retyping or deleting the target later leaves the ref as it is.
+
+`show --json` keeps the value under `custom` and adds `refs`, which resolves each target:
+`"refs": {"organizer": [{"id": "ab12.0007", "found": true, "type": "person", "title": "Ada",
+"status": "open"}]}`, or `{"id": …, "found": false}` for a value that names no item on this board.
+The human `show` prints each target's id and title under the field's heading, or `(not on this
+board)`. `nxf schema --json` reports the field as `"kind": "ref"` with its `"targets"`.
+
+A ref cannot take `merge = "crdt-text"` and cannot rank; its name is at most 64 characters.
+Redeclaring a text field as a ref keeps its values: the ones that are ids become references, the
+rest show as not on this board. A ref is written with the ordinary field ops, so a replica started
+from a snapshot stays valid.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under
