@@ -78,7 +78,7 @@ fn referenced_by_bulk_unions_single_values_and_present_entries_by_equality() {
     let by = a.referenced_by_bulk("organizer", &[P1, P2]).unwrap();
     assert_eq!(by[P1], vec![M.to_string(), "a.m2".to_string()]);
     assert!(
-        by.get(P2).is_none(),
+        !by.contains_key(P2),
         "a target nothing holds is absent, not an error"
     );
     assert_eq!(

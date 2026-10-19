@@ -151,12 +151,11 @@ fn a_ref_field_is_set_resolved_validated_shown_and_reported_through_the_command_
     // `entry remove` takes the bare suffix too.
     let (ok, _, err) = run(&["entry", "remove", &a, "related", bare_b]);
     assert!(ok, "{err}");
-    assert!(Store::open(&db, 1)
+    assert!(!Store::open(&db, 1)
         .unwrap()
         .field_entries_of(&fa)
         .unwrap()
-        .get("related")
-        .is_none());
+        .contains_key("related"));
 
     // A target deleted afterwards (by a peer — `nxf` has no delete verb) shows as not on this
     // board, in both forms.

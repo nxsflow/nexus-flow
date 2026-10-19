@@ -2144,7 +2144,7 @@ fn a_ref_set_needs_a_live_target_of_a_declared_type() {
     assert!(s.get_item(&p).unwrap().unwrap().archived.is_some());
     set(&mut s, &p).expect("an archived target passes");
     set(&mut s, "").expect("an empty value clears");
-    assert!(s.custom_fields_of(&m).unwrap().get("organizer").is_none());
+    assert!(!s.custom_fields_of(&m).unwrap().contains_key("organizer"));
     s.delete_item(&p, "t");
     assert_eq!(
         set(&mut s, &p).unwrap_err().kind,
@@ -2206,11 +2206,7 @@ fn a_ref_entry_is_validated_like_a_set_and_removed_without_validation() {
         write::entry_remove(&mut s, &cfg, NOW, ACTOR, &m, "participants", &p).unwrap(),
         p
     );
-    assert!(s
-        .field_entries_of(&m)
-        .unwrap()
-        .get("participants")
-        .is_none());
+    assert!(!s.field_entries_of(&m).unwrap().contains_key("participants"));
     assert!(s
         .export()
         .iter()
