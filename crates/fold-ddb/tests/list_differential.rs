@@ -25,6 +25,12 @@
 //! All three must give the same rows, order and total, the two boards must be equal item for item
 //! and edge for edge, and the JSON must be `Engine::list_query_value`'s. `next` is held to the
 //! same three paths.
+//!
+//! The boards also carry ref fields (6j6v.9tx3) — a single `owner` and a list `members`, written
+//! through the plain `set` / `add` / `remove` ops on the fields themselves: retargets, clears, a
+//! non-id text on a ref field, a person's id in the text field `order`, refs to persons that end
+//! up deleted or archived, and a 129-byte project holding one. Their `list --ref` queries are held
+//! to the SQL and Board paths; the fold-ddb path answers them from its hints in cut 3 (6j6v.1w3m).
 
 use nexus_flow_core::model::{EdgeKind, ItemRow, MergeStrategy};
 use nexus_flow_core::store::Store;
@@ -93,6 +99,15 @@ columns = ["id"]
 [fields.order]
 type = "text"
 on = ["goal"]
+[fields.owner]
+type = "ref"
+targets = ["person"]
+on = ["project"]
+[fields.members]
+type = "ref"
+targets = ["person"]
+list = true
+on = ["project", "goal"]
 "#;
 
 inventory::submit!(PluginRegistration {
@@ -123,6 +138,17 @@ fn items() -> Vec<(String, &'static str)> {
     out
 }
 
+/// A person's id, for a ref value: one of the board's five, or one nobody holds.
+fn person(r: &mut Lcg) -> String {
+    format!("ab12.u{:03}", r.next(6))
+}
+
+/// The one project whose own id is 129 bytes: it holds refs (a single `owner` through a plain
+/// `set`) that `ref_place_ok` keeps out of every reverse lookup (6j6v.9tx3).
+fn long_project() -> String {
+    format!("ab12.p{}", "x".repeat(123))
+}
+
 /// One replica's share of the writing.
 fn write(s: &mut Store, r: &mut Lcg, added: &mut Vec<(String, String, EdgeKind)>, steps: usize) {
     let all = items();
@@ -134,7 +160,7 @@ fn write(s: &mut Store, r: &mut Lcg, added: &mut Vec<(String, String, EdgeKind)>
             step % 24
         ));
         let (x, y) = (pick(r), pick(r));
-        match r.next(18) {
+        match r.next(24) {
             0 => s.set_field(&x, "status", Some("in_progress".into()), "u"),
             1 | 2 => s.set_field(&x, "status", Some("closed".into()), "u"),
             3 => s.set_field(&x, "status", Some("open".into()), "u"),
@@ -171,6 +197,26 @@ fn write(s: &mut Store, r: &mut Lcg, added: &mut Vec<(String, String, EdgeKind)>
             15 if r.next(3) == 0 => {
                 s.set_field(&x, "type", Some(TYPES[r.next(4) as usize].into()), "u")
             }
+            // Refs through the plain ops on the ref fields themselves (6j6v.9tx3): a single
+            // `owner` set, retargeted, cleared, or overwritten by a non-id text; `members` entries
+            // added and removed; a person's id in the text field `order`.
+            16 | 17 => {
+                let value = match r.next(6) {
+                    0 => None,
+                    1 => Some("not an id".to_string()),
+                    _ => Some(person(r)),
+                };
+                s.set_custom_field_merge(&x, "owner", value, "u", MergeStrategy::Lww);
+            }
+            18 | 19 => {
+                let p = person(r);
+                if r.next(3) == 0 {
+                    s.remove_field_entry(&x, "members", &p, "u");
+                } else {
+                    s.add_field_entry(&x, "members", &p, None, "u");
+                }
+            }
+            20 => s.set_custom_field_merge(&x, "order", Some(person(r)), "u", MergeStrategy::Lww),
             _ => s.set_custom_field_merge(
                 &x,
                 "order",
@@ -199,6 +245,15 @@ fn gen_board(seed: u64) -> Store {
             );
         }
     }
+    let long = long_project();
+    a.create_item(&long, "project", "Long", "u");
+    a.set_custom_field_merge(
+        &long,
+        "owner",
+        Some(person(&mut r)),
+        "u",
+        MergeStrategy::Lww,
+    );
     let mut b = Store::open_in_memory(2);
     b.apply(&a.export());
     let steps = 30 + r.next(40) as usize;
@@ -240,6 +295,35 @@ fn queries(container: &str) -> Vec<ListQuery> {
     ]
 }
 
+/// The `list --ref` queries (6j6v.9tx3) for the person `p`: one ref, and two as alternatives,
+/// each alone and with a type, a status, a cut and the rank.
+fn ref_queries(p: &str) -> Vec<ListQuery> {
+    let one = || ListQuery::new().referencing("owner", p);
+    let two = || {
+        ListQuery::new()
+            .referencing("members", p)
+            .referencing("owner", p)
+    };
+    let mut out = Vec::new();
+    for base in [one(), two()] {
+        out.push(base.clone());
+        out.push(base.clone().filter(NextFilter::new().with_type("project")));
+        out.push(base.clone().status("open"));
+        out.push(base.clone().limit(2));
+        out.push(base.clone().sort(SortKey::Rank).now(NOW));
+        out.push(
+            base.filter(NextFilter::new().with_type("project"))
+                .sort(SortKey::Rank)
+                .now(NOW),
+        );
+    }
+    out
+}
+
+fn ref_queries_of(people: &[String]) -> Vec<ListQuery> {
+    people.iter().flat_map(|p| ref_queries(p)).collect()
+}
+
 /// What the generated boards held, so the comparison is known to have compared something worth
 /// comparing.
 #[derive(Default)]
@@ -261,6 +345,130 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         let ctx = format!("seed {seed}");
         let t = MemTable::new("stream-1");
         ready(folder.fold_batch(&t, &delivered(&s, seed))).unwrap();
+
+        // Three persons per board: two the generator draws from, and one nobody references.
+        let people = [
+            format!("ab12.u{:03}", seed % 5),
+            format!("ab12.u{:03}", (seed + 2) % 5),
+            "ab12.unone".to_string(),
+        ];
+        for (n, q) in ref_queries_of(&people).iter().enumerate() {
+            let ctx = format!("{ctx}, ref query {n}");
+            let reads = read::list_reads(&cfg, q);
+            assert_eq!(reads.refs, q.refs, "the reads carry the refs, {ctx}");
+            let local = read::list_board(&s, &reads).unwrap();
+            let want = read::list_page(&cfg, &s, q).unwrap();
+            let board_path = read::list_board_page(&cfg, &local, q).unwrap();
+            assert_eq!(
+                ids(&board_path.items),
+                ids(&want.items),
+                "SQL vs Board, {ctx}"
+            );
+            assert_eq!(board_path.total, want.total, "total, {ctx}");
+            let records = read::list_to_value_with_custom(&cfg, &s, &want.items).unwrap();
+            assert_eq!(
+                read::list_board_value(&cfg, &local, q).unwrap(),
+                read::next_page_envelope(records, &want, false),
+                "list JSON, {ctx}"
+            );
+            assert!(
+                !ids(&want.items).contains(&long_project()),
+                "the 129-byte source is in no answer, {ctx}"
+            );
+            // The store board: only the candidates for an unranked query, the whole scope of the
+            // listed types for a ranked one (its rank is computed over all of it).
+            let scope: Vec<String> = s
+                .list_items()
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.deleted.as_deref() != Some("1") && i.archived.is_none())
+                .filter(|i| {
+                    reads
+                        .types
+                        .as_ref()
+                        .is_none_or(|t| i.item_type.as_deref().is_some_and(|ty| t.contains(ty)))
+                })
+                .map(|i| i.id)
+                .collect();
+            if reads.select.is_some() {
+                let mut candidates = std::collections::BTreeSet::new();
+                for r in &q.refs {
+                    for rows in read::referrers_of(&s, &r.field, &[r.id.as_str()])
+                        .unwrap()
+                        .into_values()
+                    {
+                        candidates.extend(rows.into_iter().map(|i| i.id));
+                    }
+                }
+                assert!(
+                    local.items.keys().all(|id| candidates.contains(id)),
+                    "an unranked ref board holds candidates only, {ctx}"
+                );
+                seen.add("unranked ref boards", 1);
+            } else {
+                let mut held: Vec<String> = local.items.keys().cloned().collect();
+                let mut scope = scope.clone();
+                held.sort();
+                scope.sort();
+                assert_eq!(held, scope, "a ranked ref board is the whole scope, {ctx}");
+                seen.add(
+                    "ranked ref boards holding non-referrers",
+                    usize::from(local.items.len() > want.total),
+                );
+            }
+            // cut 3 (6j6v.1w3m): the fold-ddb path answers ref queries from its hints; until
+            // then it is not compared here.
+            seen.add("ref rows", want.items.len());
+            seen.add("empty ref answers", usize::from(want.items.is_empty()));
+            seen.add(
+                "ref rows held as a list entry",
+                want.items
+                    .iter()
+                    .filter(|i| {
+                        s.field_entries_of_bulk(&[i.id.as_str()])
+                            .unwrap()
+                            .get(&i.id)
+                            .and_then(|f| f.get("members"))
+                            .is_some_and(|es| {
+                                es.iter().any(|e| q.refs.iter().any(|r| r.id == e.value))
+                            })
+                    })
+                    .count(),
+            );
+            seen.add(
+                "closed ref rows",
+                want.items
+                    .iter()
+                    .filter(|i| i.status.as_deref() == Some("closed"))
+                    .count(),
+            );
+        }
+        seen.add(
+            "persons' ids in a text field",
+            s.list_items()
+                .unwrap()
+                .iter()
+                .filter(|i| {
+                    s.custom_fields_of(&i.id)
+                        .unwrap()
+                        .get("order")
+                        .is_some_and(|v| v.starts_with("ab12.u"))
+                })
+                .count(),
+        );
+        seen.add(
+            "non-id values on a ref field",
+            s.list_items()
+                .unwrap()
+                .iter()
+                .filter(|i| {
+                    s.custom_fields_of(&i.id)
+                        .unwrap()
+                        .get("owner")
+                        .is_some_and(|v| v == "not an id")
+                })
+                .count(),
+        );
 
         for (n, q) in queries(&format!("ab12.p{:03}", seed % 4))
             .iter()
@@ -421,6 +629,14 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         "inbound contributes_to into a listed item",
         "archived items of a graph list type",
         "boards kept and cut before their joins",
+        "unranked ref boards",
+        "ranked ref boards holding non-referrers",
+        "ref rows",
+        "empty ref answers",
+        "ref rows held as a list entry",
+        "closed ref rows",
+        "persons' ids in a text field",
+        "non-id values on a ref field",
     ] {
         assert!(
             seen.0.get(what).copied().unwrap_or(0) > 0,
