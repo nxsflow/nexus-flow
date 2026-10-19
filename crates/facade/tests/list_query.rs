@@ -913,3 +913,68 @@ fn ref_filter_keeps_is_the_reference_rule_in_memory() {
         &lists
     ));
 }
+
+#[test]
+fn a_replica_bound_from_a_based_snapshot_answers_list_ref_on_every_path() {
+    // 6j6v.0cfa: a replica bound from a format-2 based snapshot holds the folded views and no
+    // history. `list --ref` reads the views only, so it answers there exactly as on the full
+    // replica — the SQL path and the store board, ranked and unranked, the 129-byte source left out.
+    use nexus_flow_core::task_reducer::TaskReducer;
+    use nxs_foundation::image::ViewBase;
+    use nxs_foundation::reducer::Reducer as _;
+    let tmp = workspace("list-ref-fixture");
+    let _e = ref_board(&tmp);
+    let cfg = plugin::load("list-ref-fixture").unwrap();
+    let full = writer(tmp.path());
+    let based = full
+        .based_image(
+            5,
+            &[],
+            vec![ViewBase {
+                of: "flow".into(),
+                domain: "task".into(),
+                fold_revision: TaskReducer.fold_revision(),
+            }],
+        )
+        .unwrap();
+    let mut s = Store::open_in_memory(2);
+    s.load_image(&based).unwrap();
+    assert!(s.is_based());
+    for q in [
+        ListQuery::new().referencing("participants", P1),
+        stations()
+            .referencing("person", P1)
+            .referencing("company", C1),
+        stations().referencing("person", P1).sort(SortKey::Rank),
+    ] {
+        let want = ids(&read::list_page(&cfg, &full, &q).unwrap().items);
+        assert!(!want.is_empty(), "{q:?}");
+        assert_eq!(
+            ids(&read::list_page(&cfg, &s, &q).unwrap().items),
+            want,
+            "{q:?}"
+        );
+        let board = read::list_board(&s, &read::list_reads(&cfg, &q)).unwrap();
+        assert_eq!(
+            ids(&read::list_board_page(&cfg, &board, &q).unwrap().items),
+            want,
+            "{q:?}"
+        );
+    }
+    // And it keeps answering after a write on the based replica.
+    s.set_custom_field_merge(
+        "ab12.s003",
+        "person",
+        Some(P1.into()),
+        "t",
+        MergeStrategy::Lww,
+    );
+    assert_eq!(
+        ids(
+            &read::list_page(&cfg, &s, &stations().referencing("person", P1))
+                .unwrap()
+                .items
+        ),
+        ["ab12.s001", "ab12.s002", "ab12.s003"]
+    );
+}
