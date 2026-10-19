@@ -111,17 +111,75 @@ impl Table for Failing<'_> {
     }
 }
 
-/// Fold `first` cleanly, then `second` with a run that dies at each write in turn and folds
-/// `second` again; every such stream must end as the unbroken one.
-fn dies_anywhere_in_the_second_batch(first: &[(i64, Op)], second: &[(i64, Op)], ctx: &str) {
+/// How many writes and deletes folding `second` after `first` makes — every index at which a
+/// [`Failing`] table can stop it.
+fn writes_and_deletes(first: &[(i64, Op)], second: &[(i64, Op)]) -> usize {
+    let folder = Folder::platform().unwrap();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, first)).unwrap();
+    let before = t.requests();
+    ready(folder.fold_batch(&t, second)).unwrap();
+    let after = t.requests();
+    (after.writes - before.writes + after.deletes - before.deletes) as usize
+}
+
+/// The reverse-reference triples `(source, field, value)` the stored `.radj#` hints say, and those
+/// their `.rsrc#` mirrors say (6j6v.9tx3). Equal on every place the fold finished.
+fn hint_triples(t: &MemTable) -> [std::collections::BTreeSet<(String, String, String)>; 2] {
+    [".radj#", ".rsrc#"].map(|prefix| {
+        t.rows()
+            .iter()
+            .filter(|(sk, _)| sk.starts_with(prefix))
+            .map(|(_, r)| {
+                let cell = |c: &str| text(r, c).unwrap_or_default().to_string();
+                (cell("source_id"), cell("field"), cell("target_id"))
+            })
+            .collect()
+    })
+}
+
+/// How a run that died left the reverse-reference hints, before anything repaired them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HalfReconciled {
+    /// A hint without its mirror: the run died between the `.radj#` put and the `.rsrc#` put.
+    put_crashes: usize,
+    /// A mirror without its hint: the run died between the `.radj#` delete and the `.rsrc#` delete.
+    delete_crashes: usize,
+}
+
+impl HalfReconciled {
+    fn of(t: &MemTable) -> HalfReconciled {
+        let [hints, mirrors] = hint_triples(t);
+        HalfReconciled {
+            put_crashes: hints.difference(&mirrors).count(),
+            delete_crashes: mirrors.difference(&hints).count(),
+        }
+    }
+
+    fn add(&mut self, other: HalfReconciled) {
+        self.put_crashes += other.put_crashes;
+        self.delete_crashes += other.delete_crashes;
+    }
+}
+
+/// Fold `first` cleanly, then `second` with a run that dies at each write or delete in turn and
+/// folds `second` again; every such stream must end as the unbroken one, and as `board::reindex`
+/// leaves it. Returns how many of those deaths left a place half-reconciled — so a caller knows the
+/// harness reached the reverse-reference reconcile (6j6v.1w3m, Must fix 1): a run with no reconcile
+/// in its failing half proves nothing about it.
+fn dies_anywhere_in_the_second_batch(
+    first: &[(i64, Op)],
+    second: &[(i64, Op)],
+    ctx: &str,
+) -> HalfReconciled {
     let folder = Folder::platform().unwrap();
     let clean = MemTable::new("stream-1");
     ready(folder.fold_batch(&clean, first)).unwrap();
-    let before = clean.requests().writes;
     ready(folder.fold_batch(&clean, second)).unwrap();
-    let writes = (clean.requests().writes - before) as usize;
-    assert!(writes > 0, "{ctx}");
-    for fail_at in 0..writes {
+    let indexes = writes_and_deletes(first, second);
+    assert!(indexes > 0, "{ctx}");
+    let mut half = HalfReconciled::default();
+    for fail_at in 0..indexes {
         let t = MemTable::new("stream-1");
         ready(folder.fold_batch(&t, first)).unwrap();
         let mark = ready(Folder::watermark(&t)).unwrap();
@@ -134,12 +192,20 @@ fn dies_anywhere_in_the_second_batch(first: &[(i64, Op)], second: &[(i64, Op)], 
             mark,
             "{ctx}: a failed batch does not move the watermark"
         );
+        half.add(HalfReconciled::of(&t));
         ready(folder.fold_batch(&t, second)).unwrap();
         assert!(
             t.rows() == clean.rows(),
             "{ctx}: a run that died at write {fail_at} of the second batch and folded it again differs"
         );
+        let replayed = t.rows();
+        ready(board::reindex(&t)).unwrap();
+        assert!(
+            t.rows() == replayed,
+            "{ctx}: after the replay of a death at write {fail_at}, reindex changes a row"
+        );
     }
+    half
 }
 
 #[test]
@@ -157,11 +223,18 @@ fn a_run_that_dies_at_any_write_and_folds_its_batch_again_ends_where_an_unbroken
     let second = numbered(&s, first.len());
     dies_anywhere_in_the_second_batch(&first, &second, "two tickets");
 
+    // The shared generator writes id-shaped custom values (6j6v.1w3m): both seeds' second halves
+    // hold reconciles, and a death lands between a hint and its mirror — seed 2's both on a put
+    // and on a delete, seed 9's on puts.
+    let mut both = HalfReconciled::default();
     for seed in [2, 9] {
         let ops = delivered(&merged(seed), seed);
         let (first, second) = ops.split_at(ops.len() / 2);
-        dies_anywhere_in_the_second_batch(first, second, &format!("seed {seed}"));
+        let half = dies_anywhere_in_the_second_batch(first, second, &format!("seed {seed}"));
+        assert!(half.put_crashes > 0, "seed {seed}: {half:?}");
+        both.add(half);
     }
+    assert!(both.delete_crashes > 0, "{both:?}");
 }
 
 /// `s`'s log from op `from` on, numbered by position.
@@ -745,4 +818,588 @@ fn an_item_with_no_room_for_its_index_attributes_is_refused_rather_than_left_off
         ready(board::select(&t)).unwrap().board.lanes(NOW).ready,
         vec!["ab12.0001"]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reverse-reference hints (6j6v.9tx3 cut 3, 6j6v.1w3m): `.radj#<value>#<field>#<source>` and its
+// mirror `.rsrc#<source>#<field>#<value>`, a function of the rows `ref_place_ok` admits.
+// ---------------------------------------------------------------------------------------------
+
+/// A neutral test plugin with one single and one list ref field, so `records::list_board` can be
+/// asked `list --ref` (the reads come from the facade's `list_reads`).
+const REFS: &str = r#"
+name = "robustness-ref-fixture"
+[description]
+en = "x"
+de = "y"
+[priority]
+labels = ["P0", "P1", "P2", "P3", "P4"]
+[types]
+list = ["project", "person"]
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+[ranking.next]
+order = [ { field = "priority", dir = "asc" } ]
+[presentation.list]
+columns = ["id"]
+[fields.owner]
+type = "ref"
+targets = ["person"]
+on = ["project"]
+[fields.members]
+type = "ref"
+targets = ["person"]
+list = true
+on = ["project"]
+"#;
+
+inventory::submit!(nexus_flow_facade::plugin::PluginRegistration {
+    name: "robustness-ref-fixture",
+    toml: REFS,
+    order: 142,
+});
+
+/// What a hosted `list --ref field=target` answers from `t`, unranked: the ids of its page.
+fn hosted_ref(t: &MemTable, field: &str, target: &str) -> Vec<String> {
+    let cfg = nexus_flow_facade::plugin::load("robustness-ref-fixture").unwrap();
+    let q = read::ListQuery::new().referencing(field, target);
+    let reads = read::list_reads(&cfg, &q);
+    assert!(reads.select.is_some(), "an unranked query");
+    let board = ready(records::list_board(t, &reads)).unwrap();
+    read::list_board_page(&cfg, &board, &q)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// The ids `t`'s rows themselves say hold `target` in `field` — a `custom_fields` row or a present
+/// `field_entries` row — what a hosted answer may never exceed.
+fn backed_by_rows(t: &MemTable, field: &str, target: &str) -> Vec<String> {
+    let mut ids: Vec<String> = t
+        .rows()
+        .iter()
+        .filter(|(sk, r)| {
+            (sk.starts_with("custom_fields#")
+                || (sk.starts_with("field_entries#")
+                    && !matches!(r.get("removed"), Some(Cell::Int(1)))))
+                && text(r, "field") == Some(field)
+                && text(r, "value") == Some(target)
+        })
+        .filter_map(|(_, r)| text(r, "item_id").map(str::to_string))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn without_mark(mut rows: BTreeMap<String, Row>) -> BTreeMap<String, Row> {
+    rows.remove(WATERMARK_KEY);
+    rows
+}
+
+/// Rows equal to what `board::reindex` makes of them — checked on a copy, so `t` is left as is.
+fn rows_equal_reindex(t: &MemTable) -> bool {
+    reindexed_rows(t) == t.rows()
+}
+
+/// What `board::reindex` makes of `t`'s rows, computed on a copy.
+fn reindexed_rows(t: &MemTable) -> BTreeMap<String, Row> {
+    let copy = MemTable::new(t.stream());
+    for (sk, row) in t.rows() {
+        let set = row
+            .into_iter()
+            .filter(|(n, _)| n != "stream_id" && n != "sk")
+            .collect();
+        ready(copy.write(&Write::put(sk, set))).unwrap();
+    }
+    ready(board::reindex(&copy)).unwrap();
+    copy.rows()
+}
+
+/// Persons p1..p3; project x1 owned by p1, x2 owned by p1, x3 with members p1 and p2 — the first
+/// batch. The second: x1 retargeted to p2, x2's owner cleared, p1 removed from x3's members.
+fn retarget_clear_remove() -> (Store, Vec<(i64, Op)>, Vec<(i64, Op)>) {
+    use nexus_flow_core::model::MergeStrategy::Lww;
+    let mut s = Store::open_in_memory(1);
+    for p in ["ab12.p001", "ab12.p002", "ab12.p003"] {
+        s.create_item(p, "person", "P", "u");
+    }
+    for x in ["ab12.x001", "ab12.x002", "ab12.x003"] {
+        s.create_item(x, "project", "X", "u");
+    }
+    s.set_custom_field_merge("ab12.x001", "owner", Some("ab12.p001".into()), "u", Lww);
+    s.set_custom_field_merge("ab12.x002", "owner", Some("ab12.p001".into()), "u", Lww);
+    s.add_field_entry("ab12.x003", "members", "ab12.p001", None, "u");
+    s.add_field_entry("ab12.x003", "members", "ab12.p002", None, "u");
+    let first = numbered(&s, 0);
+    s.set_custom_field_merge("ab12.x001", "owner", Some("ab12.p002".into()), "u", Lww);
+    s.set_custom_field_merge("ab12.x002", "owner", None, "u", Lww);
+    s.remove_field_entry("ab12.x003", "members", "ab12.p001", "u");
+    let second = numbered(&s, first.len());
+    (s, first, second)
+}
+
+#[test]
+fn a_ref_hint_is_written_on_fold_and_rebuilt_by_reindex() {
+    use nexus_flow_core::model::MergeStrategy::Lww;
+    use nxs_fold_ddb::layout::{ref_adjacency_key, ref_source_key};
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.x001", "project", "X", "u");
+    // Fields of any name: no declaration is involved, the rule is the value's shape.
+    s.set_custom_field_merge("ab12.x001", "sponsor", Some("ab12.p001".into()), "u", Lww);
+    s.add_field_entry("ab12.x001", "crew", "ab12.p002", Some("lead"), "u");
+    // Not id-shaped: no hint. A source of 129 bytes: no hint, single or list.
+    s.set_custom_field_merge("ab12.x001", "colour", Some("dark blue".into()), "u", Lww);
+    let long = format!("ab12.{}", "y".repeat(124));
+    assert_eq!(long.len(), 129);
+    s.create_item(&long, "project", "Long", "u");
+    s.set_custom_field_merge(&long, "sponsor", Some("ab12.p001".into()), "u", Lww);
+    let ops = numbered(&s, 0);
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &ops)).unwrap();
+
+    let rows = t.rows();
+    let refs: Vec<&String> = rows
+        .keys()
+        .filter(|sk| sk.starts_with(".radj#") || sk.starts_with(".rsrc#"))
+        .collect();
+    assert_eq!(refs.len(), 4, "{refs:#?}");
+    for (field, value) in [("sponsor", "ab12.p001"), ("crew", "ab12.p002")] {
+        for sk in [
+            ref_adjacency_key(value, field, "ab12.x001"),
+            ref_source_key("ab12.x001", field, value),
+        ] {
+            let row = &rows[&sk];
+            assert_eq!(text(row, "target_id"), Some(value), "{sk}");
+            assert_eq!(text(row, "field"), Some(field), "{sk}");
+            assert_eq!(text(row, "source_id"), Some("ab12.x001"), "{sk}");
+        }
+    }
+
+    // Reindex changes nothing; a clear and a full refold write the same rows again.
+    assert!(rows_equal_reindex(&t));
+    ready(Folder::clear(&t, head(&ops))).unwrap();
+    assert!(!t.rows().keys().any(|sk| sk.starts_with(".r")));
+    ready(folder.fold_batch(&t, &ops)).unwrap();
+    assert_eq!(without_mark(t.rows()), without_mark(rows));
+}
+
+#[test]
+fn a_snapshot_import_carries_the_hints() {
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let source = MemTable::new("stream-1");
+    ready(folder.fold_batch(&source, &numbered(&s, 0))).unwrap();
+    let snap = ready(snapshot::export(&source, &folder)).unwrap().unwrap();
+    // The task fold revision is the one before this cut: an earlier snapshot still imports.
+    assert_eq!(snap.revisions.get("task"), Some(&3));
+    let started = MemTable::new("stream-1");
+    ready(snapshot::import(&started, &folder, &snap)).unwrap();
+    for (field, p) in [
+        ("owner", "ab12.p001"),
+        ("owner", "ab12.p002"),
+        ("members", "ab12.p002"),
+    ] {
+        assert_eq!(
+            ready(records::referrers(&started, field, p)).unwrap(),
+            ready(records::referrers(&source, field, p)).unwrap(),
+            "{field} {p}"
+        );
+    }
+    assert_eq!(
+        ready(records::referrers(&started, "owner", "ab12.p002")).unwrap(),
+        ["ab12.x001"]
+    );
+    assert!(started.rows() == source.rows());
+}
+
+#[test]
+fn a_retarget_a_clear_and_a_removed_entry_prune_their_hints() {
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let p1: Vec<String> = t
+        .rows()
+        .into_keys()
+        .filter(|sk| {
+            (sk.starts_with(".radj#") && sk.contains("ab12.p001"))
+                || (sk.starts_with(".rsrc#") && sk.ends_with("ab12.p001"))
+        })
+        .collect();
+    assert!(
+        p1.is_empty(),
+        "no hint and no mirror for p1 is left: {p1:?}"
+    );
+    assert!(hosted_ref(&t, "owner", "ab12.p001").is_empty());
+    assert!(hosted_ref(&t, "members", "ab12.p001").is_empty());
+    assert_eq!(hosted_ref(&t, "owner", "ab12.p002"), ["ab12.x001"]);
+    assert_eq!(hosted_ref(&t, "members", "ab12.p002"), ["ab12.x003"]);
+    let kept = t.rows();
+    ready(board::reindex(&t)).unwrap();
+    assert!(t.rows() == kept, "reindex changes no row");
+}
+
+#[test]
+fn an_import_after_a_retarget_plus_the_tail_equals_the_whole_fold() {
+    use nexus_flow_core::model::MergeStrategy::Lww;
+    let folder = Folder::platform().unwrap();
+    let (mut s, _, _) = retarget_clear_remove();
+    // A tail that touches the same places again: the snapshot sits after the retarget.
+    s.set_custom_field_merge("ab12.x001", "owner", Some("ab12.p003".into()), "u", Lww);
+    s.add_field_entry("ab12.x003", "members", "ab12.p001", None, "u");
+    s.set_custom_field_merge("ab12.x002", "owner", Some("ab12.p002".into()), "u", Lww);
+    let ops = numbered(&s, 0);
+    let retarget_at = ops
+        .iter()
+        .position(|(_, op)| op.value.as_deref() == Some("ab12.p002") && op.field == "owner")
+        .expect("the retarget");
+    // The snapshot is taken right after the retarget; the tail touches the same places again.
+    let half = retarget_at + 1;
+    assert!(
+        half < ops.len() - 2,
+        "a tail of three ops follows the snapshot"
+    );
+    let source = MemTable::new("stream-1");
+    ready(folder.fold_batch(&source, &ops[..half])).unwrap();
+    let snap = ready(snapshot::export(&source, &folder)).unwrap().unwrap();
+    let started = MemTable::new("stream-1");
+    ready(snapshot::import(&started, &folder, &snap)).unwrap();
+    ready(folder.fold_batch(&started, &ops[half..])).unwrap();
+    let whole = MemTable::new("stream-1");
+    ready(folder.fold_batch(&whole, &ops)).unwrap();
+    assert!(started.rows() == whole.rows());
+    assert_eq!(
+        ready(records::referrers(&whole, "owner", "ab12.p003")).unwrap(),
+        ["ab12.x001"]
+    );
+}
+
+#[test]
+fn a_run_that_dies_at_any_write_of_a_reconcile_is_repaired_by_the_replay() {
+    // Must fix 1 (6j6v.1w3m): the failing table ticks on every write AND delete, and a field op
+    // writes its row and two `item_timestamps` changes before its reconcile — so no index is
+    // counted by hand: the harness fails at every one of them and replays.
+    let (_, first, second) = retarget_clear_remove();
+    let half = dies_anywhere_in_the_second_batch(&first, &second, "retarget, clear, remove");
+    // The retarget puts a pair and deletes one, the clear and the remove delete one each: deaths
+    // between a hint and its mirror happen on both sides.
+    assert_eq!(
+        half,
+        HalfReconciled {
+            put_crashes: 1,
+            delete_crashes: 3
+        }
+    );
+    // After the replay, referrers answer from what the rows hold.
+    let folder = Folder::platform().unwrap();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &first)).unwrap();
+    ready(folder.fold_batch(&t, &second)).unwrap();
+    assert!(ready(records::referrers(&t, "owner", "ab12.p001"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        ready(records::referrers(&t, "owner", "ab12.p002")).unwrap(),
+        ["ab12.x001"]
+    );
+    assert!(ready(records::referrers(&t, "members", "ab12.p001"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_delete_crash_is_finished_by_a_later_op_and_a_put_crash_leaves_one_orphan_until_reindex() {
+    // Must fix 2 (6j6v.1w3m): after a death between a `.radj#` put and its mirror, the orphan hint
+    // is invisible to every later reconcile — they read the mirrors — so a DIFFERENT later op does
+    // not remove it; only the replay of the same op and `reindex` do. A death between a `.radj#`
+    // delete and its mirror is finished by any later op on the place.
+    use nexus_flow_core::model::MergeStrategy::Lww;
+    let folder = Folder::platform().unwrap();
+    let (s, first, second) = retarget_clear_remove();
+    // Two kinds of later op on every place of the second batch: an id-shaped value, and a plain
+    // one — each a later op than the second batch's, so it wins.
+    let later = |id_shaped: bool| -> Vec<(i64, Op)> {
+        let mut s2 = Store::open_in_memory(3);
+        s2.apply(&s.export());
+        let v = if id_shaped { "ab12.p003" } else { "plain" };
+        s2.set_custom_field_merge("ab12.x001", "owner", Some(v.into()), "u", Lww);
+        s2.set_custom_field_merge("ab12.x002", "owner", Some(v.into()), "u", Lww);
+        s2.add_field_entry("ab12.x003", "members", v, None, "u");
+        let seen: std::collections::BTreeSet<String> =
+            s.export().into_iter().map(|op| op.op_id).collect();
+        let fresh: Vec<Op> = s2
+            .export()
+            .into_iter()
+            .filter(|op| !seen.contains(&op.op_id))
+            .collect();
+        assert_eq!(fresh.len(), 3);
+        fresh
+            .into_iter()
+            .enumerate()
+            .map(|(i, op)| (head(&second) + 1 + i as i64, op))
+            .collect()
+    };
+    let indexes = writes_and_deletes(&first, &second);
+    let mut orphans_seen = 0;
+    let mut delete_crashes_seen = 0;
+    for id_shaped in [true, false] {
+        let later = later(id_shaped);
+        for fail_at in 0..indexes {
+            let ctx = format!("death at {fail_at}, later op id-shaped: {id_shaped}");
+            let t = MemTable::new("stream-1");
+            ready(folder.fold_batch(&t, &first)).unwrap();
+            assert!(ready(folder.fold_batch(&Failing::new(&t, fail_at), &second)).is_err());
+            let half = HalfReconciled::of(&t);
+            // After any death, before any repair: the read answers from the rows, never from a
+            // hint alone.
+            for p in ["ab12.p001", "ab12.p002"] {
+                for field in ["owner", "members"] {
+                    let backed = backed_by_rows(&t, field, p);
+                    for id in hosted_ref(&t, field, p) {
+                        assert!(backed.contains(&id), "{ctx}: {field} {p} answered {id}");
+                    }
+                }
+            }
+            ready(folder.fold_batch(&t, &later)).unwrap();
+            let reindexed = reindexed_rows(&t);
+            let rows = t.rows();
+            if half.put_crashes > 0 {
+                orphans_seen += 1;
+                // Exactly one `.radj#` orphan: the hint of p2 under x1, its mirror never put.
+                let differ: Vec<&String> = rows
+                    .keys()
+                    .filter(|sk| reindexed.get(*sk) != rows.get(*sk))
+                    .chain(reindexed.keys().filter(|sk| !rows.contains_key(*sk)))
+                    .collect();
+                assert_eq!(differ.len(), 1, "{ctx}: {differ:#?}");
+                assert!(
+                    !reindexed.contains_key(differ[0]),
+                    "{ctx}: reindex removes it"
+                );
+                assert!(
+                    differ[0].starts_with(".radj#ab12.p002#owner#"),
+                    "{ctx}: {differ:?}"
+                );
+                assert!(
+                    !hosted_ref(&t, "owner", "ab12.p002").contains(&"ab12.x001".to_string()),
+                    "{ctx}: the read does not answer the orphan"
+                );
+                ready(board::reindex(&t)).unwrap();
+                assert!(!t.rows().contains_key(differ[0]), "{ctx}");
+            } else {
+                delete_crashes_seen += usize::from(half.delete_crashes > 0);
+                assert!(rows == reindexed, "{ctx}: rows equal reindex");
+            }
+        }
+    }
+    assert_eq!(
+        orphans_seen, 2,
+        "the one put-crash index, under both later ops"
+    );
+    assert_eq!(
+        delete_crashes_seen,
+        2 * 3,
+        "the three delete-crash indexes, under both later ops"
+    );
+}
+
+#[test]
+fn an_orphan_hint_is_ignored_by_the_read_and_removed_by_reindex() {
+    // A `.radj#` row for a value no row holds and with no mirror — a state the reconcile itself
+    // cannot reach, kept as the belt-and-braces case.
+    use nxs_fold_ddb::layout::ref_adjacency_key;
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let orphan = ref_adjacency_key("ab12.p003", "owner", "ab12.x002");
+    ready(t.write(&Write::put(
+        orphan.clone(),
+        vec![
+            ("target_id".into(), Cell::Text("ab12.p003".into())),
+            ("field".into(), Cell::Text("owner".into())),
+            ("source_id".into(), Cell::Text("ab12.x002".into())),
+        ],
+    )))
+    .unwrap();
+    assert_eq!(
+        ready(records::referrers(&t, "owner", "ab12.p003")).unwrap(),
+        ["ab12.x002"],
+        "the hint names it"
+    );
+    assert!(
+        hosted_ref(&t, "owner", "ab12.p003").is_empty(),
+        "the read does not"
+    );
+    ready(board::reindex(&t)).unwrap();
+    assert!(!t.rows().contains_key(&orphan));
+}
+
+#[test]
+fn reindex_prunes_what_the_rows_do_not_back() {
+    use nxs_fold_ddb::layout::{ref_adjacency_key, ref_source_key};
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    let clean = t.rows();
+    let cells = vec![
+        ("target_id".into(), Cell::Text("ab12.p009".into())),
+        ("field".into(), Cell::Text("owner".into())),
+        ("source_id".into(), Cell::Text("ab12.x001".into())),
+    ];
+    let stray_mirror = ref_source_key("ab12.x001", "owner", "ab12.p009");
+    let stray_hint = ref_adjacency_key("ab12.p009", "owner", "ab12.x001");
+    ready(t.write(&Write::put(stray_hint.clone(), cells.clone()))).unwrap();
+    ready(t.write(&Write::put(stray_mirror.clone(), cells))).unwrap();
+    ready(board::reindex(&t)).unwrap();
+    assert!(!t.rows().contains_key(&stray_mirror));
+    assert!(!t.rows().contains_key(&stray_hint));
+    assert!(t.rows() == clean);
+}
+
+#[test]
+fn a_stream_at_index_revision_three_is_not_current() {
+    // Index revision 4 (6j6v.9tx3) adds the hints: a stream folded by revision 3 has none, and its
+    // `list --ref` would answer nothing — refused until refolded.
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &numbered(&s, 0))).unwrap();
+    ready(t.write(&Write {
+        sk: WATERMARK_KEY.into(),
+        set: vec![("revision_index".into(), Cell::Int(3))],
+        remove: Vec::new(),
+        condition: Some(Cond::RowPresent),
+    }))
+    .unwrap();
+    assert!(!folder.is_current(&ready(Folder::watermark(&t)).unwrap().unwrap()));
+    match ready(records::list_board(&t, &read::ListReads::default())) {
+        Err(RecordsError::NotCurrent {
+            domain: "index",
+            found: Some(3),
+        }) => {}
+        other => panic!("a revision-3 stream must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_hint_is_never_a_reason_to_refuse_an_op() {
+    use nexus_flow_core::model::MergeStrategy::Lww;
+    let folder = Folder::platform().unwrap();
+    let value = format!("ab12.{}", "v".repeat(123));
+    assert_eq!(value.len(), 128);
+    let field = "f".repeat(60);
+    let mut s = Store::open_in_memory(1);
+    let fits = format!("ab12.{}", "i".repeat(115));
+    assert_eq!(fits.len(), 120);
+    let long = format!("ab12.{}", "l".repeat(124));
+    assert_eq!(long.len(), 129);
+    s.create_item(&fits, "project", "X", "u");
+    s.create_item(&long, "project", "Y", "u");
+    let base = s.export().len();
+    s.set_custom_field_merge(&fits, &field, Some(value.clone()), "u", Lww);
+    s.set_custom_field_merge(&long, &field, Some(value.clone()), "u", Lww);
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &numbered(&s, 0)[..base])).unwrap();
+    for (_, op) in &numbered(&s, base) {
+        assert_eq!(ready(folder.fold(&t, op)).unwrap(), Folded::Folded);
+    }
+    assert_eq!(
+        ready(records::referrers(&t, &field, &value)).unwrap(),
+        [fits.clone()],
+        "the 120-byte source is hinted, the 129-byte one is not"
+    );
+    assert_eq!(
+        text(&t.rows()[&format!("custom_fields#{long}#{field}")], "value"),
+        Some(value.as_str()),
+        "the 129-byte source's value folds all the same"
+    );
+}
+
+/// A [`MemTable`] that answers [`Outcome::TooLarge`] for every reverse-reference hint it is asked
+/// to write — a row that cannot occur (the `layout` unit test), to show what the fold does if it
+/// ever did.
+struct Cramped<'a>(&'a MemTable);
+
+impl Table for Cramped<'_> {
+    type Error = std::convert::Infallible;
+
+    fn stream(&self) -> &str {
+        self.0.stream()
+    }
+
+    async fn get(&self, sk: &str) -> Result<Option<Row>, Self::Error> {
+        self.0.get(sk).await
+    }
+
+    async fn get_many(&self, sks: &[String]) -> Result<BTreeMap<String, Row>, Self::Error> {
+        self.0.get_many(sks).await
+    }
+
+    async fn write(&self, write: &Write) -> Result<Outcome, Self::Error> {
+        if write.sk.starts_with(".radj#") {
+            return Ok(Outcome::TooLarge);
+        }
+        self.0.write(write).await
+    }
+
+    async fn delete(&self, sk: &str) -> Result<(), Self::Error> {
+        self.0.delete(sk).await
+    }
+
+    async fn query_prefix(&self, prefix: &str) -> Result<Vec<Row>, Self::Error> {
+        self.0.query_prefix(prefix).await
+    }
+
+    async fn query_active(&self) -> Result<Vec<Row>, Self::Error> {
+        self.0.query_active().await
+    }
+
+    async fn query_dated(
+        &self,
+        lane: Dated,
+        limit: Option<usize>,
+    ) -> Result<Vec<Row>, Self::Error> {
+        self.0.query_dated(lane, limit).await
+    }
+
+    async fn query_typed(&self, item_type: &str) -> Result<Vec<Row>, Self::Error> {
+        self.0.query_typed(item_type).await
+    }
+}
+
+#[test]
+fn a_hint_that_does_not_fit_refuses_its_op_and_never_fails_the_batch() {
+    // Low (c) of the last design pass: a `TooLarge` on a bookkeeping row must not become a fold
+    // error — that would fail `fold_batch`, hold the watermark, and wedge the stream on this op.
+    // It is reported as the op's refusal, as an item row past its size is; the mirror is not put,
+    // so the place does not read as hinted.
+    let folder = Folder::platform().unwrap();
+    let (s, _, _) = retarget_clear_remove();
+    let ops = numbered(&s, 0);
+    let t = MemTable::new("stream-1");
+    let refused = ready(folder.fold_batch(&Cramped(&t), &ops)).unwrap();
+    assert!(!refused.is_empty());
+    assert!(
+        refused
+            .iter()
+            .all(|r| r.reason.contains("the reverse-reference row .radj#")),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        ready(Folder::watermark(&t))
+            .unwrap()
+            .unwrap()
+            .folded_through,
+        head(&ops),
+        "the watermark moved past every op"
+    );
+    assert!(!t.rows().keys().any(|sk| sk.starts_with(".r")));
 }
