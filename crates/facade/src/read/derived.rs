@@ -501,6 +501,7 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
         next: false,
         ranking: None,
         select: None,
+        refs: q.refs.clone(),
     };
     // Any order but `rank` reads the item rows alone: the reader may keep and cut before it reads
     // an item's joins (review of PR #55, Integrity #1).
@@ -511,6 +512,7 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
             filter: q.filter.clone(),
             sort,
             limit: q.limit,
+            refs: q.refs.clone(),
         });
         return reads;
     }
