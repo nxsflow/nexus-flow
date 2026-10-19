@@ -259,6 +259,28 @@ Redeclaring a text field as a ref keeps its values: the ones that are ids become
 rest show as not on this board. A ref is written with the ordinary field ops, so a replica started
 from a snapshot stays valid.
 
+#### Finding the referrers
+
+`nxf list --ref <field>=<id>` lists the items whose ref field holds the id: a single value equal to
+it, or an entry equal to it. It is a `list` filter, so it composes with `--type`, `--status`,
+`--in`, `--label`, `--sort`, `--limit` and `--paginate`; a bare local id is resolved. Repeat it for
+alternatives (at most 8). With a plugin that declares meetings, stations and relationships:
+
+```
+nxf list --type meeting --ref participants=<person>              # the meetings of a person
+nxf list --type station --ref person=<person>                    # the stations of a person
+nxf list --type relationship --ref a=<person> --ref b=<person>   # relationships, from both ends
+```
+
+Under `--sort rank` the filter narrows the rows, never the ranking: the items come in the order the
+unfiltered ranked list gives them. The id need not name an item — the referrers of a deleted item
+stay findable, and an id nothing holds lists nothing. Deleted referrers are dropped, closed ones
+listed; **archived referrers are not listed**, because `list` lists live, unarchived items
+(`nxf archived` takes no `--ref`). An item whose own id is longer than 128 bytes is never a
+referrer. A field that is not a ref of the plugin, a value that is not an id, `--ref` without
+`=`, and more than 8 refs are refused. `list --json` is unchanged; over MCP, `flow_list` takes
+`refs: [{"field": "participants", "id": "<person>"}]`.
+
 ## Declaring a ranking
 
 A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort rank` ranks under

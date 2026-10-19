@@ -268,6 +268,30 @@ Zeichen. Wer ein Textfeld als Verweis neu deklariert, behält dessen Werte: Die 
 Verweisen, der Rest erscheint als nicht auf diesem Board. Ein Verweis wird mit den gewöhnlichen
 Feld-Ops geschrieben, sodass eine aus einem Snapshot gestartete Replik gültig bleibt.
 
+#### Die Verweisenden finden
+
+`nxf list --ref <feld>=<id>` listet die Items, deren Verweisfeld die Id hält: einen einzelnen Wert
+gleich ihr oder einen Eintrag gleich ihr. Es ist ein `list`-Filter und lässt sich daher mit
+`--type`, `--status`, `--in`, `--label`, `--sort`, `--limit` und `--paginate` kombinieren; eine
+nackte lokale Id wird aufgelöst. Mehrfach angegeben sind es Alternativen (höchstens 8). Mit einem
+Plugin, das Meetings, Stationen und Beziehungen deklariert:
+
+```
+nxf list --type meeting --ref participants=<person>              # die Meetings einer Person
+nxf list --type station --ref person=<person>                    # die Stationen einer Person
+nxf list --type relationship --ref a=<person> --ref b=<person>   # Beziehungen, von beiden Enden
+```
+
+Unter `--sort rank` grenzt der Filter die Zeilen ein, nie das Ranking: Die Items kommen in der
+Reihenfolge, die die ungefilterte gerankte Liste ihnen gibt. Die Id muss kein Item nennen — die
+Verweisenden eines gelöschten Items bleiben auffindbar, und eine Id, die nichts hält, listet nichts.
+Gelöschte Verweisende fallen weg, geschlossene werden gelistet; **archivierte Verweisende werden
+nicht gelistet**, weil `list` lebende, nicht archivierte Items listet (`nxf archived` nimmt kein
+`--ref`). Ein Item, dessen eigene Id länger als 128 Byte ist, ist nie ein Verweisender. Ein Feld,
+das kein Verweisfeld des Plugins ist, ein Wert, der keine Id ist, `--ref` ohne `=` und mehr als 8
+Verweise werden abgelehnt. `list --json` bleibt unverändert; über MCP nimmt `flow_list`
+`refs: [{"field": "participants", "id": "<person>"}]`.
+
 ## Ein Ranking deklarieren
 
 Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie
