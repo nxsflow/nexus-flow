@@ -73,6 +73,23 @@
 //! already, for its flag); folding an edge remove now reads the add and the remove and rewrites
 //! both entries — two `GetItem`s and two writes, one when the edge is a loop.
 //!
+//! # Reverse references
+//!
+//! Revision 4 (6j6v.9tx3) keeps what a hosted `list --ref <field>=<id>` reads
+//! ([`crate::records::referrers`]): for every custom value an item holds that
+//! [`ref_place_ok`](nexus_flow_core::model::ref_place_ok) admits — its field's single value, or a
+//! present entry of a list field — a hint `.radj#<value>#<field>#<item>`
+//! ([`ref_adjacency_key`]), and beside it a mirror `.rsrc#<item>#<field>#<value>`
+//! ([`ref_source_key`]), so the values hinted for one place are one Query. ONE ROW PER HINTED VALUE
+//! on either side, so no bookkeeping row grows with a place. The rule is syntactic — the fold knows
+//! no declarations and needs none — so [`reindex`] and a snapshot import apply it from the rows
+//! alone, and the hints are a pure FUNCTION OF THE ROWS: after every op that touches a place,
+//! [`reconcile_refs`] makes them exactly what its rows warrant, pruning a retargeted, cleared or
+//! removed value, and `reindex` rebuilds and prunes them all. Neither key is among
+//! [`derived_keys`]: a place the predicate admits always fits a sort key (968 bytes at most, the
+//! `layout` unit test), and a place it does not admit gets no hint — so a hint is never a reason to
+//! refuse an op.
+//!
 //! # One writer per stream
 //!
 //! The rows a reducer describes converge whatever the order and however many folders write them.
@@ -83,13 +100,13 @@
 
 use crate::layout::{
     adjacency_key, adjacency_prefix, contributes_adjacency_key, label_adjacency_key,
-    link_adjacency_key, row_key, table_prefix, typed_partition, ACTIVE, DATED, DATED_AT,
-    MAX_KEY_BYTES, SK, TYPED,
+    link_adjacency_key, ref_adjacency_key, ref_source_key, ref_source_prefix, row_key,
+    table_prefix, typed_partition, ACTIVE, DATED, DATED_AT, MAX_KEY_BYTES, SK, TYPED,
 };
 use crate::table::{text, Dated, Outcome, Row, Table};
 use crate::write::{attribute_bytes, Cond, Write};
 use nexus_flow_core::graph::{Board, Edge, Ticket};
-use nexus_flow_core::model::EdgeKind;
+use nexus_flow_core::model::{ref_place_ok, EdgeKind};
 use nxs_foundation::change::{Cell, Change, Effect};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -329,8 +346,11 @@ pub(crate) fn indexed_bytes(stream: &str, id: &str, row: &Row) -> usize {
         .sum::<usize>()
 }
 
-/// Keep the indexes after one op's changes were carried out. Returns the items whose row could not
-/// take its index attributes ([`Outcome::TooLarge`]) — none, when the fold's size check ran first.
+/// Keep the indexes after one op's changes were carried out. Returns what could not be written
+/// ([`Outcome::TooLarge`]), each said in words — an item row with no room for its index attributes
+/// (none, when the fold's size check ran first), a reverse-reference row (unreachable, see
+/// [`reconcile_refs`]) — for the fold to answer [`Folded::Refused`](crate::fold::Folded::Refused)
+/// with, never a fold error that would wedge the stream.
 pub(crate) async fn after<T: Table>(
     table: &T,
     changes: &[Change],
@@ -339,7 +359,19 @@ pub(crate) async fn after<T: Table>(
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
     let mut owned_tags: BTreeSet<(usize, &str)> = BTreeSet::new();
+    // Every place a custom value lives that a change touched, and whether a change carried a value
+    // the reference rule admits there (6j6v.9tx3).
+    let mut places: BTreeMap<(&str, &str), bool> = BTreeMap::new();
     for change in changes {
+        if let ("custom_fields" | "field_entries", Some(item), Some(field)) = (
+            change.table,
+            key_text(change, "item_id"),
+            key_text(change, "field"),
+        ) {
+            let admitted =
+                effect_text(change, "value").is_some_and(|v| ref_place_ok(item, field, v));
+            *places.entry((item, field)).or_default() |= admitted;
+        }
         if let Some(at) = OWNED
             .iter()
             .position(|o| o.adds == change.table || o.removes == change.table)
@@ -359,10 +391,10 @@ pub(crate) async fn after<T: Table>(
             _ => {}
         }
     }
-    let mut unindexed = Vec::new();
+    let mut unwritten = Vec::new();
     for id in items {
         if refresh_item(table, id).await? == Some(Outcome::TooLarge) {
-            unindexed.push(id.to_string());
+            unwritten.push(format!("the index attributes of item {id}"));
         }
     }
     for tag in added {
@@ -374,7 +406,205 @@ pub(crate) async fn after<T: Table>(
     for (at, tag) in owned_tags {
         refresh_owned(table, &OWNED[at], tag).await?;
     }
-    Ok(unindexed)
+    for ((item, field), touched) in places {
+        unwritten.extend(
+            reconcile_refs(table, item, field, touched)
+                .await?
+                .into_iter()
+                .map(|sk| format!("the reverse-reference row {sk}")),
+        );
+    }
+    Ok(unwritten)
+}
+
+/// The cells of a reverse-reference hint and of its mirror: the same triple.
+fn ref_cells(source: &str, field: &str, value: &str) -> Vec<(String, Cell)> {
+    vec![
+        ("target_id".to_string(), Cell::Text(value.to_string())),
+        ("field".to_string(), Cell::Text(field.to_string())),
+        ("source_id".to_string(), Cell::Text(source.to_string())),
+    ]
+}
+
+/// The sort key of the `custom_fields` row of `item`'s `field`, and the prefix of the
+/// `field_entries` rows of that place.
+fn place_keys(item: &str, field: &str) -> (String, String) {
+    let cells = [
+        ("item_id".to_string(), Cell::Text(item.to_string())),
+        ("field".to_string(), Cell::Text(field.to_string())),
+    ];
+    let register = row_key("custom_fields", &cells).expect("a text key");
+    let mut entries = row_key("field_entries", &cells).expect("a text key");
+    entries.push('#');
+    (register, entries)
+}
+
+/// Whether a stored `field_entries` row is a present entry: an add with a value that no remove
+/// observed — what `records::custom_lists` reads and [`model::present_entries`] projects, whose
+/// values are exactly these rows' values.
+///
+/// [`model::present_entries`]: nexus_flow_core::model::present_entries
+fn present_entry(row: &Row) -> Option<&str> {
+    let removed = matches!(row.get(REMOVED), Some(Cell::Int(v)) if *v != 0);
+    (!removed && text(row, "tag").is_some())
+        .then(|| text(row, "value"))
+        .flatten()
+}
+
+/// Put the hint of `(source, field, value)` and then its mirror. A row that does not fit
+/// ([`Outcome::TooLarge`] — unreachable: the longest is about 1.2 KiB) is reported in `unwritten`
+/// and its mirror is not put, so the place does not read as hinted.
+async fn link_ref<T: Table>(
+    table: &T,
+    source: &str,
+    field: &str,
+    value: &str,
+    unwritten: &mut Vec<String>,
+) -> Result<(), T::Error> {
+    let cells = ref_cells(source, field, value);
+    let hint = ref_adjacency_key(value, field, source);
+    if table
+        .write(&Write::put(hint.clone(), cells.clone()))
+        .await?
+        == Outcome::TooLarge
+    {
+        unwritten.push(hint);
+        return Ok(());
+    }
+    let mirror = ref_source_key(source, field, value);
+    if table.write(&Write::put(mirror.clone(), cells)).await? == Outcome::TooLarge {
+        unwritten.push(mirror);
+    }
+    Ok(())
+}
+
+/// Delete the hint of `(source, field, value)` and then its mirror.
+async fn unlink_ref<T: Table>(
+    table: &T,
+    source: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), T::Error> {
+    table
+        .delete(&ref_adjacency_key(value, field, source))
+        .await?;
+    table.delete(&ref_source_key(source, field, value)).await
+}
+
+/// The reverse-reference hints of one place (6j6v.9tx3), made exactly what its rows warrant:
+/// `.radj#<v>#<field>#<item>` and its mirror `.rsrc#<item>#<field>#<v>` for every value `v` the
+/// register holds or a present entry holds, when `nexus_flow_core::model::ref_place_ok` admits it —
+/// the same predicate a replica's `referenced_by_bulk` keeps rows by, so both answer `list --ref`
+/// from the same rows. Knows no declarations and needs none.
+///
+/// Reads the values hinted now from the mirrors (one Query); when none is hinted and `touched` —
+/// whether a change of this op carried a value the predicate admits here — is false, there is
+/// nothing to hint and it stops: a plain enum or date `set` costs this one Query. Otherwise one
+/// `GetItem` of the register and one Query of the place's `field_entries` range (its whole history,
+/// tombstones included), then the delta: a missing value's hint put THEN its mirror, a value the
+/// rows no longer hold its hint deleted THEN its mirror. Order-independent and idempotent: the rows
+/// after the write decide, whatever order the ops folded in.
+///
+/// `.radj#` goes first on a put and on a delete, so a run that dies half-way leaves a hint without
+/// its mirror (readers ignore it: the read re-checks the rows) or a mirror without its hint. A
+/// put-crash is repaired by the replay of the same op, which the batch watermark guarantees, and
+/// by [`reindex`] — not by a different later op, which reads the mirrors and cannot see the orphan;
+/// a delete-crash also by any later op on this place.
+///
+/// Returns the keys of the rows that did not fit ([`Outcome::TooLarge`]): unreachable, since a row
+/// the predicate admits is about 1.2 KiB at most (the `layout` unit test); reported all the same,
+/// for the op to be refused with the reason rather than the batch failed.
+pub(crate) async fn reconcile_refs<T: Table>(
+    table: &T,
+    item: &str,
+    field: &str,
+    touched: bool,
+) -> Result<Vec<String>, T::Error> {
+    let hinted: BTreeSet<String> = table
+        .query_prefix(&ref_source_prefix(item, field))
+        .await?
+        .iter()
+        .filter_map(|r| text(r, "target_id").map(str::to_string))
+        .collect();
+    if hinted.is_empty() && !touched {
+        return Ok(Vec::new());
+    }
+    let (register, entries) = place_keys(item, field);
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
+    if let Some(row) = table.get(&register).await? {
+        wanted.extend(text(&row, "value").map(str::to_string));
+    }
+    for row in table.query_prefix(&entries).await? {
+        if text(&row, "item_id") == Some(item) && text(&row, "field") == Some(field) {
+            wanted.extend(present_entry(&row).map(str::to_string));
+        }
+    }
+    wanted.retain(|v| ref_place_ok(item, field, v));
+    let mut unwritten = Vec::new();
+    for v in wanted.difference(&hinted) {
+        link_ref(table, item, field, v, &mut unwritten).await?;
+    }
+    for v in hinted.difference(&wanted) {
+        unlink_ref(table, item, field, v).await?;
+    }
+    Ok(unwritten)
+}
+
+/// Make every reverse-reference hint and mirror what the rows warrant ([`reconcile_refs`]'s rule
+/// over the whole stream): put the missing ones, rewrite any whose cells differ, delete every one
+/// no row backs. Returns the keys of the rows that did not fit.
+async fn reindex_refs<T: Table>(table: &T) -> Result<Vec<String>, T::Error> {
+    let mut wanted: BTreeSet<(String, String, String)> = BTreeSet::new();
+    let mut want = |item: Option<&str>, field: Option<&str>, value: Option<&str>| {
+        if let (Some(item), Some(field), Some(value)) = (item, field, value) {
+            if ref_place_ok(item, field, value) {
+                wanted.insert((item.to_string(), field.to_string(), value.to_string()));
+            }
+        }
+    };
+    for row in table.query_prefix(&table_prefix("custom_fields")).await? {
+        want(
+            text(&row, "item_id"),
+            text(&row, "field"),
+            text(&row, "value"),
+        );
+    }
+    for row in table.query_prefix(&table_prefix("field_entries")).await? {
+        want(
+            text(&row, "item_id"),
+            text(&row, "field"),
+            present_entry(&row),
+        );
+    }
+    let stored = |rows: Vec<Row>| -> BTreeMap<String, Row> {
+        rows.into_iter()
+            .filter_map(|r| text(&r, SK).map(str::to_string).map(|sk| (sk, r)))
+            .collect()
+    };
+    let hints = stored(table.query_prefix(".radj#").await?);
+    let mirrors = stored(table.query_prefix(".rsrc#").await?);
+    let holds = |row: Option<&Row>, cells: &[(String, Cell)]| {
+        row.is_some_and(|r| cells.iter().all(|(n, c)| r.get(n) == Some(c)))
+    };
+    let mut unwritten = Vec::new();
+    let mut backed: BTreeSet<String> = BTreeSet::new();
+    for (item, field, value) in &wanted {
+        let cells = ref_cells(item, field, value);
+        let hint = ref_adjacency_key(value, field, item);
+        let mirror = ref_source_key(item, field, value);
+        if !holds(hints.get(&hint), &cells) || !holds(mirrors.get(&mirror), &cells) {
+            link_ref(table, item, field, value, &mut unwritten).await?;
+        }
+        backed.insert(hint);
+        backed.insert(mirror);
+    }
+    // The hints first, as a reconcile deletes them.
+    for sk in hints.keys().chain(mirrors.keys()) {
+        if !backed.contains(sk) {
+            table.delete(sk).await?;
+        }
+    }
+    Ok(unwritten)
 }
 
 /// Set ticket `id`'s index attributes from its row; when its activity flipped, refresh every edge
@@ -559,8 +789,11 @@ async fn flag_edge<T: Table>(
 }
 
 /// Recompute every index attribute and adjacency entry from the rows — after a snapshot was
-/// loaded, or to repair a stream two folders wrote at once. Returns the items whose row could not
-/// take its index attributes (past `MAX_ITEM_BYTES` with them), which keep the ones they had.
+/// loaded, or to repair a stream two folders wrote at once — and make the reverse-reference hints
+/// exactly what the rows warrant, deleting every one no row backs ("Reverse references" above).
+/// Returns the items whose row could not take its index attributes (past `MAX_ITEM_BYTES` with
+/// them), which keep the ones they had, and the key of any reverse-reference row that did not fit
+/// (none can: the `layout` unit test).
 pub async fn reindex<T: Table>(table: &T) -> Result<Vec<String>, T::Error> {
     let mut unindexed = Vec::new();
     for row in table.query_prefix(&table_prefix("items")).await? {
@@ -582,6 +815,7 @@ pub async fn reindex<T: Table>(table: &T) -> Result<Vec<String>, T::Error> {
             }
         }
     }
+    unindexed.extend(reindex_refs(table).await?);
     Ok(unindexed)
 }
 
@@ -685,7 +919,9 @@ pub async fn dated<T: Table>(
 
 /// Keys the board would write for these changes, beside the rows the changes name: one adjacency
 /// entry per end of every edge add, and one entry under its ticket per label or thread link add. What [`Folder`](crate::fold::Folder) checks
-/// against the key limit before an op writes anything.
+/// against the key limit before an op writes anything. The reverse-reference hints are not among
+/// them: a place `ref_place_ok` admits always fits a sort key, and one it does not admit gets no
+/// hint ("Reverse references" above), so a hint never refuses an op.
 pub(crate) fn derived_keys(changes: &[Change]) -> Vec<String> {
     let mut keys = Vec::new();
     for change in changes.iter().filter(|c| c.table == "edge_adds") {

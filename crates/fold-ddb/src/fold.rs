@@ -33,7 +33,10 @@
 //! (6j6v.1c5s) makes the `.adj#` entries self-describing — ends, kind, coordinate, presence — for
 //! the derived ranking keys ([`crate::records::with_ranking`]), and sets the `typed` index
 //! attribute on every live item row (6j6v.xkr7, [`crate::records::list_board`]). Both ship in one
-//! release: no stream was ever folded by revision 3 without the attribute.
+//! release: no stream was ever folded by revision 3 without the attribute. Revision 4 (6j6v.9tx3)
+//! adds the `.radj#` reverse-reference hints and their `.rsrc#` mirrors ([`board`], "Reverse
+//! references"), kept as a function of the rows for every id-shaped custom value — what a hosted
+//! `list --ref` reads ([`crate::records::referrers`]).
 //!
 //! # What the server cannot see
 //!
@@ -66,7 +69,9 @@ pub const REFOLD_UNTIL: &str = "refold_until";
 /// (6j6v.t1ym). 2: the entries under a ticket for its outgoing `contributes_to` edges (6j6v.15ed).
 /// 3: the adjacency entries copy their edge's ends, kind and coordinate and say whether it is
 /// removed (6j6v.1c5s), and every live item row carries its `typed` index partition (6j6v.xkr7).
-pub const INDEX_REVISION: i64 = 3;
+/// 4 (6j6v.9tx3): the `.radj#` reverse-reference hints and their `.rsrc#` mirrors, one row per
+/// hinted value, kept as a function of the rows for every custom value `ref_place_ok` admits.
+pub const INDEX_REVISION: i64 = 4;
 
 /// The platform's reducers — the board's, the chat's and the memory's.
 pub fn platform_reducers() -> Vec<Box<dyn Reducer>> {
@@ -261,9 +266,7 @@ impl Folder {
         too_large.extend(
             board::after(table, &changes)
                 .await
-                .map_err(FoldError::Table)?
-                .into_iter()
-                .map(|id| format!("the index attributes of item {id}")),
+                .map_err(FoldError::Table)?,
         );
         if too_large.is_empty() {
             Ok(Folded::Folded)

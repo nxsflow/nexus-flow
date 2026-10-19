@@ -58,7 +58,8 @@
 //! live, unarchived items of the listed types off the `typed` index, with the joins a `list`
 //! record and its filters carry, `next`'s board when a key reads a rank `next` gives, and the
 //! graph. The server asks [`read::list_reads`](nexus_flow_facade::read::list_reads) what to read
-//! for its query; its cost is in its own doc.
+//! for its query; its cost is in its own doc. An unranked `list --ref` takes its candidates from
+//! the reverse-reference hints ([`referrers`], index revision 4) instead of a type's scope.
 //!
 //! # Two points in time
 //!
@@ -74,7 +75,8 @@
 //!
 //! The entries under a ticket came with index revision 1, the `.cadj#` entries with revision 2
 //! (6j6v.15ed), the self-describing `.adj#` entries and the `typed` index attribute with revision 3
-//! (6j6v.1c5s, 6j6v.xkr7). A stream whose watermark names an older one — or none, folded before
+//! (6j6v.1c5s, 6j6v.xkr7), the reverse-reference hints `list --ref` reads with revision 4
+//! (6j6v.9tx3). A stream whose watermark names an older one — or none, folded before
 //! revisions were recorded for the index — lacks them, and its records would come back without
 //! labels or conversations, its list empty. The rows themselves are the task reducer's, so its
 //! revision counts too: a stream folded by task revision 2 holds list-field entry ops an older
@@ -96,7 +98,7 @@ use crate::board::{int, is_active, item_key, select, Selection, REMOVED};
 use crate::fold::{Folder, INDEX_DOMAIN, INDEX_REVISION};
 use crate::layout::{
     adjacency_prefix, contributes_adjacency_prefix, label_adjacency_prefix, link_adjacency_prefix,
-    row_key, table_prefix,
+    ref_adjacency_prefix, row_key, table_prefix,
 };
 use crate::table::{text, Row, Table};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -563,6 +565,17 @@ async fn ranking_graph<T: Table>(
 /// items the stream holds and however many the status refuses — plus one Query per item the row
 /// kept when the query filters by container or label.
 ///
+/// **An unranked `list --ref`** (6j6v.9tx3, [`ListReads::refs`]) reads no type's scope: its
+/// candidates are the items the reverse-reference hints name — one Query per ref ([`referrers`])
+/// and their rows by `BatchGetItem` (`⌈candidates / 100⌉` requests), kept when live, unarchived and
+/// of a listed type — and each candidate's `custom_fields#` and `field_entries#` are read BEFORE
+/// the cut, so [`read::list_select`] keeps by the reference rule with the row's own id; the kept
+/// ones read the rest as above. The hints are the CURRENT references, so the cost follows what
+/// references the id now, not its history (measured: `1 + 4·4` Queries and two `BatchGetItem`s
+/// for four referrers, plugin-custom-fields §5.3). A hint a crash left behind costs a candidate
+/// and is verified away. A ranked `list --ref` reads the whole scope as below:
+/// [`read::list_board_page`] filters it.
+///
 /// **`sort = rank`** reads every live, unarchived item of the listed types in full — one Query
 /// each on `.adj#`, `.ladj#`, `custom_fields#`, `field_entries#` per item, and the timestamps and
 /// outside parents by
@@ -588,7 +601,11 @@ pub async fn list_board<T: Table>(
     reads: &ListReads,
 ) -> Result<ListBoard, RecordsError<T::Error>> {
     check_current(table).await?;
+    let keep = reads.select.as_ref();
     let mut rows: Vec<Row> = match &reads.types {
+        // An unranked `list --ref` (6j6v.9tx3): the candidates are the items the hints name, not
+        // the scope — the ref filter below keeps them by the rule, a stale hint verified away.
+        _ if keep.is_some() && !reads.refs.is_empty() => ref_candidates(table, reads).await?,
         Some(types) => {
             let mut rows = Vec::new();
             for ty in types {
@@ -607,16 +624,16 @@ pub async fn list_board<T: Table>(
             })
             .collect(),
     };
-    let keep = reads.select.as_ref();
     // A list that is not ranked keeps what its row decides — status, type — before any join.
     if let Some(select) = keep {
         rows.retain(|r| select.keeps_row(&item_row(r, None)));
     }
 
     // What keeping an item reads: for a ranked list every join below, for any other only what its
-    // filter reads — a container's edges, a label's labels.
+    // filter reads — a container's edges, a label's labels, a ref's custom values.
     let edges_first = keep.is_none_or(ListSelect::reads_edges);
     let labels_first = keep.is_none_or(ListSelect::reads_labels);
+    let refs_first = keep.is_some_and(ListSelect::reads_refs);
     type Read = (Row, Option<BTreeMap<String, EdgeEntry>>, ListItem);
     let first: Vec<Read> = stream::iter(rows)
         .map(|row| async move {
@@ -629,6 +646,10 @@ pub async fn list_board<T: Table>(
             let mut i = list_item(&row, &id, edges.as_ref());
             if labels_first {
                 i.labels = labels(table, &id).await?;
+            }
+            if refs_first {
+                i.custom = custom(table, &id).await?;
+                i.custom_lists = custom_lists(table, &id).await?;
             }
             Ok::<_, T::Error>((row, edges, i))
         })
@@ -675,8 +696,10 @@ pub async fn list_board<T: Table>(
             if !labels_first {
                 i.labels = labels(table, &id).await?;
             }
-            i.custom = custom(table, &id).await?;
-            i.custom_lists = custom_lists(table, &id).await?;
+            if !refs_first {
+                i.custom = custom(table, &id).await?;
+                i.custom_lists = custom_lists(table, &id).await?;
+            }
             Ok::<_, T::Error>((row, edges, i))
         })
         .buffered(READ_CONCURRENCY)
@@ -805,6 +828,32 @@ pub async fn list_board<T: Table>(
     Ok(board)
 }
 
+/// The candidate rows of an unranked `list --ref` (6j6v.9tx3): the items the hints of any of
+/// `reads.refs` name ([`referrers`], one Query per ref), read by `BatchGetItem`
+/// (`⌈candidates / 100⌉` requests), kept when they exist, are live, unarchived and — under a type
+/// filter — of a listed type, as the scope a query without refs reads holds them.
+async fn ref_candidates<T: Table>(table: &T, reads: &ListReads) -> Result<Vec<Row>, T::Error> {
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    for r in &reads.refs {
+        ids.extend(referrers(table, &r.field, &r.id).await?);
+    }
+    let keys: Vec<String> = ids.iter().map(|id| item_key(id)).collect();
+    Ok(table
+        .get_many(&keys)
+        .await?
+        .into_values()
+        .filter(|r| {
+            text(r, "deleted") != Some("1")
+                && text(r, "archived").is_none()
+                && text(r, "id").is_some()
+                && reads
+                    .types
+                    .as_ref()
+                    .is_none_or(|types| text(r, "type").is_some_and(|t| types.contains(t)))
+        })
+        .collect())
+}
+
 /// A listed item from its row and, when they were read, its present edges: its `belongs_to` and its
 /// `contributes_to` targets come from them, and stay empty without them.
 fn list_item(row: &Row, id: &str, edges: Option<&BTreeMap<String, EdgeEntry>>) -> ListItem {
@@ -919,6 +968,27 @@ fn stamps(row: Option<&Row>) -> (Option<String>, Option<String>) {
             .map(str::to_string)
     };
     (stamp("created_at"), stamp("updated_at"))
+}
+
+/// The items whose custom field `field` holds `target` as the reverse-reference hints say it
+/// (6j6v.9tx3, index revision 4): the distinct `source_id`s under `.radj#<target>#<field>#`,
+/// sorted. One Query, whatever the stream holds — the hints are the CURRENT references, the fold
+/// having pruned every retargeted, cleared or removed one ([`board`](crate::board), "Reverse
+/// references"). A hint is a lead, not the answer: [`list_board`] reads the referring item's row
+/// and its custom values and keeps it by the reference rule, so a hint a crash left behind is
+/// verified away.
+pub async fn referrers<T: Table>(
+    table: &T,
+    field: &str,
+    target: &str,
+) -> Result<Vec<String>, T::Error> {
+    let sources: BTreeSet<String> = table
+        .query_prefix(&ref_adjacency_prefix(target, field))
+        .await?
+        .iter()
+        .filter_map(|r| text(r, "source_id").map(str::to_string))
+        .collect();
+    Ok(sources.into_iter().collect())
 }
 
 /// Every non-empty custom value of the ticket, by field.
