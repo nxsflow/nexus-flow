@@ -411,7 +411,7 @@ column, no reducer change. The task fold revision stays **3**, so a replica star
 refused by exactly those (`NeedsHistory::Rebuild`, `NeedsRevision`, `ViewsDiffer`).
 
 **The reference rule** — the one definition the local reverse lookup and the hosted reverse hints
-(a later cut) both implement:
+("The hosted read" below) both implement:
 
 1. **A field is a ref iff the reader's plugin configuration declares it `type = "ref"`.** The rows
    do not know; nothing in a row says it. A plugin that redeclares a text field as a ref needs no
@@ -523,8 +523,82 @@ rule in memory, with `ref_place_ok` applied to the row's OWN id. `ListReads.refs
 candidates from the reverse lookup, reads `custom`/`custom_lists` first (`ListSelect::reads_refs`)
 and `list_select` keeps by `ref_filter_keeps`; on the ranked path the board stays the whole scope
 and `list_board_page` filters by the same function. The store oracle `read::list_board` narrows to
-`referrers_of`'s candidates on the select path only. The hosted board answers it from reverse hints
-in `6j6v.1w3m`.
+`referrers_of`'s candidates on the select path only.
+
+**The hosted read (6j6v.1w3m, index revision 4).** A hosted board answers `list --ref` from the
+folded tables (`nxs-fold-ddb`), with the same rows, order, total and JSON as a replica — held to
+that by the three-path differential (SQL path, store board, folded tables) on generated boards.
+
+*The hint rule.* For every custom value an item holds that `ref_place_ok` (rule 4) admits — the
+single value of a field, or a present entry of a list field — the fold keeps a hint
+`.radj#<value>#<field>#<source>` and beside it a mirror `.rsrc#<source>#<field>#<value>`: one row
+per hinted value on either side, each cell escaped as every key cell is (`%` → `%25`, `#` → `%23`),
+attributes `target_id`, `field`, `source_id`. The rule is SYNTACTIC: a server does not know the
+reader's declarations (rule 1), so it hints every id-shaped value — paths, versions, hosts and mail
+addresses that happen to contain a `.` included. That costs rows, never answers: the read keeps a
+row by the declaration-aware rule. Being syntactic is also what lets `reindex` and a snapshot
+import rebuild the hints from the rows alone, without history or declarations.
+
+*A function of the rows.* The hint set of a place `(source, field)` is exactly
+`W = {its single value, if admitted} ∪ {each present entry value, if admitted}` — never a value the
+rows no longer hold. After every op that touches a place (a set, a clear, an entry add or remove)
+the fold reconciles it: it reads the values hinted now from the mirrors (one Query on
+`.rsrc#<source>#<field>#`), and when none is hinted and the op carried no admitted value it stops
+there; otherwise it reads the register (one GetItem) and the place's `field_entries` range (one
+Query), and writes the delta — a missing value's hint put THEN its mirror, a value no longer held
+its hint deleted THEN its mirror. So a retarget, a clear and a removed entry PRUNE their hints;
+after N retargets a field holds one hint. The rows after the write decide, so the order ops arrive
+in does not, and reconciling twice changes nothing. `reindex` applies the same rule to the whole
+stream — puts what is missing, deletes every hint and mirror no row backs — and a snapshot import
+ends with it, so an imported stream has exactly the hints its rows warrant. Neither key is among
+the keys an op is weighed by: the longest place `ref_place_ok` admits makes a 968-byte key
+(6 + 3·128 + 1 + 3·64 + 1 + 3·128, every cell escaped three-fold, the field too) under DynamoDB's
+1,024, and a row of about 1.2 KiB, so a hint is never a reason to refuse an op. Should a hint ever
+not fit, the op is refused with the reason, as an item row past its size is — never a fold error
+that would hold the stream's watermark.
+
+*A run that dies mid-reconcile.* With `.radj#` first, it leaves a hint without its mirror (a
+put-crash) or a mirror without its hint (a delete-crash). The batch watermark moves only after the
+batch, so the fold run replays the op, and the replay's reconcile finishes the place. A delete-crash
+is also finished by any later op on the place. A put-crash is NOT finished by a different later op —
+later reconciles read the mirrors and cannot see the orphan hint — but the orphan is harmless (the
+read re-checks the rows, below) and `reindex` removes it. Between a crash and its repair a reader
+may miss a hint not yet put, the window every derived entry of the fold has.
+
+*The read.* An unranked `list --ref` (`ListReads.select` set) takes its candidates from the hints —
+one Query on `.radj#<id>#<field>#` per ref (`records::referrers`), the candidates' item rows by
+BatchGetItem — keeps the ones that exist, are live, unarchived and of a listed type, reads each
+one's `custom` and `custom_lists` BEFORE the cut, and keeps by `ref_filter_keeps`, with the row's
+own id. That verification is free (those joins are read for a kept row anyway) and makes a stale or
+orphan hint harmless. A ranked one (`sort = rank`) reads the type's whole scope, every join, and
+filters in `list_board_page`: the rank scope is the type, filters select.
+
+*Cost, measured* (the `MemTable` request counters, `crates/fold-ddb/tests/list_differential.rs`):
+
+| what | measured around | requests |
+|---|---|---|
+| unranked `list --ref owner=X --type project`, 4 current referrers | `records::list_board` | 1 GetItem (the watermark), 2 BatchGetItem (`⌈4/100⌉` candidate rows, 1 for the kept ones' timestamps), `1 + 4·4` Queries: the hint Query, then per candidate `custom_fields#` and `field_entries#` before the cut and `.adj#` and `.ladj#` after it; no index Query |
+| `set` of an id-shaped value on a fresh place | `Folder::fold` | 5 writes (the row and the two `item_timestamps` changes, then the hint and its mirror), 1 GetItem, 2 Queries |
+| `set` of a plain value | `Folder::fold` | 3 writes, 0 GetItem, 1 Query (the mirrors, empty: it stops) |
+| retarget of a single ref | `Folder::fold` | 5 writes, 2 deletes, 1 GetItem, 2 Queries |
+| after 20 retargets across 3 targets | the table | 1 hint and 1 mirror for the place |
+| entry add on a list with 1,000 adds and 500 removes | `Folder::fold` | 5 writes, 1 GetItem, 2 Queries — and those Queries read 1,001 `field_entries` rows (the place's whole history, tombstones included) and 500 mirrors (its live hints) |
+| a place with 4,000 hinted entries | the table | every op folds; 4,000 hints and 4,000 mirrors, equal to `reindex` |
+
+So the read costs the CURRENT references to X, not its history; a write costs a constant number of
+requests. "Constant" is a count of requests as the in-memory table counts them: DynamoDB pages a
+Query at 1 MB, so each of the reconcile's two Queries is one request up to one result page and one
+more per further page. In ROWS READ, a single ref's place is a handful; a list's place is its whole
+entry history (every add ever folded, removed ones included — the same range every hosted read of
+that list already reads; compacting it is `6j6v.2sbr`) plus its live hints.
+
+*The upgrade.* Index revision 4 (the task fold revision is unchanged at 3). A hosted stream folded
+by revision 3 has no hints; every hosted reader answers it `NotCurrent` until the fold run has
+cleared and refolded it from relay position 0, and `Refolding` until that refold reaches the head
+the clear named. Roll the release out to every fold run at once — two builds with different
+revisions refold each other's streams back and forth. The deploying stack changes nothing: the
+hints are plain rows in the stream's partition, on no index. A snapshot taken by the previous
+release still imports (its task revision is 3; the import rebuilds the hints from its rows).
 
 **JSON.** `list --json` and `flow_list` are unchanged: the records of `list --json`, as a plain
 array without `--limit` and as the `{items, total, next_token?, restarted?}` envelope with it. A
@@ -532,7 +606,7 @@ array without `--limit` and as the `{items, total, next_token?, restarted?}` env
 bound to its refs: the same refs in another order or repeated are the same list, other refs
 restart it, and a change to a held referrer restarts it as any op on a held item does.
 
-**Out of scope here:** the hosted reverse hints (`6j6v.1w3m`), `flow_list` parity for `in`,
+**Out of scope here:** `flow_list` parity for `in`,
 `label`, `limit`, `paginate` and `token` (`6j6v.n07w`), a `next --ref`, `mention by --ref` or
 `archived --ref`, derived ranking keys over refs, runtime-declared refs (`6j6v.bs4c`), and
 cascading anything on a target's deletion or retyping.

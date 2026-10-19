@@ -64,6 +64,7 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
             5 => s.remove_field_entry(&a, "emails", &format!("e{}@x", step % 3), "u"),
             _ => {}
         }
+        refs_on_the_step(s, &a, n, step);
         match r.next(16) {
             0 => s.create_item(&a, "task", "T", "u"),
             1 => s.set_field(&a, "status", Some("in_progress".into()), "u"),
@@ -165,6 +166,38 @@ fn write(s: &mut Store, r: &mut Lcg, n: u64, steps: usize) {
                 MergeStrategy::Lww,
             ),
         }
+    }
+}
+
+/// Id-shaped custom values (6j6v.9tx3), so the server keeps reverse-reference hints for the
+/// row-equality invariants to run over: a single `owner` set, retargeted, set to an id of a
+/// foreign prefix, cleared, and overwritten by text; `members` entries added and removed. On the
+/// step alone, as the retype and the list entries are — no `r.next` — so every other op of a seed
+/// stays as it was.
+pub fn refs_on_the_step(s: &mut Store, a: &str, n: u64, step: usize) {
+    let item = |k: usize| id(k as u64 % n.max(1));
+    match step % 13 {
+        2 | 9 => s.set_custom_field_merge(a, "owner", Some(item(step)), "u", MergeStrategy::Lww),
+        6 => s.set_custom_field_merge(
+            a,
+            "owner",
+            Some("zz99.p001".into()),
+            "u",
+            MergeStrategy::Lww,
+        ),
+        8 => s.set_custom_field_merge(a, "owner", None, "u", MergeStrategy::Lww),
+        11 => s.set_custom_field_merge(
+            a,
+            "owner",
+            Some("not an id".into()),
+            "u",
+            MergeStrategy::Lww,
+        ),
+        0 | 4 | 10 => {
+            s.add_field_entry(a, "members", &item(step / 2), None, "u");
+        }
+        7 | 12 => s.remove_field_entry(a, "members", &item(step / 2), "u"),
+        _ => {}
     }
 }
 

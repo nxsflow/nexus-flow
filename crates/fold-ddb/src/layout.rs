@@ -54,6 +54,8 @@ const ADJACENCY: &str = ".adj#";
 const LABEL_ADJACENCY: &str = ".ladj#";
 const LINK_ADJACENCY: &str = ".tadj#";
 const CONTRIBUTES_ADJACENCY: &str = ".cadj#";
+const REF_ADJACENCY: &str = ".radj#";
+const REF_SOURCE: &str = ".rsrc#";
 
 /// The sort key of a row of `table` with these key cells.
 pub fn row_key(table: &str, key: &[(String, Cell)]) -> Result<String, LayoutError> {
@@ -129,6 +131,30 @@ pub(crate) fn contributes_adjacency_key(item: &str, tag: &str) -> String {
 
 pub(crate) fn contributes_adjacency_prefix(item: &str) -> String {
     format!("{CONTRIBUTES_ADJACENCY}{}#", escape(item))
+}
+
+/// The reverse-reference hint that says item `source`'s custom field `field` holds `value`
+/// (6j6v.9tx3, index revision 4), and its prefix — what lets `list --ref field=value` find the
+/// referrers of `value` with one Query ([`crate::records::referrers`]). Every cell is escaped as a
+/// key cell is, so the longest a place `ref_place_ok` admits makes is 6 + 3·128 + 1 + 3·64 + 1 +
+/// 3·128 = 968 bytes, under [`MAX_KEY_BYTES`] (the unit test below).
+pub fn ref_adjacency_key(value: &str, field: &str, source: &str) -> String {
+    format!("{}{}", ref_adjacency_prefix(value, field), escape(source))
+}
+
+pub fn ref_adjacency_prefix(value: &str, field: &str) -> String {
+    format!("{REF_ADJACENCY}{}#{}#", escape(value), escape(field))
+}
+
+/// The mirror of a reverse-reference hint, keyed by its place: one row per value hinted for
+/// `source`'s `field`, so the values hinted for a place are one Query on [`ref_source_prefix`].
+/// The same bound as [`ref_adjacency_key`]: 968 bytes.
+pub fn ref_source_key(source: &str, field: &str, value: &str) -> String {
+    format!("{}{}", ref_source_prefix(source, field), escape(value))
+}
+
+pub fn ref_source_prefix(source: &str, field: &str) -> String {
+    format!("{REF_SOURCE}{}#{}#", escape(source), escape(field))
 }
 
 fn escape(v: &str) -> String {
@@ -339,6 +365,43 @@ mod tests {
         assert_ne!(k("x%23", "y"), k("x#", "y"));
         assert_eq!(k("x#y", "z"), "t#x%23y#z");
         assert!(row_key("t", &[("a".into(), Cell::Null)]).is_err());
+    }
+
+    #[test]
+    fn a_reference_hint_and_its_mirror_fit_a_sort_key_with_every_cell_escaped() {
+        // 6j6v.9tx3: the longest place `ref_place_ok` admits — a 128-byte value and source, a
+        // 64-character field — with every byte one that escapes three-fold, the field included
+        // (a strict upper bound: the chunk-field grammar admits no `#`).
+        let hint = ref_adjacency_key(&"#".repeat(128), &"#".repeat(64), &"%".repeat(128));
+        let mirror = ref_source_key(&"%".repeat(128), &"#".repeat(64), &"#".repeat(128));
+        assert_eq!(hint.len(), 968, "6 + 3·128 + 1 + 3·64 + 1 + 3·128");
+        assert_eq!(mirror.len(), 968, "6 + 3·128 + 1 + 3·64 + 1 + 3·128");
+        assert!(hint.len() <= MAX_KEY_BYTES && mirror.len() <= MAX_KEY_BYTES);
+        // A full row of either kind — its keys and its three text attributes — is far from
+        // MAX_ITEM_BYTES, so `Outcome::TooLarge` cannot occur for one.
+        for sk in [&hint, &mirror] {
+            let attrs = [
+                (PK, "s".repeat(128)),
+                (SK, sk.clone()),
+                ("target_id", "#".repeat(128)),
+                ("field", "#".repeat(64)),
+                ("source_id", "%".repeat(128)),
+            ];
+            let bytes: usize = attrs
+                .iter()
+                .map(|(n, v)| crate::write::attribute_bytes(n, &Cell::Text(v.clone())))
+                .sum();
+            assert!(bytes < 2048, "a hint row of {bytes} bytes");
+        }
+        // Escaped, no cell reaches into the next: `a#b` + `c` and `a` + `b#c` are two keys.
+        assert_ne!(
+            ref_adjacency_key("a#b", "c", "d"),
+            ref_adjacency_key("a", "b#c", "d")
+        );
+        assert!(ref_adjacency_key("x.y", "owner", "ab12.p1")
+            .starts_with(&ref_adjacency_prefix("x.y", "owner")));
+        assert!(!ref_adjacency_key("x.yz", "owner", "ab12.p1")
+            .starts_with(&ref_adjacency_prefix("x.y", "owner")));
     }
 
     #[test]

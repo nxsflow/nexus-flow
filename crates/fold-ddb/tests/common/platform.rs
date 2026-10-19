@@ -116,6 +116,8 @@ fn board(s: &mut Store, r: &mut Lcg, items: u64, steps: usize) {
             ),
             _ => {}
         }
+        // Id-shaped custom values (6j6v.9tx3), on the step alone: the server's hints in play.
+        super::refs_on_the_step(s, &a, items, step);
         match r.next(16) {
             0 => s.create_item(&a, ["task", "epic"][r.next(2) as usize], "T", "u"),
             1 => s.set_field(&a, "status", Some("in_progress".into()), "u"),

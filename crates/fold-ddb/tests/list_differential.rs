@@ -30,13 +30,16 @@
 //! through the plain `set` / `add` / `remove` ops on the fields themselves: retargets, clears, a
 //! non-id text on a ref field, a person's id in the text field `order`, refs to persons that end
 //! up deleted or archived, and a 129-byte project holding one. Their `list --ref` queries are held
-//! to the SQL and Board paths; the fold-ddb path answers them from its hints in cut 3 (6j6v.1w3m).
+//! to all three paths: the fold-ddb path answers an unranked one from its `.radj#` hints and a ranked
+//! one from the whole typed scope (6j6v.1w3m), and after every board the hints the fold kept op by
+//! op are exactly what `board::reindex` rebuilds from the rows.
 
 use nexus_flow_core::model::{EdgeKind, ItemRow, MergeStrategy};
 use nexus_flow_core::store::Store;
 use nexus_flow_facade::plugin::{self, PluginConfig, PluginRegistration};
 use nexus_flow_facade::read::{self, ListQuery, NextFilter, SortKey};
-use nxs_fold_ddb::fold::Folder;
+use nxs_fold_ddb::fold::{Folded, Folder};
+use nxs_fold_ddb::layout::{ref_adjacency_prefix, ref_source_prefix};
 use nxs_fold_ddb::mem::{ready, MemTable};
 use nxs_fold_ddb::{board, records};
 use std::collections::BTreeMap;
@@ -138,10 +141,17 @@ fn items() -> Vec<(String, &'static str)> {
     out
 }
 
-/// A person's id, for a ref value: one of the board's five, or one nobody holds.
+/// A person's id, for a ref value: one of the board's five, or an id of a FOREIGN prefix that names
+/// no item here — a reference is value equality, whatever stream the id comes from (6j6v.1w3m).
 fn person(r: &mut Lcg) -> String {
-    format!("ab12.u{:03}", r.next(6))
+    match r.next(6) {
+        5 => FOREIGN.to_string(),
+        n => format!("ab12.u{n:03}"),
+    }
 }
+
+/// The id of another stream's item some refs hold.
+const FOREIGN: &str = "zz99.u005";
 
 /// The one project whose own id is 129 bytes: it holds refs (a single `owner` through a plain
 /// `set`) that `ref_place_ok` keeps out of every reverse lookup (6j6v.9tx3).
@@ -349,11 +359,22 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         let ctx = format!("seed {seed}");
         let t = MemTable::new("stream-1");
         ready(folder.fold_batch(&t, &delivered(&s, seed))).unwrap();
+        // The hints are a function of the rows (6j6v.1w3m): what the fold kept op by op, in a
+        // shuffled order with duplicates, is exactly what reindex rebuilds from them.
+        let kept = t.rows();
+        ready(board::reindex(&t)).unwrap();
+        assert!(t.rows() == kept, "incremental hints vs reindex, {ctx}");
+        seen.add(
+            "hints on a board",
+            kept.keys().filter(|sk| sk.starts_with(".radj#")).count(),
+        );
 
-        // Three persons per board: two the generator draws from, and one nobody references.
+        // Four persons per board: two the generator draws from, an id of a foreign prefix, and
+        // one nobody references.
         let people = [
             format!("ab12.u{:03}", seed % 5),
             format!("ab12.u{:03}", (seed + 2) % 5),
+            FOREIGN.to_string(),
             "ab12.unone".to_string(),
         ];
         for (n, q) in ref_queries_of(&people).iter().enumerate() {
@@ -420,9 +441,47 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
                     usize::from(local.items.len() > want.total),
                 );
             }
-            // cut 3 (6j6v.1w3m): the fold-ddb path answers ref queries from its hints; until
-            // then it is not compared here.
+            // The fold-ddb path (6j6v.1w3m): candidates from the hints for an unranked query, the
+            // whole typed scope for a ranked one — the same board item for item as the store's.
+            let server = ready(records::list_board(&t, &reads)).unwrap();
+            let mut held: Vec<String> = server.items.keys().cloned().collect();
+            held.sort();
+            if reads.select.is_some() {
+                let kept: Vec<String> = want.items.iter().map(|i| i.id.clone()).collect();
+                assert!(
+                    held.iter().all(|id| kept.contains(id)) && held.len() <= scope.len(),
+                    "an unranked hosted ref board holds the kept candidates only, {ctx}"
+                );
+            } else {
+                let mut scope = scope.clone();
+                scope.sort();
+                assert_eq!(
+                    held, scope,
+                    "a ranked hosted ref board is the whole scope, {ctx}"
+                );
+            }
+            assert_eq!(server.items, local.items, "listed items, {ctx}");
+            let served = read::list_board_page(&cfg, &server, q).unwrap();
+            assert_eq!(
+                ids(&served.items),
+                ids(&want.items),
+                "SQL vs fold-ddb, {ctx}"
+            );
+            assert_eq!(served.total, want.total, "fold-ddb total, {ctx}");
+            assert_eq!(
+                read::list_board_value(&cfg, &server, q).unwrap(),
+                read::next_page_envelope(
+                    read::list_to_value_with_custom(&cfg, &s, &want.items).unwrap(),
+                    &want,
+                    false
+                ),
+                "fold-ddb list JSON, {ctx}"
+            );
             seen.add("ref rows", want.items.len());
+            seen.add(
+                "ref rows of a foreign-prefixed id",
+                usize::from(q.refs[0].id == FOREIGN) * want.items.len(),
+            );
             let target = s.get_item(&q.refs[0].id).unwrap();
             seen.add(
                 "ref rows of a deleted or archived target",
@@ -652,6 +711,8 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         "closed ref rows",
         "persons' ids in a text field",
         "non-id values on a ref field",
+        "hints on a board",
+        "ref rows of a foreign-prefixed id",
     ] {
         assert!(
             seen.0.get(what).copied().unwrap_or(0) > 0,
@@ -920,4 +981,260 @@ fn an_item_whose_typed_attribute_lags_its_row_is_not_listed_under_its_old_type()
         listed("goal").is_empty(),
         "nor under its new type, until the attribute moves"
     );
+}
+
+/// The rows under a sort-key prefix.
+fn rows_under(t: &MemTable, prefix: &str) -> Vec<String> {
+    t.rows()
+        .keys()
+        .filter(|sk| sk.starts_with(prefix))
+        .cloned()
+        .collect()
+}
+
+/// What one op costs the fold, as the request counters measure it around `Folder::fold` — the
+/// row writes, the two `item_timestamps` writes and the reconcile of the place's hints together.
+fn fold_cost(folder: &Folder, t: &MemTable, s: &Store) -> nxs_fold_ddb::mem::Requests {
+    let op = s.export().last().cloned().unwrap();
+    let before = t.requests();
+    assert_eq!(ready(folder.fold(t, &op)).unwrap(), Folded::Folded);
+    let after = t.requests();
+    nxs_fold_ddb::mem::Requests {
+        gets: after.gets - before.gets,
+        batch_gets: after.batch_gets - before.batch_gets,
+        writes: after.writes - before.writes,
+        deletes: after.deletes - before.deletes,
+        queries: after.queries - before.queries,
+        index_queries: after.index_queries - before.index_queries,
+    }
+}
+
+#[test]
+fn an_unranked_ref_query_costs_its_hints_and_its_candidates_not_the_stream() {
+    // The cost of `list --ref owner=<p>` is the hints under (p, owner) — which are exactly the
+    // CURRENT references, the reconcile having pruned the retargeted ones — plus the candidates'
+    // own joins, whatever else the stream holds.
+    let folder = Folder::platform().unwrap();
+    let cfg = cfg();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.p001", "person", "P", "u");
+    s.create_item("ab12.p002", "person", "Q", "u");
+    for i in 0..30 {
+        s.create_item(&format!("ab12.x{i:03}"), "project", "X", "u");
+    }
+    for i in 0..6 {
+        let id = format!("ab12.r{i:03}");
+        s.create_item(&id, "project", "R", "u");
+        s.set_custom_field_merge(
+            &id,
+            "owner",
+            Some("ab12.p001".into()),
+            "u",
+            MergeStrategy::Lww,
+        );
+    }
+    // Two retargets away from p001: their hints are pruned, not merely verified away.
+    for i in 0..2 {
+        s.set_custom_field_merge(
+            &format!("ab12.r{i:03}"),
+            "owner",
+            Some("ab12.p002".into()),
+            "u",
+            MergeStrategy::Lww,
+        );
+    }
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &delivered(&s, 1))).unwrap();
+    let hints_p1 = rows_under(&t, &ref_adjacency_prefix("ab12.p001", "owner"));
+    assert_eq!(
+        hints_p1.len(),
+        4,
+        "the two retargeted hints are gone: {hints_p1:?}"
+    );
+    let q = ListQuery::new()
+        .referencing("owner", "ab12.p001")
+        .filter(NextFilter::new().with_type("project"));
+    let reads = read::list_reads(&cfg, &q);
+    assert!(reads.select.is_some());
+    let before = t.requests();
+    let server = ready(records::list_board(&t, &reads)).unwrap();
+    let after = t.requests();
+    assert_eq!(
+        after.index_queries - before.index_queries,
+        0,
+        "no typed-index scan"
+    );
+    assert_eq!(after.gets - before.gets, 1, "the watermark");
+    assert_eq!(
+        after.batch_gets - before.batch_gets,
+        2,
+        "ceil(4/100) = 1 for the candidates' rows, 1 for the kept ones' timestamps"
+    );
+    assert_eq!(
+        after.queries - before.queries,
+        1 + 4 * 4,
+        "one hint Query; per candidate `custom_fields#` and `field_entries#` before the cut \
+         (the ref filter reads them), then `.adj#` and `.ladj#` for each kept one"
+    );
+    assert_eq!(after.writes, before.writes);
+    assert_eq!(server.items.len(), 4);
+    let page = read::list_board_page(&cfg, &server, &q).unwrap();
+    assert_eq!(
+        ids(&page.items),
+        ids(&read::list_page(&cfg, &s, &q).unwrap().items)
+    );
+}
+
+#[test]
+fn a_set_of_an_id_shaped_value_costs_its_row_and_the_reconcile_and_a_plain_set_one_query() {
+    // Measured around `Folder::fold` of one op each. Every custom-field op writes its row and the
+    // item's two `item_timestamps` changes (three writes) before the reconcile runs.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.x001", "project", "X", "u");
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &delivered(&s, 1))).unwrap();
+
+    s.set_custom_field_merge(
+        "ab12.x001",
+        "owner",
+        Some("a.b".into()),
+        "u",
+        MergeStrategy::Lww,
+    );
+    let id_set = fold_cost(&folder, &t, &s);
+    s.set_custom_field_merge(
+        "ab12.x001",
+        "colour",
+        Some("plain".into()),
+        "u",
+        MergeStrategy::Lww,
+    );
+    let plain_set = fold_cost(&folder, &t, &s);
+    s.set_custom_field_merge(
+        "ab12.x001",
+        "owner",
+        Some("a.c".into()),
+        "u",
+        MergeStrategy::Lww,
+    );
+    let retarget = fold_cost(&folder, &t, &s);
+
+    let cost = |r: nxs_fold_ddb::mem::Requests| (r.writes, r.deletes, r.gets, r.queries);
+    // (writes, deletes, gets, queries)
+    assert_eq!(
+        cost(id_set),
+        (3 + 2, 0, 1, 2),
+        "row + 2 timestamps, then the `.radj#` and `.rsrc#` puts; 1 Get of the register, the \
+         `.rsrc#` and `field_entries#` Queries"
+    );
+    assert_eq!(
+        cost(plain_set),
+        (3, 0, 0, 1),
+        "row + 2 timestamps; the reconcile's `.rsrc#` Query finds nothing hinted and stops"
+    );
+    assert_eq!(
+        cost(retarget),
+        (3 + 2, 2, 1, 2),
+        "row + 2 timestamps, the new pair put, the old pair deleted"
+    );
+    assert_eq!(
+        rows_under(&t, &ref_adjacency_prefix("a.c", "owner")).len(),
+        1
+    );
+    assert!(rows_under(&t, &ref_adjacency_prefix("a.b", "owner")).is_empty());
+}
+
+#[test]
+fn after_n_retargets_a_field_holds_one_hint() {
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.x001", "project", "X", "u");
+    for n in 0..20 {
+        s.set_custom_field_merge(
+            "ab12.x001",
+            "owner",
+            Some(format!("ab12.p00{}", n % 3)),
+            "u",
+            MergeStrategy::Lww,
+        );
+    }
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &delivered(&s, 3))).unwrap();
+    assert_eq!(rows_under(&t, ".radj#").len(), 1, "one hint");
+    assert_eq!(
+        rows_under(&t, &ref_source_prefix("ab12.x001", "owner")).len(),
+        1,
+        "one mirror"
+    );
+    // The 20th set (n = 19) holds p001.
+    for (p, want) in [
+        ("ab12.p000", vec![]),
+        ("ab12.p001", vec!["ab12.x001".to_string()]),
+        ("ab12.p002", vec![]),
+    ] {
+        assert_eq!(
+            ready(records::referrers(&t, "owner", p)).unwrap(),
+            want,
+            "{p}"
+        );
+    }
+}
+
+#[test]
+fn an_entry_op_on_a_list_with_history_costs_constant_requests_and_a_range_of_its_history() {
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.x001", "project", "X", "u");
+    for i in 0..1000 {
+        s.add_field_entry("ab12.x001", "members", &format!("ab12.m{i:04}"), None, "u");
+    }
+    for i in 0..500 {
+        s.remove_field_entry("ab12.x001", "members", &format!("ab12.m{i:04}"), "u");
+    }
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &delivered(&s, 4))).unwrap();
+    assert_eq!(
+        rows_under(&t, &ref_source_prefix("ab12.x001", "members")).len(),
+        500,
+        "the 500 present entries are hinted"
+    );
+    s.add_field_entry("ab12.x001", "members", "ab12.mnew", None, "u");
+    let add = fold_cost(&folder, &t, &s);
+    assert_eq!(
+        (add.writes, add.deletes, add.gets, add.queries),
+        (3 + 2, 0, 1, 2),
+        "row + 2 timestamps, the pair put; 1 Get, 2 Queries — the same requests as on a fresh list"
+    );
+    // ... but the reconcile's `field_entries#` Query reads the place's whole history: one row per
+    // add ever folded, the 500 removed ones included; and its `.rsrc#` Query the 500 live hints.
+    assert_eq!(
+        rows_under(&t, "field_entries#ab12.x001#members#").len(),
+        1001
+    );
+    assert_eq!(
+        rows_under(&t, &ref_source_prefix("ab12.x001", "members")).len(),
+        501
+    );
+}
+
+#[test]
+fn a_place_with_four_thousand_hinted_values_folds_and_equals_reindex() {
+    // More values than one 400 KiB attribute could ever have held: one row per hinted value on
+    // either side, so no bookkeeping row grows with the place.
+    let folder = Folder::platform().unwrap();
+    let mut s = Store::open_in_memory(1);
+    s.create_item("ab12.x001", "project", "X", "u");
+    for i in 0..4000 {
+        s.add_field_entry("ab12.x001", "members", &format!("ab12.m{i:04}"), None, "u");
+    }
+    let t = MemTable::new("stream-1");
+    for op in s.export() {
+        assert_eq!(ready(folder.fold(&t, &op)).unwrap(), Folded::Folded);
+    }
+    assert_eq!(rows_under(&t, ".rsrc#").len(), 4000);
+    assert_eq!(rows_under(&t, ".radj#").len(), 4000);
+    let kept = t.rows();
+    ready(board::reindex(&t)).unwrap();
+    assert!(t.rows() == kept, "incremental hints vs reindex");
 }

@@ -188,6 +188,12 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
             counted.batch_gets,
             "{sent:?}"
         );
+        // A retarget, a clear or a removed entry prunes its reverse-reference hint (6j6v.1w3m).
+        assert_eq!(
+            sent.get("DeleteItem").copied().unwrap_or(0),
+            counted.deletes,
+            "{sent:?}"
+        );
 
         let want = board::select(&mem).await.unwrap().board.lanes(NOW);
         let ddb_ref = &ddb;
@@ -231,8 +237,9 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
         let all: Vec<&String> = sent.keys().chain(read.keys()).collect();
         assert!(
             all.iter()
-                .all(|op| ["GetItem", "UpdateItem", "Query"].contains(&op.as_str())),
-            "a fold and a read send only GetItem, UpdateItem and Query: {sent:?} {read:?}"
+                .all(|op| ["GetItem", "UpdateItem", "DeleteItem", "Query"].contains(&op.as_str())),
+            "a fold and a read send only GetItem, UpdateItem, DeleteItem (a pruned hint) and \
+             Query: {sent:?} {read:?}"
         );
         assert!(!all.iter().any(|op| op.as_str() == "Scan"));
     }
@@ -619,4 +626,88 @@ async fn a_hub_whose_adjacency_spans_query_pages_reads_every_edge() {
     let got = eventually(&want, || async move { list_view(ddb_ref, reads_ref).await }).await;
     assert_eq!(got, want);
     assert_eq!(got.1.unwrap().edges.len(), n);
+}
+
+/// A neutral test plugin declaring the shared generator's `owner` and `members` as ref fields
+/// (6j6v.9tx3), so a `list --ref` can be asked of a generated board.
+const REFS: &str = r#"
+name = "dynamodb-local-ref-fixture"
+[description]
+en = "x"
+de = "y"
+[priority]
+labels = ["P0", "P1", "P2", "P3", "P4"]
+[types]
+list = ["task", "epic", "note"]
+[vocabulary.status]
+open = "open"
+in_progress = "in progress"
+closed = "closed"
+[ranking.next]
+order = [ { field = "priority", dir = "asc" } ]
+[presentation.list]
+columns = ["id"]
+[fields.owner]
+type = "ref"
+targets = ["task", "epic", "note"]
+on = ["task", "epic", "note"]
+[fields.members]
+type = "ref"
+targets = ["task", "epic", "note"]
+list = true
+on = ["task", "epic", "note"]
+"#;
+
+inventory::submit!(nexus_flow_facade::plugin::PluginRegistration {
+    name: "dynamodb-local-ref-fixture",
+    toml: REFS,
+    order: 143,
+});
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_ref_query_reads_back_from_dynamodb_as_the_replica_answers_it() {
+    // 6j6v.1w3m: the hints folded into DynamoDB, read by `records::referrers` (a base-table Query)
+    // and the candidates' rows by `BatchGetItem` — strongly consistent, no index — answer
+    // `list --ref` as the SQL path does.
+    use nexus_flow_facade::read::{self, ListQuery};
+    let Some(url) = endpoint("list_ref") else {
+        return;
+    };
+    let recorder = Recorder::default();
+    let client = client(&url, &recorder);
+    let name = fresh_table(&client, "listref").await;
+    let folder = Folder::platform().unwrap();
+    let cfg = nexus_flow_facade::plugin::load("dynamodb-local-ref-fixture").unwrap();
+    let mut answered = 0;
+    for seed in [3, 19, 41] {
+        let s = merged(seed);
+        let ops = delivered(&s, seed);
+        let stream = format!("stream-ref-{seed}");
+        let ddb = DynamoDbTable::new(client.clone(), &name, &stream);
+        folder.fold_batch(&ddb, &ops).await.unwrap();
+        recorder.take();
+        for i in 0..4 {
+            let p = common::id(i);
+            for q in [
+                ListQuery::new().referencing("owner", &p),
+                ListQuery::new()
+                    .referencing("members", &p)
+                    .referencing("owner", &p),
+            ] {
+                let want = read::list_page(&cfg, &s, &q).unwrap();
+                let reads = read::list_reads(&cfg, &q);
+                let board = records::list_board(&ddb, &reads).await.unwrap();
+                let got = read::list_board_page(&cfg, &board, &q).unwrap();
+                let ids = |items: &[nexus_flow_core::model::ItemRow]| -> Vec<String> {
+                    items.iter().map(|i| i.id.clone()).collect()
+                };
+                assert_eq!(ids(&got.items), ids(&want.items), "seed {seed}, {p}");
+                assert_eq!(got.total, want.total, "seed {seed}, {p}");
+                answered += want.items.len();
+            }
+        }
+        let sent = recorder.take();
+        assert!(!sent.contains_key("Scan"), "{sent:?}");
+    }
+    assert!(answered > 0, "the generated boards hold references");
 }

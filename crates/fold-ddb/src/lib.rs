@@ -20,7 +20,7 @@
 //! | what                 | name                     | type | role                                                                   |
 //! |----------------------|--------------------------|------|------------------------------------------------------------------------|
 //! | partition key        | `stream_id`              | S    | one partition per stream                                               |
-//! | sort key             | `sk`                     | S    | `<view table>#<key cells>`, `.adj#`/`.ladj#`/`.tadj#<ticket>#<tag>`, `.meta#watermark` |
+//! | sort key             | `sk`                     | S    | `<view table>#<key cells>`, `.adj#`/`.ladj#`/`.tadj#`/`.cadj#<ticket>#<tag>`, `.radj#<value>#<field>#<source>`, `.rsrc#<source>#<field>#<value>`, `.meta#watermark` |
 //! | GSI `active`         | `nxf_active` / `sk`      | S/S  | sparse: active tickets and the present dep/parent edges touching one   |
 //! | GSI `dated`          | `nxf_dated` / `nxf_dated_at` | S/S | sparse: `<stream>#closed` and `<stream>#archived`, by `<instant>␟<id>` |
 //! | GSI `typed`          | `nxf_typed` / `sk`       | S/S  | sparse: `<stream>#<type>` on every live item row (not deleted; archived included) |
@@ -28,6 +28,15 @@
 //! The `.adj#<ticket>#<tag>` entries are plain rows in the stream's partition, on no index. Since
 //! index revision 3 (6j6v.1c5s) each also carries its edge's `from_id`, `to_id`, `kind`, `lamport`,
 //! `site` and a `removed` flag — attributes, not keys.
+//!
+//! The `.radj#<value>#<field>#<source>` reverse-reference hints and their
+//! `.rsrc#<source>#<field>#<value>` mirrors (index revision 4, 6j6v.9tx3) are plain rows too, on
+//! no index, one row per hinted value, each carrying `target_id`, `field` and `source_id`
+//! ([`board`], "Reverse references"). Revision 4 (6j6v.9tx3) adds them for every id-shaped custom
+//! value, kept as a function of the rows; a stream folded before is `NotCurrent` until its refold,
+//! as revision 3 was — a full clear and refold by the fold run, every reader refused for its
+//! duration, rolled out to every fold run at once; the stack changes nothing; the task fold
+//! revision is unchanged, so a snapshot taken by the previous release imports.
 //!
 //! Every index projects ALL attributes, so a lane is one Query and no follow-up reads.
 //!
@@ -91,7 +100,11 @@
 //! not ranked keeps and cuts its rows first and reads four Queries per row of its page plus one
 //! `BatchGetItem` for their timestamps, however many items the stream holds; a ranked one reads
 //! four Queries per live item of its types — the scope its rank is computed over — and its point
-//! reads by `BatchGetItem`. No read caps its own requests: a server bounds one request by the
+//! reads by `BatchGetItem`. A hosted `list --ref` that is not ranked costs one Query per ref on
+//! the hints, `⌈candidates / 100⌉` `BatchGetItem`s for the candidates' rows and the candidates'
+//! own joins; a custom-field op costs one more Query for the place's reverse-reference reconcile,
+//! and one `GetItem`, one Query and the delta's puts and deletes when an id-shaped value is or was
+//! there (plugin-custom-fields §5.3, measured). No read caps its own requests: a server bounds one request by the
 //! table it hands in (E4 spec §5.1). The `typed` index costs a fold at most one write per item
 //! op, and only when the op gains, changes or loses the item's partition — a create, a retype, a
 //! delete — in the same write as the item's other index attributes when they move too. No request
