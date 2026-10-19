@@ -922,7 +922,10 @@ fn reindexed_rows(t: &MemTable) -> BTreeMap<String, Row> {
 
 /// Persons p1..p3; project x1 owned by p1, x2 owned by p1, x3 with members p1 and p2 — the first
 /// batch. The second: x1 retargeted to p2, x2's owner cleared, p1 removed from x3's members.
-fn retarget_clear_remove() -> (Store, Vec<(i64, Op)>, Vec<(i64, Op)>) {
+/// A store, the first batch of its log and the second.
+type TwoBatches = (Store, Vec<(i64, Op)>, Vec<(i64, Op)>);
+
+fn retarget_clear_remove() -> TwoBatches {
     use nexus_flow_core::model::MergeStrategy::Lww;
     let mut s = Store::open_in_memory(1);
     for p in ["ab12.p001", "ab12.p002", "ab12.p003"] {
@@ -1313,7 +1316,7 @@ fn a_hint_is_never_a_reason_to_refuse_an_op() {
     }
     assert_eq!(
         ready(records::referrers(&t, &field, &value)).unwrap(),
-        [fits.clone()],
+        std::slice::from_ref(&fits),
         "the 120-byte source is hinted, the 129-byte one is not"
     );
     assert_eq!(
