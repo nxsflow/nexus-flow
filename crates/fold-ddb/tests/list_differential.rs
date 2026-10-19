@@ -444,7 +444,6 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
             // The fold-ddb path (6j6v.1w3m): candidates from the hints for an unranked query, the
             // whole typed scope for a ranked one — the same board item for item as the store's.
             let server = ready(records::list_board(&t, &reads)).unwrap();
-            assert_eq!(server.items, local.items, "listed items, {ctx}");
             let mut held: Vec<String> = server.items.keys().cloned().collect();
             held.sort();
             if reads.select.is_some() {
@@ -461,6 +460,7 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
                     "a ranked hosted ref board is the whole scope, {ctx}"
                 );
             }
+            assert_eq!(server.items, local.items, "listed items, {ctx}");
             let served = read::list_board_page(&cfg, &server, q).unwrap();
             assert_eq!(
                 ids(&served.items),
