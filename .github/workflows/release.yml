@@ -173,7 +173,7 @@ jobs:
   # 4 targets, one job each (spec §5.2). The `platform:` keys below + the `for p in …` loop in
   # the publish job are checked against release/platforms by `cargo xtask platforms check` (CI),
   # the single source of truth for the shipped platforms (nexus-flow-4sr). darwin builds
-  # native/cross on macos-14; the two static musl targets cross-compile from ubuntu via
+  # native/cross on macos-15; the two static musl targets cross-compile from ubuntu via
   # cargo-zigbuild (zig as the C toolchain — bundled rusqlite's sqlite3.c compiles cleanly for
   # musl). The minisign pubkey
   # is baked into `nxf` here (NXF_MINISIGN_PUBKEY) so the shipped binary can self-verify
@@ -189,11 +189,11 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             platform: darwin-aarch64
             builder: cargo
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
             platform: darwin-x86_64
             builder: cargo
           - target: x86_64-unknown-linux-musl
@@ -208,7 +208,7 @@ jobs:
     # to avoid GitHub-hosted macOS billing — ~10x Linux, and `notarytool --wait` idles the
     # runner for minutes while Apple notarizes. Set repo var NXF_MACOS_RUNS_ON to a JSON label
     # array (e.g. ["self-hosted","macOS","X64"]) to route the darwin build+sign+notarize there;
-    # unset ⇒ GitHub-hosted `macos-14`. Host arch is irrelevant — both jobs build with explicit
+    # unset ⇒ GitHub-hosted `macos-15`. Host arch is irrelevant — both jobs build with explicit
     # `--target`, so an Intel runner builds x86_64 native + aarch64 cross (and vice-versa).
     # Linux jobs always use `matrix.os` (ubuntu). Safe because release.yml triggers only on tag
     # push / workflow_dispatch (write-access gated) — untrusted PR code never reaches the runner.

@@ -116,7 +116,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, label: linux-x86_64, verifier: openssl }
-          - { os: macos-14, label: darwin-arm64, verifier: minisign }
+          - { os: macos-15, label: darwin-arm64, verifier: minisign }
           # `macos-15-intel`, not `macos-13` (retired — see above). The `-intel` suffix is how
           # GitHub still offers x86_64 macOS now that the default `macos-*` labels are Apple silicon.
           - { os: macos-15-intel, label: darwin-x86_64, verifier: openssl }
