@@ -188,6 +188,12 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
             counted.batch_gets,
             "{sent:?}"
         );
+        // A retarget, a clear or a removed entry prunes its reverse-reference hint (6j6v.1w3m).
+        assert_eq!(
+            sent.get("DeleteItem").copied().unwrap_or(0),
+            counted.deletes,
+            "{sent:?}"
+        );
 
         let want = board::select(&mem).await.unwrap().board.lanes(NOW);
         let ddb_ref = &ddb;
@@ -231,8 +237,9 @@ async fn a_board_folded_into_dynamodb_reads_back_as_from_memory_and_no_request_i
         let all: Vec<&String> = sent.keys().chain(read.keys()).collect();
         assert!(
             all.iter()
-                .all(|op| ["GetItem", "UpdateItem", "Query"].contains(&op.as_str())),
-            "a fold and a read send only GetItem, UpdateItem and Query: {sent:?} {read:?}"
+                .all(|op| ["GetItem", "UpdateItem", "DeleteItem", "Query"].contains(&op.as_str())),
+            "a fold and a read send only GetItem, UpdateItem, DeleteItem (a pruned hint) and \
+             Query: {sent:?} {read:?}"
         );
         assert!(!all.iter().any(|op| op.as_str() == "Scan"));
     }
