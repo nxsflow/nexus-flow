@@ -10,7 +10,7 @@ Update item fields via `\-\-set field=value` (repeatable). The long\-form `descr
 .SH OPTIONS
 .TP
 \fB\-\-set\fR \fI<SET>\fR
-A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `\-` reads that field from STDIN (escaping\-free, multi\-line); at most one field per call may read STDIN
+A `field=value` assignment; repeat for multiple fields. An unknown field is rejected with the settable set listed. Aliases (same words `create` uses): `parent`→belongs_to, `defer`→defer_until. A value of `\-` reads that field from STDIN (escaping\-free, multi\-line); at most one field per call may read STDIN. A custom `ref` field takes an item id of one of its `targets`; a bare local id is resolved
 .TP
 \fB\-\-set\-file\fR \fI<SET_FILE>\fR
 A `field=path` assignment that reads the field\*(Aqs value from a file (UTF\-8, verbatim); `path` of `\-` reads STDIN. Repeatable; lets several long\-text fields each come from their own file in one call. A field may be set by `\-\-set` or `\-\-set\-file`, not both

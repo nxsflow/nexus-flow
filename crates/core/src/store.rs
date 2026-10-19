@@ -79,7 +79,10 @@ impl ItemReadStats {
 pub struct EdgeReadStats {
     /// Whole-kind scans, [`Store::present_edges_of_kinds`] — one query each.
     pub passes: u64,
-    /// Reverse mention lookups, [`Store::mentioned_by_bulk`] — one query per ≤500-target chunk.
+    /// Reverse lookups by value — [`Store::mentioned_by_bulk`] and, since 6j6v.9tx3,
+    /// [`Store::referenced_by_bulk`] (counted here rather than in a bucket of its own, because a new
+    /// field would break a consumer's struct literal of this exhaustive struct) — one query per
+    /// ≤500-target chunk.
     pub mention_lookups: u64,
     /// One-item reads — the edge targets ([`Store::deps_of`], [`Store::mentions_of`],
     /// [`Store::contributes_to_of`], [`Store::parents_of`] and their fallible twins),
@@ -855,13 +858,29 @@ impl Store {
     }
 
     /// Remap an op's `value`: `belongs_to` is a structural id (exact lookup); item free-text and
-    /// note bodies go through the dqj rewrite engine; everything else is unchanged.
+    /// note bodies go through the dqj rewrite engine; a custom field's value — a typed reference
+    /// (6j6v.9tx3) or any other — by an exact lookup on the whole value; everything else is
+    /// unchanged.
+    ///
+    /// On a custom-field op `op.field` is the custom field's NAME and the kind of write is
+    /// `op.op_type`, so those arms match on the op type: a `set*` value is looked up whole (a text
+    /// that holds an id among other words is NOT rewritten — custom fields are not
+    /// `FREETEXT_FIELDS`); an `add` entry is split with the entry codec, its value looked up, and
+    /// re-encoded with its label. A value the codec cannot split is left as it is, as
+    /// [`remap_target`](Self::remap_target) leaves an id it does not know — never a panic inside
+    /// the remap transaction. A `remove` carries add tags, not ids: unchanged.
     fn remap_value(op: &Op, map: &BTreeMap<String, String>) -> Option<String> {
         let value = op.value.as_ref()?;
+        let exact = |v: &str| map.get(v).cloned().unwrap_or_else(|| v.to_string());
         let rewritten = match (op.target_kind.as_str(), op.field.as_str()) {
-            ("item", "belongs_to") => map.get(value).cloned().unwrap_or_else(|| value.clone()),
+            ("item", "belongs_to") => exact(value),
             ("item", f) if FREETEXT_FIELDS.contains(&f) => rewrite_refs(value, map),
             ("note", "body") => rewrite_refs(value, map),
+            ("field", _) if op.op_type.starts_with("set") => exact(value),
+            ("field", _) if op.op_type == "add" => match crate::model::parse_entry_value(value) {
+                Some((v, label)) => crate::model::entry_value(&exact(v), label),
+                None => value.clone(),
+            },
             _ => value.clone(),
         };
         Some(rewritten)
@@ -1349,6 +1368,59 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// THE reverse lookup of the store (6j6v.9tx3): for each of `targets`, the ids of the items whose
+    /// custom field `field` holds it — the single value, or a present list entry — id-sorted and
+    /// distinct, kept through [`ref_place_ok`](crate::model::ref_place_ok). Value equality: the
+    /// store knows no declarations; the facade asks only for declared ref fields. One query per 500
+    /// targets, as [`mentioned_by_bulk`](Self::mentioned_by_bulk), each counted under
+    /// [`EdgeReadStats::mention_lookups`]. A target nothing holds is absent from the map.
+    pub fn referenced_by_bulk(
+        &self,
+        field: &str,
+        targets: &[&str],
+    ) -> rusqlite::Result<BTreeMap<String, Vec<String>>> {
+        const CHUNK: usize = 500;
+        let mut targets = targets.to_vec();
+        targets.sort_unstable();
+        targets.dedup();
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for chunk in targets.chunks(CHUNK) {
+            let mut stmt = self.conn().prepare(&Self::ref_lookup_sql(chunk.len()))?;
+            self.count_edge_read(|c| c.mention_lookups += 1);
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + 2 * chunk.len());
+            params.push(&field);
+            params.extend(chunk.iter().map(|t| t as &dyn rusqlite::ToSql));
+            params.extend(chunk.iter().map(|t| t as &dyn rusqlite::ToSql));
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (target, source) = row?;
+                if crate::model::ref_place_ok(&source, field, &target) {
+                    out.entry(target).or_default().push(source);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The SQL one chunk of `n` targets of [`referenced_by_bulk`](Self::referenced_by_bulk) runs
+    /// (6j6v.9tx3): the single values of the field UNION its present list entries, each half over
+    /// its `(field, value)` index. `?1` is the field, read by both halves; each bare `?` takes the
+    /// next number after the highest so far (SQLite's rule), so the statement binds `1 + 2n`
+    /// parameters: the field, the targets for the single values, the same targets for the entries.
+    /// Public so the planner test plans THIS text.
+    pub fn ref_lookup_sql(n: usize) -> String {
+        let ph = vec!["?"; n].join(",");
+        format!(
+            "SELECT value, item_id FROM custom_fields WHERE field = ?1 AND value IN ({ph}) \
+             UNION \
+             SELECT value, item_id FROM field_entries \
+             WHERE field = ?1 AND removed = 0 AND value IS NOT NULL AND value IN ({ph}) \
+             ORDER BY 1, 2"
+        )
     }
 
     /// Every present edge of the given `kinds`, as `(from, to, kind)`, in `(kind, from, to)` order —

@@ -551,7 +551,19 @@ fn applicable_decl<'c>(
 /// Validate a non-empty `value` against custom field `name`'s declared type, returning the form to
 /// store: as given, except a `datetime`, stored as the UTC instant (vbp6). For a list field this is
 /// the check every entry passes (6j6v.4g6r).
-fn typed_custom_value(decl: &crate::plugin::FieldDecl, name: &str, value: &str) -> Result<String> {
+///
+/// A `ref` (6j6v.9tx3, plugin-custom-fields §5.3) is checked against the store, in this order: the
+/// value is a full item id ([`is_valid_ref_value`](nexus_flow_core::model::is_valid_ref_value),
+/// `validation`) → that item exists and is not deleted (`not_found`) → its type is one of the
+/// declared `targets` (`validation`) → it is not `item_id` itself (`validation`). A closed or
+/// archived target passes. `item_id` is `None` at create, where the id is not minted yet.
+fn typed_custom_value(
+    store: &Store,
+    decl: &crate::plugin::FieldDecl,
+    name: &str,
+    item_id: Option<&str>,
+    value: &str,
+) -> Result<String> {
     match decl.field_type {
         FieldType::Date => validate::iso_date(value),
         FieldType::Datetime => validate::datetime(value)
@@ -566,6 +578,35 @@ fn typed_custom_value(decl: &crate::plugin::FieldDecl, name: &str, value: &str) 
             Ok(value.to_string())
         }
         FieldType::Text | FieldType::Longtext => Ok(value.to_string()),
+        FieldType::Ref => {
+            if !nexus_flow_core::model::is_valid_ref_value(value) {
+                return Err(NxfError::validation(format!(
+                    "custom field '{name}': a ref is a full item id '<prefix>.<suffix>' (got '{value}')"
+                )));
+            }
+            let target = store
+                .get_item(value)?
+                .filter(|i| i.deleted.as_deref() != Some("1"))
+                .ok_or_else(|| {
+                    NxfError::not_found(format!("custom field '{name}': no item '{value}'"))
+                })?;
+            let ty = target.item_type.as_deref().unwrap_or("");
+            if !decl.targets.iter().any(|t| t == ty) {
+                return Err(NxfError::validation(format!(
+                    "custom field '{name}': '{value}' is a {ty}; it accepts {}",
+                    decl.targets.join(", ")
+                )));
+            }
+            // `None` at create: the id is minted after the sets are prepared, so an id that does
+            // not exist yet already failed the existence check above — that IS the
+            // self-reference refusal at create, by construction.
+            if item_id == Some(value) {
+                return Err(NxfError::validation(format!(
+                    "custom field '{name}': an item cannot reference itself"
+                )));
+            }
+            Ok(value.to_string())
+        }
     }
 }
 
@@ -576,10 +617,13 @@ fn typed_custom_value(decl: &crate::plugin::FieldDecl, name: &str, value: &str) 
 /// — it bypasses type validation so a `date`/`enum` field can be cleared; on a LIST field it is the
 /// only value `--set` takes (6j6v.4g6r): entries are added and removed with `nxf entry`. `required`
 /// is NOT enforced here: it is a create-time-only guard (§5, TB-CF-7) applied in [`create`], never
-/// on `update`.
+/// on `update`. `store` and `item_id` serve a `ref` field's checks ([`typed_custom_value`]);
+/// `item_id` is `None` at create.
 fn prepare_custom_set(
+    store: &Store,
     cfg: &PluginConfig,
     item_type: &str,
+    item_id: Option<&str>,
     name: &str,
     value: &str,
 ) -> Result<CustomWrite> {
@@ -598,7 +642,7 @@ fn prepare_custom_set(
     let canonical = if value.is_empty() {
         String::new()
     } else {
-        typed_custom_value(decl, name, value)?
+        typed_custom_value(store, decl, name, item_id, value)?
     };
     Ok(CustomWrite::Set(
         name.to_string(),
@@ -613,8 +657,10 @@ fn prepare_custom_set(
 /// staged `(name, canonical value, strategy)` writes AND the set of supplied names (for the
 /// create-time `required` check) — nothing is written by the caller until every pair validates.
 fn prepare_custom_sets(
+    store: &Store,
     cfg: &PluginConfig,
     item_type: &str,
+    item_id: Option<&str>,
     pairs: &[(String, String)],
 ) -> Result<Vec<CustomWrite>> {
     let mut writes = Vec::with_capacity(pairs.len());
@@ -626,7 +672,9 @@ fn prepare_custom_sets(
                  canonical fields have their own create flags"
             )));
         }
-        writes.push(prepare_custom_set(cfg, item_type, name, value)?);
+        writes.push(prepare_custom_set(
+            store, cfg, item_type, item_id, name, value,
+        )?);
     }
     Ok(writes)
 }
@@ -732,7 +780,9 @@ pub fn create(
     // declared type + `on`-scope, then enforce that every applicable `required` field is supplied —
     // all BEFORE minting/writing, so a rejected create writes nothing.
     let custom_pairs = split_custom_pairs(new.custom)?;
-    let custom_writes = prepare_custom_sets(cfg, &item_type, &custom_pairs)?;
+    // The sets are prepared BEFORE the id is minted, so `None`: a `ref` naming the id this create
+    // is about to mint names no item yet and fails `not_found` (6j6v.9tx3).
+    let custom_writes = prepare_custom_sets(store, cfg, &item_type, None, &custom_pairs)?;
     let supplied: HashSet<&str> = custom_writes.iter().map(CustomWrite::name).collect();
     check_required_custom_fields(cfg, &item_type, &supplied)?;
 
@@ -875,7 +925,7 @@ pub fn update(
     let effective_type = type_write.as_deref().unwrap_or(&current_type);
     // Custom fields validate against the effective type (`on`-scope + declared type). `required` is
     // deliberately NOT re-enforced on update (TB-CF-7): clearing a required field is allowed.
-    let custom_writes = prepare_custom_sets(cfg, effective_type, &raw_custom)?;
+    let custom_writes = prepare_custom_sets(store, cfg, effective_type, Some(id), &raw_custom)?;
     // A retype re-validates the item's EXISTING edges under the new type (no silently-broken
     // hierarchy). NB: combining a retype with a re-parent in one call validates the old edges under
     // the new type; split the two calls if that ever conflicts (the #yod repair retypes alone).
@@ -1230,7 +1280,7 @@ pub fn entry_add(
     let actor = validate::actor(actor)?;
     let (_, item_type) = require_list_field(store, cfg, id, field)?;
     let decl = applicable_decl(cfg, &item_type, field)?;
-    let value = typed_custom_value(decl, field, entry_text(field, value)?)?;
+    let value = typed_custom_value(store, decl, field, Some(id), entry_text(field, value)?)?;
     let label = label.map(validate::label).transpose()?;
     let size = nexus_flow_core::model::entry_value(&value, label.as_deref()).len();
     if size > nexus_flow_core::model::MAX_FIELD_ENTRY_BYTES {
@@ -1278,6 +1328,37 @@ pub fn entry_remove(
         store.remove_field_entry(id, field, text, actor);
     }
     Ok(value)
+}
+
+/// The id input of a declared `ref` field, as the CLI and the MCP server take it (6j6v.9tx3): a
+/// bare local suffix — a value with no `.` — resolved against `prefix` to `<prefix>.<suffix>`, as
+/// every other id they take is. Any other value, a value of a field that is not a ref, and an empty
+/// value (the clear) pass through unchanged: the write seam takes full ids only and refuses what is
+/// not one. Applied BEFORE [`create`], [`update`], [`entry_add`] and [`entry_remove`].
+pub fn resolve_ref_input(cfg: &PluginConfig, prefix: &str, field: &str, value: &str) -> String {
+    let is_ref = cfg
+        .fields
+        .get(field)
+        .is_some_and(|d| d.field_type == FieldType::Ref);
+    let trimmed = value.trim();
+    if is_ref && !trimmed.is_empty() && !trimmed.contains('.') {
+        nxs_foundation::workspace::resolve_id(prefix, trimmed).into_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+/// [`resolve_ref_input`] over the `field=value` strings of `--set` (create and update): each pair
+/// whose field is a declared ref has a bare suffix resolved; every other string is unchanged.
+pub fn resolve_ref_sets(cfg: &PluginConfig, prefix: &str, sets: &[String]) -> Vec<String> {
+    sets.iter()
+        .map(|raw| match raw.split_once('=') {
+            Some((field, value)) => {
+                format!("{field}={}", resolve_ref_input(cfg, prefix, field, value))
+            }
+            None => raw.clone(),
+        })
+        .collect()
 }
 
 /// The receipt message of an entry add — `<id> <field> + <value> (<label>)`, the label part only

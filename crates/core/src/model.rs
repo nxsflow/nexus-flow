@@ -249,6 +249,33 @@ pub fn is_valid_chunk_field(field: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
+/// Whether `v` is shaped like an item id and may be a typed reference's value (6j6v.9tx3):
+/// non-empty, at most [`MAX_CHUNK_ID_BYTES`], contains `.`, no ASCII whitespace, free of both
+/// separators. The facade refuses any other value on a `ref` field and any other `list --ref`
+/// filter value; the hosted fold writes a reverse hint only for such values.
+pub fn is_valid_ref_value(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= MAX_CHUNK_ID_BYTES
+        && v.contains('.')
+        && !v
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c == ENTRY_SEP || c == CHUNK_PAYLOAD_SEP)
+}
+
+/// Whether a `(source item, field, value)` row may be a reference anywhere (6j6v.9tx3): the ONE
+/// place predicate the replica's reverse lookup keeps rows by and the server's fold writes a
+/// reverse hint for, so both answer `list --ref` from the same rows. The bounds are a list
+/// entry's (`entry_place_ok`): a source id within [`MAX_CHUNK_ID_BYTES`], a field of the
+/// chunk-field grammar, an id-shaped value — together under a server's 1 KiB sort key with
+/// every byte escaped three-fold.
+pub fn ref_place_ok(source_id: &str, field: &str, value: &str) -> bool {
+    !source_id.is_empty()
+        && source_id.len() <= MAX_CHUNK_ID_BYTES
+        && !source_id.contains(ENTRY_SEP)
+        && is_valid_chunk_field(field)
+        && is_valid_ref_value(value)
+}
+
 /// Whether `id` may name a chunk a supersede replaces: non-empty, at most [`MAX_CHUNK_ID_BYTES`],
 /// and free of both separators a supersede value uses. A chunk's id is the op id of the op that
 /// carried it.

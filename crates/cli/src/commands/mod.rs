@@ -921,6 +921,8 @@ pub fn create(
         // Custom `--set`/`--set-file` pairs share the ONE reader (the long-text fields + these all
         // obey the single-STDIN-reader rule), resolved to `name=value` strings for `write::create`.
         let custom = resolve_sets(&mut reader, raw.set, raw.set_file)?;
+        // A bare local suffix on a ref field names the local item (6j6v.9tx3), as `--parent` does.
+        let custom = write::resolve_ref_sets(&cfg, prefix, &custom);
         let ty = ty.ok_or_else(|| NxfError::validation("--type is required"))?;
         let title = title.ok_or_else(|| NxfError::validation("--title is required"))?;
         let priority = raw
@@ -1040,7 +1042,7 @@ fn create_from_json(
             // Custom `name=value` sets ride the `set` payload key, mirroring the `--set` flag (ky26
             // review CQ2) — so a `required` custom field is creatable via `create --json -` too. The
             // shared `write::create` validates them against the resolved type.
-            custom: &p.set,
+            custom: &write::resolve_ref_sets(cfg, prefix, &p.set),
         },
     )
 }
@@ -1068,6 +1070,8 @@ pub fn update(
     } else {
         resolve_sets(&mut StdinReader::new(), sets, set_files)?
     };
+    // A bare local suffix on a ref field names the local item (6j6v.9tx3).
+    let resolved = write::resolve_ref_sets(&cfg, &ws.replica.prefix, &resolved);
     let item = write::update(&mut store, &cfg, &now, &actor(), &id, &resolved)?;
     emit_item(json, &ws.replica.prefix, &item, "updated");
     Ok(())
@@ -2334,6 +2338,7 @@ pub fn entry_add(
     let (ws, cfg) = open(db)?;
     let mut store = ws.open_store()?;
     let id = ws.replica.resolve_id(id);
+    let value = write::resolve_ref_input(&cfg, &ws.replica.prefix, field, value);
     let stored = write::entry_add(
         &mut store,
         &cfg,
@@ -2341,7 +2346,7 @@ pub fn entry_add(
         &actor(),
         &id,
         field,
-        value,
+        &value,
         label,
     )?;
     emit_entry(json, &ws.replica.prefix, &id, |i| {
@@ -2361,6 +2366,7 @@ pub fn entry_remove(
     let (ws, cfg) = open(db)?;
     let mut store = ws.open_store()?;
     let id = ws.replica.resolve_id(id);
+    let value = write::resolve_ref_input(&cfg, &ws.replica.prefix, field, value);
     let matched = write::entry_remove(
         &mut store,
         &cfg,
@@ -2368,7 +2374,7 @@ pub fn entry_remove(
         &actor(),
         &id,
         field,
-        value,
+        &value,
     )?;
     emit_entry(json, &ws.replica.prefix, &id, |i| {
         write::entry_remove_receipt(i, field, &matched)
@@ -2485,28 +2491,54 @@ pub fn show(json: bool, db: Option<&str>, id: &str) -> Result<()> {
         // T4-review efficiency (ky26): a plugin with no declared `[fields]` renders no custom section,
         // so skip the `custom_fields_of` read entirely rather than query then filter everything out.
         // A list field (6j6v.4g6r) renders its entries one per line, a label in parentheses.
+        // A ref field (6j6v.9tx3) renders one line per target: its id as the CLI shows ids and its
+        // title, or the value and `(not on this board)` when it names no live item here.
         let custom: BTreeMap<String, String> = if cfg.fields.is_empty() {
             BTreeMap::new()
         } else {
-            let mut custom: BTreeMap<String, String> = store
-                .custom_fields_of(&id)?
-                .into_iter()
-                .filter(|(name, _)| cfg.fields.get(name).is_some_and(|d| !d.list))
+            let fields = store.custom_fields_of(&id)?;
+            let lists = if cfg.fields.values().any(|d| d.list) {
+                store.field_entries_of(&id)?
+            } else {
+                BTreeMap::new()
+            };
+            let mut custom: BTreeMap<String, String> = fields
+                .iter()
+                .filter(|(name, _)| cfg.fields.get(*name).is_some_and(|d| !d.list))
+                .map(|(name, value)| (name.clone(), value.clone()))
                 .collect();
-            if cfg.fields.values().any(|d| d.list) {
-                for (name, entries) in store.field_entries_of(&id)? {
-                    if !cfg.fields.get(&name).is_some_and(|d| d.list) || entries.is_empty() {
-                        continue;
-                    }
-                    let lines: Vec<String> = entries
-                        .iter()
-                        .map(|e| match &e.label {
-                            Some(l) => format!("{} ({l})", e.value),
-                            None => e.value.clone(),
-                        })
-                        .collect();
-                    custom.insert(name, lines.join("\n"));
+            for (name, entries) in &lists {
+                if !cfg.fields.get(name).is_some_and(|d| d.list) || entries.is_empty() {
+                    continue;
                 }
+                let lines: Vec<String> = entries
+                    .iter()
+                    .map(|e| match &e.label {
+                        Some(l) => format!("{} ({l})", e.value),
+                        None => e.value.clone(),
+                    })
+                    .collect();
+                custom.insert(name.clone(), lines.join("\n"));
+            }
+            for (name, targets) in read::ref_targets(&cfg, &store, &fields, &lists)? {
+                let lines: Vec<String> = targets
+                    .iter()
+                    .map(|t| {
+                        let target = match &t.item {
+                            Some(item) => format!(
+                                "{}  {}",
+                                workspace::display_id(&ws.replica.prefix, &t.id),
+                                item.title.as_deref().unwrap_or("")
+                            ),
+                            None => format!("{}  (not on this board)", t.id),
+                        };
+                        match &t.label {
+                            Some(l) => format!("{target} ({l})"),
+                            None => target,
+                        }
+                    })
+                    .collect();
+                custom.insert(name, lines.join("\n"));
             }
             custom
         };

@@ -64,3 +64,18 @@ type = "text"
 on = ["file"]
 list = true
 label = "Mirrors"
+
+# What the linked file was derived from, and the files it relates to (6j6v.9tx3): typed references,
+# so the consumer path also proves `ref` fields — a single `source` and a list of `related`, both
+# pointing at other files; `--set` and `nxf entry add` take a full id or a bare local suffix, and
+# `show` resolves each target.
+[fields.source]
+type = "ref"
+targets = ["file"]
+on = ["file"]
+
+[fields.related]
+type = "ref"
+targets = ["file"]
+list = true
+on = ["file"]

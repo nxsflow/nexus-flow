@@ -75,9 +75,11 @@ pub enum MergeStrategy {
 /// set: `text`/`longtext` are free UTF-8; `date` is ISO-8601 (the same check `due`/`defer` use);
 /// `datetime` is an RFC 3339 instant with a time zone, stored in UTC at whole seconds (nxf
 /// 6j6v.vbp6, [`validate::datetime`](crate::validate::datetime)); `enum` is one of a declared
-/// `values` list. Richer types (`int`/`bool`/format-validated uri/email/color) are additive
-/// follow-ups (§9). `#[non_exhaustive]` since 6j6v.vbp6, so the next type is an additive change for
-/// a consumer that matches on it.
+/// `values` list; `ref` is a typed reference to another item — its value is a full item id of one
+/// of the declared [`targets`](FieldDecl::targets) types (6j6v.9tx3, plugin-custom-fields §5.3).
+/// Richer types (`int`/`bool`/format-validated uri/email/color) are additive follow-ups (§9).
+/// `#[non_exhaustive]` since 6j6v.vbp6, so the next type is an additive change for a consumer that
+/// matches on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -87,6 +89,7 @@ pub enum FieldType {
     Date,
     Datetime,
     Enum,
+    Ref,
 }
 
 impl FieldType {
@@ -99,6 +102,7 @@ impl FieldType {
             FieldType::Date => "date",
             FieldType::Datetime => "datetime",
             FieldType::Enum => "enum",
+            FieldType::Ref => "ref",
         }
     }
 }
@@ -143,6 +147,12 @@ pub struct FieldDecl {
     /// `remove`, never `--set` (which only clears it). Defaults to `false`, a single value.
     #[serde(default)]
     pub list: bool,
+    /// The item types a [`FieldType::Ref`] field may point at (6j6v.9tx3, plugin-custom-fields
+    /// §5.3), their names in `[types].list` — required (non-empty) iff the field is a ref,
+    /// forbidden otherwise (validated at load). Checked when a value is written, never after: a
+    /// target retyped later keeps its referrers.
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 /// The canonical item field names + aliases a custom field may not shadow (plugin-custom-fields §3,
@@ -803,6 +813,44 @@ impl PluginConfig {
                 }
                 _ => {}
             }
+            if decl.field_type == FieldType::Ref {
+                // A typed reference (6j6v.9tx3, plugin-custom-fields §5.3): its value is an item
+                // id, so what it may point at is part of the declaration.
+                if decl.targets.is_empty() {
+                    return Err(format!(
+                        "custom field '{name}' is a ref but declares no `targets` — a ref field \
+                         needs the item types it may point at, e.g. targets = [\"person\"]"
+                    ));
+                }
+                for ty in &decl.targets {
+                    if !self.types.list.contains(ty) {
+                        return Err(format!(
+                            "custom field '{name}' lists an unknown type '{ty}' in `targets` — \
+                             add it to [types].list"
+                        ));
+                    }
+                }
+                if decl.merge == MergeStrategy::CrdtText {
+                    return Err(format!(
+                        "custom field '{name}' is a ref and declares merge = \"crdt-text\" — a \
+                         ref holds one item id, which merges last-writer-wins; drop `merge`"
+                    ));
+                }
+                // The reverse lookup keys a reference by its field name, bounded where a list
+                // entry's is (`nexus_flow_core::model::ref_place_ok`): single or list alike.
+                if !nexus_flow_core::model::is_valid_chunk_field(name) {
+                    return Err(format!(
+                        "custom field '{name}' is a ref with a {}-byte name — a ref field's name \
+                         is at most 64 characters",
+                        name.len()
+                    ));
+                }
+            } else if !decl.targets.is_empty() {
+                return Err(format!(
+                    "custom field '{name}' declares `targets` but is not a ref — `targets` is \
+                     only valid for a `ref` field"
+                ));
+            }
             if decl.list {
                 // A list field (6j6v.4g6r): an OR-set of entries, so the scalar merge choice and the
                 // create-time `required` guard (entries are added after the item exists) have no
@@ -1358,6 +1406,77 @@ mod tests {
             "#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn a_ref_field_loads_with_targets_single_or_list() {
+        // 6j6v.9tx3, plugin-custom-fields §5.3: `targets` names the item types a ref may point at.
+        let cfg = cfg_with_fields(
+            r#"
+            [fields.owner]
+            type = "ref"
+            targets = ["person"]
+            on = ["file"]
+            required = true
+
+            [fields.related]
+            type = "ref"
+            targets = ["file", "project"]
+            list = true
+            "#,
+        );
+        assert!(cfg.validate_fields().is_ok());
+        let owner = &cfg.fields["owner"];
+        assert_eq!(owner.field_type, FieldType::Ref);
+        assert_eq!(owner.field_type.as_str(), "ref");
+        assert_eq!(owner.targets, ["person"]);
+        assert_eq!(cfg.fields["related"].targets, ["file", "project"]);
+        assert!(cfg.fields["related"].list);
+        // A field of another type declares no targets: the default is empty.
+        let text = cfg_with_fields("[fields.uri]\ntype = \"text\"");
+        assert!(text.fields["uri"].targets.is_empty());
+    }
+
+    #[test]
+    fn a_ref_field_is_refused_at_load_without_targets_or_with_what_a_ref_cannot_be() {
+        // Each refusal names the field (6j6v.9tx3).
+        let long = "r".repeat(65);
+        for (body, needle) in [
+            ("[fields.owner]\ntype = \"ref\"".to_string(), "declares no `targets`"),
+            (
+                "[fields.owner]\ntype = \"ref\"\ntargets = []".to_string(),
+                "declares no `targets`",
+            ),
+            (
+                "[fields.owner]\ntype = \"ref\"\ntargets = [\"company\"]".to_string(),
+                "unknown type 'company' in `targets`",
+            ),
+            (
+                "[fields.owner]\ntype = \"text\"\ntargets = [\"person\"]".to_string(),
+                "declares `targets` but is not a ref",
+            ),
+            (
+                "[fields.owner]\ntype = \"ref\"\ntargets = [\"person\"]\nmerge = \"crdt-text\""
+                    .to_string(),
+                "merge = \"crdt-text\"",
+            ),
+            (
+                format!("[fields.{long}]\ntype = \"ref\"\ntargets = [\"person\"]"),
+                "a ref field's name is at most 64 characters",
+            ),
+            (
+                "[fields.owner]\ntype = \"ref\"\ntargets = [\"person\"]\nlist = true\nrequired = true"
+                    .to_string(),
+                "cannot be required",
+            ),
+        ] {
+            let msg = cfg_with_fields(&body).validate_fields().expect_err(&body);
+            assert!(msg.contains(needle), "{body}: {msg}");
+            assert!(
+                msg.contains("'owner'") || msg.contains(&format!("'{long}'")),
+                "the refusal names the field: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -2458,6 +2577,18 @@ mod tests {
         let msg = refused(&list).msg;
         assert!(
             msg.contains("'order'") && msg.contains("list field"),
+            "{msg}"
+        );
+        // A ref holds an item id, which ranks by nothing (6j6v.9tx3).
+        let reference = format!(
+            "{}\n[fields.order]\ntype = \"ref\"\ntargets = [\"project\"]",
+            with_action_key(
+                r#"{ related = "parent", type = "project", of = { field = "order" } }"#
+            )
+        );
+        let msg = refused(&reference).msg;
+        assert!(
+            msg.contains("'order'") && msg.contains("a ref holds an id, not a value to rank by"),
             "{msg}"
         );
     }

@@ -221,6 +221,53 @@ du siehst, lässt sich entfernen: `entry remove` prüft weder den Wert gegen den
 inzwischen gestrichenen Enum-Wert) noch `on` (einen Typ, den das Plugin inzwischen ausnimmt). Der
 Name eines Listenfelds hat höchstens 64 Zeichen.
 
+### Verweisfelder
+
+`type = "ref"` macht ein Feld zu einem typisierten Verweis auf ein anderes Item — die Organisatorin
+eines Meetings, die Firma, bei der eine Person arbeitet. Sein Wert ist eine Item-Id, und `targets`
+nennt die Item-Typen, auf die es zeigen darf. Ein Verweis ist ein einzelner Wert oder, mit
+`list = true`, eine Liste von Einträgen mit optionaler Kennzeichnung:
+
+```toml
+[fields.organizer]
+type = "ref"
+targets = ["person"]
+on = ["meeting"]
+
+[fields.participants]
+type = "ref"
+targets = ["person"]
+list = true
+on = ["meeting"]
+```
+
+```
+nxf update <meeting> --set organizer=<person>
+nxf entry add <meeting> participants <person> --label host
+nxf entry remove <meeting> participants <person>
+nxf update <meeting> --set organizer=      # leert ihn
+```
+
+`--set` und `entry add` nehmen eine volle Id (`ab12.0007` oder eine fremde `cd34.0001`) oder eine
+nackte lokale (`0007`), die wie jede eingegebene Id aufgelöst wird. Sie prüfen das Ziel, in dieser
+Reihenfolge: Der Wert ist eine Id, das Item existiert und ist nicht gelöscht, sein Typ steht in
+`targets`, und es ist nicht das Item selbst. Ein geschlossenes oder archiviertes Item ist ein
+gültiges Ziel. `entry remove` prüft nichts, sodass sich auch ein Verweis auf ein inzwischen
+gelöschtes Item entfernen lässt. Typ und Selbstverweis werden beim Schreiben geprüft, nie danach:
+Wird das Ziel später umgetypt oder gelöscht, bleibt der Verweis, wie er ist.
+
+`show --json` behält den Wert unter `custom` und ergänzt `refs`, das jedes Ziel auflöst:
+`"refs": {"organizer": [{"id": "ab12.0007", "found": true, "type": "person", "title": "Ada",
+"status": "open"}]}`, oder `{"id": …, "found": false}` für einen Wert, der kein Item auf diesem Board
+nennt. Das menschenlesbare `show` zeigt unter der Überschrift des Felds Id und Titel jedes Ziels,
+oder `(not on this board)`. `nxf schema --json` meldet das Feld als `"kind": "ref"` mit seinen
+`"targets"`.
+
+Ein Verweis kann kein `merge = "crdt-text"` haben und nicht ranken; sein Name hat höchstens 64
+Zeichen. Wer ein Textfeld als Verweis neu deklariert, behält dessen Werte: Die Ids darunter werden zu
+Verweisen, der Rest erscheint als nicht auf diesem Board. Ein Verweis wird mit den gewöhnlichen
+Feld-Ops geschrieben, sodass eine aus einem Snapshot gestartete Replik gültig bleibt.
+
 ## Ein Ranking deklarieren
 
 Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[ranking.list]`, wie

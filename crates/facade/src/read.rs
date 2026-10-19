@@ -227,7 +227,7 @@ pub struct SchemaField {
     pub field: String,
     pub label: String,
     /// How the value is interpreted: a canonical field's kind, or a custom field's declared type
-    /// (`text | longtext | date | datetime | enum`, [`FieldType::as_str`](crate::plugin::FieldType::as_str)).
+    /// (`text | longtext | date | datetime | enum | ref`, [`FieldType::as_str`](crate::plugin::FieldType::as_str)).
     pub kind: String,
     pub required: bool,
     pub settable: bool,
@@ -248,6 +248,9 @@ pub struct SchemaField {
     /// `true` for a custom LIST field (6j6v.4g6r): its value is a list of entries of `kind`, each
     /// with an optional label, written with `nxf entry add`/`remove`. Emitted only when `true`.
     pub list: bool,
+    /// The item types a custom `ref` field may point at (6j6v.9tx3, its `[fields.<name>].targets`).
+    /// `Some` only for a ref; emitted as `targets` only then.
+    pub targets: Option<Vec<String>>,
 }
 
 impl SchemaField {
@@ -282,6 +285,9 @@ impl SchemaField {
             }
             if self.list {
                 o["list"] = json!(true);
+            }
+            if let Some(t) = &self.targets {
+                o["targets"] = json!(t);
             }
         }
         o
@@ -415,6 +421,7 @@ pub fn schema(cfg: &PluginConfig) -> SchemaReport {
             on: Vec::new(),
             values: None,
             list: false,
+            targets: None,
         })
         .collect();
     // Append the plugin's declared custom fields (plugin-custom-fields §6) AFTER the canonical
@@ -439,6 +446,8 @@ pub fn schema(cfg: &PluginConfig) -> SchemaReport {
             on: decl.on.clone(),
             values: is_enum.then(|| decl.values.clone()),
             list: decl.list,
+            targets: (decl.field_type == crate::plugin::FieldType::Ref)
+                .then(|| decl.targets.clone()),
         }
     }));
     let hierarchy_types: Vec<TypeContainment> = cfg
@@ -4090,7 +4099,116 @@ pub fn show_value_with_custom(cfg: &PluginConfig, store: &Store, id: &str) -> Re
     if let Some(custom) = declared_custom_value(cfg, Some(&fields), Some(&lists)) {
         v["custom"] = custom;
     }
+    let refs = ref_targets(cfg, store, &fields, &lists)?;
+    if !refs.is_empty() {
+        v["refs"] = ref_targets_to_value(&refs);
+    }
     Ok(v)
+}
+
+/// One value of a declared `ref` field, resolved against the store (6j6v.9tx3) — what `show`
+/// reports under `refs`. `item` is the live target, `None` when the value names no item on this
+/// board: missing, deleted, or not id-shaped at all (a value written before the field was a ref,
+/// or by a binary that did not check). `label` is a list entry's label.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RefTarget {
+    /// The value as stored.
+    pub id: String,
+    pub label: Option<String>,
+    pub item: Option<ItemRow>,
+}
+
+/// Every declared `ref` field's value(s) of one item, resolved with ONE `get_items` (6j6v.9tx3):
+/// field-sorted, a list field's entries in their order. `fields` and `lists` are the item's custom
+/// values and entries as the store reads them; a field the plugin does not declare a ref is not
+/// read, a ref field with no value is absent.
+pub fn ref_targets(
+    cfg: &PluginConfig,
+    store: &Store,
+    fields: &BTreeMap<String, String>,
+    lists: &BTreeMap<String, Vec<FieldEntry>>,
+) -> Result<BTreeMap<String, Vec<RefTarget>>> {
+    let mut raw: BTreeMap<String, Vec<(String, Option<String>)>> = BTreeMap::new();
+    for (name, decl) in &cfg.fields {
+        if decl.field_type != crate::plugin::FieldType::Ref {
+            continue;
+        }
+        let values: Vec<(String, Option<String>)> = if decl.list {
+            lists
+                .get(name)
+                .map(|es| {
+                    es.iter()
+                        .map(|e| (e.value.clone(), e.label.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            fields
+                .get(name)
+                .filter(|v| !v.is_empty())
+                .map(|v| vec![(v.clone(), None)])
+                .unwrap_or_default()
+        };
+        if !values.is_empty() {
+            raw.insert(name.clone(), values);
+        }
+    }
+    if raw.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let ids: Vec<&str> = raw
+        .values()
+        .flatten()
+        .map(|(v, _)| v.as_str())
+        .filter(|v| nexus_flow_core::model::is_valid_ref_value(v))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let found: BTreeMap<String, ItemRow> = store
+        .get_items(&ids)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    Ok(raw
+        .into_iter()
+        .map(|(name, values)| {
+            let targets = values
+                .into_iter()
+                .map(|(id, label)| RefTarget {
+                    item: found.get(&id).cloned(),
+                    id,
+                    label,
+                })
+                .collect();
+            (name, targets)
+        })
+        .collect())
+}
+
+/// The `refs` JSON of `show --json` (6j6v.9tx3, plugin-custom-fields §5.3): per ref field, an array
+/// of `{"id", "found": true, "type", "title", "status"}` for a target on this board and
+/// `{"id", "found": false}` for a value that names none.
+pub fn ref_targets_to_value(refs: &BTreeMap<String, Vec<RefTarget>>) -> Value {
+    let mut o = serde_json::Map::new();
+    for (name, targets) in refs {
+        let arr = targets
+            .iter()
+            .map(|t| match &t.item {
+                Some(i) => json!({
+                    "id": t.id,
+                    "found": true,
+                    "type": i.item_type,
+                    "title": i.title,
+                    "status": i.status,
+                }),
+                None => json!({ "id": t.id, "found": false }),
+            })
+            .collect();
+        o.insert(name.clone(), Value::Array(arr));
+    }
+    Value::Object(o)
 }
 
 // ---- notes / mentions ------------------------------------------------------

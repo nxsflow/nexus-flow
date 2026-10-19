@@ -378,6 +378,121 @@ A hosted reader refuses a stream whose watermark names another task revision tha
 (`RecordsError::NotCurrent { domain: "task", .. }`), as it refuses another index revision, so a
 stream still folded at task revision 2 is not served with empty lists before its refold.
 
+### 5.3 Ref fields (6j6v.9tx3)
+
+`type = "ref"` declares a **typed reference to another item**: its value is a full item id, and
+`targets` names the item types it may point at. A ref is single or, with `list = true`, a list of
+entries (each with an optional label, §5.2):
+
+```toml
+[fields.organizer]
+type = "ref"
+targets = ["person"]
+on = ["meeting"]
+
+[fields.participants]
+type = "ref"
+targets = ["person"]
+list = true
+on = ["meeting"]
+```
+
+**Load rules.** `targets` is required and non-empty for a ref, each entry a type of `[types].list`,
+and forbidden on every other type. A ref refuses `merge = "crdt-text"` (it holds one id, which
+merges last-writer-wins). A derived ranking key `of = { field = <ref> }` is refused: a ref holds an
+id, not a value to rank by. A ref field's name is at most 64 characters of the chunk-field grammar,
+single or list — the place predicate below needs it. The list rules of §5.2 apply to a list ref (no
+`required`, no `merge`). Each refusal is a load error naming the field.
+
+**The op is the plain one.** A single ref is written with the `("field", "set")` op of §4.1, a list
+ref with the `("field", "add")` / `("field", "remove")` ops of §5.2 — no op type of its own, no
+column, no reducer change. The task fold revision stays **3**, so a replica started from a based
+(format-2) snapshot and every earlier snapshot stay valid: a revision move or a new column would be
+refused by exactly those (`NeedsHistory::Rebuild`, `NeedsRevision`, `ViewsDiffer`).
+
+**The reference rule** — the one definition the local reverse lookup and the hosted reverse hints
+(a later cut) both implement:
+
+1. **A field is a ref iff the reader's plugin configuration declares it `type = "ref"`.** The rows
+   do not know; nothing in a row says it. A plugin that redeclares a text field as a ref needs no
+   rewrite: its id-shaped values are references from then on, its other values show as "not on
+   this board" and match no filter.
+2. **A ref VALUE is id-shaped:** `nexus_flow_core::model::is_valid_ref_value` — non-empty, at most
+   128 bytes (`MAX_CHUNK_ID_BYTES`), contains `.`, no ASCII whitespace, neither U+001E nor U+001F.
+   The facade refuses any other value on a ref field. The CLI and MCP resolve a bare local suffix
+   to the full id first, as they do for every id; the write seam itself takes full ids only.
+3. **A reverse lookup is value equality** on the rows of the field: an item references `X` through
+   `f` when its single value of `f` equals `X` or a present entry of `f` does. Who wrote the value,
+   with which binary, and whether `X` exists do not matter: a plain `set` of an id by an older
+   binary is a reference, and a deleted target's referrers stay findable from the target's side.
+4. **One place predicate bounds the rows a reverse lookup sees, on every path:**
+   `nexus_flow_core::model::ref_place_ok(source_id, field, value)` — the source id non-empty, at
+   most 128 bytes and free of U+001F, the field of the chunk-field grammar, the value per (2). It is
+   the text in `model.rs`; this spec does not restate it elsewhere. A declared ref field always
+   passes the field bound and a validated value always passes the value bound, so the only row it
+   ever excludes is one whose SOURCE id is over 128 bytes or holds the separator. For a list entry
+   that row never folded anywhere (§5.2); for a SINGLE value this is a **new** exclusion — a `set`
+   has no source bound, so a single-value referrer whose own id is over 128 bytes folds and shows
+   its value, and is hidden from every reverse lookup.
+5. **Target type and self-reference are checked at write time only.** Retyping the target or the
+   source later leaves a ref that violates `targets`; `show` reports the target's current type and
+   nothing enforces after the fact. A dangling ref (its target deleted) stays as it is: nothing
+   cascades.
+6. **Archived referrers are not listed** by the `list --ref` filter (a later cut): `list` lists live,
+   unarchived items. A closed or archived TARGET is a valid target.
+7. **A prefix reassignment rewrites refs.** `Store::remap_prefix` rewrites a custom field's `set*`
+   value by an exact lookup on the whole value, and an `add` entry's value the same way, its label
+   kept; a value the entry codec cannot split is left unchanged. This holds for every custom field,
+   declared or not: a text field whose whole value is exactly an id is remapped too, a text holding
+   an id among other words is not (custom fields are not free text). A based replica refuses the
+   remap as before (`NeedsHistory::Remap`).
+
+**Write validation**, on `create`/`update --set` and `entry add`, in this order: the value is
+id-shaped (`validation`: `custom field '<f>': a ref is a full item id '<prefix>.<suffix>' (got
+'<v>')`) → the target exists and is not deleted (`not_found`: `custom field '<f>': no item '<id>'`)
+→ its type is one of `targets` (`validation`: `custom field '<f>': '<id>' is a <type>; it accepts
+<targets>`) → it is not the item itself (`validation`: `custom field '<f>': an item cannot reference
+itself`). An empty `--set f=` clears, as for every custom field. `entry remove` does not re-validate
+(§5.2) but still resolves a bare suffix. At `create` the sets are validated BEFORE the id is minted,
+so a self-reference at create is impossible by construction: an id that does not exist yet names no
+item and the write fails `not_found`.
+
+**The reverse lookup on a replica** is `Store::referenced_by_bulk(field, targets)`: per target, the
+id-sorted, distinct sources whose single value or present entry of `field` equals it, kept through
+`ref_place_ok`, one query per 500 targets. The store knows no declarations — the facade asks only
+for declared ref fields. Two indexes back it, `custom_fields_by_value(field, value)` and
+`field_entries_by_value(field, value)`: indexes, not columns, so an existing workspace — a based one
+included — gains them at its next open with no refold, and an image (which carries rows) knows
+nothing of them.
+
+**Read surface.** `nxf schema --json` / `flow_schema` report a ref as `"kind": "ref"` with
+`"targets"` (and `"list": true` for a list ref); no other field carries `targets`:
+
+```json
+{ "field": "participants", "kind": "ref", "custom": true, "on": ["meeting"],
+  "list": true, "targets": ["person"], "required": false, "settable": true, "label": "Participants" }
+```
+
+`show --json` / `flow_show` keep the value under `custom` unchanged (a single ref is its id, a list
+ref its `[{value, label?}]` entries) and add a sparse `refs` key — present only when at least one
+ref value is set — resolving every declared ref field's value(s) with one bulk read:
+
+```json
+"refs": {
+  "organizer":    [ { "id": "ab12.0002", "found": true, "type": "person", "title": "Ada", "status": "open" } ],
+  "participants": [ { "id": "ab12.0003", "found": false } ]
+}
+```
+
+`found: false` marks a value that names no live item on this board: missing, deleted, or not
+id-shaped (a value written before the field was a ref). The human `show` prints one line per target
+under the field's heading: `<id>  <title>` (the id as the CLI shows ids, ` (<label>)` after a
+labelled entry), or `<value>  (not on this board)`. Lists do not resolve targets.
+
+**Out of scope here:** the `list --ref` filter (`ListQuery::referencing`, `6j6v.e4dy`), the hosted
+reverse hints (`6j6v.1w3m`), derived ranking keys over refs, runtime-declared refs (`6j6v.bs4c`),
+and cascading anything on a target's deletion or retyping.
+
 ## 6. Read & schema surface
 
 **`nxf schema --json` / `flow_schema`** (`crates/facade/src/read.rs:322`, one source for CLI + MCP):

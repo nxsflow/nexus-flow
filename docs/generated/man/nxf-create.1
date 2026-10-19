@@ -49,7 +49,7 @@ Parent item id (sets belongs\-to); must exist
 This item depends on <id> (repeatable): <id> must exist and blocks this item until it closes. Same direction as `dep add <this> <id>`
 .TP
 \fB\-\-set\fR \fI<SET>\fR
-Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `\-\-set` carries the active plugin\*(Aqs declared custom fields (run `nxf schema` for the set). Validated against the field\*(Aqs type; a value of `\-` reads STDIN
+Set a plugin CUSTOM field: `name=value` (repeatable). Canonical fields use their own flags above; `\-\-set` carries the active plugin\*(Aqs declared custom fields (run `nxf schema` for the set). Validated against the field\*(Aqs type; a value of `\-` reads STDIN. A `ref` field takes an item id of one of its `targets`; a bare local id is resolved
 .TP
 \fB\-\-set\-file\fR \fI<SET_FILE>\fR
 Set a custom field from a file: `name=path` (UTF\-8, verbatim); `path` of `\-` reads STDIN. Repeatable. A field may be set by `\-\-set` or `\-\-set\-file`, not both

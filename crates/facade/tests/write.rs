@@ -2036,3 +2036,209 @@ fn entry_remove_refuses_what_entry_add_refuses_about_the_place() {
         assert_eq!(err.kind, kind, "{why}: {}", err.msg);
     }
 }
+
+// ---- ref fields (6j6v.9tx3) -------------------------------------------------------------------
+//
+// A ref is a plain `set` / `add` whose value is an item id, checked against the store before the op
+// is emitted: id-shaped → exists and not deleted → of a declared target type → not the item itself.
+
+fn cfg_refs() -> PluginConfig {
+    toml::from_str(
+        r#"
+        name = "refs-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P1"]
+        [types]
+        list = ["meeting", "person", "company"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "id", dir = "asc" } ]
+        [presentation.list]
+        columns = ["id"]
+
+        [fields.organizer]
+        type = "ref"
+        targets = ["person"]
+        on = ["meeting"]
+
+        [fields.participants]
+        type = "ref"
+        targets = ["person"]
+        list = true
+        on = ["meeting"]
+
+        [fields.company]
+        type = "ref"
+        targets = ["company"]
+        on = ["person"]
+        required = true
+        "#,
+    )
+    .unwrap()
+}
+
+/// Create an item of `ty` through the facade with the `custom` sets.
+fn create_typed(
+    s: &mut Store,
+    cfg: &PluginConfig,
+    ty: &str,
+    title: &str,
+    custom: &[String],
+) -> nexus_flow_facade::error::Result<String> {
+    let mut new = minimal("why", "P1");
+    new.custom = custom;
+    write::create(s, cfg, "ab12", NOW, ACTOR, ty, title, new).map(|i| i.id)
+}
+
+/// A store holding the meeting, the person (with its required company) and the company.
+fn ref_store(cfg: &PluginConfig) -> (Store, String, String, String) {
+    let mut s = store();
+    let c = create_typed(&mut s, cfg, "company", "Acme", &[]).unwrap();
+    let p = create_typed(&mut s, cfg, "person", "Ada", &[format!("company={c}")]).unwrap();
+    let m = create_typed(&mut s, cfg, "meeting", "standup", &[]).unwrap();
+    (s, m, p, c)
+}
+
+#[test]
+fn a_ref_set_needs_a_live_target_of_a_declared_type() {
+    let cfg = cfg_refs();
+    let (mut s, m, p, c) = ref_store(&cfg);
+    let set = |s: &mut Store, v: &str| {
+        write::update(s, &cfg, NOW, ACTOR, &m, &[format!("organizer={v}")])
+    };
+    let before = s.op_count();
+    for (value, kind, msg) in [
+        (
+            "ada".to_string(),
+            ErrorKind::Validation,
+            "custom field 'organizer': a ref is a full item id '<prefix>.<suffix>' (got 'ada')"
+                .to_string(),
+        ),
+        (
+            "ab12.none".to_string(),
+            ErrorKind::NotFound,
+            "custom field 'organizer': no item 'ab12.none'".to_string(),
+        ),
+        (
+            c.clone(),
+            ErrorKind::Validation,
+            format!("custom field 'organizer': '{c}' is a company; it accepts person"),
+        ),
+    ] {
+        let err = set(&mut s, &value).expect_err(&value);
+        assert_eq!(err.kind, kind, "{value}");
+        assert_eq!(err.msg, msg);
+    }
+    assert_eq!(s.op_count(), before, "no refused set was written");
+    set(&mut s, &p).unwrap();
+    assert_eq!(s.custom_fields_of(&m).unwrap()["organizer"], p);
+    write::close(&mut s, NOW, ACTOR, &p, Some("left")).unwrap();
+    set(&mut s, &p).expect("a closed target passes");
+    write::archive(&mut s, NOW, ACTOR, std::slice::from_ref(&p)).unwrap();
+    assert!(s.get_item(&p).unwrap().unwrap().archived.is_some());
+    set(&mut s, &p).expect("an archived target passes");
+    set(&mut s, "").expect("an empty value clears");
+    assert!(!s.custom_fields_of(&m).unwrap().contains_key("organizer"));
+    s.delete_item(&p, "t");
+    assert_eq!(
+        set(&mut s, &p).unwrap_err().kind,
+        ErrorKind::NotFound,
+        "a deleted target"
+    );
+    // The op is the plain set: nothing but `set` under the `field` kind.
+    assert!(s
+        .export()
+        .iter()
+        .filter(|o| o.target_kind == "field")
+        .all(|o| o.op_type == "set"));
+}
+
+#[test]
+fn a_ref_cannot_reference_its_own_item() {
+    // A meeting whose `organizer` accepted meetings could still not name itself.
+    let mut cfg = cfg_refs();
+    cfg.fields.get_mut("organizer").unwrap().targets = vec!["meeting".into()];
+    let (mut s, m, _, _) = ref_store(&cfg);
+    let err = write::update(&mut s, &cfg, NOW, ACTOR, &m, &[format!("organizer={m}")]).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(
+        err.msg,
+        "custom field 'organizer': an item cannot reference itself"
+    );
+}
+
+#[test]
+fn a_ref_entry_is_validated_like_a_set_and_removed_without_validation() {
+    let cfg = cfg_refs();
+    let (mut s, m, p, c) = ref_store(&cfg);
+    let add = |s: &mut Store, v: &str| {
+        write::entry_add(s, &cfg, NOW, ACTOR, &m, "participants", v, Some("host"))
+    };
+    assert_eq!(add(&mut s, "ada").unwrap_err().kind, ErrorKind::Validation);
+    assert_eq!(
+        add(&mut s, "ab12.none").unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    let err = add(&mut s, &c).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert!(
+        err.msg.contains("is a company; it accepts person"),
+        "{}",
+        err.msg
+    );
+    let e = add(&mut s, &p).unwrap();
+    assert_eq!(
+        e,
+        nexus_flow_facade::FieldEntry {
+            value: p.clone(),
+            label: Some("host".into())
+        }
+    );
+    // A remove does not re-validate (4g6r's rule): the entry goes even after its target is gone.
+    s.delete_item(&p, "t");
+    assert_eq!(
+        write::entry_remove(&mut s, &cfg, NOW, ACTOR, &m, "participants", &p).unwrap(),
+        p
+    );
+    assert!(!s.field_entries_of(&m).unwrap().contains_key("participants"));
+    assert!(s
+        .export()
+        .iter()
+        .filter(|o| o.target_kind == "field" && o.field == "participants")
+        .all(|o| matches!(o.op_type.as_str(), "add" | "remove")));
+}
+
+#[test]
+fn a_required_ref_is_set_at_create_and_a_self_reference_at_create_is_not_found() {
+    let cfg = cfg_refs();
+    let mut s = store();
+    let c = create_typed(&mut s, &cfg, "company", "Acme", &[]).unwrap();
+    assert_eq!(
+        create_typed(&mut s, &cfg, "person", "Ada", &[])
+            .unwrap_err()
+            .kind,
+        ErrorKind::Validation,
+        "required"
+    );
+    let p = create_typed(&mut s, &cfg, "person", "Ada", &[format!("company={c}")]).unwrap();
+    assert_eq!(s.custom_fields_of(&p).unwrap()["company"], c);
+    // The sets are validated before the id is minted (write::create): the id this create would
+    // mint names no item yet, so a self-reference at create is this refusal — and nothing is written.
+    let before = s.op_count();
+    let err = create_typed(
+        &mut s,
+        &cfg,
+        "person",
+        "Bob",
+        &["company=ab12.notyet".into()],
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotFound);
+    assert_eq!(s.op_count(), before);
+}

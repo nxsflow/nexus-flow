@@ -251,8 +251,9 @@ pub(super) fn create(
             parent: parent.as_deref(),
             depends_on: &depends_on,
             // Custom `name=value` sets ride straight through to the shared write layer, byte-identical
-            // to `nxf create --set` (plugin-custom-fields §5); the facade validates + emits them.
-            custom: &p.set,
+            // to `nxf create --set` (plugin-custom-fields §5); the facade validates + emits them. A
+            // bare local suffix on a ref field names the local item, as on the CLI (6j6v.9tx3).
+            custom: &write::resolve_ref_sets(&cfg, prefix, &p.set),
         },
     )?;
     Ok(record::item_value(&item))
@@ -268,7 +269,8 @@ pub(super) fn update(
 ) -> Result<Value> {
     let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
     let id = ws.replica.resolve_id(&p.id);
-    let item = write::update(&mut store, &cfg, &now, actor, &id, &p.set)?;
+    let sets = write::resolve_ref_sets(&cfg, &ws.replica.prefix, &p.set);
+    let item = write::update(&mut store, &cfg, &now, actor, &id, &sets)?;
     Ok(record::item_value(&item))
 }
 
@@ -486,6 +488,7 @@ pub(super) fn entry_add(
 ) -> Result<Value> {
     let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
     let id = ws.replica.resolve_id(&p.id).into_owned();
+    let value = write::resolve_ref_input(&cfg, &ws.replica.prefix, &p.field, &p.value);
     let stored = write::entry_add(
         &mut store,
         &cfg,
@@ -493,7 +496,7 @@ pub(super) fn entry_add(
         actor,
         &id,
         &p.field,
-        &p.value,
+        &value,
         p.label.as_deref(),
     )?;
     let msg = write::entry_add_receipt(&id, &p.field, &stored);
@@ -510,7 +513,8 @@ pub(super) fn entry_remove(
 ) -> Result<Value> {
     let (ws, cfg, mut store, now) = open_for_write(db, start, p.now.as_deref())?;
     let id = ws.replica.resolve_id(&p.id).into_owned();
-    let matched = write::entry_remove(&mut store, &cfg, &now, actor, &id, &p.field, &p.value)?;
+    let value = write::resolve_ref_input(&cfg, &ws.replica.prefix, &p.field, &p.value);
+    let matched = write::entry_remove(&mut store, &cfg, &now, actor, &id, &p.field, &value)?;
     let msg = write::entry_remove_receipt(&id, &p.field, &matched);
     Ok(json!({ "ok": true, "msg": msg }))
 }
@@ -820,6 +824,96 @@ mod custom_field_tests {
             shown(&id)["custom"]["produced_at"],
             serde_json::json!("2026-10-12T08:30:00Z"),
             "the refused update changed nothing"
+        );
+    }
+
+    #[test]
+    fn the_write_tools_resolve_a_bare_suffix_on_a_ref_field_before_the_facade() {
+        // 6j6v.9tx3: flow_create / flow_update `set` and flow_entry_add / _remove take a bare local
+        // suffix for a ref field, as the CLI does; the facade itself takes full ids only.
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let new_file = |set: Vec<String>| {
+            create(
+                None,
+                start,
+                "tester",
+                &create_params(set, "2026-10-12T09:00:00Z"),
+            )
+            .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let b = new_file(vec!["uri=.nxs/files/b.md".into()]);
+        let (prefix, bare) = b.split_once('.').unwrap();
+        let a = new_file(vec!["uri=.nxs/files/a.md".into(), format!("source={bare}")]);
+        assert!(a.starts_with(&format!("{prefix}.")));
+        let shown = |id: &str| {
+            show(
+                None,
+                start,
+                &FlowShowParams {
+                    id: id.to_string(),
+                    workspace: None,
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            shown(&a)["custom"]["source"],
+            serde_json::json!(b),
+            "flow_create resolved it"
+        );
+        update(
+            None,
+            start,
+            "tester",
+            &FlowUpdateParams {
+                id: b.clone(),
+                set: vec![format!("source={}", a.split_once('.').unwrap().1)],
+                now: Some("2026-10-12T09:00:00Z".into()),
+                actor: None,
+                workspace: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            shown(&b)["custom"]["source"],
+            serde_json::json!(a),
+            "flow_update resolved it"
+        );
+        assert_eq!(
+            shown(&b)["refs"]["source"][0]["found"],
+            serde_json::json!(true)
+        );
+        let related = |value: &str| FlowEntryParams {
+            field: "related".into(),
+            ..entry(&a, value, Some("mirror"))
+        };
+        let receipt = entry_add(None, start, "tester", &related(bare)).unwrap();
+        assert_eq!(
+            receipt["msg"],
+            serde_json::json!(format!("{a} related + {b} (mirror)"))
+        );
+        assert_eq!(
+            shown(&a)["custom"]["related"],
+            serde_json::json!([{ "value": b, "label": "mirror" }])
+        );
+        let receipt = entry_remove(None, start, "tester", &related(bare)).unwrap();
+        assert_eq!(
+            receipt["msg"],
+            serde_json::json!(format!("{a} related - {b}"))
+        );
+        assert!(
+            shown(&a)["custom"].get("related").is_none(),
+            "flow_entry_remove resolved it"
+        );
+        // A text field's bare value is not an id and is not resolved.
+        let receipt = entry_add(None, start, "tester", &entry(&a, "nodot", None)).unwrap();
+        assert_eq!(
+            receipt["msg"],
+            serde_json::json!(format!("{a} mirrors + nodot"))
         );
     }
 

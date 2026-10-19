@@ -2220,6 +2220,137 @@ fn schema_lists_declared_custom_fields_and_leaves_canonical_entries_untouched() 
     );
 }
 
+/// [`cfg_with_fields`] with two typed references (6j6v.9tx3): a single `organizer` and a list
+/// `participants`, both pointing at persons, on projects.
+fn cfg_with_refs() -> plugin::PluginConfig {
+    toml::from_str(
+        r#"
+        name = "refs-fixture"
+        [description]
+        en = "x"
+        de = "y"
+        [priority]
+        labels = ["P1", "P2", "P3"]
+        [types]
+        list = ["file", "project", "person"]
+        [vocabulary.status]
+        open = "open"
+        in_progress = "in progress"
+        closed = "closed"
+        [ranking.next]
+        order = [ { field = "id", dir = "asc" } ]
+        [presentation.list]
+        columns = ["id"]
+
+        [fields.uri]
+        type = "text"
+
+        [fields.organizer]
+        type = "ref"
+        targets = ["person"]
+        on = ["project"]
+
+        [fields.participants]
+        type = "ref"
+        targets = ["person"]
+        list = true
+        on = ["project"]
+        "#,
+    )
+    .expect("cfg_with_refs parses")
+}
+
+#[test]
+fn schema_json_marks_a_ref_with_its_targets() {
+    let schema = read::schema(&cfg_with_refs()).to_value();
+    let organizer = field_entry(&schema, "organizer");
+    assert_eq!(organizer["kind"], "ref");
+    assert_eq!(organizer["targets"], serde_json::json!(["person"]));
+    assert!(organizer.get("list").is_none());
+    let participants = field_entry(&schema, "participants");
+    assert_eq!(participants["kind"], "ref");
+    assert_eq!(participants["targets"], serde_json::json!(["person"]));
+    assert_eq!(participants["list"], serde_json::json!(true));
+    assert!(
+        field_entry(&schema, "uri").get("targets").is_none(),
+        "a text field carries no `targets`"
+    );
+    assert!(field_entry(&schema, "title").get("targets").is_none());
+}
+
+#[test]
+fn show_json_resolves_refs_and_marks_a_missing_target_and_a_non_id_value() {
+    let cfg = cfg_with_refs();
+    let mut s = Store::open_in_memory(1);
+    for (id, ty, title) in [
+        ("ab12.0001", "project", "Launch"),
+        ("ab12.0002", "person", "Ada"),
+        ("ab12.0003", "person", "Bob"),
+        ("ab12.0004", "project", "Legacy"),
+        ("ab12.0005", "project", "Plain"),
+    ] {
+        s.create_item(id, ty, title, "t");
+    }
+    nexus_flow_facade::write::update(
+        &mut s,
+        &cfg,
+        NOW,
+        "alice",
+        "ab12.0001",
+        &["organizer=ab12.0002".into(), "uri=x".into()],
+    )
+    .unwrap();
+    for p in ["ab12.0002", "ab12.0003"] {
+        nexus_flow_facade::write::entry_add(
+            &mut s,
+            &cfg,
+            NOW,
+            "alice",
+            "ab12.0001",
+            "participants",
+            p,
+            None,
+        )
+        .unwrap();
+    }
+    s.delete_item("ab12.0003", "t");
+    // A value an older binary wrote without a check: not id-shaped, so it names no item.
+    set_custom(&mut s, "ab12.0004", "organizer", "free text");
+
+    let sv = read::show_value_with_custom(&cfg, &s, "ab12.0001").unwrap();
+    assert_eq!(
+        sv["refs"]["organizer"],
+        serde_json::json!([
+            { "id": "ab12.0002", "found": true, "type": "person", "title": "Ada", "status": "open" }
+        ])
+    );
+    assert_eq!(
+        sv["refs"]["participants"][0]["found"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        sv["refs"]["participants"][1],
+        serde_json::json!({ "id": "ab12.0003", "found": false }),
+        "a deleted target is not on this board"
+    );
+    assert_eq!(
+        sv["custom"]["organizer"], "ab12.0002",
+        "the custom map is unchanged"
+    );
+    assert!(sv["refs"].get("uri").is_none(), "only ref fields resolve");
+
+    let legacy = read::show_value_with_custom(&cfg, &s, "ab12.0004").unwrap();
+    assert_eq!(
+        legacy["refs"]["organizer"],
+        serde_json::json!([{ "id": "free text", "found": false }])
+    );
+    let plain = read::show_value_with_custom(&cfg, &s, "ab12.0005").unwrap();
+    assert!(
+        plain.get("refs").is_none(),
+        "no ref value set, no `refs` key"
+    );
+}
+
 #[test]
 fn schema_omits_a_foreign_custom_value_it_does_not_declare() {
     // §7: a field the active plugin does not DECLARE never appears in `schema` (a schema is pure over
