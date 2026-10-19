@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-chat"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-flow-cli"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-flow-core"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "automerge",
  "nxs-foundation",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-flow-facade"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "inventory",
  "nexus-flow-core",
@@ -2331,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-memory"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "nxs"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -2438,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-fold-ddb"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "aws-sdk-dynamodb",
  "futures-util",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-foundation"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-guide"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "include_dir",
  "nxs-foundation",
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-init"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "inventory",
  "nxs-foundation",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-server"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "aws-config",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-service"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "directories",
  "libc",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-sync"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "base64",
  "flate2",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-test-support"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "nxs-ui"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2718,7 +2718,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plugin-probe"
-version = "0.214.0"
+version = "0.215.0"
 dependencies = [
  "inventory",
  "nexus-flow-cli",
