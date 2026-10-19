@@ -5,7 +5,7 @@
 
 > **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
 
-## Index (50)
+## Index (58)
 
 - **architecture-overview**: nexus-flow is an agent-native, offline-first suite — the board, the memory and the channel your agents work from — and nothing else.
 - **priority-storage-canonical-ordinal**: Priority is a plugin-named label at the SURFACE but stored as the canonical ORDINAL — never store the label, or --json stops being plugin-independent.
@@ -39,6 +39,14 @@
 - **aws-account-ids-never-in-the-repo**: Never put an AWS account id in code, a PR or the git log — it comes from a GitHub secret at runtime, and tests use the example id 123456789012.
 - **declared-members-bare-caller-qualified**: Channel members are recorded BARE while a caller arrives QUALIFIED — compare through facade::same_identity, never == or a SQL handle join.
 - **flock-ends-at-the-last-close-not-the-holders**: An flock ends at the LAST close of its open file description — any fork keeps it alive, so always LOCK_UN in an explicit Drop.
+- **arbeit-ueber-das-team**: Tickets nie selbst mit eigenen Subagenten bauen: Umsetzung geht an den Kanal coding, Planung an pm/planning; nur reine Konfig- oder Aufraeum-Tickets direkt erledigen.
+- **nxc-status-json**: nxc-Laeufe immer mit 'nxc status --thread <id> --json' beobachten, nie die Textausgabe parsen; fertig bei open == 0, anhalten bei needs_decision oder awaiting_human.
+- **nxc-nicht-quittieren**: Nie per nxc reply in einen fertig zugestellten Kanal-Lauf 'danke/uebernommen' schreiben - ein reply auf die Wurzel oeffnet eine NEUE Runde mit dem Text als Auftrag.
+- **planning-kanal-escalate**: Im planning-Kanal fragt der PM den Auftraggeber NUR mit 'nxc reply --escalate' - ein plain reply gilt als fertiges Design und laeuft in die Pruefrunde.
+- **ein-lauf-mit-arbeitskopie**: Commission one working-copy run at a time and wait for its release; the causing bugs are fixed since v0.207.0, but keep the rule until observed.
+- **no-self-update-during-chain-runs**: Never self-update nxs while a chain run works: the service restart kills service-started agent sessions with no resume (8n9a).
+- **report-to-the-commissioner**: Never write a pm_report after a delivery; report the result to whoever commissioned the work (nexflowit-revamp, orchestrator, or the owner).
+- **art9-deletion-correctness-over-date**: Never trade correctness of the Art. 9 deletion mechanism for its date: January is fine, data loss or a half-baked design is not.
 - **claude-agent-sdk-scoping-airgap**: To air-gap a claude-agent-sdk subagent set setting_sources=[], strict_mcp_config=True and mcp_servers={} — else it inherits your MCP and the web.
 - **parallel-worktree-agents-race**: Never launch two worktree-isolated agents in ONE message — a subagent checkout -b can flip the shared checkout; stagger and forbid checkout.
 - **golden-harness-runs-in-crate-dir**: The trycmd golden harness runs in crates/cli with a pinned $HOME — a command that persists state outside the workspace cannot be a golden case.
@@ -1378,6 +1386,69 @@ PASS/FAIL/FAIL/PASS on one identical tree — the neighbouring test in that same
 HOW TO TEST IT deterministically, without a race: `dup` the holder's fd, drop the holder, then try to
 acquire. `dup` and `fork` both add a reference to the same open file description, so `dup` reproduces
 every time what a fork reproduces 165 times in 100 000.
+
+---
+
+### `arbeit-ueber-das-team`
+
+Owner-Entscheidung 12.10.2026: Seit 12.10. sieht jeder Arbeitsbereich der Maschine das Coding-Team aus dem Nutzerordner ~/.nexusflow/personas (Link auf das Repo nexusflow-personas): pm, coder, verifier, finisher, merger, die drei Reviewer und die Kanaele planning, coding, review, merging, process. 'nxc list' zeigt sie mit 'from the user-level folder'.
+
+SO WIRD GEARBEITET:
+- Ein Ticket umsetzen: nxc send --to coding --ref nxf_ids=<id> - (Brief per Heredoc: was, warum, Abnahme, Fallstricke). Coder baut test-first, Verifier faehrt die Tore, Review-Runde urteilt, Finisher stellt den PR. Die Sitzung schreibt den Auftrag, beobachtet den Lauf und meldet das Ergebnis - sie baut NICHT selbst.
+- Ein Vorhaben in Tickets schneiden: nxc send --to planning (Design wird geprueft) oder fuer Kleines/eine Meinung direkt --to pm.
+- Mergen: Kanal merging, mit fertigem Ticket, naechstem Ticket und Zweig.
+- NICHT mehr fuer Ticket-Arbeit: superpowers:subagent-driven-development, eigene Implementierer-/Reviewer-Subagenten. Das Superpowers-Plugin fordert seine Skills bei jedem Start an - fuer Ticket-Arbeit hat diese Regel Vorrang.
+- AUSNAHME: reine Konfigurations- oder Aufraeum-Tickets, fuer die die volle Kette zu schwer ist, direkt erledigen und dem Owner den PR zeigen. Recherche, Messungen, Abnahmen und Deploy-Pruefungen macht die Sitzung selbst.
+- Vor jedem send: nxf search auf Dubletten und nxc status --json auf einen schon laufenden Auftrag fuer dasselbe Ticket pruefen.
+- Eine Persona oder einen Kanal mit einem dieser Namen NIE in .nxs-personas/ dieses Repos anlegen - sie verdeckt die zentrale Fassung. Aenderungen am Team gehoeren ins Repo nexusflow-personas.
+
+Vorbild: agents arbeitet seit 20.09.2026 so, nexflowit-app seit 12.10.2026.
+
+FUER DIESES REPO: Der Verifier faehrt die Tore dieses Repos - in den Brief an coding immer die Regel gates-run-in-ci-not-locally schreiben (kein lokales cargo clippy, nur die geaenderte Testdatei plus cargo fmt; CI ist das Tor). Laeufe, die nxc selbst testen (Fixture-Personas wie coder/review/test in Temp-Arbeitsbereichen), sind davon unberuehrt.
+
+REVIEW (Owner-Entscheidung 12.10.2026, 'Kette ersetzt Review'): Die Review-Runde der Coding-Kette (code-quality, test-quality, integrity in getrennten Sitzungen) IST das unabhaengige Review. Danach KEIN zusaetzlicher review-pr-Lauf, kein Anhalten fuer ein Owner-Review, keine Mitigationsrunde: nach dem PR des Finishers den Kanal merging beauftragen (fertiges Ticket, naechstes Ticket, Zweig), dann Beta-Release wenn sinnvoll, dann pm_report. Owner-gated bleibt die Befoerderung auf stabil - und wo das Repo eine eigene Merge-Regel hat, gilt sie weiter.
+
+---
+
+### `nxc-status-json`
+
+Uebernommen aus agents (Owner 22.09.2026): Den Stand von nxc-Laeufen (coding, planning, merging ...) IMMER ueber 'nxc status --thread <id> --json' beobachten. Auswertung: operations[].open == 0 heisst fertig; operations[].needs_decision == true oder threads[].awaiting_human == true heisst, ein Mensch muss entscheiden - dann sofort dem Owner melden statt weiter zu warten; threads[].escalated und interrupted ebenso. Welcher Schritt laeuft: threads[] mit state 'open' und session_state 'running' (expects nennt die Persona). Mehrere Laeufe: 'nxc status --json' ohne --thread. Warten im Hintergrund (Monitor oder Bash mit run_in_background), nie mit Vordergrund-sleep.
+
+---
+
+### `nxc-nicht-quittieren`
+
+Uebernommen aus agents: Ein reply auf die Wurzel eines zugestellten coding-Laufs startet den Coder neu, mit 'danke' als Auftrag. Ergebnis einfach lesen und weitermachen. Ab nxs 0.205.1 gibt ein sauber zugestellter Lauf die Arbeitskopie beim Ende seiner letzten Sitzung frei. Haengt sie trotzdem: nie die Datenbank von Hand anfassen, sondern die nexus-flow-Sitzung bzw. den Koordinator fragen.
+
+---
+
+### `planning-kanal-escalate`
+
+Uebernommen aus agents (gemessen 06.10.2026): planning laeuft design -> judge (Pruefrunde) -> cut. Ein einfaches reply des PM im design- oder cut-Schritt rueckt die Kette vor. Fragen an den Auftraggeber, auch die Design-Abnahme, gehen nur mit --escalate: das haelt die Kette, erreicht den Auftraggeber und setzt dieselbe PM-Sitzung fort. Die Antwort des Owners gehoert als reply in DENSELBEN Faden - jede weitere Antwort auf eine Eskalation startet sonst eine eigene Runde, die erneut Tickets schneidet.
+
+---
+
+### `ein-lauf-mit-arbeitskopie`
+
+Adopted from agents (as of 2026-10-10, nxs 0.206.1): two runs holding the working copy at the same time led to build steps skipped after a long wait, coder and verifier working in the same working copy at once, and a working copy held until its deadline after an escalation answered on the root thread. The causes are the nxc bugs 6j6v.9g8j (one step per ordered run), 6j6v.1wep (queued steps do not lapse) and 6j6v.ys54 (an answered escalation releases the copy); all three are FIXED since nxs v0.207.0. Until a newer release has been observed running two working-copy runs cleanly, keep the rule anyway: commission one run, wait until it releases the working copy, then the next. The session itself does not work in the working copy while a run is going (use its own git worktree if needed).
+
+---
+
+### `no-self-update-during-chain-runs`
+
+Never run nxs self-update (or nxs sync daemon install) while an nxc chain run is working on this machine: the service restart SIGTERMs agent sessions the service started, with no resume armed and no park, so the operation is stranded and its uncommitted work unsaved (bug 6j6v.8n9a, seen 2026-10-15 on the 0cfa coding run). Check 'nxc status --json' across workspaces first; update when no session is running.
+
+---
+
+### `report-to-the-commissioner`
+
+Owner decision 2026-10-16: do NOT write pm_report (pm-session-report) entries after a delivery. The result goes back to whoever COMMISSIONED the work: when nexflowit-revamp or orchestrator commissioned it, report there via nxc (version, what ships, what changes for the consumer); when the owner commissioned it in this session, report to the owner here. The step 'then a pm_report' in older next-task briefs is superseded. Sequence after a coding run: merging channel, a beta if it makes sense, a report to the commissioner.
+
+---
+
+### `art9-deletion-correctness-over-date`
+
+Owner direction (2026-10-19) for the Art. 9 deletion work (Direction 9, 6j6v.5vxp-a): correctness over date. A later delivery (January) is acceptable and the first days after go-live can be handled by hand; a half-baked mechanism, or any risk of data loss from a deletion design that is architecturally wrong or not thought through, is not. Never cut scope or review depth of the deletion mechanism to meet a date; give its design review the time it needs, and write down and check any manual interim path too.
 
 ---
 

@@ -321,7 +321,11 @@ fn ref_queries(p: &str) -> Vec<ListQuery> {
 }
 
 fn ref_queries_of(people: &[String]) -> Vec<ListQuery> {
-    people.iter().flat_map(|p| ref_queries(p)).collect()
+    people
+        .iter()
+        .map(String::as_str)
+        .flat_map(ref_queries)
+        .collect()
 }
 
 /// What the generated boards held, so the comparison is known to have compared something worth

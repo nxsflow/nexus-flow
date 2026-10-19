@@ -226,7 +226,7 @@ fn list_ref_lists_the_referrers_and_resolves_a_bare_id() {
 
     // A bare local suffix is resolved to the full id; the referrer is listed, its target not.
     let source_b = format!("source={b}");
-    assert_eq!(listed(&["--ref", &source_b]), [a.clone()]);
+    assert_eq!(listed(&["--ref", &source_b]), std::slice::from_ref(&a));
     // Two refs are alternatives: the union of both lookups.
     let related_c = format!("related={c}");
     let mut union = vec![a.clone(), d.clone()];

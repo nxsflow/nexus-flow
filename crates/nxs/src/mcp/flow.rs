@@ -1187,7 +1187,7 @@ mod custom_field_tests {
             },
         )
         .unwrap();
-        assert_eq!(ids(&one), [a.clone()]);
+        assert_eq!(ids(&one), std::slice::from_ref(&a));
         assert_eq!(one[0]["custom"]["source"], serde_json::json!(b));
         let mut both = vec![a.clone(), c.clone()];
         both.sort();
