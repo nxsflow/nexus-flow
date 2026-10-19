@@ -201,7 +201,10 @@ gains a third sparse index — after `active` and `dated` —, keyed by type:
   (`.adj#`) were always written for every edge add, under both ends; only the `active` INDEX flag is
   limited to `dep`/`parent` edges with an active end. Since index revision 3 the entries say what
   their edge is and whether it is removed (`next` above), so a `list`-ranked item reads its edges
-  with one Query on its own prefix, at no extra cost per edge write.
+  with one Query on its own prefix, at no extra cost per edge write. Since index revision 4
+  (6j6v.9tx3) the `.radj#` reverse-reference hints and their `.rsrc#` mirrors are the second kind
+  of plain adjacency row (plugin-custom-fields §5.3, "The hosted read"); nothing in ranking reads
+  them.
 - **Archived items.** They are in the index, because they are live. `list` filters them at read,
   as it does locally.
 - **It changes the table contract.** The deploying stack (the web package's CDK) must add the GSI

@@ -10,7 +10,8 @@
 //! [`import`] starts an EMPTY stream from one — one never folded, or one [`Folder::clear`] left —
 //! and keeps it unserved while it does: it writes a sentinel watermark that names no revision
 //! first, so readers answer `NotCurrent` throughout; then the rows; it rebuilds the board's
-//! indexes from them, and writes the real watermark last, so a stream whose import died is still
+//! indexes from them — the reverse-reference hints included, which a snapshot does not carry
+//! ([`board::reindex`], index revision 4) — and writes the real watermark last, so a stream whose import died is still
 //! unserved and is started again. The log stays where it is — on the relay — and the run then folds it from the
 //! watermark on, in batches.
 //!
