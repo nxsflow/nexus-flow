@@ -419,6 +419,16 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
             // cut 3 (6j6v.1w3m): the fold-ddb path answers ref queries from its hints; until
             // then it is not compared here.
             seen.add("ref rows", want.items.len());
+            let target = s.get_item(&q.refs[0].id).unwrap();
+            seen.add(
+                "ref rows of a deleted or archived target",
+                usize::from(
+                    !want.items.is_empty()
+                        && target.is_some_and(|t| {
+                            t.deleted.as_deref() == Some("1") || t.archived.is_some()
+                        }),
+                ),
+            );
             seen.add("empty ref answers", usize::from(want.items.is_empty()));
             seen.add(
                 "ref rows held as a list entry",
@@ -632,6 +642,7 @@ fn the_server_answers_a_ranked_list_as_the_replica_does() {
         "unranked ref boards",
         "ranked ref boards holding non-referrers",
         "ref rows",
+        "ref rows of a deleted or archived target",
         "empty ref answers",
         "ref rows held as a list entry",
         "closed ref rows",
