@@ -438,8 +438,8 @@ refused by exactly those (`NeedsHistory::Rebuild`, `NeedsRevision`, `ViewsDiffer
    source later leaves a ref that violates `targets`; `show` reports the target's current type and
    nothing enforces after the fact. A dangling ref (its target deleted) stays as it is: nothing
    cascades.
-6. **Archived referrers are not listed** by the `list --ref` filter (a later cut): `list` lists live,
-   unarchived items. A closed or archived TARGET is a valid target.
+6. **Archived referrers are not listed** by the `list --ref` filter: `list` lists live, unarchived
+   items, and `nxf archived` takes no `--ref`. A closed or archived TARGET is a valid target.
 7. **A prefix reassignment rewrites refs.** `Store::remap_prefix` rewrites a custom field's `set*`
    value by an exact lookup on the whole value, and an `add` entry's value the same way, its label
    kept; a value the entry codec cannot split is left unchanged. This holds for every custom field,
@@ -489,9 +489,53 @@ id-shaped (a value written before the field was a ref). The human `show` prints 
 under the field's heading: `<id>  <title>` (the id as the CLI shows ids, ` (<label>)` after a
 labelled entry), or `<value>  (not on this board)`. Lists do not resolve targets.
 
-**Out of scope here:** the `list --ref` filter (`ListQuery::referencing`, `6j6v.e4dy`), the hosted
-reverse hints (`6j6v.1w3m`), derived ranking keys over refs, runtime-declared refs (`6j6v.bs4c`),
-and cascading anything on a target's deletion or retyping.
+**The reverse lookup as a filter (6j6v.e4dy): `list --ref`.** "Which items reference `X` through
+`f`" is a filter on `list`, not a verb of its own:
+
+| surface | spelling |
+|---|---|
+| CLI | `nxf list --ref <field>=<id>` (repeatable; a bare local id is resolved) |
+| MCP | `flow_list { "refs": [ { "field": "<field>", "id": "<id>" } ] }` (a bare id is resolved) |
+| library | `ListQuery::referencing(field, id)` on `Engine::list_query` / `list_query_value` |
+
+It applies rule (3) under rule (4): the live, unarchived items whose single value of `field` equals
+the id or a present entry of `field` does, restricted to the rows `ref_place_ok` admits.
+`read::referrers_of(store, field, targets)` is the one lookup — `mentioners_of`'s shape and live
+rule over `Store::referenced_by_bulk`: deleted sources dropped, closed and archived ones kept (a
+caller narrows them; `list` drops the archived). Several refs are **alternatives** (OR); a query
+carries at most **8** (`read::MAX_REFS`). It composes with every other `list` filter (`--type`,
+`--status`, `--in`, `--label`), with `--sort`, `--limit` and `--paginate`. Refused with
+`validation`: a field that is not a ref of the plugin (`` `--ref` names '<f>', which is not a ref
+field of this plugin; ref fields: <list> ``), a value that is not id-shaped
+(`` `--ref <f>`: a ref is a full item id '<prefix>.<suffix>' (got '<v>') ``), more than 8 refs
+(`` `--ref` takes at most 8 filters ``), and on the CLI a `--ref` without `=` (`` `--ref` takes
+FIELD=ID ``). An id nothing holds is an empty page with total 0, never `not_found`.
+
+**Where it sits under `--sort rank`.** Inside the selection, beside the type, container and label
+filters: the filter narrows the ROWS and never the rank SCOPE, which stays every live, unarchived
+item of a type (derived-ranking-keys §12, "filters select, keys order"). A ranked `--ref` list
+therefore orders its rows exactly as the unfiltered ranked list orders the same rows — a station
+ranked by its parent person's rank keeps that rank when the persons are filtered out of the answer.
+
+**The store-free path.** `read::ref_filter_keeps(refs, source_id, custom, custom_lists)` is the
+rule in memory, with `ref_place_ok` applied to the row's OWN id. `ListReads.refs` and
+`ListSelect.refs` carry the filter; on the select path (an unranked list) a reader takes its
+candidates from the reverse lookup, reads `custom`/`custom_lists` first (`ListSelect::reads_refs`)
+and `list_select` keeps by `ref_filter_keeps`; on the ranked path the board stays the whole scope
+and `list_board_page` filters by the same function. The store oracle `read::list_board` narrows to
+`referrers_of`'s candidates on the select path only. The hosted board answers it from reverse hints
+in `6j6v.1w3m`.
+
+**JSON.** `list --json` and `flow_list` are unchanged: the records of `list --json`, as a plain
+array without `--limit` and as the `{items, total, next_token?, restarted?}` envelope with it. A
+`flow_list` call without `refs` answers byte for byte what it answered before. A page token is
+bound to its refs: the same refs in another order or repeated are the same list, other refs
+restart it, and a change to a held referrer restarts it as any op on a held item does.
+
+**Out of scope here:** the hosted reverse hints (`6j6v.1w3m`), `flow_list` parity for `in`,
+`label`, `limit`, `paginate` and `token` (`6j6v.n07w`), a `next --ref`, `mention by --ref` or
+`archived --ref`, derived ranking keys over refs, runtime-declared refs (`6j6v.bs4c`), and
+cascading anything on a target's deletion or retyping.
 
 ## 6. Read & schema surface
 

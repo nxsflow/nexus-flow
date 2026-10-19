@@ -284,7 +284,7 @@ pub struct FlowShowParams {
     pub workspace: Option<String>,
 }
 
-/// `flow_list` input — items optionally filtered by status and/or type.
+/// `flow_list` input — items optionally filtered by status, type and refs.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct FlowListParams {
     /// Filter by status.
@@ -296,9 +296,23 @@ pub struct FlowListParams {
     /// Sort order: `rank` | `id` (default `id`). An unknown key is a loud error.
     #[serde(default)]
     pub sort: Option<String>,
+    /// Only items whose ref field holds the item id (`nxf list --ref FIELD=ID`): each entry names a
+    /// ref field of the plugin and an id (a bare local id is resolved). Several are alternatives;
+    /// at most 8. Archived items are never listed.
+    #[serde(default)]
+    pub refs: Vec<FlowRefFilter>,
     /// Per-call workspace override (S7/ppa); empty/omitted ⇒ the launch default. See the module docs.
     #[serde(default)]
     pub workspace: Option<String>,
+}
+
+/// One `flow_list` ref filter: the items whose ref field `field` holds the item `id`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct FlowRefFilter {
+    /// A ref field the plugin declares (see `flow_schema`).
+    pub field: String,
+    /// The referenced item's id; a bare local id is resolved.
+    pub id: String,
 }
 
 /// `flow_blocked` input — open items held up by an open blocker (or in a cycle), each with its

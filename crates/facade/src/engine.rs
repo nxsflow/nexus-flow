@@ -563,6 +563,15 @@ impl Engine {
     /// answers `validation` ("pass `now`"). The filters narrow the rows before they are ranked, so
     /// a type filter whose order reads no such rank needs no `now`; the id order never does. A
     /// malformed `now` answers `validation` too.
+    ///
+    /// **The ref filter (6j6v.9tx3).** [`ListQuery::referencing`] keeps the items whose declared
+    /// ref field holds a full item id — a single value equal to it or a present list entry equal
+    /// to it ([`read::ref_filter_keeps`]); several refs are alternatives. It narrows the rows
+    /// inside the selection, never the rank scope, so a ranked `--ref` list orders its rows as the
+    /// unfiltered ranked list orders them. Deleted referrers are dropped, closed ones kept, archived
+    /// ones never listed (`list` lists live, unarchived items). An id nothing holds is an empty
+    /// page with total 0. `validation` for a field that is not a declared ref, an id that is not
+    /// id-shaped, and more than [`read::MAX_REFS`] refs. The page token's key names the refs.
     pub fn list_query(&self, query: &ListQuery) -> Result<NextPage> {
         self.handle
             .try_with_state(|s| read::list_page(&self.cfg, &s.store, query))
@@ -571,7 +580,8 @@ impl Engine {
     /// [`list_query`](Engine::list_query) as JSON: `{"items", "total"}`, plus `next_token` and
     /// `restarted` when the query paginates — `items` being the records
     /// [`list_value`](Engine::list_value) gives. The envelope the CLI's `list --limit <n> --json`
-    /// prints. `now` is needed exactly as for [`list_query`](Engine::list_query).
+    /// prints. `now` and the ref filter mean exactly what they mean for
+    /// [`list_query`](Engine::list_query).
     pub fn list_query_value(&self, query: &ListQuery) -> Result<Value> {
         self.handle.try_with_state(|s| {
             let page = read::list_page(&self.cfg, &s.store, query)?;

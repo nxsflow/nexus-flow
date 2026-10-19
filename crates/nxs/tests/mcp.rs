@@ -417,6 +417,55 @@ async fn flow_list_returns_canonical_item_records() {
 }
 
 #[tokio::test]
+async fn flow_list_schema_takes_refs_and_an_empty_refs_list_is_the_plain_list() {
+    // 6j6v.9tx3 cut 2: the tool schema names `refs` ({field, id} each), and on a plugin without
+    // ref fields an empty `refs` answers exactly what a call without it does.
+    let tmp = flow_fixture();
+    seed(tmp.path());
+    let client = connect(tmp.path()).await;
+    let tools = client.list_all_tools().await.expect("tools/list");
+    let list = tools
+        .iter()
+        .find(|t| t.name == "flow_list")
+        .expect("flow_list is listed");
+    let schema = serde_json::to_value(&*list.input_schema).unwrap();
+    assert!(
+        schema["properties"].get("refs").is_some(),
+        "the schema lists refs: {schema}"
+    );
+    assert!(
+        schema.to_string().contains("\"field\"") && schema.to_string().contains("\"id\""),
+        "a ref filter is {{field, id}}: {schema}"
+    );
+    assert!(
+        list.description.as_deref().unwrap_or("").contains("refs"),
+        "the description names the filter"
+    );
+    let plain = tool_sc(&client, "flow_list", json!({})).await;
+    let empty = tool_sc(&client, "flow_list", json!({ "refs": [] })).await;
+    assert_eq!(plain, empty);
+    // A ref on a plugin that declares none is refused, naming that there are none.
+    let res = client
+        .call_tool(call_with(
+            "flow_list",
+            json!({ "refs": [{ "field": "owner", "id": "0001" }] }),
+        ))
+        .await
+        .expect("a refused filter is a tool result");
+    assert_eq!(res.is_error, Some(true));
+    let sc = res.structured_content.expect("the error envelope");
+    assert_eq!(sc["error"]["kind"], "validation");
+    assert!(
+        sc["error"]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("ref fields: (none)"),
+        "{sc}"
+    );
+    client.cancel().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn flow_show_unknown_id_maps_to_a_not_found_tool_error() {
     let tmp = flow_fixture();
     let client = connect(tmp.path()).await;

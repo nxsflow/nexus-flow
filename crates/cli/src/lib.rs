@@ -248,6 +248,10 @@ enum Command {
         /// Filter to items carrying this label (user vocabulary, not the display type).
         #[arg(long)]
         label: Option<String>,
+        /// Only items whose ref field FIELD holds the item ID (a bare local id is resolved).
+        /// Repeatable: the refs are alternatives, at most 8. Archived items are never listed.
+        #[arg(long = "ref", value_name = "FIELD=ID")]
+        refs: Vec<String>,
         /// Sort order: `rank` | `id` (default `id`). `rank` is the plugin's `list` ranking: an
         /// order per type where it declares one (`[ranking.list.<type>]`), else its `next` order.
         /// An unknown key is a loud error.
@@ -757,6 +761,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             ty,
             within,
             label,
+            refs,
             sort,
             limit,
             paginate,
@@ -769,6 +774,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 types: ty,
                 within: within.as_deref(),
                 label: label.as_deref(),
+                refs,
                 sort: sort.as_deref(),
                 limit: *limit,
                 paginate: *paginate,

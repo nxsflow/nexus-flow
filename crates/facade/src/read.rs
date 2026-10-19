@@ -686,6 +686,11 @@ pub struct ListQuery {
     /// of `[ranking.list]` reads the rank of a type that `next` ranks (6j6v.x0wf, see
     /// [`list_at`]). `None`: such a query answers `validation`; any other ignores it.
     pub now: Option<String>,
+    /// Only items whose declared ref field holds the id (6j6v.9tx3, `list --ref`): value equality
+    /// under the reference rule ([`ref_filter_keeps`]). Several are alternatives (OR); at most
+    /// [`MAX_REFS`]. Empty keeps every item. Archived referrers are never listed — `list` lists
+    /// live, unarchived items.
+    pub refs: Vec<RefFilter>,
 }
 
 impl ListQuery {
@@ -738,6 +743,14 @@ impl ListQuery {
         self
     }
 
+    /// Also admit the items whose declared ref field `field` holds the full item id `id`
+    /// (6j6v.9tx3; repeatable: the refs are alternatives). A caller holding a short id resolves it
+    /// first, as for every id the Engine takes.
+    pub fn referencing(mut self, field: impl Into<String>, id: impl Into<String>) -> ListQuery {
+        self.refs.push(RefFilter::new(field, id));
+        self
+    }
+
     /// The cache key a snapshot is bound to: the read, status, sort, filter and the plugin's
     /// `[ranking.list]` policy — never `limit`. Naming the read keeps a `list` token from answering
     /// a `next` or `mentioned_by` query; the ranking's fingerprint makes a token restart under a
@@ -748,10 +761,154 @@ impl ListQuery {
             "status": self.status,
             "sort": self.sort.unwrap_or(DEFAULT_SORT_LIST).as_str(),
             "filter": self.filter.key(),
+            "refs": refs_key(&self.refs),
             "rank": policy_fingerprint(cfg, Verb::List),
         })
         .to_string()
     }
+}
+
+// ---- the ref filter: `list --ref` (6j6v.9tx3) --------------------------------
+
+/// How many `--ref` filters one `list` carries at most (6j6v.9tx3): each one is a hint Query plus
+/// a BatchGet on a hosted board, and a relationship read from both ends needs two. More is
+/// `validation` — on the CLI, MCP and [`Engine::list_query`].
+///
+/// [`Engine::list_query`]: crate::engine::Engine::list_query
+pub const MAX_REFS: usize = 8;
+
+/// One `list --ref <field>=<id>` filter (6j6v.9tx3): keep the items whose declared ref field
+/// `field` holds the full item id `id` — a single value equal to it, or a present list entry
+/// equal to it ([`ref_filter_keeps`]). The id need not name an item: a deleted target's referrers
+/// stay findable, and an id nothing holds keeps nothing.
+///
+/// `#[non_exhaustive]`: build it with [`RefFilter::new`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct RefFilter {
+    /// The declared ref field.
+    pub field: String,
+    /// The full item id it must hold.
+    pub id: String,
+}
+
+impl RefFilter {
+    /// The filter "`field` holds `id`".
+    pub fn new(field: impl Into<String>, id: impl Into<String>) -> RefFilter {
+        RefFilter {
+            field: field.into(),
+            id: id.into(),
+        }
+    }
+}
+
+/// The refs' canonical spelling in a cached snapshot's query key: `[[field, id], …]` sorted and
+/// distinct, so the same alternatives in another order or repeated are the same list.
+fn refs_key(refs: &[RefFilter]) -> Value {
+    let set: BTreeSet<(&str, &str)> = refs
+        .iter()
+        .map(|r| (r.field.as_str(), r.id.as_str()))
+        .collect();
+    json!(set.into_iter().map(|(f, i)| [f, i]).collect::<Vec<_>>())
+}
+
+/// The declaration of `field` when it is a ref field of `cfg`'s plugin; `validation` naming the
+/// plugin's ref fields otherwise (6j6v.9tx3). The store knows no declarations: this is what makes
+/// `--ref` read a REFERENCE and not any value that happens to look like an id.
+fn declared_ref<'c>(cfg: &'c PluginConfig, field: &str) -> Result<&'c crate::plugin::FieldDecl> {
+    match cfg.fields.get(field) {
+        Some(decl) if decl.field_type == crate::plugin::FieldType::Ref => Ok(decl),
+        _ => {
+            let names: Vec<&str> = cfg
+                .fields
+                .iter()
+                .filter(|(_, d)| d.field_type == crate::plugin::FieldType::Ref)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            let names = if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            };
+            Err(NxfError::validation(format!(
+                "`--ref` names '{field}', which is not a ref field of this plugin; ref fields: \
+                 {names}"
+            )))
+        }
+    }
+}
+
+/// `validation` unless `refs` is a filter the reference rule can answer: at most [`MAX_REFS`],
+/// each on a declared ref field ([`declared_ref`]) with an id-shaped value
+/// ([`is_valid_ref_value`](nexus_flow_core::model::is_valid_ref_value)).
+fn check_refs(cfg: &PluginConfig, refs: &[RefFilter]) -> Result<()> {
+    if refs.len() > MAX_REFS {
+        return Err(NxfError::validation(format!(
+            "`--ref` takes at most {MAX_REFS} filters (got {})",
+            refs.len()
+        )));
+    }
+    for r in refs {
+        declared_ref(cfg, &r.field)?;
+        if !nexus_flow_core::model::is_valid_ref_value(&r.id) {
+            return Err(NxfError::validation(format!(
+                "`--ref {}`: a ref is a full item id '<prefix>.<suffix>' (got '{}')",
+                r.field, r.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// THE in-memory form of the reference rule (6j6v.9tx3): whether the item `source_id`, with its
+/// custom values `custom` and its list fields' present entries `lists`, passes `refs`. Empty
+/// `refs` keeps; else any ref keeps it whose place [`ref_place_ok`] admits — with the row's OWN
+/// id, so the ranked and hosted paths exclude exactly what the store lookup excludes — and whose
+/// field holds the id: the single value equal to it, or a present entry equal to it.
+///
+/// [`ref_place_ok`]: nexus_flow_core::model::ref_place_ok
+pub fn ref_filter_keeps(
+    refs: &[RefFilter],
+    source_id: &str,
+    custom: &BTreeMap<String, String>,
+    lists: &BTreeMap<String, Vec<FieldEntry>>,
+) -> bool {
+    refs.is_empty()
+        || refs.iter().any(|r| {
+            nexus_flow_core::model::ref_place_ok(source_id, &r.field, &r.id)
+                && (custom.get(&r.field) == Some(&r.id)
+                    || lists
+                        .get(&r.field)
+                        .is_some_and(|es| es.iter().any(|e| e.value == r.id)))
+        })
+}
+
+/// The ids of the live items any of `refs` holds ([`referrers_of`], one lookup per field).
+fn ref_candidates(store: &Store, refs: &[RefFilter]) -> Result<HashSet<String>> {
+    let mut by_field: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for r in refs {
+        by_field.entry(&r.field).or_default().push(&r.id);
+    }
+    let mut out = HashSet::new();
+    for (field, targets) in by_field {
+        for rows in referrers_of(store, field, &targets)?.into_values() {
+            out.extend(rows.into_iter().map(|i| i.id));
+        }
+    }
+    Ok(out)
+}
+
+/// Narrow store-path rows by `refs`, keeping their order: the rows the reverse lookup names.
+fn filter_refs_store(
+    store: &Store,
+    items: Vec<ItemRow>,
+    refs: &[RefFilter],
+) -> Result<Vec<ItemRow>> {
+    if refs.is_empty() {
+        return Ok(items);
+    }
+    let keep = ref_candidates(store, refs)?;
+    Ok(items.into_iter().filter(|i| keep.contains(&i.id)).collect())
 }
 
 /// One `list` page (6j6v.n698): [`list`] under `q.status` and `q.sort`, narrowed by `q.filter`
@@ -770,14 +927,20 @@ pub fn list_page(cfg: &PluginConfig, store: &Store, q: &ListQuery) -> Result<Nex
 /// [`list_page`] on the clock `clock` (unix seconds).
 fn list_page_at(cfg: &PluginConfig, store: &Store, q: &ListQuery, clock: i64) -> Result<NextPage> {
     let paging = Paging::check(q.limit, q.paginate, q.token.as_deref())?;
+    check_refs(cfg, &q.refs)?;
     let mark = Watermark::read(store)?;
+    // The ref filter narrows the ROWS inside the select closure, never the rank scope (6j6v.9tx3):
+    // a ranked `--ref` list orders its rows as the unfiltered ranked list orders the same rows.
     let fresh = list_selected(
         cfg,
         store,
         q.status.as_deref(),
         q.sort,
         q.now.as_deref(),
-        |rows| filter_next_store(store, rows, &q.filter),
+        |rows| {
+            let rows = filter_next_store(store, rows, &q.filter)?;
+            filter_refs_store(store, rows, &q.refs)
+        },
     )?;
     page_through(store, fresh, || q.key(cfg), &paging, mark, clock)
 }
@@ -3324,6 +3487,11 @@ pub struct ListReads {
     /// (docs/specs/derived-ranking-keys.md §12, decision 2) — so a ranked list reads the scope
     /// whole.
     pub select: Option<ListSelect>,
+    /// The query's ref filters (6j6v.9tx3, [`ListQuery::refs`]). On the select path a reader takes
+    /// its candidates from the reverse lookup of these and reads each candidate's custom values
+    /// before [`list_select`]; on the ranked path the board stays the whole scope and
+    /// [`list_board_page`] filters it.
+    pub refs: Vec<RefFilter>,
 }
 
 /// The query of a `list` that is not ranked, as a reader applies it before the joins
@@ -3342,6 +3510,8 @@ pub struct ListSelect {
     pub(crate) sort: SortKey,
     /// The cut; `None`: every kept item.
     pub limit: Option<usize>,
+    /// The query's ref filters (6j6v.9tx3): [`list_select`] keeps by [`ref_filter_keeps`].
+    pub refs: Vec<RefFilter>,
 }
 
 impl ListSelect {
@@ -3376,6 +3546,12 @@ impl ListSelect {
     pub fn reads_edges(&self) -> bool {
         self.filter.within.is_some()
     }
+
+    /// Whether the query filters by refs (6j6v.9tx3): a reader reads an item's `custom` and
+    /// `custom_lists` before [`list_select`].
+    pub fn reads_refs(&self) -> bool {
+        !self.refs.is_empty()
+    }
 }
 
 /// Where a reader cut a [`ListBoard`] ([`list_select`]): the query it kept and cut for, and how many
@@ -3394,13 +3570,16 @@ pub struct ListCut {
 /// [`ListCut`] to put on the board ([`ListBoard::cut`]). What [`list_board_page`] keeps, orders and
 /// cuts, so a reader that reads the joins of the kept items only answers the same page.
 ///
-/// Every item must carry its labels when [`ListSelect::reads_labels`], and its `belongs_to` and
-/// `contributes_to` when [`ListSelect::reads_edges`]; no other join is read here.
+/// Every item must carry its labels when [`ListSelect::reads_labels`], its `belongs_to` and
+/// `contributes_to` when [`ListSelect::reads_edges`], and its `custom` and `custom_lists` when
+/// [`ListSelect::reads_refs`]; no other join is read here.
 pub fn list_select(select: &ListSelect, items: Vec<ListItem>) -> (Vec<ListItem>, ListCut) {
     let mut kept: Vec<ListItem> = items
         .into_iter()
         .filter(|i| {
-            select.keeps_row(&i.item) && select.filter.keeps(&i.item, &i.labels, &i.contributes_to)
+            select.keeps_row(&i.item)
+                && select.filter.keeps(&i.item, &i.labels, &i.contributes_to)
+                && ref_filter_keeps(&select.refs, &i.item.id, &i.custom, &i.custom_lists)
         })
         .collect();
     // Ties by id: `list_board_page` sorts the board's items stably from id order, so ties are cut
@@ -3520,7 +3699,15 @@ pub fn list_reads(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
 /// The store's [`ListBoard`] for `reads` — the parity oracle for
 /// `nxs_fold_ddb::records::list_board`, as [`active_board`] is for the records: the listed items
 /// with their joins read in bulk, `next`'s board from the store's selection, and the graph.
+///
+/// An unranked query with ref filters (`reads.select` set, `reads.refs` not empty) reads only the
+/// candidates the reverse lookup ([`referrers_of`]) names, as a server takes them from its hints;
+/// a ranked one reads the whole scope, which its rank is computed over (6j6v.9tx3).
 pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
+    let candidates = match (&reads.select, reads.refs.is_empty()) {
+        (Some(_), false) => Some(ref_candidates(store, &reads.refs)?),
+        _ => None,
+    };
     let items: Vec<ItemRow> = derived::list_scope(store)?
         .into_iter()
         .filter(|i| {
@@ -3529,6 +3716,7 @@ pub fn list_board(store: &Store, reads: &ListReads) -> Result<ListBoard> {
                 .as_ref()
                 .is_none_or(|types| i.item_type.as_deref().is_some_and(|t| types.contains(t)))
         })
+        .filter(|i| candidates.as_ref().is_none_or(|c| c.contains(&i.id)))
         .collect();
     let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
     let mut labels = store.labels_of_bulk(&ids)?;
@@ -3619,6 +3807,7 @@ pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> 
     if let Some(now) = &q.now {
         crate::validate::iso_date(now)?;
     }
+    check_refs(cfg, &q.refs)?;
     let listed = match &board.types {
         None => true,
         Some(types) => {
@@ -3650,6 +3839,9 @@ pub fn list_board_page(cfg: &PluginConfig, board: &ListBoard, q: &ListQuery) -> 
                 .is_none_or(|s| i.item.status.as_deref() == Some(s))
         })
         .filter(|i| q.filter.keeps(&i.item, &i.labels, &i.contributes_to))
+        // On every path: idempotent where `list_select` kept the board, load-bearing on the
+        // ranked path, whose board is the whole scope (6j6v.9tx3).
+        .filter(|i| ref_filter_keeps(&q.refs, &i.item.id, &i.custom, &i.custom_lists))
         .map(|i| i.item.clone())
         .collect();
     let key = q.sort.unwrap_or(DEFAULT_SORT_LIST);
@@ -4313,6 +4505,38 @@ pub fn mentioners_of(store: &Store, targets: &[&str]) -> Result<BTreeMap<String,
     let mut out = BTreeMap::new();
     for (target, froms) in edges {
         // `froms` is id-sorted and distinct (the store's ORDER BY over a DISTINCT view).
+        let rows: Vec<ItemRow> = froms.iter().filter_map(|f| live.get(f).cloned()).collect();
+        if !rows.is_empty() {
+            out.insert(target, rows);
+        }
+    }
+    Ok(out)
+}
+
+/// THE reverse reference lookup (6j6v.9tx3): for every id in `targets`, the live items whose
+/// declared ref field `field` holds it — a single value or a present list entry, by equality —
+/// id-sorted and distinct. [`mentioners_of`]'s shape and rule: a deleted referrer is dropped, a
+/// closed or archived one kept (a reference is not work); a target nothing holds is absent (a
+/// bulk read, not `not_found`). One store query per 500 targets and one item read; the
+/// `list --ref` filter and the store board ([`list_board`]) read through it. The caller validated
+/// `field` as a declared ref of its plugin; the store itself knows no declarations.
+pub fn referrers_of(
+    store: &Store,
+    field: &str,
+    targets: &[&str],
+) -> Result<BTreeMap<String, Vec<ItemRow>>> {
+    let refs = store.referenced_by_bulk(field, targets)?;
+    let sources: BTreeSet<&str> = refs.values().flatten().map(String::as_str).collect();
+    let sources: Vec<&str> = sources.into_iter().collect();
+    let live: HashMap<String, ItemRow> = store
+        .get_items(&sources)?
+        .into_iter()
+        .filter(|i| i.deleted.as_deref() != Some("1"))
+        .map(|i| (i.id.clone(), i))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (target, froms) in refs {
+        // `froms` is id-sorted and distinct (the store's UNION, ordered by target and source).
         let rows: Vec<ItemRow> = froms.iter().filter_map(|f| live.get(f).cloned()).collect();
         if !rows.is_empty() {
             out.insert(target, rows);

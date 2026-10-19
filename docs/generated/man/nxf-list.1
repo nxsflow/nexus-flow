@@ -4,7 +4,7 @@
 .SH NAME
 list \- List items, optionally filtered by status, type, container and/or label. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); `\-\-sort rank` ranks by the active plugin\*(Aqs `list` order. `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH SYNOPSIS
-\fBlist\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-in\fR] [\fB\-\-label\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-\-paginate\fR] [\fB\-\-token\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBlist\fR [\fB\-\-status\fR] [\fB\-\-type\fR] [\fB\-\-in\fR] [\fB\-\-label\fR] [\fB\-\-ref\fR] [\fB\-\-sort\fR] [\fB\-\-limit\fR] [\fB\-\-paginate\fR] [\fB\-\-token\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 List items, optionally filtered by status, type, container and/or label. Id\-ordered by default (so the `\-\-json` record stays plugin\-independent); `\-\-sort rank` ranks by the active plugin\*(Aqs `list` order. `\-\-limit` shows only the head of it, and says so; `\-\-paginate` adds a token for the next page
 .SH OPTIONS
@@ -20,6 +20,9 @@ Only items in this container: its children (whose parent it is) and the items th
 .TP
 \fB\-\-label\fR \fI<LABEL>\fR
 Filter to items carrying this label (user vocabulary, not the display type)
+.TP
+\fB\-\-ref\fR \fI<FIELD=ID>\fR
+Only items whose ref field FIELD holds the item ID (a bare local id is resolved). Repeatable: the refs are alternatives, at most 8. Archived items are never listed
 .TP
 \fB\-\-sort\fR \fI<SORT>\fR
 Sort order: `rank` | `id` (default `id`). `rank` is the plugin\*(Aqs `list` ranking: an order per type where it declares one (`[ranking.list.<type>]`), else its `next` order. An unknown key is a loud error

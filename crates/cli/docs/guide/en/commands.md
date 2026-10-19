@@ -57,7 +57,10 @@ declares one (`[ranking.list.<type>]`, with `types = [...]` for how the types st
 other), else its `next` order. An order may also rank by an item's neighbours — its parent's
 rank, how many open children it has, how often it is mentioned — with the derived keys described
 under [Plugins](nxf-plugins). `--type` (repeatable), `--in <id>` (the container's children and
-contributors), `--status` and `--label` narrow it. `--limit` and `--paginate` cut and page it
+contributors), `--status` and `--label` narrow it, and so does `--ref <field>=<id>`: the items
+whose ref field holds that item id — a person's meetings, say (repeatable: the refs are
+alternatives, at most 8; see "Ref fields" under [Plugins](nxf-plugins)). Archived items are never
+listed. `--limit` and `--paginate` cut and page it
 exactly as they do `next`: with `--limit` the answer is `{"items": [...], "total": <n>}`, and
 `--paginate` adds `next_token` (pass it back with `--token`; null on the last page) and
 `restarted`:

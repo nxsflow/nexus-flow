@@ -169,3 +169,111 @@ fn a_ref_field_is_set_resolved_validated_shown_and_reported_through_the_command_
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["refs"]["source"], json!([{ "id": fb, "found": false }]));
 }
+
+#[test]
+fn list_ref_lists_the_referrers_and_resolves_a_bare_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = nxs_foundation::workspace::setup(
+        tmp.path(),
+        &nexus_flow_facade::workspace::flow_config("file-fixture"),
+    )
+    .unwrap();
+    let db = ws.db_path().to_string_lossy().into_owned();
+    let run = |args: &[&str]| probe_nxf(tmp.path(), &db, args);
+    let create = |title: &str| {
+        let (ok, out, err) = run(&[
+            "create",
+            "--type",
+            "file",
+            "--title",
+            title,
+            "--description",
+            "d",
+            "--priority",
+            "P1",
+            "--set",
+            &format!("uri=.nxs/files/{title}"),
+            "-q",
+        ]);
+        assert!(ok, "create {title}: {err}");
+        out.trim().to_string()
+    };
+    let (a, b, c, d) = (
+        create("a.md"),
+        create("b.md"),
+        create("c.md"),
+        create("d.md"),
+    );
+    let (ok, _, err) = run(&["update", &a, "--set", &format!("source={b}")]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = run(&["entry", "add", &d, "related", &c]);
+    assert!(ok, "{err}");
+    let listed = |args: &[&str]| -> Vec<String> {
+        let mut argv = vec!["list", "--json"];
+        argv.extend_from_slice(args);
+        let (ok, out, err) = run(&argv);
+        assert!(ok, "{argv:?}: {err}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let id = r["id"].as_str().unwrap();
+                id.split_once('.').unwrap().1.to_string()
+            })
+            .collect()
+    };
+
+    // A bare local suffix is resolved to the full id; the referrer is listed, its target not.
+    let source_b = format!("source={b}");
+    assert_eq!(listed(&["--ref", &source_b]), std::slice::from_ref(&a));
+    // Two refs are alternatives: the union of both lookups.
+    let related_c = format!("related={c}");
+    let mut union = vec![a.clone(), d.clone()];
+    union.sort();
+    assert_eq!(listed(&["--ref", &source_b, "--ref", &related_c]), union);
+    // Composed with `--limit`: the envelope of the filtered list.
+    let (ok, out, err) = run(&[
+        "list", "--json", "--ref", &source_b, "--ref", &related_c, "--limit", "1",
+    ]);
+    assert!(ok, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["total"], json!(2));
+    // An id nothing holds is an empty list.
+    assert!(listed(&["--ref", "source=zz99.none"]).is_empty());
+
+    let refused = |args: &[&str]| -> String {
+        let mut argv = vec!["list"];
+        argv.extend_from_slice(args);
+        let (ok, _, err) = run(&argv);
+        assert!(!ok, "{argv:?} must be refused");
+        err
+    };
+    let err = refused(&["--ref", &format!("uri={b}")]);
+    assert!(
+        err.contains(
+            "`--ref` names 'uri', which is not a ref field of this plugin; ref fields: related, \
+             source"
+        ),
+        "{err}"
+    );
+    for malformed in ["novalue", "source=", "=x"] {
+        let err = refused(&["--ref", malformed]);
+        assert!(err.contains("`--ref` takes FIELD=ID"), "{malformed}: {err}");
+    }
+    // A bare value is resolved to a local id first; one with whitespace is no id even then.
+    let err = refused(&["--ref", "source=two words"]);
+    assert!(
+        err.contains("`--ref source`: a ref is a full item id '<prefix>.<suffix>' (got"),
+        "{err}"
+    );
+    let nine: Vec<String> = (0..9).map(|i| format!("source=zz99.n{i}")).collect();
+    let mut argv: Vec<&str> = Vec::new();
+    for r in &nine {
+        argv.extend(["--ref", r.as_str()]);
+    }
+    let err = refused(&argv);
+    assert!(err.contains("`--ref` takes at most 8 filters"), "{err}");
+    let eight = &argv[..16];
+    assert!(listed(eight).is_empty(), "exactly eight refs are accepted");
+}

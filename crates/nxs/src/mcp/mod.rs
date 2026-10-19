@@ -126,11 +126,14 @@ impl NxsMcp {
         self.tool_result(flow::show(db, &start, &p))
     }
 
-    /// Items, optionally filtered by status and/or type; id-ordered by default.
+    /// Items, optionally filtered by status, type and refs; id-ordered by default.
     #[tool(
         name = "flow_list",
         description = "List flow items, optionally filtered by status and/or type. Id-ordered by \
-                       default; pass sort=rank for the ranked order.",
+                       default; pass sort=rank for the ranked order. refs=[{field, id}] keeps the \
+                       items whose ref field holds that item id (a person's meetings, stations or \
+                       relationships) — several are alternatives, at most 8; archived items are \
+                       never listed.",
         annotations(title = "List items", read_only_hint = true, open_world_hint = false)
     )]
     fn flow_list(&self, Parameters(p): Parameters<FlowListParams>) -> CallToolResult {
