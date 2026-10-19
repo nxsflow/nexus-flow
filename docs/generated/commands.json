@@ -680,6 +680,14 @@
             "help": "Filter to items carrying this label (user vocabulary, not the display type)"
           },
           {
+            "name": "refs",
+            "long": "ref",
+            "short": null,
+            "required": false,
+            "takes_value": true,
+            "help": "Only items whose ref field FIELD holds the item ID (a bare local id is resolved). Repeatable: the refs are alternatives, at most 8. Archived items are never listed"
+          },
+          {
             "name": "sort",
             "long": "sort",
             "short": null,

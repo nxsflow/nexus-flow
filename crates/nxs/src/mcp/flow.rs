@@ -50,7 +50,7 @@ fn resolve_now(over: Option<&str>) -> Result<String> {
     }
 }
 
-/// `flow_list`: items filtered by status/type, in the chosen order (default id). Canonical record:
+/// `flow_list`: items filtered by status/type/refs, in the chosen order (default id). Canonical record:
 /// an item array, each with a sparse `parent_closed_reason` join for a closed-masked open child
 /// (07a.3 §5). Mirrors `nxf list --json`.
 pub(super) fn list(db: Option<&str>, start: &Path, p: &FlowListParams) -> Result<Value> {
@@ -63,15 +63,33 @@ pub(super) fn list(db: Option<&str>, start: &Path, p: &FlowListParams) -> Result
     let now = (sort == Some(read::SortKey::Rank) && cfg.ranking.list.has_derived())
         .then(|| resolve_now(None))
         .transpose()?;
-    let items = read::list_at(
-        &cfg,
-        &store,
-        p.status.as_deref(),
-        p.item_type.as_deref(),
-        sort,
-        now.as_deref(),
-    )?;
-    read::list_to_value_with_custom(&cfg, &store, &items)
+    // One query through `read::list_page`, as `nxf list` builds it (6j6v.9tx3): `status`, `type`,
+    // `sort`, `now` and the refs. No limit, so the answer is the plain array `list_at` gave.
+    let mut filter = read::NextFilter::new();
+    if let Some(ty) = &p.item_type {
+        filter = filter.with_type(ty.as_str());
+    }
+    let mut query = read::ListQuery::new().filter(filter);
+    if let Some(status) = &p.status {
+        query = query.status(status.as_str());
+    }
+    if let Some(sort) = sort {
+        query = query.sort(sort);
+    }
+    if let Some(now) = now {
+        query = query.now(now);
+    }
+    for r in &p.refs {
+        // An empty id stays empty, so the facade refuses it rather than a resolved `<prefix>.`.
+        let id = if r.id.is_empty() {
+            String::new()
+        } else {
+            ws.replica.resolve_id(&r.id).into_owned()
+        };
+        query = query.referencing(r.field.as_str(), id);
+    }
+    let page = read::list_page(&cfg, &store, &query)?;
+    read::list_to_value_with_custom(&cfg, &store, &page.items)
 }
 
 /// `flow_next`: actionable work (ready + already-claimed) ranked by the plugin's `next` policy and
@@ -1108,5 +1126,184 @@ mod custom_field_tests {
         let err = entry_add(None, start, "tester", &with(&id, "mirrors", "x", Some(" ")))
             .expect_err("a blank label");
         assert_eq!(err.kind, ErrorKind::Validation);
+    }
+
+    #[test]
+    fn flow_list_refs_lists_the_referrers_and_resolves_a_bare_id() {
+        // 6j6v.9tx3 cut 2: `flow_list { refs: [{field, id}] }` is `nxf list --ref`, composed with
+        // `type`; a bare local suffix is resolved first; the facade's validation is the tool's.
+        use super::{list, FlowListParams};
+        use crate::mcp::params::FlowRefFilter;
+        use nxs_foundation::error::ErrorKind;
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let new_file = |set: Vec<String>| {
+            create(
+                None,
+                start,
+                "tester",
+                &create_params(set, "2026-10-12T09:00:00Z"),
+            )
+            .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let b = new_file(vec!["uri=.nxs/files/b.md".into()]);
+        let bare = b.split_once('.').unwrap().1.to_string();
+        let a = new_file(vec!["uri=.nxs/files/a.md".into(), format!("source={bare}")]);
+        let c = new_file(vec!["uri=.nxs/files/c.md".into()]);
+        entry_add(
+            None,
+            start,
+            "tester",
+            &FlowEntryParams {
+                field: "related".into(),
+                ..entry(&c, &b, None)
+            },
+        )
+        .unwrap();
+        let refs = |rs: &[(&str, &str)]| -> Vec<FlowRefFilter> {
+            rs.iter()
+                .map(|(f, i)| FlowRefFilter {
+                    field: f.to_string(),
+                    id: i.to_string(),
+                })
+                .collect()
+        };
+        let ids = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .expect("a plain array, as without refs")
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let one = list(
+            None,
+            start,
+            &FlowListParams {
+                refs: refs(&[("source", &bare)]),
+                ..FlowListParams::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ids(&one), [a.clone()]);
+        assert_eq!(one[0]["custom"]["source"], serde_json::json!(b));
+        let mut both = vec![a.clone(), c.clone()];
+        both.sort();
+        let union = list(
+            None,
+            start,
+            &FlowListParams {
+                refs: refs(&[("source", &b), ("related", &bare)]),
+                item_type: Some("file".into()),
+                sort: Some("id".into()),
+                ..FlowListParams::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ids(&union), both);
+        let err = list(
+            None,
+            start,
+            &FlowListParams {
+                refs: refs(&[("uri", &b)]),
+                ..FlowListParams::default()
+            },
+        )
+        .expect_err("uri is no ref field");
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert!(
+            err.msg.contains("ref fields: related, source"),
+            "{}",
+            err.msg
+        );
+        let nine: Vec<(String, String)> = (0..9)
+            .map(|i| ("source".to_string(), format!("zz99.n{i}")))
+            .collect();
+        let nine: Vec<(&str, &str)> = nine.iter().map(|(f, i)| (f.as_str(), i.as_str())).collect();
+        let err = list(
+            None,
+            start,
+            &FlowListParams {
+                refs: refs(&nine),
+                ..FlowListParams::default()
+            },
+        )
+        .expect_err("nine refs");
+        assert!(
+            err.msg.contains("`--ref` takes at most 8 filters"),
+            "{}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn flow_list_without_refs_is_byte_identical_to_the_list_it_gave_before() {
+        // The tool now routes through `read::list_page`; without `refs` its JSON must stay what
+        // `read::list_at` + `list_to_value_with_custom` gave for every status / type / sort.
+        use super::{list, FlowListParams};
+        use nexus_flow_facade::read;
+        let tmp = file_workspace();
+        let start = tmp.path();
+        let mut ids = Vec::new();
+        for title in ["b.md", "a.md", "c.md"] {
+            ids.push(
+                create(
+                    None,
+                    start,
+                    "tester",
+                    &create_params(
+                        vec![format!("uri=.nxs/files/{title}")],
+                        "2026-10-12T09:00:00Z",
+                    ),
+                )
+                .unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        use nexus_flow_facade::workspace::WorkspaceExt;
+        let ws = nexus_flow_facade::workspace::discover(start).unwrap();
+        let cfg = nexus_flow_facade::plugin::load("file-fixture").unwrap();
+        let mut store = ws.open_store().unwrap();
+        store.set_field(&ids[1], "status", Some("in_progress".into()), "t");
+        for status in [None, Some("open"), Some("in_progress")] {
+            for ty in [None, Some("file"), Some("nosuch")] {
+                for sort in [None, Some("id"), Some("rank")] {
+                    let before = read::list_to_value_with_custom(
+                        &cfg,
+                        &store,
+                        &read::list_at(
+                            &cfg,
+                            &store,
+                            status,
+                            ty,
+                            sort.map(read::parse_sort).transpose().unwrap(),
+                            None,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    let now = list(
+                        None,
+                        start,
+                        &FlowListParams {
+                            status: status.map(str::to_string),
+                            item_type: ty.map(str::to_string),
+                            sort: sort.map(str::to_string),
+                            ..FlowListParams::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        now.to_string(),
+                        before.to_string(),
+                        "{status:?} {ty:?} {sort:?}"
+                    );
+                }
+            }
+        }
     }
 }

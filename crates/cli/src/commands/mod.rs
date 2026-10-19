@@ -1741,6 +1741,8 @@ pub struct ListArgs<'a> {
     pub types: &'a [String],
     pub within: Option<&'a str>,
     pub label: Option<&'a str>,
+    /// `--ref FIELD=ID`, as given (6j6v.9tx3).
+    pub refs: &'a [String],
     pub sort: Option<&'a str>,
     pub limit: Option<usize>,
     pub paginate: bool,
@@ -1786,6 +1788,15 @@ pub fn list(json: bool, db: Option<&str>, args: ListArgs<'_>) -> Result<()> {
     }
     if let Some(token) = args.token {
         query = query.token(token);
+    }
+    // `--ref FIELD=ID` (6j6v.9tx3): the id resolved as every id the CLI takes; the field, the id's
+    // shape and the count are the facade's validation.
+    for r in args.refs {
+        let (field, id) = r
+            .split_once('=')
+            .filter(|(field, id)| !field.is_empty() && !id.is_empty())
+            .ok_or_else(|| NxfError::validation("`--ref` takes FIELD=ID"))?;
+        query = query.referencing(field, ws.replica.resolve_id(id).into_owned());
     }
     let page = read::list_page(&cfg, &store, &query)?;
 

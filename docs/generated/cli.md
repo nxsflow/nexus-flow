@@ -237,6 +237,7 @@ List items, optionally filtered by status, type, container and/or label. Id-orde
 * `--type <TYPE>` — Filter by type, using the active plugin's vocabulary (see `nxf schema`). Repeatable: the types are alternatives
 * `--in <ID>` — Only items in this container: its children (whose parent it is) and the items that contribute to it
 * `--label <LABEL>` — Filter to items carrying this label (user vocabulary, not the display type)
+* `--ref <FIELD=ID>` — Only items whose ref field FIELD holds the item ID (a bare local id is resolved). Repeatable: the refs are alternatives, at most 8. Archived items are never listed
 * `--sort <SORT>` — Sort order: `rank` | `id` (default `id`). `rank` is the plugin's `list` ranking: an order per type where it declares one (`[ranking.list.<type>]`), else its `next` order. An unknown key is a loud error
 * `--limit <LIMIT>` — Max items to show (default: no limit). Applied last — after `--sort` and the filters — and never silently: a truncated list is headed `showing <n> of <total>`, and under `--json` the flag wraps the records as `{"items": [...], "total": <n>}`
 * `--paginate` — Page through the list `--limit` rows at a time: the answer ends with a token for the next page (`next_token` and `restarted` under `--json`). The list is cached on this machine for an hour; a change to an item in it, or a stale or invalid token, restarts at the first page
