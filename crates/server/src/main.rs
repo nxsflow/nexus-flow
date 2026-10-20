@@ -212,8 +212,7 @@ fn serve() -> u8 {
         .build()
         .expect("build the relay runtime");
     runtime.block_on(async {
-        let addr =
-            std::env::var("NXF_RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+        let addr = std::env::var("NXF_RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
         let (ops, registry) = backends();
         let listener = tokio::net::TcpListener::bind(&addr)
             .await

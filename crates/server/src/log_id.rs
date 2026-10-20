@@ -341,7 +341,11 @@ mod tests {
                 "3f1c2a9e-0000-4000-8000-000000000001",
                 "rid=h1:t1:ca8c97c1c46d0dc5c92131fc",
             ),
-            (Kind::Mid, "m-laptop-1", "mid=h1:t1:232916555290733ba960135f"),
+            (
+                Kind::Mid,
+                "m-laptop-1",
+                "mid=h1:t1:232916555290733ba960135f",
+            ),
         ] {
             assert_eq!(key.token(kind, id), token, "{kind:?} {id}");
         }
@@ -398,7 +402,10 @@ mod tests {
     fn a_refusal_never_echoes_the_value() {
         for (value, _) in refusals() {
             let message = LogKey::parse(&value).expect_err("refused").to_string();
-            assert!(message.starts_with("NXS_LOG_HMAC_KEY is malformed"), "{message}");
+            assert!(
+                message.starts_with("NXS_LOG_HMAC_KEY is malformed"),
+                "{message}"
+            );
             // Every fragment of the value long enough to identify it stays out of the message.
             for start in 0..value.len().saturating_sub(7) {
                 if let Some(piece) = value.get(start..start + 8) {
@@ -418,14 +425,23 @@ mod tests {
     #[test]
     fn debug_never_shows_the_key_bytes() {
         let shown = format!("{:?}", c9());
-        assert!(shown.contains("t1") && shown.contains("redacted"), "{shown}");
+        assert!(
+            shown.contains("t1") && shown.contains("redacted"),
+            "{shown}"
+        );
         assert!(!shown.contains("[0, 1, 2"), "{shown}");
     }
 
     #[test]
     fn without_a_key_an_id_is_written_as_its_kind_and_a_dash() {
-        assert_eq!(LogId::with_key(Kind::Sid, "6j6v", None).to_string(), "sid=-");
-        assert_eq!(LogId::with_key(Kind::Mid, "m-laptop-1", None).to_string(), "mid=-");
+        assert_eq!(
+            LogId::with_key(Kind::Sid, "6j6v", None).to_string(),
+            "sid=-"
+        );
+        assert_eq!(
+            LogId::with_key(Kind::Mid, "m-laptop-1", None).to_string(),
+            "mid=-"
+        );
     }
 
     #[test]
@@ -464,7 +480,10 @@ mod tests {
         assert_eq!(code, 0, "{err}");
         assert_eq!(out, "sid=h1:t1:d5bfa71653806fdbcfb1052f\n");
         let (code, out, _) = run_log_hash(&["mid", "m-laptop-1"], Some(C9_KEY));
-        assert_eq!((code, out.as_str()), (0, "mid=h1:t1:232916555290733ba960135f\n"));
+        assert_eq!(
+            (code, out.as_str()),
+            (0, "mid=h1:t1:232916555290733ba960135f\n")
+        );
     }
 
     #[test]
