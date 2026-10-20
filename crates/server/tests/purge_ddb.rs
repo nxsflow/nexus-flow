@@ -564,19 +564,25 @@ fn rt_fold_table(c: &Client, table: &str) {
 }
 
 #[test]
-fn dynamodb_local_returns_table_id_and_creation_time_and_a_recreated_table_is_another_store() {
-    // MF-8: the identity rules lean on TableId and CreationDateTime; check DynamoDB Local
-    // returns both. MF-12: assert on TableId so the re-create needs no second-resolution wait.
+fn a_recreated_table_is_another_store() {
+    // MF-8, answered by CI: DynamoDB Local returns TableArn and CreationDateTime but no TableId,
+    // so the TableId rules are tested on constructed descriptions (purge::ddb unit tests) and a
+    // re-created table is told apart here by its creation time alone. MF-12: real AWS reports
+    // CreationDateTime in seconds, so the re-create waits more than one.
     let f = fixture!("purge_ddb_recreate", 2, 0);
     let first = f.dry(&target());
     let identity = first.report["store"]["identity"].clone();
     assert!(identity["ops_table_arn"].is_string(), "{identity}");
-    assert!(identity["ops_table_id"].is_string(), "TableId: {identity}");
     assert!(
         identity["ops_created"].is_string(),
         "CreationDateTime: {identity}"
     );
+    eprintln!(
+        "DynamoDB Local TableId: {} (null means the TableId rules rest on the unit tests)",
+        identity["ops_table_id"]
+    );
     ddb::delete_table(&f.client, &f.ops);
+    std::thread::sleep(Duration::from_millis(1_500));
     ddb::create(
         &f.client,
         &f.ops,
@@ -589,8 +595,8 @@ fn dynamodb_local_returns_table_id_and_creation_time_and_a_recreated_table_is_an
     let again = f.dry(&target());
     again.expect(0, "after the re-create");
     assert_ne!(
-        again.report["store"]["identity"]["ops_table_id"],
-        identity["ops_table_id"]
+        again.report["store"]["identity"]["ops_created"],
+        identity["ops_created"]
     );
     assert_ne!(again.identity_digest(), first.identity_digest());
 }

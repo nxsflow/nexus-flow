@@ -345,6 +345,8 @@ struct FakeStore {
     /// Keys a writer adds right after the delete, before the verification.
     late_write: Mutex<Option<PlanKey>>,
     unknown: Vec<String>,
+    /// Unknown kinds that appear only from this plan on (a newer writer during the run).
+    unknown_from_plan: Option<(u32, Vec<String>)>,
     plans: Mutex<u32>,
     sql: bool,
 }
@@ -363,6 +365,7 @@ impl FakeStore {
             fail_after_batches: None,
             late_write: Mutex::new(None),
             unknown: Vec::new(),
+            unknown_from_plan: None,
             plans: Mutex::new(0),
             sql: false,
         }
@@ -433,7 +436,11 @@ impl PurgeStore for FakeStore {
     }
 
     fn plan(&self, stream: &StreamId, ctx: &mut RunCtx<'_>) -> Result<Plan, PurgeError> {
-        *self.plans.lock().unwrap() += 1;
+        let nth = {
+            let mut plans = self.plans.lock().unwrap();
+            *plans += 1;
+            *plans
+        };
         for _ in 0..self.plan_pages {
             self.clock.advance(self.secs_per_page);
             ctx.plan_page()?;
@@ -450,6 +457,11 @@ impl PurgeStore for FakeStore {
             plan.ops = OpsFacts::default();
         }
         plan.unknown = self.unknown.clone();
+        if let Some((from, names)) = &self.unknown_from_plan {
+            if nth >= *from {
+                plan.unknown.extend(names.iter().cloned());
+            }
+        }
         if let Some(lease) = &self.lease {
             plan.lease = lease.read(stream)?;
         }
@@ -771,6 +783,26 @@ fn an_unknown_kind_refuses_every_mode_before_anything_is_deleted() {
         store.lease.as_ref().unwrap().read(&sid("n-h-1")).unwrap(),
         None,
         "the lease is released after a 78"
+    );
+}
+
+#[test]
+fn an_unknown_kind_that_appears_after_the_delete_is_residue_never_complete() {
+    // A newer writer adds an item of a kind this build does not know while the delete runs: the
+    // verification read sees it, and the run must not say complete.
+    let clock = FakeClock::at(1_000.0);
+    let mut store = FakeStore::new(&clock);
+    store.seed("n-h-1", 4, 1);
+    // Plans: 1 the dry run, 2 the delete run's plan, 3 its verification.
+    store.unknown_from_plan = Some((3, vec!["zzz#".into()]));
+    let store = Arc::new(store);
+    let dry = run(&store, &clock, "n-h-1", DRY);
+    let out = run(&store, &clock, "n-h-1", yes(dry.digest()));
+    assert_eq!(out.code(), 3, "{:?}", out.outcome.error);
+    assert_eq!(out.json()["complete"], false);
+    assert_eq!(
+        out.json()["residue"],
+        json!([{"kind": "unknown", "count": 1}])
     );
 }
 

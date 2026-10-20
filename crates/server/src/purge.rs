@@ -1371,7 +1371,7 @@ fn delete(
     ctx.reached("V0")?;
     ctx.plan_started = ctx.now();
     let verification = store.plan(stream, ctx)?;
-    let residue: Vec<ResidueEntry> = verification
+    let mut residue: Vec<ResidueEntry> = verification
         .kinds
         .iter()
         .filter(|k| k.found() > 0)
@@ -1381,6 +1381,15 @@ fn delete(
             by_prefix: (k.kind == "registry").then(|| k.by_prefix.clone()),
         })
         .collect();
+    // A kind this build does not know that appeared during the run (a newer writer): it is still
+    // there, so the run is not complete — residue, never a silent success.
+    if !verification.unknown.is_empty() {
+        residue.push(ResidueEntry {
+            kind: "unknown",
+            count: verification.unknown.len() as u64,
+            by_prefix: None,
+        });
+    }
     let left: Vec<String> = residue
         .iter()
         .map(|r| format!("{}={}", r.kind, r.count))
