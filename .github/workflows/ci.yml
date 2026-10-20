@@ -274,6 +274,16 @@ jobs:
       - name: Tests (debug)
         run: cargo test --all
 
+      # The purge's test seams (6j6v.f6yb) exist only behind the `test-seams` feature, which only
+      # this package's own tests turn on — so every test above ran a relay WITH them. This builds
+      # the relay the way it ships (no dev-dependencies, so no `test-seams`) and runs one SQLite
+      # purge with every NXF_RELAY_TEST_PURGE_* variable set: it must exit 0 with the target empty.
+      # The release workflow runs the same script against the release artefact (MF-4).
+      - name: The shipped nxf-relay carries no purge test seam
+        run: |
+          cargo build -p nxs-server --bin nxf-relay --release
+          bash crates/server/scripts/purge-seam-inertness.sh target/release/nxf-relay
+
       # Release profile is a REQUIRED gate, not a nicety: a side effect placed inside
       # `debug_assert!` is compiled out of release builds and silently no-ops there,
       # while passing the entire debug test suite. That bug class shipped once
@@ -642,8 +652,10 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
         run: |
           export NXF_RELAY_PG_CA_FILE="$RUNNER_TEMP/pgtls/ca.crt"
+          # `purge_pg`: the purge dials its own connection through `tls_pg`; here it is proven
+          # over a real TLS session (MF-7 — the plaintext job above cannot).
           cargo test -p nxs-server --features postgres \
-            --test postgres_parity --test postgres_in_runtime
+            --test postgres_parity --test postgres_in_runtime --test purge_pg
 
       - name: Stop Postgres
         if: always()
@@ -886,8 +898,19 @@ jobs:
       - name: Clippy (dynamodb backend, warnings are errors)
         run: cargo clippy -p nxs-server -p nxs-fold-ddb --all-targets --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb -- -D warnings
 
+      # The purge acceptance (6j6v.f6yb, `tests/purge_acceptance.rs`) writes its target stream
+      # through two real workspaces, so the shipped `nxs`/`nxf` must exist and be current (the
+      # freshness gate in nxs-test-support refuses a stale one).
+      - name: Build the shipped nxs/nxf binaries the purge acceptance drives
+        run: cargo build -p nxs
+
       - name: DynamoDB Local tests (debug)
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb
+
+      # The release-profile run of the purge acceptance needs a current release `nxs` too.
+      - name: Build the shipped nxs/nxf binaries (release)
+        if: github.event_name != 'pull_request'
+        run: cargo build -p nxs --release
 
       # Same staggering as the other two release steps (6j6v.6e0e).
       - name: DynamoDB Local tests (release)

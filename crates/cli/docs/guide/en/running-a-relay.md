@@ -317,6 +317,27 @@ that API Gateway or CloudFront in front of a serverless relay allow. Behind a sh
 If you point a **released** binary at `NXF_RELAY_BACKEND=dynamodb`, it will refuse to start and
 tell you exactly this: the backend is a build-time feature, and this build does not carry it.
 
+## Removing a stream
+
+`nxf-relay purge` removes everything the relay holds for one stream — its ops, its prefix claims
+and the machines announced for it — and nothing else. It never guesses where the store is: every
+variable is required (`NXF_RELAY_BACKEND`, and `NXF_RELAY_DB` plus `NXF_RELAY_REGISTRY_DB` on
+SQLite, `NXF_RELAY_PG_URL` on Postgres). Three steps, each one JSON report on stdout:
+
+```bash
+nxf-relay purge <stream-id> --dry-run                       # what would go, and a plan digest
+nxf-relay purge <stream-id> --yes --plan <plan_digest>      # delete exactly that plan
+nxf-relay purge <stream-id> --dry-run --expect-empty        # confirm nothing is left (exit 0)
+```
+
+If anything was written to the stream since the dry run, `--yes` deletes nothing and exits 4: take
+a fresh dry run. Record the report's `store.identity_digest` once and pass it as
+`--expect-identity` on every run — it refuses any other store, and the confirm after a store's last
+stream needs it. On SQLite, stop the relay first when the dry run says `"large": true`, and run
+`VACUUM` once on a file an older release wrote. The relay authenticates nobody, so stop it or block
+the stream at your proxy while you purge. The full procedure, every exit code and the account-level
+sequence are in `docs/runbooks/relay-purge.md` in the repository.
+
 ## What is not here yet
 
 - **Authentication.** See the warning at the top. Until it ships, treat relay reachability as the

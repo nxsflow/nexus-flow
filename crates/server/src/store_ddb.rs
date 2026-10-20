@@ -238,15 +238,18 @@ use std::time::{Duration, Instant};
 use aws_sdk_dynamodb::error::ProvideErrorMetadata;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, ConditionCheck, Put, ReturnValuesOnConditionCheckFailure, TransactWriteItem,
-    Update,
+    AttributeValue, ConditionCheck, Put, ReturnValue, ReturnValuesOnConditionCheckFailure,
+    TransactWriteItem, Update,
 };
 use aws_sdk_dynamodb::Client;
 use nxs_sync::protocol::{Cursor, MachineHello, RegisterOutcome, StreamId};
 use nxs_sync::wire::WireOp;
 
 use crate::presence::{MachineRecord, MachinesPage, PresenceStore};
-use crate::registry::{candidate_prefix, PrefixRegistry, REASSIGN_ATTEMPTS};
+use crate::registry::{
+    candidate_prefix, LeaseItem, LeaseRenewed, LeaseTaken, PrefixRegistry, StreamLease,
+    REASSIGN_ATTEMPTS,
+};
 use crate::store::{
     decode_extra, encode_extra, page_limit, past_deadline, OpStore, StoreError, StoreResult,
 };
@@ -331,6 +334,17 @@ fn ddb_err<E: Into<aws_sdk_dynamodb::Error>>(e: E) -> StoreError {
     StoreError(message)
 }
 
+/// An SDK error as its error CODE only (log-id v1 C10, owner decision 2026-10-20): the SDK's own
+/// message can quote a key or a value, so neither the log nor a purge report ever carries it. Used
+/// by the stream lease and the purge; unlike [`ddb_err`] it writes nothing to stderr itself.
+pub(crate) fn ddb_code_err<E: Into<aws_sdk_dynamodb::Error>>(e: E) -> StoreError {
+    let err = e.into();
+    StoreError(format!(
+        "dynamodb error: {}",
+        err.code().unwrap_or("UnknownError")
+    ))
+}
+
 /// Build a client from explicit config. The store and the registry take their table name,
 /// endpoint, and region as CONSTRUCTOR ARGUMENTS rather than reading the environment
 /// themselves, so both stay directly testable against DynamoDB Local; reading the
@@ -342,7 +356,7 @@ fn ddb_err<E: Into<aws_sdk_dynamodb::Error>>(e: E) -> StoreError {
 /// existence are only ever proven by an actual request. Shared by
 /// [`DynamoDbOpStore::new`] and [`DynamoDbPrefixRegistry::new`]: identical client
 /// construction, two independently provisioned tables.
-async fn build_client(endpoint: Option<String>, region: Option<String>) -> Client {
+pub(crate) async fn build_client(endpoint: Option<String>, region: Option<String>) -> Client {
     let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .timeout_config(request_timeouts());
     if let Some(region) = region {
@@ -1750,6 +1764,10 @@ impl PrefixRegistry for DynamoDbPrefixRegistry {
         Some(self)
     }
 
+    fn stream_lease(&self) -> Option<&dyn StreamLease> {
+        Some(self)
+    }
+
     fn register(
         &self,
         stream: &StreamId,
@@ -1832,6 +1850,187 @@ impl PrefixRegistry for DynamoDbPrefixRegistry {
             Err(StoreError(format!(
                 "prefix space exhausted for stream {stream_id} after {REASSIGN_ATTEMPTS} attempts"
             )))
+        })
+    }
+}
+
+// ----- the stream lease (6j6v.f6yb design §7a) --------------------------------------------------
+
+/// The partition of the per-stream lease items (and of 5vxp-a's global `lease` item, which the
+/// purge never reads or writes).
+pub const SWEEP_PARTITION: &str = "#sweep";
+
+/// The lease item's sort key for one stream. `validate_purge_id` keeps ids at 1,000 bytes so this
+/// stays inside DynamoDB's 1,024-byte sort key (MF-R3-4).
+pub fn lease_sk(stream_id: &str) -> String {
+    format!("stream#{stream_id}")
+}
+
+fn lease_item(item: &HashMap<String, AttributeValue>) -> StoreResult<LeaseItem> {
+    Ok(LeaseItem {
+        holder: parse_s(item, "holder")?,
+        expires_at: parse_n(item, "expires_at")?,
+    })
+}
+
+fn unix_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// What one conditional `PutItem` of a lease item did.
+enum LeasePut {
+    /// Written; the item it replaced, if any (`ReturnValues = ALL_OLD`).
+    Written(Option<LeaseItem>),
+    /// The condition failed; the item as it stood (`ReturnValuesOnConditionCheckFailure`).
+    Refused(Option<LeaseItem>),
+}
+
+impl DynamoDbPrefixRegistry {
+    /// One conditional `PutItem` of the lease item.
+    async fn put_lease(
+        client: &Client,
+        table: &str,
+        stream_id: &str,
+        holder: &str,
+        expires_at: i64,
+        condition: &str,
+        values: Vec<(&str, AttributeValue)>,
+    ) -> StoreResult<LeasePut> {
+        use aws_sdk_dynamodb::operation::put_item::PutItemError;
+        let mut put = client
+            .put_item()
+            .table_name(table)
+            .item("stream_id", AttributeValue::S(SWEEP_PARTITION.into()))
+            .item("sk", AttributeValue::S(lease_sk(stream_id)))
+            .item("holder", AttributeValue::S(holder.into()))
+            .item("expires_at", AttributeValue::N(expires_at.to_string()))
+            .condition_expression(condition)
+            .return_values(ReturnValue::AllOld)
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld);
+        for (name, value) in values {
+            put = put.expression_attribute_values(name, value);
+        }
+        match put.send().await {
+            Ok(out) => Ok(LeasePut::Written(
+                out.attributes().map(lease_item).transpose()?,
+            )),
+            Err(e) => match e.into_service_error() {
+                PutItemError::ConditionalCheckFailedException(c) => {
+                    Ok(LeasePut::Refused(c.item().map(lease_item).transpose()?))
+                }
+                other => Err(ddb_code_err(other)),
+            },
+        }
+    }
+}
+
+impl StreamLease for DynamoDbPrefixRegistry {
+    fn take(
+        &self,
+        stream: &StreamId,
+        holder: &str,
+        ttl: Duration,
+        now: std::time::SystemTime,
+    ) -> StoreResult<LeaseTaken> {
+        let (client, table) = (self.client.clone(), self.table.clone());
+        let (stream_id, holder) = (stream.as_str().to_string(), holder.to_string());
+        let now_s = unix_secs(now);
+        let expires_at = unix_secs(now + ttl);
+        block_on(async move {
+            let put = Self::put_lease(
+                &client,
+                &table,
+                &stream_id,
+                &holder,
+                expires_at,
+                "attribute_not_exists(sk) OR expires_at < :now",
+                vec![(":now", AttributeValue::N(now_s.to_string()))],
+            )
+            .await?;
+            Ok(match put {
+                LeasePut::Written(previous) => LeaseTaken::Taken {
+                    expires_at,
+                    previous,
+                },
+                LeasePut::Refused(Some(held)) => LeaseTaken::Held(held),
+                LeasePut::Refused(None) => {
+                    return Err(StoreError(
+                        "dynamodb error: the lease condition failed without an item".into(),
+                    ))
+                }
+            })
+        })
+    }
+
+    fn renew(
+        &self,
+        stream: &StreamId,
+        holder: &str,
+        ttl: Duration,
+        now: std::time::SystemTime,
+    ) -> StoreResult<LeaseRenewed> {
+        let (client, table) = (self.client.clone(), self.table.clone());
+        let (stream_id, holder) = (stream.as_str().to_string(), holder.to_string());
+        let expires_at = unix_secs(now + ttl);
+        block_on(async move {
+            let put = Self::put_lease(
+                &client,
+                &table,
+                &stream_id,
+                &holder,
+                expires_at,
+                "holder = :me",
+                vec![(":me", AttributeValue::S(holder.clone()))],
+            )
+            .await?;
+            Ok(match put {
+                LeasePut::Written(_) => LeaseRenewed::Renewed { expires_at },
+                LeasePut::Refused(_) => LeaseRenewed::Lost,
+            })
+        })
+    }
+
+    fn release(&self, stream: &StreamId, holder: &str) -> StoreResult<bool> {
+        use aws_sdk_dynamodb::operation::delete_item::DeleteItemError;
+        let (client, table) = (self.client.clone(), self.table.clone());
+        let (stream_id, holder) = (stream.as_str().to_string(), holder.to_string());
+        block_on(async move {
+            let deleted = client
+                .delete_item()
+                .table_name(&table)
+                .key("stream_id", AttributeValue::S(SWEEP_PARTITION.into()))
+                .key("sk", AttributeValue::S(lease_sk(&stream_id)))
+                .condition_expression("holder = :me")
+                .expression_attribute_values(":me", AttributeValue::S(holder))
+                .send()
+                .await;
+            match deleted {
+                Ok(_) => Ok(true),
+                Err(e) => match e.into_service_error() {
+                    DeleteItemError::ConditionalCheckFailedException(_) => Ok(false),
+                    other => Err(ddb_code_err(other)),
+                },
+            }
+        })
+    }
+
+    fn read(&self, stream: &StreamId) -> StoreResult<Option<LeaseItem>> {
+        let (client, table) = (self.client.clone(), self.table.clone());
+        let stream_id = stream.as_str().to_string();
+        block_on(async move {
+            let resp = client
+                .query()
+                .table_name(&table)
+                .key_condition_expression("stream_id = :p AND sk = :sk")
+                .expression_attribute_values(":p", AttributeValue::S(SWEEP_PARTITION.into()))
+                .expression_attribute_values(":sk", AttributeValue::S(lease_sk(&stream_id)))
+                .consistent_read(true)
+                .send()
+                .await
+                .map_err(ddb_code_err)?;
+            resp.items().first().map(lease_item).transpose()
         })
     }
 }

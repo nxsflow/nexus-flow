@@ -34,9 +34,9 @@ postgres = [
 # build host, so a contributor without those cannot compile `--features dynamodb` at all
 # (`cargo build` and `cargo test` without the feature are unaffected).
 # `tokio/time` is required, not incidental: the registry's bounded retry after a
-# TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry). `sha2` derives
-# the range key of an op's claim item, which makes append idempotent (store_ddb::claim_seq).
-dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "dep:sha2", "tokio/time"]
+# TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry). (`sha2`, which
+# derives an op's claim key, is in every build since 6j6v.f6yb; see below.)
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "tokio/time", "nxs-fold-ddb/dynamodb"]
 # Test seams on the production types (`DynamoDbOpStore::with_before_write`, 6j6v.r3jf). Off in every
 # shipped build: only this package's own dev-dependency on itself (below) turns it on, so the
 # integration tests can hold an append between choosing its seq and sending its write while the
@@ -83,7 +83,12 @@ rustls-pemfile = { version = "2", optional = true }
 # rather than bending the trait toward async.
 aws-sdk-dynamodb = { version = "1", optional = true }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
-sha2 = { version = "0.10", optional = true }
+# The claim key of an op (store_ddb::claim_seq), and since 6j6v.f6yb in every build: the log-id
+# HMAC (log_id.rs, log-id v1 C2) and the purge's plan and identity digests (purge.rs).
+sha2 = "0.10"
+# log-id v1 (6j6v.01wt, built by 6j6v.f6yb): HMAC-SHA256 over the id, and the key's base64url text.
+hmac = "0.12"
+base64 = "0.22"
 
 [[example]]
 name = "managed-pg"
@@ -111,3 +116,6 @@ assert_cmd = "2"
 # This package itself, with its test seams on (see the `test-seams` feature). A dev-dependency, so
 # the feature is unified into the library only when tests are built.
 nxs-server = { path = ".", features = ["test-seams"] }
+# The purge's identity gate must refuse the board-fold table named as the registry (6j6v.f6yb DoD),
+# so the DynamoDB suite creates that table exactly as `nxs_fold_ddb::ddb::create_table` does.
+nxs-fold-ddb = { path = "../fold-ddb" }
