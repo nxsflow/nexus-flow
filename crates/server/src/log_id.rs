@@ -11,7 +11,6 @@
 //! prints stream ids only this way. `nxf-relay log-hash` (01wt unit 5, C8) is its command line.
 
 use std::fmt;
-use std::io::Write as _;
 use std::sync::OnceLock;
 
 /// The environment variable that carries the key (C1).

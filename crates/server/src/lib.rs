@@ -9,6 +9,8 @@ pub mod app;
 // log-id v1 (6j6v.01wt): ids in logs and reports only as a keyed, truncated HMAC.
 pub mod log_id;
 pub mod presence;
+// The whole-stream purge (6j6v.f6yb): `nxf-relay purge` and the Rust seam behind it.
+pub mod purge;
 pub mod registry;
 pub mod store;
 

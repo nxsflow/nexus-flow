@@ -68,6 +68,71 @@ pub trait PrefixRegistry {
     fn presence(&self) -> Option<&dyn PresenceStore> {
         None
     }
+
+    /// The per-stream lease that keeps a purge and a sweep off the same stream at the same time
+    /// (6j6v.f6yb design §7a; 5vxp-a's sweep calls the same trait). `Some` only on DynamoDB: on
+    /// SQL both run as transactions under the stream's own lock and serialize without an item.
+    fn stream_lease(&self) -> Option<&dyn StreamLease> {
+        None
+    }
+}
+
+/// A stream lease item: who holds it and until when (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseItem {
+    pub holder: String,
+    pub expires_at: i64,
+}
+
+/// What [`StreamLease::take`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseTaken {
+    /// Ours until `expires_at`; `previous` is the expired item it replaced, if there was one.
+    Taken {
+        expires_at: i64,
+        previous: Option<LeaseItem>,
+    },
+    /// Another holder has it and it has not expired.
+    Held(LeaseItem),
+}
+
+/// What [`StreamLease::renew`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseRenewed {
+    /// Still ours, now until `expires_at`.
+    Renewed { expires_at: i64 },
+    /// Another holder has it (or it is gone): the condition `holder = :me` failed.
+    Lost,
+}
+
+/// One lease item per stream, `("#sweep", "stream#<id>")` in the registry table (design §7a).
+/// Every write is conditional, so a holder never overwrites another's lease and never releases
+/// one that is not its own.
+pub trait StreamLease {
+    /// Take the lease if it is free or expired (`attribute_not_exists(sk) OR expires_at < :now`),
+    /// for `ttl` from `now`.
+    fn take(
+        &self,
+        stream: &StreamId,
+        holder: &str,
+        ttl: std::time::Duration,
+        now: std::time::SystemTime,
+    ) -> StoreResult<LeaseTaken>;
+
+    /// Extend the lease to `now + ttl` if it is still ours (`holder = :me`).
+    fn renew(
+        &self,
+        stream: &StreamId,
+        holder: &str,
+        ttl: std::time::Duration,
+        now: std::time::SystemTime,
+    ) -> StoreResult<LeaseRenewed>;
+
+    /// Delete the lease if it is still ours; `Ok(false)` when it was not any more.
+    fn release(&self, stream: &StreamId, holder: &str) -> StoreResult<bool>;
+
+    /// The item as it stands (an exact-key, strongly consistent read).
+    fn read(&self, stream: &StreamId) -> StoreResult<Option<LeaseItem>>;
 }
 
 /// SQLite-backed [`PrefixRegistry`]. The connection sits behind a `Mutex`, which serializes
