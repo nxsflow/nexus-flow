@@ -176,19 +176,56 @@ fn push_deadline(raw: Option<String>) -> std::time::Duration {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let addr = std::env::var("NXF_RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
-    let (ops, registry) = backends();
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("bind relay address");
-    eprintln!("nxf-relay listening on http://{addr}");
-    let push_deadline = push_deadline(std::env::var("NXF_RELAY_PUSH_DEADLINE_SECS").ok());
-    let router = app_with_push_deadline(ops, registry, system_clock(), push_deadline);
-    axum::serve(listener, router)
-        .await
-        .expect("relay server error");
+/// `nxf-relay` with no arguments serves, exactly as before subcommands existed (the Lambda image
+/// runs it that way). A first argument picks a one-shot command that never binds a port:
+/// `log-hash` (log-id v1 C8) and `purge` (6j6v.f6yb). Anything else is a usage error, 64.
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let code = match args.first().map(String::as_str) {
+        None => serve(),
+        Some("log-hash") => {
+            let key = std::env::var_os(nxs_server::log_id::KEY_ENV)
+                .map(|v| v.to_string_lossy().into_owned());
+            nxs_server::log_id::log_hash_command(
+                &args[1..],
+                key.as_deref(),
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )
+        }
+        Some(_) => {
+            eprintln!(
+                "nxf-relay: unknown subcommand; run `nxf-relay` with no arguments to serve, or \
+                 `nxf-relay log-hash <kind> <id>`"
+            );
+            64
+        }
+    };
+    std::process::exit(i32::from(code));
+}
+
+/// The relay server: what `main` was before subcommands existed, on a runtime built here instead
+/// of by `#[tokio::main]` so the one-shot commands above never start one.
+fn serve() -> u8 {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the relay runtime");
+    runtime.block_on(async {
+        let addr =
+            std::env::var("NXF_RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+        let (ops, registry) = backends();
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .expect("bind relay address");
+        eprintln!("nxf-relay listening on http://{addr}");
+        let push_deadline = push_deadline(std::env::var("NXF_RELAY_PUSH_DEADLINE_SECS").ok());
+        let router = app_with_push_deadline(ops, registry, system_clock(), push_deadline);
+        axum::serve(listener, router)
+            .await
+            .expect("relay server error");
+    });
+    0
 }
 
 #[cfg(test)]

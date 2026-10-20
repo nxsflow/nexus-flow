@@ -6,6 +6,8 @@
 //! fold code — so the separation is visible in the dependency graph.
 
 pub mod app;
+// log-id v1 (6j6v.01wt): ids in logs and reports only as a keyed, truncated HMAC.
+pub mod log_id;
 pub mod presence;
 pub mod registry;
 pub mod store;
