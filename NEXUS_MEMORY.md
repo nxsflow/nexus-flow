@@ -5,7 +5,7 @@
 
 > **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
 
-## Index (58)
+## Index (59)
 
 - **architecture-overview**: nexus-flow is an agent-native, offline-first suite — the board, the memory and the channel your agents work from — and nothing else.
 - **priority-storage-canonical-ordinal**: Priority is a plugin-named label at the SURFACE but stored as the canonical ORDINAL — never store the label, or --json stops being plugin-independent.
@@ -47,6 +47,7 @@
 - **no-self-update-during-chain-runs**: Never self-update nxs while a chain run works: the service restart kills service-started agent sessions with no resume (8n9a).
 - **report-to-the-commissioner**: Never write a pm_report after a delivery; report the result to whoever commissioned the work (nexflowit-revamp, orchestrator, or the owner).
 - **art9-deletion-correctness-over-date**: Never trade correctness of the Art. 9 deletion mechanism for its date: January is fine, data loss or a half-baked design is not.
+- **design-review-until-no-high**: Design reviews: re-round only while a High finding remains; then accept with a 'Must fix in the build' section for the Mediums and Lows.
 - **claude-agent-sdk-scoping-airgap**: To air-gap a claude-agent-sdk subagent set setting_sources=[], strict_mcp_config=True and mcp_servers={} — else it inherits your MCP and the web.
 - **parallel-worktree-agents-race**: Never launch two worktree-isolated agents in ONE message — a subagent checkout -b can flip the shared checkout; stagger and forbid checkout.
 - **golden-harness-runs-in-crate-dir**: The trycmd golden harness runs in crates/cli with a pinned $HOME — a command that persists state outside the workspace cannot be a golden case.
@@ -1449,6 +1450,12 @@ Owner decision 2026-10-16: do NOT write pm_report (pm-session-report) entries af
 ### `art9-deletion-correctness-over-date`
 
 Owner direction (2026-10-19) for the Art. 9 deletion work (Direction 9, 6j6v.5vxp-a): correctness over date. A later delivery (January) is acceptable and the first days after go-live can be handled by hand; a half-baked mechanism, or any risk of data loss from a deletion design that is architecturally wrong or not thought through, is not. Never cut scope or review depth of the deletion mechanism to meet a date; give its design review the time it needs, and write down and check any manual interim path too.
+
+---
+
+### `design-review-until-no-high`
+
+Owner rule (2026-10-20) for design reviews of the deletion chain: run rounds until no High finding remains. Then the design is accepted, and the remaining Medium and Low findings go into a 'Must fix in the build' section on the ticket, which the coding chain's own review round checks (the same as 1w3m). Do not keep re-rounding a design that has only Mediums left.
 
 ---
 
