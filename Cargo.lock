@@ -2503,6 +2503,7 @@ dependencies = [
  "axum",
  "base64",
  "hmac 0.12.1",
+ "nxs-fold-ddb",
  "nxs-server",
  "nxs-sync",
  "nxs-test-support",

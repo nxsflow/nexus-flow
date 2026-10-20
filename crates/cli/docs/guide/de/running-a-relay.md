@@ -343,6 +343,29 @@ einem kürzeren Timeout setzt du `NXF_RELAY_PUSH_DEADLINE_SECS` darunter.
 Zeigst du eine **ausgelieferte** Binary auf `NXF_RELAY_BACKEND=dynamodb`, startet sie nicht und sagt
 dir genau das: der Backend ist eine Bau-Zeit-Fähigkeit, und dieser Bau trägt sie nicht.
 
+## Einen Stream entfernen
+
+`nxf-relay purge` entfernt alles, was der Relay zu einem Stream hält — seine Ops, seine
+Präfix-Ansprüche und die für ihn angemeldeten Maschinen — und sonst nichts. Wo der Speicher liegt,
+rät er nie: Jede Variable ist Pflicht (`NXF_RELAY_BACKEND`, dazu `NXF_RELAY_DB` und
+`NXF_RELAY_REGISTRY_DB` bei SQLite, `NXF_RELAY_PG_URL` bei Postgres). Drei Schritte, jeder mit
+einem JSON-Bericht auf stdout:
+
+```bash
+nxf-relay purge <stream-id> --dry-run                       # was ginge, und ein Plan-Digest
+nxf-relay purge <stream-id> --yes --plan <plan_digest>      # genau diesen Plan löschen
+nxf-relay purge <stream-id> --dry-run --expect-empty        # bestätigen, dass nichts bleibt (Exit 0)
+```
+
+Wurde seit dem Dry-Run etwas in den Stream geschrieben, löscht `--yes` nichts und endet mit Exit 4:
+dann einen frischen Dry-Run nehmen. Notiere dir einmal `store.identity_digest` aus dem Bericht und
+gib ihn bei jedem Lauf als `--expect-identity` mit — er weist jeden anderen Speicher ab, und die
+Bestätigung nach dem letzten Stream eines Speichers braucht ihn. Bei SQLite stoppst du den Relay
+vorher, wenn der Dry-Run `"large": true` meldet, und führst einmal `VACUUM` auf einer Datei aus, die
+eine ältere Version geschrieben hat. Der Relay authentifiziert niemanden, also stoppe ihn oder
+sperre den Stream an deinem Proxy, während du löschst. Das ganze Verfahren, jeder Exit-Code und die
+Abfolge für ein Konto stehen in `docs/runbooks/relay-purge.md` im Repository.
+
 ## Was es noch nicht gibt
 
 - **Authentifizierung.** Siehe die Warnung ganz oben. Bis sie da ist, ist die Erreichbarkeit des

@@ -68,7 +68,7 @@ impl PostgresPrefixRegistry {
                      ON machine_presence(stream_id, last_seen);",
             )
             .map_err(pg_err)?;
-        Ok(())
+        crate::store_pg::init_store_identity(&mut client)
     }
 }
 

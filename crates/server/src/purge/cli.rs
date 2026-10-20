@@ -233,7 +233,8 @@ fn open_store(
                 ops, registry, region, endpoint,
             )))
         }
-        "postgres" | "dynamodb" => Err(PurgeError::Config(format!(
+        // Only reached for a backend whose arm above this build was compiled without.
+        other if other == "postgres" || other == "dynamodb" => Err(PurgeError::Config(format!(
             "NXF_RELAY_BACKEND={backend} is not in this build (it needs a source build with \
              `--features {backend}`)"
         ))),

@@ -438,6 +438,17 @@ fn a_yes_with_another_streams_digest_is_exit_4_even_when_counts_and_clocks_are_e
 }
 
 #[test]
+fn the_empty_plans_digest_is_the_same_after_a_purge_and_for_a_never_existing_id() {
+    // No stream id in the digest: a digest in a log cannot be rebuilt from a candidate id.
+    let f = Fixture::seeded(false, 4);
+    let dry = f.dry(&target());
+    f.yes(&target(), &dry.digest()).expect(0, "--yes");
+    let after = f.dry(&target()).digest();
+    let never = f.dry(&format!("n-{H}-404")).digest();
+    assert_eq!(after, never);
+}
+
+#[test]
 fn a_confirm_finds_anything_left_and_a_never_existing_stream_confirms_with_zero_found() {
     let f = Fixture::seeded(false, 5);
     let c = f.confirm(&target());

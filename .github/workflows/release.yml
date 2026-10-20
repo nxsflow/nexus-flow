@@ -622,6 +622,13 @@ jobs:
         run: |
           echo "::warning::darwin ${PLATFORM} built UNSIGNED — set repo var NXF_MACOS_SIGNING_ENABLED=true and provision the Apple Developer ID secrets (nexus-flow-85y.30) to enable codesign + notarization."
 
+      # The purge's test seams (6j6v.f6yb) must not be in what ships — CI proves it on its own
+      # release build; this proves it on the release ARTEFACT (MF-4). The linux-x86_64 binary is
+      # the one the ubuntu runner can execute natively.
+      - name: The released nxf-relay carries no purge test seam
+        if: matrix.platform == 'linux-x86_64'
+        run: bash crates/server/scripts/purge-seam-inertness.sh "target/${TARGET}/release/nxf-relay"
+
       # One tarball per platform. Multicall (nexus-flow-5jz.7): ship the TWO real binaries — `nxs`
       # (the whole CLI suite; nxf/nxm are symlinks install.sh + self-update create locally) and the
       # opt-in `nxf-relay` server (+ LICENSE/README when present — added once the repo gets root

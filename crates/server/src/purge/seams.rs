@@ -9,7 +9,9 @@
 //! The variables (test builds only):
 //! - `NXF_RELAY_TEST_PURGE_STOP_AFTER=<point>`: `std::process::abort()` right after the point;
 //! - `NXF_RELAY_TEST_PURGE_INJECT_AT=<point>:<write>`: one write of the target through the store's
-//!   own path (`op`, `machine`, `prefix`, `steal`);
+//!   own path (`op`, `machine`, `prefix`, `steal`); a batch point written `<step>-batch:*` injects
+//!   after EVERY batch of the step. On DynamoDB, `NXF_RELAY_TEST_PURGE_INJECT_ENDPOINT` sends the
+//!   injected writes to another endpoint than the purge's own (past a recording proxy);
 //! - `NXF_RELAY_TEST_PURGE_FAIL_AT=<point>`: a `Store` error at the point (`renew` names the lease
 //!   renewal);
 //! - `NXF_RELAY_TEST_PURGE_PAUSE_AT=<point>:<secs>`: sleep that long right after the point;
@@ -159,22 +161,49 @@ impl PurgeSeams {
         Duration::from_secs(60).min(self.lease_ttl() / 4)
     }
 
-    /// What the seam does at `point`. Always [`SeamAction::None`] in a build without `test-seams`.
-    pub fn action_at(&self, point: &str) -> SeamAction {
+    /// What the seams do at `point`, in the order they run: the injection, the pause, the failure,
+    /// the stop — so one point can carry a steal AND the pause that lets the next renewal find it.
+    /// Always empty in a build without `test-seams`.
+    pub fn actions_at(&self, point: &str) -> Vec<SeamAction> {
         if !cfg!(feature = "test-seams") {
-            return SeamAction::None;
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if let Some((_, write)) = self
+            .inject
+            .as_ref()
+            .filter(|(p, _)| p == point || wildcard(p, point))
+        {
+            actions.push(SeamAction::Inject(*write));
+        }
+        if let Some((_, d)) = self.pause.as_ref().filter(|(p, _)| p == point) {
+            actions.push(SeamAction::Pause(*d));
+        }
+        if self.fail.as_deref() == Some(point) {
+            actions.push(SeamAction::Fail);
         }
         if self.stop.as_deref() == Some(point) {
-            SeamAction::Stop
-        } else if let Some((_, write)) = self.inject.as_ref().filter(|(p, _)| p == point) {
-            SeamAction::Inject(*write)
-        } else if self.fail.as_deref() == Some(point) {
-            SeamAction::Fail
-        } else if let Some((_, d)) = self.pause.as_ref().filter(|(p, _)| p == point) {
-            SeamAction::Pause(*d)
-        } else {
-            SeamAction::None
+            actions.push(SeamAction::Stop);
         }
+        actions
+    }
+
+    /// The first of [`Self::actions_at`], or [`SeamAction::None`].
+    pub fn action_at(&self, point: &str) -> SeamAction {
+        self.actions_at(point)
+            .first()
+            .copied()
+            .unwrap_or(SeamAction::None)
+    }
+}
+
+/// `<step>-batch:*` matches every `<step>-batch:<k>`.
+fn wildcard(pattern: &str, point: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) if prefix.ends_with("-batch:") => point
+            .strip_prefix(prefix)
+            .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit())),
+        _ => false,
     }
 }
 
@@ -211,6 +240,7 @@ mod tests {
             ("NXF_RELAY_TEST_PURGE_LEASE_SECS", "8"),
         ]);
         assert_eq!(s.action_at("D1-batch:3"), SeamAction::Stop);
+        assert_eq!(s.actions_at("D1-batch:3"), vec![SeamAction::Stop]);
         assert_eq!(s.action_at("D1-batch:30"), SeamAction::None);
         assert_eq!(s.action_at("D1"), SeamAction::None);
         assert_eq!(s.action_at("V0"), SeamAction::Inject(InjectWrite::Machine));
@@ -222,6 +252,40 @@ mod tests {
         assert_eq!(s.page(), 7);
         assert_eq!(s.lease_ttl(), Duration::from_secs(8));
         assert_eq!(s.lease_margin(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_batch_wildcard_injects_after_every_batch_of_its_step_only() {
+        let s = seams(&[("NXF_RELAY_TEST_PURGE_INJECT_AT", "D1-batch:*:op")]);
+        for point in ["D1-batch:1", "D1-batch:2", "D1-batch:40"] {
+            assert_eq!(
+                s.action_at(point),
+                SeamAction::Inject(InjectWrite::Op),
+                "{point}"
+            );
+        }
+        for point in ["D1", "D2-batch:1", "D1-batch:", "D1-batch:x"] {
+            assert_eq!(s.action_at(point), SeamAction::None, "{point}");
+        }
+    }
+
+    #[test]
+    fn one_point_can_carry_an_injection_a_pause_a_failure_and_a_stop_in_that_order() {
+        let s = seams(&[
+            ("NXF_RELAY_TEST_PURGE_INJECT_AT", "D1-batch:1:steal"),
+            ("NXF_RELAY_TEST_PURGE_PAUSE_AT", "D1-batch:1:12"),
+            ("NXF_RELAY_TEST_PURGE_FAIL_AT", "D1-batch:1"),
+            ("NXF_RELAY_TEST_PURGE_STOP_AFTER", "D1-batch:1"),
+        ]);
+        assert_eq!(
+            s.actions_at("D1-batch:1"),
+            vec![
+                SeamAction::Inject(InjectWrite::Steal),
+                SeamAction::Pause(Duration::from_secs(12)),
+                SeamAction::Fail,
+                SeamAction::Stop,
+            ]
+        );
     }
 
     #[test]

@@ -243,6 +243,29 @@ pub(crate) fn advisory_xact_lock_stream(
     Ok(())
 }
 
+/// The store id the purge pins a relay database by (6j6v.f6yb): one row, written once by the
+/// first boot and never changed. Both stores' `init_schema` run it (they share the database);
+/// `ON CONFLICT DO NOTHING` makes the second, and every later boot, a no-op. The purge reads it
+/// and never writes it.
+pub(crate) fn init_store_identity(client: &mut postgres::Client) -> StoreResult<()> {
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS relay_store_identity(
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 store_id  TEXT NOT NULL
+             );",
+        )
+        .map_err(pg_err)?;
+    client
+        .execute(
+            "INSERT INTO relay_store_identity(singleton, store_id) VALUES (1, $1)
+             ON CONFLICT (singleton) DO NOTHING",
+            &[&crate::purge::random_hex32()],
+        )
+        .map_err(pg_err)?;
+    Ok(())
+}
+
 /// Postgres-backed [`OpStore`]. Connections are pooled, so concurrent appends genuinely
 /// race on independent sessions — the atomicity is the database's, not a client mutex's.
 pub struct PostgresOpStore {
@@ -301,7 +324,7 @@ impl PostgresOpStore {
                      ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';",
             )
             .map_err(pg_err)?;
-        Ok(())
+        init_store_identity(&mut client)
     }
 }
 

@@ -40,6 +40,37 @@
 //! | 78 | configuration: a variable missing or malformed, a backend not in this build, not a relay store, `IdentityMismatch`, `EmptyStore`, `UnknownKind` |
 //!
 //! The table lives in one place, [`exit_code`].
+//!
+//! # Backends
+//!
+//! [`sqlite::SqlitePurgeStore`] (one transaction under the write locks, `secure_delete`, the
+//! checkpoint), `pg::PostgresPurgeStore` (one direct connection through `tls_pg`, session advisory
+//! locks before the transaction — connect directly, never through a transaction-pooling pooler),
+//! `ddb::DynamoDbPurgeStore` (the identity gate, the stream lease, plan-keyed batches). Each module
+//! says what it does and why; the operations runbook is `docs/runbooks/relay-purge.md`.
+//!
+//! # IAM on DynamoDB — UNVERIFIED until kwv2's throwaway-account run
+//!
+//! The purge runs under its own role, never the relay's. On the two table ARNs only (no index
+//! ARN): dry run and confirm need `dynamodb:DescribeTable` and `dynamodb:Query`; a delete run
+//! additionally `dynamodb:BatchWriteItem`, and on the registry table `dynamodb:PutItem` and
+//! `dynamodb:DeleteItem` restricted to the `#sweep` partition (`ForAllValues:StringEquals` on
+//! `dynamodb:LeadingKeys` = `#sweep`). No `GetItem`, no `Scan`, no `PutItem`/`DeleteItem` anywhere
+//! else. **Pass criterion** of the throwaway run: (i) a dry run, a bound `--yes` and a confirm (with
+//! `--expect-identity`) succeed under exactly these actions; (ii) without `BatchWriteItem` the dry
+//! run succeeds and `--yes` exits 1 with every `deleted` at 0; (iii) without `DescribeTable` every
+//! mode exits 78 before any Query; (iii-b) without the `#sweep` `PutItem`, `--yes` exits 1 before
+//! any delete; (iv) CloudTrail shows no other DynamoDB action. Until that is reported, this list is
+//! a design, not a fact.
+//!
+//! On Postgres: `SELECT, DELETE` on `stream_ops`, `prefix_claims`, `machine_presence`, `SELECT` on
+//! `relay_store_identity`. On SQLite: read-write access to the files and their directory.
+//!
+//! # Ids in output
+//!
+//! Log-id v1 (6j6v.01wt): the stream id appears only as its `sid` token (`h1:<kid>:<hex24>`, `-`
+//! without `NXS_LOG_HMAC_KEY`); no op id, claim key, registry key, prefix, replica uuid or machine
+//! id is printed in any form — counts only; an AWS error is its code only.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -905,7 +936,7 @@ impl RunCtx<'_> {
         if expires_ms - now_ms >= ttl.as_millis() as i64 / 2 {
             return Ok(());
         }
-        if self.seams.action_at("renew") == SeamAction::Fail {
+        if self.seams.actions_at("renew").contains(&SeamAction::Fail) {
             return Err(PurgeError::Store(StoreError(
                 "the lease renewal failed (test seam)".into(),
             )));
@@ -923,21 +954,23 @@ impl RunCtx<'_> {
 
     /// The seam at `point`: abort, inject, fail or pause under `test-seams`; nothing otherwise.
     pub fn reached(&mut self, point: &str) -> Result<(), PurgeError> {
-        match self.seams.action_at(point) {
-            SeamAction::None => Ok(()),
-            SeamAction::Stop => {
-                self.progress(&format!("stop at {point} (test seam)"));
-                std::process::abort()
+        for action in self.seams.actions_at(point) {
+            match action {
+                SeamAction::None => {}
+                SeamAction::Stop => {
+                    self.progress(&format!("stop at {point} (test seam)"));
+                    std::process::abort()
+                }
+                SeamAction::Fail => {
+                    return Err(PurgeError::Store(StoreError(format!(
+                        "failure injected at {point} (test seam)"
+                    ))))
+                }
+                SeamAction::Pause(d) => std::thread::sleep(d),
+                SeamAction::Inject(write) => self.inject(point, write)?,
             }
-            SeamAction::Fail => Err(PurgeError::Store(StoreError(format!(
-                "failure injected at {point} (test seam)"
-            )))),
-            SeamAction::Pause(d) => {
-                std::thread::sleep(d);
-                Ok(())
-            }
-            SeamAction::Inject(write) => self.inject(point, write),
         }
+        Ok(())
     }
 
     #[cfg(feature = "test-seams")]
