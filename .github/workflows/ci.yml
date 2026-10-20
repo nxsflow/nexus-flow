@@ -907,6 +907,11 @@ jobs:
       - name: DynamoDB Local tests (debug)
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb
 
+      # The release-profile run of the purge acceptance needs a current release `nxs` too.
+      - name: Build the shipped nxs/nxf binaries (release)
+        if: github.event_name != 'pull_request'
+        run: cargo build -p nxs --release
+
       # Same staggering as the other two release steps (6j6v.6e0e).
       - name: DynamoDB Local tests (release)
         if: github.event_name != 'pull_request'
