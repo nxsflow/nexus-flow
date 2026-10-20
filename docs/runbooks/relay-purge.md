@@ -208,10 +208,15 @@ it, then the confirm again. A confirm that finds a lease item exits 3.
 
 - **Lock time.** The `--yes` holds the store's write lock for the plan's re-read and one `DELETE`
   per table; the relay's own pushes wait up to `busy_timeout` (5 s) and are retried by the client
-  after that (append is idempotent: nothing is lost). Measured (release build, this repo's suite
-  `purge_sqlite`, write lock + checkpoint): **5,000 ops: LOCK5K; 100,000 ops: LOCK100K.** Rule:
-  **above 100,000 ops or 64 MB of `value_bytes`, stop the relay before the `--yes`**; the dry run
-  says so with `large: true`.
+  after that (append is idempotent: nothing is lost). Measured 2026-10-20 (release build, a
+  developer Mac on an external disk, ops of 400-byte values; `cargo test --release -p nxs-server
+  --test purge_sqlite -- --include-ignored --nocapture the_delete_step_of`, which reads the
+  `lock_ms`/`checkpoint_ms` the `--yes` prints on stderr): **5,000 ops: write lock 87 ms +
+  checkpoint 11 ms; 100,000 ops (~40 MB): write lock 3,111 ms + checkpoint 24 ms** — under the 5 s
+  `busy_timeout`, so the initial threshold stands. Rule: **above 100,000 ops or 64 MB of
+  `value_bytes`, stop the relay before the `--yes`**; the dry run says so with `large: true`.
+  Re-measure on your own hardware before trusting the margin: the lock time grows with the
+  stream, not with the store.
 - **`physical: "file_level"`** means `secure_delete` was on for this run's deletes and every WAL
   checkpoint completed. It says nothing about pages freed earlier by a relay without
   `secure_delete` — every release before this one. **Once, in a maintenance window with the relay
