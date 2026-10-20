@@ -4,8 +4,9 @@
 DynamoDB — with a dry run that shows what would go, a delete bound to that dry run, and a confirm
 run that proves nothing is left (6j6v.f6yb; the tool's reference is the module doc of
 `crates/server/src/purge.rs`). It is the relay half of an account deletion. The account sequence
-below is consumer contract v1.3: foundations (kwv2) runs it for nexflow.it; a self-hosted operator
-runs the same steps by hand.
+below is consumer contract v1.4 (design §10 on 6j6v.f6yb; v1.4 changes step 0 only — board-fold is
+fenced by the shared deny table, not by `NXS_FOLD_STREAMS`): foundations (kwv2) runs it for
+nexflow.it; a self-hosted operator runs the same steps by hand.
 
 **What "deleted" means is the whole sequence, not one exit 0.** A single `--yes` proves the
 logical delete of the plan it was bound to; the confirm runs, the fence and the spacing below are
@@ -77,7 +78,7 @@ The purge creates nothing. A store written by a relay older than this release ha
 both are `NotARelayStore` (78) naming what is missing. Start the CURRENT relay once against that
 store (its own open adds the table and writes the row), stop it, then purge.
 
-## The account sequence (consumer contract v1.3)
+## The account sequence (consumer contract v1.4)
 
 **Day 0** is the day the deletion order is given. "Stop" below means: nothing further for this
 account, the fence stays where it is, escalate to the owner.
@@ -107,26 +108,40 @@ account, the fence stays where it is, escalate to the owner.
 
 **0. Fence, permanent and account-scoped.**
 
-- The authorizer's deny list gets `u-<h>` and the prefix `n-<h>-` (WITH the trailing hyphen: an id
-  is denied iff it equals `u-<h>` or begins with `n-<h>-`). The account's tokens are revoked; the
-  hosted engine instance for the account is stopped.
-- Board-fold admission closed: every id of the account is removed from `NXS_FOLD_STREAMS` in every
-  board-fold function, as one configuration update at time T_u. **Stop when `NXS_FOLD_STREAMS` is
-  unset or empty in any of them** (unset admits every stream). Then the admission proof: (i) the
-  configuration read back lacks every id of the account and is non-empty; (ii) board-fold logs its
-  configuration fingerprint (`cfg=<24 hex>`) in its start line and every EMF line: `LastUpdateStatus`
-  is `Successful` at T_u, and after T_u + timeout every invocation logs the NEW fingerprint, over at
-  least 15 min with at least one invocation per function; (ii-b) a canary id `n-<h_canary>-1`,
-  removed in the same update, gets a progress and a rescue message after T_u + timeout: both are
-  refused at `streams.admits`, logged under the new fingerprint, and reach the DLQ without a write;
-  (iii) at least the function's timeout has passed since T_u. Until (ii) and (ii-b) have passed once
-  in staging, step 8b applies.
-- **The pre-purge 403 probe.** Deny list first, then the probe, then token revocation. Through the
-  public endpoint: `POST /streams/{id}/ops` with `{"ops":[]}` and
-  `GET /streams/{id}/ops?since=0&limit=1`. Fenced = 403 on both AND the authorizer's log has
-  `deny_list` with the request's `sid` token for both. `200 {"appended":0}`: NOT fenced — stop. A
-  401/403 without the `deny_list` line, or anything else: inconclusive — stop. Run it also for one
-  synthetic, never-used `n-<h>-<k>` (a `<k>` above every enumerated one), which proves the prefix rule.
+- **The deny item.** Write the account's item `{"h": "<h>", "v": 1, "since": "<RFC 3339 UTC>"}`
+  into the shared deny table (key `h`, a string: the 32-hex `<h>`) with `PutItem`, at time **T_w**.
+  The authorizer reads that table and denies `u-<h>` and every id beginning `n-<h>-` (WITH the
+  trailing hyphen: an id is denied iff it equals `u-<h>` or begins with `n-<h>-`) — every
+  `/streams/{id}/` route answers 403 — at the latest `deny_cache_ttl` (≤ 60 s, hits and misses) after
+  T_w. Then revoke the account's tokens and stop the hosted engine instance for the account.
+- **Board-fold fenced through the same table.** Board-fold's live fold, rescue, progress and
+  backfill check the deny table (uncached) before EVERY chunk; for the account a chunk writes
+  nothing, errs, is redriven and lands in the DLQ, logged with the reason `deny_list`.
+  **`NXS_FOLD_STREAMS` is neither changed nor read by any step here** — it is an operational
+  allow-list (unset = every stream), and a Lambda environment's 4 KB could never list every stream
+  anyway. The proof, all three:
+  - **(i)** the deny item, read back with a consistent `GetItem`, exists; and every board-fold
+    function of the environment reads back with `NXS_DENY_TABLE` naming the SAME table the
+    authorizer reads. **A function without `NXS_DENY_TABLE`, or naming another table: stop.**
+  - **(ii) The canary:** a throwaway `<h_canary>` written to the deny table the same way; after
+    T_w + `deny_cache_ttl` + the function timeout, one progress and one rescue message for
+    `n-<h_canary>-1` are refused at `admission`, logged with `deny_list`, and reach the DLQ without
+    a write to the board-fold table (a Query of the canary's partition stays empty). Until the
+    canary has passed once in staging and foundations has reported it, step 8b applies.
+  - **(iii) The wait:** step 1 — and with it every destructive step — not before
+    **T_w + `deny_cache_ttl` + the function's timeout** (≤ 60 s + ≤ 15 min; 960 s on the staging
+    probe): the authorizer's cache has expired, and a chunk that read the table before T_w has
+    finished.
+  A queued progress message for the account is then refused at its `admission` check and lands in
+  the DLQ without writing, as is a change-stream record from before the fence, so the queues are
+  not waited out. If (ii) cannot be shown, step 8b applies.
+- **The pre-purge 403 probe.** The deny item first; then — **not before T_w + `deny_cache_ttl`**, a
+  cached miss would still answer 200 — the probe; then token revocation. Through the public
+  endpoint: `POST /streams/{id}/ops` with `{"ops":[]}` and `GET /streams/{id}/ops?since=0&limit=1`.
+  Fenced = 403 on both AND the authorizer's log has `deny_list` with the request's `sid` token for
+  both. `200 {"appended":0}`: NOT fenced — stop. A 401/403 without the `deny_list` line, or anything
+  else: inconclusive — stop. Run it also for one synthetic, never-used `n-<h>-<k>` (a `<k>` above
+  every enumerated one), which proves the prefix rule.
 
 **1. Two relay dry runs, at least 10 minutes apart**, each with `--expect-identity`. (1a) A2's
 checks (first entry) or the re-entry compare; (1b) the same ids as in A; (1c) no growth since A:
@@ -144,7 +159,8 @@ does not block.
 **4. At least 1 h after step 2:** relay confirm, exits 0.
 
 **5. At least 25 h after the `finished_at` of step 4's report:** fold pass 2, a fold confirm, exits
-0. On 3: a fold dry run and a bound `--yes`, check step 0's admission proof again, repeat 4 and 5.
+0. On 3: a fold dry run and a bound `--yes`, check step 0's proof again (the deny item still there,
+every board-fold function's `NXS_DENY_TABLE` still the authorizer's table), repeat 4 and 5.
 
 **6. After step 5:** relay confirm again, exits 0.
 
@@ -154,10 +170,20 @@ does not block.
 fence runs steps A2 to 7 itself; one that does not match: the fence is not what step 0 says — stop.
 The account is deleted when step 8 finds no id outside those already processed.
 
-**8b. Only when step 0's (ii) could not be shown — the queue window:** wait `R_q` after the later of
-T_u (+15 min) and step 5's `finished_at`, then a fold confirm and a relay confirm, both exit 0.
+**8b. Only when step 0's canary (ii) has not passed once in staging — the queue window:** wait `R_q`
+after the later of T_w + `deny_cache_ttl` + the function timeout and step 5's `finished_at`, then a
+fold confirm and a relay confirm, both exit 0.
 `R_q` is the queues' `MessageRetentionPeriod` (the larger of the two for standard queues, their sum
 for FIFO): 14 days for the known deployments.
+
+**"Deleted" for a stream** means: steps 2, 4, 5 and 6 exited 0 in that order with the required
+spacing, step 0's probe and step 7 answered 403, step 0's proof holds (or 8b passed), and the fence —
+the deny item — is still in place. For an account: every id, and step 8 found no new one.
+
+**Inputs the deployer reports with the hand-over:** the ops table's stream view type; board-fold's
+`MaximumRecordAgeInSeconds` and Lambda timeout; both queues' `MessageRetentionPeriod` and type; the
+PITR window; the pinned `identity_digest` per environment; the deny table's name and `TableArn`, the
+authorizer's `deny_cache_ttl`, and the evidence used for step 0 (i) and (ii).
 
 **Timing rule.** Every destructive step on a table with point-in-time recovery (step 2, step 3,
 every repeat, every `--yes` for an id step 8 finds) finishes by day 30 minus the PITR window
@@ -186,8 +212,9 @@ DELETE FROM machine_presence WHERE stream_id = ?;
 ## The unfence procedure
 
 Only for an id or an `<h>` proven NOT to belong to the account, before any destructive step touched
-it (for example when check 1c later fails): take it off the deny list and put it back into
-`NXS_FOLD_STREAMS` — two people, with the proof and the time recorded.
+it (for example when check 1c later fails): its deny item is deleted from the shared deny table —
+by two people, with the proof and the time recorded. `NXS_FOLD_STREAMS` plays no part. The deletion
+takes effect at the authorizer within `deny_cache_ttl`; board-fold reads the table uncached.
 
 **Unfencing does NOT undo the rest of step 0** (MF-9): the account's tokens stay revoked — the user
 signs in again and gets new ones — and the stopped engine instance stays stopped until foundations
