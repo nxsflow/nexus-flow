@@ -1088,6 +1088,7 @@ fn the_report_shape_is_pinned_for_a_success() {
              "expired": 0}
         ],
         "machines": {"newest_last_seen": null},
+        "large": null,
         "lease": {"found": false, "expired": null, "taken": true, "renewals": 0, "released": true},
         "present": {"counter": true, "registry": true},
         "physical": "provider",
@@ -1111,6 +1112,7 @@ fn the_report_shape_is_pinned_for_a_success() {
         "\"plan_digest\"",
         "\"kinds\"",
         "\"machines\"",
+        "\"large\"",
         "\"lease\"",
         "\"present\"",
         "\"physical\"",

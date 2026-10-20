@@ -79,6 +79,31 @@ pub(crate) fn past_deadline(stream: &StreamId, done: usize, of: usize) -> StoreE
     ))
 }
 
+/// What every relay SQLite file gets from the server's open, beside its tables (6j6v.f6yb):
+///
+/// - `secure_delete = ON`: a page the relay frees is zeroed instead of keeping its old bytes, so a
+///   deleted stream does not linger in the file's free space. Per connection, so it is set on
+///   every open. A file written by an older release can still hold bytes freed before; the purge
+///   runbook says to `VACUUM` it once.
+/// - `relay_store_identity`: one row with a random `store_id`, written once and never changed,
+///   which the purge pins a store by (a path can be re-created and an inode reused; this id is
+///   not, and a byte copy of the file keeps it, as it should — the copy holds the same rows).
+pub(crate) fn secure_delete_and_identity(conn: &Connection) -> StoreResult<()> {
+    conn.execute_batch(
+        "PRAGMA secure_delete = ON;
+         CREATE TABLE IF NOT EXISTS relay_store_identity(
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             store_id  TEXT NOT NULL
+         );",
+    )?;
+    conn.execute(
+        "INSERT INTO relay_store_identity(singleton, store_id) VALUES (1, ?1)
+         ON CONFLICT (singleton) DO NOTHING",
+        [crate::purge::random_hex32()],
+    )?;
+    Ok(())
+}
+
 /// The durable op log behind the relay. Two operations, each with explicit write
 /// semantics — the atomic, per-stream monotone sequence is the real backend risk (§5) — plus
 /// [`OpStore::append_batch`], the push handler's way in, which a backend need not implement.
@@ -189,6 +214,7 @@ impl SqliteOpStore {
              );",
         )?;
         Self::add_extra_column_if_missing(&conn)?;
+        secure_delete_and_identity(&conn)?;
         Ok(SqliteOpStore {
             conn: Mutex::new(conn),
         })
@@ -620,6 +646,63 @@ mod tests {
                 Some("ed25519:deadbeef")
             );
         }
+    }
+
+    fn store_id(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT store_id FROM relay_store_identity WHERE singleton = 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("the identity row")
+    }
+
+    #[test]
+    fn opening_a_relay_file_writes_its_store_id_once_and_never_changes_it() {
+        // 6j6v.f6yb: the purge pins a store by this id, not by device or inode (both reused).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.sqlite");
+        let first = SqliteOpStore::open(path.to_str().unwrap()).unwrap();
+        let id = store_id(&first.lock());
+        assert_eq!(id.len(), 32, "{id}");
+        assert!(id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        drop(first);
+        let again = SqliteOpStore::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(store_id(&again.lock()), id, "a reopen keeps the id");
+        let rows: i64 = again
+            .lock()
+            .query_row("SELECT COUNT(*) FROM relay_store_identity", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn a_new_file_at_the_same_path_gets_a_new_store_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.sqlite");
+        let first = store_id(&SqliteOpStore::open(path.to_str().unwrap()).unwrap().lock());
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(dir.path().join("relay.sqlite-wal"));
+        let _ = std::fs::remove_file(dir.path().join("relay.sqlite-shm"));
+        let second = store_id(&SqliteOpStore::open(path.to_str().unwrap()).unwrap().lock());
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn the_relays_own_connection_runs_with_secure_delete() {
+        // 6j6v.f6yb: pages the relay frees no longer keep their old bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.sqlite");
+        let store = SqliteOpStore::open(path.to_str().unwrap()).unwrap();
+        let on: i64 = store
+            .lock()
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
     }
 
     #[test]

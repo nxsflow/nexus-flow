@@ -179,6 +179,7 @@ impl SqlitePrefixRegistry {
              CREATE INDEX IF NOT EXISTS machine_presence_recency
                  ON machine_presence(stream_id, last_seen);",
         )?;
+        crate::store::secure_delete_and_identity(&conn)?;
         Ok(SqlitePrefixRegistry {
             conn: Mutex::new(conn),
         })
@@ -336,6 +337,45 @@ mod tests {
 
     fn stream() -> StreamId {
         StreamId("s".into())
+    }
+
+    #[test]
+    fn the_registry_file_carries_a_store_id_and_runs_with_secure_delete() {
+        // 6j6v.f6yb: with two files, each carries its own id; with one, the op store and the
+        // registry share the one row.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("registry.sqlite");
+        let path = path.to_str().unwrap();
+        let reg = SqlitePrefixRegistry::open(path).unwrap();
+        let id: String = reg
+            .lock()
+            .query_row("SELECT store_id FROM relay_store_identity", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(id.len(), 32);
+        let on: i64 = reg
+            .lock()
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        drop(reg);
+        let shared = crate::store::SqliteOpStore::open(path).unwrap();
+        drop(shared);
+        let reg = SqlitePrefixRegistry::open(path).unwrap();
+        let rows: i64 = reg
+            .lock()
+            .query_row("SELECT COUNT(*) FROM relay_store_identity", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let again: String = reg
+            .lock()
+            .query_row("SELECT store_id FROM relay_store_identity", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!((rows, again), (1, id), "one file, one row, written once");
     }
 
     #[test]

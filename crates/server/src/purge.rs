@@ -89,6 +89,14 @@ pub const PURGE_COVERS: &[&str] = &[
     "lease",
 ];
 
+/// Above this many ops of one stream a SQLite `--yes` holds the write lock long enough that the
+/// relay should be stopped first (the dry run says `large: true`; the runbook gives the measured
+/// lock times). An initial value per MF-11, kept while the measured lock time at it stays under
+/// the relay's `busy_timeout`.
+pub const SQLITE_LARGE_OPS: u64 = 100_000;
+/// The same rule by the size of the stream's op values, bytes.
+pub const SQLITE_LARGE_VALUE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The SQL tables this build deletes a stream's rows from. A table with a `stream_id` column
 /// outside it is `UnknownKind` (78) before anything is deleted.
 pub const SQL_PURGE_TABLES: &[&str] = &["stream_ops", "prefix_claims", "machine_presence"];
@@ -628,6 +636,9 @@ pub struct PurgeReport {
     pub plan_digest: Option<String>,
     pub kinds: Vec<KindReport>,
     pub machines: MachinesReport,
+    /// SQLite: the plan is above [`SQLITE_LARGE_OPS`] ops or [`SQLITE_LARGE_VALUE_BYTES`] of
+    /// values — stop the relay before the `--yes` (the runbook's rule, MF-11). `null` elsewhere.
+    pub large: Option<bool>,
     pub lease: Option<LeaseReport>,
     pub present: Option<PresentReport>,
     pub physical: Option<Physical>,
@@ -806,6 +817,29 @@ pub struct RunCtx<'a> {
     progress: &'a mut dyn FnMut(&str),
     #[cfg(feature = "test-seams")]
     injector: Option<(&'a dyn PurgeStore, StreamId)>,
+}
+
+impl<'a> RunCtx<'a> {
+    /// A context outside a run, for a backend's own unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        seams: &'a PurgeSeams,
+        clock: Clock<'a>,
+        progress: &'a mut dyn FnMut(&str),
+    ) -> RunCtx<'a> {
+        RunCtx {
+            seams,
+            clock,
+            lease: None,
+            pages_since_check: 0,
+            pages_total: 0,
+            plan_started: clock(),
+            sid: "sid=-".into(),
+            progress,
+            #[cfg(feature = "test-seams")]
+            injector: None,
+        }
+    }
 }
 
 impl RunCtx<'_> {
@@ -1021,6 +1055,44 @@ pub(crate) fn random_hex32() -> String {
     out
 }
 
+/// The op an injection appends (test seam): a new op id, so no planned batch deletes it.
+#[cfg(feature = "test-seams")]
+pub(crate) fn injected_op() -> nxs_sync::wire::WireOp {
+    nxs_sync::wire::WireOp {
+        envelope_version: nxs_sync::wire::ENVELOPE_VERSION,
+        op_id: format!("inject-{}", random_hex32()),
+        lamport: 1,
+        site: 1,
+        domain: "task".into(),
+        target_kind: "item".into(),
+        target_id: "inject.0001".into(),
+        field: "title".into(),
+        op_type: "set".into(),
+        value: Some("injected by the purge test seam".into()),
+        author: "purge-test-seam".into(),
+        wall_clock: String::new(),
+        extra: Default::default(),
+    }
+}
+
+/// The machine an injection announces (test seam): a new machine id.
+#[cfg(feature = "test-seams")]
+pub(crate) fn injected_hello() -> nxs_sync::protocol::MachineHello {
+    nxs_sync::protocol::MachineHello {
+        machine_id: format!("inject-{}", &random_hex32()[..16]),
+        name: "Injected machine".into(),
+        interval_secs: 300,
+    }
+}
+
+/// The prefix and replica uuid an injection registers (test seam): both new.
+#[cfg(feature = "test-seams")]
+pub(crate) fn injected_claim() -> (String, String) {
+    let id = random_hex32();
+    // Four characters of the relay's prefix alphabet; collisions are reassigned, which is fine.
+    (format!("z{}", &id[..3]), format!("inject-{id}"))
+}
+
 /// Releases the stream lease if the run unwinds before its explicit release (design §7a.4). A
 /// process abort releases nothing; the lease then expires on its own after at most its ttl.
 struct ReleaseOnUnwind<'a> {
@@ -1158,6 +1230,11 @@ fn read_plan(
         return Err(PurgeError::UnknownKind(plan.unknown.clone()));
     }
     report.kinds = kind_reports(store.kinds(), &plan);
+    if store.backend() == "sqlite" {
+        let ops = plan.kind("ops").map_or(0, PlannedKind::found);
+        let bytes = plan.ops.value_bytes.unwrap_or(0);
+        report.large = Some(ops > SQLITE_LARGE_OPS || bytes > SQLITE_LARGE_VALUE_BYTES);
+    }
     report.machines.newest_last_seen = plan
         .newest_last_seen
         .map(|secs| format_utc(Instant { secs, nanos: 0 }));
@@ -1301,6 +1378,7 @@ pub fn new_report(mode: PurgeMode, sid: String, now: SystemTime) -> PurgeReport 
         plan_digest: None,
         kinds: Vec::new(),
         machines: MachinesReport::default(),
+        large: None,
         lease: None,
         present: None,
         physical: None,

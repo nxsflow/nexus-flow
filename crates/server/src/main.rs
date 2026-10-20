@@ -178,7 +178,8 @@ fn push_deadline(raw: Option<String>) -> std::time::Duration {
 
 /// `nxf-relay` with no arguments serves, exactly as before subcommands existed (the Lambda image
 /// runs it that way). A first argument picks a one-shot command that never binds a port:
-/// `log-hash` (log-id v1 C8) and `purge` (6j6v.f6yb). Anything else is a usage error, 64.
+/// `log-hash` (log-id v1 C8) and `purge` (6j6v.f6yb, see `nxs_server::purge`). Anything else is
+/// a usage error, 64.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -193,10 +194,16 @@ fn main() {
                 &mut std::io::stderr(),
             )
         }
+        Some("purge") => nxs_server::purge::cli::run(
+            &args[1..],
+            &|name: &str| std::env::var(name).ok(),
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         Some(_) => {
             eprintln!(
-                "nxf-relay: unknown subcommand; run `nxf-relay` with no arguments to serve, or \
-                 `nxf-relay log-hash <kind> <id>`"
+                "nxf-relay: unknown subcommand; run `nxf-relay` with no arguments to serve, \
+                 `nxf-relay purge <stream-id> …` or `nxf-relay log-hash <kind> <id>`"
             );
             64
         }
