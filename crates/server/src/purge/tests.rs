@@ -324,10 +324,13 @@ impl StreamLease for FakeLease {
     }
 }
 
+/// Per stream: its op keys and its registry keys.
+type Streams = BTreeMap<String, (Vec<PlanKey>, Vec<PlanKey>)>;
+
 /// An in-memory relay store: per stream, op keys and registry keys. Deletes in batches of
 /// `batch` keys, asking the lease rule before each, like the DynamoDB store.
 struct FakeStore {
-    data: Mutex<BTreeMap<String, (Vec<PlanKey>, Vec<PlanKey>)>>,
+    data: Mutex<Streams>,
     identity: Value,
     lease: Option<FakeLease>,
     batch: usize,

@@ -76,15 +76,17 @@ pub struct SdkBatchDeleter {
     client: Client,
 }
 
-fn key_attributes(table_is_ops: bool, key: &ItemKey) -> HashMap<String, AttributeValue> {
+/// The item key as DynamoDB takes it: a number range key is the ops table's `seq`, a string one
+/// the registry table's `sk`.
+fn key_attributes(key: &ItemKey) -> HashMap<String, AttributeValue> {
     let mut map = HashMap::new();
     map.insert(
         "stream_id".to_string(),
         AttributeValue::S(key.partition.clone()),
     );
-    let (name, value) = match (&key.sort, table_is_ops) {
-        (SortKey::N(n), _) => ("seq", AttributeValue::N(n.to_string())),
-        (SortKey::S(s), _) => ("sk", AttributeValue::S(s.clone())),
+    let (name, value) = match &key.sort {
+        SortKey::N(n) => ("seq", AttributeValue::N(n.to_string())),
+        SortKey::S(s) => ("sk", AttributeValue::S(s.clone())),
     };
     map.insert(name.to_string(), value);
     map
@@ -110,7 +112,7 @@ impl BatchDeleter for SdkBatchDeleter {
                 WriteRequest::builder()
                     .delete_request(
                         DeleteRequest::builder()
-                            .set_key(Some(key_attributes(matches!(k.sort, SortKey::N(_)), k)))
+                            .set_key(Some(key_attributes(k)))
                             .build()
                             .expect("a delete request with a key builds"),
                     )
@@ -160,8 +162,7 @@ pub fn delete_keys(
     for (i, batch) in keys.chunks(BATCH).enumerate() {
         ctx.before_batch()?;
         // Defence in depth: a key of another stream in a batch is a bug; stop before sending.
-        if let Some(stray) = batch.iter().find(|k| !is_target(k)) {
-            let _ = stray;
+        if batch.iter().any(|k| !is_target(k)) {
             return Err(PurgeError::Store(StoreError(format!(
                 "a key outside the target was planned for {step}; nothing more is deleted"
             ))));

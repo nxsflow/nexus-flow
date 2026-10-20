@@ -1879,9 +1879,16 @@ fn unix_secs(t: std::time::SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
+/// What one conditional `PutItem` of a lease item did.
+enum LeasePut {
+    /// Written; the item it replaced, if any (`ReturnValues = ALL_OLD`).
+    Written(Option<LeaseItem>),
+    /// The condition failed; the item as it stood (`ReturnValuesOnConditionCheckFailure`).
+    Refused(Option<LeaseItem>),
+}
+
 impl DynamoDbPrefixRegistry {
-    /// One conditional `PutItem` of the lease item; `Ok(Err(item))` when the condition failed
-    /// (the item as it stood, from `ReturnValuesOnConditionCheckFailure`).
+    /// One conditional `PutItem` of the lease item.
     async fn put_lease(
         client: &Client,
         table: &str,
@@ -1890,7 +1897,7 @@ impl DynamoDbPrefixRegistry {
         expires_at: i64,
         condition: &str,
         values: Vec<(&str, AttributeValue)>,
-    ) -> StoreResult<Result<Option<LeaseItem>, Option<LeaseItem>>> {
+    ) -> StoreResult<LeasePut> {
         use aws_sdk_dynamodb::operation::put_item::PutItemError;
         let mut put = client
             .put_item()
@@ -1906,10 +1913,12 @@ impl DynamoDbPrefixRegistry {
             put = put.expression_attribute_values(name, value);
         }
         match put.send().await {
-            Ok(out) => Ok(Ok(out.attributes().map(lease_item).transpose()?)),
+            Ok(out) => Ok(LeasePut::Written(
+                out.attributes().map(lease_item).transpose()?,
+            )),
             Err(e) => match e.into_service_error() {
                 PutItemError::ConditionalCheckFailedException(c) => {
-                    Ok(Err(c.item().map(lease_item).transpose()?))
+                    Ok(LeasePut::Refused(c.item().map(lease_item).transpose()?))
                 }
                 other => Err(ddb_code_err(other)),
             },
@@ -1941,12 +1950,12 @@ impl StreamLease for DynamoDbPrefixRegistry {
             )
             .await?;
             Ok(match put {
-                Ok(previous) => LeaseTaken::Taken {
+                LeasePut::Written(previous) => LeaseTaken::Taken {
                     expires_at,
                     previous,
                 },
-                Err(Some(held)) => LeaseTaken::Held(held),
-                Err(None) => {
+                LeasePut::Refused(Some(held)) => LeaseTaken::Held(held),
+                LeasePut::Refused(None) => {
                     return Err(StoreError(
                         "dynamodb error: the lease condition failed without an item".into(),
                     ))
@@ -1977,8 +1986,8 @@ impl StreamLease for DynamoDbPrefixRegistry {
             )
             .await?;
             Ok(match put {
-                Ok(_) => LeaseRenewed::Renewed { expires_at },
-                Err(_) => LeaseRenewed::Lost,
+                LeasePut::Written(_) => LeaseRenewed::Renewed { expires_at },
+                LeasePut::Refused(_) => LeaseRenewed::Lost,
             })
         })
     }

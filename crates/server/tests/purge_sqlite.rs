@@ -1305,6 +1305,3 @@ fn the_delete_step_of_100000_ops() {
     let took = measure(100_000);
     eprintln!("100,000 ops: lock and checkpoint together {took:?}");
 }
-
-#[allow(dead_code)]
-fn unused(_: Value) {}

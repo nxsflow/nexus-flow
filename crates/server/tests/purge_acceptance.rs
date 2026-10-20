@@ -350,9 +350,8 @@ fn acceptance(
     // The pin for this store, as the operator takes it once.
     let pin = run(&[&target(), "--dry-run"]).identity_digest();
     let pinned = |mode: &[&str]| -> Purged {
-        let mut args: Vec<&str> = vec![];
         let t = target();
-        args.push(&t);
+        let mut args: Vec<&str> = vec![t.as_str()];
         args.extend_from_slice(mode);
         args.extend(["--expect-identity", pin.as_str()]);
         run(&args)

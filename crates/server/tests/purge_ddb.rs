@@ -507,7 +507,7 @@ fn the_identity_gate_refuses_every_wrong_pair_after_describe_and_before_any_quer
         true,
     );
     let proxy = ddb::Proxy::start(&f.endpoint);
-    let cases: Vec<(String, String, &str)> = vec![
+    let cases: [(String, String, &str); 5] = [
         (f.registry.clone(), f.ops.clone(), "swapped"),
         (f.ops.clone(), f.ops.clone(), "the same table twice"),
         (
@@ -821,7 +821,7 @@ fn each_injection_gives_exactly_its_exit_and_residue() {
     let r = |pairs: &[(&str, u64)]| -> BTreeMap<String, u64> {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     };
-    let cases: Vec<(&str, i32, BTreeMap<String, u64>)> = vec![
+    let cases: [(&str, i32, BTreeMap<String, u64>); 11] = [
         ("L0:op", 4, r(&[])),
         ("L0:machine", 4, r(&[])),
         ("L0:prefix", 4, r(&[])),
