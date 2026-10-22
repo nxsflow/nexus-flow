@@ -207,6 +207,99 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The most a bearer read by [`read_bearer`] may be. A token from a token exchange is a few
+/// kilobytes at most; anything past this is not one, and is not read to its end.
+pub const MAX_BEARER_BYTES: usize = 16 * 1024;
+
+/// A bearer token as a person hands it over (6j6v.47vy) — on STDIN, never in argv or the
+/// environment, where every other process of the same user can read it. Made only by
+/// [`read_bearer`]; deliberately no `Display`, and a `Debug` that does not show it.
+pub struct Bearer(String);
+
+impl Bearer {
+    /// The token, for [`HttpTransport::bearer_only`] and nothing that prints.
+    pub fn token(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Bearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bearer(<redacted>)")
+    }
+}
+
+/// Why a bearer was not taken. No variant carries what was read: it was meant to be a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BearerError {
+    /// Nothing was read, or only a newline.
+    Empty,
+    /// More than one line was read.
+    NotOneLine,
+    /// The line holds a space, a tab or another control character — no token does.
+    NotAToken,
+    /// More than [`MAX_BEARER_BYTES`] were offered.
+    TooLong,
+    /// The input could not be read; the I/O error's kind, never its bytes.
+    Unreadable(String),
+    /// The relay URL carries a userinfo as well: two credentials for one request.
+    UserinfoInUrl,
+}
+
+impl std::fmt::Display for BearerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BearerError::Empty => f.write_str("no bearer token on stdin: it was empty"),
+            BearerError::NotOneLine => {
+                f.write_str("the bearer token on stdin must be ONE line; more than one was read")
+            }
+            BearerError::NotAToken => f.write_str(
+                "the bearer token on stdin holds a space or a control character, which no token \
+                 does",
+            ),
+            BearerError::TooLong => write!(
+                f,
+                "the bearer token on stdin is longer than {MAX_BEARER_BYTES} bytes"
+            ),
+            BearerError::Unreadable(kind) => {
+                write!(f, "reading the bearer token from stdin: {kind}")
+            }
+            BearerError::UserinfoInUrl => f.write_str(
+                "the relay URL carries a user and password, and a bearer token was given as well: \
+                 a request carries one credential — take the userinfo off the relay URL",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BearerError {}
+
+/// Read a bearer token from `input` (6j6v.47vy): ONE line, its trailing `\n` or `\r\n` taken off.
+pub fn read_bearer(input: impl std::io::Read) -> Result<Bearer, BearerError> {
+    let mut read = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(input, MAX_BEARER_BYTES as u64 + 1),
+        &mut read,
+    )
+    .map_err(|e| BearerError::Unreadable(e.kind().to_string()))?;
+    if read.len() > MAX_BEARER_BYTES {
+        return Err(BearerError::TooLong);
+    }
+    let text = String::from_utf8(read).map_err(|_| BearerError::NotAToken)?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.contains('\n') {
+        return Err(BearerError::NotOneLine);
+    }
+    if line.is_empty() {
+        return Err(BearerError::Empty);
+    }
+    if line.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(BearerError::NotAToken);
+    }
+    Ok(Bearer(line.to_string()))
+}
+
 /// A transport-layer failure (network / HTTP / decode). Opaque string payload.
 #[derive(Debug)]
 pub struct TransportError(pub String);
@@ -927,6 +1020,18 @@ impl HttpTransport {
             secret: self.secret.with_bearer(token),
             agent: self.agent.clone(),
         }
+    }
+
+    /// A transport to the relay at `base` that sends `bearer` and no other credential
+    /// (6j6v.47vy) — [`new`](Self::new), then [`with_bearer`](Self::with_bearer). A `base` that
+    /// carries a userinfo is refused before anything is sent: the person's token would replace
+    /// it silently, and the operator who put it there would believe it was used.
+    pub fn bearer_only(base: &str, bearer: &Bearer) -> Result<HttpTransport, BearerError> {
+        let transport = HttpTransport::new(base);
+        if transport.authorization.is_some() {
+            return Err(BearerError::UserinfoInUrl);
+        }
+        Ok(transport.with_bearer(bearer.token()))
     }
 
     fn failed(&self, message: impl std::fmt::Display) -> TransportError {
@@ -3653,5 +3758,88 @@ mod tests {
         assert!(!TransportError::refused(401).is_too_large());
         assert!(!TransportError::too_large().is_refused());
         assert!(!SyncError::from(TransportError::too_large()).is_refused());
+    }
+
+    /// The token a person pipes in (6j6v.47vy): one line, its newline taken off — `\n`, or the
+    /// `\r\n` a Windows pipe writes — and nothing else changed.
+    #[test]
+    fn read_bearer_takes_one_line_and_strips_only_its_trailing_newline() {
+        for input in ["tok.en-47vy", "tok.en-47vy\n", "tok.en-47vy\r\n"] {
+            assert_eq!(
+                read_bearer(input.as_bytes()).unwrap().token(),
+                "tok.en-47vy",
+                "{input:?}"
+            );
+        }
+    }
+
+    /// What is not one token is refused by what is wrong with it — and no refusal quotes what it
+    /// read, because what it read is meant to be a credential.
+    #[test]
+    fn read_bearer_refuses_what_is_not_one_token_without_quoting_it() {
+        for (input, expected) in [
+            ("", BearerError::Empty),
+            ("\n", BearerError::Empty),
+            ("\r\n", BearerError::Empty),
+            ("secret-one\nsecret-two\n", BearerError::NotOneLine),
+            ("secret-one\n\n", BearerError::NotOneLine),
+            ("secret one", BearerError::NotAToken),
+            ("secret\tone", BearerError::NotAToken),
+            (" secret-one", BearerError::NotAToken),
+            ("secret\u{7f}one", BearerError::NotAToken),
+        ] {
+            let refused = read_bearer(input.as_bytes()).unwrap_err();
+            assert_eq!(refused, expected, "{input:?}");
+            let said = refused.to_string();
+            assert!(!said.contains("secret"), "{input:?} -> {said}");
+        }
+        let endless = std::io::Read::take(std::io::repeat(b'a'), MAX_BEARER_BYTES as u64 + 1);
+        assert_eq!(read_bearer(endless).unwrap_err(), BearerError::TooLong);
+    }
+
+    /// The token's type says nothing about it: `Debug` is how a value ends up in a log.
+    #[test]
+    fn a_bearer_does_not_show_its_token_in_debug() {
+        let bearer = read_bearer("secret-47vy".as_bytes()).unwrap();
+        assert!(!format!("{bearer:?}").contains("secret-47vy"));
+    }
+
+    /// A relay URL that carries a userinfo and a bearer would be two credentials for one request:
+    /// refused before anything is sent, and the refusal quotes neither.
+    #[test]
+    fn bearer_only_refuses_a_relay_url_that_carries_a_userinfo() {
+        let bearer = read_bearer("person-token-47vy".as_bytes()).unwrap();
+        for url in [
+            "http://relay-user:s3cret-key@127.0.0.1:9",
+            "http://relay-user@127.0.0.1:9",
+            "http://:s3cret-key@127.0.0.1:9",
+        ] {
+            let refused = HttpTransport::bearer_only(url, &bearer)
+                .err()
+                .unwrap_or_else(|| panic!("{url} was taken"));
+            assert_eq!(refused, BearerError::UserinfoInUrl, "{url}");
+            let said = refused.to_string();
+            assert!(
+                !said.contains("s3cret") && !said.contains("relay-user"),
+                "{said}"
+            );
+            assert!(!said.contains("person-token"), "{said}");
+        }
+    }
+
+    /// A bare relay URL and a token make the transport `with_bearer` makes: the bearer header on
+    /// the request, nothing else.
+    #[test]
+    fn bearer_only_sends_the_token_as_the_one_authorization() {
+        let (addr, relay) = one_request_relay(r#"{"ops":[],"next":0}"#);
+        let bearer = read_bearer("person-token-47vy\n".as_bytes()).unwrap();
+        let t = HttpTransport::bearer_only(&format!("http://{addr}"), &bearer).unwrap();
+        t.pull(&StreamId("s".into()), Cursor(0), 10).unwrap();
+        let head = relay.join().unwrap();
+        let auth: Vec<&str> = head
+            .lines()
+            .filter(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .collect();
+        assert_eq!(auth, ["Authorization: Bearer person-token-47vy"], "{head}");
     }
 }
