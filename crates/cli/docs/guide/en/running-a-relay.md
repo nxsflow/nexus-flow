@@ -243,6 +243,19 @@ is checked like any op that arrives: every signature is verified again on the ne
 starts with a trust list of its own — so a snapshot cannot make anything act there. One the import could not read back — a log with a value of the wrong type, a view cell that
 does not fit its column — is refused whole, before anything is written.
 
+**A relay that takes a person's token** rather than a key in its URL is reached with
+`--bearer-stdin`: the snapshot verb reads the token from stdin — one line, its newline taken off —
+and sends it as `Authorization: Bearer`, for both formats:
+
+```bash
+get-my-token | nxs sync snapshot board.snapshot --based --bearer-stdin
+```
+
+The token never goes on the command line or into the environment, and no output, error or log line
+quotes it. The relay URL must then carry no user and password — the two together are refused before
+anything is sent — and a relay that refuses the token (401 or 403) is a `forbidden` error naming the
+status. Without the flag the verb uses whatever the relay URL carries, as before.
+
 An app that embeds nxs — a hosted board that starts cold — does the same through
 `nxs_sync::snapshot::{export, import}`: export from a replica that is in sync (the export confirms
 the position with the relay), store the bytes where the app trusts them, and on the next cold start
