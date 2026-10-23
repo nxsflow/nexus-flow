@@ -4,8 +4,10 @@
 //!
 //! It is the relay half of an account deletion (nexflow.it's published promise: deletion within
 //! 30 days). The account orchestration — which streams, the fence, the order across the relay and
-//! board-fold — is foundations' (kwv2) and follows consumer contract v1.4 (design §10 on the
-//! ticket); this module is the tool it drives, through `nxf-relay purge` or [`purge_stream`].
+//! board-fold — is foundations' (kwv2) and follows consumer contract v2.1, the one contract of
+//! this purge and the board-fold purge (`nxs_fold_ddb::purge`, 6j6v.dbmd), written in
+//! `docs/runbooks/relay-purge.md`; this module is the tool it drives, through `nxf-relay purge` or
+//! [`purge_stream`].
 //!
 //! What a purge must never do (owner rule: correctness of a deletion over its date): touch anything
 //! outside the one stream; say "deleted" when it deleted nothing, for example against the wrong
