@@ -24,6 +24,26 @@
       "why": "anything after n-<h>- belongs to the account"
     },
     {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12.7x3k-g1",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a nexflow.it note body n-<h>-<noteId>-g<gen> (runbook A3 (iii)): the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12.7x3k-g12",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a note body of generation 12: the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12-g1.7x3k-g3",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a noteId that itself contains -g1 (ids are parsed from the end): the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab127x3k-g1",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a dotless noteId, as a manipulated client can create under its own prefix: the same account (deletion goes by prefix)"
+    },
+    {
       "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-",
       "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
       "why": "n-<h>- with nothing after the trailing hyphen"

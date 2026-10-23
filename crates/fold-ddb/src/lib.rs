@@ -204,7 +204,7 @@
 //!
 //! | what | value |
 //! |------|-------|
-//! | key | `h` (S), the account's `<h>`: exactly 32 lowercase hex, the first 32 of SHA-256(`<issuer>:<sub>`); no sort key, no index (`ddb::create_deny_table`, checked by `ddb::deny_table_shape`) |
+//! | key | `h` (S), the account's `<h>`: exactly 32 lowercase hex, the first 32 of SHA-256(`<issuer>:<sub>`), issuer byte for byte ([`deny::AccountHash::of_subject`], pinned by `contract/deny-derivation-vectors.json`); no sort key, no index (`ddb::create_deny_table`, checked by `ddb::deny_table_shape`) |
 //! | item | `{"h": "<h>", "v": 1, "since": "<RFC 3339 UTC>"}`, one per deleted account; a reader judges PRESENCE only — any item under `<h>` is a denial, whatever `v` or other attributes it carries; no personal data, no expiry attribute (a TTL could unfence silently) |
 //! | writer | kwv2 alone, `PutItem`, in step 0; T_w is when the `PutItem` was acknowledged |
 //! | readers | the authorizer (`deny_cache_ttl` ≤ 60 s, hits and misses); board-fold before EVERY chunk, uncached ([`deny::admission`]); `nxf-fold-purge` once a run — all `GetItem` only |

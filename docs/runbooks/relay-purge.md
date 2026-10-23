@@ -125,8 +125,13 @@ account, the fence stays where it is, escalate to the owner.
   typed in by an operator. (ii) Recompute `<h>` = the first 32 lowercase hex characters of
   SHA-256(`<issuer>:<sub>`) in your own code; where the order stores an `<h>` or a `subjectHash`,
   both must be equal to it — no normalisation of the issuer (a trailing `/` is a mismatch). (iii)
-  Every id A1 found must parse as exactly `u-<h>` or `n-<h>-<k>` with `<k>` matching `^[0-9]+$`.
-  Any failure — an enumerated id outside the scoped forms included — stop.
+  Every id A1 found must be exactly `u-<h>` or match `^n-<h>-[a-z0-9_.-]+$` — every id under the
+  prefix `n-<h>-`, as `account_of` reads it, whatever follows: nexflow.it's note bodies are
+  `n-<h>-<noteId>-g<gen>` (e.g. `n-<h>-ab12.7x3k-g1`; the `<noteId>` may itself contain `-g1`),
+  and a client can create dotless ids under its own prefix, so deletion goes by prefix and never by
+  one id shape. Any failure — an enumerated id outside `u-<h>` and `n-<h>-…` included — stop. The
+  derivation in (ii) is pinned by `crates/fold-ddb/contract/deny-derivation-vectors.json`, the
+  id-to-`<h>` mapping by `deny-account-vectors.json`; kwv2's own code reproduces both.
 - **Re-entry.** A2's stop conditions apply on the FIRST entry for an id only. On every later entry
   (after exit 1, 2, 4 or 5, or step 8's re-run) compare the dry run with the previous report for
   that id instead: the same `identity_digest`, no `found` larger than before, and — when the
@@ -190,8 +195,8 @@ account, the fence stays where it is, escalate to the owner.
   endpoint: `POST /streams/{id}/ops` with `{"ops":[]}` and `GET /streams/{id}/ops?since=0&limit=1`.
   Fenced = 403 on both AND the authorizer's log has `deny_list` with the request's `sid` token for
   both. `200 {"appended":0}`: NOT fenced — stop. A 401/403 without the `deny_list` line, or anything
-  else: inconclusive — stop. Run it also for one synthetic, never-used `n-<h>-<k>` (a `<k>` above
-  every enumerated one), which proves the prefix rule. **A 503 `deny_list_unavailable` is
+  else: inconclusive — stop. Run it also for one synthetic, never-used `n-<h>-<k>` (a `<k>` of
+  `[a-z0-9_.-]+` equal to no enumerated id's), which proves the prefix rule. **A 503 `deny_list_unavailable` is
   inconclusive — stop**; it never counts as fenced.
 
 **1. Two relay dry runs, at least 10 minutes apart**, each with `--expect-identity`. (1a) A2's

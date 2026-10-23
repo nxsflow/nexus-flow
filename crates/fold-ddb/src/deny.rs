@@ -16,6 +16,8 @@
 //!
 //! Which `<h>` an id belongs to is [`account_of`], pinned by the vector file
 //! `contract/deny-account-vectors.json` that foundations run against the authorizer too.
+//! How a subject `(issuer, sub)` becomes its `<h>` is [`AccountHash::of_subject`], pinned by
+//! `contract/deny-derivation-vectors.json` (vectors confirmed by nexflowit).
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -38,6 +40,20 @@ impl AccountHash {
             && s.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         hex.then(|| AccountHash(s.to_string()))
+    }
+
+    /// The `<h>` of the subject `(issuer, sub)`: the first 32 lowercase hex characters of SHA-256
+    /// over the UTF-8 bytes of `<issuer>:<sub>`. The issuer is taken byte for byte — a trailing `/`
+    /// is another issuer and another `<h>`. Pinned by `contract/deny-derivation-vectors.json`.
+    pub fn of_subject(issuer: &str, sub: &str) -> AccountHash {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::new()
+            .chain_update(issuer.as_bytes())
+            .chain_update(b":")
+            .chain_update(sub.as_bytes())
+            .finalize();
+        let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+        AccountHash(hex)
     }
 
     pub fn as_str(&self) -> &str {
@@ -214,6 +230,39 @@ mod tests {
                 case["why"]
             );
         }
+    }
+
+    #[test]
+    fn of_subject_reproduces_the_shared_derivation_vectors() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../contract/deny-derivation-vectors.json"))
+                .expect("the vector file is JSON");
+        assert_eq!(doc["contract"], "deny-account-derivation");
+        assert_eq!(doc["version"], 1);
+        let cases = doc["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 3, "the file lost cases: {}", cases.len());
+        for case in cases {
+            let (issuer, sub) = (
+                case["issuer"].as_str().unwrap(),
+                case["sub"].as_str().unwrap(),
+            );
+            assert_eq!(
+                AccountHash::of_subject(issuer, sub).as_str(),
+                case["h"].as_str().expect("h"),
+                "{issuer:?} {sub:?}: {}",
+                case["why"]
+            );
+        }
+    }
+
+    /// The file's own claim: the trailing-slash issuer derives another `<h>` than the bare one.
+    #[test]
+    fn a_trailing_slash_on_the_issuer_is_another_account() {
+        let sub = "00000000-0000-0000-0000-000000000001";
+        assert_ne!(
+            AccountHash::of_subject("https://id.nxsflow.com", sub),
+            AccountHash::of_subject("https://id.nxsflow.com/", sub)
+        );
     }
 
     #[test]
