@@ -170,6 +170,41 @@ jobs:
           SHA: ${{ steps.commit.outputs.sha }}
         run: ./.github/scripts/require-green-ci.sh
 
+  # The board-fold purge's test seams (6j6v.dbmd) must not be in what consumers build either (MF-2,
+  # the release-side twin of f6yb's MF-4 step in the build job). `nxf-fold-purge` is in no tarball:
+  # the consuming stack builds it from the same pin as its board-fold, with exactly the command
+  # below — so the "release artefact" is THAT build of the tagged commit, made here without
+  # dev-dependencies (no `test-seams`) and purged against DynamoDB Local with every
+  # NXF_FOLD_TEST_PURGE_* variable set. CI runs the same script on every push; this proves it on
+  # the commit being released, and `publish` waits for it.
+  fold-purge-seam-inertness:
+    needs: [ci-green]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+        options: >-
+          --health-cmd "curl -s -o /dev/null http://localhost:8000"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The board-fold purge as consumers build it carries no purge test seam
+        run: |
+          cargo build -p nxs-fold-ddb --bin nxf-fold-purge --features dynamodb --release
+          bash crates/fold-ddb/scripts/fold-purge-seam-inertness.sh target/release/nxf-fold-purge http://localhost:8000
+
   # 4 targets, one job each (spec §5.2). The `platform:` keys below + the `for p in …` loop in
   # the publish job are checked against release/platforms by `cargo xtask platforms check` (CI),
   # the single source of truth for the shipped platforms (nexus-flow-4sr). darwin builds
@@ -672,7 +707,7 @@ jobs:
     # `ci-green` is listed explicitly (fail-closed gate, nexus-flow-85y.29): even though `build`
     # already transitively depends on it, naming it here makes the no-publish-on-red guarantee
     # verbatim in this job's needs.
-    needs: [meta, build, ci-green]
+    needs: [meta, build, ci-green, fold-purge-seam-inertness]
     runs-on: ubuntu-latest
     permissions:
       contents: write # GitHub Pre-Release + asset upload (prod/tag path only)

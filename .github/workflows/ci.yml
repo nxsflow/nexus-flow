@@ -907,6 +907,16 @@ jobs:
       - name: DynamoDB Local tests (debug)
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb
 
+      # The board-fold purge's test seams (6j6v.dbmd) exist only behind `nxs-fold-ddb`'s
+      # `test-seams` feature, which only its own tests turn on. This builds `nxf-fold-purge` the
+      # way the consuming stack builds it (no dev-dependencies, so no `test-seams`) and purges one
+      # stream on DynamoDB Local with every NXF_FOLD_TEST_PURGE_* variable set: it must exit 0 with
+      # the partition empty. The release workflow runs the same script on the tagged commit (MF-2).
+      - name: The shipped nxf-fold-purge carries no purge test seam
+        run: |
+          cargo build -p nxs-fold-ddb --bin nxf-fold-purge --features dynamodb --release
+          bash crates/fold-ddb/scripts/fold-purge-seam-inertness.sh target/release/nxf-fold-purge "$NXF_RELAY_DDB_ENDPOINT"
+
       # The release-profile run of the purge acceptance needs a current release `nxs` too.
       - name: Build the shipped nxs/nxf binaries (release)
         if: github.event_name != 'pull_request'
