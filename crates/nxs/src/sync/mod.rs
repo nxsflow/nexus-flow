@@ -682,6 +682,12 @@ fn register_platform_reducers(store: &mut Store) -> Result<()> {
     Ok(())
 }
 
+/// The bearer `nxs sync snapshot --bearer-stdin` reads (6j6v.47vy): stdin, through
+/// [`engine::read_bearer`], a refusal as a validation error that quotes nothing it read.
+pub fn read_bearer_from_stdin() -> Result<engine::Bearer> {
+    engine::read_bearer(std::io::stdin().lock()).map_err(|e| NxfError::validation(e.to_string()))
+}
+
 /// `nxs sync snapshot <file>` (6j6v.mxt2): write this workspace's snapshot — the whole log, the
 /// folded board and the relay position they reach — for a new machine to start from.
 ///
@@ -693,7 +699,25 @@ pub fn snapshot_verb(
     ws: &Workspace,
     file: &std::path::Path,
     based: bool,
+    bearer: Option<&engine::Bearer>,
 ) -> Result<()> {
+    let bytes = take_snapshot(ws, based, bearer)?;
+    // Owner-only: the state it carries is the workspace's own, whether or not the log rides along
+    // (review of PR #487, Code Quality #7).
+    crate::workspaces::write_atomic_private(file, &bytes)?;
+    let header = nxs_sync::snapshot::peek(&bytes).map_err(snapshot_error)?;
+    println!("{}", snapshot_report(json, file, bytes.len(), &header));
+    Ok(())
+}
+
+/// The snapshot `nxs sync snapshot` writes, as bytes — the library seam under the verb
+/// (6j6v.47vy). `based` picks format 2. With a `bearer` the relay is asked with that token alone
+/// ([`HttpTransport::bearer_only`]); without one, with whatever the relay URL carries, as before.
+pub fn take_snapshot(
+    ws: &Workspace,
+    based: bool,
+    bearer: Option<&engine::Bearer>,
+) -> Result<Vec<u8>> {
     let meta = load(ws)?.ok_or_else(|| {
         NxfError::validation("workspace is not bound to a stream; run `nxs sync bind` first")
     })?;
@@ -708,9 +732,13 @@ pub fn snapshot_verb(
         pulled_through: meta.pulled_through,
     };
     let remote = resolve_endpoint(None, &meta)?;
-    let transport = HttpTransport::new(&remote);
+    let transport = match bearer {
+        Some(bearer) => HttpTransport::bearer_only(&remote, bearer)
+            .map_err(|e| NxfError::validation(e.to_string()))?,
+        None => HttpTransport::new(&remote),
+    };
     let stream = StreamId(meta.stream_id.clone());
-    let bytes = if based {
+    let taken = if based {
         nxs_sync::snapshot::export_based(
             &store,
             ws.replica.site_id,
@@ -721,14 +749,22 @@ pub fn snapshot_verb(
         )
     } else {
         nxs_sync::snapshot::export(&store, ws.replica.site_id, &stream, &marks, &transport)
-    }
-    .map_err(snapshot_error)?;
-    // Owner-only: the state it carries is the workspace's own, whether or not the log rides along
-    // (review of PR #487, Code Quality #7).
-    crate::workspaces::write_atomic_private(file, &bytes)?;
-    let header = nxs_sync::snapshot::peek(&bytes).map_err(snapshot_error)?;
-    println!("{}", snapshot_report(json, file, bytes.len(), &header));
-    Ok(())
+    };
+    taken.map_err(|e| match (bearer, e.refused_status()) {
+        // Only where the bearer was given: without it the verb answers as it always has.
+        (Some(_), Some(status)) => NxfError::new(
+            ErrorKind::Forbidden,
+            format!(
+                "the relay refused the bearer token read from stdin (HTTP {status}): {} — get a \
+                 new token and take the snapshot again",
+                match status {
+                    401 => "it is missing, expired or not accepted",
+                    _ => "it is accepted, but may not read this stream",
+                }
+            ),
+        ),
+        _ => snapshot_error(e),
+    })
 }
 
 /// What `nxs sync snapshot` says it wrote — `--json`, or a sentence. A based snapshot's sentence

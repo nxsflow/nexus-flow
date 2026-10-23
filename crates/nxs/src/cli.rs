@@ -341,6 +341,13 @@ enum SyncAction {
         /// whose fold rules match can take its state.
         #[arg(long)]
         based: bool,
+        /// Reach the relay with a BEARER token read from stdin — one line, its newline taken off —
+        /// instead of the userinfo in the relay URL: for a relay that takes a person's token from a
+        /// token exchange. The token never goes on the command line or into the environment, and
+        /// no output quotes it. The relay URL must then carry no userinfo; a relay that refuses the
+        /// token (401/403) is a `forbidden` error.
+        #[arg(long)]
+        bearer_stdin: bool,
     },
     /// Take a workspace back off the list this service instance attends
     /// (`~/.nexusflow/workspaces.toml`, or `~/.nexusflow-<name>/` for a development BUILD that
@@ -816,9 +823,26 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 let ws = resolve(db)?;
                 sync::run(cli.json, &ws, remote.as_deref())
             }
-            SyncAction::Snapshot { file, based } => {
+            SyncAction::Snapshot {
+                file,
+                based,
+                bearer_stdin,
+            } => {
+                // Read before anything else is touched, so an empty or malformed token is refused
+                // before the workspace is opened or the relay is asked.
+                let bearer = if *bearer_stdin {
+                    Some(sync::read_bearer_from_stdin()?)
+                } else {
+                    None
+                };
                 let ws = resolve(db)?;
-                sync::snapshot_verb(cli.json, &ws, std::path::Path::new(file), *based)
+                sync::snapshot_verb(
+                    cli.json,
+                    &ws,
+                    std::path::Path::new(file),
+                    *based,
+                    bearer.as_ref(),
+                )
             }
             SyncAction::Endpoint { url } => sync::endpoint_verb(cli.json, url.as_deref()),
             // Machine-wide like `endpoint`: this machine is the service home's, not the cwd's

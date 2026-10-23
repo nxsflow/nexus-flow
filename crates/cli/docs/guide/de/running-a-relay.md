@@ -267,6 +267,20 @@ dort also nichts zum Wirken bringen. Einer, den der Import nicht zurücklesen k�
 vom falschen Typ, eine View-Zelle, die nicht zu ihrer Spalte passt —, wird ganz abgewiesen, bevor
 etwas geschrieben wird.
 
+**Ein Relay, das das Token einer Person annimmt** statt eines Schlüssels in seiner URL, erreichst du
+mit `--bearer-stdin`: Das Schnappschuss-Verb liest das Token von stdin — eine Zeile, ihr
+Zeilenumbruch entfernt — und sendet es als `Authorization: Bearer`, für beide Formate:
+
+```bash
+get-my-token | nxs sync snapshot board.snapshot --based --bearer-stdin
+```
+
+Das Token kommt nie auf die Kommandozeile oder in die Umgebung, und keine Ausgabe, kein Fehler und
+keine Logzeile zitiert es. Die Relay-URL darf dann weder Benutzer noch Passwort tragen — beides
+zusammen wird abgewiesen, bevor etwas gesendet wird —, und ein Relay, das das Token ablehnt (401 oder
+403), ergibt einen `forbidden`-Fehler, der den Status nennt. Ohne das Flag nimmt das Verb wie bisher,
+was die Relay-URL trägt.
+
 Eine App, die nxs einbettet — ein gehostetes Brett, das kalt startet —, macht dasselbe über
 `nxs_sync::snapshot::{export, import}`: von einem Replikat exportieren, das auf Stand ist (der Export
 bestätigt die Position beim Relay), die Bytes dort ablegen, wo die App ihnen traut, und beim nächsten
