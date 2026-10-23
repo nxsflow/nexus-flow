@@ -1254,7 +1254,10 @@ fn without_the_deny_item_only_the_dry_run_runs() {
 
 /// Every GetItem's body, as the SDK sends it.
 #[derive(Debug, Clone, Default)]
-struct Bodies(Arc<Mutex<Vec<(String, Value)>>>);
+struct Bodies(Arc<Mutex<Vec<Sent>>>);
+
+/// One request: its operation and its JSON body.
+type Sent = (String, Value);
 
 impl Intercept for Bodies {
     fn name(&self) -> &'static str {
@@ -1385,11 +1388,11 @@ fn a_board_fold_shaped_loop_stops_writing_a_denied_account_at_its_next_chunk() {
     let (t_chunks, o_chunks) = (chunks("T"), chunks("O"));
     let mut target_after = Vec::new();
     let mut other_after = Vec::new();
-    for i in 0..5 {
+    for (i, (t_chunk, o_chunk)) in t_chunks.iter().zip(&o_chunks).enumerate() {
         if i == 2 {
             f.deny_account(H);
         }
-        for (stream, chunk) in [(target(), &t_chunks[i]), (other(), &o_chunks[i])] {
+        for (stream, chunk) in [(target(), t_chunk), (other(), o_chunk)] {
             let admitted = ddb::rt().block_on(admission(&list, &stream)).unwrap();
             if admitted.writes() {
                 f.fold_ops(&stream, chunk);
@@ -1403,11 +1406,11 @@ fn a_board_fold_shaped_loop_stops_writing_a_denied_account_at_its_next_chunk() {
         "frozen after the deny item"
     );
     assert!(!target_after[1].is_empty());
-    for i in 2..5 {
+    for (chunk, pair) in other_after.windows(2).enumerate().skip(1) {
         assert!(
-            other_after[i].len() > other_after[i - 1].len(),
+            pair[1].len() > pair[0].len(),
             "the other account gains rows in chunk {}",
-            i + 1
+            chunk + 2
         );
     }
 

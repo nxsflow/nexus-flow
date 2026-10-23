@@ -46,13 +46,14 @@ fn item(n: u64) -> String {
     format!("ab12.{n:04}")
 }
 
+/// The fixture ops minted so far, by tag.
+type Minted = std::collections::HashMap<String, Vec<(i64, Op)>>;
+
 /// The fixture's ops for `tag`, the SAME ops on every call in a process (the stores mint random op
 /// ids, and sort keys carry them): so a control fold, a re-fold after a purge and the list of keys
 /// no report may print all name exactly the keys the folded partition holds.
 pub fn fixture_ops(tag: &str) -> Vec<(i64, Op)> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Vec<(i64, Op)>>>,
-    > = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Minted>> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(Default::default)
         .lock()

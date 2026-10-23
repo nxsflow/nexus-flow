@@ -48,7 +48,6 @@ fn validate_purge_id_refuses_exactly_what_the_relay_refuses_with_the_same_rule()
     for id in ids() {
         let ours = purge::validate_purge_id(&id);
         let relay = nxs_server::purge::validate_purge_id(&StreamId(id.clone()));
-        let rule = |r: Option<&'static str>| r;
         let ours_rule = match &ours {
             Ok(()) => None,
             Err(PurgeError::InvalidStreamId { rule }) => Some(*rule),
@@ -59,7 +58,7 @@ fn validate_purge_id_refuses_exactly_what_the_relay_refuses_with_the_same_rule()
             Err(nxs_server::purge::PurgeError::InvalidStreamId { rule }) => Some(*rule),
             Err(other) => panic!("{id:?}: {other:?}"),
         };
-        assert_eq!(rule(ours_rule), rule(relay_rule), "{id:?}");
+        assert_eq!(ours_rule, relay_rule, "{id:?}");
     }
     assert_eq!(
         purge::MAX_PURGE_ID_BYTES,
