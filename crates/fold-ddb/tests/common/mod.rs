@@ -18,6 +18,9 @@ pub const NOW: &str = "2026-10-08T12:00:00Z";
 /// (6j6v.0cfa). Its own module because it is the only generator that speaks chat and memory.
 pub mod platform;
 
+/// The board-fold purge's fixture (6j6v.dbmd): every kind of row, with byte markers.
+pub mod purge;
+
 pub struct Lcg(pub u64);
 impl Lcg {
     pub fn next(&mut self, n: u64) -> u64 {

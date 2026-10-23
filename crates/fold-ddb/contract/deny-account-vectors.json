@@ -1,0 +1,147 @@
+{
+  "contract": "deny-account-of",
+  "version": 1,
+  "about": "Which account <h> a stream id belongs to, as the shared deny list judges it (6j6v.dbmd round 4b, review round 4b Integrity 5). <h> is exactly 32 lowercase hex characters. An id belongs to account <h> iff it equals u-<h> or begins with n-<h>- (the trailing hyphen included); every other id is unscoped (null) and no deny item can name it. nxs_fold_ddb::deny::account_of is pinned to this file by its unit tests; foundations run the same file against the ticket authorizer. The authorizer additionally refuses ids outside its own pattern; that refusal is not part of this mapping.",
+  "cases": [
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00ff",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "u-<h> exactly"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-1",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "n-<h>-<k>"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-10",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "n-<h>-<k>, k of two digits: the same account as n-<h>-1"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-1-x",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "anything after n-<h>- belongs to the account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12.7x3k-g1",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a nexflow.it note body n-<h>-<noteId>-g<gen> (runbook A3 (iii)): the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12.7x3k-g12",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a note body of generation 12: the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab12-g1.7x3k-g3",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a noteId that itself contains -g1 (ids are parsed from the end): the same account"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-ab127x3k-g1",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "a dotless noteId, as a manipulated client can create under its own prefix: the same account (deletion goes by prefix)"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "n-<h>- with nothing after the trailing hyphen"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-team board/#x",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "arbitrary text after n-<h>-: still the account (the authorizer's id pattern refuses the id on its own)"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff-999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "account": "00ff00ff00ff00ff00ff00ff00ff00ff",
+      "why": "an id longer than the authorizer's 128 characters: account_of still names the account (fail closed: deny more, never less)"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00ff-1",
+      "account": null,
+      "why": "u-<h> with a suffix is not u-<h>"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00ffx",
+      "account": null,
+      "why": "u-<h> with a suffix is not u-<h>"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff",
+      "account": null,
+      "why": "n-<h> without the trailing hyphen"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff1",
+      "account": null,
+      "why": "no hyphen after <h>"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00f-1",
+      "account": null,
+      "why": "<h> of 31 characters"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00ff0-1",
+      "account": null,
+      "why": "<h> of 33 characters"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00f",
+      "account": null,
+      "why": "<h> of 31 characters"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00ff0",
+      "account": null,
+      "why": "<h> of 33 characters"
+    },
+    {
+      "id": "n-00FF00FF00FF00FF00FF00FF00FF00FF-1",
+      "account": null,
+      "why": "uppercase hex is not <h>"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00fF",
+      "account": null,
+      "why": "one uppercase hex digit"
+    },
+    {
+      "id": "n-00ff00ff00ff00ff00ff00ff00ff00fg-1",
+      "account": null,
+      "why": "a non-hex character"
+    },
+    {
+      "id": "x-00ff00ff00ff00ff00ff00ff00ff00ff-1",
+      "account": null,
+      "why": "an unknown scope letter"
+    },
+    {
+      "id": "N-00ff00ff00ff00ff00ff00ff00ff00ff-1",
+      "account": null,
+      "why": "the scope letter is lowercase"
+    },
+    {
+      "id": " u-00ff00ff00ff00ff00ff00ff00ff00ff",
+      "account": null,
+      "why": "no normalisation: a leading space"
+    },
+    {
+      "id": "u-00ff00ff00ff00ff00ff00ff00ff00ff ",
+      "account": null,
+      "why": "no normalisation: a trailing space"
+    },
+    {
+      "id": "6j6v",
+      "account": null,
+      "why": "an unscoped id"
+    },
+    {
+      "id": "",
+      "account": null,
+      "why": "the empty id"
+    }
+  ]
+}

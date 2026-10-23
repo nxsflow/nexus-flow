@@ -13,7 +13,21 @@ default = []
 # this crate — the layout, the write plan, the board index, the in-memory table the tests fold
 # into, snapshots — builds without it, so the rules are tested on every run and only the SDK
 # adapter waits for the `dynamodb-local` CI job.
-dynamodb = ["dep:aws-sdk-dynamodb"]
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "dep:tokio"]
+# Test seams of the board-fold purge (6j6v.dbmd): `PurgeSeams::from_env` and the stop, inject and
+# page seams it reads (`NXF_FOLD_TEST_PURGE_*`). Off in every shipped build: only this package's
+# own dev-dependency on itself (below) turns it on, so `nxf-fold-purge` as foundations build it
+# (`cargo build -p nxs-fold-ddb --bin nxf-fold-purge --features dynamodb`) never reads them — CI
+# and the release workflow prove that on such a build (`scripts/fold-purge-seam-inertness.sh`).
+test-seams = []
+
+[[bin]]
+# The board-fold purge (6j6v.dbmd): one stream's partition of the board-fold table, deleted the way
+# `nxf-relay purge` deletes the relay's (6j6v.f6yb). Not part of any release tarball: the
+# consuming stack builds it from the same pin as its board-fold (`purge` module doc).
+name = "nxf-fold-purge"
+path = "src/bin/nxf-fold-purge.rs"
+required-features = ["dynamodb"]
 
 [dependencies]
 nxs-foundation = { path = "../foundation" }
@@ -31,7 +45,15 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The purge's plan and identity digests and its log-id v1 copy (6j6v.dbmd; the same three crates
+# `nxs-server` uses for its own, so nothing new enters the build).
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
 aws-sdk-dynamodb = { version = "1", optional = true }
+# `nxf-fold-purge` only: the SDK's standard credential chain, and the runtime the bin awaits on.
+aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
@@ -46,3 +68,8 @@ toml = "0.8"
 # The derived-keys differential test (6j6v.1c5s) registers its plugin fixture, so `plugin::load`
 # validates it as it validates a consumer's plugin.
 inventory = "0.3"
+# The purge (6j6v.dbmd): this package with its test seams on, as nxs-server does for its own; and
+# nxs-server itself, so the parity tests hold `purge::validate_purge_id` and the log-id copy equal
+# to the relay's (design MF-1). DEV-only: the library never depends on the relay.
+nxs-fold-ddb = { path = ".", features = ["test-seams"] }
+nxs-server = { path = "../server" }

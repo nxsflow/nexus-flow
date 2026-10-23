@@ -1,0 +1,25 @@
+{
+  "contract": "deny-account-derivation",
+  "version": 1,
+  "about": "How an account's <h> is derived from its subject (6j6v.dbmd, consumer contract v2.1, runbook step A3 (ii)): the first 32 lowercase hex characters of SHA-256 over the UTF-8 bytes of \"<issuer>:<sub>\". The issuer is taken byte for byte, never normalised: a trailing slash is a different issuer and a different <h>. The two nxsflow vectors were confirmed by nexflowit (nexflowit-app main 0bb5dee, MemberIdentity.userId) and recomputed by nexus. nxs_fold_ddb::deny::AccountHash::of_subject is pinned to this file by its unit tests.",
+  "cases": [
+    {
+      "issuer": "https://id.staging.nxsflow.com",
+      "sub": "00000000-0000-0000-0000-000000000001",
+      "h": "956611f3b74b6600801bed075b7d6fc5",
+      "why": "the staging issuer, confirmed by nexflowit"
+    },
+    {
+      "issuer": "https://id.nxsflow.com",
+      "sub": "00000000-0000-0000-0000-000000000001",
+      "h": "95b7f9041db5dc7d09dbfb1c858e06b1",
+      "why": "the production issuer, confirmed by nexflowit"
+    },
+    {
+      "issuer": "https://id.nxsflow.com/",
+      "sub": "00000000-0000-0000-0000-000000000001",
+      "h": "9460b247625fe2686f038d01b71dd27a",
+      "why": "a trailing slash on the issuer is not normalised away: a different <h> than the production issuer's"
+    }
+  ]
+}
