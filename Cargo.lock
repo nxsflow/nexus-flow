@@ -2440,18 +2440,24 @@ dependencies = [
 name = "nxs-fold-ddb"
 version = "0.218.0"
 dependencies = [
+ "aws-config",
  "aws-sdk-dynamodb",
+ "base64",
  "futures-util",
+ "hmac 0.12.1",
  "inventory",
  "nexus-chat",
  "nexus-flow-core",
  "nexus-flow-facade",
  "nexus-memory",
+ "nxs-fold-ddb",
  "nxs-foundation",
+ "nxs-server",
  "nxs-sync",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "toml",
 ]
