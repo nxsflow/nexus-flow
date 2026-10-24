@@ -926,3 +926,11 @@ jobs:
       - name: DynamoDB Local tests (release)
         if: github.event_name != 'pull_request'
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
+
+  # The dependency vulnerability gate (6j6v.2dn0): cargo deny, the expiry of recorded exceptions,
+  # and npm audit for the npm packages that ship. The steps live in dependency-audit.yml, which
+  # also runs them DAILY on its own schedule — an advisory arrives without a code change. Calling
+  # the same file here is what makes the per-change gate and the daily one the same check.
+  # Process: docs/runbooks/dependency-vulnerabilities.md.
+  dependency-audit:
+    uses: ./.github/workflows/dependency-audit.yml

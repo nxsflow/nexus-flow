@@ -5,6 +5,7 @@
 mod cache;
 mod changelog;
 mod channels;
+mod deps;
 mod docs;
 mod facade;
 mod macos_tests;
@@ -61,6 +62,20 @@ enum Command {
     /// (nexus-flow-6j6v.gapx).
     #[command(subcommand)]
     Cache(CacheCmd),
+    /// Dependency vulnerability gate: the expiry of recorded advisory exceptions, and npm audit
+    /// with its exceptions (nexus-flow-6j6v.2dn0; docs/runbooks/dependency-vulnerabilities.md).
+    #[command(subcommand)]
+    Deps(DepsCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum DepsCmd {
+    /// Assert every `[advisories] ignore` entry in deny.toml starts its reason with
+    /// `expires YYYY-MM-DD:`, has not expired, and names its board item (CI gate, fail-closed).
+    Exceptions,
+    /// Run `npm audit --omit=dev` for one npm package and fail on any advisory not recorded in its
+    /// `npm-audit.toml` (CI gate, fail-closed).
+    NpmAudit { dir: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -261,6 +276,13 @@ fn main() -> Result<()> {
         Command::MacosTests(MacosTestsCmd::Check) => {
             let inventory = macos_tests::check(&root)?;
             println!("macos-tests check ok — {inventory}");
+        }
+        Command::Deps(DepsCmd::Exceptions) => {
+            let n = deps::check_exceptions(&root)?;
+            println!("deps exceptions ok — {n} recorded, none expired");
+        }
+        Command::Deps(DepsCmd::NpmAudit { dir }) => {
+            println!("{}", deps::npm_audit(&dir)?);
         }
         Command::Cache(CacheCmd::Sweep {
             caches,
