@@ -26,7 +26,7 @@ terminal_size = "0.3"
 # inquire: the arrow-key Select the chooser widget wraps — themed to manufakt-Forge. The ticket
 # pins it (shared with hai.3's plugin chooser). It owns its own raw-mode/TTY handling; we only ever
 # invoke the interactive prompt behind an is-terminal gate.
-inquire = "0.7"
+inquire = "0.9"
 
 [dev-dependencies]
 # Round-trip the emitted SGR back to plain text to prove the byte-stability guard (no escapes on a

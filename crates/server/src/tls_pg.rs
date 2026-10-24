@@ -34,6 +34,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use rustls::{ClientConfig, RootCertStore};
 
 use crate::store::{StoreError, StoreResult};
@@ -66,8 +67,7 @@ fn root_store(ca_file: Option<&Path>) -> StoreResult<RootCertStore> {
             path.display()
         ))
     })?;
-    let mut cursor = std::io::Cursor::new(pem);
-    let certs = rustls_pemfile::certs(&mut cursor)
+    let certs = CertificateDer::pem_slice_iter(&pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             StoreError(format!(
@@ -204,6 +204,33 @@ qqmhPSVjLnYNOdyeyKzF3JdrQoITD2ubDi5Yk3qVtQ==\n\
         assert!(
             err.0.contains("no CERTIFICATE block"),
             "message must say what was missing: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_pinned_supabase_root_with_its_prose_note_is_read_as_one_certificate() {
+        // The managed-postgres CI job points NXF_RELAY_PG_CA_FILE at this file, whose note sits
+        // OUTSIDE the BEGIN/END block. The PEM parser must skip that text, not trip on it.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/certs/supabase-root-2021-ca.pem");
+        let roots = root_store(Some(&path)).expect("the pinned Supabase root is accepted");
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len() + 1);
+    }
+
+    #[test]
+    fn a_ca_file_with_a_malformed_certificate_block_fails_loudly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A CERTIFICATE block whose body is not base64 — a truncated copy-paste. It must be a
+        // parse error naming the knob, not a block silently skipped.
+        let path = write(
+            &dir,
+            "broken.pem",
+            "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n",
+        );
+        let err = root_store(Some(&path)).expect_err("a malformed certificate must not pass");
+        assert!(
+            err.0.contains(CA_FILE_ENV) && err.0.contains("cannot parse"),
+            "message must name the knob and say the file did not parse: {err:?}"
         );
     }
 
