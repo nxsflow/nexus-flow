@@ -112,7 +112,7 @@ pub fn problems(exceptions: &[Exception], today: &str) -> Vec<String> {
     out
 }
 
-/// The `YYYY-MM-DD` of a reason that starts `expires YYYY-MM-DD:`, if it is a plausible date.
+/// The `YYYY-MM-DD` of a reason that starts `expires YYYY-MM-DD:`, if it is a calendar date.
 fn expiry(reason: &str) -> Option<&str> {
     let date = reason.strip_prefix("expires ")?.get(..10)?;
     if reason.get(18..19) != Some(":") {
@@ -125,10 +125,21 @@ fn expiry(reason: &str) -> Option<&str> {
     }
     let month: u32 = date[5..7].parse().ok()?;
     let day: u32 = date[8..10].parse().ok()?;
-    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some(date)
+    let year: u32 = date[..4].parse().ok()?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (1..=days_in_month).contains(&day).then_some(date)
 }
 
 /// Whether `text` holds a board id: four lowercase alphanumerics, a dot, four more, standing alone.
+/// This restates the board's `<prefix>.<suffix>` id shape (both four characters today); if the id
+/// format changes, this matcher and its test change with it.
 fn names_a_board_item(text: &str) -> bool {
     let b = text.as_bytes();
     let id_char = |c: u8| c.is_ascii_digit() || c.is_ascii_lowercase();
@@ -204,17 +215,44 @@ pub fn has_runtime_dependencies(package_json: &str) -> Result<bool> {
 
 /// `cargo xtask deps exceptions`: the ignore entries of `deny.toml`. Returns how many there are.
 pub fn check_exceptions(root: &Path) -> Result<usize> {
+    check_exceptions_at(root, &crate::changelog::system_today())
+}
+
+/// [`check_exceptions`] on a given `today` (`YYYY-MM-DD`).
+pub fn check_exceptions_at(root: &Path, today: &str) -> Result<usize> {
     let path = root.join("deny.toml");
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     let exceptions = parse_exceptions(&text, &["advisories", "ignore"])
         .with_context(|| format!("in {}", path.display()))?;
-    refuse_problems(&path, &exceptions)?;
+    refuse_problems(&path, &exceptions, today)?;
     Ok(exceptions.len())
 }
 
 /// `cargo xtask deps npm-audit <dir>`: the production dependencies of one npm package.
 pub fn npm_audit(dir: &Path) -> Result<String> {
+    npm_audit_with(dir, &crate::changelog::system_today(), run_npm_audit)
+}
+
+/// `npm audit --omit=dev --json` in `dir`, returning the report's text. npm exits non-zero
+/// whenever it finds anything, so its status says nothing here; the report decides, and a report
+/// that is not one fails in [`npm_findings`].
+fn run_npm_audit(dir: &Path) -> Result<String> {
+    let out = Command::new("npm")
+        .args(["audit", "--omit=dev", "--json"])
+        .current_dir(dir)
+        .output()
+        .context("cannot run npm")?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// [`npm_audit`] on a given `today`, with `run` standing in for [`run_npm_audit`]. Everything
+/// that can fail closed without npm — no lockfile, an invalid exception — fails before `run`.
+pub fn npm_audit_with(
+    dir: &Path,
+    today: &str,
+    run: impl FnOnce(&Path) -> Result<String>,
+) -> Result<String> {
     let manifest = dir.join("package.json");
     let text = std::fs::read_to_string(&manifest)
         .with_context(|| format!("cannot read {}", manifest.display()))?;
@@ -233,26 +271,28 @@ pub fn npm_audit(dir: &Path) -> Result<String> {
         let text = std::fs::read_to_string(&exceptions_path)?;
         let list = parse_exceptions(&text, &["ignore"])
             .with_context(|| format!("in {}", exceptions_path.display()))?;
-        refuse_problems(&exceptions_path, &list)?;
+        refuse_problems(&exceptions_path, &list, today)?;
         list
     } else {
         Vec::new()
     };
-    // npm audit exits non-zero whenever it finds anything, so its status says nothing here; the
-    // report decides, and a report that is not one fails in npm_findings.
-    let out = Command::new("npm")
-        .args(["audit", "--omit=dev", "--json"])
-        .current_dir(dir)
-        .output()
-        .context("cannot run npm")?;
-    let findings = npm_findings(&String::from_utf8_lossy(&out.stdout))
-        .with_context(|| format!("{}: npm audit", dir.display()))?;
+    let report = run(dir).with_context(|| format!("{}: npm audit", dir.display()))?;
+    let findings =
+        npm_findings(&report).with_context(|| format!("{}: npm audit", dir.display()))?;
     let (open, stale) = npm_verdict(&findings, &exceptions);
-    for id in &stale {
-        eprintln!(
-            "warning: {}: exception {id} matches no advisory any more — remove it",
-            exceptions_path.display()
-        );
+    // A stale exception warns and never fails: the advisory it covered is gone, which is the
+    // outcome the process wants. It is named, so the next change removes it.
+    let warnings: Vec<String> = stale
+        .iter()
+        .map(|id| {
+            format!(
+                "warning: {}: exception {id} matches no advisory any more — remove it",
+                exceptions_path.display()
+            )
+        })
+        .collect();
+    for w in &warnings {
+        eprintln!("{w}");
     }
     if !open.is_empty() {
         let lines: Vec<String> = open
@@ -273,11 +313,16 @@ pub fn npm_audit(dir: &Path) -> Result<String> {
             lines.join("\n")
         );
     }
-    Ok(format!(
+    let mut summary = format!(
         "{}: npm audit clean ({} finding(s) covered by a recorded exception)",
         dir.display(),
         findings.len()
-    ))
+    );
+    for w in warnings {
+        summary.push('\n');
+        summary.push_str(&w);
+    }
+    Ok(summary)
 }
 
 /// The npm packages that ship, and so are audited: the agent sidecar, whose bundle is compiled
@@ -334,8 +379,8 @@ fn cargo_deny(root: &Path) -> Result<String> {
     Ok("advisories, bans, licenses and sources ok".to_owned())
 }
 
-fn refuse_problems(path: &Path, exceptions: &[Exception]) -> Result<()> {
-    let found = problems(exceptions, &crate::changelog::today());
+fn refuse_problems(path: &Path, exceptions: &[Exception], today: &str) -> Result<()> {
+    let found = problems(exceptions, today);
     if found.is_empty() {
         return Ok(());
     }
@@ -515,6 +560,7 @@ ignore = [
         assert!(has_runtime_dependencies(r#"{"dependencies":{"a":"1"}}"#).unwrap());
         assert!(has_runtime_dependencies(r#"{"optionalDependencies":{"a":"1"}}"#).unwrap());
     }
+
     #[test]
     fn the_verdict_passes_only_when_every_check_passed_and_says_what_each_found() {
         let all_green = verdict(vec![
@@ -553,5 +599,134 @@ ignore = [
             err.contains("agent-sidecar") && err.contains("2 advisories"),
             "{err}"
         );
+    }
+    #[test]
+    fn an_impossible_calendar_day_is_refused_and_a_leap_day_is_not() {
+        for reason in [
+            "expires 2027-02-29: not a leap year (6j6v.abcd)",
+            "expires 2027-02-30: no such day (6j6v.abcd)",
+            "expires 2027-04-31: april has thirty (6j6v.abcd)",
+        ] {
+            let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
+            assert_eq!(got.len(), 1, "{reason:?} must be refused: {got:?}");
+        }
+        let leap = ex(
+            "RUSTSEC-2024-0449",
+            "expires 2028-02-29: leap day (6j6v.abcd)",
+        );
+        assert!(problems(&[leap], "2026-10-24").is_empty());
+    }
+
+    /// A package directory with the given package.json, and optionally a lockfile and an
+    /// npm-audit.toml.
+    fn npm_package(manifest: &str, lockfile: bool, exceptions: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), manifest).unwrap();
+        if lockfile {
+            std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        }
+        if let Some(text) = exceptions {
+            std::fs::write(dir.path().join("npm-audit.toml"), text).unwrap();
+        }
+        dir
+    }
+
+    const WITH_DEPS: &str = r#"{"dependencies":{"proxy-addr":"2"}}"#;
+
+    fn npm_must_not_run(_: &Path) -> Result<String> {
+        panic!("npm audit must not run on this path")
+    }
+
+    #[test]
+    fn a_package_without_runtime_dependencies_passes_without_running_npm() {
+        let dir = npm_package(r#"{"devDependencies":{"esbuild":"0.27"}}"#, false, None);
+        let got = npm_audit_with(dir.path(), "2026-10-24", npm_must_not_run).unwrap();
+        assert!(got.contains("no runtime dependencies"), "{got}");
+    }
+
+    #[test]
+    fn runtime_dependencies_without_a_lockfile_fail_closed() {
+        let dir = npm_package(WITH_DEPS, false, None);
+        let err = npm_audit_with(dir.path(), "2026-10-24", npm_must_not_run)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("package-lock.json"), "{err}");
+    }
+
+    #[test]
+    fn an_invalid_npm_exception_fails_before_npm_runs() {
+        for text in [
+            "ignore = [{ id = \"GHSA-jqcg-44mw-7w3h\", reason = \"expires 2026-10-01: x (6j6v.abcd)\" }]\n",
+            "ignore = [{ id = \"GHSA-jqcg-44mw-7w3h\", reason = \"accepted\" }]\n",
+        ] {
+            let dir = npm_package(WITH_DEPS, true, Some(text));
+            let err = npm_audit_with(dir.path(), "2026-10-24", npm_must_not_run)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("GHSA-jqcg-44mw-7w3h"), "{err}");
+            assert!(err.contains("npm-audit.toml"), "names the file: {err}");
+        }
+    }
+
+    #[test]
+    fn an_uncovered_npm_advisory_fails_and_names_it() {
+        let dir = npm_package(WITH_DEPS, true, None);
+        let err = npm_audit_with(dir.path(), "2026-10-24", |_| Ok(AUDIT.to_owned()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("GHSA-jqcg-44mw-7w3h") && err.contains("critical"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_npm_audit_that_did_not_run_fails_closed() {
+        let dir = npm_package(WITH_DEPS, true, None);
+        let failed = r#"{"error":{"code":"ENOTFOUND","summary":"request failed"}}"#;
+        assert!(npm_audit_with(dir.path(), "2026-10-24", |_| Ok(failed.to_owned())).is_err());
+        assert!(npm_audit_with(dir.path(), "2026-10-24", |_| bail!("npm not found")).is_err());
+    }
+
+    #[test]
+    fn a_covered_advisory_passes_and_a_stale_exception_only_warns() {
+        let text = "ignore = [\n\
+            { id = \"GHSA-jqcg-44mw-7w3h\", reason = \"expires 2027-01-31: x (6j6v.abcd)\" },\n\
+            { id = \"GHSA-xxxx-xxxx-xxxx\", reason = \"expires 2027-01-31: y (6j6v.abcd)\" },\n]\n";
+        let dir = npm_package(WITH_DEPS, true, Some(text));
+        let got = npm_audit_with(dir.path(), "2026-10-24", |_| Ok(AUDIT.to_owned())).unwrap();
+        assert!(got.contains("1 finding(s) covered"), "{got}");
+        assert!(
+            got.contains("GHSA-xxxx-xxxx-xxxx") && got.contains("matches no advisory"),
+            "a stale exception is reported, and does not fail the gate: {got}"
+        );
+    }
+
+    fn deny_toml(entry: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let text = format!("[advisories]\nversion = 2\nignore = [\n    {entry},\n]\n");
+        std::fs::write(dir.path().join("deny.toml"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn deny_toml_exceptions_pass_while_valid_and_fail_once_expired() {
+        let dir = deny_toml(
+            r#"{ id = "RUSTSEC-2024-0449", reason = "expires 2027-01-31: x (6j6v.abcd)" }"#,
+        );
+        assert_eq!(check_exceptions_at(dir.path(), "2027-01-31").unwrap(), 1);
+        let err = check_exceptions_at(dir.path(), "2027-02-01")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("deny.toml") && err.contains("expired"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bare_id_in_deny_toml_is_refused() {
+        let dir = deny_toml(r#""RUSTSEC-2024-0449""#);
+        assert!(check_exceptions_at(dir.path(), "2026-10-24").is_err());
     }
 }

@@ -1295,6 +1295,13 @@ pub fn today() -> String {
             return d;
         }
     }
+    system_today()
+}
+
+/// Today's date as `YYYY-MM-DD` (UTC) from the system clock, with NO override. For a gate whose
+/// verdict depends on the date — `deps exceptions` refuses an expired exception — an environment
+/// variable that moves the date would be a switch that silences the gate (6j6v.2dn0).
+pub fn system_today() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
