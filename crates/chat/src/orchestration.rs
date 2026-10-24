@@ -6283,7 +6283,8 @@ fn coordinator_commission_in(
         })
     };
     let declare = |store: &mut ChatStore| {
-        let expects_json = serde_json::to_string(&[owed_role.clone()]).expect("expects serialize");
+        let expects_json =
+            serde_json::to_string(std::slice::from_ref(&owed_role)).expect("expects serialize");
         store.set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle());
     };
     // **The obligation is the slot** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A). A COORDINATED slot
