@@ -267,6 +267,15 @@ pub struct TriggerRequest {
     /// actually wrote `expects_reply_from` — makes that teardown step a no-op, because there is
     /// nothing owed to settle.
     pub reply_thread: Option<String>,
+    /// **A coordinator on this device owns the slot this trigger serves** (nxf 6j6v.kgfn, epic
+    /// 6j6v.nmc9 section A) — `crate::stranded::coordinator_of(slot).is_some()`, decided once by
+    /// the trigger funnel ([`crate::orchestration::trigger_role`]). Reaches the sidecar's spec JSON
+    /// as `coordinated`, beside the `coordinator` record key: `true` makes the teardown post NO
+    /// substitute for the slot, because the coordinator takes a quiet end up itself. `false` — every
+    /// slot nobody here owns (a border inbound thread, a chat another machine executes, a worker
+    /// that cannot look) — is today's substitute, and an older sidecar that does not know the key
+    /// behaves as `false`.
+    pub coordinated: bool,
 }
 
 /// What a [`Worker`] reports back about the session a trigger was supposed to start (nxf
@@ -716,6 +725,22 @@ pub trait Worker: Send + Sync {
         false
     }
 
+    /// **Can this worker ASK a running session something, mid-turn?** (nxf 6j6v.kgfn, epic
+    /// 6j6v.nmc9 section B) — the third capability a software coordinator needs beside
+    /// [`answers_liveness`](Worker::answers_liveness) and [`stops_sessions`](Worker::stops_sessions):
+    /// a slot is coordinated on this device only when all three are `true`
+    /// (`crate::stranded::coordinator_of`, clause 4).
+    ///
+    /// **The default is `false`, and it is a decline**, for the two reads beside it: a host that
+    /// cannot reach a running session keeps today's behaviour for every slot it runs — the sidecar
+    /// substitute, the staleness lapse, the `LivenessUnknown` finding — rather than a coordinator
+    /// that believes it can ask and cannot.
+    ///
+    /// Must return promptly, from local state, and must not call back into the engine.
+    fn asks_sessions(&self) -> bool {
+        false
+    }
+
     /// **Ask the session to stop** (nxf 6j6v.b9nf) — the one WRITE on this trait, and the shape of
     /// it is the whole contract: it returns once the request is DELIVERED, never once the process
     /// has exited.
@@ -906,6 +931,12 @@ impl Worker for BoundedWorker {
     /// refuse by name for a runtime that can. A plain field read on a conforming host.
     fn stops_sessions(&self) -> bool {
         self.inner.stops_sessions()
+    }
+
+    /// Forwarded with the two capabilities above it (nxf 6j6v.kgfn): answering `false` for a host
+    /// that can ask its sessions would read every slot it runs as uncoordinated.
+    fn asks_sessions(&self) -> bool {
+        self.inner.asks_sessions()
     }
 
     /// **Forwarded, not bounded** — the same argument
@@ -1765,6 +1796,13 @@ impl Worker for SidecarWorker {
         SESSIONS_ARE_STOPPABLE
     }
 
+    /// **Where the stop can be sent, the ask can be** (nxf 6j6v.kgfn) — the same platform
+    /// condition: the ask door is a file beside the spec plus a signal through the same pid claim
+    /// the stop uses (built by the ladder's cut, 6j6v.558h).
+    fn asks_sessions(&self) -> bool {
+        SESSIONS_ARE_STOPPABLE
+    }
+
     /// **The pid file [`SessionLock`] wrote, read once more — and this time written TO** (nxf
     /// 6j6v.b9nf). The same path, the same [`a_session_claim`] parse and the same [`who_holds`]
     /// identity check that [`session_is_running`](Worker::session_is_running) uses, so the process
@@ -1883,6 +1921,10 @@ impl Worker for SidecarWorker {
             // is here so a run's own spec file says who commissioned it, which is the first thing
             // anyone reading `.nxs/agent-logs/<session>.spec.json` after a bad round wants to know.
             "coordinator": req.coordinator,
+            // **The one key the sidecar DOES read beside it** (nxf 6j6v.kgfn): `true` when a
+            // coordinator on this device owns the slot, and then the teardown posts no substitute
+            // (`postFailureReply`). An older sidecar ignores it, which is today's behaviour.
+            "coordinated": req.coordinated,
             // Which VERSION of the declaration this prompt was built from (nxf 6j6v.pkw9). Not read
             // by the sidecar either, and here for the same reason as `coordinator` one line up: the
             // second thing anyone reading a spec file after a bad round wants to know is whether the

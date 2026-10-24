@@ -848,9 +848,10 @@ pub fn trigger_role(
         eprintln!("warning: {finding}");
     }
     let reply_thread = reply_thread.or(owed_on_the_way_back.as_deref());
-    // ONE number, derived once, for both consumers: what is recorded against the session and what
-    // the session is told in `NXC_HOP`. `resolve_hop` takes the larger of the two later, so letting
-    // them be computed apart is letting the higher of two independent expressions silently win.
+    let coordinated = false; // placeholder, replaced by coordinator_of below
+                             // ONE number, derived once, for both consumers: what is recorded against the session and what
+                             // the session is told in `NXC_HOP`. `resolve_hop` takes the larger of the two later, so letting
+                             // them be computed apart is letting the higher of two independent expressions silently win.
     let depth = chain.depth_for(hop, || store.session_depth(&internal_session))?;
     // BEFORE the spawn, never after: `Worker::trigger` is fire-and-forget, so the session it starts
     // can already be calling back into `nxc` — and reading its own depth — while this call is still
@@ -1095,6 +1096,7 @@ pub fn trigger_role(
             // a persona may declare its own, THIS is the line that reads the declaration.
             terms: TurnTerms::default(),
             env: trigger_env(ctx.origin, ctx.db_path, depth),
+            coordinated,
         },
     )?;
 
@@ -13839,6 +13841,9 @@ pub fn on_channel_complete(
                         // other turn. Same terms as every commission; there is one definition.
                         terms: TurnTerms::default(),
                         env: trigger_env(ctx.origin, ctx.db_path, depth),
+                        // An engine identity has no coordinator (epic 6j6v.nmc9 section A's table:
+                        // the synthesizer keeps today's behaviour), and it owes no thread anyway.
+                        coordinated: false,
                     },
                 )
                 .map_err(NxfError::from)

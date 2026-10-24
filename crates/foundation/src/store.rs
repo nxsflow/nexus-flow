@@ -212,6 +212,12 @@ impl Store {
         &self.conn
     }
 
+    /// This replica's site id — the second half of every `(lamport, site)` coordinate it writes,
+    /// so a reader can tell which of a register's winning ops THIS replica wrote.
+    pub fn site(&self) -> i64 {
+        self.site
+    }
+
     /// The current Lamport clock (the highest lamport this replica has emitted/observed). Exposed
     /// for the flow crate's tests, which assert op-emission advances it.
     pub fn clock(&self) -> i64 {

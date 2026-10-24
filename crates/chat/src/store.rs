@@ -778,6 +778,10 @@ impl ChatStore {
     pub fn connection(&self) -> &Connection {
         self.inner.connection()
     }
+    /// This replica's site id (see [`nxs_foundation::store::Store::site`]).
+    pub fn site(&self) -> i64 {
+        self.inner.site()
+    }
     pub fn data_version(&self) -> rusqlite::Result<i64> {
         self.inner.data_version()
     }

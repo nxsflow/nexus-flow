@@ -30,6 +30,7 @@ fn trigger_request(internal_session: &str, role: RoleSpec) -> TriggerRequest {
         reply_thread: None,
         coordinator: Coordinator::Persona,
         terms: TurnTerms::default(),
+        coordinated: false,
     }
 }
 
@@ -815,6 +816,32 @@ fn spec_json_carries_the_coordinator_that_admitted_this_spawn() {
     });
     let spec = read_spec_json(tmp.path(), "s-coord");
     assert_eq!(spec["coordinator"], serde_json::json!("channel"), "{spec}");
+}
+
+// ---- coordinated (nxf 6j6v.kgfn) -------------------------------------------------------------
+
+#[test]
+fn spec_json_carries_coordinated_true_when_the_trigger_serves_a_coordinated_slot() {
+    // The one bit the sidecar's teardown keys its substitute on (`postFailureReply`): `true` means
+    // a coordinator on this device owns the slot and nothing is posted in the session's name.
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = sidecar_over(tmp.path()).trigger(TriggerRequest {
+        reply_thread: Some("thread-owned".into()),
+        coordinated: true,
+        ..trigger_request("s-owned", role_spec())
+    });
+    let spec = read_spec_json(tmp.path(), "s-owned");
+    assert_eq!(spec["coordinated"], serde_json::json!(true), "{spec}");
+    // …beside the record key, which stays a record.
+    assert_eq!(spec["coordinator"], serde_json::json!("persona"), "{spec}");
+}
+
+#[test]
+fn spec_json_carries_coordinated_false_for_an_unowned_slot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = sidecar_over(tmp.path()).trigger(trigger_request("s-unowned", role_spec()));
+    let spec = read_spec_json(tmp.path(), "s-unowned");
+    assert_eq!(spec["coordinated"], serde_json::json!(false), "{spec}");
 }
 
 #[test]

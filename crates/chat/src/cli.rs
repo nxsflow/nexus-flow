@@ -1531,6 +1531,14 @@ impl crate::worker::Worker for LazyWorker {
         crate::worker::select_worker(self.cwd.clone()).is_ok_and(|w| w.stops_sessions())
     }
 
+    /// **Forwarded in the same change that added it to the trait** (nxf 6j6v.kgfn), for the reason
+    /// the method above gives: left on the default, every slot the shipped sidecar runs would read
+    /// as uncoordinated and keep the substitute its coordinator is meant to replace. A selection
+    /// failure is `false` — a worker that could not be built asks nothing.
+    fn asks_sessions(&self) -> bool {
+        crate::worker::select_worker(self.cwd.clone()).is_ok_and(|w| w.asks_sessions())
+    }
+
     /// The act behind the question one method up, forwarded with it (nxf 6j6v.b9nf). A selection
     /// failure is reported AS the refusal it is, in `run_precondition`'s shape below: there is no
     /// safe `Ok` to fall back to — an `Ok` here means "delivered", and a caller would wait on a
