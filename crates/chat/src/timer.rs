@@ -130,21 +130,22 @@ pub trait Timer: Send + Sync {
         self.schedule(session, deadline, &resume_command(session))
     }
 
-    /// **Arm a look at one owed session** (nxf 6j6v.ccvy): at `deadline`, tick `thread` so the
-    /// workspace-wide stranded sweep judges `session`.
+    /// **Arm a look at one owed slot** (nxf 6j6v.ccvy; keyed by slot since 6j6v.kgfn): at
+    /// `deadline`, tick `thread` so the workspace-wide stranded sweep judges the slot `slot` names
+    /// (`<thread>-<bare role>`, `crate::stranded::look_key`).
     ///
     /// A method of its own for [`schedule_resume`](Timer::schedule_resume)'s reason — the service
-    /// backend files it under the SESSION (`stranded-look-<session>`), so it never replaces the
-    /// channel's own window and is not replaced by it. The default ticks `thread` through
+    /// backend files it under the SLOT (`stranded-look-<slot>`), so it never replaces the channel's
+    /// own window and is not replaced by it. The default ticks `thread` through
     /// [`schedule`](Timer::schedule), which is the job the look runs, and gates BOTH ids first: the
     /// default builds a shell command string out of `thread`.
     fn schedule_stranded_look(
         &self,
-        session: &str,
+        slot: &str,
         thread: &str,
         deadline: &str,
     ) -> Result<TimerHandle> {
-        look_ids_are_schedulable(session, thread)?;
+        look_ids_are_schedulable(slot, thread)?;
         self.schedule(thread, deadline, &tick_command(thread))
     }
     /// Cancel a previously scheduled job. Only meaningful/tested within the SAME process that
@@ -204,19 +205,19 @@ impl Timer for DryTimer {
     /// **A stranded look goes to a log of its own** (nxf 6j6v.ccvy): `NXC_TIMER_LOOK_LOG`, one line
     /// per look, silently a no-op when unset. Not `NXC_TIMER_LOG`, which every suite that reads it
     /// reads as "the channel windows that were armed" — a look is a different job, keyed by a
-    /// session, and mixing it in would make a window that was NOT armed look as if one had been.
+    /// slot, and mixing it in would make a window that was NOT armed look as if one had been.
     fn schedule_stranded_look(
         &self,
-        session: &str,
+        slot: &str,
         thread: &str,
         deadline: &str,
     ) -> Result<TimerHandle> {
-        look_ids_are_schedulable(session, thread)?;
-        let handle = TimerHandle(format!("dry:stranded-look-{session}"));
+        look_ids_are_schedulable(slot, thread)?;
+        let handle = TimerHandle(format!("dry:stranded-look-{slot}"));
         if let Ok(path) = std::env::var("NXC_TIMER_LOOK_LOG") {
             append_log(
                 &path,
-                &format!("look session={session} thread={thread} deadline={deadline}\n"),
+                &format!("look slot={slot} thread={thread} deadline={deadline}\n"),
             )?;
         }
         Ok(handle)
@@ -225,8 +226,8 @@ impl Timer for DryTimer {
 
 /// The gate every non-service backend applies to a stranded look's two ids before it uses them
 /// (nxf 6j6v.ccvy): both become part of a command a timer backend runs.
-fn look_ids_are_schedulable(session: &str, thread: &str) -> Result<()> {
-    match [session, thread]
+fn look_ids_are_schedulable(slot: &str, thread: &str) -> Result<()> {
+    match [slot, thread]
         .into_iter()
         .find(|id| !nxs_service::timers::valid_key(id))
     {

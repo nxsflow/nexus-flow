@@ -253,7 +253,11 @@ fn a_session_that_ended_owing_an_answer_with_no_substitute_is_recorded() {
     // The end armed its look, on the channel thread.
     let looks = std::fs::read_to_string(root.join("looks.log")).unwrap_or_default();
     assert!(
-        looks.contains(&format!("session={s} thread={thread} deadline={}", at(150))),
+        // Filed under the SLOT since nxf 6j6v.kgfn: `<thread>-<bare role>`.
+        looks.contains(&format!(
+            "slot={slot}-verifier thread={thread} deadline={}",
+            at(150)
+        )),
         "a look at ended + 120 s: {looks}"
     );
 

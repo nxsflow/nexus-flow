@@ -47,25 +47,46 @@ use crate::store::ChatStore;
 /// The DDL of this module's three tables — applied with the chat views, device-local like
 /// `session_map`.
 pub(crate) const STRANDED_DDL: &str = "
-    -- The obligation record (nxf 6j6v.ccvy): thread T owes an answer from role H (the qualified
-    -- handle, as the thread register names it), and S is the session that owes it. ONE clock
-    -- column: the mint instant until the first trigger, the trigger instant from then on, moved by
-    -- every re-trigger and by a resume; `triggered` says which.
+    -- The obligation record (nxf 6j6v.ccvy; the SLOT since 6j6v.kgfn): thread T owes an answer
+    -- from role H (the qualified handle, as the thread register names it). Written when the slot is
+    -- OPENED, before any session exists — `session` is NULL until the mint fills it. ONE clock
+    -- column: the open instant, then the mint's, then every trigger's, moved by every re-trigger
+    -- and by a resume; `triggered` says whether any trigger ran. `coordinator` is the thread whose
+    -- tick coordinates the slot (`coordinator_of`). `recovering_until`, `attempts`,
+    -- `recovery_started_at`, `asked_at` and `last_progress_at` are the ladder's (6j6v.558h) and
+    -- stay at their defaults until it is built. `backfilled` marks a row the one-time backfill
+    -- wrote for a slot opened before this cut; `abandoned` is the reason such a slot is recorded as
+    -- given up (never nudged), with `abandoned_at`.
     CREATE TABLE IF NOT EXISTS owed_starts(
-        thread        TEXT    NOT NULL,
-        role          TEXT    NOT NULL,
-        session       TEXT    NOT NULL,
-        trigger_clock TEXT    NOT NULL,
-        triggered     INTEGER NOT NULL,
+        thread              TEXT    NOT NULL,
+        role                TEXT    NOT NULL,
+        session             TEXT,
+        trigger_clock       TEXT    NOT NULL,
+        triggered           INTEGER NOT NULL,
+        coordinator         TEXT,
+        recovering_until    TEXT,
+        attempts            INTEGER NOT NULL DEFAULT 0,
+        recovery_started_at TEXT,
+        backfilled          INTEGER NOT NULL DEFAULT 0,
+        asked_at            TEXT,
+        last_progress_at    TEXT,
+        abandoned           TEXT,
+        abandoned_at        TEXT,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
+    -- The one-time backfill's marker (nxf 6j6v.kgfn): one row, written in the SAME transaction as
+    -- the rows the backfill wrote, so a crash between them leaves neither.
+    CREATE TABLE IF NOT EXISTS owed_backfill_done(
+        done_at TEXT NOT NULL
+    );
     -- The first look at a session with no end (nxf 6j6v.ccvy): what the evidence was. Keyed by the
-    -- OBLIGATION rather than by the session, because one session may owe two threads.
+    -- OBLIGATION rather than by the session, because one session may owe two threads. `session` is
+    -- NULL for a slot that never got one (6j6v.kgfn).
     CREATE TABLE IF NOT EXISTS stranded_suspects(
         thread             TEXT    NOT NULL,
         role               TEXT    NOT NULL,
-        session            TEXT    NOT NULL,
+        session            TEXT,
         first_seen         TEXT    NOT NULL,
         bound              INTEGER NOT NULL,
         transcript_entries INTEGER NOT NULL,
@@ -73,11 +94,12 @@ pub(crate) const STRANDED_DDL: &str = "
     );
     -- The record (nxf 6j6v.ccvy): one row per stranding of one obligation. CURRENT while
     -- `superseded_at` is NULL — a later trigger of the same obligation stamps it — so the record
-    -- outlives the owed row the escalation discharges.
+    -- outlives the owed row the escalation discharges. `session` is NULL for a slot that never got
+    -- one (6j6v.kgfn).
     CREATE TABLE IF NOT EXISTS stranded_sessions(
         thread              TEXT    NOT NULL,
         role                TEXT    NOT NULL,
-        session             TEXT    NOT NULL,
+        session             TEXT,
         trigger_clock       TEXT    NOT NULL,
         judged_from         TEXT    NOT NULL,
         recorded_at         TEXT    NOT NULL,
@@ -91,6 +113,109 @@ pub(crate) const STRANDED_DDL: &str = "
         PRIMARY KEY(thread, role, trigger_clock)
     );
 ";
+
+/// **The three tables as cut 1a created them, rebuilt in place** (nxf 6j6v.kgfn) — `CREATE TABLE IF
+/// NOT EXISTS` is a no-op for a table that exists, and SQLite cannot drop a `NOT NULL` or add a
+/// primary-key-compatible shape with `ALTER TABLE`. So a table of the old shape is renamed aside,
+/// created anew from [`STRANDED_DDL`], its rows copied over and the old one dropped — inside one
+/// savepoint, so an interrupted rebuild leaves the old table standing. Idempotent: a table of the new
+/// shape is left alone, so every open after the first does nothing.
+pub(crate) fn rebuild_pre_slot_tables(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let owed_is_old =
+        table_exists(conn, "owed_starts")? && !column_exists(conn, "owed_starts", "coordinator")?;
+    let suspects_is_old = session_is_not_null(conn, "stranded_suspects")?;
+    let records_is_old = session_is_not_null(conn, "stranded_sessions")?;
+    if !(owed_is_old || suspects_is_old || records_is_old) {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT pre_slot_rebuild;")?;
+    let rebuilt = (|| -> rusqlite::Result<()> {
+        if owed_is_old {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS owed_starts_by_session;
+                 ALTER TABLE owed_starts RENAME TO owed_starts_pre_slot;",
+            )?;
+        }
+        if suspects_is_old {
+            conn.execute_batch(
+                "ALTER TABLE stranded_suspects RENAME TO stranded_suspects_pre_slot;",
+            )?;
+        }
+        if records_is_old {
+            conn.execute_batch(
+                "ALTER TABLE stranded_sessions RENAME TO stranded_sessions_pre_slot;",
+            )?;
+        }
+        conn.execute_batch(STRANDED_DDL)?;
+        if owed_is_old {
+            conn.execute_batch(
+                "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered)
+                     SELECT thread, role, session, trigger_clock, triggered FROM owed_starts_pre_slot;
+                 DROP TABLE owed_starts_pre_slot;",
+            )?;
+        }
+        if suspects_is_old {
+            conn.execute_batch(
+                "INSERT INTO stranded_suspects(thread, role, session, first_seen, bound,
+                         transcript_entries)
+                     SELECT thread, role, session, first_seen, bound, transcript_entries
+                       FROM stranded_suspects_pre_slot;
+                 DROP TABLE stranded_suspects_pre_slot;",
+            )?;
+        }
+        if records_is_old {
+            conn.execute_batch(&format!(
+                "INSERT INTO stranded_sessions({RECORD_COLS})
+                     SELECT {RECORD_COLS} FROM stranded_sessions_pre_slot;
+                 DROP TABLE stranded_sessions_pre_slot;"
+            ))?;
+        }
+        Ok(())
+    })();
+    match rebuilt {
+        Ok(()) => conn.execute_batch("RELEASE pre_slot_rebuild;"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO pre_slot_rebuild; RELEASE pre_slot_rebuild;");
+            Err(e)
+        }
+    }
+}
+
+fn table_exists(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |r| r.get(0),
+    )
+}
+
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
+        |r| r.get(0),
+    )
+}
+
+/// Whether `table` exists with its `session` column declared `NOT NULL` — cut 1a's shape.
+fn session_is_not_null(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT \"notnull\" FROM pragma_table_info(?1) WHERE name = 'session'",
+            [table],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        == Some(1))
+}
+
+/// **The key a look at one slot is filed under** (nxf 6j6v.kgfn): the thread and the role's bare
+/// handle — a slot, not a session, because a slot is owed before any session exists, and one look
+/// per slot is what the service book keeps (`stranded-look-<key>`).
+pub(crate) fn look_key(thread: &str, role: &str) -> String {
+    let bare = role.rsplit_once('/').map_or(role, |(_, b)| b);
+    format!("{thread}-{bare}")
+}
 
 /// How long an owed session may stand with no live claim, no hold and no end before the sweep first
 /// LOOKS at it — two liveness cadences. The ONE grace constant of the stranded rule.
@@ -106,22 +231,64 @@ pub(crate) const STRANDED_DDL: &str = "
 /// an owed-row → claim latency past the second look.
 pub const STRANDED_GRACE_SECS: i64 = 2 * crate::orchestration::SESSION_LIVENESS_RECHECK_SECS;
 
+/// **A backfilled slot whose newest evidence is older than this is abandoned** (nxf 6j6v.kgfn; epic
+/// 6j6v.nmc9 section A) — one day. The evidence is the session's end, else its last transcript
+/// entry, else the slot's open. Strictly older: a slot exactly this old is still taken up.
+pub const ABANDONED_AFTER_SECS: i64 = 86_400;
+
 /// How long a stranded record is kept once written — the retention bound of `stranded_sessions`.
 pub const STRANDED_RETENTION_DAYS: i64 = 30;
 
-/// **The obligation record** — thread `thread` owes an answer from `role`, and `session` owes it.
+/// **The obligation record** — thread `thread` owes an answer from `role`; the SLOT (nxf
+/// 6j6v.kgfn), owed from the instant it is opened, and `session` is the one that owes it once a
+/// session exists.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct OwedStart {
     pub thread: String,
     /// The qualified handle, as the thread register names it.
     pub role: String,
-    pub session: String,
-    /// The instant the session is judged from when it has no end: the mint instant until the first
-    /// trigger, the trigger instant from then on.
+    /// `None` until the mint fills it — a slot whose session was never minted stays `None`.
+    pub session: Option<String>,
+    /// The instant the slot is judged from when its session has no end: the open instant, then the
+    /// mint's, then every trigger's.
     pub trigger_clock: String,
     /// Whether any trigger ever ran for this obligation. `false` is a slot that was opened and whose
     /// start never happened.
     pub triggered: bool,
+    /// The thread whose tick coordinates this slot, as [`coordinator_of`] named it when the row was
+    /// written. `None` on a row cut 1a wrote before this column existed.
+    pub coordinator: Option<String>,
+    /// Written by the one-time backfill for a slot opened before this cut.
+    pub backfilled: bool,
+    /// The ladder's budget (6j6v.558h) — `0` until it is built.
+    pub attempts: u32,
+    /// The ladder's claim (6j6v.558h).
+    pub recovering_until: Option<String>,
+    /// The ladder's ceiling anchor (6j6v.558h).
+    pub recovery_started_at: Option<String>,
+    /// The ladder's last ask (6j6v.558h).
+    pub asked_at: Option<String>,
+    /// The ladder's last sign of life (6j6v.558h).
+    pub last_progress_at: Option<String>,
+    /// Why the slot was given up, when it was: `delivered` / `withdrawn` (the root no longer
+    /// waits), `aged` (its newest evidence is older than [`ABANDONED_AFTER_SECS`]), `consolidated`
+    /// (its commissioning message is gone). Never nudged; `withdraw` is its exit.
+    pub abandoned: Option<String>,
+    pub abandoned_at: Option<String>,
+}
+
+/// **One row the one-time backfill writes** (nxf 6j6v.kgfn) — an open coordinated slot opened before
+/// this cut, which therefore has no row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Backfill {
+    pub thread: String,
+    pub role: String,
+    /// The session of that role standing on the thread, when one does (`session_map`).
+    pub session: Option<String>,
+    pub coordinator: String,
+    pub clock: String,
+    /// The reason it is abandoned, when the rule says so.
+    pub abandoned: Option<String>,
 }
 
 /// **What the sweep saw** — the five observations a stranded record carries, numbered as the design
@@ -206,7 +373,8 @@ impl Escalation {
 pub struct StrandedRecord {
     pub thread: String,
     pub role: String,
-    pub session: String,
+    /// `None` for a slot that never got a session (nxf 6j6v.kgfn) — observation 1.
+    pub session: Option<String>,
     /// The owed row's clock when it was recorded — the key that makes a later trigger a NEW
     /// stranding rather than this one.
     pub trigger_clock: String,
@@ -228,7 +396,7 @@ pub struct StrandedRecord {
 /// The first look's evidence about a session with no end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Suspect {
-    pub session: String,
+    pub session: Option<String>,
     pub first_seen: String,
     pub bound: bool,
     pub transcript_entries: i64,
@@ -269,22 +437,87 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
     })
 }
 
+const OWED_COLS: &str = "thread, role, session, trigger_clock, triggered, coordinator, \
+     backfilled, attempts, recovering_until, recovery_started_at, asked_at, last_progress_at, \
+     abandoned, abandoned_at";
+
 fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
     let triggered: i64 = r.get(4)?;
+    let backfilled: i64 = r.get(6)?;
+    let attempts: i64 = r.get(7)?;
     Ok(OwedStart {
         thread: r.get(0)?,
         role: r.get(1)?,
         session: r.get(2)?,
         trigger_clock: r.get(3)?,
         triggered: triggered != 0,
+        coordinator: r.get(5)?,
+        backfilled: backfilled != 0,
+        attempts: u32::try_from(attempts).unwrap_or(0),
+        recovering_until: r.get(8)?,
+        recovery_started_at: r.get(9)?,
+        asked_at: r.get(10)?,
+        last_progress_at: r.get(11)?,
+        abandoned: r.get(12)?,
+        abandoned_at: r.get(13)?,
     })
 }
 
 impl ChatStore {
-    /// **Record (or re-record) the obligation `thread` owes `role` on `session`.**
+    /// **The slot is OPENED: `thread` owes `role` from `clock`, and no session exists yet** (nxf
+    /// 6j6v.kgfn). The row the obligation is from now on — written before any mint, so a slot whose
+    /// session is never minted still has a clock and a look. Re-opening the same `(thread, role)`
+    /// starts it over: no session, not triggered, not abandoned.
+    pub(crate) fn open_slot(
+        &mut self,
+        thread: &str,
+        role: &str,
+        coordinator: &str,
+        clock: &str,
+    ) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered, coordinator)
+             VALUES (?1, ?2, NULL, ?3, 0, ?4)
+             ON CONFLICT(thread, role) DO UPDATE SET
+                 session = NULL, trigger_clock = excluded.trigger_clock, triggered = 0,
+                 coordinator = excluded.coordinator, abandoned = NULL, abandoned_at = NULL",
+            params![thread, role, clock, coordinator],
+        )?;
+        supersede_older(conn, thread, role, clock)?;
+        Ok(())
+    }
+
+    /// **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn). Not a trigger:
+    /// `triggered` is left as it is. Answers whether a row moved — a slot opened without a row
+    /// (no coordinator) has none to fill.
+    pub(crate) fn bind_owed_session(
+        &mut self,
+        thread: &str,
+        role: &str,
+        session: &str,
+        clock: &str,
+    ) -> Result<bool> {
+        let conn = self.connection();
+        let n = conn.execute(
+            "UPDATE owed_starts SET session = ?3, trigger_clock = ?4
+              WHERE thread = ?1 AND role = ?2",
+            params![thread, role, session, clock],
+        )?;
+        if n > 0 {
+            supersede_older(conn, thread, role, clock)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// **Record (or re-record) the obligation `thread` owes `role` on `session`** — the funnel's
+    /// write. `coordinator` is the slot's coordinating thread when it has one; `None` is a slot
+    /// nobody coordinates, which keeps cut 1a's row exactly as it was (a `coordinator` an earlier
+    /// write named is left as it is — the next look decides whether it still holds).
     ///
-    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the row whole,
-    /// and the same session re-triggered moves only the clock. Every stranded record of the same
+    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the session,
+    /// and the same session re-triggered moves only the clock. What the open wrote about the slot —
+    /// and what the ladder will write about its recovery — stays. Every stranded record of the same
     /// obligation judged against an OLDER clock is stamped superseded in the same call — a later
     /// trigger is what ends a record's currency, and it is the one event that does.
     pub(crate) fn record_owed_start(
@@ -294,19 +527,89 @@ impl ChatStore {
         session: &str,
         clock: &str,
         triggered: bool,
+        coordinator: Option<&str>,
     ) -> Result<()> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered, coordinator)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(thread, role) DO UPDATE SET
                  session = excluded.session,
                  trigger_clock = excluded.trigger_clock,
-                 triggered = excluded.triggered",
-            params![thread, role, session, clock, i64::from(triggered)],
+                 triggered = excluded.triggered,
+                 coordinator = COALESCE(excluded.coordinator, owed_starts.coordinator)",
+            params![
+                thread,
+                role,
+                session,
+                clock,
+                i64::from(triggered),
+                coordinator
+            ],
         )?;
         supersede_older(conn, thread, role, clock)?;
         Ok(())
+    }
+
+    /// Name the thread that coordinates a slot whose row did not say (a row cut 1a wrote), or no
+    /// longer said the right one — what a look found `coordinator_of` answering.
+    pub(crate) fn set_slot_coordinator(
+        &mut self,
+        thread: &str,
+        role: &str,
+        coordinator: &str,
+    ) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET coordinator = ?3 WHERE thread = ?1 AND role = ?2",
+            params![thread, role, coordinator],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the one-time backfill has run on this device.
+    pub(crate) fn owed_backfill_done(&self) -> Result<bool> {
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM owed_backfill_done)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// **The one-time backfill: `rows` and the marker, in ONE transaction** (nxf 6j6v.kgfn; must-fix
+    /// of the design review, round 2 IR #9). `Ok(false)` when the marker already stands — nothing is
+    /// written. A failure anywhere rolls back every row with the marker, so a crash between them
+    /// leaves neither and the next sweep backfills again. A row that already exists is left alone:
+    /// the backfill fills slots that HAVE no row.
+    pub(crate) fn backfill_owed_starts(&mut self, rows: &[Backfill], now: &str) -> Result<bool> {
+        let tx = self.connection().unchecked_transaction()?;
+        let done: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM owed_backfill_done)", [], |r| {
+                r.get(0)
+            })?;
+        if done {
+            return Ok(false);
+        }
+        for row in rows {
+            tx.execute(
+                "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered,
+                     coordinator, backfilled, abandoned, abandoned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, CASE WHEN ?7 IS NULL THEN NULL ELSE ?8 END)
+                 ON CONFLICT(thread, role) DO NOTHING",
+                params![
+                    row.thread,
+                    row.role,
+                    row.session,
+                    row.clock,
+                    i64::from(row.session.is_some()),
+                    row.coordinator,
+                    row.abandoned,
+                    now
+                ],
+            )?;
+        }
+        tx.execute("INSERT INTO owed_backfill_done(done_at) VALUES (?1)", [now])?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// **Move the clock of one obligation, only while `session` is the one that owes it** — the
@@ -336,8 +639,7 @@ impl ChatStore {
         Ok(self
             .connection()
             .query_row(
-                "SELECT thread, role, session, trigger_clock, triggered FROM owed_starts
-                  WHERE thread = ?1 AND role = ?2",
+                &format!("SELECT {OWED_COLS} FROM owed_starts WHERE thread = ?1 AND role = ?2"),
                 params![thread, role],
                 owed_from_row,
             )
@@ -348,10 +650,9 @@ impl ChatStore {
     /// open: the sweep deletes a row one look after its thread stops owing the role.
     pub(crate) fn owed_starts(&self) -> Result<Vec<OwedStart>> {
         let conn = self.connection();
-        let mut st = conn.prepare(
-            "SELECT thread, role, session, trigger_clock, triggered FROM owed_starts
-              ORDER BY thread, role",
-        )?;
+        let mut st = conn.prepare(&format!(
+            "SELECT {OWED_COLS} FROM owed_starts ORDER BY thread, role"
+        ))?;
         let rows = st
             .query_map([], owed_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -361,10 +662,9 @@ impl ChatStore {
     /// The obligation records `session` owes — what a session's end looks at.
     pub(crate) fn owed_starts_of_session(&self, session: &str) -> Result<Vec<OwedStart>> {
         let conn = self.connection();
-        let mut st = conn.prepare(
-            "SELECT thread, role, session, trigger_clock, triggered FROM owed_starts
-              WHERE session = ?1 ORDER BY thread, role",
-        )?;
+        let mut st = conn.prepare(&format!(
+            "SELECT {OWED_COLS} FROM owed_starts WHERE session = ?1 ORDER BY thread, role"
+        ))?;
         let rows = st
             .query_map([session], owed_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -619,6 +919,16 @@ impl ChatStore {
         )?)
     }
 
+    /// The instant of `session`'s newest transcript entry, when it wrote any — the "last transcript
+    /// activity" `border.rs` reads the same way.
+    pub(crate) fn last_transcript_at(&self, session: &str) -> Result<Option<String>> {
+        Ok(self.connection().query_row(
+            "SELECT MAX(at) FROM agent_transcript WHERE internal_session = ?1",
+            [session],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Whether `session` ever bound to a runtime session id — the other half.
     pub(crate) fn session_is_bound(&self, session: &str) -> Result<bool> {
         Ok(self
@@ -683,6 +993,241 @@ fn earlier(a: &str, b: &str) -> bool {
         (Ok(a), Ok(b)) => a < b,
         _ => false,
     }
+}
+
+// ---- who coordinates a slot (nxf 6j6v.kgfn) -----------------------------------------------------
+
+/// **Which kind of coordinator a slot has** — the rows of epic 6j6v.nmc9 section A's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoordinatorKind {
+    /// A flow step or a parallel member: the channel thread's tick.
+    Channel,
+    /// A direct commission (`send --to <persona>`) by a person: the root thread's tick.
+    Root,
+    /// A direct commission by a SESSION's own `nxc send`: the sending session's thread.
+    Session,
+    /// A slot that stands for a nested round (a step whose answer is a channel's discharge): the
+    /// parent channel thread, coordinated while any open slot inside the round is.
+    NestedRound,
+}
+
+/// **The software coordinator of one slot** — the thread whose tick coordinates it, and which kind
+/// of coordinator that is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CoordinatorRef {
+    pub thread: String,
+    pub kind: CoordinatorKind,
+}
+
+/// What [`coordinator_of`]'s clauses found — the one evaluation the predicate, the open, the funnel
+/// and the backfill share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Assessment {
+    /// Every clause holds.
+    Coordinated(CoordinatorRef),
+    /// Clauses 1-4 and 6 hold, and the slot's commissioning message is gone (clause 5): a backfilled
+    /// slot of this shape is abandoned with reason `consolidated`.
+    Consolidated(CoordinatorRef),
+    /// No coordinator: the slot keeps today's behaviour in full.
+    Uncoordinated,
+}
+
+/// **`coordinator_of(slot)`** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A) — `Some` iff ALL six
+/// clauses hold for the slot `(thread, role)`, evaluated afresh at every call (nothing is cached,
+/// so a hand-over moves ownership with the register and a worker that stops answering takes it
+/// back):
+///
+/// 1. `role` is a persona declared in THIS workspace — not a human, not an engine identity, not a
+///    foreign or border handle;
+/// 2. the thread is not an inbound border thread, and the slot is OPEN for `role` (neither
+///    answered, escalated nor awaiting a human — all three discharge the outstanding handle), and
+///    the register that opened it may carry an action here;
+/// 3. THIS DEVICE EXECUTES THE SLOT: the thread's `machine` register names this machine, or it is
+///    unset and this site wrote the expectation;
+/// 4. the worker on this device answers liveness, stops sessions AND asks them;
+/// 5. the slot's commissioning message exists on its thread — whoever posted it: the channel tick,
+///    a person's `send --to`, a session's own `nxc send`;
+/// 6. a slot that stands for a nested round (the outstanding handle is the channel supervisor): iff
+///    any open slot of that round is coordinated.
+///
+/// A slot with no coordinator keeps today's behaviour in full: the sidecar's substitute, the
+/// staleness lapse, the `LivenessUnknown` finding.
+pub fn coordinator_of(
+    ctx: &Ctx,
+    store: &ChatStore,
+    thread: &str,
+    role: &str,
+) -> Result<Option<CoordinatorRef>> {
+    Ok(match assess(ctx, store, thread, role)? {
+        Assessment::Coordinated(c) => Some(c),
+        Assessment::Consolidated(_) | Assessment::Uncoordinated => None,
+    })
+}
+
+/// The six clauses, in one place — see [`coordinator_of`].
+pub(crate) fn assess(ctx: &Ctx, store: &ChatStore, thread: &str, role: &str) -> Result<Assessment> {
+    let Some(q) = store.thread_quorum(thread, ctx.now)? else {
+        return Ok(Assessment::Uncoordinated);
+    };
+    // Clause 2's second half, asked first because every other clause is about an OPEN slot: the
+    // role still owes this thread an answer, and nothing that opened the obligation is unvouched.
+    if q.held || !outstanding_has(&q.outstanding, role) {
+        return Ok(Assessment::Uncoordinated);
+    }
+    let supervisor = crate::orchestration::supervisor_qualified(ctx.origin);
+    if crate::facade::same_identity(Some(role), &supervisor) {
+        return nested_round(ctx, store, thread);
+    }
+    // Clause 1.
+    if crate::orchestration::is_engine_identity(role) || !is_local_persona(ctx, role) {
+        return Ok(Assessment::Uncoordinated);
+    }
+    // Clause 2: an inbound border thread is coordinated on the side that commissioned it.
+    if matches!(crate::border::row(store, thread)?, Some(r) if r.direction == crate::border::Direction::Inbound)
+    {
+        return Ok(Assessment::Uncoordinated);
+    }
+    // Clause 4, before the reads clause 3 makes.
+    if !worker_can_coordinate(ctx.worker) {
+        return Ok(Assessment::Uncoordinated);
+    }
+    // Clause 3.
+    if !executes_here(ctx, store, thread)? {
+        return Ok(Assessment::Uncoordinated);
+    }
+    let coordinator = coordinator_ref(ctx, store, thread, q.opener.as_deref())?;
+    // Clause 5.
+    if store.acting_messages_in_thread(thread)?.is_empty() {
+        return Ok(Assessment::Consolidated(coordinator));
+    }
+    Ok(Assessment::Coordinated(coordinator))
+}
+
+/// **[`coordinator_of`] for a slot this call is ABOUT TO OPEN** (nxf 6j6v.kgfn) — asked by
+/// `coordinator_commission_in` before the expectation exists, so that a coordinated slot can be owed
+/// before its session is minted. The same clauses, with the two that read the expectation answered
+/// for the one this site is about to write: the slot will be open for `role` (clause 2), and when no
+/// `machine` register names a machine, this site writes the expectation (clause 3). The
+/// commissioning message is already posted (clause 5).
+pub(crate) fn assess_at_open(
+    ctx: &Ctx,
+    store: &ChatStore,
+    thread: &str,
+    role: &str,
+) -> Result<Option<CoordinatorRef>> {
+    if crate::orchestration::is_engine_identity(role) || !is_local_persona(ctx, role) {
+        return Ok(None);
+    }
+    if matches!(crate::border::row(store, thread)?, Some(r) if r.direction == crate::border::Direction::Inbound)
+    {
+        return Ok(None);
+    }
+    if !worker_can_coordinate(ctx.worker) {
+        return Ok(None);
+    }
+    let executes_here = match store.thread_machine(thread)? {
+        Some(_) => executes_here(ctx, store, thread)?,
+        None => true,
+    };
+    if !executes_here || store.acting_messages_in_thread(thread)?.is_empty() {
+        return Ok(None);
+    }
+    let opener = store.thread_quorum(thread, ctx.now)?.and_then(|q| q.opener);
+    Ok(Some(coordinator_ref(
+        ctx,
+        store,
+        thread,
+        opener.as_deref(),
+    )?))
+}
+
+/// Clause 4: the three capabilities a software coordinator needs of the worker on this device.
+pub(crate) fn worker_can_coordinate(worker: &dyn crate::worker::Worker) -> bool {
+    worker.answers_liveness() && worker.stops_sessions() && worker.asks_sessions()
+}
+
+/// Clause 1's test: `role` names a persona declared in THIS workspace's catalogue, qualified with
+/// this workspace's origin.
+fn is_local_persona(ctx: &Ctx, role: &str) -> bool {
+    let Some((prefix, bare)) = role.rsplit_once('/') else {
+        return false;
+    };
+    prefix == ctx.origin && ctx.defs.role(bare).is_ok()
+}
+
+/// Clause 3: whether THIS device executes the slot on `thread`. Re-read at every call — the
+/// register is the one replicated fact a hand-over moves (`handed_to` is a receipt field only).
+fn executes_here(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<bool> {
+    Ok(match store.thread_machine(thread)? {
+        Some(m) => {
+            m.acts
+                && ctx
+                    .machines
+                    .and_then(|ms| ms.here())
+                    .is_some_and(|here| here.machine_id == m.machine_id)
+        }
+        None => store.expects_reply_from_site(thread)? == Some(store.site()),
+    })
+}
+
+/// Which thread coordinates the slot on `thread`, opened by `opener` — section A's table.
+fn coordinator_ref(
+    ctx: &Ctx,
+    store: &ChatStore,
+    thread: &str,
+    opener: Option<&str>,
+) -> Result<CoordinatorRef> {
+    let supervisor = crate::orchestration::supervisor_qualified(ctx.origin);
+    let parent = store.thread_parent(thread)?;
+    let opened_by =
+        |handle: &str| opener.is_some_and(|o| crate::facade::same_identity(Some(o), handle));
+    Ok(if opened_by(&supervisor) {
+        CoordinatorRef {
+            thread: parent.unwrap_or_else(|| thread.to_string()),
+            kind: CoordinatorKind::Channel,
+        }
+    } else if opener.is_some_and(|o| is_local_persona(ctx, o)) && parent.is_some() {
+        CoordinatorRef {
+            thread: parent.unwrap_or_default(),
+            kind: CoordinatorKind::Session,
+        }
+    } else {
+        CoordinatorRef {
+            thread: store.thread_root(thread)?,
+            kind: CoordinatorKind::Root,
+        }
+    })
+}
+
+/// Clause 6: the slot on `thread` stands for a nested round — coordinated iff any open slot of that
+/// round (a member thread under it, opened by the supervisor) is.
+fn nested_round(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Assessment> {
+    let supervisor = crate::orchestration::supervisor_qualified(ctx.origin);
+    for child in store.thread_children(thread)? {
+        let Some(member) = store.thread_quorum(&child, ctx.now)? else {
+            continue;
+        };
+        if !member
+            .opener
+            .as_deref()
+            .is_some_and(|o| crate::facade::same_identity(Some(o), &supervisor))
+        {
+            continue;
+        }
+        for handle in &member.outstanding {
+            if let Assessment::Coordinated(_) = assess(ctx, store, &child, handle)? {
+                return Ok(Assessment::Coordinated(CoordinatorRef {
+                    thread: store
+                        .thread_parent(thread)?
+                        .unwrap_or_else(|| thread.to_string()),
+                    kind: CoordinatorKind::NestedRound,
+                }));
+            }
+        }
+    }
+    Ok(Assessment::Uncoordinated)
 }
 
 // ---- what is still coming ------------------------------------------------------------------
@@ -776,9 +1321,9 @@ impl PauseFacts {
     pub(crate) fn given_up(
         &self,
         thread: &str,
-        owed: &str,
+        owed: Option<&str>,
     ) -> Option<&crate::working_tree::FailedStart> {
-        self.failed_start(thread, Some(owed))
+        self.failed_start(thread, owed)
             .filter(|f| f.retry_at.is_none())
     }
 }
@@ -870,21 +1415,33 @@ pub(crate) fn look_thread(store: &ChatStore, origin: &str, thread: &str) -> Resu
     Ok(thread.to_string())
 }
 
-/// **Arm a look at `session`, owing on `thread`, for `at`** — best-effort, and REPORTED: a look that
+/// **Arm a look at the slot `(thread, role)` for `at`** — best-effort, and REPORTED: a look that
 /// cannot be armed is a finding on the receipt of whoever tried, and the sweep is workspace-wide, so
-/// the next tick anybody causes looks anyway.
+/// the next tick anybody causes looks anyway. Filed under the SLOT ([`look_key`], nxf 6j6v.kgfn): a
+/// slot is owed before any session exists.
 pub(crate) fn arm_look(
     ctx: &Ctx,
     store: &ChatStore,
-    session: &str,
     thread: &str,
+    role: &str,
     at: &str,
 ) -> Option<FailedConsequence> {
+    let slot = look_key(thread, role);
+    // The finding names the slot's session when it has one, so the receipt of whoever started it
+    // can tell its own look from another's (`open_flow_step` keeps exactly those).
+    let unarmed = |error: &str| {
+        let session = store
+            .owed_start(thread, role)
+            .ok()
+            .flatten()
+            .and_then(|r| r.session);
+        look_unarmed(thread, &slot, session.as_deref(), at, error)
+    };
     let target = match look_thread(store, ctx.origin, thread) {
         Ok(t) => t,
-        Err(e) => return Some(look_unarmed(thread, session, at, &e.to_string())),
+        Err(e) => return Some(unarmed(&e.to_string())),
     };
-    match ctx.timer.schedule_stranded_look(session, &target, at) {
+    match ctx.timer.schedule_stranded_look(&slot, &target, at) {
         Ok(_) => None,
         // **A service that is down is said once, by the call, not once per look** — the service
         // backend writes the look into the book and THEN refuses, so the look is durable and will
@@ -892,26 +1449,32 @@ pub(crate) fn arm_look(
         // add already says that nothing attends the workspace. A breadcrumb stays.
         Err(e) if ctx.timer.service_fault().is_some() => {
             eprintln!(
-                "warning: the look at session {session} is booked for {at}, and nothing attends \
-                 this workspace to honour it yet: {e}"
+                "warning: the look at slot {slot} is booked for {at}, and nothing attends this \
+                 workspace to honour it yet: {e}"
             );
             None
         }
-        Err(e) => Some(look_unarmed(thread, session, at, &e.to_string())),
+        Err(e) => Some(unarmed(&e.to_string())),
     }
 }
 
-fn look_unarmed(thread: &str, session: &str, at: &str, error: &str) -> FailedConsequence {
+fn look_unarmed(
+    thread: &str,
+    slot: &str,
+    session: Option<&str>,
+    at: &str,
+    error: &str,
+) -> FailedConsequence {
     let detail = format!(
-        "the look at session {session} (owing on thread {thread}) could not be armed for {at}: \
-         {error} — the next tick of any thread in this workspace looks instead; `nxc tick --thread \
+        "the look at slot {slot} (owing on thread {thread}) could not be armed for {at}: {error} \
+         — the next tick of any thread in this workspace looks instead; `nxc tick --thread \
          {thread}` looks now"
     );
     eprintln!("warning: {detail}");
     FailedConsequence::stranded(
         ConsequenceClass::TickUnscheduled,
         Some(thread),
-        Some(session),
+        session,
         detail,
     )
 }
@@ -920,20 +1483,85 @@ fn look_unarmed(thread: &str, session: &str, at: &str, error: &str) -> FailedCon
 pub(crate) fn arm_first_look(
     ctx: &Ctx,
     store: &ChatStore,
-    session: &str,
     thread: &str,
+    role: &str,
     clock: &str,
 ) -> Option<FailedConsequence> {
     match after(clock, STRANDED_GRACE_SECS, "the first stranded look") {
-        Ok(at) => arm_look(ctx, store, session, thread, &at),
-        Err(e) => Some(look_unarmed(thread, session, clock, &e.to_string())),
+        Ok(at) => arm_look(ctx, store, thread, role, &at),
+        Err(e) => Some(look_unarmed(
+            thread,
+            &look_key(thread, role),
+            None,
+            clock,
+            &e.to_string(),
+        )),
     }
 }
 
-/// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write
-/// every mint and trigger site makes. Best-effort: a store error is a finding, never a failed
-/// commission — the row only adds a judgement on top of what the commission already did, and a
-/// slot without one keeps today's behaviour.
+/// The finding for an obligation row that could not be written. Best-effort, everywhere: a store
+/// error is a finding, never a failed commission — the row only adds a judgement on top of what the
+/// commission already did, and a slot without one keeps today's behaviour.
+fn not_owed(
+    thread: &str,
+    role: &str,
+    session: Option<&str>,
+    e: &dyn std::fmt::Display,
+) -> Vec<FailedConsequence> {
+    let detail = format!(
+        "the obligation of {role} on thread {thread} could not be recorded: {e} — a slot that is \
+         never answered there is not noticed by the stranded sweep, and its window lapses as before"
+    );
+    eprintln!("warning: {detail}");
+    vec![FailedConsequence::stranded(
+        ConsequenceClass::StrandedNotJudged,
+        Some(thread),
+        session,
+        detail,
+    )]
+}
+
+/// **The slot is opened: write its row with no session, and arm its first look** (nxf 6j6v.kgfn) —
+/// before any mint, at the two places a coordinated slot is opened (`coordinator_commission_in`,
+/// which every flow step, parallel member and direct commission passes through). `coordinator` is
+/// [`coordinator_of`]'s thread.
+pub(crate) fn owe_the_slot(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    role: &str,
+    coordinator: &str,
+) -> Vec<FailedConsequence> {
+    if let Err(e) = store.open_slot(thread, role, coordinator, ctx.now) {
+        return not_owed(thread, role, None, &e);
+    }
+    arm_first_look(ctx, store, thread, role, ctx.now)
+        .into_iter()
+        .collect()
+}
+
+/// **The mint fills the slot's session** (nxf 6j6v.kgfn) and moves its clock; the look moves with
+/// it. Nothing for a slot that has no row.
+pub(crate) fn bind(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    role: &str,
+    session: &str,
+) -> Vec<FailedConsequence> {
+    match store.bind_owed_session(thread, role, session, ctx.now) {
+        Ok(true) => arm_first_look(ctx, store, thread, role, ctx.now)
+            .into_iter()
+            .collect(),
+        Ok(false) => Vec::new(),
+        Err(e) => not_owed(thread, role, Some(session), &e),
+    }
+}
+
+/// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write the
+/// trigger funnel makes, and the mint of a slot nobody coordinates (cut 1a's row, kept exactly as it
+/// was: a slot with no coordinator keeps today's behaviour). `coordinator` is the slot's
+/// coordinating thread when it has one.
 pub(crate) fn owe(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -941,27 +1569,18 @@ pub(crate) fn owe(
     role: &str,
     session: &str,
     triggered: bool,
+    coordinator: Option<&str>,
 ) -> Vec<FailedConsequence> {
     // An engine identity (the synthesizer) answers for the engine; rule 1 excludes it anyway, and
     // keeping it out of the table keeps the work list to what can strand.
     if crate::orchestration::is_engine_identity(role) {
         return Vec::new();
     }
-    if let Err(e) = store.record_owed_start(thread, role, session, ctx.now, triggered) {
-        let detail = format!(
-            "the obligation of {role} on thread {thread} (session {session}) could not be \
-             recorded: {e} — a session that never answers there is not noticed by the stranded \
-             sweep, and its window lapses as before"
-        );
-        eprintln!("warning: {detail}");
-        return vec![FailedConsequence::stranded(
-            ConsequenceClass::StrandedNotJudged,
-            Some(thread),
-            Some(session),
-            detail,
-        )];
+    if let Err(e) = store.record_owed_start(thread, role, session, ctx.now, triggered, coordinator)
+    {
+        return not_owed(thread, role, Some(session), &e);
     }
-    arm_first_look(ctx, store, session, thread, ctx.now)
+    arm_first_look(ctx, store, thread, role, ctx.now)
         .into_iter()
         .collect()
 }
@@ -977,7 +1596,7 @@ pub(crate) fn touch(
     session: &str,
 ) -> Vec<FailedConsequence> {
     match store.touch_owed_start(thread, role, session, ctx.now) {
-        Ok(true) => arm_first_look(ctx, store, session, thread, ctx.now)
+        Ok(true) => arm_first_look(ctx, store, thread, role, ctx.now)
             .into_iter()
             .collect(),
         Ok(false) => Vec::new(),
@@ -1009,7 +1628,7 @@ pub(crate) fn arm_after_an_end(
             .flatten()
             .is_some_and(|q| outstanding_has(&q.outstanding, &row.role));
         if still_owed {
-            findings.extend(arm_first_look(ctx, store, session, &row.thread, ctx.now));
+            findings.extend(arm_first_look(ctx, store, &row.thread, &row.role, ctx.now));
         }
     }
     findings
@@ -1045,6 +1664,8 @@ pub(crate) fn reconcile_stranded_sessions(
     store: &mut ChatStore,
 ) -> Vec<FailedConsequence> {
     let mut findings = Vec::new();
+    // The one-time backfill (nxf 6j6v.kgfn), before anything reads the rows it writes.
+    findings.extend(backfill_once(ctx, store));
     // FIRST the records whose escalation is still to be settled — the stamp retry iterates THEM,
     // never the candidates below (a posted escalation is exactly what discharges the candidate),
     // and BEFORE retention, which would otherwise take the owed row they are judged against.
@@ -1137,6 +1758,40 @@ fn judge_candidates(
         let Some(q) = quorums.get(&row.thread) else {
             continue;
         };
+        // **Who coordinates the slot is asked again at every look** (nxf 6j6v.kgfn): a hand-over
+        // moves ownership with the `machine` register, and a device whose row named a coordinator
+        // but which no longer executes the slot forgets its row rather than acting on it — the
+        // device that now executes it has its own. A row that never named one (a slot nobody
+        // coordinates, or a row cut 1a wrote) is judged as cut 1a judges it, and learns its
+        // coordinator when it has one now. An abandoned row stays — it is the record of why —
+        // until the slot stops being owed.
+        if row.abandoned.is_none() {
+            match assess(ctx, store, &row.thread, &row.role) {
+                Ok(Assessment::Coordinated(c)) => {
+                    if row.coordinator.as_deref() != Some(c.thread.as_str()) {
+                        store.set_slot_coordinator(&row.thread, &row.role, &c.thread)?;
+                    }
+                }
+                Ok(_) if row.coordinator.is_some() => {
+                    store.forget_owed_start(&row.thread, &row.role)?;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    findings.push(FailedConsequence::stranded(
+                        ConsequenceClass::StrandedNotJudged,
+                        Some(&row.thread),
+                        row.session.as_deref(),
+                        format!(
+                            "who coordinates the slot of {} on thread {} could not be read: {e}; \
+                             the next tick looks again",
+                            row.role, row.thread
+                        ),
+                    ));
+                    continue;
+                }
+            }
+        }
         // A failure on ONE obligation is a finding about that obligation; the walk goes on, so one
         // bad row cannot stop every later one from being judged on every tick.
         let judged = judge(ctx, store, &row, q, &facts, findings).and_then(|j| match j {
@@ -1152,16 +1807,196 @@ fn judge_candidates(
             Err(e) => findings.push(FailedConsequence::stranded(
                 ConsequenceClass::StrandedNotJudged,
                 Some(&row.thread),
-                Some(&row.session),
+                row.session.as_deref(),
                 format!(
-                    "the owed session {} on thread {} could not be judged: {e}; the next tick \
-                     looks again",
-                    row.session, row.thread
+                    "the slot of {} on thread {} could not be judged: {e}; the next tick looks \
+                     again",
+                    row.role, row.thread
                 ),
             )),
         }
     }
     Ok(())
+}
+
+// ---- the one-time backfill, and abandoned (nxf 6j6v.kgfn) ----------------------------------------
+
+/// **Backfill once** — at the first sweep after the upgrade, every open coordinated slot that has no
+/// row gets one, written with the marker in ONE transaction. Only a device whose worker can
+/// coordinate backfills: under any other worker every slot reads uncoordinated, and burning the
+/// marker on zero rows would leave the slots opened before this cut unowned for good.
+///
+/// A backfilled slot gets `trigger_clock = now`, `backfilled = 1`, and the session of its role
+/// standing on the thread when there is one (`session_map`). It is ABANDONED — recorded with its
+/// reason, never nudged, never escalated, one [`ConsequenceClass::SlotAbandoned`] finding — when its
+/// operation's root no longer waits (delivered, withdrawn, accepted), when its newest evidence is
+/// older than [`ABANDONED_AFTER_SECS`], or when its run has no commissioning message (clause 5:
+/// `consolidated`). A replica writes none for a slot another site opened: clause 3 says so.
+fn backfill_once(ctx: &Ctx, store: &mut ChatStore) -> Vec<FailedConsequence> {
+    let not_backfilled = |e: &dyn std::fmt::Display| {
+        let detail = format!(
+            "the slots opened before this version could not be backfilled: {e}; the next tick \
+             tries again"
+        );
+        eprintln!("warning: {detail}");
+        vec![FailedConsequence::stranded(
+            ConsequenceClass::StrandedNotJudged,
+            None,
+            None,
+            detail,
+        )]
+    };
+    if !worker_can_coordinate(ctx.worker) {
+        return Vec::new();
+    }
+    match store.owed_backfill_done() {
+        Ok(true) => return Vec::new(),
+        Ok(false) => {}
+        Err(e) => return not_backfilled(&e),
+    }
+    let rows = match backfill_rows(ctx, store) {
+        Ok(rows) => rows,
+        Err(e) => return not_backfilled(&e),
+    };
+    match store.backfill_owed_starts(&rows, ctx.now) {
+        Ok(true) => {}
+        Ok(false) => return Vec::new(),
+        Err(e) => return not_backfilled(&e),
+    }
+    let mut findings = Vec::new();
+    for row in &rows {
+        match &row.abandoned {
+            Some(reason) => {
+                let finding = FailedConsequence::stranded(
+                    ConsequenceClass::SlotAbandoned,
+                    Some(&row.thread),
+                    row.session.as_deref(),
+                    format!(
+                        "the slot of {} on thread {} was opened before this version and is \
+                         abandoned: {} — nothing will take it up; `nxc withdraw --thread {}` \
+                         takes it back",
+                        row.role,
+                        row.thread,
+                        abandoned_words(reason),
+                        row.thread
+                    ),
+                );
+                eprintln!("warning: {finding}");
+                findings.push(finding);
+            }
+            None => findings.extend(arm_first_look(ctx, store, &row.thread, &row.role, ctx.now)),
+        }
+    }
+    findings
+}
+
+/// The rows the backfill writes: every open slot of a persona that [`assess`] coordinates (or finds
+/// consolidated) and that has no row yet.
+fn backfill_rows(ctx: &Ctx, store: &ChatStore) -> Result<Vec<Backfill>> {
+    let mut rows = Vec::new();
+    for q in store.thread_quorums_all(ctx.now)? {
+        for role in &q.outstanding {
+            if crate::orchestration::is_engine_identity(role)
+                || store.owed_start(&q.thread_id, role)?.is_some()
+            {
+                continue;
+            }
+            let (coordinator, consolidated) = match assess(ctx, store, &q.thread_id, role)? {
+                Assessment::Coordinated(c) => (c, false),
+                Assessment::Consolidated(c) => (c, true),
+                Assessment::Uncoordinated => continue,
+            };
+            let session = session_of_role_on(store, &q.thread_id, role)?;
+            let abandoned = if consolidated {
+                Some("consolidated".to_string())
+            } else {
+                abandoned_reason(ctx, store, &q.thread_id, session.as_deref())?
+            };
+            rows.push(Backfill {
+                thread: q.thread_id.clone(),
+                role: role.clone(),
+                session,
+                coordinator: coordinator.thread,
+                clock: ctx.now.to_string(),
+                abandoned,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// The newest session of `role` standing on `thread` in this device's `session_map`.
+fn session_of_role_on(store: &ChatStore, thread: &str, role: &str) -> Result<Option<String>> {
+    let bare = role.rsplit_once('/').map_or(role, |(_, b)| b);
+    Ok(store
+        .sessions_in_thread(thread)?
+        .into_iter()
+        .rev()
+        .find(|s| s.role == bare)
+        .map(|s| s.internal_id))
+}
+
+/// Section A's abandoned rule for a backfilled slot that still has its commissioning message: the
+/// root no longer waits, or the newest evidence is older than [`ABANDONED_AFTER_SECS`].
+fn abandoned_reason(
+    ctx: &Ctx,
+    store: &ChatStore,
+    thread: &str,
+    session: Option<&str>,
+) -> Result<Option<String>> {
+    let root = store.thread_root(thread)?;
+    if let Some(rq) = store.thread_quorum(&root, ctx.now)? {
+        let waits = rq.outstanding.iter().any(|h| {
+            let bare = h.rsplit_once('/').map_or(h.as_str(), |(_, b)| b);
+            bare != crate::channel::DELIVERED_HANDLE && bare != crate::channel::WITHDRAWN_HANDLE
+        });
+        if !waits {
+            let marker = |m: &str| {
+                rq.expects
+                    .iter()
+                    .any(|h| h.rsplit_once('/').map_or(h.as_str(), |(_, b)| b) == m)
+            };
+            let why = if marker(crate::channel::WITHDRAWN_HANDLE) {
+                "withdrawn"
+            } else {
+                "delivered"
+            };
+            return Ok(Some(why.to_string()));
+        }
+    }
+    let mut evidence = store
+        .acting_messages_in_thread(thread)?
+        .into_iter()
+        .find_map(|m| m.created);
+    if let Some(s) = session {
+        for at in [store.session_ended_at(s)?, store.last_transcript_at(s)?]
+            .into_iter()
+            .flatten()
+        {
+            if evidence.as_deref().is_none_or(|e| earlier(e, &at)) {
+                evidence = Some(at);
+            }
+        }
+    }
+    let Some(evidence) = evidence else {
+        return Ok(None);
+    };
+    let horizon = after(&evidence, ABANDONED_AFTER_SECS, "the abandoned horizon")?;
+    Ok(earlier(&horizon, ctx.now).then(|| "aged".to_string()))
+}
+
+/// An abandoned slot's reason, in words — what `status` and the finding say.
+pub(crate) fn abandoned_words(reason: &str) -> String {
+    match reason {
+        "delivered" => "its operation was already delivered".to_string(),
+        "withdrawn" => "its operation was withdrawn".to_string(),
+        "aged" => format!(
+            "nothing has been heard from it for more than {} h",
+            ABANDONED_AFTER_SECS / 3600
+        ),
+        "consolidated" => "its run no longer has the message that commissioned it".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Rules 1-6 for one obligation. Drops the first look whenever the evidence no longer holds.
@@ -1173,7 +2008,11 @@ fn judge(
     facts: &PauseFacts,
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<Judgement> {
-    let (t, h, s) = (row.thread.as_str(), row.role.as_str(), row.session.as_str());
+    let (t, h, s) = (
+        row.thread.as_str(),
+        row.role.as_str(),
+        row.session.as_deref(),
+    );
     let not_now = |store: &mut ChatStore| -> Result<Judgement> {
         store.drop_stranded_suspect(t, h)?;
         Ok(Judgement::Nothing)
@@ -1198,20 +2037,25 @@ fn judge(
     // Rules 2-4: its answer is still coming — a standing hold, a start still to come (the queue, a
     // retry due), its own sub-round in flight, or a delivery held for it. The ONE predicate the
     // member-set read uses too, so "paused" cannot mean two things.
-    if member_answer_is_still_coming(ctx.now, store, q, Some(s), facts)?.is_some() {
+    if member_answer_is_still_coming(ctx.now, store, q, s, facts)?.is_some() {
+        return not_now(store);
+    }
+    // **An abandoned slot is never nudged** (nxf 6j6v.kgfn): its record is the row's reason, and
+    // `withdraw` is its exit.
+    if row.abandoned.is_some() {
         return not_now(store);
     }
     let failed_start = facts.given_up(t, s);
     // Rule 5: no claim a session still holds. While it holds one, the look comes back one cadence
     // out — a session killed after a healthy look needs a further look.
-    if ctx.worker.session_is_running(s) {
+    if s.is_some_and(|s| ctx.worker.session_is_running(s)) {
         store.drop_stranded_suspect(t, h)?;
         if let Ok(at) = after(
             ctx.now,
             crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
             "the next stranded look",
         ) {
-            findings.extend(arm_look(ctx, store, s, t, &at));
+            findings.extend(arm_look(ctx, store, t, h, &at));
         }
         return Ok(Judgement::Nothing);
     }
@@ -1221,7 +2065,7 @@ fn judge(
     if let Some(f) = failed_start {
         let due = after(&f.last_failed_at, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
-            findings.extend(arm_look(ctx, store, s, t, &due));
+            findings.extend(arm_look(ctx, store, t, h, &due));
             return Ok(Judgement::Nothing);
         }
         return Ok(Judgement::Record {
@@ -1234,10 +2078,14 @@ fn judge(
         });
     }
     // An announced end: one look at the end + grace.
-    if let Some(ended) = store.session_ended_at(s)? {
+    let ended = match s {
+        Some(s) => store.session_ended_at(s)?,
+        None => None,
+    };
+    if let Some(ended) = ended {
         let due = after(&ended, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
-            findings.extend(arm_look(ctx, store, s, t, &due));
+            findings.extend(arm_look(ctx, store, t, h, &due));
             return Ok(Judgement::Nothing);
         }
         store.drop_stranded_suspect(t, h)?;
@@ -1255,19 +2103,22 @@ fn judge(
     if !reached(ctx.now, &first_due) {
         return Ok(Judgement::Nothing);
     }
-    let bound = store.session_is_bound(s)?;
-    let entries = store.transcript_entry_count(s)?;
+    // A slot whose session was never minted has neither (nxf 6j6v.kgfn).
+    let (bound, entries) = match s {
+        Some(s) => (store.session_is_bound(s)?, store.transcript_entry_count(s)?),
+        None => (false, 0),
+    };
     let second_look = |store: &ChatStore, findings: &mut Vec<FailedConsequence>| {
         if let Ok(at) = after(
             ctx.now,
             crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
             "the second stranded look",
         ) {
-            findings.extend(arm_look(ctx, store, s, t, &at));
+            findings.extend(arm_look(ctx, store, t, h, &at));
         }
     };
     let fresh = Suspect {
-        session: s.to_string(),
+        session: s.map(str::to_string),
         first_seen: ctx.now.to_string(),
         bound,
         transcript_entries: entries,
@@ -1279,7 +2130,10 @@ fn judge(
     };
     // The tuple is load-bearing: the session, its bind and its transcript must be what the first
     // look saw. Anything moved — RESET, and look again one cadence out.
-    if suspect.session != s || suspect.bound != bound || suspect.transcript_entries != entries {
+    if suspect.session.as_deref() != s
+        || suspect.bound != bound
+        || suspect.transcript_entries != entries
+    {
         store.put_stranded_suspect(t, h, &fresh)?;
         second_look(store, findings);
         return Ok(Judgement::Nothing);
@@ -1361,12 +2215,12 @@ fn record(
     let finding = FailedConsequence::stranded(
         ConsequenceClass::SessionStranded,
         Some(&rec.thread),
-        Some(&rec.session),
+        rec.session.as_deref(),
         format!(
-            "step {step} on thread {} is stranded: session {} will not answer — observation {}: \
-             {}; recorded at {}, escalated to the commissioner",
+            "step {step} on thread {} is stranded: {} will not answer — observation {}: {}; \
+             recorded at {}, escalated to the commissioner",
             rec.thread,
-            rec.session,
+            session_words(&rec),
             rec.observed.number(),
             rec.detail,
             rec.recorded_at
@@ -1448,7 +2302,7 @@ fn post_as_the_member(
         .to_string();
     let as_member = Ctx {
         actor: &bare,
-        session: Some(&rec.session),
+        session: rec.session.as_deref(),
         ..*ctx
     };
     let receipt =
@@ -1533,11 +2387,12 @@ fn stamp(
         let finding = FailedConsequence::stranded(
             ConsequenceClass::StrandedNotEscalated,
             Some(&rec.thread),
-            Some(&rec.session),
+            rec.session.as_deref(),
             format!(
-                "the escalation of stranded session {} on thread {} could not be stamped: {e}; \
-                 the next sweep reads the thread and stamps it then",
-                rec.session, rec.thread
+                "the escalation of stranded {} on thread {} could not be stamped: {e}; the next \
+                 sweep reads the thread and stamps it then",
+                session_words(rec),
+                rec.thread
             ),
         );
         eprintln!("warning: {finding}");
@@ -1550,10 +2405,11 @@ fn skipped(store: &mut ChatStore, rec: &StrandedRecord, findings: &mut Vec<Faile
     findings.push(FailedConsequence::stranded(
         ConsequenceClass::StrandedEscalationSkipped,
         Some(&rec.thread),
-        Some(&rec.session),
+        rec.session.as_deref(),
         format!(
-            "stranded session {} on thread {} was not escalated: the slot was answered meanwhile",
-            rec.session, rec.thread
+            "stranded {} on thread {} was not escalated: the slot was answered meanwhile",
+            session_words(rec),
+            rec.thread
         ),
     ));
 }
@@ -1573,25 +2429,26 @@ fn not_escalated(
     if give_up {
         stamp(store, rec, Escalation::GivenUp, None, findings);
     }
+    let who = session_words(rec);
     let detail = if give_up {
         format!(
-            "the escalation of stranded session {} on thread {} could not be posted and is given \
-             up after {attempts} attempt(s): {error} — withdraw the round with `nxc withdraw \
+            "the escalation of stranded {who} on thread {} could not be posted and is given up \
+             after {attempts} attempt(s): {error} — withdraw the round with `nxc withdraw \
              --thread {}`",
-            rec.session, rec.thread, rec.thread
+            rec.thread, rec.thread
         )
     } else {
         format!(
-            "the escalation of stranded session {} on thread {} could not be posted yet \
-             (attempt {attempts}): {error}; a further look is armed",
-            rec.session, rec.thread
+            "the escalation of stranded {who} on thread {} could not be posted yet (attempt \
+             {attempts}): {error}; a further look is armed",
+            rec.thread
         )
     };
     eprintln!("warning: {detail}");
     findings.push(FailedConsequence::stranded(
         ConsequenceClass::StrandedNotEscalated,
         Some(&rec.thread),
-        Some(&rec.session),
+        rec.session.as_deref(),
         detail,
     ));
     if !give_up {
@@ -1600,8 +2457,16 @@ fn not_escalated(
             crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
             "the next escalation attempt",
         ) {
-            findings.extend(arm_look(ctx, store, &rec.session, &rec.thread, &at));
+            findings.extend(arm_look(ctx, store, &rec.thread, &rec.role, &at));
         }
+    }
+}
+
+/// The session a record is about, in words — `session <id>`, or what a slot without one is.
+fn session_words(rec: &StrandedRecord) -> String {
+    match &rec.session {
+        Some(s) => format!("session {s}"),
+        None => format!("the slot of {} (no session was ever started)", rec.role),
     }
 }
 
@@ -1611,15 +2476,17 @@ fn escalation_body(store: &ChatStore, rec: &StrandedRecord) -> String {
     let root = store
         .thread_root(&rec.thread)
         .unwrap_or_else(|_| rec.thread.clone());
+    let session = match &rec.session {
+        Some(s) => format!("session {s} is not running and nothing is coming from it"),
+        None => "no session was ever started for it".to_string(),
+    };
     format!(
-        "STRANDED — step {step} on thread {thread} will not be answered: session {session} is not \
-         running and nothing is coming from it.\n\n\
+        "STRANDED — step {step} on thread {thread} will not be answered: {session}.\n\n\
          Observation {n}: {detail}. Judged from {judged} with a grace of {grace} s; recorded at \
          {at}.\n\n\
          Nothing was restarted. A reply into thread {root} commissions the round again; `nxc \
          withdraw --thread {root}` takes it back.",
         thread = rec.thread,
-        session = rec.session,
         n = rec.observed.number(),
         detail = rec.detail,
         judged = rec.judged_from,
@@ -1679,7 +2546,7 @@ mod tests {
         StrandedRecord {
             thread: "m-t".into(),
             role: "ws/verifier".into(),
-            session: "m-s".into(),
+            session: Some("m-s".into()),
             trigger_clock: clock.into(),
             judged_from: clock.into(),
             recorded_at: T1.into(),
@@ -1693,33 +2560,194 @@ mod tests {
         }
     }
 
+    // ---- the obligation is the slot (nxf 6j6v.kgfn) ---------------------------------------------
+
+    /// The row exists from the OPEN, before any session; the mint fills the session and moves the
+    /// clock, the funnel marks it triggered, and what the open wrote about the coordinator stays.
+    #[test]
+    fn a_slot_is_owed_before_any_session_exists() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.open_slot("m-t", "ws/verifier", "m-chan", T0).unwrap();
+        let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
+        assert_eq!(row.session, None);
+        assert_eq!(row.trigger_clock, T0);
+        assert!(!row.triggered);
+        assert_eq!(row.coordinator.as_deref(), Some("m-chan"));
+        assert!(!row.backfilled);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.abandoned, None);
+
+        s.bind_owed_session("m-t", "ws/verifier", "m-s1", T1)
+            .unwrap();
+        let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
+        assert_eq!(row.session.as_deref(), Some("m-s1"));
+        assert_eq!(row.trigger_clock, T1);
+        assert!(!row.triggered, "a mint is not a trigger");
+
+        s.record_owed_start("m-t", "ws/verifier", "m-s1", T2, true, Some("m-chan"))
+            .unwrap();
+        let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
+        assert!(row.triggered);
+        assert_eq!(row.trigger_clock, T2);
+        assert_eq!(row.coordinator.as_deref(), Some("m-chan"));
+    }
+
+    /// A store from before this cut carries the old `owed_starts` (session NOT NULL, five columns)
+    /// and the two record tables with a NOT NULL session. Opening it rebuilds all three in place and
+    /// keeps every row.
+    #[test]
+    fn a_pre_slot_store_is_rebuilt_in_place_and_keeps_its_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owed_starts(
+                 thread TEXT NOT NULL, role TEXT NOT NULL, session TEXT NOT NULL,
+                 trigger_clock TEXT NOT NULL, triggered INTEGER NOT NULL,
+                 PRIMARY KEY(thread, role));
+             CREATE INDEX owed_starts_by_session ON owed_starts(session);
+             CREATE TABLE stranded_suspects(
+                 thread TEXT NOT NULL, role TEXT NOT NULL, session TEXT NOT NULL,
+                 first_seen TEXT NOT NULL, bound INTEGER NOT NULL,
+                 transcript_entries INTEGER NOT NULL, PRIMARY KEY(thread, role));
+             CREATE TABLE stranded_sessions(
+                 thread TEXT NOT NULL, role TEXT NOT NULL, session TEXT NOT NULL,
+                 trigger_clock TEXT NOT NULL, judged_from TEXT NOT NULL,
+                 recorded_at TEXT NOT NULL, observed INTEGER NOT NULL, detail TEXT NOT NULL,
+                 escalation TEXT, escalation_attempts INTEGER NOT NULL DEFAULT 0,
+                 escalated_at TEXT, escalation_error TEXT, superseded_at TEXT,
+                 PRIMARY KEY(thread, role, trigger_clock));
+             INSERT INTO owed_starts VALUES ('m-t', 'ws/verifier', 'm-s', '2026-10-18T10:00:00Z', 1);
+             INSERT INTO stranded_suspects VALUES ('m-t', 'ws/verifier', 'm-s', 'x', 0, 0);
+             INSERT INTO stranded_sessions(thread, role, session, trigger_clock, judged_from,
+                 recorded_at, observed, detail, escalation)
+                 VALUES ('m-t', 'ws/verifier', 'm-s', 'c', 'c', 'r', 2, 'd', 'posted');",
+        )
+        .unwrap();
+        crate::schema::apply_chat_views(&conn);
+        crate::schema::apply_chat_views(&conn); // and again: idempotent
+        for table in ["owed_starts", "stranded_suspects", "stranded_sessions"] {
+            let notnull: i64 = conn
+                .query_row(
+                    &format!("SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = 'session'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(notnull, 0, "{table}.session is nullable after the rebuild");
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 1, "{table} kept its row");
+        }
+        let (session, clock, triggered, attempts, backfilled): (String, String, i64, i64, i64) =
+            conn.query_row(
+                "SELECT session, trigger_clock, triggered, attempts, backfilled FROM owed_starts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                session.as_str(),
+                clock.as_str(),
+                triggered,
+                attempts,
+                backfilled
+            ),
+            ("m-s", "2026-10-18T10:00:00Z", 1, 0, 0)
+        );
+        let escalation: String = conn
+            .query_row("SELECT escalation FROM stranded_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(escalation, "posted");
+    }
+
+    fn backfill_row(thread: &str, abandoned: Option<&str>) -> Backfill {
+        Backfill {
+            thread: thread.into(),
+            role: "ws/verifier".into(),
+            session: None,
+            coordinator: "m-chan".into(),
+            clock: T0.into(),
+            abandoned: abandoned.map(str::to_string),
+        }
+    }
+
+    /// The marker and the rows are ONE transaction: written together, and a second backfill finds
+    /// the marker and writes nothing.
+    #[test]
+    fn the_backfill_writes_its_rows_and_its_marker_together_and_only_once() {
+        let mut s = ChatStore::open_in_memory(1);
+        assert!(!s.owed_backfill_done().unwrap());
+        assert!(s
+            .backfill_owed_starts(
+                &[
+                    backfill_row("m-a", None),
+                    backfill_row("m-b", Some("consolidated"))
+                ],
+                T0
+            )
+            .unwrap());
+        assert!(s.owed_backfill_done().unwrap());
+        let rows = s.owed_starts().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.backfilled && r.session.is_none()));
+        assert_eq!(rows[1].abandoned.as_deref(), Some("consolidated"));
+        assert_eq!(rows[1].abandoned_at.as_deref(), Some(T0));
+        assert!(
+            !s.backfill_owed_starts(&[backfill_row("m-c", None)], T1)
+                .unwrap(),
+            "the marker stands: nothing more is backfilled"
+        );
+        assert_eq!(s.owed_starts().unwrap().len(), 2);
+    }
+
+    /// **A crash between the rows and the marker leaves neither** — the marker write is made to fail
+    /// inside the store itself, and the rows written before it in the same call are gone with it.
+    #[test]
+    fn a_backfill_whose_marker_cannot_be_written_leaves_no_rows_behind() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.connection()
+            .execute_batch(
+                "CREATE TRIGGER no_marker BEFORE INSERT ON owed_backfill_done
+                 BEGIN SELECT RAISE(ABORT, 'the marker cannot be written (injected)'); END;",
+            )
+            .unwrap();
+        assert!(s
+            .backfill_owed_starts(&[backfill_row("m-a", None)], T0)
+            .is_err());
+        assert!(
+            s.owed_starts().unwrap().is_empty(),
+            "no row without its marker"
+        );
+        assert!(!s.owed_backfill_done().unwrap());
+    }
+
+    #[test]
+    fn a_look_is_keyed_by_its_slot() {
+        assert_eq!(look_key("m-t", "ws/verifier"), "m-t-verifier");
+        assert_eq!(look_key("m-t", "verifier"), "m-t-verifier");
+    }
+
     #[test]
     fn a_new_session_for_the_same_obligation_replaces_the_row_whole() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T0, false)
+        s.record_owed_start("m-t", "ws/verifier", "m-s1", T0, false, Some("m-chan"))
             .unwrap();
-        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true)
+        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true, Some("m-chan"))
             .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
-        assert_eq!(
-            row,
-            OwedStart {
-                thread: "m-t".into(),
-                role: "ws/verifier".into(),
-                session: "m-s2".into(),
-                trigger_clock: T1.into(),
-                triggered: true,
-            }
-        );
+        assert_eq!(row.session.as_deref(), Some("m-s2"));
+        assert_eq!(row.trigger_clock, T1);
+        assert!(row.triggered);
         assert_eq!(s.owed_starts().unwrap().len(), 1);
     }
 
     #[test]
     fn a_touch_moves_only_the_obligation_the_session_owes() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true)
+        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true, Some("m-chan"))
             .unwrap();
-        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true)
+        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true, Some("m-chan"))
             .unwrap();
         assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2", T2).unwrap());
         assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2", T2).unwrap());
@@ -1744,7 +2772,7 @@ mod tests {
     #[test]
     fn a_record_stays_current_after_its_owed_row_goes_and_a_later_trigger_supersedes_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true)
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
             .unwrap();
         assert!(s.record_stranded(&record(T0)).unwrap());
         assert!(
@@ -1758,7 +2786,7 @@ mod tests {
             Some(T0)
         );
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true)
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true, Some("m-chan"))
             .unwrap();
         assert!(s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty());
         assert_eq!(
@@ -1798,7 +2826,7 @@ mod tests {
     fn a_suspect_is_reset_in_place_and_goes_with_its_obligation() {
         let mut s = ChatStore::open_in_memory(1);
         let first = Suspect {
-            session: "m-s".into(),
+            session: Some("m-s".into()),
             first_seen: T0.into(),
             bound: false,
             transcript_entries: 0,
@@ -1816,7 +2844,7 @@ mod tests {
             s.stranded_suspect("m-t", "ws/verifier").unwrap(),
             Some(reset)
         );
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true)
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
             .unwrap();
         s.forget_owed_start("m-t", "ws/verifier").unwrap();
         assert_eq!(s.stranded_suspect("m-t", "ws/verifier").unwrap(), None);
@@ -1840,12 +2868,12 @@ mod tests {
         }
         fn schedule_stranded_look(
             &self,
-            session: &str,
+            slot: &str,
             _thread: &str,
             deadline: &str,
         ) -> Result<crate::timer::TimerHandle> {
-            self.0.lock().unwrap().push(format!("{session}@{deadline}"));
-            Ok(crate::timer::TimerHandle(session.to_string()))
+            self.0.lock().unwrap().push(format!("{slot}@{deadline}"));
+            Ok(crate::timer::TimerHandle(slot.to_string()))
         }
         fn cancel(&self, _handle: &crate::timer::TimerHandle) -> Result<()> {
             Ok(())
@@ -1941,7 +2969,7 @@ mod tests {
         scene.rec = StrandedRecord {
             thread: sent.thread_id.clone(),
             role: format!("{}/verifier", scene.origin),
-            session: sent.session.clone().unwrap(),
+            session: sent.session.clone(),
             ..record(T0)
         };
         assert!(scene.store.record_stranded(&scene.rec).unwrap());
@@ -2010,7 +3038,7 @@ mod tests {
         {
             let rec = scene.rec.clone();
             let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
-            let ctx = scene.ctx("2026-10-18T10:03:30Z", "verifier", Some(&rec.session));
+            let ctx = scene.ctx("2026-10-18T10:03:30Z", "verifier", rec.session.as_deref());
             crate::surface::reply_in_thread(
                 &ctx,
                 &mut store,
@@ -2060,7 +3088,15 @@ mod tests {
         let synth = format!("{}/{}", scene.origin, crate::channel::SYNTHESIS_HANDLE);
         let findings = {
             let ctx = scene.ctx(T0, "service", None);
-            owe(&ctx, &mut store, "m-board", &synth, "m-synth-session", true)
+            owe(
+                &ctx,
+                &mut store,
+                "m-board",
+                &synth,
+                "m-synth-session",
+                true,
+                None,
+            )
         };
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(store.owed_start("m-board", &synth).unwrap(), None);
@@ -2074,8 +3110,15 @@ mod tests {
         let older = "2026-10-18T10:00:00Z";
         let later_fractional = "2026-10-18T10:00:00.5Z";
         s.record_stranded(&record(older)).unwrap();
-        s.record_owed_start("m-t", "ws/verifier", "m-s", later_fractional, true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            later_fractional,
+            true,
+            Some("m-chan"),
+        )
+        .unwrap();
         assert!(
             s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty(),
             "a later fractional clock supersedes"
@@ -2089,6 +3132,7 @@ mod tests {
             "m-s",
             "2026-10-18T12:00:00+02:00",
             true,
+            Some("m-chan"),
         )
         .unwrap();
         assert_eq!(s.current_stranded_by_threads(&["m-t"]).unwrap().len(), 1);

@@ -768,6 +768,60 @@ pub struct StatusThread {
     /// skipped in `--json`; device-local, so a replica shows `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stranded: Option<StrandedStatus>,
+    /// **This slot was ABANDONED** (nxf 6j6v.kgfn): it was opened before the slot row existed, and
+    /// the one-time backfill found that nothing will take it up — its operation's root no longer
+    /// waits, nothing has been heard from it for a day, or its commissioning message is gone. It is
+    /// never nudged and nothing is escalated; `withdraw` takes it back. `None` for every other
+    /// thread, which is skipped in `--json`; device-local, so a replica shows `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abandoned: Option<AbandonedStatus>,
+}
+
+/// **An abandoned slot as a status row shows it** (nxf 6j6v.kgfn).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct AbandonedStatus {
+    /// The handle the slot was owed by.
+    pub role: String,
+    /// Why: `delivered`, `withdrawn`, `aged` or `consolidated`.
+    pub reason: String,
+    /// The reason in words.
+    pub detail: String,
+    /// When the backfill recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// **Where an operation hangs** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A) — the deepest slot under
+/// the operation that is escalated, recorded stranded or abandoned, with the thread whose tick
+/// coordinates it. Ties at one depth go to the oldest last activity, then the lowest thread id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HangsAt {
+    /// The slot's thread.
+    pub thread: String,
+    /// The handle the slot is owed by.
+    pub role: String,
+    /// The thread whose tick coordinates the slot, when this device knows one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<String>,
+    /// What is being done about it.
+    pub recovery: SlotRecovery,
+}
+
+/// **What is being done about a slot that hangs** (nxf 6j6v.kgfn). The ladder (6j6v.558h) adds its
+/// rungs here; until then a slot is watched, recorded as never started, or abandoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SlotRecovery {
+    /// Its coordinator watches it: the escalation or the record is on the thread, and the
+    /// commissioner's answer is what moves it.
+    Watched,
+    /// It was recorded as never started: no session was ever started for it.
+    NeverStarted,
+    /// It was recorded as abandoned: nothing will take it up; `withdraw` is its exit.
+    Abandoned,
 }
 
 pub use crate::stranded::Observation;
@@ -776,8 +830,9 @@ pub use crate::stranded::Observation;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct StrandedStatus {
-    /// The session that will not answer.
-    pub session: String,
+    /// The session that will not answer — `null` for a slot that never got a session (nxf
+    /// 6j6v.kgfn: the row is written when the slot is opened, before any mint).
+    pub session: Option<String>,
     /// When the sweep recorded it.
     pub recorded_at: String,
     /// Which of the five observations it was recorded on (`never_started`, `never_bound`,
@@ -956,6 +1011,10 @@ pub struct StatusOperation {
     /// It goes false again on its own, like `needs_decision`: taking the operation up stamps the
     /// hold, and a stamped hold is not standing.
     pub interrupted: bool,
+    /// **Where this operation hangs** (nxf 6j6v.kgfn) — see [`HangsAt`]. `None` when no slot under
+    /// it is escalated, recorded stranded or abandoned, and omitted from `--json` then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hangs_at: Option<HangsAt>,
     /// The tree in depth-first order, root first, siblings by thread id (which is a ULID, so
     /// chronological). Deterministic.
     pub threads: Vec<StatusThread>,
@@ -4152,6 +4211,15 @@ pub fn status(
     // The stranded records (nxf 6j6v.ccvy) — the fourteenth read, one statement over a device-local
     // table that is empty unless a session was found that will not answer.
     let stranded = stranded_for(store, &id_list, edges.len())?;
+    // The slot rows (nxf 6j6v.kgfn) — the fifteenth read, one statement over a device-local table
+    // bounded by what is open, for the abandoned mark and `hangs_at`'s coordinator.
+    let owed: BTreeMap<String, Vec<crate::stranded::OwedStart>> = {
+        let mut by_thread: BTreeMap<String, Vec<crate::stranded::OwedStart>> = BTreeMap::new();
+        for row in store.owed_starts()? {
+            by_thread.entry(row.thread.clone()).or_default().push(row);
+        }
+        by_thread
+    };
     // **One bundle, because these seven ARE one thing**: the bulk reads this report is assembled
     // from, taken once for the whole selection and then read per thread. Passing them
     // individually made the per-thread derivation an eight-argument call, and the argument list
@@ -4169,6 +4237,7 @@ pub fn status(
         held_answers: &held_answers,
         borders: &borders,
         stranded: &stranded,
+        owed: &owed,
     };
 
     let mut operations = Vec::new();
@@ -4265,6 +4334,7 @@ pub fn status(
             } else {
                 None
             };
+            let hangs_at = hangs_at_of(store, &threads, &stranded, &owed, &sessions)?;
             operations.push(StatusOperation {
                 root: root.to_string(),
                 channel_id: forest
@@ -4279,6 +4349,7 @@ pub fn status(
                 holds_working_tree,
                 held_by_hand_back,
                 interrupted,
+                hangs_at,
                 threads,
                 parked: parked_here,
                 park_refused: refused_here,
@@ -4292,6 +4363,96 @@ pub fn status(
         worker_answers_liveness: worker.answers_liveness(),
         worker_names_a_working_copy: worker.working_copy().is_some(),
     })
+}
+
+/// **[`StatusOperation::hangs_at`]** (nxf 6j6v.kgfn): the deepest slot of `threads` that is
+/// abandoned, recorded stranded or escalated. Read from the rows this report already holds; only a
+/// TIE at the deepest level costs a read per tied slot (its newest message and its session's newest
+/// transcript entry), so a report with nothing hanging pays nothing.
+fn hangs_at_of(
+    store: &ChatStore,
+    threads: &[StatusThread],
+    stranded: &BTreeMap<String, crate::stranded::StrandedRecord>,
+    owed: &BTreeMap<String, Vec<crate::stranded::OwedStart>>,
+    sessions: &BTreeMap<String, String>,
+) -> Result<Option<HangsAt>> {
+    let mut candidates: Vec<(&StatusThread, HangsAt)> = Vec::new();
+    for t in threads {
+        let rows = owed.get(&t.thread_id).map(Vec::as_slice).unwrap_or(&[]);
+        // The coordinator a row named, else the one the tree implies: a slot's parent coordinates
+        // it (a channel's member, a session's own commission), and a root coordinates itself.
+        let coordinator_of = |role: &str| {
+            rows.iter()
+                .find(|r| r.role == role)
+                .and_then(|r| r.coordinator.clone())
+                .or_else(|| t.parent.clone())
+                .or_else(|| Some(t.thread_id.clone()))
+        };
+        let hang = if let Some(r) = rows.iter().find(|r| r.abandoned.is_some()) {
+            Some((r.role.clone(), SlotRecovery::Abandoned))
+        } else if let Some(rec) = stranded.get(&t.thread_id) {
+            let recovery = match rec.observed {
+                crate::stranded::Observation::NeverStarted => SlotRecovery::NeverStarted,
+                _ => SlotRecovery::Watched,
+            };
+            Some((rec.role.clone(), recovery))
+        } else if t.escalated {
+            t.expects
+                .first()
+                .map(|role| (role.clone(), SlotRecovery::Watched))
+        } else {
+            None
+        };
+        if let Some((role, recovery)) = hang {
+            let coordinator = coordinator_of(&role);
+            candidates.push((
+                t,
+                HangsAt {
+                    thread: t.thread_id.clone(),
+                    role,
+                    coordinator,
+                    recovery,
+                },
+            ));
+        }
+    }
+    let Some(deepest) = candidates.iter().map(|(t, _)| t.depth).max() else {
+        return Ok(None);
+    };
+    let mut tied: Vec<(Option<String>, HangsAt)> = candidates
+        .into_iter()
+        .filter(|(t, _)| t.depth == deepest)
+        .map(|(_, h)| (None, h))
+        .collect();
+    if tied.len() > 1 {
+        for (activity, h) in &mut tied {
+            *activity = last_activity_of(store, &h.thread, sessions.get(&h.thread))?;
+        }
+    }
+    // The oldest last activity first (an unknown one sorts first: nothing newer is known of it),
+    // then the lowest thread id. Instants compare as text here: they are this store's own,
+    // canonical RFC 3339 UTC.
+    tied.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.thread.cmp(&y.thread)));
+    Ok(tied.into_iter().next().map(|(_, h)| h))
+}
+
+/// A slot's last activity: the newest of its thread's newest message and its session's newest
+/// transcript entry.
+fn last_activity_of(
+    store: &ChatStore,
+    thread: &str,
+    session: Option<&String>,
+) -> Result<Option<String>> {
+    let message = store
+        .acting_messages_in_thread(thread)?
+        .into_iter()
+        .filter_map(|m| m.created)
+        .max();
+    let transcript = match session {
+        Some(s) => store.last_transcript_at(s)?,
+        None => None,
+    };
+    Ok(message.max(transcript))
 }
 
 /// [`StatusOperation::held_by_hand_back`] for the operation whose threads are `ids`: the release
@@ -4350,6 +4511,8 @@ struct DerivedFacts<'a> {
     borders: &'a BTreeMap<String, crate::border::BorderRow>,
     /// The current stranded record, per thread (nxf 6j6v.ccvy).
     stranded: &'a BTreeMap<String, crate::stranded::StrandedRecord>,
+    /// The slot rows, per thread (nxf 6j6v.kgfn).
+    owed: &'a BTreeMap<String, Vec<crate::stranded::OwedStart>>,
 }
 
 /// **How many process questions ONE status read will ask** (review of PR #444, Integrity #1).
@@ -4927,6 +5090,7 @@ impl<'a> Forest<'a> {
             held_answers,
             borders,
             stranded,
+            owed,
         } = facts;
         let q = by_id.get(id)?;
         let parent = self.declared.get(id).copied().flatten();
@@ -5012,6 +5176,18 @@ impl<'a> Forest<'a> {
                 reason: r.reason.clone(),
             }),
             stranded: stranded.get(id).map(StrandedStatus::from_record),
+            abandoned: owed
+                .get(id)
+                .and_then(|rows| rows.iter().find(|r| r.abandoned.is_some()))
+                .map(|r| {
+                    let reason = r.abandoned.clone().unwrap_or_default();
+                    AbandonedStatus {
+                        role: r.role.clone(),
+                        detail: crate::stranded::abandoned_words(&reason),
+                        reason,
+                        since: r.abandoned_at.clone(),
+                    }
+                }),
         })
     }
 }

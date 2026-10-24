@@ -62,6 +62,7 @@ fn request(session: &str) -> TriggerRequest {
         env: Vec::new(),
         reply_thread: None,
         coordinator: Coordinator::Persona,
+        coordinated: false,
         terms: TurnTerms::default(),
     }
 }

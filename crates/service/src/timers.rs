@@ -107,8 +107,9 @@ pub enum Job {
     /// has lifted; the verb it runs checks that for itself, along with everything else it refuses
     /// to take on trust.
     ChatResume { session: String },
-    /// **Bring the stranded sweep to one owed session** (nxf 6j6v.ccvy) — what
-    /// `nxc tick --thread <thread>` does, filed under the SESSION it is a look at.
+    /// **Bring the stranded sweep to one owed SLOT** (nxf 6j6v.ccvy; keyed by slot since 6j6v.kgfn)
+    /// — what `nxc tick --thread <thread>` does, filed under the slot it is a look at
+    /// (`<thread>-<bare role>`: a slot is owed before any session exists).
     ///
     /// Every tick runs the workspace-wide sweep that records a member session that will not answer,
     /// so the job only has to make a tick HAPPEN at the instant that session can first be judged.
@@ -116,11 +117,15 @@ pub enum Job {
     /// CHANNEL thread, or the slot itself for a direct commission that has no channel above it —
     /// never a supervised slot, whose own tick would consolidate it.
     ///
-    /// **Keyed per session, ticking a per-obligation thread** (build item 16): a second arm for the
-    /// same session replaces the first even when it names another thread. That is harmless because
-    /// the sweep is workspace-wide — whichever thread the surviving look ticks, it judges every owed
-    /// session there is.
-    StrandedLook { session: String, thread: String },
+    /// **Keyed per slot, ticking the slot's coordinating thread**: a second arm for the same slot
+    /// replaces the first. A book written before 6j6v.kgfn names the field `session`; it reads as
+    /// the key it was filed under, and the sweep is workspace-wide, so whichever thread a surviving
+    /// look ticks, it judges every owed slot there is.
+    StrandedLook {
+        #[serde(alias = "session")]
+        slot: String,
+        thread: String,
+    },
     /// A job this binary does not know. Never written; only produced by reading a book a newer
     /// binary wrote.
     #[serde(other)]
@@ -176,7 +181,7 @@ impl Job {
         match self {
             Job::ChatTick { thread } => vec![thread],
             Job::ChatDeliver { session } | Job::ChatResume { session } => vec![session],
-            Job::StrandedLook { session, thread } => vec![session, thread],
+            Job::StrandedLook { slot, thread } => vec![slot, thread],
             Job::Unknown => Vec::new(),
         }
     }
@@ -204,10 +209,11 @@ impl Job {
             Job::ChatResume { session } => {
                 Some(std::borrow::Cow::Owned(format!("resume-{session}")))
             }
-            // Per SESSION, so the look armed at the mint, the one armed before the spawn and the
-            // ones the sweep re-arms all replace one another (see the variant's own doc).
-            Job::StrandedLook { session, .. } => {
-                Some(std::borrow::Cow::Owned(format!("stranded-look-{session}")))
+            // Per SLOT, so the look armed at the open, the one armed at the mint, the one armed
+            // before the spawn and the ones the sweep re-arms all replace one another (see the
+            // variant's own doc).
+            Job::StrandedLook { slot, .. } => {
+                Some(std::borrow::Cow::Owned(format!("stranded-look-{slot}")))
             }
             Job::Unknown => None,
         }
@@ -830,18 +836,18 @@ mod tests {
 
     // ---- the stranded look (nxf 6j6v.ccvy) -------------------------------------------------
 
-    fn look(session: &str, thread: &str) -> Job {
+    fn look(slot: &str, thread: &str) -> Job {
         Job::StrandedLook {
-            session: session.into(),
+            slot: slot.into(),
             thread: thread.into(),
         }
     }
 
-    /// The look ticks the thread it names, and files under the SESSION it is a look at — so a look
-    /// re-armed for another thread of the same session replaces the first (build item 16), and a
-    /// look never collides with the tick, the delivery or the resume of the same id.
+    /// The look ticks the thread it names, and files under the SLOT it is a look at (nxf
+    /// 6j6v.kgfn) — so a look re-armed for the same slot ticking another thread replaces the first,
+    /// and a look never collides with the tick, the delivery or the resume of the same id.
     #[test]
-    fn a_stranded_look_ticks_its_thread_under_a_key_of_its_session() {
+    fn a_stranded_look_ticks_its_thread_under_a_key_of_its_slot() {
         let id = "m-00000000000000000000000002";
         assert_eq!(
             look(id, "m-chan").argv().unwrap(),
@@ -863,8 +869,25 @@ mod tests {
         arm(&p, "2026-10-18T10:02:00Z", look(id, "m-chan")).unwrap();
         arm(&p, "2026-10-18T10:03:00Z", look(id, "m-slot")).unwrap();
         let got = read_from(&p).unwrap();
-        assert_eq!(got.len(), 1, "one look per session");
+        assert_eq!(got.len(), 1, "one look per slot");
         assert_eq!(got[0].job, look(id, "m-slot"));
+    }
+
+    /// A book written before 6j6v.kgfn names the look's key `session`; it still reads, as the key it
+    /// was filed under.
+    #[test]
+    fn a_look_booked_under_the_old_session_field_still_reads() {
+        let tmp = TempDir::new().unwrap();
+        let p = book(&tmp);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"deadline":[{"due":"2026-10-18T10:02:00Z","job":"stranded_look","session":"m-s1","thread":"m-chan"}]}"#,
+        )
+        .unwrap();
+        let got = read_from(&p).unwrap();
+        assert_eq!(got[0].job, look("m-s1", "m-chan"));
+        assert_eq!(got[0].job.key().unwrap(), "stranded-look-m-s1");
     }
 
     /// **Build item 4**: the thread a look ticks is not its key, so gating the key alone would put

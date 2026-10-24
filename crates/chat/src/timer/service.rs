@@ -230,17 +230,17 @@ impl Timer for ServiceTimer {
         Ok(TimerHandle(format!("{HANDLE_PREFIX}{key}")))
     }
 
-    /// Arm a look at `session` for `deadline`, ticking `thread` — filed under its own
+    /// Arm a look at the slot `slot` for `deadline`, ticking `thread` — filed under its own
     /// `stranded-look-` key so the channel's window and the look cannot disarm each other (see
     /// [`Job::StrandedLook`]).
     fn schedule_stranded_look(
         &self,
-        session: &str,
+        slot: &str,
         thread: &str,
         deadline: &str,
     ) -> Result<TimerHandle> {
         let job = Job::StrandedLook {
-            session: session.to_string(),
+            slot: slot.to_string(),
             thread: thread.to_string(),
         };
         // Same order as its siblings, and for their reason: every refusal that needs no filesystem

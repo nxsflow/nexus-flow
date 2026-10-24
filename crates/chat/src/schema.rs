@@ -770,6 +770,9 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     conn.execute_batch(crate::border::BORDER_DDL)?;
     // The stranded-session record (nxf 6j6v.ccvy): device-local, like `session_map` — it names
     // sessions by their internal id, which is a process on THIS machine. See `crate::stranded`.
+    // A store from before the slot row (nxf 6j6v.kgfn) has cut 1a's three tables, whose `session`
+    // is NOT NULL — rebuilt in place, rows kept, before the DDL below (a no-op for them then).
+    crate::stranded::rebuild_pre_slot_tables(conn)?;
     conn.execute_batch(crate::stranded::STRANDED_DDL)?;
     Ok(upgraded)
 }
@@ -1265,6 +1268,7 @@ mod tests {
             "withdrawn_sessions",
             "failed_starts",
             "owed_starts",
+            "owed_backfill_done",
             "stranded_suspects",
             "stranded_sessions",
         ] {

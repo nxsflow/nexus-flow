@@ -1360,11 +1360,11 @@ impl crate::timer::Timer for LazyTimer {
     /// thread and would let it replace the channel's own window.
     fn schedule_stranded_look(
         &self,
-        session: &str,
+        slot: &str,
         thread: &str,
         deadline: &str,
     ) -> Result<crate::timer::TimerHandle> {
-        (self.resolve)()?.schedule_stranded_look(session, thread, deadline)
+        (self.resolve)()?.schedule_stranded_look(slot, thread, deadline)
     }
     fn cancel(&self, handle: &crate::timer::TimerHandle) -> Result<()> {
         (self.resolve)()?.cancel(handle)
@@ -3575,9 +3575,10 @@ fn status(
 /// as it always has; see [`StatusOperation::withdrawn`], [`StatusOperation::parked`],
 /// [`StatusOperation::park_refused`] and [`StatusOperation::start_failed`] for the attribution rule.
 fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
-    op.withdrawn
+    op.hangs_at
         .iter()
-        .map(withdrawn_line)
+        .map(|h| hangs_at_line(h, &op.threads))
+        .chain(op.withdrawn.iter().map(withdrawn_line))
         .chain(op.held_by_hand_back.iter().map(held_by_hand_back_line))
         .chain(op.park_refused.iter().map(park_refused_line))
         .chain(op.parked.iter().map(parked_line))
@@ -3587,6 +3588,34 @@ fn operation_detail_lines(op: &crate::facade::StatusOperation) -> Vec<String> {
                 .map(|f| start_failed_line(f, &op.root)),
         )
         .collect()
+}
+
+/// **Where the operation hangs** (nxf 6j6v.kgfn): the deepest slot that is escalated, recorded or
+/// abandoned, named the way a reader names a step — `<channel>/<role>` — with the thread whose tick
+/// coordinates it and what is being done about it.
+fn hangs_at_line(h: &crate::facade::HangsAt, threads: &[crate::facade::StatusThread]) -> String {
+    use crate::facade::SlotRecovery;
+    let channel = threads
+        .iter()
+        .find(|t| t.thread_id == h.thread)
+        .and_then(|t| t.channel_id.as_deref())
+        .map(|c| {
+            c.strip_prefix(crate::orchestration::DECLARED_CHANNEL_PREFIX)
+                .unwrap_or(c)
+        })
+        .unwrap_or("?");
+    let role = h.role.rsplit_once('/').map_or(h.role.as_str(), |(_, b)| b);
+    let by = h
+        .coordinator
+        .as_deref()
+        .map(|c| format!(" (coordinated by {c})"))
+        .unwrap_or_default();
+    let what = match h.recovery {
+        SlotRecovery::Watched => "watched",
+        SlotRecovery::NeverStarted => "never started",
+        SlotRecovery::Abandoned => "ABANDONED — withdraw it",
+    };
+    format!("  hangs at {channel}/{role}{by}: {what}")
 }
 
 /// Why a copy with nothing open is still held (nxf 6j6v.ys54): which thread, and where the answer
@@ -3912,6 +3941,11 @@ fn session_suffix(t: &crate::facade::StatusThread) -> String {
     // answered the slot, for as long as the record is current.
     if let Some(stranded) = &t.stranded {
         return stranded_suffix(stranded);
+    }
+    // **An ABANDONED slot says why and names its exit** (nxf 6j6v.kgfn) — for the stranded
+    // record's reason: it is the answer to "is anything coming?", and the exit is `withdraw`.
+    if let Some(abandoned) = &t.abandoned {
+        return format!(" — ABANDONED: {} — withdraw it", abandoned.detail);
     }
     session_line(t).to_string()
 }
@@ -4636,6 +4670,48 @@ mod tests {
             interrupted: None,
             border: None,
             stranded,
+            abandoned: None,
+        }
+    }
+
+    // ---- ABANDONED and `hangs at` (nxf 6j6v.kgfn) ----------------------------------------------
+
+    #[test]
+    fn an_abandoned_slot_says_why_and_names_its_exit_instead_of_nothing_is_coming() {
+        let mut row = open_row(crate::orchestration::SessionState::Ended, None);
+        row.abandoned = Some(crate::facade::AbandonedStatus {
+            role: "ws/verifier".into(),
+            reason: "aged".into(),
+            detail: "nothing has been heard from it for more than 24 h".into(),
+            since: Some("2026-10-24T10:00:00Z".into()),
+        });
+        let line = session_suffix(&row);
+        assert_eq!(
+            line,
+            " — ABANDONED: nothing has been heard from it for more than 24 h — withdraw it"
+        );
+        assert!(!line.contains("nothing is coming"), "{line}");
+    }
+
+    #[test]
+    fn the_operation_says_where_it_hangs_and_who_coordinates_it() {
+        use crate::facade::{HangsAt, SlotRecovery};
+        let row = open_row(crate::orchestration::SessionState::Unknown, None);
+        for (recovery, says) in [
+            (SlotRecovery::Watched, "watched"),
+            (SlotRecovery::NeverStarted, "never started"),
+            (SlotRecovery::Abandoned, "ABANDONED — withdraw it"),
+        ] {
+            let hangs = HangsAt {
+                thread: "m-slot".into(),
+                role: "ws/verifier".into(),
+                coordinator: Some("m-root".into()),
+                recovery,
+            };
+            assert_eq!(
+                hangs_at_line(&hangs, std::slice::from_ref(&row)),
+                format!("  hangs at review/verifier (coordinated by m-root): {says}")
+            );
         }
     }
 
@@ -4645,7 +4721,7 @@ mod tests {
         escalation: crate::facade::StrandedEscalation,
     ) -> crate::facade::StrandedStatus {
         crate::facade::StrandedStatus {
-            session: "m-s".into(),
+            session: Some("m-s".into()),
             recorded_at: "2026-10-18T10:03:00Z".into(),
             observed,
             detail: detail.into(),
