@@ -953,6 +953,67 @@ test("replyThread: null (a trigger with no obligation) skips the reply step enti
   ]);
 });
 
+// ---- `coordinated`: a slot the engine's coordinator owns gets no substitute (nxf 6j6v.kgfn) -------
+//
+// The engine sets `coordinated: true` on the spec when the slot the trigger serves has a software
+// coordinator on this device (`stranded::coordinator_of`); that coordinator notices the quiet end
+// and acts on it, so the substitute post would discharge the very slot it is about to recover. Every
+// other shape — an inbound border session, a chat another machine executes, a worker that cannot
+// look — arrives with the key `false` or absent, and keeps today's substitute.
+
+test("a coordinated session ending quietly posts NOTHING and still announces its end", (t) => {
+  const { status, stderr, calls } = runSidecar(t, {
+    messages: A_TURN_THEN_AN_OPEN_BLOCK,
+    spec: { replyThread: "thread-owned", coordinated: true },
+  });
+
+  assert.equal(status, 0, `expected a clean exit, stderr:\n${stderr}`);
+  assert.deepEqual(verbs(calls), [
+    "transcript append",
+    "session bind",
+    "transcript append",
+    // The reminder's board read still runs (gh7f): the reminder is the session's own, not the
+    // substitute's.
+    "status --thread",
+    "session ended",
+  ]);
+  assert.deepEqual(replyCalls(calls), [], "no substitute for a coordinated slot");
+  assert.match(stderr, /coordinated: no substitute/);
+});
+
+test("a coordinated session whose run FAILED posts nothing either, and still announces its end", (t) => {
+  const { stderr, calls } = runSidecar(t, {
+    messages: [init, textDelta("hello "), textDelta("world")],
+    throwAfter: 3,
+    spec: { replyThread: "thread-owned-fail", coordinated: true },
+  });
+
+  assert.match(stderr, /sidecar: the SDK stream failed/);
+  assert.deepEqual(replyCalls(calls), [], "the coordinator, not the sidecar, answers for the slot");
+  assert.ok(verbs(calls).includes("session ended"), "the end is still announced");
+  assert.match(stderr, /coordinated: no substitute/);
+});
+
+test("coordinated: false is today's behaviour — the substitute goes out", (t) => {
+  const { calls } = runSidecar(t, {
+    messages: A_TURN_THEN_AN_OPEN_BLOCK,
+    spec: { replyThread: "thread-unowned", coordinated: false },
+  });
+  const [reply] = replyCalls(calls);
+  assert.equal(reply?.thread, "thread-unowned", "an unowned slot keeps its substitute");
+  assert.equal(reply.ifUnanswered, true);
+});
+
+test("a coordinated session told to stop posts nothing, whatever the board says", async (t) => {
+  const { calls, stderr } = await runSidecarAndStopIt(t, {
+    messages: [init],
+    hangAt: 1,
+    spec: { replyThread: "thread-owned-stop", coordinated: true },
+  });
+  assert.deepEqual(replyCalls(calls), [], `no substitute; stderr:\n${stderr}`);
+  assert.ok(verbs(calls).includes("session ended"), "the end is still announced");
+});
+
 test("a failing nxc reply --if-unanswered does not fail an otherwise-successful run, and does not touch bind or flush", (t) => {
   // DoD: "the new step cannot displace bind and transcript flush". Both already ran (in order)
   // BEFORE this call is even attempted, so there is nothing left for it to displace — and its own

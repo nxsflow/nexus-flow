@@ -749,6 +749,17 @@ async function remindBeforeSpeakingForTheAgent() {
  *  otherwise successful run into a failed one. */
 function postFailureReply() {
   if (!spec.replyThread) return;
+  // **A SLOT WITH A COORDINATOR GETS NO SUBSTITUTE** (nxf 6j6v.kgfn, epic 6j6v.nmc9 section A). The
+  // engine sets `coordinated: true` only when the slot this trigger serves has a software
+  // coordinator on this device, and that coordinator is what notices a quiet end and takes the slot
+  // up again; a substitute posted here would discharge the very slot it is about to recover. Only
+  // an explicit `true` counts: absent (an older engine) or `false` (a border inbound session, a chat
+  // another machine executes, a worker that cannot look) is today's substitute, untouched. The
+  // reminder above and `announceSessionEnd` below run either way.
+  if (spec.coordinated === true) {
+    console.error(`sidecar: coordinated: no substitute for thread ${spec.replyThread}`);
+    return;
+  }
   // **A STOPPED SESSION ASKS THE BOARD; IT DOES NOT ASSUME** (nxf 6j6v.b9nf, fix round 2 of that
   // item's review, Integrity #3).
   //
