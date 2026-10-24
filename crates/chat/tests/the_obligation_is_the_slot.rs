@@ -1093,7 +1093,7 @@ fn the_backfill_runs_once_and_only_where_slots_can_be_coordinated() {
 // ---- hangs_at ---------------------------------------------------------------------------------------
 
 /// `hangs_at` names the DEEPEST slot of a three-level chain that is escalated or recorded, with its
-/// coordinator; status renders a recorded `never_started` slot as such.
+/// coordinator — not the round above it, which hangs too once its whole set has escalated.
 #[test]
 fn hangs_at_names_the_deepest_slot_of_a_three_level_chain() {
     let team = team();
@@ -1108,6 +1108,7 @@ fn hangs_at_names_the_deepest_slot_of_a_three_level_chain() {
         false,
     );
     let verifier = team.worker.last("verifier");
+    let reviewer = team.worker.last("reviewer");
     let deep = verifier.reply_thread.clone().unwrap();
     let round = team.parent(&deep);
     assert!(
@@ -1122,10 +1123,25 @@ fn hangs_at_names_the_deepest_slot_of_a_three_level_chain() {
         "I cannot",
         true,
     );
-    let hangs = team.op(&at(13), &coding).hangs_at.expect("it hangs");
+    let r_slot = reviewer.reply_thread.clone().unwrap();
+    team.reply(
+        &at(14),
+        "reviewer",
+        &reviewer.internal_session,
+        &r_slot,
+        "nor I",
+        true,
+    );
+    let rows = team.op(&at(15), &coding);
+    let round_row = rows.threads.iter().find(|t| t.thread_id == round).unwrap();
+    assert!(
+        round_row.escalated,
+        "the round above hangs too — so the depth is what decides"
+    );
+    let hangs = rows.hangs_at.expect("it hangs");
     assert_eq!(
         hangs.thread, deep,
-        "the deepest slot, not the round above it"
+        "the deepest slot (and the older of the two there)"
     );
     assert_eq!(hangs.role, team.q("verifier"));
     assert_eq!(hangs.coordinator.as_deref(), Some(round.as_str()));

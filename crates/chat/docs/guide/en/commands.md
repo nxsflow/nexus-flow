@@ -640,6 +640,26 @@ somebody else` when a late answer beat it, `the escalation could not be posted y
 retried, and `could not be escalated: <error> — withdraw it` when the retry gave up. It stays on the
 slot until the slot is started again.
 
+**A slot that nothing will take up any more says ABANDONED.** A slot opened before the version that
+gave every slot its own record is taken over once, at the first sweep. One whose operation was
+already delivered or withdrawn, from which nothing has been heard for more than a day, or whose
+commissioning message is gone, is recorded with its reason (`abandoned`: `reason`, `detail`,
+`since`), never nudged and never escalated. The way out is `nxc withdraw`:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — ABANDONED: nothing has been heard from it for more than 24 h — withdraw it
+```
+
+**And the operation says where it hangs.** `hangs_at` names the deepest slot under the operation
+that is escalated, recorded as stranded or abandoned, with the thread whose tick coordinates it and
+what is being done about it (`recovery`: `watched`, `never_started`, `abandoned`). A tie at one
+depth goes to the slot with the oldest activity, then the lowest thread id:
+
+```text
+operation m-01M0…  decl:coding  5 thread(s), 1 open  · NEEDS DECISION
+  hangs at review/verifier (coordinated by m-01M1…): watched
+```
+
 **And a thread says when the party it is waiting for is itself waiting.** `waiting_on_sub_round`
 lists the rounds that party commissioned out of this thread and has not got back; the terminal reads
 
