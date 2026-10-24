@@ -571,7 +571,7 @@ fn a_worker_without_liveness_stop_or_ask_coordinates_nothing() {
 fn a_default_custom_workers_stale_slot_lapses_as_today() {
     let team = team_with(Hand::lacking("liveness"));
     let root = team.commission(T0, "quick", "verify").thread_id;
-    assert_eq!(team.worker.last("verifier").coordinated, false);
+    assert!(!team.worker.last("verifier").coordinated);
     let r = team.tick(&at(130), &root);
     assert!(
         r.warnings
