@@ -2,9 +2,9 @@
 # The process around it (who is told, response time per severity, how an exception is recorded
 # and what evidence is kept) is docs/runbooks/dependency-vulnerabilities.md.
 #
-# Run it the way CI does:   cargo deny check
-# It runs in ci.yml's `dependency-audit` job on every change and daily on a schedule
-# (.github/workflows/dependency-audit.yml), because an advisory arrives without a code change.
+# CI runs it through `cargo xtask deps audit` (cargo deny check, the expiry of the exceptions below,
+# npm audit), in ci.yml's `dependency-audit` job on every change and daily in
+# .github/workflows/dependency-audit.yml, because an advisory arrives without a code change.
 
 [graph]
 # Every feature, because the shipped artifacts are built with different ones: the `nxs` binary,

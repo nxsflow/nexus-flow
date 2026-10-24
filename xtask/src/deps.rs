@@ -280,6 +280,60 @@ pub fn npm_audit(dir: &Path) -> Result<String> {
     ))
 }
 
+/// The npm packages that ship, and so are audited: the agent sidecar, whose bundle is compiled
+/// into every `nxs`, and the `@nexus-flow/mcp` runner shim.
+pub const SHIPPED_NPM_PACKAGES: &[&str] = &["agent-sidecar", "npm/mcp"];
+
+/// The outcome of every check, in order: `Ok` with each line when all passed, `Err` naming every
+/// check that failed. Every check has run by then — one red never hides the next.
+pub fn verdict(results: Vec<(String, Result<String>)>) -> Result<String> {
+    let total = results.len();
+    let mut passed = Vec::new();
+    let mut failed = Vec::new();
+    for (check, result) in results {
+        match result {
+            Ok(line) => passed.push(format!("{check}: {line}")),
+            Err(e) => failed.push(format!("{check}: {e:#}")),
+        }
+    }
+    if failed.is_empty() {
+        return Ok(passed.join("\n"));
+    }
+    bail!(
+        "{} of {total} dependency check(s) failed (docs/runbooks/dependency-vulnerabilities.md):\n\n{}",
+        failed.len(),
+        failed.join("\n\n")
+    )
+}
+
+/// `cargo xtask deps audit`: the whole gate — `cargo deny check`, the exceptions of deny.toml and
+/// npm audit for every shipped npm package. The one command both CI and the daily run invoke.
+pub fn audit(root: &Path) -> Result<String> {
+    let mut results = vec![("cargo deny check".to_owned(), cargo_deny(root))];
+    results.push((
+        "deny.toml exceptions".to_owned(),
+        check_exceptions(root).map(|n| format!("{n} recorded, none expired")),
+    ));
+    for dir in SHIPPED_NPM_PACKAGES {
+        results.push((format!("npm audit {dir}"), npm_audit(&root.join(dir))));
+    }
+    verdict(results)
+}
+
+/// `cargo deny check` over deny.toml. Its own report goes to the log as it runs; the status
+/// decides.
+fn cargo_deny(root: &Path) -> Result<String> {
+    let status = Command::new("cargo")
+        .args(["deny", "check"])
+        .current_dir(root)
+        .status()
+        .context("cannot run `cargo deny` — install cargo-deny")?;
+    if !status.success() {
+        bail!("refused ({status}); its report is above");
+    }
+    Ok("advisories, bans, licenses and sources ok".to_owned())
+}
+
 fn refuse_problems(path: &Path, exceptions: &[Exception]) -> Result<()> {
     let found = problems(exceptions, &crate::changelog::today());
     if found.is_empty() {
@@ -460,5 +514,44 @@ ignore = [
         );
         assert!(has_runtime_dependencies(r#"{"dependencies":{"a":"1"}}"#).unwrap());
         assert!(has_runtime_dependencies(r#"{"optionalDependencies":{"a":"1"}}"#).unwrap());
+    }
+    #[test]
+    fn the_verdict_passes_only_when_every_check_passed_and_says_what_each_found() {
+        let all_green = verdict(vec![
+            ("cargo deny check".into(), Ok("advisories ok".into())),
+            ("agent-sidecar".into(), Ok("npm audit clean".into())),
+        ])
+        .unwrap();
+        assert!(
+            all_green.contains("cargo deny check: advisories ok"),
+            "{all_green}"
+        );
+        assert!(
+            all_green.contains("agent-sidecar: npm audit clean"),
+            "{all_green}"
+        );
+    }
+
+    #[test]
+    fn the_verdict_names_every_failed_check_not_only_the_first() {
+        let err = verdict(vec![
+            (
+                "cargo deny check".into(),
+                Err(anyhow::anyhow!("advisories FAILED")),
+            ),
+            ("deny.toml exceptions".into(), Ok("1 recorded".into())),
+            ("agent-sidecar".into(), Err(anyhow::anyhow!("2 advisories"))),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("2 of 3"), "{err}");
+        assert!(
+            err.contains("cargo deny check") && err.contains("advisories FAILED"),
+            "{err}"
+        );
+        assert!(
+            err.contains("agent-sidecar") && err.contains("2 advisories"),
+            "{err}"
+        );
     }
 }

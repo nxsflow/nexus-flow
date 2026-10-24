@@ -11,20 +11,21 @@ as a dated exception. Nothing is silenced in bulk, and nothing is silenced for g
 
 ## What the gate checks
 
-One workflow, `.github/workflows/dependency-audit.yml`, runs in two ways:
+The gate is one command, `cargo xtask deps audit` (`xtask/src/deps.rs`), and it runs in two
+places:
 
 - as `ci.yml`'s `dependency-audit` job, on every push, pull request and dispatch;
-- on its own, **daily at 05:23 UTC**, because an advisory is published without anybody touching
-  the tree.
+- in `.github/workflows/dependency-audit.yml`, **daily at 05:23 UTC**, because an advisory is
+  published without anybody touching the tree.
 
-It is red when any of these fails:
+It runs every check below, even after one has failed, and is red when any of them fails:
 
-| Step | What it refuses |
+| Check | What it refuses |
 |---|---|
 | `cargo deny check` (config: `deny.toml`) | A RustSec advisory (vulnerability, unsound, unmaintained) or a yanked version, against any crate a shipped artifact links, under every feature. Dev-dependencies are excluded: they build tests, not artifacts. Also: a license outside the allow-list, `openssl-sys` in the graph, a crate from an unknown registry or git source. |
-| `cargo xtask deps exceptions` | An ignore entry in `deny.toml` whose reason does not start with `expires YYYY-MM-DD:`, names no board item, or whose date has passed. |
-| `cargo xtask deps npm-audit agent-sidecar` | Any `npm audit --omit=dev` advisory against the sidecar's production dependencies that `agent-sidecar/npm-audit.toml` does not record, or an invalid or expired entry there. |
-| `cargo xtask deps npm-audit npm/mcp` | The `@nexus-flow/mcp` runner shim gaining a runtime dependency without a lockfile to audit. Today it has none. |
+| deny.toml exceptions (`cargo xtask deps exceptions` on its own) | An ignore entry in `deny.toml` whose reason does not start with `expires YYYY-MM-DD:`, names no board item, or whose date has passed. |
+| npm audit `agent-sidecar` (`cargo xtask deps npm-audit agent-sidecar` on its own) | Any `npm audit --omit=dev` advisory against the sidecar's production dependencies that `agent-sidecar/npm-audit.toml` does not record, or an invalid or expired entry there. An audit that could not reach the registry is red too. |
+| npm audit `npm/mcp` | The `@nexus-flow/mcp` runner shim gaining a runtime dependency without a lockfile to audit. Today it has none. |
 
 Out of scope, with the reason: `content/` (the website's content provider, never shipped to a
 user) and the npm dev-dependencies (esbuild builds the bundle but is not in it).
@@ -33,13 +34,10 @@ Because `require-green-ci.sh` refuses to tag a commit whose `ci.yml` run is not 
 advisory also blocks a release** until it is fixed or recorded. That is intended: a release never
 ships an advisory nobody decided on.
 
-Run the same checks locally from the repository root:
+Run the same gate locally from the repository root (it needs `cargo-deny` and `npm`):
 
 ```bash
-cargo deny check                          # brew install cargo-deny, or cargo install cargo-deny
-cargo xtask deps exceptions
-cargo xtask deps npm-audit agent-sidecar
-cargo xtask deps npm-audit npm/mcp
+cargo xtask deps audit       # brew install cargo-deny, or cargo install cargo-deny
 ```
 
 ## Who is notified

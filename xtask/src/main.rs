@@ -70,6 +70,9 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum DepsCmd {
+    /// The whole gate: `cargo deny check`, the deny.toml exceptions, and npm audit for every
+    /// shipped npm package. Runs every check and names every failure (CI gate, fail-closed).
+    Audit,
     /// Assert every `[advisories] ignore` entry in deny.toml starts its reason with
     /// `expires YYYY-MM-DD:`, has not expired, and names its board item (CI gate, fail-closed).
     Exceptions,
@@ -276,6 +279,9 @@ fn main() -> Result<()> {
         Command::MacosTests(MacosTestsCmd::Check) => {
             let inventory = macos_tests::check(&root)?;
             println!("macos-tests check ok — {inventory}");
+        }
+        Command::Deps(DepsCmd::Audit) => {
+            println!("{}", deps::audit(&root)?);
         }
         Command::Deps(DepsCmd::Exceptions) => {
             let n = deps::check_exceptions(&root)?;

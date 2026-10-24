@@ -1,25 +1,21 @@
 name: dependency-audit
 
-# The dependency vulnerability gate (nexus-flow-6j6v.2dn0). The process around it — who is told,
-# the response time per severity, how an exception is recorded and what evidence is kept — is
-# docs/runbooks/dependency-vulnerabilities.md. Red means: a dependency that SHIPS has an advisory
-# that is neither fixed nor recorded, or a recorded exception has run out.
+# The DAILY run of the dependency vulnerability gate (nexus-flow-6j6v.2dn0). The process around it —
+# who is told, the response time per severity, how an exception is recorded and what evidence is
+# kept — is docs/runbooks/dependency-vulnerabilities.md. Red means: a dependency that SHIPS has an
+# advisory that is neither fixed nor recorded, or a recorded exception has run out.
 #
-# What it checks, and why each half is here:
-#   - `cargo deny check` (deny.toml): RustSec advisories (vulnerable, unsound, unmaintained,
-#     yanked) against every crate a shipped artifact links, under every feature; plus the license
-#     allow-list, the bans and the allowed sources.
-#   - `cargo xtask deps exceptions`: every ignore entry in deny.toml carries an expiry and a board
-#     item, and the expiry has not passed. cargo-deny itself has no notion of an expiry.
-#   - `cargo xtask deps npm-audit`: `npm audit --omit=dev` for the npm packages that ship — the
-#     agent sidecar, whose bundle is compiled into `nxs`, and the `@nexus-flow/mcp` runner shim,
-#     which must stay free of runtime dependencies or bring a lockfile to audit.
+# The check itself is ONE command, `cargo xtask deps audit` (xtask/src/deps.rs): `cargo deny check`
+# over deny.toml, the expiry of deny.toml's recorded exceptions, and `npm audit --omit=dev` for the
+# npm packages that ship. ci.yml's `dependency-audit` job runs the same command on every change; this
+# file exists only because an advisory is published without anybody touching the tree, and a gate
+# that only runs on a change would stay green over it for as long as nobody pushes.
+#
+# NOT a `workflow_call` target that ci.yml reuses, on purpose: a callable workflow counts as one that
+# can publish (a caller can hand it its scopes), which `every_publishing_workflow_is_carved_out`
+# then rightly demands a changelog fragment for on every edit. Two jobs of setup and one shared
+# command keep the check in one place without that.
 on:
-  # ci.yml calls this as its `dependency-audit` job, so every change — push, pull request,
-  # dispatch — runs the same steps this file runs on its own schedule.
-  workflow_call:
-  # DAILY, because an advisory is published without anybody touching this tree: the gate that only
-  # runs on a change would stay green over a known vulnerability for as long as nobody pushes.
   # GitHub notifies the account that last edited this cron line when a scheduled run fails — the
   # runbook makes that account the first recipient.
   schedule:
@@ -40,27 +36,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-
-      # Every check below runs even when one before it went red (`!cancelled()`), so one red run
-      # names every open finding at once instead of one per round trip.
-      - name: cargo deny check (advisories, licenses, bans, sources)
-        run: cargo deny check
-
-      - name: Recorded advisory exceptions are dated, attributed and not expired
-        if: ${{ !cancelled() }}
-        run: cargo xtask deps exceptions
-
+      # npm audit reads the lockfile only; no `npm ci` is needed.
       - uses: actions/setup-node@v5
-        if: ${{ !cancelled() }}
         with:
           node-version: "22"
-
-      # The sidecar's bundle is part of every `nxs` binary, so its production dependencies are
-      # shipped dependencies. `npm audit` reads the lockfile only; no `npm ci` is needed.
-      - name: npm audit — agent sidecar (bundled into nxs)
-        if: ${{ !cancelled() }}
-        run: cargo xtask deps npm-audit agent-sidecar
-
-      - name: npm audit — @nexus-flow/mcp runner shim
-        if: ${{ !cancelled() }}
-        run: cargo xtask deps npm-audit npm/mcp
+      - name: Dependency audit (cargo deny, recorded exceptions, npm audit)
+        run: cargo xtask deps audit
