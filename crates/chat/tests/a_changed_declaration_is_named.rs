@@ -165,6 +165,7 @@ fn the_spec_the_sidecar_reads_carries_the_version_the_prompt_was_built_from() {
         },
         reply_thread: None,
         coordinator: Coordinator::Persona,
+        coordinated: false,
         terms: Default::default(),
         env: Default::default(),
     });
@@ -467,6 +468,7 @@ fn the_version_stamp_survives_a_hash_that_is_not_hex() {
         },
         reply_thread: None,
         coordinator: Coordinator::Persona,
+        coordinated: false,
         terms: Default::default(),
         env: Default::default(),
     })

@@ -350,6 +350,7 @@ fn the_spec_the_sidecar_reads_carries_the_grant_as_its_own_key() {
         coordinator: nexus_chat::worker::Coordinator::Persona,
         terms: Default::default(),
         env: Default::default(),
+        coordinated: false,
     });
 
     let spec: serde_json::Value = serde_json::from_str(

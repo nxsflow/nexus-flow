@@ -833,12 +833,36 @@ pub fn trigger_role(
     // escalate it in `pm`'s name while its real owner is alive. On the way back the row is only
     // TOUCHED, and only when this very session is the one that owes it. Before the spawn, beside the
     // depth, so the look is armed before anything can go wrong. Best-effort: a finding here goes to
-    // stderr, and the commission's own look (armed at the mint) or the next tick stands in.
+    // stderr, and the commission's own look (armed at the open) or the next tick stands in.
+    //
+    // **Who coordinates it** (nxf 6j6v.kgfn): `coordinator_of` is asked once, here, of the slot this
+    // trigger serves, and its answer is both the row's `coordinator` and the `coordinated` bit the
+    // sidecar keys its substitute on — one evaluation, so the two cannot disagree. A slot nobody
+    // coordinates keeps cut 1a's row and today's substitute.
     let owed_role = ctx.qualify(&decl.handle);
-    let owed_findings = match (reply_thread, owed_on_the_way_back.as_deref()) {
-        (Some(owed_on), _) => {
-            crate::stranded::owe(ctx, store, owed_on, &owed_role, &internal_session, true)
+    let slot_coordinator = match reply_thread.or(owed_on_the_way_back.as_deref()) {
+        Some(slot) => {
+            crate::stranded::coordinator_of(ctx, store, slot, &owed_role).unwrap_or_else(|e| {
+                eprintln!(
+                    "warning: who coordinates the slot of {owed_role} on thread {slot} could not \
+                     be read: {e}; the slot is treated as uncoordinated and keeps the sidecar's \
+                     substitute"
+                );
+                None
+            })
         }
+        None => None,
+    };
+    let owed_findings = match (reply_thread, owed_on_the_way_back.as_deref()) {
+        (Some(owed_on), _) => crate::stranded::owe(
+            ctx,
+            store,
+            owed_on,
+            &owed_role,
+            &internal_session,
+            true,
+            slot_coordinator.as_ref().map(|c| c.thread.as_str()),
+        ),
         (None, Some(owed_on)) => {
             crate::stranded::touch(ctx, store, owed_on, &owed_role, &internal_session)
         }
@@ -848,6 +872,7 @@ pub fn trigger_role(
         eprintln!("warning: {finding}");
     }
     let reply_thread = reply_thread.or(owed_on_the_way_back.as_deref());
+    let coordinated = slot_coordinator.is_some();
     // ONE number, derived once, for both consumers: what is recorded against the session and what
     // the session is told in `NXC_HOP`. `resolve_hop` takes the larger of the two later, so letting
     // them be computed apart is letting the higher of two independent expressions silently win.
@@ -1095,6 +1120,7 @@ pub fn trigger_role(
             // a persona may declare its own, THIS is the line that reads the declaration.
             terms: TurnTerms::default(),
             env: trigger_env(ctx.origin, ctx.db_path, depth),
+            coordinated,
         },
     )?;
 
@@ -6232,15 +6258,60 @@ fn coordinator_commission_in(
     }
     let handed_to = designated.clone().filter(|m| !m.here);
 
+    // `thread_quorum` returning `None` (no `threads` row at all) is deliberately treated the same
+    // as an EMPTY `expects`, not distinguished from it: either way this is a brand-new obligation
+    // for this commission to declare, not something already owed to someone else (PR review,
+    // deferred item, 2026-08-12).
+    let already_expects = store
+        .thread_quorum(&thread, ctx.now)?
+        .is_some_and(|q| !q.expects.is_empty());
+    let owed_role = ctx.qualify(req.role);
+    // **Does the slot this commission opens have a coordinator here?** (nxf 6j6v.kgfn) — asked
+    // only of a slot this call declares and starts here: a thread that already carries an
+    // expectation is somebody else's slot, and a chat handed to another machine is coordinated
+    // there. Asked BEFORE the expectation exists, so clause 3 is answered for the expectation this
+    // site is about to write ([`crate::stranded::assess_at_open`]).
+    let slot_coordinator = if already_expects || handed_to.is_some() {
+        None
+    } else {
+        crate::stranded::assess_at_open(ctx, store, &thread, &owed_role).unwrap_or_else(|e| {
+            eprintln!(
+                "warning: who coordinates the slot of {owed_role} on thread {thread} could not be \
+                 read: {e}; the slot is opened uncoordinated and keeps today's behaviour"
+            );
+            None
+        })
+    };
+    let declare = |store: &mut ChatStore| {
+        let expects_json =
+            serde_json::to_string(std::slice::from_ref(&owed_role)).expect("expects serialize");
+        store.set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle());
+    };
+    // **The obligation is the slot** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A). A COORDINATED slot
+    // is owed from the instant it is opened: the expectation, then the row with no session and its
+    // first look — BEFORE the mint below. A mint that fails then leaves exactly what the slot is:
+    // owed, with a clock and a look, which the sweep records as `never_started` and its coordinator
+    // takes up. That reverses, for a coordinated slot only, the order the paragraph below the mint
+    // gives for every other slot: the orphaned expectation it guards against is precisely what the
+    // row exists to notice. Best-effort, reported on this receipt.
+    let mut owed_findings = Vec::new();
+    if let Some(c) = &slot_coordinator {
+        declare(store);
+        owed_findings.extend(crate::stranded::owe_the_slot(
+            ctx, store, &thread, &owed_role, &c.thread,
+        ));
+    }
+
     // **The session id, minted and held — BEFORE the obligation below it** (independent review of
-    // PR #378, Integrity #7). `create_pending_session` is the last fallible step on this path, and
-    // while it stood AFTER the register write, a failure there left an `expects_reply_from` on a
-    // thread that hangs under `ambient_parent` — i.e. inside the enclosing operation's claim
-    // subtree, where `work_scope_has_outstanding` reads it as work still owed and holds the working
-    // copy until `operation_lease_expiry`. Nothing would ever answer it: no session was minted, so
-    // no worker was ever asked. Minting first costs nothing (a pending session with no trigger is
-    // exactly what a queued commission already leaves behind, and `withdraw` is written for it) and
-    // makes the register write the LAST thing this function does before the spawn.
+    // PR #378, Integrity #7) — for every slot WITHOUT a coordinator. `create_pending_session` is the
+    // last fallible step on this path, and while it stood AFTER the register write, a failure there
+    // left an `expects_reply_from` on a thread that hangs under `ambient_parent` — i.e. inside the
+    // enclosing operation's claim subtree, where `work_scope_has_outstanding` reads it as work still
+    // owed and holds the working copy until `operation_lease_expiry`. Nothing would ever answer it:
+    // no session was minted, so no worker was ever asked, and no row records the slot. Minting
+    // first costs nothing (a pending session with no trigger is exactly what a queued commission
+    // already leaves behind, and `withdraw` is written for it) and makes the register write the
+    // LAST thing this function does before the spawn.
     // **Minted, or CONTINUED** (nxf 6j6v.y1t9). A continued session needs no mint — it is already
     // in the map, with its role, its depth and its transcript — so the paragraph above applies to
     // the branch that mints and the other branch has nothing that can fail. What both hand down is
@@ -6269,25 +6340,18 @@ fn coordinator_commission_in(
     // whole quorum on, and setting ours unconditionally would silently collapse it to one handle.
     //
     // `declared_here` is `Some(thread)` in EXACTLY the branch that actually wrote
-    // `expects_reply_from` below, and feeds the guidance half (nxf 6j6v.enrs) the role is spawned
-    // with — one boolean driving both, not two expressions that can drift apart (PR review,
-    // 2026-08-13): telling a role "you owe a reply on thread X" while the register disagrees would
-    // be a lie ticket 8's `--if-unanswered` discharge — which reads that SAME register — could not
-    // catch, silently finding nothing owed for a role that believed otherwise.
-    //
-    // `thread_quorum` returning `None` (no `threads` row at all) is deliberately treated the same
-    // as an EMPTY `expects`, not distinguished from it: either way this is a brand-new obligation
-    // for this commission to declare, not something already owed to someone else (PR review,
-    // deferred item, 2026-08-12).
-    let already_expects = store
-        .thread_quorum(&thread, ctx.now)?
-        .is_some_and(|q| !q.expects.is_empty());
+    // `expects_reply_from` (above, for a coordinated slot, or here), and feeds the guidance half
+    // (nxf 6j6v.enrs) the role is spawned with — one boolean driving both, not two expressions that
+    // can drift apart (PR review, 2026-08-13): telling a role "you owe a reply on thread X" while
+    // the register disagrees would be a lie ticket 8's `--if-unanswered` discharge — which reads
+    // that SAME register — could not catch, silently finding nothing owed for a role that believed
+    // otherwise.
     let declared_here: Option<&str> = if already_expects {
         None
     } else {
-        let expects_json =
-            serde_json::to_string(&[ctx.qualify(req.role)]).expect("expects serialize");
-        store.set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle());
+        if slot_coordinator.is_none() {
+            declare(store);
+        }
         Some(thread.as_str())
     };
 
@@ -6316,21 +6380,22 @@ fn coordinator_commission_in(
         }
     }
 
-    // **The obligation record, and its first look** (nxf 6j6v.ccvy) — written for a MINTED session
-    // that owes an answer, right after the register says so, so a slot whose trigger never runs
-    // still has a clock and a look. A continued session mints nothing here: the trigger funnel
+    // **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn) — the minted
+    // session, or the continued one; the trigger funnel below then marks it triggered.
+    //
+    // A slot nobody coordinates keeps cut 1a's record exactly (nxf 6j6v.ccvy): written for a MINTED
+    // session that owes an answer, right after the register says so, so a slot whose trigger never
+    // runs still has a clock and a look. A continued session mints nothing here: the trigger funnel
     // below writes its row with the trigger's own instant. Best-effort, reported on this receipt.
-    let owed_findings = match (declared_here, &req.continue_session) {
-        (Some(owed_on), None) => crate::stranded::owe(
-            ctx,
-            store,
-            owed_on,
-            &ctx.qualify(req.role),
-            &internal,
-            false,
-        ),
-        _ => Vec::new(),
-    };
+    match (&slot_coordinator, declared_here, &req.continue_session) {
+        (Some(_), _, _) => owed_findings.extend(crate::stranded::bind(
+            ctx, store, &thread, &owed_role, &internal,
+        )),
+        (None, Some(owed_on), None) => owed_findings.extend(crate::stranded::owe(
+            ctx, store, owed_on, &owed_role, &internal, false, None,
+        )),
+        _ => {}
+    }
 
     // **The task, as the role will read it** (nxf 6j6v.ntp9). The caller's own words are what was
     // POSTED; what the session is STARTED with additionally names the thread it must answer into —
@@ -7674,6 +7739,10 @@ fn open_declared_channel_and_fan_out(
 /// `expects_reply_from` and compared against a thread's `opener`. Written once so the
 /// bare-vs-qualified discipline `channel::SUPERVISOR_HANDLE` documents cannot be got wrong at one of
 /// the several sites that need it.
+/// **Who coordinates a slot** (nxf 6j6v.kgfn) — the predicate, published at the library seam beside
+/// the [`Ctx`] it reads.
+pub use crate::stranded::{coordinator_of, CoordinatorKind, CoordinatorRef};
+
 pub fn supervisor_qualified(origin: &str) -> String {
     format!("{}/{}", origin, crate::channel::SUPERVISOR_HANDLE)
 }
@@ -8530,7 +8599,9 @@ fn members_and_the_ones_still_waiting(
 fn owed_session_of(store: &ChatStore, member: &ThreadQuorum) -> Result<Option<String>> {
     for handle in &member.outstanding {
         if let Some(row) = store.owed_start(&member.thread_id, handle)? {
-            return Ok(Some(row.session));
+            // A slot with a row and no session yet (nxf 6j6v.kgfn) owes nothing a process could
+            // be running for — the same answer as no row.
+            return Ok(row.session);
         }
     }
     Ok(None)
@@ -10166,7 +10237,7 @@ fn slot_session_state(ctx: &Ctx, store: &ChatStore, slot: &ThreadQuorum) -> Resu
     let mut session = None;
     for handle in slot.expects.iter().chain(slot.outstanding.iter()) {
         if let Some(row) = store.owed_start(&slot.thread_id, handle)? {
-            session = Some(row.session);
+            session = row.session;
             break;
         }
     }
@@ -11670,6 +11741,13 @@ pub enum ConsequenceClass {
     /// keeps the window-lapse behaviour it had before the rule, and an unjudged one is looked at
     /// again by the next tick.
     StrandedNotJudged,
+    /// **A slot opened before the slot row existed was recorded as ABANDONED** (nxf 6j6v.kgfn) —
+    /// once, when the one-time backfill wrote its row. Its operation's root no longer waits, its
+    /// newest evidence is older than [`crate::stranded::ABANDONED_AFTER_SECS`], or its run no longer
+    /// has the commissioning message. It is never nudged and nothing is escalated; `nxc status`
+    /// renders it `ABANDONED: <why> — withdraw it`, and `withdraw` is its exit. `thread` is the
+    /// slot, `session` the session standing on it when there is one.
+    SlotAbandoned,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -13839,6 +13917,9 @@ pub fn on_channel_complete(
                         // other turn. Same terms as every commission; there is one definition.
                         terms: TurnTerms::default(),
                         env: trigger_env(ctx.origin, ctx.db_path, depth),
+                        // An engine identity has no coordinator (epic 6j6v.nmc9 section A's table:
+                        // the synthesizer keeps today's behaviour), and it owes no thread anyway.
+                        coordinated: false,
                     },
                 )
                 .map_err(NxfError::from)

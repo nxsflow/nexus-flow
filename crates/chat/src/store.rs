@@ -778,6 +778,10 @@ impl ChatStore {
     pub fn connection(&self) -> &Connection {
         self.inner.connection()
     }
+    /// This replica's site id (see [`nxs_foundation::store::Store::site`]).
+    pub fn site(&self) -> i64 {
+        self.inner.site()
+    }
     pub fn data_version(&self) -> rusqlite::Result<i64> {
         self.inner.data_version()
     }
@@ -1160,6 +1164,24 @@ impl ChatStore {
             }
             _ => None,
         })
+    }
+
+    /// The site whose op wrote `thread_id`'s `expects_reply_from` register — what tells a replica
+    /// that THIS site opened the obligation (nxf 6j6v.kgfn, `stranded::coordinator_of` clause 3).
+    /// `None` for an unknown thread or a register nobody set.
+    pub fn expects_reply_from_site(&self, thread_id: &str) -> crate::error::Result<Option<i64>> {
+        let site: Option<Option<i64>> = self
+            .inner
+            .connection()
+            .query_row(
+                "SELECT CASE WHEN COALESCE(expects_reply_from_v, 0) = 0 THEN NULL
+                             ELSE expects_reply_from_site END
+                   FROM threads WHERE thread_id = ?1",
+                [thread_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(site.flatten())
     }
 
     /// The chats whose `machine` register names `machine_id` AND whose winning op may carry an
@@ -3010,6 +3032,8 @@ pub(crate) mod tests {
             // The stranded-session record (nxf 6j6v.ccvy): the obligation a session owes, the first
             // look at it, and the record — all keyed by internal session ids of THIS machine.
             "owed_starts",
+            // The one-time backfill's marker (nxf 6j6v.kgfn): this machine's.
+            "owed_backfill_done",
             "stranded_suspects",
             "stranded_sessions",
         ];

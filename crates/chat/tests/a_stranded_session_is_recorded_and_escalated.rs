@@ -121,6 +121,18 @@ impl Worker for Recorder {
     fn answers_liveness(&self) -> bool {
         !*self.blind.lock().unwrap()
     }
+
+    /// **It stands in for the sidecar, so it claims what the sidecar claims** (nxf 6j6v.kgfn): a
+    /// slot is owed a row only when the worker on this device can look, stop and ask
+    /// (`coordinator_of`, clause 4). Nothing here is ever stopped or asked — the claim is what
+    /// makes these slots coordinated, which is the shape this file is about.
+    fn stops_sessions(&self) -> bool {
+        self.answers_liveness()
+    }
+
+    fn asks_sessions(&self) -> bool {
+        self.answers_liveness()
+    }
 }
 
 // ---- the timer ------------------------------------------------------------------------------------
@@ -143,20 +155,20 @@ struct Look {
 }
 
 impl Book {
-    fn looks_for(&self, session: &str) -> Vec<Look> {
+    fn looks_for(&self, slot: &str) -> Vec<Look> {
         self.looks
             .lock()
             .unwrap()
             .iter()
-            .filter(|l| l.session == session)
+            .filter(|l| l.session == slot)
             .cloned()
             .collect()
     }
 
-    /// The look that stands for `session` — the last one armed, as the service book keeps one per
-    /// session.
-    fn standing_look(&self, session: &str) -> Option<Look> {
-        self.looks_for(session).last().cloned()
+    /// The look that stands for `slot` — the last one armed, as the service book keeps one per
+    /// slot.
+    fn standing_look(&self, slot: &str) -> Option<Look> {
+        self.looks_for(slot).last().cloned()
     }
 
     fn refuse_looks(&self, refuse: bool) {
@@ -513,9 +525,10 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
     // The look, under its own key, on the CHANNEL thread — never the slot, whose own tick would
     // consolidate it.
     assert_eq!(
-        team.book.standing_look(&s),
+        team.standing_look(&s),
         Some(Look {
-            session: s.clone(),
+            // Filed under the SLOT since nxf 6j6v.kgfn.
+            session: team.slot_key(&s),
             thread: root.clone(),
             due: at(STRANDED_GRACE_SECS),
         })
@@ -531,7 +544,7 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
     assert_eq!(team.suspect(&slot), Some((s.clone(), at(120))));
     assert!(team.records().is_empty());
     assert!(!has(&r.warnings, ConsequenceClass::SessionStranded));
-    assert_eq!(team.book.standing_look(&s).unwrap().due, at(180));
+    assert_eq!(team.standing_look(&s).unwrap().due, at(180));
 
     // +180 s: the second look on unchanged evidence records it — observation 2, "never bound".
     let r = team.tick(&at(180), &root);
@@ -553,7 +566,7 @@ fn a_member_that_never_starts_is_recorded_and_the_round_escalates_to_its_commiss
     assert!(row.substituted, "the runtime spoke for the member");
     let stranded = row.stranded.expect("the slot shows its record");
     assert_eq!(stranded.observed, facade::Observation::NeverBound);
-    assert_eq!(stranded.session, s);
+    assert_eq!(stranded.session.as_deref(), Some(s.as_str()));
     assert_eq!(stranded.escalation, StrandedEscalation::Posted);
     assert!(stranded.escalated);
     assert!(team.needs_decision(&at(180), &root));
@@ -628,6 +641,46 @@ impl Team {
         .expect("session ended")
     }
 
+    /// **The slot a look at `session` is filed under** (nxf 6j6v.kgfn: looks are keyed by slot,
+    /// `<thread>-<bare role>`): read off the obligation row the session owes, else off its last
+    /// trigger.
+    fn slot_key(&self, session: &str) -> String {
+        let row: Option<(String, String)> = self
+            .store()
+            .connection()
+            .query_row(
+                "SELECT thread, role FROM owed_starts WHERE session = ?1",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let (thread, role) = row.unwrap_or_else(|| {
+            let req = self
+                .worker
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|r| r.internal_session == session)
+                .cloned()
+                .unwrap_or_else(|| panic!("no trigger and no row for {session}"));
+            (slot_of(&req), req.role.handle.clone())
+        });
+        let bare = role.rsplit_once('/').map_or(role.as_str(), |(_, b)| b);
+        format!("{thread}-{bare}")
+    }
+
+    /// Every look armed at the slot `session` owes.
+    fn looks_for(&self, session: &str) -> Vec<Look> {
+        self.book.looks_for(&self.slot_key(session))
+    }
+
+    /// The look that stands for the slot `session` owes.
+    fn standing_look(&self, session: &str) -> Option<Look> {
+        self.book.standing_look(&self.slot_key(session))
+    }
+
     /// Walk a never-running owed session through its two looks, ticking `look` at `clock + 120 s`
     /// and `clock + 180 s`. Returns the second receipt.
     fn two_looks(&self, clock: &str, look: &str) -> TickReceipt {
@@ -659,7 +712,7 @@ fn a_silent_member_of_a_parallel_round_is_recorded_while_its_sibling_answered() 
         "nothing consolidated at B's answer"
     );
     assert_eq!(
-        team.book.standing_look(&a).map(|l| (l.thread, l.due)),
+        team.standing_look(&a).map(|l| (l.thread, l.due)),
         Some((root.clone(), at(STRANDED_GRACE_SECS))),
         "A's look still stands after the channel's window was re-armed"
     );
@@ -691,7 +744,7 @@ fn a_persona_commissioned_directly_that_never_starts_is_escalated_on_its_own_thr
         team.owed(&thread, "verifier"),
         Some((s.clone(), at(0), true))
     );
-    assert_eq!(team.book.standing_look(&s).unwrap().thread, thread);
+    assert_eq!(team.standing_look(&s).unwrap().thread, thread);
 
     team.two_looks(T0, &thread);
     assert_eq!(
@@ -765,9 +818,9 @@ fn a_slot_whose_trigger_never_ran_is_recorded_as_never_started() {
     let root = team.commission(T0, "review", "verify the build").thread_id;
     let (s, slot) = team.last("verifier");
     assert!(
-        team.book.looks_for(&s).len() >= 2,
+        team.looks_for(&s).len() >= 2,
         "one look at the mint, one before the spawn: {:?}",
-        team.book.looks_for(&s)
+        team.looks_for(&s)
     );
     team.sql("UPDATE owed_starts SET triggered = 0");
     team.two_looks(T0, &root);
@@ -1031,7 +1084,7 @@ fn false_positive_a_running_session_is_never_suspected() {
     team.worker.mark_running(&s);
     team.two_looks(T0, &root);
     nothing_recorded(&team, &slot, &["verifier"]);
-    assert_eq!(team.book.standing_look(&s).unwrap().due, at(240));
+    assert_eq!(team.standing_look(&s).unwrap().due, at(240));
 }
 
 /// **AC 5 (b)** — a clean end after answering.
@@ -1100,14 +1153,19 @@ fn false_positive_a_claim_that_appears_between_the_looks() {
     nothing_recorded(&team, &slot, &["verifier"]);
 }
 
-/// **AC 5 (p)** — a slot opened BEFORE this version has no obligation record: no look, no record,
-/// and its window lapses and advances exactly as it did.
+/// **AC 5 (p)** — a slot with no obligation record keeps today's behaviour: no look, no record, and
+/// its window lapses and advances exactly as it did. Since nxf 6j6v.kgfn a slot opened before the
+/// slot row is BACKFILLED once (`the_obligation_is_the_slot.rs`), so the shape here is a slot with no
+/// row on a device whose backfill already ran.
 #[test]
 fn false_positive_a_slot_from_before_this_version_lapses_as_before() {
     let team = team(&[REVIEW_2M]);
     let root = team.commission(T0, "review2", "verify").thread_id;
     let (_s, slot) = team.last("verifier");
-    team.sql("DELETE FROM owed_starts");
+    team.sql(
+        "DELETE FROM owed_starts;
+         INSERT INTO owed_backfill_done(done_at) VALUES ('2026-10-18T09:00:00Z');",
+    );
     let r = team.tick(&at(180), &root);
     assert_eq!(team.suspect(&slot), None);
     assert!(team.records().is_empty());
@@ -1141,7 +1199,7 @@ fn false_positive_a_transcript_that_grows_between_the_looks_resets_the_suspect()
         Some(at(180)),
         "reset, not deleted"
     );
-    assert_eq!(team.book.standing_look(&s).unwrap().due, at(240));
+    assert_eq!(team.standing_look(&s).unwrap().due, at(240));
 }
 
 /// **AC 5 (l)** — a slot of a round the supervisor is finished with. A hung reviewer lapsed and the
@@ -1235,10 +1293,10 @@ fn a_post_the_engine_refuses_for_good_is_given_up_on_the_first_attempt() {
     assert_eq!(team.records()[0].3.as_deref(), Some("given_up"));
     let row = team.status_of(&at(180), &slot).stranded.unwrap();
     assert_eq!(row.escalation, StrandedEscalation::GivenUp);
-    let looks = team.book.looks_for(&s).len();
+    let looks = team.looks_for(&s).len();
     team.tick(&at(300), &root);
     assert_eq!(
-        team.book.looks_for(&s).len(),
+        team.looks_for(&s).len(),
         looks,
         "nothing armed after giving up"
     );
@@ -1291,11 +1349,11 @@ fn a_session_end_arms_a_look_only_while_its_thread_is_still_owed() {
     team.commission(T0, "panel", "review");
     let (a, _a_slot) = team.last("verifier");
     let (b, b_slot) = team.last("reviewer");
-    let before_b = team.book.looks_for(&b).len();
+    let before_b = team.looks_for(&b).len();
     team.answer(&at(30), "reviewer", &b, &b_slot, "LGTM");
     team.end(&at(31), "reviewer", &b);
     assert_eq!(
-        team.book.looks_for(&b).len(),
+        team.looks_for(&b).len(),
         before_b,
         "an answered end arms nothing"
     );
@@ -1304,7 +1362,7 @@ fn a_session_end_arms_a_look_only_while_its_thread_is_still_owed() {
     let r = team.end(&ended, "verifier", &a);
     assert!(r.warnings.is_empty(), "{:?}", classes(&r.warnings));
     assert_eq!(
-        team.book.standing_look(&a).unwrap().due,
+        team.standing_look(&a).unwrap().due,
         at_from(&ended, STRANDED_GRACE_SECS)
     );
 }

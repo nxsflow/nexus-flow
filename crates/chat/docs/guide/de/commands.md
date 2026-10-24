@@ -688,6 +688,28 @@ Die Klausel endet auf `escalated to the commissioner`, sobald die Eskalation gep
 not be posted yet`, solange sie wiederholt wird, und auf `could not be escalated: <error> — withdraw
 it`, wenn die Wiederholung aufgab. Sie bleibt am Slot, bis der Slot erneut gestartet wird.
 
+**Ein Slot, den nichts mehr aufnehmen wird, sagt ABANDONED.** Ein Slot, der vor der Version
+geöffnet wurde, die jedem Slot einen eigenen Eintrag gab, wird beim ersten Durchlauf einmalig
+übernommen. Einer, dessen Operation schon geliefert oder zurückgezogen wurde, von dem seit mehr als
+einem Tag nichts kam oder dessen beauftragende Nachricht fehlt, wird mit Grund erfasst
+(`abandoned`: `reason`, `detail`, `since`), nie angestoßen und nie eskaliert. Der Ausweg ist
+`nxc withdraw`:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — ABANDONED: nothing has been heard from it for more than 24 h — withdraw it
+```
+
+**Und die Operation sagt, wo sie hängt.** `hangs_at` nennt den tiefsten Slot unter der Operation,
+der eskaliert, als gestrandet erfasst oder aufgegeben ist, mit dem Thread, dessen Tick ihn
+koordiniert, und was mit ihm geschieht (`recovery`: `watched`, `never_started`, `abandoned`). Bei
+Gleichstand auf einer Ebene gewinnt der Slot mit der ältesten Aktivität, dann die kleinste
+Thread-ID:
+
+```text
+operation m-01M0…  decl:coding  5 thread(s), 1 open  · NEEDS DECISION
+  hangs at review/verifier (coordinated by m-01M1…): watched
+```
+
 **Und ein Faden sagt, wenn die Partei, auf die er wartet, selbst wartet.** `waiting_on_sub_round`
 listet die Runden, die diese Partei aus diesem Faden heraus beauftragt und noch nicht zurück hat; im
 Terminal steht

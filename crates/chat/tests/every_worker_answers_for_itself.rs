@@ -88,6 +88,12 @@ const DEFAULTED: &[&str] = &[
     // "can you stop it" and then refuse to.
     "stops_sessions",
     "stop_session",
+    // **The eighth, added here in the same change that added it to the trait** (nxf 6j6v.kgfn). A
+    // slot is coordinated only when the worker on this device can look, stop AND ask
+    // (`stranded::coordinator_of`, clause 4); a delegator resting on `false` would turn every slot
+    // of a capable host back into an uncoordinated one, and the sidecar would post its substitute
+    // for slots a coordinator is about to recover.
+    "asks_sessions",
 ];
 
 struct Implementor {
@@ -103,7 +109,7 @@ use Answers::{ForItself, OnTheDefault};
 const IMPLEMENTORS: &[Implementor] = &[
     Implementor {
         name: "BoundedWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
         why: "A DELEGATOR: it wraps a host-supplied worker to bound `trigger`. Anything it does not \
               forward is answered for a third party that may well know better, so it forwards. \
               Neither READ is bounded on its own thread the way `trigger` is — a conforming \
@@ -117,13 +123,16 @@ const IMPLEMENTORS: &[Implementor] = &[
               would be reported as unable to, and the resume would then refuse by name for a \
               runtime that can. The sixth and seventh are the fifth's argument about the one WRITE: \
               a host that can stop its own sessions would be reported as unable to, and a \
-              withdrawal of a running round would refuse by name for a runtime that can. Neither \
+              withdrawal of a running round would refuse by name for a runtime that can. The \
+              eighth is the same argument about the coordinator: a host that can ask its sessions \
+              would have every slot read as uncoordinated. Neither \
               is bounded on its own thread — a conforming `stop_session` DELIVERS a signal and \
               returns, which is the same local-state promise the reads make.",
     },
     Implementor {
         name: "DryWorker",
         answers: &[
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -146,11 +155,12 @@ const IMPLEMENTORS: &[Implementor] = &[
               there is none to carry on and `false` is the truth rather than a decline. And it \
               can stop nothing, for the reason it starts nothing: there is no process of its own to \
               signal, and a `true` here would have a withdrawal believe a stop was delivered to a \
-              session that goes on running.",
+              session that goes on running. And it asks nothing, for the same reason: there is no \
+              running session of its own to reach.",
     },
     Implementor {
         name: "SidecarWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
         why: "The only worker in this crate that owns real processes. Liveness comes off the pid \
               file its own `SessionLock` already writes at every trigger — same file, same parse, \
               same identity check, and the residual that type documents: content that does not \
@@ -173,11 +183,13 @@ const IMPLEMENTORS: &[Implementor] = &[
               pid has PROVED it is this session's process, because a claim is never removed and \
               the number in a stale one may since belong to a stranger — and `stops_sessions` says \
               so exactly where the liveness read can be asked, on the one platform condition both \
-              share.",
+              share. The eighth is that condition once more: the ask door is a file beside the \
+              spec and a signal through the same pid claim, so it can be asked exactly where the \
+              stop can be sent.",
     },
     Implementor {
         name: "LazyWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
         why: "A DELEGATOR, and the one this gate exists for: `cli.rs` resolves the worker per call \
               from the environment, so EVERY command-line call passes through it. It forwarded only \
               `trigger`, the default answered for the selected worker, and the gate that keeps two \
@@ -193,11 +205,12 @@ const IMPLEMENTORS: &[Implementor] = &[
               the FOURTH instance of this class at this wrapper, caught by review rather than by \
               this gate, because a new defaulted method does not add its own row above. The sixth \
               and seventh were added here in the same change that added them to the trait, so \
-              this row is the gate for them rather than the apology.",
+              this row is the gate for them rather than the apology. The eighth likewise.",
     },
     Implementor {
         name: "DisabledWorker",
         answers: &[
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -214,7 +227,8 @@ const IMPLEMENTORS: &[Implementor] = &[
               about are the workspace's, not its own. It names no working copy on the same ground: \
               a handle that refuses to start anything has no directory it starts things in. And it continues nothing for the reason it starts nothing. \
               And it stops nothing on the same ground: a session it never started is not its to \
-              signal, and the named refusal is the truth rather than a decline.",
+              signal, and the named refusal is the truth rather than a decline. And it asks nothing: a \
+              session it never started is not one it can reach.",
     },
 ];
 
