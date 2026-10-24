@@ -926,3 +926,24 @@ jobs:
       - name: DynamoDB Local tests (release)
         if: github.event_name != 'pull_request'
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
+
+  # The dependency vulnerability gate (6j6v.2dn0): `cargo xtask deps audit` runs cargo deny over
+  # deny.toml, checks that no recorded exception has expired, and runs npm audit for the npm
+  # packages that ship — every check, every failure named. The same command runs DAILY in
+  # dependency-audit.yml, because an advisory arrives without a code change; that file says why
+  # it is a second workflow and not one this job calls.
+  # Process: docs/runbooks/dependency-vulnerabilities.md.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Dependency audit (cargo deny, recorded exceptions, npm audit)
+        run: cargo xtask deps audit

@@ -50,7 +50,11 @@ serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
-aws-sdk-dynamodb = { version = "1", optional = true }
+# `default-features = false` drops the SDK's deprecated `rustls` feature (6j6v.2dn0): it switches on
+# the LEGACY hyper-0.14 client, and with it rustls 0.21, rustls-webpki 0.101 and h2 0.3 — three
+# crates with open RustSec advisories that `cargo deny` refuses. `default-https-client` is the
+# hyper-1 / rustls-0.23 client the SDK uses either way; `rt-tokio` is the other default kept.
+aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 # `nxf-fold-purge` only: the SDK's standard credential chain, and the runtime the bin awaits on.
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time"] }

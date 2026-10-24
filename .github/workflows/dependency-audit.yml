@@ -1,0 +1,44 @@
+name: dependency-audit
+
+# The DAILY run of the dependency vulnerability gate (nexus-flow-6j6v.2dn0). The process around it —
+# who is told, the response time per severity, how an exception is recorded and what evidence is
+# kept — is docs/runbooks/dependency-vulnerabilities.md. Red means: a dependency that SHIPS has an
+# advisory that is neither fixed nor recorded, or a recorded exception has run out.
+#
+# The check itself is ONE command, `cargo xtask deps audit` (xtask/src/deps.rs): `cargo deny check`
+# over deny.toml, the expiry of deny.toml's recorded exceptions, and `npm audit --omit=dev` for the
+# npm packages that ship. ci.yml's `dependency-audit` job runs the same command on every change; this
+# file exists only because an advisory is published without anybody touching the tree, and a gate
+# that only runs on a change would stay green over it for as long as nobody pushes.
+#
+# NOT a `workflow_call` target that ci.yml reuses, on purpose: a callable workflow counts as one that
+# can publish (a caller can hand it its scopes), which `every_publishing_workflow_is_carved_out`
+# then rightly demands a changelog fragment for on every edit. Two jobs of setup and one shared
+# command keep the check in one place without that.
+on:
+  # GitHub notifies the account that last edited this cron line when a scheduled run fails — the
+  # runbook makes that account the first recipient.
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binary (no compile), the same route facade-semver.yml takes for its tool.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # npm audit reads the lockfile only; no `npm ci` is needed.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Dependency audit (cargo deny, recorded exceptions, npm audit)
+        run: cargo xtask deps audit

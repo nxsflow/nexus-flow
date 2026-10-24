@@ -408,6 +408,13 @@ fn spawn_relay_failing_presence(status: axum::http::StatusCode) -> String {
     let router = nxs_server::app::app(ops, registry).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| async move {
             if req.uri().path().ends_with("/machines") {
+                // Read the announcement's body before answering, as a real handler does. Answered
+                // with the body still unread, hyper closes a connection the client is still
+                // writing to, and on macOS the client's read then fails with `Invalid argument
+                // (os error 22)` instead of returning the status this test is about. Intermittent
+                // on the hosted macOS runner (main c1970c5, 2026-10-19), and reproduced under CPU
+                // load (6j6v.2dn0).
+                let _ = axum::body::to_bytes(req.into_body(), usize::MAX).await;
                 status.into_response()
             } else {
                 next.run(req).await

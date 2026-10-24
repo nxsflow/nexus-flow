@@ -1,0 +1,73 @@
+# cargo-deny configuration — the Rust half of the dependency vulnerability gate (nxf 6j6v.2dn0).
+# The process around it (who is told, response time per severity, how an exception is recorded
+# and what evidence is kept) is docs/runbooks/dependency-vulnerabilities.md.
+#
+# CI runs it through `cargo xtask deps audit` (cargo deny check, the expiry of the exceptions below,
+# npm audit), in ci.yml's `dependency-audit` job on every change and daily in
+# .github/workflows/dependency-audit.yml, because an advisory arrives without a code change.
+
+[graph]
+# Every feature, because the shipped artifacts are built with different ones: the `nxs` binary,
+# and `nxf-relay` with `postgres` (and `dynamodb` for the hosted relay). A crate that ships under
+# one feature set is shipped.
+all-features = true
+# Dev-dependencies never reach a user: they build tests, not artifacts. Leaving them out is what
+# makes a red here mean "a SHIPPED dependency has an advisory" — the bar the runbook sets.
+exclude-dev = true
+
+[advisories]
+version = 2
+# Every advisory kind refuses — vulnerability, unsound, unmaintained (version 2 defaults) — and
+# a yanked crate too. An advisory is fixed or recorded below, never silenced in bulk.
+yanked = "deny"
+# Each exception starts its reason with `expires YYYY-MM-DD:` and names the board item that
+# carries the decision. cargo-deny takes only `id` and `reason` here and knows no expiry, so
+# `cargo xtask deps exceptions` enforces both, in the same job — red on the day after the date.
+ignore = [
+    # unmaintained, not a vulnerability: reaches nxs through serde_yaml 0.9 (deprecated), which
+    # nexus-chat reads persona and channel declarations with. Replacing it is 6j6v.spqq.
+    { id = "RUSTSEC-2024-0449", reason = "expires 2027-01-31: unsafe-libyaml is unmaintained; no exploitable defect reported; reaches nxs via the deprecated serde_yaml, replaced in 6j6v.spqq (recorded by 6j6v.2dn0)" },
+]
+
+[licenses]
+version = 2
+# What the shipped graph carries today, all permissive or file-level weak copyleft (MPL-2.0:
+# option-ext, used unmodified). A new license is a decision, not a drive-by: it fails here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[licenses.private]
+# The workspace's own crates are `publish = false` and carry no `license` field; the repository's
+# LICENSE covers them.
+ignore = true
+
+[bans]
+# Duplicate versions are common in this graph (windows-sys, getrandom, …) and are not a security
+# property; they are allowed rather than reported on every run.
+multiple-versions = "allow"
+wildcards = "deny"
+# The workspace's own path dependencies carry no version; they are not published.
+allow-wildcard-paths = true
+deny = [
+    # Pure-Rust TLS is a shipping guarantee (the musl static binary, spec §5.2; rustls everywhere).
+    # OpenSSL entering the graph is a regression of that, not a dependency choice.
+    { crate = "openssl-sys", reason = "nexus-flow ships pure-Rust TLS (rustls); see crates/cli/Cargo.toml" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

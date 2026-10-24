@@ -23,7 +23,6 @@ postgres = [
   "dep:r2d2_postgres",
   "dep:tokio-postgres-rustls",
   "dep:rustls",
-  "dep:rustls-pemfile",
   "dep:webpki-roots",
 ]
 # Durable DynamoDB backend behind the OpStore/PrefixRegistry traits (ddb-opstore epic).
@@ -77,11 +76,14 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 # certificate store to read. A private or self-signed CA is added on top via
 # NXF_RELAY_PG_CA_FILE (see tls_pg.rs), so this is a floor, not a ceiling.
 webpki-roots = { version = "1", optional = true }
-rustls-pemfile = { version = "2", optional = true }
 # DynamoDB backend (feature-gated). The SDK is async; OpStore/PrefixRegistry are sync
 # traits, so store_ddb bridges the two on a dedicated runtime (see store_ddb::block_on)
 # rather than bending the trait toward async.
-aws-sdk-dynamodb = { version = "1", optional = true }
+# `default-features = false` drops the SDK's deprecated `rustls` feature (6j6v.2dn0): it switches on
+# the LEGACY hyper-0.14 client, and with it rustls 0.21, rustls-webpki 0.101 and h2 0.3 — three
+# crates with open RustSec advisories that `cargo deny` refuses. `default-https-client` is the
+# hyper-1 / rustls-0.23 client the SDK uses either way; `rt-tokio` is the other default kept.
+aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
 # The claim key of an op (store_ddb::claim_seq), and since 6j6v.f6yb in every build: the log-id
 # HMAC (log_id.rs, log-id v1 C2) and the purge's plan and identity digests (purge.rs).
