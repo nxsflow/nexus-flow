@@ -58,15 +58,15 @@ repository until the fixing release is out.
 
 ## Response time per severity
 
-> **Proposed, owner to confirm.** The clock starts when the gate first goes red on the advisory
+> **Owner-confirmed (2026-10-24).** The clock starts when the gate first goes red on the advisory
 > (the run's timestamp is the evidence).
 
 | Severity | Response |
 |---|---|
 | **Critical** | Within **72 hours**: a fixed release, or a documented mitigation (what is affected, why users are not exposed, or what they must do) recorded on the board and in the exception. |
 | **High** | Within **14 days**: a fixed release. |
-| **Medium** | With the **next release**. |
-| **Low** | **Recorded**: fixed when convenient, or a dated exception. |
+| **Medium** | With the **next regular release**. |
+| **Low** | **Recorded**, no deadline: fixed when convenient, or a dated exception. |
 
 The severity is the advisory's own (GHSA severity for npm, the CVSS score of a RustSec
 advisory). A RustSec **unmaintained** or **unsound** notice without a CVSS score counts as
@@ -118,7 +118,7 @@ ignore = [
 - **`reason`** starts with **`expires YYYY-MM-DD:`**. The gate is red again on the day after that
   date, without anybody touching the tree, so the decision gets taken again rather than
   forgotten. Pick the date by severity: no further out than the response time for critical and
-  high, the next planned release for medium, at most three months for low.
+  high, the next regular release for medium, at most three months for low.
 - The reason **names the board item** that carries the decision (`6j6v.xxxx`). The item holds
   the reading of whether we are exposed, and the follow-up that removes the exception.
 - One entry per advisory, never a pattern, never a whole crate.
