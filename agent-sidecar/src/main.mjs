@@ -111,7 +111,11 @@ function drainAskFiles() {
   for (const name of names.filter((n) => n.startsWith(prefix) && n.endsWith(".json")).sort()) {
     const path = join(logsDir, name);
     try {
-      asks.push(JSON.parse(readFileSync(path, "utf8")));
+      const ask = JSON.parse(readFileSync(path, "utf8"));
+      // Only an ask of the shape the engine writes is delivered: a file that names no thread or
+      // carries no text is dropped, never yielded — a malformed one must not take the turn down.
+      if (ask && typeof ask.thread === "string" && typeof ask.text === "string") asks.push(ask);
+      else console.error(`sidecar: the ask ${name} is not of the engine's shape and is dropped`);
     } catch (err) {
       console.error(`sidecar: the ask ${name} could not be read and is dropped: ${err?.message ?? err}`);
     }
@@ -627,8 +631,10 @@ let retriedRuntime = 0;
 
 /** Sleep, for the backoff between runtime retries. Bounded by [`retryDelay`]; nothing else in this
  *  file waits. */
-/** The last tool call that came back as an error, in its first line — what the end's cause names
- *  when nothing else went wrong (nxf 6j6v.558h). */
+/** The last tool call that came back as an error — what the end's cause names when nothing else
+ *  went wrong (nxf 6j6v.558h). ONLY its exit status, never its output: the cause travels into the
+ *  coordinator's escalation, which is posted in a thread, and a tool's output can carry anything
+ *  the session handled. */
 let lastToolFailure = null;
 function noteToolFailure(msg) {
   if (msg?.type !== "user" || !Array.isArray(msg.message?.content)) return;
@@ -637,7 +643,8 @@ function noteToolFailure(msg) {
     const text = Array.isArray(block.content)
       ? block.content.map((c) => (typeof c?.text === "string" ? c.text : "")).join(" ")
       : String(block.content ?? "");
-    lastToolFailure = text.split("\n").map((l) => l.trim()).find((l) => l !== "") ?? "an error";
+    const code = /exit code (\d+)/i.exec(text);
+    lastToolFailure = code ? `exit code ${code[1]}` : "an error";
   }
 }
 
@@ -658,7 +665,7 @@ function causeOfTheEnd() {
     cause = `reminded that thread ${spec.replyThread} is waiting on its answer and ended again without one`;
   } else if (remindOutcome === "answered") cause = "answered after a reminder";
   else cause = "ended";
-  if (lastToolFailure && !stopping()) cause += `; its last failed tool call said: ${lastToolFailure}`;
+  if (lastToolFailure && !stopping()) cause += `; its last tool call failed with ${lastToolFailure}`;
   return capFailureReply(cause);
 }
 

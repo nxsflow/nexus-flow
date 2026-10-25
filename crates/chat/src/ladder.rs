@@ -115,6 +115,142 @@ impl RecoveryAction {
     }
 }
 
+/// **What became of one rung** — the `outcome` of its log row, in the one spelling producer and
+/// reader share. A refusal and a failure carry their error beside the word (`refused: <error>`,
+/// `failed: <error>`), which is why they are not variants here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RungOutcome {
+    /// The ask reached the session.
+    Asked,
+    /// The trigger started the session.
+    Triggered,
+    /// The trigger waits in the working-copy queue.
+    Queued,
+    /// The runtime had lost the conversation; the slot was started afresh instead.
+    SessionGoneRecommissioned,
+    /// The slot had no session to ask.
+    NoSession,
+    /// No live process held the session.
+    NoProcess,
+    /// A process held it and could not be asked.
+    CannotAsk,
+    /// A process for the session was already running; nothing was started.
+    AlreadyRunning,
+    /// The rung was in flight past the trigger timeout; a later look took the slot up again.
+    TimedOut,
+    /// The coordinator escalated.
+    Escalated,
+    /// An asked-for `--progress` reset the budget.
+    Reset,
+}
+
+impl RungOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RungOutcome::Asked => "asked",
+            RungOutcome::Triggered => "triggered",
+            RungOutcome::Queued => "queued",
+            RungOutcome::SessionGoneRecommissioned => "session_gone_recommissioned",
+            RungOutcome::NoSession => "no_session",
+            RungOutcome::NoProcess => "no_process",
+            RungOutcome::CannotAsk => "cannot_ask",
+            RungOutcome::AlreadyRunning => "already_running",
+            RungOutcome::TimedOut => "timed_out",
+            RungOutcome::Escalated => "escalated",
+            RungOutcome::Reset => "reset",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<RungOutcome> {
+        Some(match raw {
+            "asked" => RungOutcome::Asked,
+            "triggered" => RungOutcome::Triggered,
+            "queued" => RungOutcome::Queued,
+            "session_gone_recommissioned" => RungOutcome::SessionGoneRecommissioned,
+            "no_session" => RungOutcome::NoSession,
+            "no_process" => RungOutcome::NoProcess,
+            "cannot_ask" => RungOutcome::CannotAsk,
+            "already_running" => RungOutcome::AlreadyRunning,
+            "timed_out" => RungOutcome::TimedOut,
+            "escalated" => RungOutcome::Escalated,
+            "reset" => RungOutcome::Reset,
+            _ => return None,
+        })
+    }
+
+    /// The outcome as a person reads it — what the escalation shows.
+    pub fn words(self) -> &'static str {
+        match self {
+            RungOutcome::Asked => "the session was asked",
+            RungOutcome::Triggered => "the session was started",
+            RungOutcome::Queued => "the start waits for the working copy",
+            RungOutcome::SessionGoneRecommissioned => {
+                "the runtime had lost the conversation, so the slot was started afresh"
+            }
+            RungOutcome::NoSession => "there was no session to ask",
+            RungOutcome::NoProcess => "no process held the session, so nothing was asked",
+            RungOutcome::CannotAsk => "the session's process could not be asked",
+            RungOutcome::AlreadyRunning => "a process was already running it, so nothing started",
+            RungOutcome::TimedOut => "it did not finish within the trigger timeout",
+            RungOutcome::Escalated => "escalated",
+            RungOutcome::Reset => "the budget was reset",
+        }
+    }
+}
+
+/// A log row's outcome as a person reads it: the typed word in words, a refusal or failure with
+/// its error, and a word this build does not know verbatim.
+fn outcome_words(raw: Option<&str>) -> String {
+    match raw {
+        None => "still in flight".to_string(),
+        Some(raw) => match RungOutcome::parse(raw) {
+            Some(o) => o.words().to_string(),
+            None => match raw.split_once(": ") {
+                Some(("refused", why)) => format!("refused: {why}"),
+                Some(("failed", why)) => format!("failed: {why}"),
+                _ => raw.to_string(),
+            },
+        },
+    }
+}
+
+/// **What a resume did with a hold** — `session_interruption.outcome`, written by
+/// `resume_interrupted` and by the ladder's rung B, read by rung B and rung D.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HoldOutcome {
+    /// The session was continued.
+    Resumed,
+    /// The provider cannot continue it — rung D, never rung C.
+    ProviderCannotResume,
+    /// The tree moved and the root was asked — once.
+    TreeMovedAsked,
+    /// The window had not lifted yet.
+    NotYet,
+}
+
+impl HoldOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HoldOutcome::Resumed => "resumed",
+            HoldOutcome::ProviderCannotResume => "provider_cannot_resume",
+            HoldOutcome::TreeMovedAsked => "tree_moved_asked",
+            HoldOutcome::NotYet => "not_yet",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<HoldOutcome> {
+        Some(match raw {
+            "resumed" => HoldOutcome::Resumed,
+            "provider_cannot_resume" => HoldOutcome::ProviderCannotResume,
+            "tree_moved_asked" => HoldOutcome::TreeMovedAsked,
+            "not_yet" => HoldOutcome::NotYet,
+            _ => return None,
+        })
+    }
+}
+
 /// **One row of the ladder's record.**
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RecoveryLogRow {
@@ -286,8 +422,16 @@ impl ChatStore {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Write what became of a rung.
-    pub(crate) fn settle_rung(&mut self, id: i64, outcome: &str) -> Result<()> {
+    /// Write what became of a rung — one of the typed words.
+    pub(crate) fn settle_rung_as(&mut self, id: i64, outcome: RungOutcome) -> Result<()> {
+        self.settle_rung(id, outcome.as_str())
+    }
+
+    /// Write what became of a rung, verbatim — the typed words through [`settle_rung_as`], and a
+    /// refusal or failure as `refused: <error>` / `failed: <error>`.
+    ///
+    /// [`settle_rung_as`]: ChatStore::settle_rung_as
+    fn settle_rung(&mut self, id: i64, outcome: &str) -> Result<()> {
         self.connection().execute(
             "UPDATE recovery_log SET outcome = ?2 WHERE id = ?1",
             params![id, outcome],
@@ -316,21 +460,23 @@ impl ChatStore {
         &self,
         threads: &[&str],
     ) -> Result<std::collections::BTreeMap<(String, String), RecoveryLogRow>> {
-        if threads.is_empty() {
-            return Ok(std::collections::BTreeMap::new());
-        }
-        let placeholders = vec!["?"; threads.len()].join(",");
+        let mut out = std::collections::BTreeMap::new();
         let conn = self.connection();
-        let mut st = conn.prepare(&format!(
-            "SELECT {LOG_COLS} FROM recovery_log WHERE thread IN ({placeholders}) ORDER BY id"
-        ))?;
-        let rows = st
-            .query_map(rusqlite::params_from_iter(threads.iter()), log_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows
-            .into_iter()
-            .map(|r| ((r.thread.clone(), r.role.clone()), r))
-            .collect())
+        // In chunks well under SQLite's bound-variable limit, so no report is too wide to read.
+        for chunk in threads.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut st = conn.prepare(&format!(
+                "SELECT {LOG_COLS} FROM recovery_log WHERE thread IN ({placeholders}) ORDER BY id"
+            ))?;
+            let rows = st
+                .query_map(rusqlite::params_from_iter(chunk.iter()), log_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.extend(
+                rows.into_iter()
+                    .map(|r| ((r.thread.clone(), r.role.clone()), r)),
+            );
+        }
+        Ok(out)
     }
 
     /// **Retention** of the ladder's record: drop the rows older than `cutoff`, compared as
@@ -523,7 +669,7 @@ impl ChatStore {
     }
 
     /// The newest hold of `session`, standing or not, with the outcome its resume recorded.
-    pub(crate) fn latest_hold(&self, session: &str) -> Result<Option<HoldOutcome>> {
+    pub(crate) fn latest_hold(&self, session: &str) -> Result<Option<HoldRow>> {
         Ok(self
             .connection()
             .query_row(
@@ -531,12 +677,13 @@ impl ChatStore {
                   WHERE session = ?1 ORDER BY id DESC LIMIT 1",
                 [session],
                 |r| {
-                    Ok(HoldOutcome {
+                    let outcome: Option<String> = r.get(4)?;
+                    Ok(HoldRow {
                         id: r.get(0)?,
                         at: r.get(1)?,
                         until: r.get(2)?,
                         resumed_at: r.get(3)?,
-                        outcome: r.get(4)?,
+                        outcome: outcome.map(|o| HoldOutcome::parse(&o).ok_or(o)),
                     })
                 },
             )
@@ -589,25 +736,25 @@ impl ChatStore {
         Ok(kept)
     }
 
-    /// Record what the resume did with a hold (`resumed`, `provider_cannot_resume`,
-    /// `tree_moved_asked`, `not_yet`).
-    pub(crate) fn set_hold_outcome(&mut self, id: i64, outcome: &str) -> Result<()> {
+    /// Record what the resume did with a hold.
+    pub(crate) fn set_hold_outcome(&mut self, id: i64, outcome: HoldOutcome) -> Result<()> {
         self.connection().execute(
             "UPDATE session_interruption SET outcome = ?2 WHERE id = ?1",
-            params![id, outcome],
+            params![id, outcome.as_str()],
         )?;
         Ok(())
     }
 }
 
-/// A hold as the ladder reads it — [`crate::interruption::Interruption`] plus its outcome.
+/// A hold as the ladder reads it — [`crate::interruption::Interruption`] plus its outcome. A word
+/// a newer build wrote reads as `Some(Err(word))`: decided, by somebody this build does not know.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HoldOutcome {
+pub(crate) struct HoldRow {
     pub id: i64,
     pub at: String,
     pub until: Option<String>,
     pub resumed_at: Option<String>,
-    pub outcome: Option<String>,
+    pub outcome: Option<std::result::Result<HoldOutcome, String>>,
 }
 
 /// The latest of a set of instants, compared as instants.
@@ -753,7 +900,7 @@ fn rung_after_an_end(store: &ChatStore, row: &OwedStart, observed: Observation) 
 /// clock — the case rung B sends to D, never to C.
 fn provider_refused_the_resume(store: &ChatStore, row: &OwedStart, session: &str) -> Result<bool> {
     Ok(store.latest_hold(session)?.is_some_and(|h| {
-        h.outcome.as_deref() == Some("provider_cannot_resume")
+        h.outcome == Some(Ok(HoldOutcome::ProviderCannotResume))
             && !earlier(&h.at, &row.trigger_clock)
     }))
 }
@@ -770,19 +917,8 @@ fn live(
 ) -> Result<()> {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
     let session = row.session.as_deref().unwrap_or_default();
-    if past_the_ceiling(store, row, ctx.now)? {
-        return escalate(
-            ctx,
-            store,
-            row,
-            coordinator,
-            Occasion {
-                observed: Observation::Silent,
-                judged_from: row.recovery_started_at.clone().unwrap_or_default(),
-                detail: ceiling_words(store, row)?,
-            },
-            findings,
-        );
+    if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
+        return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
     let activity = store.slot_last_activity(session, t)?;
     let quiet_since = latest(
@@ -806,7 +942,7 @@ fn live(
     // An ask this host cannot deliver is not retried every cadence: the slot waits for its end.
     let door_closed = store.slot_recovery_log(t, h)?.last().is_some_and(|r| {
         r.action == RecoveryAction::Asked.as_str()
-            && r.outcome.as_deref() == Some("cannot_ask")
+            && r.outcome.as_deref() == Some(RungOutcome::CannotAsk.as_str())
             && !reached(
                 ctx.now,
                 &after(&r.at, SILENCE_SECS, "the closed door").unwrap_or_default(),
@@ -848,7 +984,7 @@ fn held(
     };
     let waits_on_nobody = hold.until.is_none()
         && hold.resumed_at.is_none()
-        && matches!(hold.outcome.as_deref(), None | Some("not_yet"))
+        && matches!(hold.outcome, None | Some(Ok(HoldOutcome::NotYet)))
         && !ctx.worker.session_is_running(session);
     if !waits_on_nobody {
         return Ok(());
@@ -860,7 +996,7 @@ fn held(
     }
     // Taken up by the ladder: the hold no longer stands once the session is continued.
     if store.mark_interruption_resumed(hold.id, ctx.now)? {
-        store.set_hold_outcome(hold.id, "resumed")?;
+        store.set_hold_outcome(hold.id, HoldOutcome::Resumed)?;
     }
     let occasion = Occasion {
         observed: Observation::EndedWithoutAnswer,
@@ -883,24 +1019,25 @@ fn declared_window(store: &ChatStore, thread: &str) -> Result<Option<i64>> {
     Ok(store.member_deadline(thread)?.map(|d| d.window_secs))
 }
 
-fn past_the_ceiling(store: &ChatStore, row: &OwedStart, now: &str) -> Result<bool> {
+/// **The ceiling, checked in one place**: the occasion of rung E when the episode's wall clock from
+/// its first attempt has reached `clamp(3 × window, 2 h, 6 h)`, `None` before that or with no
+/// episode under way.
+fn ceiling_reached(store: &ChatStore, row: &OwedStart, now: &str) -> Result<Option<Occasion>> {
     let Some(started) = row.recovery_started_at.as_deref() else {
-        return Ok(false);
+        return Ok(None);
     };
     let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
-    Ok(reached(
-        now,
-        &after(started, ceiling, "the recovery ceiling")?,
-    ))
-}
-
-fn ceiling_words(store: &ChatStore, row: &OwedStart) -> Result<String> {
-    let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
-    Ok(format!(
-        "its recovery began at {} and reached the ceiling of {} h without an answer",
-        row.recovery_started_at.as_deref().unwrap_or("?"),
-        ceiling / 3600
-    ))
+    if !reached(now, &after(started, ceiling, "the recovery ceiling")?) {
+        return Ok(None);
+    }
+    Ok(Some(Occasion {
+        observed: Observation::Silent,
+        judged_from: started.to_string(),
+        detail: format!(
+            "its recovery began at {started} and reached the ceiling of {} h without an answer",
+            ceiling / 3600
+        ),
+    }))
 }
 
 fn arm(
@@ -919,40 +1056,65 @@ fn arm(
     findings.extend(crate::stranded::arm_look(ctx, store, thread, role, at));
 }
 
-/// **The claim, kept alive while a trigger runs** — renewed every half of [`CLAIM_SECS`] from a
-/// connection of its own, so a trigger slower than the claim never lets a second look in. Counted
-/// from the look's own instant plus the real time elapsed, so an injected clock and the wall clock
-/// agree about how far it reaches.
-struct ClaimRenewal {
+/// How often a claim is renewed while its trigger runs, in milliseconds — half of [`CLAIM_SECS`].
+static RENEW_EVERY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(CLAIM_SECS as u64 * 500);
+
+/// **Renew claims more often than every half claim** — for a host whose triggers it wants to watch
+/// closely, and for the tests that run a trigger slower than the claim without waiting for one.
+/// Each renewal still moves the claim's horizon by half a claim, so a shorter interval makes the
+/// claim reach further sooner, never less far. Process-wide; the default is `CLAIM_SECS / 2`.
+#[doc(hidden)]
+pub fn renew_claims_every(every: std::time::Duration) {
+    let ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX).max(1);
+    RENEW_EVERY_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// **The claim, kept alive while a trigger runs** — renewed at every interval from a connection of
+/// its own, so a trigger slower than the claim never lets a second look in. Each renewal moves the
+/// horizon half a claim on from the look's own instant: `base + n × CLAIM_SECS / 2 + CLAIM_SECS`
+/// after the `n`-th, which at the default interval is the wall clock's own reading, and which an
+/// injected clock agrees with.
+pub(crate) struct ClaimRenewal {
     stop: Option<std::sync::mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
+    failures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ClaimRenewal {
     fn start(ctx: &Ctx, thread: &str, role: &str) -> ClaimRenewal {
+        ClaimRenewal::start_on(ctx.db_path, thread, role, ctx.now)
+    }
+
+    pub(crate) fn start_on(db: &str, thread: &str, role: &str, base: &str) -> ClaimRenewal {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let db = ctx.db_path.to_string();
-        let (thread, role, base) = (thread.to_string(), role.to_string(), ctx.now.to_string());
-        let begun = std::time::Instant::now();
+        let (db, thread, role, base) = (
+            db.to_string(),
+            thread.to_string(),
+            role.to_string(),
+            base.to_string(),
+        );
+        let failures = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failed = failures.clone();
+        let every = std::time::Duration::from_millis(
+            RENEW_EVERY_MS.load(std::sync::atomic::Ordering::Relaxed),
+        );
         let handle = std::thread::Builder::new()
             .name("nxc-claim-renewal".into())
             .spawn(move || {
-                let half = std::time::Duration::from_secs((CLAIM_SECS / 2) as u64);
-                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(half) {
-                    let elapsed = i64::try_from(begun.elapsed().as_secs()).unwrap_or(i64::MAX);
-                    let Ok(until) = after(&base, elapsed.saturating_add(CLAIM_SECS), "renewal")
-                    else {
-                        return;
-                    };
-                    let renewed = rusqlite::Connection::open(&db).and_then(|c| {
-                        c.busy_timeout(std::time::Duration::from_secs(5))?;
-                        c.execute(
-                            "UPDATE owed_starts SET recovering_until = ?3
-                              WHERE thread = ?1 AND role = ?2 AND recovering_until IS NOT NULL",
-                            params![thread, role, until],
-                        )
-                    });
+                let mut renewals: i64 = 0;
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(every) {
+                    renewals += 1;
+                    let reach = renewals
+                        .saturating_mul(CLAIM_SECS / 2)
+                        .saturating_add(CLAIM_SECS);
+                    let renewed = after(&base, reach, "the claim's renewal")
+                        .map_err(|e| e.to_string())
+                        .and_then(|until| {
+                            renew_claim(&db, &thread, &role, &until).map_err(|e| e.to_string())
+                        });
                     if let Err(e) = renewed {
+                        failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         eprintln!(
                             "warning: the claim on the slot of {role} on thread {thread} could not \
                              be renewed: {e}; the recheck still refuses a second rung while this \
@@ -965,8 +1127,30 @@ impl ClaimRenewal {
         ClaimRenewal {
             stop: Some(tx),
             handle,
+            failures,
         }
     }
+
+    /// How many renewals failed so far.
+    #[cfg(test)]
+    pub(crate) fn failures(&self) -> usize {
+        self.failures.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// One renewal, on a connection of its own — only of a claim still standing (a released one is not
+/// taken again).
+fn renew_claim(db: &str, thread: &str, role: &str, until: &str) -> rusqlite::Result<usize> {
+    let c = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    c.busy_timeout(std::time::Duration::from_secs(5))?;
+    c.execute(
+        "UPDATE owed_starts SET recovering_until = ?3
+          WHERE thread = ?1 AND role = ?2 AND recovering_until IS NOT NULL",
+        params![thread, role, until],
+    )
 }
 
 impl Drop for ClaimRenewal {
@@ -975,15 +1159,22 @@ impl Drop for ClaimRenewal {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+        let failed = self.failures.load(std::sync::atomic::Ordering::Relaxed);
+        if failed > 0 {
+            eprintln!(
+                "warning: {failed} renewal(s) of a claim failed while its trigger ran; the rung's \
+                 own log row is what kept a second rung out"
+            );
+        }
     }
 }
 
 /// What a rung's trigger did, for its log row and for what follows.
 enum Done {
-    /// It did something; the outcome word for the log.
-    Acted(&'static str),
+    /// It did something.
+    Acted(RungOutcome),
     /// It did nothing and counts nothing.
-    Nothing(&'static str),
+    Nothing(RungOutcome),
     /// A refusal no retry will change — rung E names it.
     Refused(String),
     /// It failed this time; the next look tries again.
@@ -1001,7 +1192,10 @@ fn run(
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<()> {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
-    if row.attempts >= MAX_RECOVERY_ATTEMPTS || past_the_ceiling(store, row, ctx.now)? {
+    if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
+        return escalate(ctx, store, row, coordinator, ceiling, findings);
+    }
+    if row.attempts >= MAX_RECOVERY_ATTEMPTS {
         return escalate(ctx, store, row, coordinator, occasion, findings);
     }
     match store.claim_slot(t, h, ctx.now)? {
@@ -1034,7 +1228,7 @@ fn run(
 }
 
 /// The part of [`run`] that holds the claim: the recheck, the attempt, the log row, the lease hook,
-/// the trigger — in that order, fail-closed. `None` when the recheck stopped it.
+/// the trigger, what follows — in that order, fail-closed. `None` when the recheck stopped it.
 fn under_the_claim(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -1044,25 +1238,8 @@ fn under_the_claim(
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<Option<Done>> {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
-    // The recheck: still owed by this role, and no rung of its own still in flight.
-    let owed = store
-        .thread_quorum(t, ctx.now)?
-        .is_some_and(|q| outstanding_has(&q.outstanding, h));
-    if !owed {
+    if !recheck(ctx, store, row, findings)? {
         return Ok(None);
-    }
-    if let Some(flying) = store
-        .slot_recovery_log(t, h)?
-        .into_iter()
-        .rev()
-        .find(|r| r.outcome.is_none())
-    {
-        let horizon = after(&flying.at, TRIGGER_TIMEOUT_SECS, "a rung in flight")?;
-        if !reached(ctx.now, &horizon) {
-            arm(ctx, store, t, h, &horizon, findings);
-            return Ok(None);
-        }
-        store.settle_rung(flying.id, "timed_out")?;
     }
     // The lease hook (cut 1g): the slot's lease still names this operation. Until 1g there is
     // nothing to check and nothing to renew.
@@ -1082,23 +1259,74 @@ fn under_the_claim(
         let _renewal = ClaimRenewal::start(ctx, t, h);
         fire_the_rung(ctx, store, row, rung)
     };
-    let outcome = match &done {
-        Done::Acted(word) | Done::Nothing(word) => (*word).to_string(),
-        Done::Refused(why) => format!("refused: {why}"),
-        Done::Failed(why) => format!("failed: {why}"),
-    };
-    store.settle_rung(log, &outcome)?;
     match &done {
-        Done::Nothing(_) => store.revert_attempt(t, h, opened_the_episode)?,
-        Done::Acted("asked") => {
+        Done::Acted(o) | Done::Nothing(o) => store.settle_rung_as(log, *o)?,
+        Done::Refused(why) => store.settle_rung(log, &format!("refused: {why}"))?,
+        Done::Failed(why) => store.settle_rung(log, &format!("failed: {why}"))?,
+    }
+    after_the_rung(ctx, store, row, rung, &done, opened_the_episode, findings)?;
+    Ok(Some(done))
+}
+
+/// **The recheck inside the claim**: the slot is still owed by this role, and no rung of its own is
+/// still in flight — a log row with no outcome younger than [`TRIGGER_TIMEOUT_SECS`] refuses, an
+/// older one is settled `timed_out`. `false` stops the rung.
+fn recheck(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<bool> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let owed = store
+        .thread_quorum(t, ctx.now)?
+        .is_some_and(|q| outstanding_has(&q.outstanding, h));
+    if !owed {
+        return Ok(false);
+    }
+    if let Some(flying) = store
+        .slot_recovery_log(t, h)?
+        .into_iter()
+        .rev()
+        .find(|r| r.outcome.is_none())
+    {
+        let horizon = after(&flying.at, TRIGGER_TIMEOUT_SECS, "a rung in flight")?;
+        if !reached(ctx.now, &horizon) {
+            arm(ctx, store, t, h, &horizon, findings);
+            return Ok(false);
+        }
+        store.settle_rung_as(flying.id, RungOutcome::TimedOut)?;
+    }
+    Ok(true)
+}
+
+/// **What follows a rung**: an attempt that did nothing is taken back, an ask starts the silence
+/// clock, a failure is a finding — and the next look is armed once, for when this outcome wants it.
+fn after_the_rung(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    rung: Rung,
+    done: &Done,
+    opened_the_episode: bool,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let recheck = crate::orchestration::SESSION_LIVENESS_RECHECK_SECS;
+    let next = match done {
+        Done::Nothing(_) => {
+            store.revert_attempt(t, h, opened_the_episode)?;
+            Some(after(ctx.now, recheck, "the next look")?)
+        }
+        Done::Acted(RungOutcome::Asked) => {
             store.set_asked(t, h, ctx.now)?;
-            let next = after(ctx.now, SILENCE_SECS, "the next ask")?;
-            arm(ctx, store, t, h, &next, findings);
+            Some(after(ctx.now, SILENCE_SECS, "the next ask")?)
         }
         Done::Acted(_) => {
-            // The trigger armed the slot's first look one grace out (`stranded::owe`).
+            // The trigger armed the slot's first look one grace out (`stranded::owe`); noted only.
             let next = after(ctx.now, STRANDED_GRACE_SECS, "the next look")?;
             store.set_next_look(t, h, &next)?;
+            None
         }
         Done::Failed(why) => {
             let detail = format!(
@@ -1112,24 +1340,14 @@ fn under_the_claim(
                 row.session.as_deref(),
                 detail,
             ));
-            let next = after(
-                ctx.now,
-                crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
-                "the next look",
-            )?;
-            arm(ctx, store, t, h, &next, findings);
+            Some(after(ctx.now, recheck, "the next look")?)
         }
-        Done::Refused(_) => {}
-    }
-    if matches!(&done, Done::Nothing(_)) {
-        let next = after(
-            ctx.now,
-            crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
-            "the next look",
-        )?;
+        Done::Refused(_) => None,
+    };
+    if let Some(next) = next {
         arm(ctx, store, t, h, &next, findings);
     }
-    Ok(Some(done))
+    Ok(())
 }
 
 /// **The lease hook every rung calls** (cut 1g, 6j6v.vh0z, fills it): renew the operation's lease
@@ -1142,7 +1360,7 @@ fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) 
     match rung {
         Rung::Ask => {
             let Some(session) = row.session.as_deref() else {
-                return Done::Nothing("no_session");
+                return Done::Nothing(RungOutcome::NoSession);
             };
             let ask = SessionAsk {
                 session: session.to_string(),
@@ -1152,9 +1370,9 @@ fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) 
                 at: ctx.now.to_string(),
             };
             match ctx.worker.ask_session(&ask) {
-                AskOutcome::Asked => Done::Acted("asked"),
-                AskOutcome::NoProcess => Done::Nothing("no_process"),
-                _ => Done::Nothing("cannot_ask"),
+                AskOutcome::Asked => Done::Acted(RungOutcome::Asked),
+                AskOutcome::NoProcess => Done::Nothing(RungOutcome::NoProcess),
+                _ => Done::Nothing(RungOutcome::CannotAsk),
             }
         }
         Rung::Continue => {
@@ -1171,7 +1389,7 @@ fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) 
                 // The runtime no longer has the conversation: there is nothing to continue, so the
                 // slot is started over with its task, in the same claim.
                 Err(TriggerError::SessionGone { .. }) => match recommission(ctx, store, row) {
-                    Done::Acted(_) => Done::Acted("session_gone_recommissioned"),
+                    Done::Acted(_) => Done::Acted(RungOutcome::SessionGoneRecommissioned),
                     other => other,
                 },
                 Err(e) => classify(e),
@@ -1195,16 +1413,16 @@ fn recommission(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> Done {
     }
 }
 
-fn admitted(admission: &crate::orchestration::TriggerAdmission) -> &'static str {
+fn admitted(admission: &crate::orchestration::TriggerAdmission) -> RungOutcome {
     match admission {
-        crate::orchestration::TriggerAdmission::Queued { .. } => "queued",
-        _ => "triggered",
+        crate::orchestration::TriggerAdmission::Queued { .. } => RungOutcome::Queued,
+        _ => RungOutcome::Triggered,
     }
 }
 
 fn classify(e: TriggerError) -> Done {
     match e {
-        TriggerError::AlreadyRunning { .. } => Done::Nothing("already_running"),
+        TriggerError::AlreadyRunning { .. } => Done::Nothing(RungOutcome::AlreadyRunning),
         TriggerError::Failed(inner)
             if matches!(
                 inner.kind,
@@ -1241,7 +1459,6 @@ fn escalate(
         row.session.as_deref(),
         &occasion.detail,
     )?;
-    store.end_recovery_episode(t, h)?;
     findings.extend(crate::stranded::record(
         ctx,
         store,
@@ -1251,7 +1468,10 @@ fn escalate(
         occasion.detail,
         Some(summary),
     )?);
-    store.settle_rung(log, "escalated")?;
+    // Only once the record stands does the episode end: a record that could not be written leaves
+    // the budget and the ceiling clock as they were, and the next look escalates again.
+    store.end_recovery_episode(t, h)?;
+    store.settle_rung_as(log, RungOutcome::Escalated)?;
     Ok(())
 }
 
@@ -1283,7 +1503,7 @@ fn summary(
                 r.attempt,
                 r.at,
                 r.action,
-                r.outcome.as_deref().unwrap_or("in flight"),
+                outcome_words(r.outcome.as_deref()),
                 r.detail
             )
         })
@@ -1354,4 +1574,151 @@ pub(crate) fn under_recovery(row: &OwedStart) -> bool {
 
 pub(crate) fn action_of(row: &RecoveryLogRow) -> Option<RecoveryAction> {
     RecoveryAction::parse(&row.action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "2026-10-25T10:00:00Z";
+
+    fn at(secs: i64) -> String {
+        after(BASE, secs, "a test instant").unwrap()
+    }
+
+    /// A store on a real file (the renewal opens a connection of its own), with one slot claimed at
+    /// [`BASE`].
+    fn claimed() -> (tempfile::TempDir, String, ChatStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
+        let mut store = ChatStore::open(&path, 1).unwrap();
+        store.open_slot("t-1", "o/coder", "t-1", BASE).unwrap();
+        assert_eq!(
+            store.claim_slot("t-1", "o/coder", BASE).unwrap(),
+            SlotClaim::Claimed
+        );
+        (tmp, path, store)
+    }
+
+    fn until(store: &ChatStore) -> Option<String> {
+        store
+            .connection()
+            .query_row(
+                "SELECT recovering_until FROM owed_starts WHERE thread = 't-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn wait_for(what: &str, ok: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} never happened"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// **The claim is renewed while its trigger runs** (must-fix, design review round 3 TQ #4): each
+    /// renewal moves the horizon half a claim further from the look's own instant, so a second look
+    /// past the first claim finds it still held — and once the renewal stops, a look past the last
+    /// horizon finds it free.
+    #[test]
+    fn a_running_renewal_moves_the_claim_on_by_half_a_claim_per_renewal() {
+        renew_claims_every(std::time::Duration::from_millis(5));
+        let (_tmp, path, mut store) = claimed();
+        assert_eq!(until(&store), Some(at(CLAIM_SECS)));
+        let renewal = ClaimRenewal::start_on(&path, "t-1", "o/coder", BASE);
+        wait_for("three renewals", || {
+            until(&store).is_some_and(|u| !earlier(&u, &at(CLAIM_SECS + 3 * CLAIM_SECS / 2)))
+        });
+        // Past the first claim, and past the in-flight guard's ten minutes: still held.
+        wait_for("the claim to reach past the trigger timeout", || {
+            until(&store).is_some_and(|u| earlier(&at(TRIGGER_TIMEOUT_SECS + 1), &u))
+        });
+        assert!(matches!(
+            store
+                .claim_slot("t-1", "o/coder", &at(TRIGGER_TIMEOUT_SECS + 1))
+                .unwrap(),
+            SlotClaim::BeingRecovered { .. }
+        ));
+        assert_eq!(renewal.failures(), 0);
+        drop(renewal);
+        let last = until(&store).unwrap();
+        assert!(
+            (0..CLAIM_SECS * 10_000).step_by(30).any(|n| at(n) == last),
+            "the horizon moves in half-claim steps: {last}"
+        );
+        // Stopped: a look past the last horizon takes the slot.
+        let past = after(&last, 1, "past the horizon").unwrap();
+        assert_eq!(
+            store.claim_slot("t-1", "o/coder", &past).unwrap(),
+            SlotClaim::Claimed
+        );
+    }
+
+    /// A released claim is not taken again by a renewal that is still winding down.
+    #[test]
+    fn a_renewal_never_takes_a_released_claim_again() {
+        renew_claims_every(std::time::Duration::from_millis(5));
+        let (_tmp, path, mut store) = claimed();
+        store.release_slot_claim("t-1", "o/coder").unwrap();
+        let renewal = ClaimRenewal::start_on(&path, "t-1", "o/coder", BASE);
+        // Give it renewals to run: wait until its interval has passed a few times over, by its own
+        // count of attempts made (a successful no-op UPDATE counts nothing, so poll the clock).
+        let begun = std::time::Instant::now();
+        wait_for("several intervals", || {
+            begun.elapsed() > std::time::Duration::from_millis(50)
+        });
+        drop(renewal);
+        assert_eq!(until(&store), None);
+    }
+
+    /// **A renewal that cannot reach the store** says so, counts it, and neither panics nor creates
+    /// a database where there was none; the rung's own in-flight log row is what then keeps a
+    /// second rung out.
+    #[test]
+    fn a_renewal_that_cannot_reach_the_store_counts_its_failures_and_creates_nothing() {
+        renew_claims_every(std::time::Duration::from_millis(5));
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-dir").join("db.sqlite");
+        let renewal = ClaimRenewal::start_on(missing.to_str().unwrap(), "t-1", "o/coder", BASE);
+        wait_for("a failed renewal", || renewal.failures() > 0);
+        drop(renewal);
+        assert!(!missing.exists(), "nothing was created");
+    }
+
+    /// Every typed outcome reads back as itself — the log's words and the hold's.
+    #[test]
+    fn every_outcome_word_parses_back_to_its_variant() {
+        for o in [
+            RungOutcome::Asked,
+            RungOutcome::Triggered,
+            RungOutcome::Queued,
+            RungOutcome::SessionGoneRecommissioned,
+            RungOutcome::NoSession,
+            RungOutcome::NoProcess,
+            RungOutcome::CannotAsk,
+            RungOutcome::AlreadyRunning,
+            RungOutcome::TimedOut,
+            RungOutcome::Escalated,
+            RungOutcome::Reset,
+        ] {
+            assert_eq!(RungOutcome::parse(o.as_str()), Some(o));
+            assert!(!o.words().contains('_'), "{:?} reads as a sentence", o);
+        }
+        for o in [
+            HoldOutcome::Resumed,
+            HoldOutcome::ProviderCannotResume,
+            HoldOutcome::TreeMovedAsked,
+            HoldOutcome::NotYet,
+        ] {
+            assert_eq!(HoldOutcome::parse(o.as_str()), Some(o));
+        }
+        assert_eq!(outcome_words(Some("refused: no")), "refused: no");
+        assert_eq!(outcome_words(None), "still in flight");
+    }
 }

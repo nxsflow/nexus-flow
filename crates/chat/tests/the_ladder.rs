@@ -1303,15 +1303,15 @@ fn a_rung_in_flight_past_the_claim_blocks_a_second_rung_until_the_trigger_timeou
     assert_eq!(log[0].1.as_deref(), Some("timed_out"));
 }
 
-/// **Two looks racing** — on two connections, the second arriving while the first one's trigger is
-/// still running inside the worker: exactly one trigger. Measured by mutation: with the claim AND
-/// the in-flight recheck both disabled this stays green, because the first look's trigger has moved
-/// the slot's clock and reopened its session before it reaches the worker — so this pins the
-/// end-to-end outcome, and `a_held_claim_fires_nothing_and_one_past_it_fires_exactly_once` and
-/// `a_rung_in_flight_past_the_claim_blocks_a_second_rung_until_the_trigger_timeout` pin the two
-/// guards one by one.
+/// **A second look while the first one's trigger runs starts nothing** — on two connections,
+/// exactly one trigger. Measured by mutation: this stays green with the claim AND the in-flight
+/// recheck both disabled, because the first look's trigger has already moved the slot's clock
+/// before it reaches the worker. It pins that end-to-end outcome only; the guards are pinned one
+/// by one by `a_held_claim_fires_nothing_and_one_past_it_fires_exactly_once`,
+/// `a_rung_in_flight_past_the_claim_blocks_a_second_rung_until_the_trigger_timeout` and
+/// `a_trigger_slower_than_the_claim_keeps_it_and_a_look_past_the_in_flight_guard_fires_nothing`.
 #[test]
-fn two_looks_racing_on_one_slot_fire_exactly_one_trigger() {
+fn a_second_look_while_the_first_ones_trigger_runs_starts_nothing() {
     let team = team();
     let thread = team.commission(T0, "coder", "build").thread_id;
     let session = team.worker.last("coder").internal_session;
@@ -1878,4 +1878,85 @@ fn an_acceptance_over_a_recovering_slot_is_refused_and_names_it() {
     assert!(err.contains("this round is still moving"), "{err}");
     assert!(err.contains("its coordinator is recovering"), "{err}");
     assert!(err.contains(&rework), "names the slot: {err}");
+}
+
+/// **A trigger slower than the claim keeps it** (must-fix, design review round 3 TQ #4; review of
+/// pass 1, CQ #1 / TQ #1): the first look's trigger blocks inside the worker. While it runs, the
+/// claim's renewal moves `recovering_until` forward — seen here, past the first claim and past the
+/// ten-minute in-flight horizon — and the looks after it, at instants where the in-flight guard no
+/// longer refuses (its rung row is older than the trigger timeout) and where the slot again reads
+/// as a session with no process, fire ZERO triggers: the renewed claim is what holds them off. With the claim or the renewal off, that look starts a second
+/// continuation.
+#[test]
+fn a_trigger_slower_than_the_claim_keeps_it_and_a_look_past_the_in_flight_guard_fires_nothing() {
+    nexus_chat::ladder::renew_claims_every(std::time::Duration::from_millis(5));
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    let (release, gate) = std::sync::mpsc::channel();
+    *team.worker.gate.lock().unwrap() = Some(gate);
+    let claimed_until = || {
+        team.ladder(&thread, "coder")
+            .and_then(|l| l.recovering_until)
+    };
+    // Nothing is asserted while the first look sits at the gate: a failing assertion there would
+    // leave it blocked for ever. What the looks saw is collected, the gate released, then read.
+    let (renewed, starts_meanwhile) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| team.tick(&at(130), &thread));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let renewed_past =
+            |secs: i64| claimed_until().is_some_and(|u| u.as_str() > at(secs).as_str());
+        let mut renewed = false;
+        while std::time::Instant::now() < deadline {
+            let gated = team
+                .worker
+                .at_the_gate
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if gated && renewed_past(130 + 600 + 60 + 90 + 60) {
+                renewed = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let mut starts_meanwhile = None;
+        if renewed {
+            // The first claim (130 + 60) and the in-flight guard (130 + 600) are both behind these
+            // looks. The trigger moved the slot's clock before it reached the worker, so the slot
+            // reads as a session with no process again: one look suspects it, the next one cadence
+            // later would take it up — and that is the look the renewed claim has to hold off.
+            team.tick(&at(130 + 600 + 60), &thread);
+            team.tick(&at(130 + 600 + 60 + 90), &thread);
+            starts_meanwhile = Some(team.worker.of("coder").len());
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        (renewed, starts_meanwhile)
+    });
+    assert!(
+        renewed,
+        "the claim was renewed past the in-flight horizon while the trigger ran: {:?}",
+        claimed_until()
+    );
+    assert_eq!(
+        starts_meanwhile,
+        Some(1),
+        "the looks started nothing while the first one's trigger ran"
+    );
+    assert_eq!(
+        team.worker.of("coder").len(),
+        2,
+        "the first start and ONE continuation"
+    );
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("continued".to_string(), Some("triggered".to_string()))],
+        "one rung, never timed out by a second look"
+    );
+    assert_eq!(
+        team.ladder(&thread, "coder").unwrap().recovering_until,
+        None,
+        "released"
+    );
 }

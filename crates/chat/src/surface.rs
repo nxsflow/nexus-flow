@@ -1122,7 +1122,7 @@ pub fn reply_progress(
                 ctx.session,
                 body.lines().next().unwrap_or(""),
             )
-            .and_then(|id| store.settle_rung(id, "reset"))?;
+            .and_then(|id| store.settle_rung_as(id, crate::ladder::RungOutcome::Reset))?;
     }
     Ok(ProgressReceipt {
         thread_id: thread.to_string(),

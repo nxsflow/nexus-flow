@@ -1234,7 +1234,20 @@ impl SidecarWorker {
             return AskOutcome::CannotAsk;
         }
         match send(claim.pid) {
-            Ok(()) => AskOutcome::Asked,
+            // **The race with the door closing** (review of pass 1, I&R #4): the sidecar withdraws
+            // `ask: 1` before its last drain, and a signal that landed after that is not taken.
+            // Read once more: a claim that no longer declares the door, with this ask still lying
+            // there, is an ask nobody will take — not counted, and its file taken back.
+            Ok(()) => {
+                let still_open = std::fs::read_to_string(&claim_path)
+                    .map(|c| claim_declares_the_ask_door(&c))
+                    .unwrap_or(false);
+                if !still_open && file.exists() {
+                    let _ = std::fs::remove_file(&file);
+                    return AskOutcome::CannotAsk;
+                }
+                AskOutcome::Asked
+            }
             Err(outcome) => {
                 // Not delivered: the file must not be found by a later turn as if it had been.
                 let _ = std::fs::remove_file(&file);
@@ -3251,6 +3264,27 @@ mod tests {
             })
             .collect();
         assert_eq!(threads, vec!["t-x", "t-y"], "drained in ulid order");
+
+        // The door closes between the claim's read and the signal: the ask is not counted, and its
+        // file is taken back.
+        let closing = |_pid: u32| {
+            std::fs::write(logs.join("s-door.pid"), session_claim_for(held.pid())).unwrap();
+            Ok(())
+        };
+        assert_eq!(
+            worker.ask_session_by(&an_ask("s-door"), closing),
+            AskOutcome::CannotAsk
+        );
+        assert_eq!(
+            ask_files(&logs, "s-door").len(),
+            2,
+            "the late ask took its file back"
+        );
+        std::fs::write(
+            logs.join("s-door.pid"),
+            format!("{}ask: 1\n", session_claim_for(held.pid())),
+        )
+        .unwrap();
 
         let gone = worker.ask_session_by(&an_ask("s-door"), |_| Err(AskOutcome::NoProcess));
         assert_eq!(gone, AskOutcome::NoProcess);

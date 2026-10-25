@@ -2544,7 +2544,61 @@ test("a session whose last tool call was killed names it in its cause", () => {
   );
   const ended = run.calls.find((x) => x.argv[0] === "session" && x.argv[1] === "ended");
   const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
-  assert.equal(cause, "ended; its last failed tool call said: Exit code 137");
+  assert.equal(cause, "ended; its last tool call failed with exit code 137");
+});
+
+/** **Only the exit status of a failed tool call reaches the cause**, never its output: the cause is
+ *  posted in the coordinator's escalation, and a tool's output can carry anything the session saw. */
+test("a failed tool call's output never reaches the cause", () => {
+  const leaky = {
+    type: "user",
+    session_id: "real-1",
+    parent_tool_use_id: null,
+    message: {
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: "TOKEN=sk-secret-123 denied" },
+      ],
+    },
+  };
+  const run = runSidecar(
+    { after: () => {} },
+    {
+      messages: [init, toolUse, leaky, result],
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+  );
+  const ended = run.calls.find((x) => x.argv[0] === "session" && x.argv[1] === "ended");
+  const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
+  assert.equal(cause, "ended; its last tool call failed with an error");
+  assert.doesNotMatch(cause, /sk-secret/);
+});
+
+/** A malformed ask file is dropped, logged, and never yielded; the run goes on. */
+test("a malformed ask file is dropped and the turn goes on", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolUse, toolResult, result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, child, claim, waitFor, read }) => {
+      await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      writeFileSync(join(dir, "s-1.ask.01jask0000000000000000000e.json"), JSON.stringify({ thread: 7 }));
+      writeFileSync(join(dir, "s-1.ask.01jask0000000000000000000f.json"), "not json");
+      child.kill("SIGUSR2");
+      await waitFor("both files to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000e.json")) && !existsSync(join(dir, "s-1.ask.01jask0000000000000000000f.json")));
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.match(run.stderr, /is not of the engine's shape and is dropped/);
+  assert.match(run.stderr, /could not be read and is dropped/);
+  assert.ok(!existsSync(join(dirname(run.claimPath), "later-prompts.log")), "nothing was yielded");
 });
 
 /** An `nxc` from before the cause refuses the flags; the end is announced without them. */

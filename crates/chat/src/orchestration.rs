@@ -15371,7 +15371,7 @@ pub fn resume_interrupted(
     // instant the runtime named. A hold with no instant is still secured and simply gets no
     // automatic return, which is the honest consequence of nobody having said when it lifts.
     if !hold.is_due(ctx.now) && !req.force {
-        note_the_hold_outcome(store, hold.id, "not_yet");
+        note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::NotYet);
         secure_the_interrupted_tree(ctx, store, thread.as_deref(), &mut warnings);
         let armed_for = hold.until.as_deref().and_then(|until| {
             match ctx.timer.schedule_resume(&session, until) {
@@ -15432,7 +15432,11 @@ pub fn resume_interrupted(
         );
         // **The outcome is recorded ON THE HOLD** (nxf 6j6v.558h, rung B): the slot's coordinator
         // re-commissions a slot whose resume the provider refused, and never continues it.
-        note_the_hold_outcome(store, hold.id, "provider_cannot_resume");
+        note_the_hold_outcome(
+            store,
+            hold.id,
+            crate::ladder::HoldOutcome::ProviderCannotResume,
+        );
         stamp_taken_up(ctx, store, hold.id, &mut warnings);
         return Ok(receipt(ResumeOutcome::ProviderCannotResume, None, warnings));
     }
@@ -15446,12 +15450,12 @@ pub fn resume_interrupted(
         // **Asked once, and recorded** (nxf 6j6v.558h, rung B): a hold whose moved tree was put
         // to the root reads `needs_decision` until somebody answers, and a second resume of the
         // same hold — the background job and a human both arriving — does not ask again.
-        let asked = store
-            .latest_hold(&session)?
-            .is_some_and(|h| h.id == hold.id && h.outcome.as_deref() == Some("tree_moved_asked"));
+        let asked = store.latest_hold(&session)?.is_some_and(|h| {
+            h.id == hold.id && h.outcome == Some(Ok(crate::ladder::HoldOutcome::TreeMovedAsked))
+        });
         if !asked {
             ask_the_root_thread(ctx, store, &hold, thread.as_deref(), &drift, &mut warnings);
-            note_the_hold_outcome(store, hold.id, "tree_moved_asked");
+            note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::TreeMovedAsked);
         }
         // **The hold is NOT stamped and nothing is re-armed.** The operation has not been taken up
         // — it is waiting for a person to say what should happen — so it stays on hold, which is
@@ -15522,7 +15526,7 @@ pub fn resume_interrupted(
             //
             // **It resumes with the remainder it had at the hold** (nxf 6j6v.558h, rung B): the
             // paused window ends at `resumed_at + (deadline - hold.at)`, not one whole window later.
-            note_the_hold_outcome(store, hold.id, "resumed");
+            note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::Resumed);
             if let Err(e) = store.resume_member_deadlines_of_session(&session, ctx.now, &hold.at) {
                 eprintln!(
                     "warning: session {session} was resumed, but its member window could not be \
@@ -15596,9 +15600,12 @@ fn being_recovered_as(
 
 /// Record what a resume did with a hold — best-effort: the outcome is what rung B reads, and a hold
 /// without one reads as not yet decided.
-fn note_the_hold_outcome(store: &mut ChatStore, hold: i64, outcome: &str) {
+fn note_the_hold_outcome(store: &mut ChatStore, hold: i64, outcome: crate::ladder::HoldOutcome) {
     if let Err(e) = store.set_hold_outcome(hold, outcome) {
-        eprintln!("warning: the outcome {outcome} of hold {hold} could not be recorded: {e}");
+        eprintln!(
+            "warning: the outcome {} of hold {hold} could not be recorded: {e}",
+            outcome.as_str()
+        );
     }
 }
 
