@@ -1,7 +1,0 @@
----
-type: fixed
----
-[en]
-Dependencies with published security advisories are updated in `nxs`, `nxf-relay` and the bundled agent sidecar. Among them: rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.11 (TLS handshake and certificate-path checks, distrusted roots), tokio-postgres 0.7.18 and postgres-protocol 0.6.12 (a malicious server could crash or stall the relay's Postgres connection), h2 0.4.20, tokio 1.54.1 and anyhow 1.0.104. In the agent sidecar: the MCP TypeScript SDK 1.32.2, express' proxy-addr, body-parser and qs, hono, fast-uri, ip-address and zod. A relay built with the `dynamodb` feature no longer links the legacy rustls 0.21 / hyper 0.14 client. The interactive chooser runs on inquire 0.9.
-[de]
-Abhängigkeiten mit veröffentlichten Sicherheitshinweisen sind in `nxs`, `nxf-relay` und dem gebündelten Agent-Sidecar aktualisiert. Darunter: rustls 0.23.46, rustls-webpki 0.103.16 und webpki-roots 1.0.11 (TLS-Handshake und Prüfung von Zertifikatsketten, nicht mehr vertrauenswürdige Wurzeln), tokio-postgres 0.7.18 und postgres-protocol 0.6.12 (ein bösartiger Server konnte die Postgres-Verbindung des Relays zum Absturz bringen oder blockieren), h2 0.4.20, tokio 1.54.1 und anyhow 1.0.104. Im Agent-Sidecar: das MCP-TypeScript-SDK 1.32.2, proxy-addr, body-parser und qs von express, hono, fast-uri, ip-address und zod. Ein mit dem Feature `dynamodb` gebautes Relay bindet den veralteten rustls-0.21-/hyper-0.14-Client nicht mehr ein. Die interaktive Auswahl läuft auf inquire 0.9.
