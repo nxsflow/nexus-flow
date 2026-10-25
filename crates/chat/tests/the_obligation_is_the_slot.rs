@@ -665,11 +665,11 @@ fn a_nested_round_is_coordinated_while_a_slot_inside_it_is() {
 // ---- the row at the open (field case 3) -----------------------------------------------------------
 
 /// **Field case 3** at the record level: a review-round slot whose MINT fails. The row is there from
-/// the open with no session, its look armed under the slot; the sweep records `never_started` at
-/// the clock + 180 s (cut 1a's escalation stands until cut 1d's rung D replaces it); status renders
-/// it with no session; and the round's own slot reads coordinated while it is owed (clause 6).
+/// the open with no session, its look armed under the slot; the sweep judges it `never_started` at
+/// the clock + 180 s and its coordinator re-commissions it (cut 1d's rung D, which replaced cut
+/// 1a's escalation here); and the round's own slot reads coordinated while it is owed (clause 6).
 #[test]
-fn a_review_slot_whose_mint_fails_is_owed_with_no_session_and_recorded_never_started() {
+fn a_review_slot_whose_mint_fails_is_owed_with_no_session_and_recommissioned_when_never_started() {
     let team = team();
     team.sql(
         "CREATE TRIGGER no_verifier_mint BEFORE INSERT ON session_map WHEN NEW.role = 'verifier'
@@ -731,11 +731,17 @@ fn a_review_slot_whose_mint_fails_is_owed_with_no_session_and_recorded_never_sta
         "one look is not a record"
     );
     team.tick(&at(180), &root);
+    // Judged `never_started` at +180 s — and since cut 1d its coordinator RE-COMMISSIONS it (rung
+    // D, `the_ladder.rs`) instead of recording and escalating it: a fresh session into the slot.
     let row = team.status_of(&at(180), &slot);
-    let stranded = row.stranded.expect("recorded at +180 s");
-    assert_eq!(stranded.observed, facade::Observation::NeverStarted);
-    assert_eq!(stranded.session, None);
-    assert!(stranded.escalated, "cut 1a's escalation, until rung D");
+    assert!(row.stranded.is_none(), "no record, no escalation: {row:?}");
+    let fresh = team.worker.last("verifier");
+    assert_eq!(fresh.reply_thread.as_deref(), Some(slot.as_str()));
+    assert_eq!(
+        team.row(&slot, "verifier").and_then(|r| r.session),
+        Some(fresh.internal_session.clone()),
+        "the slot's row names the new session"
+    );
 }
 
 // ---- ownership across machines (must-fix, design review round 2 CQ #2 / TQ #2 / IR #3) -------------
@@ -917,6 +923,82 @@ fn a_chat_designated_to_another_machine_is_owed_there_only_and_a_hand_over_back_
     lap.tick(&d, &at(40), &thread);
     assert!(row_in(&lap.store, &thread, "o/coder").is_some());
     assert_eq!(stu.worker.count(), 1, "nothing more started on the studio");
+}
+
+/// **A coordinated row is not forgotten for want of a machine read** (nxf 6j6v.ndbr, the kgfn
+/// review's Integrity #1): a chat designated to the studio and executed there has its row with a
+/// coordinator. The studio's next look cannot say which machine it is — no machine read — and the
+/// row SURVIVES, still naming its coordinator: the sidecar posted no substitute for this slot, so
+/// forgetting the row would leave it with neither. Once the slot is KNOWN to run elsewhere (the hand-over
+/// back to the laptop), the row goes, and that is said.
+#[test]
+fn a_coordinated_row_survives_a_look_that_cannot_read_the_machine() {
+    let d = coder_only();
+    let mut lap = Replica::new(1, laptop(), "/laptop.db");
+    let mut stu = Replica::new(2, studio(), "/studio.db");
+    let thread = lap
+        .run(&d, T0, "alice", |ctx, store| {
+            surface::send_to(
+                ctx,
+                store,
+                SendToRequest {
+                    machine: Some("studio"),
+                    to: "coder",
+                    body: "Add a --since flag.",
+                    refs: SendToRefs::ExplicitlyNone,
+                },
+            )
+        })
+        .unwrap()
+        .thread_id;
+    pull(&lap.store, &mut stu.store);
+    stu.run(&d, &at(10), "service", |ctx, store| {
+        orchestration::pick_up(ctx, store)
+    })
+    .unwrap();
+    let before = row_in(&stu.store, &thread, "o/coder").expect("the studio's row");
+    assert_eq!(before.coordinator.as_deref(), Some(thread.as_str()));
+
+    // The machine read is gone.
+    stu.machines = None;
+    stu.tick(&d, &at(20), &thread);
+    let after = row_in(&stu.store, &thread, "o/coder").expect("the row survives the look");
+    assert_eq!(after.coordinator, before.coordinator, "still coordinated");
+
+    // Back with a read, and the chat handed to the laptop: now it is KNOWN to run elsewhere.
+    stu.machines = Some(FixedMachines::new(Some(studio()), Ok(both_online())));
+    lap.run(&d, &at(30), "alice", |ctx, store| {
+        surface::reply_in_thread(
+            ctx,
+            store,
+            ReplyThreadRequest {
+                machine: Some("laptop"),
+                thread: &thread,
+                body: "carry on here",
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+    })
+    .unwrap();
+    pull(&lap.store, &mut stu.store);
+    let r = stu
+        .run(&d, &at(40), "service", |ctx, store| {
+            orchestration::tick(ctx, store, TickRequest { thread_id: &thread })
+        })
+        .expect("tick");
+    assert!(
+        row_in(&stu.store, &thread, "o/coder").is_none(),
+        "forgotten"
+    );
+    assert!(
+        r.warnings
+            .iter()
+            .any(|f| f.detail.contains("no longer coordinated on this device")),
+        "and said: {:?}",
+        r.warnings.iter().map(|f| &f.detail).collect::<Vec<_>>()
+    );
 }
 
 /// A replica of a stream another site wrote the expectation in writes NO row for that slot — not at

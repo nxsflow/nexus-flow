@@ -137,6 +137,57 @@ impl ChatStore {
     /// The second caller (beside the transcript flush) is the supervisor handing a member its NEXT
     /// TURN: a turn declared after the previous window has run out would otherwise be born `stale`,
     /// and `stale` is exactly what the settle decision and `nxc tick` both read as "due".
+    /// **A paused window resumes with the remainder it had at the hold** (nxf 6j6v.558h, rung B):
+    /// every member clock `session` holds ends at `resumed_at + (deadline - held_at)` — what was left
+    /// of the window when the model went away, counted from the take-up. A window that had nothing
+    /// left at the hold ends at the take-up itself. Returns how many clocks moved.
+    pub(crate) fn resume_member_deadlines_of_session(
+        &mut self,
+        session: &str,
+        resumed_at: &str,
+        held_at: &str,
+    ) -> Result<usize> {
+        use time::format_description::well_known::Rfc3339;
+        let armed: Vec<MemberDeadline> = {
+            let conn = self.connection();
+            let mut st = conn.prepare(
+                "SELECT thread_id, session, window_secs, deadline
+                   FROM channel_member_deadline WHERE session = ?1",
+            )?;
+            let rows = st.query_map([session], |r| {
+                Ok(MemberDeadline {
+                    thread_id: r.get(0)?,
+                    session: r.get(1)?,
+                    window_secs: r.get(2)?,
+                    deadline: r.get(3)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let parse = |at: &str, what: &str| {
+            time::OffsetDateTime::parse(at, &Rfc3339).map_err(|e| {
+                crate::error::NxfError::validation(format!("{what} {at:?} is not an instant: {e}"))
+            })
+        };
+        let held = parse(held_at, "the hold's instant")?;
+        let mut moved = 0;
+        for m in armed {
+            let remainder =
+                (parse(&m.deadline, "the member deadline")? - held).max(time::Duration::ZERO);
+            let deadline = crate::facade::instant_after(
+                resumed_at,
+                remainder,
+                &format!("the resumed timeout of member thread {}", m.thread_id),
+            )?;
+            self.connection().execute(
+                "UPDATE channel_member_deadline SET deadline = ?1 WHERE thread_id = ?2",
+                params![deadline, m.thread_id],
+            )?;
+            moved += 1;
+        }
+        Ok(moved)
+    }
+
     pub(crate) fn reset_member_deadline(
         &mut self,
         thread_id: &str,

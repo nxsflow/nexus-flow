@@ -303,6 +303,12 @@ enum Command {
         /// something other than "the review passed" — because it is not that.
         #[arg(long, conflicts_with_all = ["escalate", "needs_rework"])]
         accept: bool,
+        /// Only when a coordinator asked you, in the words it used.
+        #[arg(
+            long,
+            conflicts_with_all = ["escalate", "needs_rework", "accept", "if_unanswered", "stream"]
+        )]
+        progress: bool,
         /// Answer in this thread. A thread id identifies a conversation on its own — no channel
         /// context — and hands the turn back to whoever is on the other side of it.
         ///
@@ -581,6 +587,12 @@ enum SessionAction {
     Ended {
         /// The internal (nxc-minted) session id whose process has ended.
         internal: String,
+        /// Why the turn ended, in the runtime's own capped words.
+        #[arg(long)]
+        cause: Option<String>,
+        /// How many times the runtime was asked to run the turn.
+        #[arg(long)]
+        attempts: Option<u32>,
     },
     // USER-VISIBLE `--help` text below, so it carries no board id — `Tick`'s rule. This is the
     // sidecar's THIRD callback, beside `bind` and `ended`, and nxf 6j6v.npy3 is what needs it: an
@@ -965,6 +977,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             escalate,
             needs_rework,
             accept,
+            progress,
             thread,
             if_unanswered,
             stream,
@@ -972,6 +985,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
         } => {
             refuse_another_db_for_a_session(db)?;
             let body = resolve_body(body.as_deref(), body_file.as_deref())?;
+            if *progress {
+                return reply_progress(cli.json, db, thread.as_deref(), &body);
+            }
             reply_thread(
                 cli.json,
                 db,
@@ -1537,6 +1553,16 @@ impl crate::worker::Worker for LazyWorker {
     /// failure is `false` — a worker that could not be built asks nothing.
     fn asks_sessions(&self) -> bool {
         crate::worker::select_worker(self.cwd.clone()).is_ok_and(|w| w.asks_sessions())
+    }
+
+    /// The act behind the question one method up, forwarded with it (nxf 6j6v.558h). A selection
+    /// failure is `CannotAsk` — a worker that could not be built asked nothing, and saying so is
+    /// what keeps the coordinator from counting an ask that never went out.
+    fn ask_session(&self, ask: &crate::worker::SessionAsk) -> crate::worker::AskOutcome {
+        match crate::worker::select_worker(self.cwd.clone()) {
+            Ok(w) => w.ask_session(ask),
+            Err(_) => crate::worker::AskOutcome::CannotAsk,
+        }
     }
 
     /// The act behind the question one method up, forwarded with it (nxf 6j6v.b9nf). A selection
@@ -2510,6 +2536,17 @@ fn resume(
             "resumed {} on thread {named}, with its own transcript in front of it",
             r.session.as_deref().unwrap_or("-")
         ),
+        ResumeOutcome::BeingRecovered {
+            attempt,
+            of,
+            action,
+            retry_at,
+        } => println!(
+            "NOT resumed: the coordinator of thread {named} is recovering it right now ({} \
+             {attempt}/{of}) — one action at a time per slot. Try again at {retry_at}, or read \
+             `nxc status --thread {named}`",
+            action.map_or("watching", |a| a.as_str())
+        ),
     }
     for w in &r.warnings {
         println!("  ! {}", w.detail);
@@ -2984,6 +3021,40 @@ struct ReplyArgs<'a> {
     stream: bool,
     /// `--machine`: hand the chat to that machine (nxf 6j6v.1c6k).
     machine: Option<&'a str>,
+}
+
+/// **`nxc reply --progress`** (nxf 6j6v.558h) — see [`crate::surface::reply_progress`]. The thread
+/// resolves as a plain reply's does: named, or the one conversation open for the caller.
+fn reply_progress(json: bool, db: Option<&str>, thread: Option<&str>, body: &str) -> Result<()> {
+    let cli_ctx = CliCtx::resolve(db, hop())?;
+    let ctx = cli_ctx.ctx();
+    let mut store = open(db)?;
+    let resolved;
+    let thread = match thread {
+        Some(named) => named,
+        None => {
+            resolved = crate::addressees::sole_open_thread(
+                &store,
+                &ctx.caller_handle(),
+                crate::facade::parent_thread_of(&store, ctx.session).as_deref(),
+                ctx.now,
+            )?;
+            resolved.as_str()
+        }
+    };
+    let r = crate::surface::reply_progress(&ctx, &mut store, thread, body)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&r).expect("progress receipt serializes")
+        );
+    } else {
+        println!(
+            "progress {} in thread {}: {}",
+            r.message_id, r.thread_id, r.receipt
+        );
+    }
+    Ok(())
 }
 
 fn reply_thread(json: bool, db: Option<&str>, args: ReplyArgs<'_>) -> Result<()> {
@@ -3611,11 +3682,31 @@ fn hangs_at_line(h: &crate::facade::HangsAt, threads: &[crate::facade::StatusThr
         .map(|c| format!(" (coordinated by {c})"))
         .unwrap_or_default();
     let what = match h.recovery {
-        SlotRecovery::Watched => "watched",
-        SlotRecovery::NeverStarted => "never started",
-        SlotRecovery::Abandoned => "ABANDONED — withdraw it",
+        SlotRecovery::Watched => "watched".to_string(),
+        SlotRecovery::NeverStarted => "never started".to_string(),
+        SlotRecovery::Abandoned => "ABANDONED — withdraw it".to_string(),
+        // **The rung, the attempt, the last activity and the next look** (nxf 6j6v.558h) — off the
+        // slot's own row, which carries them.
+        SlotRecovery::Recovering => threads
+            .iter()
+            .find(|t| t.thread_id == h.thread)
+            .and_then(|t| t.recovery.as_ref())
+            .map_or_else(|| "recovering".to_string(), recovery_words),
     };
     format!("  hangs at {channel}/{role}{by}: {what}")
+}
+
+/// A recovery in words — `asked 2/3, last activity <t>, next look <t>` (nxf 6j6v.558h).
+fn recovery_words(r: &crate::facade::RecoveryStatus) -> String {
+    let mut words = format!("{} {}/{} at {}", r.action.as_str(), r.attempt, r.of, r.at);
+    words.push_str(&format!(
+        ", last activity {}",
+        r.last_activity.as_deref().unwrap_or("none")
+    ));
+    if let Some(next) = &r.next_look {
+        words.push_str(&format!(", next look {next}"));
+    }
+    words
 }
 
 /// Why a copy with nothing open is still held (nxf 6j6v.ys54): which thread, and where the answer
@@ -3947,6 +4038,11 @@ fn session_suffix(t: &crate::facade::StatusThread) -> String {
     if let Some(abandoned) = &t.abandoned {
         return format!(" — ABANDONED: {} — withdraw it", abandoned.detail);
     }
+    // **A slot under recovery says what its coordinator is doing** (nxf 6j6v.558h), in place of
+    // "nothing is coming": something is — the ladder's next rung, or the answer it asked for.
+    if let Some(recovery) = &t.recovery {
+        return format!(" — RECOVERING: {}", recovery_words(recovery));
+    }
     session_line(t).to_string()
 }
 
@@ -4192,10 +4288,22 @@ fn session_cmd(json: bool, db: Option<&str>, action: &SessionAction) -> Result<(
         // drives has to run here (nxf 6j6v.10yb). Everything it may then do — start the next step,
         // consolidate, wake a requester — is reported on the receipt, because the caller is an
         // exiting sidecar and nobody is reading this process's stderr.
-        SessionAction::Ended { internal } => {
+        SessionAction::Ended {
+            internal,
+            cause,
+            attempts,
+        } => {
             let cli_ctx = CliCtx::resolve(db, hop())?;
             let mut store = open(db)?;
-            let r = crate::orchestration::session_ended(&cli_ctx.ctx(), &mut store, internal)?;
+            let r = crate::orchestration::session_ended_with(
+                &cli_ctx.ctx(),
+                &mut store,
+                internal,
+                crate::orchestration::SessionEnd {
+                    cause: cause.as_deref(),
+                    attempts: *attempts,
+                },
+            )?;
             if json {
                 println!(
                     "{}",
@@ -4671,7 +4779,40 @@ mod tests {
             border: None,
             stranded,
             abandoned: None,
+            recovery: None,
         }
+    }
+
+    // ---- RECOVERING (nxf 6j6v.558h) ------------------------------------------------------------
+
+    fn recovering(
+        action: crate::ladder::RecoveryAction,
+        attempt: u32,
+    ) -> crate::facade::RecoveryStatus {
+        crate::facade::RecoveryStatus {
+            role: "ws/verifier".into(),
+            attempt,
+            of: 3,
+            action,
+            at: "2026-10-24T10:20:00Z".into(),
+            last_activity: Some("2026-10-24T10:00:00Z".into()),
+            next_look: Some("2026-10-24T10:40:00Z".into()),
+        }
+    }
+
+    /// A slot under recovery says what its coordinator did and when it looks next — in place of
+    /// "nothing is coming", which is false while a coordinator is taking the slot up.
+    #[test]
+    fn a_recovering_slot_says_what_its_coordinator_did_instead_of_nothing_is_coming() {
+        let mut row = open_row(crate::orchestration::SessionState::Ended, None);
+        row.recovery = Some(recovering(crate::ladder::RecoveryAction::Continued, 2));
+        let line = session_suffix(&row);
+        assert_eq!(
+            line,
+            " — RECOVERING: continued 2/3 at 2026-10-24T10:20:00Z, last activity \
+             2026-10-24T10:00:00Z, next look 2026-10-24T10:40:00Z"
+        );
+        assert!(!line.contains("nothing is coming"), "{line}");
     }
 
     // ---- ABANDONED and `hangs at` (nxf 6j6v.kgfn) ----------------------------------------------
@@ -4713,6 +4854,21 @@ mod tests {
                 format!("  hangs at review/verifier (coordinated by m-root): {says}")
             );
         }
+        // **And a slot under recovery says how far its coordinator got** (nxf 6j6v.558h).
+        let mut row = row;
+        row.recovery = Some(recovering(crate::ladder::RecoveryAction::Asked, 2));
+        let hangs = HangsAt {
+            thread: "m-slot".into(),
+            role: "ws/verifier".into(),
+            coordinator: Some("m-root".into()),
+            recovery: SlotRecovery::Recovering,
+        };
+        assert_eq!(
+            hangs_at_line(&hangs, std::slice::from_ref(&row)),
+            "  hangs at review/verifier (coordinated by m-root): asked 2/3 at \
+             2026-10-24T10:20:00Z, last activity 2026-10-24T10:00:00Z, next look \
+             2026-10-24T10:40:00Z"
+        );
     }
 
     fn stranded(

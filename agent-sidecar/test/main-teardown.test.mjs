@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_FAILURE_REPLY_CHARS, REPLY_REMINDER_BOUND_MS, STOPPED_EXIT_CODE } from "../src/spec-helpers.mjs";
 
@@ -219,6 +219,16 @@ function scratch(
     throwEveryRound = false,
     hangAt = null,
     hangInRound = 0,
+    holdUntilReleased = false,
+    askRoundMessages = [
+      {
+        type: "assistant",
+        session_id: "real-1",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "text", text: "on it" }] },
+      },
+      { type: "result", subtype: "success", session_id: "real-1", is_error: false, result: "asked" },
+    ],
   },
 ) {
   const dir = mkdtempSync(join(tmpdir(), "nxc-sidecar-teardown-"));
@@ -240,7 +250,7 @@ function scratch(
   // and `poisonAt` stay bound to round one, where each of them is about the main turn.
   writeFileSync(
     join(dir, "sdk-stub.mjs"),
-    `import { appendFileSync, writeFileSync } from "node:fs";\n` +
+    `import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";\n` +
       `const ROUNDS = ${JSON.stringify([messages, laterRoundMessages ?? messages])};\n` +
       `const THROW_AFTER = ${JSON.stringify(throwAfter)};\n` +
       `const POISON_AT = ${JSON.stringify(poisonAt)};\n` +
@@ -268,7 +278,14 @@ function scratch(
       // HANDLE, so the process stays up while nothing is happening. A bare pending promise keeps
       // nothing alive — without this Node drains the loop, reports an unsettled top-level await and
       // exits 13 before any signal can arrive.
+      // A HOLD instead of a hang (nxf 6j6v.558h): the wait ends when the test writes `release.txt`
+      // — a model turn that simply takes long — as well as on an abort.
+      `const HOLD = ${JSON.stringify(holdUntilReleased ? join(dir, "release.txt") : null)};\n` +
       `function untilAborted(signal) {\n` +
+      `  if (HOLD) return new Promise((resolve, reject) => {\n` +
+      `    const held = setInterval(() => { if (existsSync(HOLD)) { clearInterval(held); resolve(); } }, 20);\n` +
+      `    signal?.addEventListener("abort", () => { clearInterval(held); const e = new Error("Request was aborted."); e.name = "AbortError"; reject(e); }, { once: true });\n` +
+      `  });\n` +
       `  return new Promise((_, reject) => {\n` +
       `    const held = setInterval(() => {}, 1000);\n` +
       `    const abort = () => { clearInterval(held); const e = new Error("Request was aborted."); e.name = "AbortError"; reject(e); };\n` +
@@ -277,7 +294,21 @@ function scratch(
       `  });\n` +
       `}\n` +
       `let round = 0;\n` +
+      // **A STREAMING prompt is read the way the SDK reads one** (nxf 6j6v.558h): the first message
+      // opens the round and is what the query log records as `prompt`; every later message is
+      // pumped as it comes and served, once the scripted round has reached its `result`, as one more
+      // turn of `ASK_ROUND` — the runtime queuing a message to the end of the running turn.
+      `const ASK_ROUND = ${JSON.stringify(askRoundMessages)};\n` +
+      `const LATER_LOG = ${JSON.stringify(join(dir, "later-prompts.log"))};\n` +
+      `const CLAIM = ${JSON.stringify(join(dir, "s-1.pid"))};\n` +
+      `const textOf = (m) => typeof m?.message?.content === "string" ? m.message.content : JSON.stringify(m);\n` +
       `export async function* query(arg) {\n` +
+      `  const inbox = arg && typeof arg.prompt === "object" && arg.prompt && typeof arg.prompt[Symbol.asyncIterator] === "function" ? arg.prompt[Symbol.asyncIterator]() : null;\n` +
+      `  let firstPrompt = arg?.prompt ?? null;\n` +
+      `  if (inbox) { const r = await inbox.next(); firstPrompt = r.done ? null : textOf(r.value); }\n` +
+      `  const later = []; let pumpDone = inbox === null; let ping = null;\n` +
+      `  const roundOfThisQuery = round;\n` +
+      `  if (inbox) (async () => { for (;;) { const r = await inbox.next(); if (r.done) break; later.push(textOf(r.value)); let door = false; try { door = readFileSync(CLAIM, "utf8").includes("ask: 1"); } catch {} appendFileSync(LATER_LOG, JSON.stringify({ round: roundOfThisQuery, prompt: textOf(r.value), doorOpen: door }) + "\\n"); const p = ping; ping = null; p?.(); } pumpDone = true; const p = ping; ping = null; p?.(); })();\n` +
       `  const roundIndex = round;\n` +
       `  const throwsThisRound = THROW_AFTER_IS_LIST\n` +
       `    ? (THROW_AFTER[roundIndex] ?? null)\n` +
@@ -286,7 +317,7 @@ function scratch(
       `  if (!first && REMINDER_THROWS) { round += 1; throw new Error("reminder stream failure"); }\n` +
       `  const MESSAGES = ROUNDS[Math.min(round, ROUNDS.length - 1)];\n` +
       `  round += 1;\n` +
-      `  appendFileSync(${JSON.stringify(queryLog)}, JSON.stringify(arg ?? null) + "\\n");\n` +
+      `  appendFileSync(${JSON.stringify(queryLog)}, JSON.stringify(arg ? { ...arg, prompt: firstPrompt } : null) + "\\n");\n` +
       `  let consumed = 0;\n` +
       `  try {\n` +
       `    for (const [i, m] of MESSAGES.entries()) {\n` +
@@ -305,6 +336,13 @@ function scratch(
       `    if (HANG_AT !== null && roundIndex === HANG_IN_ROUND && HANG_AT >= MESSAGES.length) {\n` +
       `      writeFileSync(HANGING, String(MESSAGES.length));\n` +
       `      await untilAborted(arg?.options?.abortController?.signal);\n` +
+      `    }\n` +
+      `    if (MESSAGES.some((m) => m.type === "result")) {\n` +
+      `      for (;;) {\n` +
+      `        if (later.length > 0) { later.shift(); for (const m of ASK_ROUND) yield m; continue; }\n` +
+      `        if (pumpDone) break;\n` +
+      `        await new Promise((r) => { ping = r; });\n` +
+      `      }\n` +
       `    }\n` +
       `  } finally {\n` +
       `    if (round === 1) writeFileSync(${JSON.stringify(consumedLog)}, String(consumed));\n` +
@@ -541,7 +579,11 @@ test("happy path: entries flush in order, bind precedes the final flush, exit 0"
   // whatever else the teardown did. It has to be last — a step of a `working_tree: exclusive`
   // channel is released by it, and releasing before the reply above would hand the next step a
   // thread that is still owed an answer.
-  assert.deepEqual(calls[3].argv, ["session", "ended", "s-1"]);
+  //
+  // **With its cause** (nxf 6j6v.558h): `--cause` says why the turn ended, in the runtime's own
+  // capped words, and `--attempts` how many times the runtime was asked to run it — what the slot's
+  // coordinator reads when it takes the slot up, and what its escalation names if it cannot.
+  assert.deepEqual(calls[3].argv, ["session", "ended", "s-1", "--cause", "ended", "--attempts", "1"]);
 
   const flushes = appends(calls);
   assert.equal(flushes[0].session, "s-1");
@@ -2027,7 +2069,8 @@ test("a withdrawal's stop posts nothing in the session's name — the thread is 
   assert.deepEqual(calls[0].argv, ["session", "bind", "s-1", "real-1"], "the runtime session is bound, so a resume can find it");
   assert.deepEqual(
     appends(calls)[0].entries.map((e) => e.kind),
-    ["session_init", "tool_use", "tool_result"],
+    // `turn_start` first (nxf 6j6v.558h): the sidecar marks which slot each turn was opened for.
+    ["turn_start", "session_init", "tool_use", "tool_result"],
     "everything the aborted turn produced is flushed",
   );
   assert.equal(
@@ -2039,7 +2082,11 @@ test("a withdrawal's stop posts nothing in the session's name — the thread is 
   assert.deepEqual(replyCalls(calls), [], "nothing is posted in the session's name");
   assert.match(stderr, /not reminding session s-1 .* told to stop/);
   assert.match(stderr, /posting nothing for thread thread-77 .* already discharged/);
-  assert.deepEqual(calls[calls.length - 1].argv, ["session", "ended", "s-1"], "and the end is announced last");
+  assert.deepEqual(
+    calls[calls.length - 1].argv,
+    ["session", "ended", "s-1", "--cause", "told to stop (SIGTERM)", "--attempts", "1"],
+    "and the end is announced last, with its cause (nxf 6j6v.558h)",
+  );
 });
 
 test("a second SIGTERM during the stop neither kills the process nor starts a second teardown", async (t) => {
@@ -2193,6 +2240,8 @@ test("a stop that arrives during the reminder round is honoured there too", asyn
       "session bind",
       "transcript append",
       "status --thread",
+      // The reminder round's own `turn_start` (nxf 6j6v.558h), flushed as the round is abandoned.
+      "transcript append",
       "status --thread",
       "reply --thread",
       "session ended",
@@ -2200,4 +2249,306 @@ test("a stop that arrives during the reminder round is honoured there too", asyn
     `stderr:\n${stderr}`,
   );
   assert.match(stderr, /sidecar stopped: role=tester session=s-1 real=real-1 reminded=stopped/);
+});
+
+// ---- the ask door (nxf 6j6v.558h, epic 6j6v.nmc9 section B, rung A) --------------------------------
+
+/**
+ * Run the REAL `main.mjs` the way `SidecarWorker::trigger` does — the claim `<session>.pid` handed to
+ * the child the moment it exists — and let `drive` act on it while it runs: write an ask, send
+ * SIGUSR2, release the stub's hold. Every wait polls a named signal, bounded; nothing sleeps.
+ */
+async function runSidecarWithTheDoor(t, opts, drive) {
+  const { dir, argv, env, collect } = scratch(t, opts);
+  const child = spawn(process.execPath, argv, { env, stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  child.stdin.end();
+  const claim = join(dir, "s-1.pid");
+  // What `SessionLock::hand_to` writes: the child's pid and the instant it started.
+  writeFileSync(claim, `${child.pid}\n2026-10-24T10:00:00Z\n`);
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const exited = new Promise((resolve) => child.on("close", (status, signal) => resolve({ status, signal })));
+  const waitFor = async (what, ok) => {
+    const deadline = Date.now() + 10_000;
+    while (!ok()) {
+      assert.ok(Date.now() < deadline, `${what} never happened; stderr so far:\n${stderr}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+  const read = (path) => (existsSync(path) ? readFileSync(path, "utf8") : "");
+  await drive({
+    dir,
+    child,
+    claim,
+    stderr: () => stderr,
+    waitFor,
+    read,
+    later: () =>
+      read(join(dir, "later-prompts.log"))
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .map((l) => JSON.parse(l)),
+    ask: (name, thread, text) =>
+      writeFileSync(
+        join(dir, `s-1.ask.${name}.json`),
+        JSON.stringify({ at: "2026-10-24T10:20:00Z", thread, role: "ws/tester", text }),
+      ),
+  });
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  const { status, signal } = await exited;
+  clearTimeout(timer);
+  return { ...collect({ status, signal, stdout, stderr }), claimAfter: read(claim), claimPath: claim };
+}
+
+const ASK_TEXT = "Coordinator of thread thread-77: I have seen no activity from you for 20 minutes.";
+
+/** The door's whole round trip: the sidecar declares `ask: 1` in its claim once its handler is in
+ *  place; SIGUSR2 with an ask file delivers the ask as the NEXT user message while the running turn
+ *  is still running (the stub has it before the turn ends) and removes the file; SIGUSR2 without a
+ *  file is a no-op; the asked turn opens with a `turn_start` for its thread; and the door is
+ *  withdrawn from the claim before the process ends. */
+test("SIGUSR2 with an ask file yields the ask as the next user message; without one it is a no-op", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolUse, toolResult, result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, child, claim, waitFor, read, later, ask }) => {
+      await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      child.kill("SIGUSR2");
+      await waitFor("the empty signal to be absorbed", () => true);
+      ask("01jask0000000000000000000a", "thread-77", ASK_TEXT);
+      child.kill("SIGUSR2");
+      await waitFor("the ask to reach the runtime", () => later().length === 1);
+      assert.equal(later()[0].prompt, ASK_TEXT, "the ask's text, verbatim");
+      assert.equal(later()[0].doorOpen, true, "delivered mid-turn, the door still open");
+      assert.ok(
+        !existsSync(join(dir, "s-1.ask.01jask0000000000000000000a.json")),
+        "the ask file is taken",
+      );
+      assert.ok(!existsSync(join(dir, "release.txt")), "and the turn it was asked in is still running");
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.equal(run.signal, null, "SIGUSR2 never killed it");
+  assert.equal(run.query.prompt, "hi", "the trigger's message opens the main turn");
+  assert.deepEqual(
+    run.queries.length,
+    1,
+    "the ask went into the SAME query, not a round of its own",
+  );
+  const turns = appends(run.calls)
+    .flatMap((a) => a.entries)
+    .filter((e) => e.kind === "turn_start")
+    .map((e) => e.data.thread);
+  assert.deepEqual(turns, ["thread-77", "thread-77"], "one turn_start per opened turn");
+  assert.doesNotMatch(run.claimAfter, /ask: 1/, "the door is withdrawn before the end");
+  assert.deepEqual(replyCalls(run.calls), [], "coordinated: nothing is posted in its name");
+});
+
+/** **The door closes BEFORE the last drain** (must-fix, design review round 3 TQ #5 / IR #3, round 4
+ *  TQ #8 / IR #6): at the first `result` with no ask pending, `ask: 1` leaves the claim — so an ask
+ *  from then on reads `CannotAsk` at the engine and counts nothing — and only then are the files
+ *  present drained, as one final turn. */
+test("the door is withdrawn from the claim before the final drain, and a late ask is one final turn", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolUse, toolResult, result],
+      hangAt: 3,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, claim, waitFor, read, ask }) => {
+      await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      // An ask whose signal never came — the race at the close: its file is there when the turn's
+      // result arrives.
+      ask("01jask0000000000000000000b", "thread-77", ASK_TEXT);
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  const delivered = readFileSync(join(dirname(run.claimPath), "later-prompts.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l));
+  assert.equal(delivered.length, 1, "the late ask is delivered");
+  assert.equal(delivered[0].doorOpen, false, "AFTER the door left the claim");
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  const order = ["the ask door is open", "the ask door is closed", "sidecar done"].map((line) =>
+    run.stderr.indexOf(line),
+  );
+  assert.ok(order.every((i) => i >= 0), `stderr:\n${run.stderr}`);
+  assert.ok(order[0] < order[1] && order[1] < order[2], "declared, withdrawn, then done");
+  assert.equal(
+    appends(run.calls)
+      .flatMap((a) => a.entries)
+      .filter((e) => e.kind === "turn_start").length,
+    2,
+    "the late ask was delivered as one final turn, with its own turn_start",
+  );
+});
+
+/** An ask that arrives during the REMINDER round is drained into the reminder's own input. */
+test("an ask during the reminder round is delivered into the reminder", async (t) => {
+  const owes = JSON.stringify({
+    operations: [{ threads: [{ thread_id: "thread-77", outstanding: ["ws/tester"] }] }],
+  });
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, result],
+      laterRoundMessages: [init, toolUse, toolResult, result],
+      hangAt: 1,
+      hangInRound: 1,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": owes },
+    },
+    async ({ dir, child, waitFor, later, ask }) => {
+      await waitFor("the reminder to be running", () => existsSync(join(dir, "hanging.txt")));
+      ask("01jask0000000000000000000c", "thread-77", ASK_TEXT);
+      child.kill("SIGUSR2");
+      await waitFor("the ask to reach the reminder", () => later().length === 1);
+      assert.equal(later()[0].round, 1, "into the reminder's round");
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.equal(run.queries.length, 2, "the main turn and the reminder");
+});
+
+/** An error on the ASKED turn feeds the run's failure — and so the cause its end announces. */
+test("an error on the asked turn sets the cause the end announces", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolUse, toolResult, result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      askRoundMessages: [overloadedResult],
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, child, claim, waitFor, read, later, ask }) => {
+      await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      ask("01jask0000000000000000000d", "thread-77", ASK_TEXT);
+      child.kill("SIGUSR2");
+      await waitFor("the ask to reach the runtime", () => later().length === 1);
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  const ended = run.calls.find((c) => c.argv[0] === "session" && c.argv[1] === "ended");
+  assert.ok(ended, `stderr:\n${run.stderr}`);
+  const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
+  assert.match(cause, /ended without answering — .*error_during_execution/, cause);
+});
+
+// ---- the cause on `session ended` (nxf 6j6v.558h, B.8) ---------------------------------------------
+
+/** **The four former teardown texts, each as the cause of the end** (must-fix, design review round 2
+ *  IR #6; TQ #6): a coordinated session posts NOTHING whatever its end looked like, and announces its
+ *  end with the capped cause — what the coordinator chooses its rung by, beside (bound, entries), and
+ *  what its escalation names verbatim. */
+test("a coordinated session's end carries the cause, for each of the four former texts", () => {
+  const cases = [
+    {
+      name: "the runtime never ran it",
+      opts: { messages: A_529_AT_THE_DOOR, throwEveryRound: false },
+      cause: /^the runtime never ran this session — \d attempts?, last error: /,
+    },
+    {
+      name: "it ended without answering (error)",
+      opts: { messages: MODEL_OUTPUT_THEN_AN_ERROR },
+      cause: /^ended without answering — /,
+    },
+    {
+      name: "it was reminded and ended again",
+      opts: {
+        messages: [init, toolUse, toolResult, result],
+        nxcStdout: {
+          "status --thread": JSON.stringify({
+            operations: [{ threads: [{ thread_id: "thread-77", outstanding: ["ws/tester"] }] }],
+          }),
+        },
+      },
+      cause: /^reminded that thread thread-77 is waiting on its answer and ended again without one$/,
+    },
+    {
+      name: "it ended without ever posting a reply",
+      opts: {
+        messages: [init, toolUse, toolResult, result],
+        nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+      },
+      cause: /^ended$/,
+    },
+  ];
+  for (const c of cases) {
+    const run = runSidecar(
+      { after: () => {} },
+      { ...c.opts, spec: { replyThread: "thread-77", coordinated: true } },
+    );
+    assert.deepEqual(replyCalls(run.calls), [], `${c.name}: nothing posted in its name`);
+    const ended = run.calls.find((x) => x.argv[0] === "session" && x.argv[1] === "ended");
+    assert.ok(ended, `${c.name}: the end is announced\n${run.stderr}`);
+    const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
+    assert.match(cause, c.cause, `${c.name}: ${cause}`);
+    assert.ok(cause.length <= MAX_FAILURE_REPLY_CHARS, `${c.name}: capped`);
+    assert.equal(ended.argv[ended.argv.indexOf("--attempts") + 1].length > 0, true);
+  }
+});
+
+/** The field case of 2026-10-24: a child the session ran was killed (exit 137) and the session ended
+ *  without a reply — the cause now says so. */
+test("a session whose last tool call was killed names it in its cause", () => {
+  const killed = {
+    type: "user",
+    session_id: "real-1",
+    parent_tool_use_id: null,
+    message: {
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: "Exit code 137\nKilled" },
+      ],
+    },
+  };
+  const run = runSidecar(
+    { after: () => {} },
+    {
+      messages: [init, toolUse, killed, result],
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+  );
+  const ended = run.calls.find((x) => x.argv[0] === "session" && x.argv[1] === "ended");
+  const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
+  assert.equal(cause, "ended; its last failed tool call said: Exit code 137");
+});
+
+/** An `nxc` from before the cause refuses the flags; the end is announced without them. */
+test("an nxc that does not know --cause still hears the end", () => {
+  const run = runSidecar(
+    { after: () => {} },
+    {
+      messages: [init, result],
+      nxcFailures: {
+        "session ended": { status: 2, stderr: "error: unexpected argument '--cause' found\n" },
+      },
+    },
+  );
+  const ends = run.calls.filter((x) => x.argv[0] === "session" && x.argv[1] === "ended");
+  assert.equal(ends.length, 2, "tried with the cause, then without");
+  assert.deepEqual(ends[1].argv, ["session", "ended", "s-1"]);
 });

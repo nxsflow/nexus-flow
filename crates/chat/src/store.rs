@@ -359,7 +359,12 @@ pub(crate) fn acts(msg: &str) -> String {
 /// otherwise anybody who can reach the relay could answer for a member by writing a message that
 /// claims the member's name, and the round would move on.
 fn answers(msg: &str) -> String {
-    format!("({} AND {})", after_the_declaration(msg), acts(msg))
+    format!(
+        "({} AND {} AND {msg}.kind <> '{}')",
+        after_the_declaration(msg),
+        acts(msg),
+        crate::model::KIND_PROGRESS
+    )
 }
 
 /// **The turn watermark (nxf 6j6v.cg8g), written once.** Whether a message from alias `msg` was
@@ -3036,6 +3041,8 @@ pub(crate) mod tests {
             "owed_backfill_done",
             "stranded_suspects",
             "stranded_sessions",
+            // The ladder's record (nxf 6j6v.558h): the rungs this machine's coordinators ran.
+            "recovery_log",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store
@@ -3747,7 +3754,9 @@ pub(crate) mod tests {
                 // `NeedsRework`, and moved the terminator on rather than adding a second `break`.
                 // 6j6v.am8j arrived the same way again with `Accepted`, and moved it on again.
                 MessageKind::NeedsRework => MessageKind::Accepted,
-                MessageKind::Accepted => break,
+                // 6j6v.558h arrived the same way with `Progress`, and moved the terminator on.
+                MessageKind::Accepted => MessageKind::Progress,
+                MessageKind::Progress => break,
             };
         }
         all
@@ -4074,6 +4083,14 @@ pub(crate) mod tests {
             seed_thread(&mut s, "t-1", "c-1", "o/a", &["o/b"]);
             post_in_thread_of_kind(&mut s, "c-1", "t-1", "o/b", "I cannot do this", kind);
             let q = s.thread_quorum("t-1", NOW).unwrap().unwrap();
+            // **The one kind that is not an answer** (nxf 6j6v.558h): `--progress` says "still
+            // working" because a coordinator asked, and settles nothing.
+            if kind == MessageKind::Progress {
+                assert!(q.replied.is_empty(), "progress discharges nothing: {q:?}");
+                assert_eq!(q.outstanding, vec!["o/b"], "{q:?}");
+                assert!(!q.complete, "{q:?}");
+                continue;
+            }
             assert_eq!(
                 q.replied,
                 vec!["o/b"],

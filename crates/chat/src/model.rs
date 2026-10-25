@@ -297,7 +297,17 @@ pub enum MessageKind {
     /// supervisor, not the owner) and it holds no working copy. What it does is start the next step,
     /// and that step's own obligation is what takes the lease, exactly as on every other edge.
     Accepted,
+    /// **"Still working"** — `nxc reply --progress` (nxf 6j6v.558h), said ONLY because a coordinator
+    /// asked, in the words its ask used. It is NOT an answer: the discharge predicate excludes it
+    /// (`store::answers`), so it never settles a turn, never starts a step, never wakes an opener,
+    /// and the collected answers never carry it. What it does is reset the slot's silence clock and
+    /// its budget when an ask was pending; an unrequested one is stored and counts nothing.
+    Progress,
 }
+
+/// The label [`MessageKind::Progress`] is stored as in `messages.kind` — [`KIND_ESCALATION`]'s
+/// family once more, pinned by the same test, because the discharge predicate compares against it.
+pub const KIND_PROGRESS: &str = "progress";
 
 /// **The discriminants are written out because they are an ON-DISK FORMAT, not because a reader
 /// needs the numbers** (PR review of nxf epic 6j6v.bqe0). `working_tree_queue.priority` stores
@@ -514,6 +524,18 @@ mod tests {
                 .unwrap()
                 .as_str(),
             Some(KIND_NEEDS_REWORK)
+        );
+    }
+
+    #[test]
+    fn the_progress_marker_is_the_label_the_column_stores() {
+        // nxf 6j6v.558h. The discharge predicate EXCLUDES this label in SQL; a rename that drifted
+        // from `KIND_PROGRESS` would make every `--progress` discharge the slot it was meant to keep.
+        assert_eq!(
+            serde_json::to_value(MessageKind::Progress)
+                .unwrap()
+                .as_str(),
+            Some(KIND_PROGRESS)
         );
     }
 

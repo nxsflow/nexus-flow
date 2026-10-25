@@ -19,6 +19,8 @@ pub mod cli;
 pub mod guide;
 /// **A session that stopped because the model went away, and the way back** (nxf 6j6v.npy3).
 pub mod interruption;
+/// **The ladder: ask, continue, re-commission, escalate** (nxf 6j6v.558h).
+pub mod ladder;
 #[cfg(feature = "cli")]
 pub mod onboarding;
 

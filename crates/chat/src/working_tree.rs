@@ -769,6 +769,11 @@ fn hands_the_task_back(kind_label: &str) -> bool {
         // `every_message_kind_is_sorted_into_hand_back_or_conclusion_by_an_exhaustive_match` still
         // pins this arm by value.
         crate::model::MessageKind::Escalation | crate::model::MessageKind::Question => true,
+        // **A PROGRESS NOTE CONCLUDES NOTHING** (nxf 6j6v.558h): "still working" is the plainest
+        // statement that the task is mid-flight. The discharge predicate never counts it as an
+        // answer, so it is never the reply this reads; should it ever be, holding the copy is the
+        // benign direction.
+        crate::model::MessageKind::Progress => true,
         // **A VERDICT CONCLUDES, it does not hand the task back** (nxf 6j6v.553s (a)) — and this is
         // the arm the construction above exists to force somebody to think about, so here is the
         // thinking.
@@ -5133,6 +5138,8 @@ mod tests {
             ("task", false),
             ("needs_rework", false),
             ("accepted", false),
+            // nxf 6j6v.558h: "still working" — the task is mid-flight, so the copy stays.
+            ("progress", true),
         ];
         assert_eq!(
             table.len(),

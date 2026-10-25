@@ -60,6 +60,8 @@ struct Recorder {
     seen: Mutex<Vec<TriggerRequest>>,
     running: Mutex<HashSet<String>>,
     blind: Mutex<bool>,
+    /// Whether it claims the ask door — and so whether its slots are COORDINATED (nxf 6j6v.558h).
+    coordinating: Mutex<bool>,
 }
 
 impl Recorder {
@@ -98,6 +100,11 @@ impl Recorder {
     fn go_blind(&self) {
         *self.blind.lock().unwrap() = true;
     }
+
+    /// Claim the ask door: from now on its slots have a coordinator, and the ladder takes them up.
+    fn coordinate(&self) {
+        *self.coordinating.lock().unwrap() = true;
+    }
 }
 
 impl Worker for Recorder {
@@ -122,16 +129,17 @@ impl Worker for Recorder {
         !*self.blind.lock().unwrap()
     }
 
-    /// **It stands in for the sidecar, so it claims what the sidecar claims** (nxf 6j6v.kgfn): a
-    /// slot is owed a row only when the worker on this device can look, stop and ask
-    /// (`coordinator_of`, clause 4). Nothing here is ever stopped or asked — the claim is what
-    /// makes these slots coordinated, which is the shape this file is about.
+    /// **It looks and it stops, and it asks only when a test says so** (nxf 6j6v.558h). This file is
+    /// cut 1a's: the stranded record and its escalation, which since the ladder are what a slot
+    /// NOBODY COORDINATES gets — so by default the door is not claimed (`coordinator_of`, clause 4),
+    /// and the slots here keep cut 1a's behaviour in full. The tests about a coordinated slot claim
+    /// it with [`Recorder::coordinate`]; what its coordinator then does is `the_ladder.rs`'s.
     fn stops_sessions(&self) -> bool {
         self.answers_liveness()
     }
 
     fn asks_sessions(&self) -> bool {
-        self.answers_liveness()
+        self.answers_liveness() && *self.coordinating.lock().unwrap()
     }
 }
 
@@ -1486,8 +1494,45 @@ fn a_dead_step_is_not_advanced_past_and_the_round_escalates_at_the_record() {
     );
 }
 
-/// **AC 3 (b)** — the hung case is KEPT (nxf 6j6v.rs9k): a verifier still RUNNING past its window,
-/// with no declared-input consumer behind it, is advanced past exactly as before, finding unchanged.
+/// **AC 3 (b), rewritten by the ladder** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, "never settled
+/// by staleness"; the pin rs9k left inverted): a verifier still RUNNING past its window is NOT
+/// advanced past when its slot has a coordinator. The window settles nothing for it: the tick
+/// waits, says that the coordinator is taking the step up, opens no judge and records nothing —
+/// the coordinator's silence clock is what acts on a live session. Its sibling below keeps rs9k's
+/// behaviour for a slot nobody coordinates.
+#[test]
+fn a_hung_step_with_a_live_process_is_not_advanced_past_while_its_coordinator_owns_it() {
+    let team = team(&[PB9Y_NO_INPUT]);
+    team.worker.coordinate();
+    let (root, started) = team.built();
+    let (v, _v_slot) = team.last("verifier");
+    team.worker.mark_running(&v);
+    let r = team.tick(&at_from(&started, 121), &root);
+    assert_ne!(r.reason, "advanced", "{:?}", classes(&r.warnings));
+    assert_eq!(team.counts(), [1, 1, 0, 0], "judge is not opened");
+    assert!(
+        r.warnings
+            .iter()
+            .all(|f| f.class != ConsequenceClass::StepUnanswered),
+        "nothing lapsed: {:?}",
+        classes(&r.warnings)
+    );
+    assert!(
+        r.warnings
+            .iter()
+            .any(|f| f.detail.contains("its coordinator is taking it up")),
+        "{:?}",
+        r.warnings.iter().map(|f| &f.detail).collect::<Vec<_>>()
+    );
+    // Long past the window, still running: still not settled, still nothing recorded.
+    team.tick(&at_from(&started, 1_000), &root);
+    assert_eq!(team.counts(), [1, 1, 0, 0]);
+    assert!(team.records().is_empty());
+}
+
+/// **AC 3 (b)'s sibling** — the hung case is KEPT for a slot NOBODY COORDINATES (nxf 6j6v.rs9k): a
+/// verifier still RUNNING past its window, with no declared-input consumer behind it, under a
+/// worker that cannot ask its sessions, is advanced past exactly as before, finding unchanged.
 #[test]
 fn a_hung_step_with_a_live_process_is_still_advanced_past() {
     let team = team(&[PB9Y_NO_INPUT]);

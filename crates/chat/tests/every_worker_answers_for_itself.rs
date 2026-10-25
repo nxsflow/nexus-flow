@@ -94,6 +94,11 @@ const DEFAULTED: &[&str] = &[
     // of a capable host back into an uncoordinated one, and the sidecar would post its substitute
     // for slots a coordinator is about to recover.
     "asks_sessions",
+    // **The ninth, the act behind the eighth, added in the same change that added it to the trait**
+    // (nxf 6j6v.558h). The question and the act travel together, as `stops_sessions` and
+    // `stop_session` do: a delegator that forwards `asks_sessions` and rests on the default
+    // `CannotAsk` here would claim the door and then never open it.
+    "ask_session",
 ];
 
 struct Implementor {
@@ -109,7 +114,10 @@ use Answers::{ForItself, OnTheDefault};
 const IMPLEMENTORS: &[Implementor] = &[
     Implementor {
         name: "BoundedWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
+            ForItself,
+        ],
         why: "A DELEGATOR: it wraps a host-supplied worker to bound `trigger`. Anything it does not \
               forward is answered for a third party that may well know better, so it forwards. \
               Neither READ is bounded on its own thread the way `trigger` is — a conforming \
@@ -125,13 +133,15 @@ const IMPLEMENTORS: &[Implementor] = &[
               a host that can stop its own sessions would be reported as unable to, and a \
               withdrawal of a running round would refuse by name for a runtime that can. The \
               eighth is the same argument about the coordinator: a host that can ask its sessions \
-              would have every slot read as uncoordinated. Neither \
+              would have every slot read as uncoordinated, and the ninth is its act: a delegator \
+              resting on `CannotAsk` would claim the door and never open it. Neither \
               is bounded on its own thread — a conforming `stop_session` DELIVERS a signal and \
               returns, which is the same local-state promise the reads make.",
     },
     Implementor {
         name: "DryWorker",
         answers: &[
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -156,11 +166,14 @@ const IMPLEMENTORS: &[Implementor] = &[
               can stop nothing, for the reason it starts nothing: there is no process of its own to \
               signal, and a `true` here would have a withdrawal believe a stop was delivered to a \
               session that goes on running. And it asks nothing, for the same reason: there is no \
-              running session of its own to reach.",
+              running session of its own to reach, and `CannotAsk` is the truth of the act.",
     },
     Implementor {
         name: "SidecarWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
+            ForItself,
+        ],
         why: "The only worker in this crate that owns real processes. Liveness comes off the pid \
               file its own `SessionLock` already writes at every trigger — same file, same parse, \
               same identity check, and the residual that type documents: content that does not \
@@ -185,11 +198,15 @@ const IMPLEMENTORS: &[Implementor] = &[
               so exactly where the liveness read can be asked, on the one platform condition both \
               share. The eighth is that condition once more: the ask door is a file beside the \
               spec and a signal through the same pid claim, so it can be asked exactly where the \
-              stop can be sent.",
+              stop can be sent, and the ninth writes that file and sends that signal — only to a \
+              claim that declares `ask: 1`, which the sidecar writes after its handler is installed.",
     },
     Implementor {
         name: "LazyWorker",
-        answers: &[ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself],
+        answers: &[
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
+            ForItself,
+        ],
         why: "A DELEGATOR, and the one this gate exists for: `cli.rs` resolves the worker per call \
               from the environment, so EVERY command-line call passes through it. It forwarded only \
               `trigger`, the default answered for the selected worker, and the gate that keeps two \
@@ -205,11 +222,12 @@ const IMPLEMENTORS: &[Implementor] = &[
               the FOURTH instance of this class at this wrapper, caught by review rather than by \
               this gate, because a new defaulted method does not add its own row above. The sixth \
               and seventh were added here in the same change that added them to the trait, so \
-              this row is the gate for them rather than the apology. The eighth likewise.",
+              this row is the gate for them rather than the apology. The eighth and ninth likewise.",
     },
     Implementor {
         name: "DisabledWorker",
         answers: &[
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -228,7 +246,7 @@ const IMPLEMENTORS: &[Implementor] = &[
               a handle that refuses to start anything has no directory it starts things in. And it continues nothing for the reason it starts nothing. \
               And it stops nothing on the same ground: a session it never started is not its to \
               signal, and the named refusal is the truth rather than a decline. And it asks nothing: a \
-              session it never started is not one it can reach.",
+              session it never started is not one it can reach, so `CannotAsk` is the truth.",
     },
 ];
 
