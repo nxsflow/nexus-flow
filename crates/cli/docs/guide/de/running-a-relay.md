@@ -281,6 +281,25 @@ zusammen wird abgewiesen, bevor etwas gesendet wird —, und ein Relay, das das 
 403), ergibt einen `forbidden`-Fehler, der den Status nennt. Ohne das Flag nimmt das Verb wie bisher,
 was die Relay-URL trägt.
 
+`nxs sync run --bearer-stdin` führt den Durchlauf selbst ebenso aus — den Schritt, den ein
+basierter Schnappschuss zuerst braucht, weil er sich weigert, solange diese Maschine Ops hält, die
+sie nicht gepusht hat. Ein erster Push kann lange dauern, und ein kurzlebiges Token kann mitten darin
+ablaufen. Das kostet nichts: Jeder Durchlauf schreibt seine Position nach jedem Batch, den das Relay
+bestätigt, und nach jeder Seite, die er anwendet, nach `.nxs/sync.toml`. Ein Token, das das Relay
+angenommen hat und unterwegs ablehnt, beendet den Durchlauf daher als `token_expired` mit
+Exit-Code 75, und derselbe Befehl mit einem frischen Token macht beim letzten bestätigten Batch
+weiter:
+
+```bash
+get-my-token | nxs sync run --bearer-stdin      # Exit 75: Token abgelaufen, mit frischem erneut ausführen
+get-my-token | nxs sync run --bearer-stdin      # setzt fort; pusht nur, was nie bestätigt wurde
+get-my-token | nxs sync snapshot board.snapshot --based --bearer-stdin
+```
+
+Ein Token, das schon bei der ersten Anfrage abgelehnt wird, ist wie beim Schnappschuss `forbidden`
+(Exit 1): Bevor das Relay es einmal angenommen hat, unterscheidet nichts ein abgelaufenes Token von
+einem falschen.
+
 Eine App, die nxs einbettet — ein gehostetes Brett, das kalt startet —, macht dasselbe über
 `nxs_sync::snapshot::{export, import}`: von einem Replikat exportieren, das auf Stand ist (der Export
 bestätigt die Position beim Relay), die Bytes dort ablegen, wo die App ihnen traut, und beim nächsten

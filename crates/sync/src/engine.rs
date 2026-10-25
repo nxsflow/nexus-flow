@@ -518,6 +518,32 @@ impl PassBudget for Unbounded {
     }
 }
 
+/// Told every time a watermark moves (6j6v.2tn0) — after each push request the relay acknowledged
+/// and after each pull page that was applied, never mid-request and never for a page that moved
+/// nothing.
+///
+/// **This is what makes a pass resumable from disk, not only from memory.** The engine has always
+/// advanced `pushed_through` per batch and `pulled_through` per page, but in the caller's memory: a
+/// pass that is killed — or whose 15-minute bearer token runs out three hundred batches into a
+/// first import — kept nothing on disk until it returned. A checkpoint lets the caller write each
+/// position down as it is reached, so the next pass, under a fresh token, starts at the last batch
+/// the relay acknowledged and re-pushes none of it.
+///
+/// An error stops the pass at once and is returned as the pass's error: pushing on past a position
+/// the caller could not keep would only widen what has to be pushed again.
+pub trait Checkpoint {
+    fn reached(&mut self, marks: &Watermarks) -> Result<(), SyncError>;
+}
+
+/// No checkpoint: the caller keeps the watermarks only from what [`sync`] leaves in `marks`.
+pub struct NoCheckpoint;
+
+impl Checkpoint for NoCheckpoint {
+    fn reached(&mut self, _marks: &Watermarks) -> Result<(), SyncError> {
+        Ok(())
+    }
+}
+
 /// Hard per-pass ceiling on pull pages: without one, the pull loop follows `next` until the
 /// relay reports the stream exhausted, and a relay that keeps returning a FULL page with an
 /// ADVANCING cursor — buggy, compromised, or just serving a pathologically large stream — wedges
@@ -553,6 +579,33 @@ pub fn sync(
         PULL_PAGE_CEILING,
         MAX_PUSH_BYTES,
         budget,
+        &mut NoCheckpoint,
+    )
+}
+
+/// [`sync`], telling `checkpoint` every position the pass reaches as it reaches it (6j6v.2tn0).
+#[allow(clippy::too_many_arguments)]
+pub fn sync_checkpointed(
+    store: &mut Store,
+    local_site: i64,
+    stream: &StreamId,
+    marks: &mut Watermarks,
+    transport: &dyn Transport,
+    page_limit: usize,
+    budget: &dyn PassBudget,
+    checkpoint: &mut dyn Checkpoint,
+) -> Result<SyncOutcome, SyncError> {
+    sync_with_pull_ceiling(
+        store,
+        local_site,
+        stream,
+        marks,
+        transport,
+        page_limit,
+        PULL_PAGE_CEILING,
+        MAX_PUSH_BYTES,
+        budget,
+        checkpoint,
     )
 }
 
@@ -575,6 +628,7 @@ fn sync_with_pull_ceiling(
     pull_page_ceiling: usize,
     push_body_ceiling: usize,
     budget: &dyn PassBudget,
+    checkpoint: &mut dyn Checkpoint,
 ) -> Result<SyncOutcome, SyncError> {
     // A zero page would panic `chunks(0)` in push (and spin the pull loop). The sole caller
     // passes a fixed non-zero limit, but `sync` is `pub`, so clamp once here rather than
@@ -605,7 +659,7 @@ fn sync_with_pull_ceiling(
         let split = split_by_body_size(page, push_body_ceiling);
         for batch in split.batches {
             if let Some((op_id, bytes)) =
-                push_halving_on_413(transport, stream, batch, marks, &mut pushed)?
+                push_halving_on_413(transport, stream, batch, marks, &mut pushed, checkpoint)?
             {
                 too_large = Some((op_id, bytes, None));
                 break 'pages;
@@ -660,6 +714,8 @@ fn sync_with_pull_ceiling(
             // The cursor did not move: the relay has nothing beyond here. The one true stop.
             break;
         }
+        // The page is applied and the cursor moved: that position is durable now (6j6v.2tn0).
+        checkpoint.reached(marks)?;
         pull_pages += 1;
         if page_was_empty {
             // Counted only for a page whose cursor DID move — an empty page that also stands still
@@ -710,20 +766,24 @@ fn push_halving_on_413(
     batch: &[(i64, WireOp)],
     marks: &mut Watermarks,
     pushed: &mut usize,
+    checkpoint: &mut dyn Checkpoint,
 ) -> Result<Option<(String, usize)>, SyncError> {
     let ops: Vec<WireOp> = batch.iter().map(|(_, w)| w.clone()).collect();
     match transport.push(stream, &ops) {
         Ok(()) => {
             marks.pushed_through = batch.last().expect("a pushed run is non-empty").0;
             *pushed += batch.len();
+            checkpoint.reached(marks)?;
             Ok(None)
         }
         Err(e) if e.is_too_large() && batch.len() > 1 => {
             let (head, tail) = batch.split_at(batch.len() / 2);
-            if let Some(refused) = push_halving_on_413(transport, stream, head, marks, pushed)? {
+            if let Some(refused) =
+                push_halving_on_413(transport, stream, head, marks, pushed, checkpoint)?
+            {
                 return Ok(Some(refused));
             }
-            push_halving_on_413(transport, stream, tail, marks, pushed)
+            push_halving_on_413(transport, stream, tail, marks, pushed, checkpoint)
         }
         Err(e) if e.is_too_large() => {
             let (_, op) = &batch[0];
@@ -1691,6 +1751,99 @@ mod tests {
         );
     }
 
+    /// The watermarks reach the caller after EVERY push request that landed and EVERY pull page that
+    /// was applied, not only once the pass returns (6j6v.2tn0): a pass killed between two batches
+    /// leaves on disk exactly what the relay acknowledged.
+    #[test]
+    fn every_landed_push_batch_and_every_applied_pull_page_is_checkpointed() {
+        let stream = StreamId("s".into());
+        let relay = MemTransport::new();
+        let mut a = Store::open_in_memory(1);
+        for i in 1..=4 {
+            a.create_item(&format!("aaaa.000{i}"), "task", "t", "alice");
+        }
+        let total = local_ops_since(a.connection(), 1, 0).unwrap().len() as i64;
+        assert_eq!(total, 12, "fixture: 4 creates of 3 ops each");
+
+        struct Recorded(Vec<Watermarks>);
+        impl Checkpoint for Recorded {
+            fn reached(&mut self, marks: &Watermarks) -> Result<(), SyncError> {
+                self.0.push(*marks);
+                Ok(())
+            }
+        }
+        let mut seen = Recorded(Vec::new());
+        let mut ma = Watermarks::default();
+        sync_checkpointed(
+            &mut a, 1, &stream, &mut ma, &relay, 5, &Unbounded, &mut seen,
+        )
+        .unwrap();
+
+        let at = |pushed_through, pulled_through| Watermarks {
+            pushed_through,
+            pulled_through,
+        };
+        assert_eq!(
+            seen.0,
+            vec![
+                // One per push batch: 5 + 5 + 2.
+                at(5, 0),
+                at(10, 0),
+                at(12, 0),
+                // One per pull page whose cursor moved; the standstill page that ends the pass
+                // moved nothing and is not reported.
+                at(12, 5),
+                at(12, 10),
+                at(12, 12),
+            ]
+        );
+        assert_eq!(
+            ma,
+            at(12, 12),
+            "the pass ends where the last checkpoint stood"
+        );
+    }
+
+    /// A checkpoint that cannot be recorded stops the pass right there: nothing more is pushed past
+    /// a position the caller could not keep.
+    #[test]
+    fn a_checkpoint_that_fails_stops_the_pass_before_the_next_request() {
+        let stream = StreamId("s".into());
+        let relay = MemTransport::new();
+        let mut a = Store::open_in_memory(1);
+        for i in 1..=4 {
+            a.create_item(&format!("aaaa.000{i}"), "task", "t", "alice");
+        }
+        struct FailsOnSecond(usize);
+        impl Checkpoint for FailsOnSecond {
+            fn reached(&mut self, _: &Watermarks) -> Result<(), SyncError> {
+                self.0 += 1;
+                if self.0 == 2 {
+                    return Err(SyncError::Storage("disk full".into()));
+                }
+                Ok(())
+            }
+        }
+        let mut ma = Watermarks::default();
+        let err = sync_checkpointed(
+            &mut a,
+            1,
+            &stream,
+            &mut ma,
+            &relay,
+            5,
+            &Unbounded,
+            &mut FailsOnSecond(0),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SyncError::Storage(_)), "{err}");
+        assert_eq!(
+            relay.push_batches.borrow().clone(),
+            vec![5, 5],
+            "the third batch was never sent"
+        );
+    }
+
     /// A relay that refuses a push body over `ceiling` the way the real one does (413 from its
     /// `DefaultBodyLimit`), measuring the body exactly as `HttpTransport` sends it, and records the
     /// size of every body it accepted.
@@ -1757,6 +1910,7 @@ mod tests {
             PULL_PAGE_CEILING,
             ceiling,
             &Unbounded,
+            &mut NoCheckpoint,
         )
     }
 
@@ -2775,6 +2929,7 @@ mod tests {
             ceiling,
             MAX_PUSH_BYTES,
             &Unbounded,
+            &mut NoCheckpoint,
         )
         .unwrap();
 
@@ -2804,6 +2959,7 @@ mod tests {
             ceiling,
             MAX_PUSH_BYTES,
             &Unbounded,
+            &mut NoCheckpoint,
         )
         .unwrap();
         assert!(outcome2.pull_ceiling_hit);
@@ -2913,6 +3069,7 @@ mod tests {
             20_000,
             MAX_PUSH_BYTES,
             &budget,
+            &mut NoCheckpoint,
         )
         .unwrap();
 
@@ -2947,6 +3104,7 @@ mod tests {
             20_000,
             MAX_PUSH_BYTES,
             &AfterPages::new(3),
+            &mut NoCheckpoint,
         )
         .unwrap();
         let after_first = ma.pulled_through;
@@ -2962,6 +3120,7 @@ mod tests {
             20_000,
             MAX_PUSH_BYTES,
             &AfterPages::new(3),
+            &mut NoCheckpoint,
         )
         .unwrap();
         assert!(
@@ -2987,6 +3146,7 @@ mod tests {
             20_000,
             MAX_PUSH_BYTES,
             &Unbounded,
+            &mut NoCheckpoint,
         )
         .unwrap();
         assert!(!outcome.budget_exhausted);
@@ -3010,6 +3170,7 @@ mod tests {
             20_000,
             MAX_PUSH_BYTES,
             &AfterPages::new(4),
+            &mut NoCheckpoint,
         )
         .unwrap();
         assert_eq!(
@@ -3036,6 +3197,7 @@ mod tests {
             4,
             MAX_PUSH_BYTES,
             &Unbounded,
+            &mut NoCheckpoint,
         )
         .unwrap();
         assert_eq!(outcome.pull_pages, 4);
