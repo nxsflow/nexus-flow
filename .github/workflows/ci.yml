@@ -48,6 +48,11 @@ permissions:
 jobs:
   quality-gates:
     runs-on: ubuntu-latest
+    # About twice a normal run (45-80 min over the last 30 green runs on main). Without it a hang
+    # costs GitHub's 6-hour default: on 2026-10-25 three hung lease tests held this job for ~2h
+    # until it was cancelled by hand (nxf 6j6v.6n9m). A run that outgrows the budget by honest
+    # growth fails here loudly; raise the number then, with the new durations beside it.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
       # ---- room for both profiles AND the cache save (nxf 6j6v.z5ae) ------------------------
@@ -521,6 +526,8 @@ jobs:
   # the `postgres` feature compiles the backend + the parity suite in.
   postgres-parity:
     runs-on: ubuntu-latest
+    # About twice the slowest of the last 30 green runs (3-11 min); see `quality-gates`.
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -591,6 +598,9 @@ jobs:
   # becomes testable precisely because the CA is private.
   postgres-tls:
     runs-on: ubuntu-latest
+    # Normally under 2 min; the margin is for a cold cache's compile, not for the tests. See
+    # `quality-gates`.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -743,11 +753,11 @@ jobs:
     concurrency:
       group: managed-postgres
       cancel-in-progress: false
-    # Same budget as `quality-gates` and the platform gates, and it matters more here than on any
-    # of them: this job is meant to become a REQUIRED check, and every step in it talks to a
-    # third-party endpoint over the internet. A stall with no ceiling would hold the merge gate
-    # open instead of failing fast — the opposite of what a blocking check is for. The probe's own
-    # `connect_timeout` bounds each connection; this bounds the job.
+    # The platform gates' budget, and it matters more here than on any of them: this job is meant
+    # to become a REQUIRED check, and every step in it talks to a third-party endpoint over the
+    # internet. A stall with no ceiling would hold the merge gate open instead of failing fast —
+    # the opposite of what a blocking check is for. The probe's own `connect_timeout` bounds each
+    # connection; this bounds the job.
     timeout-minutes: 30
     env:
       # The same variable the suites already key on, so the preflight and the suites can never
@@ -860,6 +870,8 @@ jobs:
   # way it already does for the postgres job above.
   dynamodb-local:
     runs-on: ubuntu-latest
+    # About twice a normal run (28-62 min over the last 30 green runs); see `quality-gates`.
+    timeout-minutes: 120
     services:
       dynamodb-local:
         image: amazon/dynamodb-local:latest
@@ -935,6 +947,8 @@ jobs:
   # Process: docs/runbooks/dependency-vulnerabilities.md.
   dependency-audit:
     runs-on: ubuntu-latest
+    # Normally about a minute; the margin covers a cold cargo-deny install. See `quality-gates`.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
