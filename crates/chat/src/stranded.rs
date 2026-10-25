@@ -1814,6 +1814,11 @@ pub(crate) fn reconcile_stranded_sessions(
         if let Err(e) = store.forget_stranded_before(&cutoff) {
             eprintln!("warning: old stranded records could not be dropped: {e}");
         }
+        // The ladder's record, for the same month (nxf 6j6v.558h), and the obligations kept for
+        // queued triggers that are no longer queued.
+        if let Err(e) = store.forget_recovery_before(&cutoff) {
+            eprintln!("warning: old recovery records could not be dropped: {e}");
+        }
     }
     findings
 }

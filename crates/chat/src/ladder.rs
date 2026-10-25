@@ -333,6 +333,29 @@ impl ChatStore {
             .collect())
     }
 
+    /// **Retention** of the ladder's record: drop the rows older than `cutoff`, compared as
+    /// instants; and the obligations kept for queued triggers that are no longer in the queue.
+    pub(crate) fn forget_recovery_before(&mut self, cutoff: &str) -> Result<usize> {
+        let conn = self.connection();
+        let rows: Vec<(i64, String)> = {
+            let mut st = conn.prepare("SELECT id, at FROM recovery_log")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut gone = 0;
+        for (id, _) in rows.iter().filter(|(_, at)| earlier(at, cutoff)) {
+            gone += conn.execute("DELETE FROM recovery_log WHERE id = ?1", [id])?;
+        }
+        conn.execute(
+            "DELETE FROM queued_obligations WHERE NOT EXISTS (
+                 SELECT 1 FROM working_tree_queue q
+                  WHERE q.session = queued_obligations.session
+                    AND q.thread = queued_obligations.thread)",
+            [],
+        )?;
+        Ok(gone)
+    }
+
     /// Mark the slot asked at `now`.
     pub(crate) fn set_asked(&mut self, thread: &str, role: &str, now: &str) -> Result<()> {
         self.connection().execute(

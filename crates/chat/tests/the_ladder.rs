@@ -201,6 +201,12 @@ impl Timer for Book {
 const QUICK: &str = "name: quick\nmembers: [verifier, finisher]\nflow: sequential\ntimeout: 2h\n";
 /// A review round of two, in parallel, two hours long.
 const REVIEW: &str = "name: review\nmembers: [verifier, reviewer]\nflow: parallel\ntimeout: 2h\n";
+/// A build/check cycle with a back edge, two-minute windows — for `--accept`.
+const CYCLE: &str = "name: cycle\nmembers: [coder, reviewer, finisher]\ntimeout: 2m\nsteps:\n  \
+                     - id: build\n    target: coder\n    next: check\n  \
+                     - id: check\n    target: reviewer\n    on_needs_rework: build\n    \
+                     max_passes: 3\n    next: ship\n  \
+                     - id: ship\n    target: finisher\n";
 /// A coding chain whose second step is the review round — a nested round.
 const CODING: &str = "name: coding\nmembers: [coder, review]\nflow: sequential\ntimeout: 2h\n";
 
@@ -221,7 +227,7 @@ fn role(handle: &str) -> RoleDecl {
 fn team() -> Team {
     let tmp = TempDir::new().unwrap();
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
-    let channels: Vec<ChannelDecl> = [QUICK, REVIEW, CODING]
+    let channels: Vec<ChannelDecl> = [QUICK, REVIEW, CODING, CYCLE]
         .iter()
         .map(|c| serde_yaml::from_str(c).expect("channel parses"))
         .collect();
@@ -765,6 +771,25 @@ fn a_slot_that_never_got_a_session_is_recommissioned_with_its_original_body_into
     assert!(
         team.status_of(&at(180), &slot).stranded.is_none(),
         "no record, no escalation"
+    );
+    // **The member's window is armed onto the new session** (must-fix, design review round 2 CQ
+    // #3) — here the channel's declared two hours, since the failed mint never armed one.
+    let (armed_for, window, deadline): (String, i64, String) = team
+        .store()
+        .connection()
+        .query_row(
+            "SELECT session, window_secs, deadline FROM channel_member_deadline WHERE thread_id = ?1",
+            [&slot],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("a member clock");
+    assert_eq!(
+        (armed_for.as_str(), window, deadline.as_str()),
+        (
+            fresh.internal_session.as_str(),
+            7_200,
+            at(180 + 7_200).as_str()
+        )
     );
 
     // The member answers; the round consolidates once. (The fan-out stopped at the failed mint, so
@@ -1786,4 +1811,71 @@ fn field_case_2c_a_held_answer_for_a_parent_with_no_live_process_is_delivered_on
         "{}",
         woken[0].message
     );
+}
+
+// ---- `--accept` names a recovering slot ------------------------------------------------------------
+
+/// **`--accept`'s refusal names a slot its coordinator is recovering** (nxf 6j6v.558h): the rework
+/// step past its window is neither silent nor dead — its coordinator owns it — and accepting over it
+/// would open the next step beside it, so the refusal says which thread is being recovered.
+#[test]
+fn an_acceptance_over_a_recovering_slot_is_refused_and_names_it() {
+    let team = team();
+    team.commission(T0, "pm", "ship it");
+    let pm = team.worker.last("pm").internal_session;
+    let board = team
+        .session_sends(T0, "pm", &pm, "cycle", "build the thing")
+        .thread_id;
+    let coder = team.worker.last("coder");
+    team.reply(
+        &at(10),
+        "coder",
+        &coder.internal_session,
+        coder.reply_thread.as_deref().unwrap(),
+        "first cut is in",
+    );
+    let reviewer = team.worker.last("reviewer");
+    team.with(
+        &at(20),
+        "reviewer",
+        Some(&reviewer.internal_session),
+        |ctx, store| {
+            surface::reply_in_thread(
+                ctx,
+                store,
+                ReplyThreadRequest {
+                    machine: None,
+                    thread: reviewer.reply_thread.as_deref().unwrap(),
+                    body: "not yet",
+                    escalate: false,
+                    needs_rework: true,
+                    accept: false,
+                },
+            )
+        },
+    )
+    .expect("the verdict is posted");
+    let rework = team.worker.last("coder").reply_thread.unwrap();
+    // The rework step: past its two-minute window, its session alive — its coordinator owns it.
+    team.worker.run(&team.worker.last("coder").internal_session);
+    let err = team
+        .with(&at(400), "pm", Some(&pm), |ctx, store| {
+            surface::reply_in_thread(
+                ctx,
+                store,
+                ReplyThreadRequest {
+                    machine: None,
+                    thread: &board,
+                    body: "ship it anyway",
+                    escalate: false,
+                    needs_rework: false,
+                    accept: true,
+                },
+            )
+        })
+        .expect_err("refused");
+    let err = err.to_string();
+    assert!(err.contains("this round is still moving"), "{err}");
+    assert!(err.contains("its coordinator is recovering"), "{err}");
+    assert!(err.contains(&rework), "names the slot: {err}");
 }

@@ -5292,6 +5292,25 @@ fn note_the_park_was_resumed(ctx: &Ctx, store: &mut ChatStore, id: i64) {
 /// only caller's breadcrumb says the entry "could not be started … nothing is running for it", which
 /// is true of an early return and false of anything after [`trigger_role`]. Work that follows the
 /// trigger is therefore best-effort with a breadcrumb of its own, never a `?`.
+/// The window a supervised slot's channel declares (`timeout:`), in seconds — `None` for a slot no
+/// declared channel supervises, or one whose channel declares no window.
+fn declared_window_of_slot(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Option<i64>> {
+    let Some(channel_thread) = supervising_parent(store, thread)? else {
+        return Ok(None);
+    };
+    let Some(q) = store.thread_quorum(&channel_thread, ctx.now)? else {
+        return Ok(None);
+    };
+    let Some(timeout) = declared_channel_of(ctx, &q).and_then(|c| c.timeout.clone()) else {
+        return Ok(None);
+    };
+    Ok(
+        facade::resolve_deadline_spec(ctx.now, &timeout, "the channel's declared `timeout`")?
+            .window
+            .map(|w| w.whole_seconds()),
+    )
+}
+
 /// **The bound of a child round a session opened** (nxf 6j6v.558h): `clamp(parent_remaining_window,
 /// 30 min, 2 h)` from now — never less than half an hour and never more than two, whatever the
 /// parent has left. A parent with no window of its own gives the child the most it may have.
@@ -5421,13 +5440,19 @@ pub(crate) fn ladder_recommission(
             queued_since: None,
         },
     )?;
-    if let Some(armed) = store.member_deadline(thread)? {
+    // The member's window moves onto the new session — the one armed before, or, for a slot whose
+    // first mint failed before any was armed, the window its channel declares.
+    let window = match store.member_deadline(thread)? {
+        Some(armed) => Some(armed.window_secs),
+        None => declared_window_of_slot(ctx, store, thread)?,
+    };
+    if let Some(window_secs) = window {
         let deadline = facade::instant_after(
             ctx.now,
-            time::Duration::seconds(armed.window_secs),
+            time::Duration::seconds(window_secs),
             &format!("the declared timeout of member thread {thread}"),
         )?;
-        store.arm_member_deadline(thread, &internal, armed.window_secs, &deadline)?;
+        store.arm_member_deadline(thread, &internal, window_secs, &deadline)?;
     }
     Ok(admission)
 }
