@@ -97,10 +97,13 @@ fn started_n(root: &Path, n: usize) -> Vec<Value> {
     }
 }
 
-/// Every spec the stub sidecar was handed so far, oldest first.
+/// Every spec the stub sidecar has finished writing, oldest first. Only newline-terminated lines
+/// count: the newline is the last byte of each append, so a line without it is still being written
+/// (nxf 6j6v.b53g).
 fn started(root: &Path) -> Vec<Value> {
-    std::fs::read_to_string(root.join("stub.log"))
-        .unwrap_or_default()
+    let log = std::fs::read_to_string(root.join("stub.log")).unwrap_or_default();
+    let finished = log.rfind('\n').map_or("", |end| &log[..end]);
+    finished
         .lines()
         .map(|l| serde_json::from_str(l).expect("a spec"))
         .collect()
@@ -297,6 +300,24 @@ fn escalations_in(root: &Path, thread: &str) -> usize {
 /// not record and escalate: its coordinator CONTINUES the same session — the real sidecar worker
 /// starts the sidecar on the same internal session, resuming the runtime session it bound, told
 /// which thread waits and what the task was. The transcript is intact.
+/// The stub appends each spec as one line, but a concurrent reader can see that append half done —
+/// a spec past 4 KiB was read cut at column 4096 on CI (nxf 6j6v.b53g). A line without its newline is
+/// still being written, so `started` must leave it for the next poll instead of parsing it.
+#[test]
+fn a_spec_line_the_stub_is_still_appending_is_not_read_yet() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("stub.log"),
+        "{\"session\":\"one\"}\n{\"session\":\"tw",
+    )
+    .unwrap();
+
+    let got = started(tmp.path());
+
+    assert_eq!(got.len(), 1, "only the finished line is a spec: {got:?}");
+    assert_eq!(got[0]["session"], "one");
+}
+
 #[test]
 fn a_session_that_ended_owing_an_answer_is_continued_in_the_same_session() {
     let tmp = workspace();
