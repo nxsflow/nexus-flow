@@ -968,6 +968,18 @@ pub fn trigger_role(
             if let Some((behind, position, findings)) =
                 acquire_or_queue(ctx, store, &scope, &entry)?
             {
+                // **The obligation travels with the queued entry** (nxf 6j6v.558h, field case 4):
+                // the release fires it with the reply thread it was queued with, rather than
+                // re-deriving one at a moment the derivation may no longer hold.
+                if let Err(e) =
+                    store.note_queued_obligation(&internal_session, thread, reply_thread)
+                {
+                    eprintln!(
+                        "warning: the obligation of the queued trigger for session \
+                         {internal_session} could not be kept with it: {e}; the release derives it \
+                         again"
+                    );
+                }
                 return Ok(TriggerAdmission::Queued {
                     behind,
                     position,
@@ -5444,13 +5456,21 @@ fn fire_queued_trigger(
     let decl = ctx.defs.role(&entry.role)?.clone();
     let hop = CheckedHop(check_depth_guard(entry.depth.saturating_sub(1))?);
     let resume_real = store.resolve_real(&entry.session)?;
-    let owes = facade::owes_reply(
-        store,
-        entry.thread.as_deref(),
-        ctx.origin,
-        &entry.role,
-        ctx.now,
-    )?;
+    // **From the ROW it was queued with** (nxf 6j6v.558h, field case 4) — the obligation the trigger
+    // carried when it met the queue. Only an entry queued before this was kept derives it again.
+    let reply_thread =
+        match store.take_queued_obligation(&entry.session, entry.thread.as_deref())? {
+            Some(kept) => kept,
+            None => facade::owes_reply(
+                store,
+                entry.thread.as_deref(),
+                ctx.origin,
+                &entry.role,
+                ctx.now,
+            )?
+            .then(|| entry.thread.clone())
+            .flatten(),
+        };
     // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
     // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
     // tree has not run a single instruction, and it produces no transcript to reset its own clock
@@ -5497,7 +5517,7 @@ fn fire_queued_trigger(
             // Only a `Deeper` trigger is ever parked (an answer travelling back up a chain is never
             // queued), so this is the one it was.
             chain: ChainMove::Deeper,
-            reply_thread: owes.then_some(entry.thread.as_deref()).flatten(),
+            reply_thread: reply_thread.as_deref(),
             thread: entry.thread.as_deref(),
             priority: entry.priority,
             queued_since: entry.enqueued_at.as_deref(),

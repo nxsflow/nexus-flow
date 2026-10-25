@@ -131,6 +131,16 @@ pub(crate) const STRANDED_DDL: &str = "
         detail  TEXT    NOT NULL
     );
     CREATE INDEX IF NOT EXISTS recovery_log_by_slot ON recovery_log(thread, role, id);
+    -- The obligation a queued trigger carried when it met the working-copy queue (nxf 6j6v.558h,
+    -- field case 4): its reply thread, or NULL for a trigger that owed nothing. Written at the
+    -- enqueue, taken at the fire — so the release fires the entry with the obligation it was
+    -- queued with instead of deriving one again.
+    CREATE TABLE IF NOT EXISTS queued_obligations(
+        session      TEXT NOT NULL,
+        thread       TEXT NOT NULL,
+        reply_thread TEXT,
+        PRIMARY KEY(session, thread)
+    );
 ";
 
 /// **The ladder's columns on tables that exist before it** (nxf 6j6v.558h) — added in place,

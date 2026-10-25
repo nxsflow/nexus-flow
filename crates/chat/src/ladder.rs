@@ -520,6 +520,52 @@ impl ChatStore {
             .optional()?)
     }
 
+    /// Keep the obligation of a queued trigger with it (field case 4). A trigger with no thread has
+    /// no slot to keep one for.
+    pub(crate) fn note_queued_obligation(
+        &mut self,
+        session: &str,
+        thread: Option<&str>,
+        reply_thread: Option<&str>,
+    ) -> Result<()> {
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        self.connection().execute(
+            "INSERT INTO queued_obligations(session, thread, reply_thread) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session, thread) DO UPDATE SET reply_thread = excluded.reply_thread",
+            params![session, thread, reply_thread],
+        )?;
+        Ok(())
+    }
+
+    /// Take the obligation kept with a queued trigger: `Some(reply_thread)` when one was kept (the
+    /// inner `None` a trigger that owed nothing), `None` for an entry queued before it was kept.
+    pub(crate) fn take_queued_obligation(
+        &mut self,
+        session: &str,
+        thread: Option<&str>,
+    ) -> Result<Option<Option<String>>> {
+        let Some(thread) = thread else {
+            return Ok(None);
+        };
+        let conn = self.connection();
+        let kept: Option<Option<String>> = conn
+            .query_row(
+                "SELECT reply_thread FROM queued_obligations WHERE session = ?1 AND thread = ?2",
+                params![session, thread],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if kept.is_some() {
+            conn.execute(
+                "DELETE FROM queued_obligations WHERE session = ?1 AND thread = ?2",
+                params![session, thread],
+            )?;
+        }
+        Ok(kept)
+    }
+
     /// Record what the resume did with a hold (`resumed`, `provider_cannot_resume`,
     /// `tree_moved_asked`, `not_yet`).
     pub(crate) fn set_hold_outcome(&mut self, id: i64, outcome: &str) -> Result<()> {

@@ -103,6 +103,13 @@ impl Worker for Hand {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = gate.recv();
         }
+        // One internal session, one process — the sidecar's own guard.
+        if self.session_is_running(&req.internal_session) {
+            return Err(TriggerError::AlreadyRunning {
+                session: req.internal_session.clone(),
+                pid: 4242,
+            });
+        }
         if let Some(how) = self.refuse.lock().unwrap().take() {
             return Err(match how {
                 "already_running" => TriggerError::AlreadyRunning {
@@ -1693,4 +1700,90 @@ fn a_coordinated_child_past_its_bound_is_never_settled_by_it() {
         vec![team.q("coder")]
     );
     let _ = parent;
+}
+
+// ---- field case 2: a parent and its orphaned child -----------------------------------------------
+
+/// **Field case 2 (a)**: a pm session commissions a verifier with its own `nxc send` and ends its
+/// turn waiting. The child binds, writes, and is killed — no end announced, no process. Its
+/// coordinator (the parent's thread) finds it at the grace and continues it; silent every time, it
+/// is escalated after three attempts — INTO the child's thread, in the member's name — and the
+/// parent session, which has no live process, is continued with that outcome exactly once.
+#[test]
+fn field_case_2a_a_killed_child_is_continued_then_escalated_and_its_parent_is_woken_once() {
+    let team = team();
+    let parent = team.commission(T0, "pm", "plan the release").thread_id;
+    let pm = team.worker.last("pm").internal_session;
+    let child = team
+        .session_sends(&at(10), "pm", &pm, "verifier", "check the release notes")
+        .thread_id;
+    team.ended(&at(20), &pm, Some("ended"));
+    let verifier = team.worker.last("verifier").internal_session;
+    team.bound_with_transcript(&verifier, 2, &at(30));
+    // Killed: no end, no process. Two looks a cadence apart, from its clock.
+    let mut now = 10;
+    for attempt in 1..=3 {
+        now += 120;
+        team.tick(&at(now), &parent);
+        now += 90;
+        team.tick(&at(now), &parent);
+        assert_eq!(
+            team.worker.of("verifier").len(),
+            1 + attempt,
+            "attempt {attempt}: continued"
+        );
+    }
+    let pm_starts_before = team.worker.of("pm").len();
+    now += 120;
+    team.tick(&at(now), &parent);
+    now += 90;
+    team.tick(&at(now), &parent);
+    let posted = escalations(&team.messages(&child));
+    assert_eq!(posted.len(), 1, "escalated into the child's thread");
+    assert!(posted[0].contains("attempt 3/3"), "{}", posted[0]);
+    let woken: Vec<TriggerRequest> = team.worker.of("pm")[pm_starts_before..].to_vec();
+    assert_eq!(woken.len(), 1, "the parent is continued exactly once");
+    assert_eq!(woken[0].internal_session, pm, "its own session");
+    assert!(
+        woken[0].message.contains("ESCALATION") && woken[0].message.contains(&child),
+        "with the child's outcome:\n{}",
+        woken[0].message
+    );
+    team.tick(&at(now + 600), &parent);
+    assert_eq!(
+        team.worker.of("pm").len(),
+        pm_starts_before + 1,
+        "and only once"
+    );
+}
+
+/// **Field case 2 (c)**: the child answers while its parent session is still running — the answer is
+/// HELD for it. The parent's process then goes without a word; its held answer is delivered by the
+/// next tick, through the parent slot's claim, exactly once.
+#[test]
+fn field_case_2c_a_held_answer_for_a_parent_with_no_live_process_is_delivered_once() {
+    let team = team();
+    let parent = team.commission(T0, "pm", "plan the release").thread_id;
+    let pm = team.worker.last("pm").internal_session;
+    team.worker.run(&pm);
+    let child = team
+        .session_sends(&at(10), "pm", &pm, "verifier", "check the release notes")
+        .thread_id;
+    let verifier = team.worker.last("verifier").internal_session;
+    team.reply(&at(60), "verifier", &verifier, &child, "notes are fine");
+    assert!(
+        !team.store().held_wakes(&pm).unwrap().is_empty(),
+        "held for the running parent"
+    );
+    let before = team.worker.of("pm").len();
+    team.worker.stop(&pm);
+    team.tick(&at(120), &parent);
+    team.tick(&at(240), &parent);
+    let woken = team.worker.of("pm")[before..].to_vec();
+    assert_eq!(woken.len(), 1, "delivered exactly once");
+    assert!(
+        woken[0].message.contains("notes are fine"),
+        "{}",
+        woken[0].message
+    );
 }

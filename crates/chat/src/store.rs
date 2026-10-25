@@ -3043,6 +3043,8 @@ pub(crate) mod tests {
             "stranded_sessions",
             // The ladder's record (nxf 6j6v.558h): the rungs this machine's coordinators ran.
             "recovery_log",
+            // The obligation a queued trigger carried (nxf 6j6v.558h): this machine's queue.
+            "queued_obligations",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store
