@@ -1094,21 +1094,21 @@ pub fn reply_progress(
         .thread_channel(thread)
         .or_else(|| store.thread_channel_via_message(thread))
         .ok_or_else(|| NxfError::not_found(format!("no such thread: {thread}")))?;
-    let sent = crate::facade::send(
-        store,
-        crate::facade::SendRequest {
-            now: ctx.now,
-            origin: ctx.origin,
-            actor: ctx.actor,
-            channel: &channel,
-            body,
-            kind: MessageKind::Progress,
-            priority: Priority::Normal,
-            disposition: Disposition::InTurn,
-            thread: Some(thread),
-            refs: Refs::default(),
-        },
-    )?;
+    // Posted straight into the thread, as `facade::send` posts: the note starts nothing, and the
+    // store's own post is the whole of what it does.
+    let actor = nxs_foundation::model::validate_author(ctx.actor)?;
+    store.set_wall_clock(ctx.now);
+    let message_id = store.post_message(&crate::model::MessageEnvelope {
+        origin: ctx.origin.to_string(),
+        channel_id: channel,
+        sender: format!("{}/{actor}", ctx.origin),
+        kind: MessageKind::Progress,
+        priority: Priority::Normal,
+        disposition: Disposition::InTurn,
+        thread_id: Some(thread.to_string()),
+        refs: Refs::default(),
+        body: body.to_string(),
+    });
     let role = ctx.caller_handle();
     let counted = store.take_progress(thread, &role, ctx.now)?;
     if counted {
@@ -1126,7 +1126,7 @@ pub fn reply_progress(
     }
     Ok(ProgressReceipt {
         thread_id: thread.to_string(),
-        message_id: sent.message_id,
+        message_id,
         counted,
         receipt: if counted {
             PROGRESS_TAKEN

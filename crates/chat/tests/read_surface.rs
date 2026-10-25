@@ -847,6 +847,44 @@ const SURFACE: &[Member] = &[
               are not: what runs at that deadline is `resume_interrupted`, in its own call.",
     },
     Member {
+        name: "session_ended_with",
+        kind: Handle,
+        records: Recorded::ReadBy {
+            fact: "that the process behind a session is over, and what its end said about itself \
+                   — the runtime's capped cause and how many times it was asked to run the turn \
+                   (nxf 6j6v.558h), which the coordinator's escalation names if it cannot recover \
+                   the slot",
+            by: &["session_state", "thread"],
+        },
+        causes: Causes::OnlyWhatWasCommissioned {
+            starts: "what `session_ended` starts: the next step of the round this session stood \
+                     in, or a step that waited in the working-copy queue for it",
+            commissioned_by: "send_to",
+        },
+        why: "`session_ended` with the end's own words (nxf 6j6v.558h, `nxc session ended --cause \
+              --attempts`). A separate method rather than a widened one so that every host calling \
+              `session_ended` keeps compiling and keeps meaning what it meant; on the handle for \
+              `session_ended`'s reason — a runtime that owns its sessions elsewhere reaches nothing \
+              but its host — and it starts exactly what that call starts.",
+    },
+    Member {
+        name: "reply_progress",
+        kind: Handle,
+        records: Recorded::ReadBy {
+            fact: "a progress note in the thread, and — when the slot's coordinator had asked — \
+                   the slot's silence clock and budget reset (nxf 6j6v.558h)",
+            by: &["thread", "status"],
+        },
+        causes: Causes::Nothing,
+        why: "A session tells its slot's coordinator it is STILL WORKING, because the coordinator \
+              asked (`nxc reply --progress`, nxf 6j6v.558h). It is a callback of the coordinated \
+              session, not a way to speak: the discharge predicate excludes the message's kind, \
+              so it answers no turn, starts no step and wakes nobody — which is why it is a \
+              `Handle` row that starts nothing rather than a third way to speak. On the handle \
+              for `session_ended`'s reason: a session running under a host that owns it elsewhere \
+              reaches nothing but its host.",
+    },
+    Member {
         name: "resume_interrupted",
         kind: Handle,
         records: Recorded::ReadBy {

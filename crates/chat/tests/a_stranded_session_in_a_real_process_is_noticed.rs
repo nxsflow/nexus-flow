@@ -13,6 +13,14 @@
 //! liveness question goes to the real pid probe. `NXC_NOW` is pinned on every process; nothing
 //! sleeps — each step reads a named signal (a table row, the dry log, the timer log).
 //!
+//! **Since the ladder (nxf 6j6v.558h) these slots are COORDINATED** — the sidecar worker looks, stops
+//! and asks — so what a look does about a session that will not answer is its coordinator's rung,
+//! not cut 1a's record: the ended session is continued in the same session, the one that never
+//! bound is started afresh. The sidecar the ticks start is a stub (`NXC_SIDECAR`) that writes the
+//! spec it was handed to `stub.log` and exits, so what was started is read off that file. (Cut 1a's
+//! record and escalation, which a slot nobody coordinates still gets, is pinned in
+//! `a_stranded_session_is_recorded_and_escalated.rs`.)
+//!
 //! **This repository's own board is never touched**: every `nxc` here strips the `NXC_*` variables it
 //! would otherwise inherit from the agent running the suite (an `NXC_DB` pointing at the live
 //! workspace among them), and `$HOME` is pinned by `nxs_test_support::cargo_bin`.
@@ -61,7 +69,54 @@ fn workspace() -> TempDir {
          - name: rival\n  members: [coder]\n  working_tree: exclusive\n",
     )
     .unwrap();
+    // The sidecar a tick starts: it writes what it was handed and exits, as a session that dies at
+    // once would — which is also what keeps a test from ever starting a real model session.
+    std::fs::write(
+        tmp.path().join("stub-sidecar.mjs"),
+        format!(
+            "import {{ appendFileSync, readFileSync }} from \"node:fs\";\n\
+             const spec = JSON.parse(readFileSync(process.argv[process.argv.indexOf(\"--spec\") + 1], \"utf8\"));\n\
+             appendFileSync({log:?}, JSON.stringify(spec) + \"\\n\");\n",
+            log = tmp.path().join("stub.log").display().to_string()
+        ),
+    )
+    .unwrap();
     tmp
+}
+
+/// Every spec the stub sidecar was handed, oldest first — once `n` of them are there (the stub is
+/// spawned detached, so its line lands after the tick returns), bounded at ten seconds.
+fn started_n(root: &Path, n: usize) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let got = started(root);
+        if got.len() >= n || std::time::Instant::now() > deadline {
+            return got;
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// Every spec the stub sidecar was handed so far, oldest first.
+fn started(root: &Path) -> Vec<Value> {
+    std::fs::read_to_string(root.join("stub.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a spec"))
+        .collect()
+}
+
+/// The ladder's record of the one slot here: (action, outcome).
+fn rungs(root: &Path) -> Vec<(String, Option<String>)> {
+    let s = store(root);
+    let mut st = s
+        .connection()
+        .prepare("SELECT action, outcome FROM recovery_log ORDER BY id")
+        .unwrap();
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
 }
 
 /// One `nxc` process at `now`, under `worker`, with nothing inherited from the agent running this.
@@ -80,7 +135,8 @@ fn nxc(root: &Path, now: &str, worker: &str) -> Command {
         .env("NXC_DRY_LOG", root.join("dry.log"))
         .env("NXC_TIMER", "dry")
         .env("NXC_TIMER_LOG", root.join("timer.log"))
-        .env("NXC_TIMER_LOOK_LOG", root.join("looks.log"));
+        .env("NXC_TIMER_LOOK_LOG", root.join("looks.log"))
+        .env("NXC_SIDECAR", root.join("stub-sidecar.mjs"));
     c
 }
 
@@ -236,11 +292,13 @@ fn escalations_in(root: &Path, thread: &str) -> usize {
         .count()
 }
 
-/// **AC 2 (a)** — the session's process ends owing an answer and NO substitute is posted (the
-/// teardown's post is what this stages as missing). A look at `ended + 120 s` records observation
-/// 3 and escalates; the transcript is intact and nothing is started.
+/// **AC 2 (a), field case 1 in real processes** — the session's process ends owing an answer and NO
+/// substitute is posted (a coordinated slot's teardown posts none). A look at `ended + 120 s` does
+/// not record and escalate: its coordinator CONTINUES the same session — the real sidecar worker
+/// starts the sidecar on the same internal session, resuming the runtime session it bound, told
+/// which thread waits and what the task was. The transcript is intact.
 #[test]
-fn a_session_that_ended_owing_an_answer_with_no_substitute_is_recorded() {
+fn a_session_that_ended_owing_an_answer_is_continued_in_the_same_session() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, slot, s) = commission(root, "review");
@@ -262,32 +320,52 @@ fn a_session_that_ended_owing_an_answer_with_no_substitute_is_recorded() {
     );
 
     tick(root, &at(149), &thread);
-    assert!(records(root).is_empty(), "not before the grace");
+    assert!(rungs(root).is_empty(), "not before the grace");
     tick(root, &at(150), &thread);
-    assert_eq!(records(root), vec![(3, Some("posted".to_string()))]);
-    assert_eq!(escalations_in(root, &slot), 1);
+    let specs = started_n(root, 1);
+    assert_eq!(specs.len(), 1, "one continuation: {specs:?}");
+    let cont = &specs[0];
+    assert_eq!(cont["session"], s.as_str(), "the SAME session");
+    assert_eq!(
+        cont["resume"],
+        format!("real-{s}").as_str(),
+        "resuming what it bound"
+    );
+    assert_eq!(cont["replyThread"], slot.as_str());
+    assert_eq!(cont["coordinated"], true);
+    let message = cont["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!(
+            "Your turn for thread {slot} ended without a reply"
+        )) && message.contains("the task was: verify the build"),
+        "{message}"
+    );
+    assert!(records(root).is_empty(), "nothing recorded");
+    assert_eq!(escalations_in(root, &slot), 0, "nothing escalated");
+    assert_eq!(
+        rungs(root),
+        vec![("continued".to_string(), Some("triggered".to_string()))]
+    );
     assert_eq!(transcript_entries(root, &s), 1, "the transcript is intact");
     assert_eq!(
         triggers(root),
         1,
-        "nothing started: only the round's own first start"
+        "the dry worker started only the round's own first start"
     );
 }
 
-/// **AC 2 (b)** — a `five_hour` hold, then the session's end. Nothing is recorded while the hold
-/// stands. The EXISTING resume takes the hold up — under the dry worker, which cannot continue a
-/// session, as `provider_cannot_resume`: the hold is stamped and nothing is started, which is the
-/// shape the design names as this same case. With no hold left and nothing coming, the next look
-/// records observation 3, judged from the session's end. (The cn4p continuation — resumed, then
-/// ended again with no new hold — is driven through a worker that CAN continue a session, in
-/// `a_stranded_session_is_recorded_and_escalated.rs`.)
+/// **AC 2 (b), rung B in real processes** — a `five_hour` hold that names NO instant, then the
+/// session's end. Nothing is done while the hold is younger than the grace; no resume will ever
+/// take a hold up that names no instant, so one grace after it was taken its coordinator does —
+/// continuing the same session — and the hold no longer stands. Nothing is recorded.
 #[test]
-fn a_session_whose_hold_was_taken_up_without_a_restart_is_recorded_from_its_end() {
+fn a_hold_naming_no_instant_is_continued_by_its_coordinator_one_grace_after_it() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, slot, s) = commission(root, "review");
     let child = stand_in(root, &s);
     bind(root, &at(5), &s);
+    write_transcript(root, &at(6), &s);
     kill_hard(child);
     nxc(root, &at(30), "dry")
         .env("NXC_SESSION", &s)
@@ -295,29 +373,31 @@ fn a_session_whose_hold_was_taken_up_without_a_restart_is_recorded_from_its_end(
         .assert()
         .success();
     ended(root, &at(31), &s);
-    tick(root, &at(400), &thread);
-    assert!(records(root).is_empty(), "never while the hold stands");
-
-    let out = nxc(root, &at(500), "dry")
-        .args(["resume", "--session", &s, "--force", "--json"])
+    tick(root, &at(149), &thread);
+    assert!(rungs(root).is_empty(), "inside the grace of the hold");
+    tick(root, &at(150), &thread);
+    let specs = started_n(root, 1);
+    assert_eq!(specs.len(), 1, "{specs:?}");
+    assert_eq!(specs[0]["session"], s.as_str(), "the same session");
+    assert_eq!(specs[0]["replyThread"], slot.as_str());
+    let out = nxc(root, &at(160), "dry")
+        .args(["resume", "--session", &s, "--json"])
         .output()
         .unwrap();
     assert_eq!(
         json_of(&out.stdout)["outcome"],
-        "provider_cannot_resume",
-        "the existing resume stamps the hold"
+        "nothing_on_hold",
+        "the hold was taken up"
     );
-    assert_eq!(triggers(root), 1, "and starts nothing");
-    tick(root, &at(560), &thread);
-    assert_eq!(records(root), vec![(3, Some("posted".to_string()))]);
-    assert_eq!(escalations_in(root, &slot), 1);
-    assert_eq!(triggers(root), 1);
+    assert!(records(root).is_empty());
+    assert_eq!(escalations_in(root, &slot), 0);
 }
 
 /// **AC 2 (c)** — bound, writing, healthy at the first look; killed from outside AFTER it (the pid
-/// file left behind): suspected at the next look, recorded one cadence later with observation 4.
+/// file left behind): suspected at the next look, and one cadence later — no live process, bound,
+/// with work of its own — CONTINUED in the same session by its coordinator.
 #[test]
-fn a_session_killed_after_a_healthy_look_is_recorded_as_holding_no_live_process() {
+fn a_session_killed_after_a_healthy_look_is_continued_by_its_coordinator() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, _slot, s) = commission(root, "review");
@@ -329,45 +409,73 @@ fn a_session_killed_after_a_healthy_look_is_recorded_as_holding_no_live_process(
     kill_hard(child);
     tick(root, &at(180), &thread);
     assert!(suspected(root));
-    assert!(records(root).is_empty());
+    assert!(rungs(root).is_empty());
     tick(root, &at(240), &thread);
-    assert_eq!(records(root), vec![(4, Some("posted".to_string()))]);
+    let specs = started_n(root, 1);
+    assert_eq!(specs.len(), 1, "{specs:?}");
+    assert_eq!(
+        specs[0]["session"],
+        s.as_str(),
+        "continued in the same session"
+    );
+    assert_eq!(specs[0]["resume"], format!("real-{s}").as_str());
+    assert!(records(root).is_empty());
 }
 
-/// **AC 2 (c′)** — the same process killed BEFORE it bound: observation 2.
+/// **AC 2 (c′), rung D in real processes** — the same process killed BEFORE it bound: there is no
+/// runtime session to continue, so its coordinator RE-COMMISSIONS the slot — a fresh session, the
+/// original body, into the same slot.
 #[test]
-fn a_session_killed_before_it_bound_is_recorded_as_never_bound() {
+fn a_session_killed_before_it_bound_is_recommissioned_with_its_original_body() {
     let tmp = workspace();
     let root = tmp.path();
-    let (thread, _slot, s) = commission(root, "review");
+    let (thread, slot, s) = commission(root, "review");
     kill_hard(stand_in(root, &s));
     tick(root, &at(120), &thread);
     tick(root, &at(180), &thread);
-    assert_eq!(records(root), vec![(2, Some("posted".to_string()))]);
+    let specs = started_n(root, 1);
+    assert_eq!(specs.len(), 1, "{specs:?}");
+    assert_ne!(specs[0]["session"], s.as_str(), "a fresh session");
+    assert!(specs[0]["resume"].is_null(), "nothing resumed");
+    assert_eq!(specs[0]["replyThread"], slot.as_str(), "into the same slot");
+    assert!(specs[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("verify the build"));
+    assert_eq!(
+        rungs(root),
+        vec![("recommissioned".to_string(), Some("triggered".to_string()))]
+    );
+    assert!(records(root).is_empty());
 }
 
 /// **AC 9 (b)** — a session bound BY HAND (no process claim at all) reads as not running under the
-/// sidecar worker and IS recorded at +180 s with observation 2 — the stated residual: a session
-/// driven by hand must answer within the grace or it is escalated.
+/// sidecar worker, and at +180 s its coordinator takes the slot up — the stated residual, re-read
+/// for the ladder: a session driven by hand must answer within the grace or the slot is started
+/// again. Bound but with nothing written, there is no turn of its own to continue: a fresh session.
 #[test]
-fn a_session_bound_by_hand_with_no_claim_is_recorded() {
+fn a_session_bound_by_hand_with_no_claim_is_taken_up_by_its_coordinator() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, _slot, s) = commission(root, "review");
     bind(root, &at(5), &s);
     tick(root, &at(120), &thread);
     tick(root, &at(180), &thread);
-    let got = records(root);
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0].1.as_deref(), Some("posted"));
+    let specs = started_n(root, 1);
+    assert_eq!(specs.len(), 1, "{specs:?}");
+    assert_ne!(
+        specs[0]["session"],
+        s.as_str(),
+        "nothing of its own to continue"
+    );
 }
 
 /// **AC 2 (d)** — the working copy, before `PARK_AFTER`: as (a), on a channel that holds the copy
-/// alone, with an uncommitted file in it. After the escalation the file is untouched, nothing was
-/// committed or checked out, the operation still holds the copy as any escalated holder does, and a
-/// rival queued behind it stays first in line.
+/// alone, with an uncommitted file in it. Its coordinator takes the slot up (rung D: it never bound)
+/// and the file is untouched, nothing was committed or checked out, the operation still holds the
+/// copy, and a rival queued behind it stays first in line.
 #[test]
-fn a_stranded_holder_keeps_the_working_copy_and_its_files_untouched() {
+fn a_holder_being_recovered_keeps_the_working_copy_and_its_files_untouched() {
     let tmp = workspace();
     let root = tmp.path();
     let git = |args: &[&str]| {
@@ -403,7 +511,8 @@ fn a_stranded_holder_keeps_the_working_copy_and_its_files_untouched() {
     kill_hard(child);
     ended(root, &at(30), &s);
     tick(root, &at(150), &thread);
-    assert_eq!(records(root), vec![(3, Some("posted".to_string()))]);
+    assert_eq!(started_n(root, 1).len(), 1, "taken up: {:?}", started(root));
+    assert!(records(root).is_empty());
 
     assert_eq!(
         std::fs::read_to_string(root.join("half-done.rs")).unwrap(),
@@ -425,7 +534,11 @@ fn a_stranded_holder_keeps_the_working_copy_and_its_files_untouched() {
         .find(|op| op["root"] == thread.as_str())
         .expect("the stranded operation");
     assert_eq!(held["holds_working_tree"], true, "{held}");
-    assert_eq!(held["needs_decision"], true, "{held}");
+    assert_eq!(
+        held["needs_decision"], false,
+        "nothing escalated while it is recovered: {held}"
+    );
+    assert_eq!(held["hangs_at"]["recovery"], "recovering", "{held}");
     let queued = ops
         .iter()
         .flat_map(|op| op["threads"].as_array().cloned().unwrap_or_default())

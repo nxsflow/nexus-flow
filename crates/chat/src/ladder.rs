@@ -1080,7 +1080,7 @@ fn under_the_claim(
     )?;
     let done = {
         let _renewal = ClaimRenewal::start(ctx, t, h);
-        trigger(ctx, store, row, rung)
+        fire_the_rung(ctx, store, row, rung)
     };
     let outcome = match &done {
         Done::Acted(word) | Done::Nothing(word) => (*word).to_string(),
@@ -1137,7 +1137,7 @@ fn under_the_claim(
 fn lease_hook(_ctx: &Ctx, _store: &mut ChatStore, _row: &OwedStart) {}
 
 /// The trigger of one rung.
-fn trigger(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) -> Done {
+fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) -> Done {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
     match rung {
         Rung::Ask => {
