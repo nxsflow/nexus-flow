@@ -564,6 +564,57 @@ fn a_tree_that_moved_under_the_hold_sends_a_question_back_instead_of_resuming_bl
     );
 }
 
+/// **Asked once, and recorded on the hold** (must-fix, design review round 2 CQ #4; nxf 6j6v.558h,
+/// rung B): a second resume of the same hold over the same moved tree — the background job and a
+/// human both arriving — answers `TreeMoved` again and asks NOTHING again, and the hold carries the
+/// outcome `tree_moved_asked`, which is what the slot's coordinator reads to leave it to the person.
+#[test]
+fn a_tree_that_moved_is_put_to_the_root_once_and_the_hold_says_so() {
+    let tmp = workspace();
+    let (session, thread) = interrupted_with_the_window_already_past(&tmp);
+    the_tree_moves_on(&tmp);
+    let resume = || {
+        tmp.with(AFTER_THE_WINDOW, "carsten", |ctx, store| {
+            orchestration::resume_interrupted(
+                ctx,
+                store,
+                ResumeRequest {
+                    scope: ResumeScope::Session(&session),
+                    force: false,
+                },
+            )
+            .expect("decides")
+        })
+    };
+    for round in 1..=2 {
+        let out = resume();
+        assert!(
+            matches!(out.outcome, ResumeOutcome::TreeMoved { .. }),
+            "round {round}: {:?}",
+            out.outcome
+        );
+    }
+    let root = tmp.store().thread_root(&thread).expect("a root");
+    let questions = tmp
+        .store()
+        .messages_in_thread(&root)
+        .expect("read the root thread")
+        .into_iter()
+        .filter(|m| m.body.contains("working copy has moved"))
+        .count();
+    assert_eq!(questions, 1, "the question goes back once");
+    let outcome: Option<String> = tmp
+        .store()
+        .connection()
+        .query_row(
+            "SELECT outcome FROM session_interruption WHERE session = ?1 ORDER BY id DESC LIMIT 1",
+            [&session],
+            |r| r.get(0),
+        )
+        .expect("the hold");
+    assert_eq!(outcome.as_deref(), Some("tree_moved_asked"));
+}
+
 #[test]
 fn an_unrelated_operations_parked_work_does_not_switch_off_this_ones_drift_check() {
     // **THE REGRESSION TEST FOR CODE QUALITY #2.** The check skipped itself on

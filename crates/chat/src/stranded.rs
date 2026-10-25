@@ -72,6 +72,7 @@ pub(crate) const STRANDED_DDL: &str = "
         last_progress_at    TEXT,
         abandoned           TEXT,
         abandoned_at        TEXT,
+        next_look           TEXT,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
@@ -110,9 +111,79 @@ pub(crate) const STRANDED_DDL: &str = "
         escalated_at        TEXT,
         escalation_error    TEXT,
         superseded_at       TEXT,
+        summary             TEXT,
         PRIMARY KEY(thread, role, trigger_clock)
     );
+    -- The ladder's record (nxf 6j6v.558h): one row per rung a coordinator ran on one slot — an
+    -- ask, a continuation, a re-commission, a progress taken, the escalation — with what became of
+    -- it. APPEND-ONLY and device-local: it is what `status` and rung E's escalation read, and a row
+    -- whose `outcome` is still NULL is a rung in flight (the claim's recheck refuses a second one
+    -- while it is younger than the trigger timeout).
+    CREATE TABLE IF NOT EXISTS recovery_log(
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread  TEXT    NOT NULL,
+        role    TEXT    NOT NULL,
+        at      TEXT    NOT NULL,
+        action  TEXT    NOT NULL,
+        attempt INTEGER NOT NULL,
+        session TEXT,
+        outcome TEXT,
+        detail  TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS recovery_log_by_slot ON recovery_log(thread, role, id);
+    -- The obligation a queued trigger carried when it met the working-copy queue (nxf 6j6v.558h,
+    -- field case 4): its reply thread, or NULL for a trigger that owed nothing. Written at the
+    -- enqueue, taken at the fire — so the release fires the entry with the obligation it was
+    -- queued with instead of deriving one again.
+    CREATE TABLE IF NOT EXISTS queued_obligations(
+        session      TEXT NOT NULL,
+        thread       TEXT NOT NULL,
+        reply_thread TEXT,
+        PRIMARY KEY(session, thread)
+    );
 ";
+
+/// **The ladder's columns on tables that exist before it** (nxf 6j6v.558h) — added in place,
+/// column-presence-guarded, as `schema.rs` adds every device-local minor; a fresh store creates
+/// them with its tables, so concurrent first opens of one file never race on an `ALTER`. They are:
+/// the coordinator's summary
+/// on a stranded record (what rung E posts), the next look a status row names, a session's last
+/// cause and attempt count (what `nxc session ended --cause --attempts` says), and the outcome a
+/// resume recorded on its hold.
+pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    for (table, column, ddl) in [
+        (
+            "stranded_sessions",
+            "summary",
+            "ALTER TABLE stranded_sessions ADD COLUMN summary TEXT;",
+        ),
+        (
+            "owed_starts",
+            "next_look",
+            "ALTER TABLE owed_starts ADD COLUMN next_look TEXT;",
+        ),
+        (
+            "session_map",
+            "last_cause",
+            "ALTER TABLE session_map ADD COLUMN last_cause TEXT;",
+        ),
+        (
+            "session_map",
+            "last_cause_attempts",
+            "ALTER TABLE session_map ADD COLUMN last_cause_attempts INTEGER;",
+        ),
+        (
+            "session_interruption",
+            "outcome",
+            "ALTER TABLE session_interruption ADD COLUMN outcome TEXT;",
+        ),
+    ] {
+        if table_exists(conn, table)? && !column_exists(conn, table, column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
 
 /// **The three tables as cut 1a created them, rebuilt in place** (nxf 6j6v.kgfn) — `CREATE TABLE IF
 /// NOT EXISTS` is a no-op for a table that exists, and SQLite cannot drop a `NOT NULL` or add a
@@ -307,6 +378,9 @@ pub enum Observation {
     NoLiveProcess,
     /// 5 — its start failed and was given up.
     StartGivenUp,
+    /// 6 — its process stayed alive and silent on its slot through every ask its coordinator put
+    /// to it (nxf 6j6v.558h, rung A); recorded only by the ladder's escalation.
+    Silent,
 }
 
 impl Observation {
@@ -318,6 +392,7 @@ impl Observation {
             Observation::EndedWithoutAnswer => 3,
             Observation::NoLiveProcess => 4,
             Observation::StartGivenUp => 5,
+            Observation::Silent => 6,
         }
     }
 
@@ -328,6 +403,7 @@ impl Observation {
             3 => Observation::EndedWithoutAnswer,
             4 => Observation::NoLiveProcess,
             5 => Observation::StartGivenUp,
+            6 => Observation::Silent,
             _ => return None,
         })
     }
@@ -984,7 +1060,7 @@ fn supersede_older(
 
 /// Whether instant `a` is strictly before instant `b`. An instant that does not parse is never
 /// earlier — the fail-safe direction for both callers is "leave the row as it is".
-fn earlier(a: &str, b: &str) -> bool {
+pub(crate) fn earlier(a: &str, b: &str) -> bool {
     use time::format_description::well_known::Rfc3339;
     match (
         time::OffsetDateTime::parse(a, &Rfc3339),
@@ -1032,6 +1108,11 @@ pub(crate) enum Assessment {
     Consolidated(CoordinatorRef),
     /// No coordinator: the slot keeps today's behaviour in full.
     Uncoordinated,
+    /// Clauses 1, 2, 4-6 hold and clause 3 cannot be decided here: the thread's `machine` register
+    /// names a machine, and this device cannot say which machine it is (no machine read, or it
+    /// failed). A row that already names a coordinator KEEPS it then (nxf 6j6v.ndbr) — the sidecar
+    /// gave up its substitute for that slot, so forgetting the row would leave it with neither.
+    MachineUnknown(CoordinatorRef),
 }
 
 /// **`coordinator_of(slot)`** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A) — `Some` iff ALL six
@@ -1062,7 +1143,9 @@ pub fn coordinator_of(
 ) -> Result<Option<CoordinatorRef>> {
     Ok(match assess(ctx, store, thread, role)? {
         Assessment::Coordinated(c) => Some(c),
-        Assessment::Consolidated(_) | Assessment::Uncoordinated => None,
+        Assessment::Consolidated(_) | Assessment::Uncoordinated | Assessment::MachineUnknown(_) => {
+            None
+        }
     })
 }
 
@@ -1094,8 +1177,17 @@ pub(crate) fn assess(ctx: &Ctx, store: &ChatStore, thread: &str, role: &str) -> 
         return Ok(Assessment::Uncoordinated);
     }
     // Clause 3.
-    if !executes_here(ctx, store, thread)? {
-        return Ok(Assessment::Uncoordinated);
+    match executes_here_known(ctx, store, thread)? {
+        Some(true) => {}
+        Some(false) => return Ok(Assessment::Uncoordinated),
+        None => {
+            return Ok(Assessment::MachineUnknown(coordinator_ref(
+                ctx,
+                store,
+                thread,
+                q.opener.as_deref(),
+            )?))
+        }
     }
     let coordinator = coordinator_ref(ctx, store, thread, q.opener.as_deref())?;
     // Clause 5.
@@ -1169,6 +1261,19 @@ fn executes_here(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<bool> {
                     .is_some_and(|here| here.machine_id == m.machine_id)
         }
         None => store.expects_reply_from_site(thread)? == Some(store.site()),
+    })
+}
+
+/// Clause 3 with its third answer (nxf 6j6v.ndbr): `None` when the register names a machine this
+/// device cannot place — no machine read, or one that does not say which machine this is.
+fn executes_here_known(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Option<bool>> {
+    Ok(match store.thread_machine(thread)? {
+        Some(m) if !m.acts => Some(false),
+        Some(m) => ctx
+            .machines
+            .and_then(|ms| ms.here())
+            .map(|here| here.machine_id == m.machine_id),
+        None => Some(store.expects_reply_from_site(thread)? == Some(store.site())),
     })
 }
 
@@ -1375,14 +1480,14 @@ pub(crate) fn member_answer_is_still_coming(
 // ---- the sweep ---------------------------------------------------------------------------------
 
 /// `at` plus `secs`, in the one canonical form every stored instant uses.
-fn after(at: &str, secs: i64, what: &str) -> Result<String> {
+pub(crate) fn after(at: &str, secs: i64, what: &str) -> Result<String> {
     crate::facade::instant_after(at, time::Duration::seconds(secs), what)
 }
 
 /// Whether `now` is at or past `at`. Compared as INSTANTS, never as strings: a fractional second and
 /// a whole one do not sort as text the way they do as time. An instant that does not parse has not
 /// been reached — the fail-safe direction here is "do not record".
-fn reached(now: &str, at: &str) -> bool {
+pub(crate) fn reached(now: &str, at: &str) -> bool {
     use time::format_description::well_known::Rfc3339;
     match (
         time::OffsetDateTime::parse(now, &Rfc3339),
@@ -1634,7 +1739,7 @@ pub(crate) fn arm_after_an_end(
     findings
 }
 
-fn outstanding_has(outstanding: &[String], role: &str) -> bool {
+pub(crate) fn outstanding_has(outstanding: &[String], role: &str) -> bool {
     let bare = role.rsplit_once('/').map_or(role, |(_, b)| b);
     outstanding.iter().any(|o| {
         crate::facade::same_identity(Some(o), role) || crate::facade::same_identity(Some(o), bare)
@@ -1642,15 +1747,21 @@ fn outstanding_has(outstanding: &[String], role: &str) -> bool {
 }
 
 /// What the sweep decided about one candidate.
-enum Judgement {
+pub(crate) enum Judgement {
     /// Not stranded, or not yet — nothing to record.
     Nothing,
-    /// Stranded: record it with this observation, judged from this instant.
+    /// Stranded: record it with this observation, judged from this instant. For a COORDINATED slot
+    /// (nxf 6j6v.558h) this is the occasion of a rung instead of a record.
     Record {
         observed: Observation,
         judged_from: String,
         detail: String,
     },
+    /// A coordinated slot whose session holds a live process — the ladder's silence clock decides
+    /// (rung A). Never answered for a slot nobody coordinates: rule 5 arms its recheck instead.
+    Live,
+    /// A coordinated slot whose owed session has a standing hold — the ladder's rung B decides.
+    Held,
 }
 
 /// **The sweep** — the sixth workspace-wide step of every tick (nxf 6j6v.ccvy). Records every owed
@@ -1702,6 +1813,11 @@ pub(crate) fn reconcile_stranded_sessions(
     ) {
         if let Err(e) = store.forget_stranded_before(&cutoff) {
             eprintln!("warning: old stranded records could not be dropped: {e}");
+        }
+        // The ladder's record, for the same month (nxf 6j6v.558h), and the obligations kept for
+        // queued triggers that are no longer queued.
+        if let Err(e) = store.forget_recovery_before(&cutoff) {
+            eprintln!("warning: old recovery records could not be dropped: {e}");
         }
     }
     findings
@@ -1765,14 +1881,42 @@ fn judge_candidates(
         // coordinates, or a row cut 1a wrote) is judged as cut 1a judges it, and learns its
         // coordinator when it has one now. An abandoned row stays — it is the record of why —
         // until the slot stops being owed.
+        let mut coordinated = None;
         if row.abandoned.is_none() {
             match assess(ctx, store, &row.thread, &row.role) {
                 Ok(Assessment::Coordinated(c)) => {
                     if row.coordinator.as_deref() != Some(c.thread.as_str()) {
                         store.set_slot_coordinator(&row.thread, &row.role, &c.thread)?;
                     }
+                    coordinated = Some(c);
+                }
+                // **Not knowing which machine this is decides nothing** (nxf 6j6v.ndbr): a row
+                // that named a coordinator keeps it, and the slot stays its coordinator's.
+                Ok(Assessment::MachineUnknown(c)) if row.coordinator.is_some() => {
+                    coordinated = Some(CoordinatorRef {
+                        thread: row.coordinator.clone().unwrap_or(c.thread),
+                        kind: c.kind,
+                    });
                 }
                 Ok(_) if row.coordinator.is_some() => {
+                    // Known to run elsewhere now, or no longer coordinated for a reason this
+                    // device can see — forgotten, and SAID: the sidecar posted no substitute for
+                    // this slot, so the device that coordinates it now is the one to take it up.
+                    let finding = FailedConsequence::stranded(
+                        ConsequenceClass::StrandedNotJudged,
+                        Some(&row.thread),
+                        row.session.as_deref(),
+                        format!(
+                            "the slot of {} on thread {} is open and no longer coordinated on \
+                             this device, so its row here is forgotten; it was coordinated by \
+                             thread {}",
+                            row.role,
+                            row.thread,
+                            row.coordinator.as_deref().unwrap_or("?")
+                        ),
+                    );
+                    eprintln!("warning: {finding}");
+                    findings.push(finding);
                     store.forget_owed_start(&row.thread, &row.role)?;
                     continue;
                 }
@@ -1794,14 +1938,23 @@ fn judge_candidates(
         }
         // A failure on ONE obligation is a finding about that obligation; the walk goes on, so one
         // bad row cannot stop every later one from being judged on every tick.
-        let judged = judge(ctx, store, &row, q, &facts, findings).and_then(|j| match j {
-            Judgement::Nothing => Ok(Vec::new()),
-            Judgement::Record {
-                observed,
-                judged_from,
-                detail,
-            } => record(ctx, store, &row, observed, judged_from, detail),
-        });
+        let judged = judge(ctx, store, &row, q, &facts, findings, coordinated.is_some()).and_then(
+            |j| match (j, &coordinated) {
+                (Judgement::Nothing, _) => Ok(Vec::new()),
+                // **A coordinated slot is never merely recorded** (nxf 6j6v.558h): its coordinator
+                // runs one rung of the ladder on what the look saw, and escalates only last.
+                (j, Some(c)) => crate::ladder::climb(ctx, store, &row, c, j),
+                (
+                    Judgement::Record {
+                        observed,
+                        judged_from,
+                        detail,
+                    },
+                    None,
+                ) => record(ctx, store, &row, observed, judged_from, detail, None),
+                (Judgement::Live | Judgement::Held, None) => Ok(Vec::new()),
+            },
+        );
         match judged {
             Ok(more) => findings.extend(more),
             Err(e) => findings.push(FailedConsequence::stranded(
@@ -1904,7 +2057,7 @@ fn backfill_rows(ctx: &Ctx, store: &ChatStore) -> Result<Vec<Backfill>> {
             let (coordinator, consolidated) = match assess(ctx, store, &q.thread_id, role)? {
                 Assessment::Coordinated(c) => (c, false),
                 Assessment::Consolidated(c) => (c, true),
-                Assessment::Uncoordinated => continue,
+                Assessment::Uncoordinated | Assessment::MachineUnknown(_) => continue,
             };
             let session = session_of_role_on(store, &q.thread_id, role)?;
             let abandoned = if consolidated {
@@ -2007,6 +2160,7 @@ fn judge(
     q: &crate::store::ThreadQuorum,
     facts: &PauseFacts,
     findings: &mut Vec<FailedConsequence>,
+    coordinated: bool,
 ) -> Result<Judgement> {
     let (t, h, s) = (
         row.thread.as_str(),
@@ -2037,8 +2191,15 @@ fn judge(
     // Rules 2-4: its answer is still coming — a standing hold, a start still to come (the queue, a
     // retry due), its own sub-round in flight, or a delivery held for it. The ONE predicate the
     // member-set read uses too, so "paused" cannot mean two things.
-    if member_answer_is_still_coming(ctx.now, store, q, s, facts)?.is_some() {
-        return not_now(store);
+    match member_answer_is_still_coming(ctx.now, store, q, s, facts)? {
+        // **A coordinated slot's hold is the ladder's rung B** (nxf 6j6v.558h): the resume takes
+        // most holds up, and the ladder takes up the ones nothing will.
+        Some(StillComing::OnHold { .. }) if coordinated => {
+            store.drop_stranded_suspect(t, h)?;
+            return Ok(Judgement::Held);
+        }
+        Some(_) => return not_now(store),
+        None => {}
     }
     // **An abandoned slot is never nudged** (nxf 6j6v.kgfn): its record is the row's reason, and
     // `withdraw` is its exit.
@@ -2050,6 +2211,9 @@ fn judge(
     // out — a session killed after a healthy look needs a further look.
     if s.is_some_and(|s| ctx.worker.session_is_running(s)) {
         store.drop_stranded_suspect(t, h)?;
+        if coordinated {
+            return Ok(Judgement::Live);
+        }
         if let Ok(at) = after(
             ctx.now,
             crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
@@ -2182,13 +2346,14 @@ fn judge(
 
 /// **Recording**, in its order: the row, the escalation in the member's name, the stamp from the
 /// evidence, and the service-log finding.
-fn record(
+pub(crate) fn record(
     ctx: &Ctx,
     store: &mut ChatStore,
     row: &OwedStart,
     observed: Observation,
     judged_from: String,
     detail: String,
+    summary: Option<String>,
 ) -> Result<Vec<FailedConsequence>> {
     let rec = StrandedRecord {
         thread: row.thread.clone(),
@@ -2210,6 +2375,9 @@ fn record(
         // Already recorded for this clock — another sweep got here first; its escalation is that
         // sweep's to settle.
         return Ok(findings);
+    }
+    if let Some(summary) = &summary {
+        store.set_stranded_summary(&rec, summary)?;
     }
     let step = step_name(store, &rec);
     let finding = FailedConsequence::stranded(
@@ -2234,7 +2402,7 @@ fn record(
 
 /// The step a slot serves, as a reader names it: the flow mark when the thread carries one, else the
 /// role's bare handle.
-fn step_name(store: &ChatStore, rec: &StrandedRecord) -> String {
+pub(crate) fn step_name(store: &ChatStore, rec: &StrandedRecord) -> String {
     match store.flow_mark(&rec.thread).ok().flatten() {
         Some(mark) => mark.step,
         None => rec
@@ -2463,15 +2631,19 @@ fn not_escalated(
 }
 
 /// The session a record is about, in words — `session <id>`, or what a slot without one is.
-fn session_words(rec: &StrandedRecord) -> String {
+pub(crate) fn session_words(rec: &StrandedRecord) -> String {
     match &rec.session {
         Some(s) => format!("session {s}"),
         None => format!("the slot of {} (no session was ever started)", rec.role),
     }
 }
 
-/// The escalation the commissioner reads.
+/// The escalation the commissioner reads — the coordinator's summary when the ladder escalated
+/// (nxf 6j6v.558h), cut 1a's text for a slot nobody coordinates.
 fn escalation_body(store: &ChatStore, rec: &StrandedRecord) -> String {
+    if let Ok(Some(summary)) = store.stranded_summary(rec) {
+        return summary;
+    }
     let step = step_name(store, rec);
     let root = store
         .thread_root(&rec.thread)

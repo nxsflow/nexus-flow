@@ -968,6 +968,18 @@ pub fn trigger_role(
             if let Some((behind, position, findings)) =
                 acquire_or_queue(ctx, store, &scope, &entry)?
             {
+                // **The obligation travels with the queued entry** (nxf 6j6v.558h, field case 4):
+                // the release fires it with the reply thread it was queued with, rather than
+                // re-deriving one at a moment the derivation may no longer hold.
+                if let Err(e) =
+                    store.note_queued_obligation(&internal_session, thread, reply_thread)
+                {
+                    eprintln!(
+                        "warning: the obligation of the queued trigger for session \
+                         {internal_session} could not be kept with it: {e}; the release derives it \
+                         again"
+                    );
+                }
                 return Ok(TriggerAdmission::Queued {
                     behind,
                     position,
@@ -5280,6 +5292,171 @@ fn note_the_park_was_resumed(ctx: &Ctx, store: &mut ChatStore, id: i64) {
 /// only caller's breadcrumb says the entry "could not be started … nothing is running for it", which
 /// is true of an early return and false of anything after [`trigger_role`]. Work that follows the
 /// trigger is therefore best-effort with a breadcrumb of its own, never a `?`.
+/// The window a supervised slot's channel declares (`timeout:`), in seconds — `None` for a slot no
+/// declared channel supervises, or one whose channel declares no window.
+fn declared_window_of_slot(ctx: &Ctx, store: &ChatStore, thread: &str) -> Result<Option<i64>> {
+    let Some(channel_thread) = supervising_parent(store, thread)? else {
+        return Ok(None);
+    };
+    let Some(q) = store.thread_quorum(&channel_thread, ctx.now)? else {
+        return Ok(None);
+    };
+    let Some(timeout) = declared_channel_of(ctx, &q).and_then(|c| c.timeout.clone()) else {
+        return Ok(None);
+    };
+    Ok(
+        facade::resolve_deadline_spec(ctx.now, &timeout, "the channel's declared `timeout`")?
+            .window
+            .map(|w| w.whole_seconds()),
+    )
+}
+
+/// **The bound of a child round a session opened** (nxf 6j6v.558h): `clamp(parent_remaining_window,
+/// 30 min, 2 h)` from now — never less than half an hour and never more than two, whatever the
+/// parent has left. A parent with no window of its own gives the child the most it may have.
+fn child_bound(ctx: &Ctx, store: &ChatStore, parent: &str) -> Result<String> {
+    use time::format_description::well_known::Rfc3339;
+    let remaining = store
+        .thread_quorum(parent, ctx.now)?
+        .and_then(|q| q.deadline)
+        .and_then(|d| {
+            let (d, now) = (
+                time::OffsetDateTime::parse(&d, &Rfc3339).ok()?,
+                time::OffsetDateTime::parse(ctx.now, &Rfc3339).ok()?,
+            );
+            Some((d - now).whole_seconds())
+        })
+        .unwrap_or(crate::ladder::CHILD_WINDOW_CAP_SECS);
+    facade::instant_after(
+        ctx.now,
+        time::Duration::seconds(crate::ladder::child_window_secs(remaining)),
+        "the child round's bound",
+    )
+}
+
+/// The longest cause a session's end may record — the sidecar's own reply cap.
+pub const MAX_SESSION_CAUSE_CHARS: usize = 2_000;
+
+fn cap_session_cause(cause: &str) -> String {
+    match cause.char_indices().nth(MAX_SESSION_CAUSE_CHARS) {
+        Some((cut, _)) => format!("{}…", &cause[..cut]),
+        None => cause.to_string(),
+    }
+}
+
+/// **Rung C: continue the SAME session on its slot** (nxf 6j6v.558h) — the session resumes the
+/// runtime conversation it bound, told by `text` which of its threads is owed and what the task
+/// was. Not new work: the chain unwinds (its depth is the session's own), and a slot whose work was
+/// parked and released goes through the gate as any resume does. The slot's window is re-stamped
+/// by one window.
+pub(crate) fn ladder_continue(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    role: &str,
+    session: &str,
+    text: &str,
+) -> std::result::Result<TriggerAdmission, TriggerError> {
+    let frozen = operation_declarations(ctx, store, thread)?;
+    let ctx = &with_declarations(ctx, frozen.as_ref());
+    let bare = role.rsplit_once('/').map_or(role, |(_, b)| b);
+    let decl = ctx.defs.role(bare)?.clone();
+    let hop = resolve_hop(ctx, store)?;
+    let resume_real = store.resolve_real(session)?;
+    let admission = trigger_role(
+        ctx,
+        store,
+        RoleSpawn {
+            decl: &decl,
+            internal_session: session.to_string(),
+            resume_real,
+            message: text,
+            coordinator: Coordinator::Recovery,
+            model_override: None,
+            hop,
+            chain: ChainMove::Unwind,
+            reply_thread: Some(thread),
+            thread: Some(thread),
+            priority: Priority::Normal,
+            queued_since: None,
+        },
+    )?;
+    if let Err(e) = store.reset_member_deadlines_of_session(session, ctx.now) {
+        eprintln!(
+            "warning: session {session} was continued on thread {thread}, but its window could not \
+             be re-stamped: {e}"
+        );
+    }
+    Ok(admission)
+}
+
+/// **Rung D: re-commission the slot** (nxf 6j6v.558h) — a FRESH session, given the slot's original
+/// body, minted into the same `(thread, role)`: the row's session is replaced by the trigger's own
+/// record, and the member's window is re-armed onto the new session. Never told "continuing with
+/// your own transcript" — it has none. `previous` is the session it replaces, whose chain depth it
+/// keeps.
+pub(crate) fn ladder_recommission(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    role: &str,
+    previous: Option<&str>,
+    body: &str,
+) -> std::result::Result<TriggerAdmission, TriggerError> {
+    let frozen = operation_declarations(ctx, store, thread)?;
+    let ctx = &with_declarations(ctx, frozen.as_ref());
+    let bare = role.rsplit_once('/').map_or(role, |(_, b)| b);
+    let decl = ctx.defs.role(bare)?.clone();
+    let hop = match previous
+        .map(|p| store.session_depth(p))
+        .transpose()?
+        .flatten()
+    {
+        Some(depth) => CheckedHop(check_depth_guard(depth.saturating_sub(1))?),
+        None => resolve_hop(ctx, store)?,
+    };
+    let internal = store.mint_session_id();
+    store.create_pending_session(&internal, bare)?;
+    let wake = wake_message(
+        body,
+        false,
+        &reply_guidance(store, ctx.now, role, Some(thread)),
+    );
+    let admission = trigger_role(
+        ctx,
+        store,
+        RoleSpawn {
+            decl: &decl,
+            internal_session: internal.clone(),
+            resume_real: None,
+            message: &wake,
+            coordinator: Coordinator::Recovery,
+            model_override: None,
+            hop,
+            chain: ChainMove::Deeper,
+            reply_thread: Some(thread),
+            thread: Some(thread),
+            priority: Priority::Normal,
+            queued_since: None,
+        },
+    )?;
+    // The member's window moves onto the new session — the one armed before, or, for a slot whose
+    // first mint failed before any was armed, the window its channel declares.
+    let window = match store.member_deadline(thread)? {
+        Some(armed) => Some(armed.window_secs),
+        None => declared_window_of_slot(ctx, store, thread)?,
+    };
+    if let Some(window_secs) = window {
+        let deadline = facade::instant_after(
+            ctx.now,
+            time::Duration::seconds(window_secs),
+            &format!("the declared timeout of member thread {thread}"),
+        )?;
+        store.arm_member_deadline(thread, &internal, window_secs, &deadline)?;
+    }
+    Ok(admission)
+}
+
 fn fire_queued_trigger(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -5304,13 +5481,21 @@ fn fire_queued_trigger(
     let decl = ctx.defs.role(&entry.role)?.clone();
     let hop = CheckedHop(check_depth_guard(entry.depth.saturating_sub(1))?);
     let resume_real = store.resolve_real(&entry.session)?;
-    let owes = facade::owes_reply(
-        store,
-        entry.thread.as_deref(),
-        ctx.origin,
-        &entry.role,
-        ctx.now,
-    )?;
+    // **From the ROW it was queued with** (nxf 6j6v.558h, field case 4) — the obligation the trigger
+    // carried when it met the queue. Only an entry queued before this was kept derives it again.
+    let reply_thread =
+        match store.take_queued_obligation(&entry.session, entry.thread.as_deref())? {
+            Some(kept) => kept,
+            None => facade::owes_reply(
+                store,
+                entry.thread.as_deref(),
+                ctx.origin,
+                &entry.role,
+                ctx.now,
+            )?
+            .then(|| entry.thread.clone())
+            .flatten(),
+        };
     // **A channel member's window starts when it actually STARTS** (nxf 6j6v.nf38). The clock is
     // armed at fan-out, when the requester begins waiting — but a trigger parked behind the working
     // tree has not run a single instruction, and it produces no transcript to reset its own clock
@@ -5357,7 +5542,7 @@ fn fire_queued_trigger(
             // Only a `Deeper` trigger is ever parked (an answer travelling back up a chain is never
             // queued), so this is the one it was.
             chain: ChainMove::Deeper,
-            reply_thread: owes.then_some(entry.thread.as_deref()).flatten(),
+            reply_thread: reply_thread.as_deref(),
             thread: entry.thread.as_deref(),
             priority: entry.priority,
             queued_since: entry.enqueued_at.as_deref(),
@@ -6246,6 +6431,15 @@ fn coordinator_commission_in(
     // race it against an empty thread.
     if opened_here {
         commission_thread_name(ctx, &thread);
+    }
+    // **A child a SESSION opened inherits a bound** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, "an
+    // orphaned child wakes its parent"): its own `nxc send` used to open a round with no deadline
+    // at all (t7y5), so a child that hung held its parent for as long as nobody looked.
+    if opened_here && ctx.session.is_some() {
+        if let Some(parent) = store.thread_parent(&thread)? {
+            let bound = child_bound(ctx, store, &parent)?;
+            store.set_deadline(&thread, &bound, &ctx.caller_handle());
+        }
     }
 
     // **The chat's machine, written with the chat** (nxf 6j6v.1c6k) — whichever machine runs it,
@@ -8539,6 +8733,12 @@ pub(crate) enum Unsettled {
     /// does not move past it: the stranded sweep records and escalates such a session within its
     /// grace, which is what settles the slot the honest way.
     NotRunning { session: String },
+    /// **Its coordinator owns it** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, "never settled by
+    /// staleness"): a coordinated slot that is neither abandoned nor escalated — or a nested round's
+    /// slot while a slot inside it is — is never settled by its window. The window is informational;
+    /// the ladder asks, continues, re-commissions and finally escalates, and only an answer or that
+    /// escalation settles the slot.
+    Coordinated,
 }
 
 /// A channel's member slots, and the ones among them that are NOT settled although their window has
@@ -8580,12 +8780,16 @@ fn members_and_the_ones_still_waiting(
             continue;
         }
         let owed = owed_session_of(store, member)?;
-        let reason =
+        let coordinates = worker.is_some_and(crate::stranded::worker_can_coordinate);
+        let reason = if coordinates && slot_is_coordinated(now, store, member, 0)? {
+            Some(Unsettled::Coordinated)
+        } else {
             match member_answer_is_still_coming(now, store, member, owed.as_deref(), &facts)? {
                 Some(coming) => Some(Unsettled::StillComing(coming)),
                 None => owed_session_not_running(store, member, worker)?
                     .map(|session| Unsettled::NotRunning { session }),
-            };
+            }
+        };
         if let Some(reason) = reason {
             member.stale = false;
             unsettled.push((member.thread_id.clone(), reason));
@@ -8593,6 +8797,59 @@ fn members_and_the_ones_still_waiting(
     }
     Ok((members, unsettled))
 }
+
+/// **Is this slot its coordinator's?** (nxf 6j6v.558h) — read off the obligation row the look keeps
+/// current: a row of an outstanding handle that names a coordinator and is not abandoned. A slot
+/// that stands for a nested round is its coordinator's while any slot inside the round is
+/// (`coordinator_of`'s clause 6), followed down a bounded number of levels. An escalated slot owes
+/// nothing, so it is never here: the escalation is what settles it.
+fn slot_is_coordinated(
+    now: &str,
+    store: &ChatStore,
+    slot: &ThreadQuorum,
+    depth: u32,
+) -> Result<bool> {
+    for handle in &slot.outstanding {
+        if store
+            .owed_start(&slot.thread_id, handle)?
+            .is_some_and(|row| row.coordinator.is_some() && row.abandoned.is_none())
+        {
+            return Ok(true);
+        }
+    }
+    if depth >= MAX_NESTED_ROUND_DEPTH || slot.outstanding.is_empty() {
+        return Ok(false);
+    }
+    let children = store.supervised_children(&slot.thread_id)?;
+    let ids: Vec<&str> = children.iter().map(String::as_str).collect();
+    for child in store.thread_quorums(&ids, now)? {
+        if slot_is_coordinated(now, store, &child, depth + 1)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// A recovering slot as a refusal names it: the thread and, when the ladder has acted, its last rung.
+fn recovering_words(store: &ChatStore, slot: &str) -> String {
+    let last = store
+        .newest_recovery_by_threads(&[slot])
+        .ok()
+        .and_then(|m| m.into_values().next_back());
+    match last {
+        Some(r) => format!(
+            "thread {slot} ({} {}/{} at {})",
+            r.action,
+            r.attempt,
+            crate::ladder::MAX_RECOVERY_ATTEMPTS,
+            r.at
+        ),
+        None => format!("thread {slot} (watched, no rung run yet)"),
+    }
+}
+
+/// How deep [`slot_is_coordinated`] follows nested rounds — far past any declared nesting.
+const MAX_NESTED_ROUND_DEPTH: u32 = 8;
 
 /// The OWED session of a member slot — the obligation record of the first outstanding handle that
 /// has one. `None` for a slot with no record, which keeps today's behaviour.
@@ -9651,11 +9908,25 @@ fn acceptance_target(
             .filter(|(slot, _)| working.contains(&slot.as_str()))
             .filter_map(|(slot, why)| match why {
                 Unsettled::NotRunning { session } => Some(format!("{slot} (session {session})")),
-                Unsettled::StillComing(_) => None,
+                Unsettled::StillComing(_) | Unsettled::Coordinated => None,
             })
+            .collect();
+        // **A slot its coordinator is recovering is named as such** (nxf 6j6v.558h): it is neither
+        // silent nor dead — it is being asked, continued or re-commissioned, and the acceptance
+        // waits for that to end in an answer or an escalation.
+        let recovering: Vec<String> = unsettled
+            .iter()
+            .filter(|(slot, _)| working.contains(&slot.as_str()))
+            .filter(|(_, why)| matches!(why, Unsettled::Coordinated))
+            .map(|(slot, _)| recovering_words(store, slot))
             .collect();
         let waiting_on = match (working.is_empty(), not_running.is_empty()) {
             (true, _) => "a session of this round is still writing".to_string(),
+            (false, _) if !recovering.is_empty() => format!(
+                "its coordinator is recovering {} — it answers or escalates before the round can \
+                 move",
+                recovering.join(", ")
+            ),
             (false, false) => format!(
                 "the session of thread(s) {} is past its window and not running; the stranded \
                  sweep records and escalates it within {STRANDED_GRACE_SECS} s of its clock",
@@ -11748,6 +12019,10 @@ pub enum ConsequenceClass {
     /// renders it `ABANDONED: <why> — withdraw it`, and `withdraw` is its exit. `thread` is the
     /// slot, `session` the session standing on it when there is one.
     SlotAbandoned,
+    /// **A rung of a coordinated slot's ladder failed this time** (nxf 6j6v.558h) — its trigger met
+    /// an error that a retry may not meet. The attempt stays counted and its error is in the slot's
+    /// recovery log; the next look tries again, and the budget ends in an escalation either way.
+    RecoveryFailed,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -14346,6 +14621,28 @@ pub fn session_ended(
     store: &mut ChatStore,
     internal_session: &str,
 ) -> Result<SessionEndedReceipt> {
+    session_ended_with(ctx, store, internal_session, SessionEnd::default())
+}
+
+/// **What a session's end says about itself** (nxf 6j6v.558h) — `nxc session ended --cause
+/// --attempts`. The cause is the sidecar's capped text of why the turn ended (`told to stop
+/// (SIGTERM)`, the runtime's error, a killed child); `attempts` how many times the runtime was
+/// asked to run it. Kept on the session's row, read by rung E's escalation and by `status`. Both
+/// absent is an end that said nothing more, which is every end before this cut.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionEnd<'a> {
+    pub cause: Option<&'a str>,
+    pub attempts: Option<u32>,
+}
+
+/// [`session_ended`] with what the end says about itself — see [`SessionEnd`]. The cause is capped
+/// at [`MAX_SESSION_CAUSE_CHARS`] here too, so a runtime that sends more cannot grow the row.
+pub fn session_ended_with(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    internal_session: &str,
+    end: SessionEnd,
+) -> Result<SessionEndedReceipt> {
     let hop = resolve_hop(ctx, store)?;
     if store.session_role(internal_session)?.is_none() {
         return Err(NxfError::not_found(format!(
@@ -14353,6 +14650,10 @@ pub fn session_ended(
         )));
     }
     store.mark_session_ended(internal_session, ctx.now)?;
+    if end.cause.is_some() || end.attempts.is_some() {
+        let cause = end.cause.map(cap_session_cause);
+        store.record_session_cause(internal_session, cause.as_deref(), end.attempts)?;
+    }
     // **THE SETTLE SIGNAL** (nxf 6j6v.gn8b). This announcement is the one moment the system knows a
     // caller has stopped working, and it is where a held delivery is armed — not delivered: the
     // process making the announcement is by definition still alive while it speaks, so a resume
@@ -14680,10 +14981,43 @@ fn sweep_held_deliveries(ctx: &Ctx, store: &mut ChatStore) -> Vec<FailedConseque
         if ctx.worker.session_is_running(&session) {
             continue;
         }
-        drained += 1;
-        match deliver_held(ctx, store, &session) {
-            Ok(receipt) => findings.extend(receipt.warnings),
-            Err(e) => findings.push(FailedConsequence::tick_unscheduled(&session, &e.msg)),
+        // **Through the claim of every slot the session owes** (nxf 6j6v.558h): a delivery starts
+        // the session, so it never runs beside a rung of one of those slots' coordinators, and the
+        // held rows are consumed inside the claim exactly once. A slot claimed elsewhere leaves the
+        // delivery to the next sweep.
+        let slots: Vec<(String, String)> = store
+            .owed_starts_of_session(&session)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.thread, r.role))
+            .collect();
+        let mut claimed = Vec::new();
+        let mut taken_elsewhere = false;
+        for (t, r) in &slots {
+            match store.claim_slot(t, r, ctx.now) {
+                Ok(crate::ladder::SlotClaim::BeingRecovered { .. }) => {
+                    taken_elsewhere = true;
+                    break;
+                }
+                Ok(_) => claimed.push((t.clone(), r.clone())),
+                Err(e) => {
+                    findings.push(FailedConsequence::tick_unscheduled(&session, &e.msg));
+                    taken_elsewhere = true;
+                    break;
+                }
+            }
+        }
+        if !taken_elsewhere {
+            drained += 1;
+            match deliver_held(ctx, store, &session) {
+                Ok(receipt) => findings.extend(receipt.warnings),
+                Err(e) => findings.push(FailedConsequence::tick_unscheduled(&session, &e.msg)),
+            }
+        }
+        for (t, r) in claimed {
+            if let Err(e) = store.release_slot_claim(&t, &r) {
+                eprintln!("warning: the claim on the slot of {r} on thread {t} could not be released: {e}");
+            }
         }
     }
     findings
@@ -14881,6 +15215,19 @@ pub enum ResumeOutcome {
     /// against doing the work twice: a session that sees its own `nxf create` and the id it
     /// returned does not create the ticket again, and one started from nothing does.
     ProviderCannotResume,
+    /// **Its coordinator holds the slot's claim** (nxf 6j6v.558h): a rung of its ladder is running
+    /// right now, so nothing was started beside it — one action at a time per slot. `retry_at` is
+    /// the claim's renewal horizon, the earliest moment a second try can find it free.
+    BeingRecovered {
+        /// The budget's attempts this episode has spent…
+        attempt: u32,
+        /// …of how many.
+        of: u32,
+        /// The last rung its coordinator ran, when one is on record.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<crate::ladder::RecoveryAction>,
+        retry_at: String,
+    },
     /// The session was started again, with its transcript in front of it.
     Resumed,
 }
@@ -15012,11 +15359,19 @@ pub fn resume_interrupted(
         return Ok(receipt(ResumeOutcome::AlreadyAnswered, None, warnings));
     }
 
+    // **A slot its coordinator is recovering right now is left to it** (nxf 6j6v.558h) — asked
+    // BEFORE anything below posts, stamps or secures: one action at a time per slot, and the answer
+    // names the rung and the moment the claim can be free again.
+    if let Some(being) = being_recovered(ctx, store, &session, thread.as_deref())? {
+        return Ok(receipt(being, None, warnings));
+    }
+
     // **NOT YET.** This is the near firing: secure the working copy — a weekly window is up to a
     // week, and holding this workspace's checkout for a week is not on offer — and re-arm for the
     // instant the runtime named. A hold with no instant is still secured and simply gets no
     // automatic return, which is the honest consequence of nobody having said when it lifts.
     if !hold.is_due(ctx.now) && !req.force {
+        note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::NotYet);
         secure_the_interrupted_tree(ctx, store, thread.as_deref(), &mut warnings);
         let armed_for = hold.until.as_deref().and_then(|until| {
             match ctx.timer.schedule_resume(&session, until) {
@@ -15075,6 +15430,13 @@ pub fn resume_interrupted(
             &provider_cannot_resume_notice(&hold, thread.as_deref()),
             &mut warnings,
         );
+        // **The outcome is recorded ON THE HOLD** (nxf 6j6v.558h, rung B): the slot's coordinator
+        // re-commissions a slot whose resume the provider refused, and never continues it.
+        note_the_hold_outcome(
+            store,
+            hold.id,
+            crate::ladder::HoldOutcome::ProviderCannotResume,
+        );
         stamp_taken_up(ctx, store, hold.id, &mut warnings);
         return Ok(receipt(ResumeOutcome::ProviderCannotResume, None, warnings));
     }
@@ -15085,7 +15447,16 @@ pub fn resume_interrupted(
     // single time. Where nothing was parked, this is the only thing that can notice that another
     // chain has been through the checkout.
     if let Some(drift) = the_tree_moved_under_the_hold(ctx, store, thread.as_deref())? {
-        ask_the_root_thread(ctx, store, &hold, thread.as_deref(), &drift, &mut warnings);
+        // **Asked once, and recorded** (nxf 6j6v.558h, rung B): a hold whose moved tree was put
+        // to the root reads `needs_decision` until somebody answers, and a second resume of the
+        // same hold — the background job and a human both arriving — does not ask again.
+        let asked = store.latest_hold(&session)?.is_some_and(|h| {
+            h.id == hold.id && h.outcome == Some(Ok(crate::ladder::HoldOutcome::TreeMovedAsked))
+        });
+        if !asked {
+            ask_the_root_thread(ctx, store, &hold, thread.as_deref(), &drift, &mut warnings);
+            note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::TreeMovedAsked);
+        }
         // **The hold is NOT stamped and nothing is re-armed.** The operation has not been taken up
         // — it is waiting for a person to say what should happen — so it stays on hold, which is
         // what keeps it visible in `nxc status` instead of looking finished. And nothing re-arms,
@@ -15097,6 +15468,32 @@ pub fn resume_interrupted(
     let role = store
         .session_role(&session)?
         .ok_or_else(|| NxfError::not_found(format!("no such session: {session}")))?;
+    // **Through the slot's claim** (nxf 6j6v.558h): every path that triggers an owed session takes
+    // it, so a resume never runs beside a rung of the slot's own coordinator.
+    let slot = thread
+        .as_deref()
+        .map(|t| (t.to_string(), ctx.qualify(&role)))
+        .filter(|(t, r)| store.owed_start(t, r).ok().flatten().is_some());
+    if let Some((t, r)) = &slot {
+        if let crate::ladder::SlotClaim::BeingRecovered { retry_at } =
+            store.claim_slot(t, r, ctx.now)?
+        {
+            return Ok(receipt(
+                being_recovered_as(store, t, r, retry_at)?,
+                None,
+                warnings,
+            ));
+        }
+    }
+    let release = |store: &mut ChatStore| {
+        if let Some((t, r)) = &slot {
+            if let Err(e) = store.release_slot_claim(t, r) {
+                eprintln!(
+                    "warning: the claim on the slot of {r} on thread {t} could not be released: {e}"
+                );
+            }
+        }
+    };
     let body = continuation_message(&hold, &role, thread.as_deref());
     let channel = thread
         .as_deref()
@@ -15117,15 +15514,20 @@ pub fn resume_interrupted(
             model: None,
         },
     );
+    release(store);
     match started {
         Ok(r) => {
             warnings.extend(r.warnings);
-            // **The member's window restarts when it is actually put back to work** (nxf 6j6v.ccvy)
+            // **The member's window resumes when it is actually put back to work** (nxf 6j6v.ccvy)
             // — after the SUCCESSFUL trigger and before the stamp. The hold paused the window; once
             // the stamp lifts the pause, a window that ran out meanwhile would make the slot `stale`
             // at once, and a RUNNING session past its window is the one shape the flow still
             // advances past. (The obligation's own clock moved inside `role_resume`.)
-            if let Err(e) = store.reset_member_deadlines_of_session(&session, ctx.now) {
+            //
+            // **It resumes with the remainder it had at the hold** (nxf 6j6v.558h, rung B): the
+            // paused window ends at `resumed_at + (deadline - hold.at)`, not one whole window later.
+            note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::Resumed);
+            if let Err(e) = store.resume_member_deadlines_of_session(&session, ctx.now, &hold.at) {
                 eprintln!(
                     "warning: session {session} was resumed, but its member window could not be \
                      restarted: {e}; its slot may read past its window until its first transcript \
@@ -15157,6 +15559,56 @@ pub fn resume_interrupted(
 /// was working when the window closed. It deliberately does NOT walk the whole operation: a thread
 /// is what a human reads off `nxc status`, and taking up "some session somewhere under this root"
 /// would start work the person did not point at.
+/// [`ResumeOutcome::BeingRecovered`] when the slot `session` owes on `thread` is claimed by its
+/// coordinator at `ctx.now`; `None` when it is free or has no row.
+fn being_recovered(
+    ctx: &Ctx,
+    store: &ChatStore,
+    session: &str,
+    thread: Option<&str>,
+) -> Result<Option<ResumeOutcome>> {
+    let (Some(thread), Some(role)) = (thread, store.session_role(session)?) else {
+        return Ok(None);
+    };
+    let role = ctx.qualify(&role);
+    match store.slot_claim_standing(thread, &role, ctx.now)? {
+        Some(retry_at) => Ok(Some(being_recovered_as(store, thread, &role, retry_at)?)),
+        None => Ok(None),
+    }
+}
+
+fn being_recovered_as(
+    store: &ChatStore,
+    thread: &str,
+    role: &str,
+    retry_at: String,
+) -> Result<ResumeOutcome> {
+    let attempt = store
+        .owed_start(thread, role)?
+        .map_or(0, |row| row.attempts);
+    let action = store
+        .slot_recovery_log(thread, role)?
+        .last()
+        .and_then(crate::ladder::action_of);
+    Ok(ResumeOutcome::BeingRecovered {
+        attempt,
+        of: crate::ladder::MAX_RECOVERY_ATTEMPTS,
+        action,
+        retry_at,
+    })
+}
+
+/// Record what a resume did with a hold — best-effort: the outcome is what rung B reads, and a hold
+/// without one reads as not yet decided.
+fn note_the_hold_outcome(store: &mut ChatStore, hold: i64, outcome: crate::ladder::HoldOutcome) {
+    if let Err(e) = store.set_hold_outcome(hold, outcome) {
+        eprintln!(
+            "warning: the outcome {} of hold {hold} could not be recorded: {e}",
+            outcome.as_str()
+        );
+    }
+}
+
 fn standing_hold(
     store: &ChatStore,
     scope: ResumeScope<'_>,
@@ -17235,6 +17687,15 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
                         coming.says()
                     ),
                 ),
+                Unsettled::Coordinated => FailedConsequence::step_still_waiting(
+                    slot,
+                    format!(
+                        "the step on thread {slot} is past its window and its coordinator is \
+                         taking it up, so its window settles nothing and the flow waits for it; \
+                         `nxc status` shows the recovery, and `nxc withdraw --thread {thread_id}` \
+                         takes the operation back"
+                    ),
+                ),
                 Unsettled::NotRunning { session } => FailedConsequence::stranded(
                     ConsequenceClass::StepNotRunning,
                     Some(slot),
@@ -17997,8 +18458,13 @@ fn tick_move(
     members: &[ThreadQuorum],
 ) -> Result<TickMove> {
     if members.is_empty() {
-        // Not a supervised channel: its own register is all there is, unchanged.
-        return Ok(if q.complete || q.stale {
+        // Not a supervised channel: its own register is all there is, unchanged — except that a
+        // slot its coordinator owns is never settled by its window (nxf 6j6v.558h).
+        let coordinated = !q.complete
+            && q.stale
+            && crate::stranded::worker_can_coordinate(ctx.worker)
+            && slot_is_coordinated(ctx.now, store, q, 0)?;
+        return Ok(if q.complete || (q.stale && !coordinated) {
             TickMove::Consolidate
         } else {
             TickMove::Waiting

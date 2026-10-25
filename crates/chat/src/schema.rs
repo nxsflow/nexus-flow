@@ -125,7 +125,10 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          -- parent on a `ThreadRoot` — IS synced; only the resolution is local.
          CREATE TABLE IF NOT EXISTS session_map(
              internal_id TEXT PRIMARY KEY, role TEXT NOT NULL, real_sdk_id TEXT, created TEXT,
-             depth INTEGER NOT NULL DEFAULT 0, thread TEXT, ended TEXT, ended_before TEXT
+             depth INTEGER NOT NULL DEFAULT 0, thread TEXT, ended TEXT, ended_before TEXT,
+             -- What the session's last end said about itself (nxf 6j6v.558h): `nxc session ended
+             -- --cause --attempts`.
+             last_cause TEXT, last_cause_attempts INTEGER
          );
 
          -- **The collecting coordinator's pending queue** (nxf 6j6v.gn8b): an answer that arrived
@@ -541,7 +544,10 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              limit_name TEXT NOT NULL,
              until      TEXT,
              detail     TEXT NOT NULL,
-             resumed_at TEXT
+             resumed_at TEXT,
+             -- What the resume did with the hold (nxf 6j6v.558h, rung B): `resumed`,
+             -- `provider_cannot_resume`, `tree_moved_asked`, `not_yet`.
+             outcome    TEXT
          );
          CREATE INDEX IF NOT EXISTS session_interruption_open
              ON session_interruption(session, id);
@@ -774,6 +780,7 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     // is NOT NULL — rebuilt in place, rows kept, before the DDL below (a no-op for them then).
     crate::stranded::rebuild_pre_slot_tables(conn)?;
     conn.execute_batch(crate::stranded::STRANDED_DDL)?;
+    crate::stranded::add_ladder_columns(conn)?;
     Ok(upgraded)
 }
 

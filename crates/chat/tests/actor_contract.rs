@@ -247,6 +247,40 @@ fn cases() -> Vec<Case> {
             }),
         ),
         (
+            // `reply_progress` (nxf 6j6v.558h, `nxc reply --progress`) validates the actor before it
+            // writes anything and stamps `<origin>/<actor>` on its post, as `send` does. It is a
+            // surface call, so it takes the compute layer's context; nothing in it reads the
+            // catalogue, the worker or the timer, which is why empty ones stand in for them.
+            "reply_progress",
+            prefixed,
+            &[],
+            Box::new(|b: &Boundary| {
+                let mut s = fixture();
+                thread_opened_by(&mut s, "t-1", SEEDER);
+                let defs = nexus_chat::definitions::Definitions::new(vec![], vec![])
+                    .expect("an empty catalogue");
+                let ctx = nexus_chat::orchestration::Ctx {
+                    now: NOW,
+                    origin: ORIGIN,
+                    actor: b.actor,
+                    session: None,
+                    hop: 0,
+                    defs: &defs,
+                    worker: &nexus_chat::worker::DryWorker { log: None },
+                    timer: &nexus_chat::timer::DryTimer,
+                    namer: &nexus_chat::naming::DryNamer,
+                    db_path: ":memory:",
+                    project_claude_md: None,
+                    module_primes: None,
+                    machines: None,
+                    peers: None,
+                };
+                let before = s.export().len();
+                let r = nexus_chat::surface::reply_progress(&ctx, &mut s, "t-1", "still at it");
+                outcome(&s, before, r)
+            }),
+        ),
+        (
             "set_expects",
             str::to_owned,
             SET_EXPECTS_DEVIATIONS,

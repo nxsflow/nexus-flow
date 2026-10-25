@@ -1150,6 +1150,21 @@ impl Engine {
         })
     }
 
+    /// **Say "still working" because a coordinator asked** (`nxc reply --progress`, nxf
+    /// 6j6v.558h) — see [`surface::reply_progress`]. Never an answer: it settles no turn, starts
+    /// no step and wakes nobody; it resets the caller's slot's silence clock and budget when an ask
+    /// was pending, and is stored for the record otherwise.
+    pub fn reply_progress(
+        &self,
+        caller: Caller<'_>,
+        thread: &str,
+        body: &str,
+    ) -> Result<surface::ProgressReceipt> {
+        self.with_orchestration(caller, |ctx, store| {
+            surface::reply_progress(ctx, store, thread, body)
+        })
+    }
+
     /// **Say what a conversation is called** (`nxc threads name`, nxf 6j6v.e76c).
     ///
     /// The write behind the register [`crate::store::ThreadQuorum::name`] reports, under the rule
@@ -1312,6 +1327,21 @@ impl Engine {
     ) -> Result<orchestration::SessionEndedReceipt> {
         self.with_orchestration(caller, |ctx, store| {
             orchestration::session_ended(ctx, store, internal_session)
+        })
+    }
+
+    /// [`session_ended`](Engine::session_ended) with what the end says about itself (`nxc session
+    /// ended --cause --attempts`, nxf 6j6v.558h): the runtime's capped text of why the turn ended,
+    /// and how many times it was asked to run it. Kept on the session's row, and named verbatim by
+    /// the coordinator's escalation when its slot cannot be recovered.
+    pub fn session_ended_with(
+        &self,
+        caller: Caller<'_>,
+        internal_session: &str,
+        end: orchestration::SessionEnd<'_>,
+    ) -> Result<orchestration::SessionEndedReceipt> {
+        self.with_orchestration(caller, |ctx, store| {
+            orchestration::session_ended_with(ctx, store, internal_session, end)
         })
     }
 

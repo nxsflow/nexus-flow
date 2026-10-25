@@ -131,6 +131,9 @@ pub enum Coordinator {
     /// trusted, its role listed in `addressable.external` — and nothing about the caller's own
     /// working copy is inherited.
     Border,
+    /// **A coordinator's ladder** (nxf 6j6v.558h): a rung that continued or re-commissioned a slot
+    /// its coordinator took up.
+    Recovery,
 }
 
 impl Coordinator {
@@ -144,6 +147,7 @@ impl Coordinator {
             Coordinator::Return => "return",
             Coordinator::Released => "released",
             Coordinator::Border => "border",
+            Coordinator::Recovery => "recovery",
         }
     }
 }
@@ -776,6 +780,54 @@ pub trait Worker: Send + Sync {
         let _ = internal_session;
         Err("this worker cannot stop a running session".to_string())
     }
+
+    /// **Ask a running session something, through the ask door** (nxf 6j6v.558h, epic 6j6v.nmc9
+    /// section B, rung A) — the coordinator's one act on a LIVE session. The session sees `ask.text`
+    /// as its next user message, when its current assistant turn ends.
+    ///
+    /// Three answers, and only one of them counts as having asked:
+    /// [`AskOutcome::Asked`] — the ask is delivered to the process; [`AskOutcome::NoProcess`] —
+    /// there is no live process to ask (the coordinator judges the slot as ended at its next look);
+    /// [`AskOutcome::CannotAsk`] — there is a process and this worker cannot reach it (a session
+    /// whose claim does not declare the door, a host without one).
+    ///
+    /// **The default is `CannotAsk`**, for [`asks_sessions`](Worker::asks_sessions)' reason: a host
+    /// that has not built the door must not be believed to have asked.
+    ///
+    /// Must return promptly and must not call back into the engine — [`Worker`]'s two rules.
+    fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
+        let _ = ask;
+        AskOutcome::CannotAsk
+    }
+}
+
+/// **One ask a coordinator puts to a running session** (nxf 6j6v.558h) — what
+/// [`Worker::ask_session`] delivers, and what [`SidecarWorker`] writes to
+/// `.nxs/agent-logs/<session>.ask.<ulid>.json` as `{at, thread, role, text}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionAsk {
+    /// The internal session asked.
+    pub session: String,
+    /// The slot's thread — the one the asked turn is for.
+    pub thread: String,
+    /// The slot's role, qualified.
+    pub role: String,
+    /// The coordinator's text, verbatim.
+    pub text: String,
+    /// When it was asked.
+    pub at: String,
+}
+
+/// **What became of one ask** (nxf 6j6v.558h) — see [`Worker::ask_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AskOutcome {
+    /// Delivered to the session's process.
+    Asked,
+    /// No live process holds the session.
+    NoProcess,
+    /// A process holds it and this worker cannot reach it.
+    CannotAsk,
 }
 
 /// How long one declared precondition's command gets before [`SidecarWorker`] kills it and reports
@@ -947,6 +999,12 @@ impl Worker for BoundedWorker {
     /// the host's process either.
     fn stop_session(&self, internal_session: &str) -> std::result::Result<SessionStop, String> {
         self.inner.stop_session(internal_session)
+    }
+
+    /// Forwarded, not bounded, for [`stop_session`](Worker::stop_session)'s reason: a conforming
+    /// ask writes a file and sends a signal (nxf 6j6v.558h).
+    fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
+        self.inner.ask_session(ask)
     }
 
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
@@ -1126,6 +1184,75 @@ impl SidecarWorker {
                  session's. Check it (`ps -p {pid}`) and stop it by hand if it is the session",
                 path.display()
             )),
+        }
+    }
+
+    /// [`Worker::ask_session`]'s body, with the SIGNAL as a parameter — [`stop_session_by`]'s seam,
+    /// for its reason: every decision here is testable without sending one.
+    ///
+    /// [`stop_session_by`]: SidecarWorker::stop_session_by
+    fn ask_session_by(
+        &self,
+        ask: &SessionAsk,
+        send: impl Fn(u32) -> std::result::Result<(), AskOutcome>,
+    ) -> AskOutcome {
+        let logs = agent_logs_dir(&self.cwd);
+        let claim_path = logs.join(format!("{}.pid", ask.session));
+        let Ok(content) = std::fs::read_to_string(&claim_path) else {
+            return AskOutcome::NoProcess;
+        };
+        let Some(claim) = a_session_claim(&content) else {
+            return AskOutcome::NoProcess;
+        };
+        match who_holds(&claim) {
+            ClaimHolder::TheSession => {}
+            ClaimHolder::Gone | ClaimHolder::SomebodyElse => return AskOutcome::NoProcess,
+            // A live pid nothing proves is this session's is never signalled — the stop's rule.
+            ClaimHolder::Unverifiable => return AskOutcome::CannotAsk,
+        }
+        if !SESSIONS_ARE_STOPPABLE || !claim_declares_the_ask_door(&content) {
+            return AskOutcome::CannotAsk;
+        }
+        let file = logs.join(format!(
+            "{}.ask.{}.json",
+            ask.session,
+            monotonic_ulid().to_lowercase()
+        ));
+        let tmp = file.with_extension("json.tmp");
+        let body = serde_json::json!({
+            "at": ask.at, "thread": ask.thread, "role": ask.role, "text": ask.text,
+        });
+        let written =
+            std::fs::write(&tmp, body.to_string()).and_then(|()| std::fs::rename(&tmp, &file));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!(
+                "warning: the ask for session {} could not be written to {}: {e}",
+                ask.session,
+                file.display()
+            );
+            return AskOutcome::CannotAsk;
+        }
+        match send(claim.pid) {
+            // **The race with the door closing** (review of pass 1, I&R #4): the sidecar withdraws
+            // `ask: 1` before its last drain, and a signal that landed after that is not taken.
+            // Read once more: a claim that no longer declares the door, with this ask still lying
+            // there, is an ask nobody will take — not counted, and its file taken back.
+            Ok(()) => {
+                let still_open = std::fs::read_to_string(&claim_path)
+                    .map(|c| claim_declares_the_ask_door(&c))
+                    .unwrap_or(false);
+                if !still_open && file.exists() {
+                    let _ = std::fs::remove_file(&file);
+                    return AskOutcome::CannotAsk;
+                }
+                AskOutcome::Asked
+            }
+            Err(outcome) => {
+                // Not delivered: the file must not be found by a later turn as if it had been.
+                let _ = std::fs::remove_file(&file);
+                outcome
+            }
         }
     }
 
@@ -1732,6 +1859,49 @@ fn signal_to_stop(_pid: u32) -> std::result::Result<SessionStop, String> {
     Err("this build cannot signal a process".to_string())
 }
 
+/// A ULID strictly greater than every earlier one this process minted — two asks inside one
+/// millisecond still drain in the order they were asked.
+fn monotonic_ulid() -> String {
+    static GENERATOR: std::sync::OnceLock<std::sync::Mutex<ulid::Generator>> =
+        std::sync::OnceLock::new();
+    let mut generator = GENERATOR
+        .get_or_init(|| std::sync::Mutex::new(ulid::Generator::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    generator
+        .generate()
+        .unwrap_or_else(|_| ulid::Ulid::new())
+        .to_string()
+}
+
+/// **Whether a claim declares the ask door** (nxf 6j6v.558h) — a line `ask: 1` after the pid and
+/// its start instant, which the sidecar writes once its SIGUSR2 handler is installed and removes
+/// before its last drain. Every other reader of a claim ignores the line.
+fn claim_declares_the_ask_door(contents: &str) -> bool {
+    contents.lines().skip(2).any(|l| l.trim() == "ask: 1")
+}
+
+/// SIGUSR2 to the one pid a proven claim names — the ask door's signal. `ESRCH` is a process that
+/// left between the read and the send: nothing to ask.
+#[cfg(unix)]
+fn signal_to_ask(pid: u32) -> std::result::Result<(), AskOutcome> {
+    // SAFETY: as `signal_to_stop` — a signal to one positive pid, which `a_signalable_pid` bounds;
+    // an errno, never UB.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR2) };
+    if rc == 0 {
+        return Ok(());
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Err(AskOutcome::NoProcess),
+        _ => Err(AskOutcome::CannotAsk),
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_to_ask(_pid: u32) -> std::result::Result<(), AskOutcome> {
+    Err(AskOutcome::CannotAsk)
+}
+
 impl Worker for SidecarWorker {
     /// **The pid file [`SessionLock`] already writes, read back** (nxf 6j6v.10yb). The claim taken
     /// with `create_new` at every trigger holds the pid of the detached `node` that IS the session
@@ -1842,6 +2012,16 @@ impl Worker for SidecarWorker {
     /// at.
     fn stop_session(&self, internal_session: &str) -> std::result::Result<SessionStop, String> {
         self.stop_session_by(internal_session, signal_to_stop)
+    }
+
+    /// **The ask door** (nxf 6j6v.558h): the ask is written beside the spec as
+    /// `<session>.ask.<ulid>.json` — one file per ask, so two slots of one session never overwrite
+    /// each other, drained by the sidecar in ulid order — and the process the session's claim names
+    /// is sent SIGUSR2. Only a claim that DECLARES the door (`ask: 1`, written by the sidecar after
+    /// it installed its handler) is ever signalled: Node's default for SIGUSR2 terminates the
+    /// process, so an older sidecar, or one still starting, answers `CannotAsk` and is left alone.
+    fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
+        self.ask_session_by(ask, signal_to_ask)
     }
 
     /// **The declared hurdle, run where the sessions run** (nxf 6j6v.n92p): `sh -c <command>` in
@@ -2966,6 +3146,152 @@ mod tests {
             *sent.lock().unwrap(),
             vec![held.pid()],
             "one signal, to the pid the claim names and to nothing else"
+        );
+    }
+
+    // ---- the ask door (nxf 6j6v.558h) -----------------------------------------------------------
+
+    fn an_ask(session: &str) -> SessionAsk {
+        SessionAsk {
+            session: session.to_string(),
+            thread: "t-1".to_string(),
+            role: "o/coder".to_string(),
+            text: "Coordinator of thread t-1: …".to_string(),
+            at: "2026-10-24T10:20:00Z".to_string(),
+        }
+    }
+
+    fn ask_files(logs: &std::path::Path, session: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(logs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{session}.ask.")) && n.ends_with(".json"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// **A claim that does not declare the door is never signalled** (must-fix, design review round
+    /// 3 IR #2): Node's default for SIGUSR2 terminates the process, so a sidecar that has not yet
+    /// installed its handler — or one from before the door — answers `CannotAsk`, and no ask file is
+    /// left behind for a later turn to find. A dead claim is `NoProcess`; an unverifiable one is
+    /// `CannotAsk`.
+    #[test]
+    fn an_undeclared_claim_is_never_signalled_and_leaves_no_ask_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join(".nxs/agent-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let worker = SidecarWorker {
+            sidecar: tmp.path().join("stub.mjs"),
+            cwd: tmp.path().to_path_buf(),
+        };
+        let sent: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::default();
+        let record = |pid: u32| {
+            sent.lock().unwrap().push(pid);
+            Ok(())
+        };
+        let held = LiveProcess::spawn();
+        std::fs::write(logs.join("s-undeclared.pid"), session_claim_for(held.pid())).unwrap();
+        assert_eq!(
+            worker.ask_session_by(&an_ask("s-undeclared"), record),
+            AskOutcome::CannotAsk
+        );
+        std::fs::write(logs.join("s-old.pid"), format!("{}\n", held.pid())).unwrap();
+        assert_eq!(
+            worker.ask_session_by(&an_ask("s-old"), record),
+            AskOutcome::CannotAsk,
+            "a claim that cannot prove its process"
+        );
+        assert_eq!(
+            worker.ask_session_by(&an_ask("s-never"), record),
+            AskOutcome::NoProcess,
+            "no claim at all"
+        );
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "{:?}",
+            sent.lock().unwrap()
+        );
+        for s in ["s-undeclared", "s-old", "s-never"] {
+            assert!(ask_files(&logs, s).is_empty(), "{s}");
+        }
+    }
+
+    /// The other side: a claim that declares `ask: 1` gets ONE file per ask — two asks, two files,
+    /// in ulid order — and one SIGUSR2 per ask to the pid it names. A signal that cannot be delivered
+    /// takes its file back.
+    #[test]
+    fn a_declared_claim_gets_one_ask_file_per_ask_and_one_signal_each() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join(".nxs/agent-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let worker = SidecarWorker {
+            sidecar: tmp.path().join("stub.mjs"),
+            cwd: tmp.path().to_path_buf(),
+        };
+        let held = LiveProcess::spawn();
+        std::fs::write(
+            logs.join("s-door.pid"),
+            format!("{}ask: 1\n", session_claim_for(held.pid())),
+        )
+        .unwrap();
+        let sent: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::default();
+        let record = |pid: u32| {
+            sent.lock().unwrap().push(pid);
+            Ok(())
+        };
+        let mut first = an_ask("s-door");
+        first.thread = "t-x".into();
+        let mut second = an_ask("s-door");
+        second.thread = "t-y".into();
+        assert_eq!(worker.ask_session_by(&first, record), AskOutcome::Asked);
+        assert_eq!(worker.ask_session_by(&second, record), AskOutcome::Asked);
+        assert_eq!(*sent.lock().unwrap(), vec![held.pid(), held.pid()]);
+        let files = ask_files(&logs, "s-door");
+        assert_eq!(files.len(), 2, "{files:?}");
+        let threads: Vec<String> = files
+            .iter()
+            .map(|f| {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(logs.join(f)).unwrap()).unwrap();
+                assert_eq!(v["role"], "o/coder");
+                assert!(v["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Coordinator of thread"));
+                v["thread"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(threads, vec!["t-x", "t-y"], "drained in ulid order");
+
+        // The door closes between the claim's read and the signal: the ask is not counted, and its
+        // file is taken back.
+        let closing = |_pid: u32| {
+            std::fs::write(logs.join("s-door.pid"), session_claim_for(held.pid())).unwrap();
+            Ok(())
+        };
+        assert_eq!(
+            worker.ask_session_by(&an_ask("s-door"), closing),
+            AskOutcome::CannotAsk
+        );
+        assert_eq!(
+            ask_files(&logs, "s-door").len(),
+            2,
+            "the late ask took its file back"
+        );
+        std::fs::write(
+            logs.join("s-door.pid"),
+            format!("{}ask: 1\n", session_claim_for(held.pid())),
+        )
+        .unwrap();
+
+        let gone = worker.ask_session_by(&an_ask("s-door"), |_| Err(AskOutcome::NoProcess));
+        assert_eq!(gone, AskOutcome::NoProcess);
+        assert_eq!(
+            ask_files(&logs, "s-door").len(),
+            2,
+            "the undelivered ask took its file back"
         );
     }
 

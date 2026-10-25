@@ -94,6 +94,10 @@ struct RecordingWorker {
     running: Mutex<HashSet<String>>,
     /// The error the next CODER start fails with, once.
     failing_coder: Mutex<Option<ErrorKind>>,
+    /// Whether it can stop and ask its sessions — and so whether the slots it runs have a
+    /// coordinator (nxf 6j6v.558h). By default it cannot: this file is about the queue and the
+    /// window, for a slot nobody coordinates.
+    coordinating: Mutex<bool>,
 }
 
 impl RecordingWorker {
@@ -124,6 +128,10 @@ impl RecordingWorker {
     fn fail_the_next_coder_start(&self, kind: ErrorKind) {
         *self.failing_coder.lock().unwrap() = Some(kind);
     }
+
+    fn coordinate(&self) {
+        *self.coordinating.lock().unwrap() = true;
+    }
 }
 
 impl Worker for RecordingWorker {
@@ -151,6 +159,14 @@ impl Worker for RecordingWorker {
 
     fn answers_liveness(&self) -> bool {
         true
+    }
+
+    fn stops_sessions(&self) -> bool {
+        *self.coordinating.lock().unwrap()
+    }
+
+    fn asks_sessions(&self) -> bool {
+        *self.coordinating.lock().unwrap()
     }
 }
 
@@ -539,7 +555,24 @@ fn the_lease_handed_on_after_a_long_wait_is_not_already_expired() {
 /// asked: the flow must not open the verifier, or the retry would start the coder beside it.
 #[test]
 fn a_failed_start_with_a_retry_due_does_not_lapse_and_its_retry_runs_alone() {
+    a_failed_start_retried_and_then_silent(false);
+}
+
+/// **The same run, its slot COORDINATED — the pin rewritten** (nxf 6j6v.558h, epic 6j6v.nmc9 section
+/// B, "never settled by staleness"): everything up to the retry is the same, and the retried coder
+/// that then stays silent past its window is NOT advanced past — no lapse, no verifier. Its
+/// coordinator's silence clock is what acts on it. The test above is its sibling: the same slot with
+/// nobody coordinating it lapses as before.
+#[test]
+fn a_coordinated_step_retried_and_then_silent_is_never_settled_by_its_window() {
+    a_failed_start_retried_and_then_silent(true);
+}
+
+fn a_failed_start_retried_and_then_silent(coordinated: bool) {
     let (tmp, engine, worker) = team_with(SHORT);
+    if coordinated {
+        worker.coordinate();
+    }
     let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
     let (round, channel_thread) = an_ordered_round_queued_behind_the_holder(&tmp, &engine);
     tick(&tmp, &worker, SIX_HOURS_LATER, &channel_thread);
@@ -579,12 +612,26 @@ fn a_failed_start_with_a_retry_due_does_not_lapse_and_its_retry_runs_alone() {
         "and nothing of the run runs beside it"
     );
 
-    // Its window runs from the retry that started it, and a started step that stays silent lapses.
+    // Its window runs from the retry that started it, and a started step that stays silent lapses
+    // — unless its coordinator owns it.
     let receipt = tick(&tmp, &worker, INSIDE_THE_RETRIED_WINDOW, &channel_thread);
     assert_ne!(receipt.reason, ADVANCED, "{receipt:?}");
     let receipt = tick(&tmp, &worker, PAST_THE_RETRIED_WINDOW, &channel_thread);
-    assert_eq!(receipt.reason, ADVANCED, "{receipt:?}");
-    assert_eq!(lapse_findings(&receipt), 1, "{receipt:?}");
+    if coordinated {
+        assert_ne!(
+            receipt.reason, ADVANCED,
+            "never settled by its window: {receipt:?}"
+        );
+        assert_eq!(lapse_findings(&receipt), 0, "{receipt:?}");
+        assert_eq!(
+            worker.started("verifier"),
+            0,
+            "the flow did not move past it"
+        );
+    } else {
+        assert_eq!(receipt.reason, ADVANCED, "{receipt:?}");
+        assert_eq!(lapse_findings(&receipt), 1, "{receipt:?}");
+    }
 }
 
 /// A start that failed on something waiting cannot fix is not retried. Nothing will ever start

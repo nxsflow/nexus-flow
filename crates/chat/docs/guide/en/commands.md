@@ -626,6 +626,22 @@ cannot be asked at all: `worker_answers_liveness`. It reads `false` in the examp
 guide's worked session records its triggers instead of starting real sessions, so there is no
 process anywhere to ask about — and `true` under the shipped sidecar.
 
+**A slot its coordinator is taking up says RECOVERING.** When a coordinated slot's session goes
+quiet, ends without answering or never starts, the coordinator acts before anybody is asked: it
+asks the running session (once it has been silent on that slot for 20 minutes), continues the
+ended one in the same session, or starts the slot afresh with its original task — three attempts in
+all, and at most two to six hours for a session that keeps answering with `--progress`. `recovery`
+says how far it got (`attempt`, `of`, `action`, `at`, `last_activity`, `next_look`), `stale` reads
+`false` beside it, and the line says it in place of "nothing is coming":
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 1/3 at 2026-10-18T10:20:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:40:00Z
+```
+
+When the attempts are spent the coordinator escalates in the member's name, with the step, the
+cause, every attempt, the last activity, the session and the working copy — and the slot then says
+STRANDED, below.
+
 **A slot whose session will not answer says STRANDED instead** — and why, and what was done about
 it. `stranded` names the observation (`observed`, 1–5: never started, never bound, ended without
 answering, no live process, start given up), when it was recorded, and what became of the
@@ -651,8 +667,9 @@ m-01M0…  #review  waiting on ab12/verifier — ABANDONED: nothing has been hea
 ```
 
 **And the operation says where it hangs.** `hangs_at` names the deepest slot under the operation
-that is escalated, recorded as stranded or abandoned, with the thread whose tick coordinates it and
-what is being done about it (`recovery`: `watched`, `never_started`, `abandoned`). A tie at one
+that is recovering, escalated, recorded as stranded or abandoned, with the thread whose tick
+coordinates it and what is being done about it (`recovery`: `recovering`, `watched`,
+`never_started`, `abandoned`). A tie at one
 depth goes to the slot with the oldest activity, then the lowest thread id:
 
 ```text

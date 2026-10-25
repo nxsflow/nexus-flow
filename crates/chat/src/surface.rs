@@ -1050,6 +1050,93 @@ pub fn reply_in_thread(
 }
 
 /// What [`machine`] is asked about (nxf 6j6v.1c6k): a chat about to start, or one that runs.
+/// **What `nxc reply --progress` did** (nxf 6j6v.558h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct ProgressReceipt {
+    pub thread_id: String,
+    pub message_id: String,
+    /// Whether an ask was pending on the caller's slot and this progress answered it: the silence
+    /// clock restarted and the budget went back to zero. `false` is a progress nobody asked for —
+    /// stored, and counted for nothing.
+    pub counted: bool,
+    /// What the caller is told, verbatim.
+    pub receipt: String,
+}
+
+/// The receipt of a progress an ask was waiting for.
+pub const PROGRESS_TAKEN: &str = "taken as progress — your answer is still owed";
+/// The receipt of a progress nobody asked for.
+pub const PROGRESS_UNREQUESTED: &str = "stored; no ask was pending — this did not count";
+
+/// **`nxc reply --progress <text>`** (nxf 6j6v.558h) — "still working", said ONLY because a
+/// coordinator asked. The message is posted into the thread as kind `progress`, which the discharge
+/// predicate excludes: it never settles the slot, never starts a step, never wakes an opener, and
+/// no consolidation carries it.
+///
+/// When an ask is pending on the caller's slot of `thread` (its coordinator asked and nothing has
+/// answered the ask since), the slot's silence clock restarts from now, its budget goes back to
+/// zero and the ask is answered — the ceiling clock is left standing, so a session that answers
+/// every ask with progress still reaches its coordinator's escalation at the ceiling. Otherwise the
+/// message is stored for the record and nothing else happens.
+pub fn reply_progress(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    body: &str,
+) -> Result<ProgressReceipt> {
+    if body.trim().is_empty() {
+        return Err(NxfError::validation(
+            "a progress note needs one line saying what is still being done",
+        ));
+    }
+    let channel = store
+        .thread_channel(thread)
+        .or_else(|| store.thread_channel_via_message(thread))
+        .ok_or_else(|| NxfError::not_found(format!("no such thread: {thread}")))?;
+    // Posted straight into the thread, as `facade::send` posts: the note starts nothing, and the
+    // store's own post is the whole of what it does.
+    let actor = nxs_foundation::model::validate_author(ctx.actor)?;
+    store.set_wall_clock(ctx.now);
+    let message_id = store.post_message(&crate::model::MessageEnvelope {
+        origin: ctx.origin.to_string(),
+        channel_id: channel,
+        sender: format!("{}/{actor}", ctx.origin),
+        kind: MessageKind::Progress,
+        priority: Priority::Normal,
+        disposition: Disposition::InTurn,
+        thread_id: Some(thread.to_string()),
+        refs: Refs::default(),
+        body: body.to_string(),
+    });
+    let role = ctx.caller_handle();
+    let counted = store.take_progress(thread, &role, ctx.now)?;
+    if counted {
+        store
+            .log_rung(
+                thread,
+                &role,
+                ctx.now,
+                crate::ladder::RecoveryAction::Progress,
+                0,
+                ctx.session,
+                body.lines().next().unwrap_or(""),
+            )
+            .and_then(|id| store.settle_rung_as(id, crate::ladder::RungOutcome::Reset))?;
+    }
+    Ok(ProgressReceipt {
+        thread_id: thread.to_string(),
+        message_id,
+        counted,
+        receipt: if counted {
+            PROGRESS_TAKEN
+        } else {
+            PROGRESS_UNREQUESTED
+        }
+        .to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum MachineQuery<'a> {
     /// A new chat with this persona — where it would run, and whether starting it would ask.

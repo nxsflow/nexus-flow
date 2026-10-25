@@ -4,7 +4,8 @@
 // bind` (never the db directly). Env-stamped by the caller so in-session `nxc` calls resolve their
 // own caller session (NXC_SESSION) and act as the role (NXC_ACTOR).
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   resolveToolsOption,
@@ -77,6 +78,217 @@ process.on("SIGTERM", () => {
   );
   stop.abort();
 });
+
+/** **The ask door** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, rung A): the engine's coordinator
+ *  asks a running session something by writing `<session>.ask.<ulid>.json` (`{at, thread, role,
+ *  text}`) beside this process's spec and sending it SIGUSR2. The handler reads every such file in
+ *  ulid order, removes it, and queues its text; the running turn's input stream (`turnStream`) yields
+ *  it as the next user message, which the SDK delivers when the current assistant turn ends.
+ *
+ *  INSTALLED BEFORE THE DOOR IS DECLARED, and that order is the whole safety argument (must-fix,
+ *  design review round 3 IR #2): Node's default for SIGUSR2 TERMINATES the process, so the engine
+ *  signals only a claim that declares `ask: 1`, and this file writes that line only once the handler
+ *  below is in place. A sidecar that never declares it — an older one, or one still starting — is
+ *  never signalled at all.
+ *
+ *  SIGUSR1 is Node's inspector signal and is not used. */
+const logsDir = arg("--spec") ? dirname(arg("--spec")) : null;
+const askQueue = [];
+let askArrived = () => {};
+
+/** Every ask file of this session present now, oldest first — read, removed, returned. A file that
+ *  cannot be read is removed too: an ask nobody can deliver must not be found by a later turn. */
+function drainAskFiles() {
+  if (!logsDir || !spec.session) return [];
+  let names;
+  try {
+    names = readdirSync(logsDir);
+  } catch {
+    return [];
+  }
+  const prefix = `${spec.session}.ask.`;
+  const asks = [];
+  for (const name of names.filter((n) => n.startsWith(prefix) && n.endsWith(".json")).sort()) {
+    const path = join(logsDir, name);
+    try {
+      const ask = JSON.parse(readFileSync(path, "utf8"));
+      // Only an ask of the shape the engine writes is delivered: a file that names no thread or
+      // carries no text is dropped, never yielded — a malformed one must not take the turn down.
+      if (ask && typeof ask.thread === "string" && typeof ask.text === "string") asks.push(ask);
+      else console.error(`sidecar: the ask ${name} is not of the engine's shape and is dropped`);
+    } catch (err) {
+      console.error(`sidecar: the ask ${name} could not be read and is dropped: ${err?.message ?? err}`);
+    }
+    try {
+      unlinkSync(path);
+    } catch {
+      // Already gone — another drain took it.
+    }
+  }
+  return asks;
+}
+
+/** Whether a turn stream is open to deliver an ask into. While none is — between attempts, in the
+ *  teardown — the handler leaves the files where they are: an ask nobody can deliver is not taken. */
+let streamOpen = false;
+
+process.on("SIGUSR2", () => {
+  if (!streamOpen) return;
+  const asks = drainAskFiles();
+  if (asks.length === 0) return;
+  console.error(
+    `sidecar: session ${spec.session} was asked (${asks.map((a) => a.thread).join(", ")}) — ` +
+      "it is delivered as the next turn, once the running one reaches its result",
+  );
+  askQueue.push(...asks);
+  askArrived();
+});
+
+/** **Declare — or withdraw — the door in this session's claim** (`<session>.pid`): the line `ask: 1`
+ *  after the pid and its start instant. Only once the claim names THIS process: the engine hands the
+ *  claim to the child right after the spawn, and a rewrite before that would be overwritten. Written
+ *  atomically (a temp file and a rename), so a reader sees the old claim or the new one. */
+function rewriteClaim(withDoor) {
+  if (!logsDir || !spec.session) return false;
+  const claim = join(logsDir, `${spec.session}.pid`);
+  let content;
+  try {
+    content = readFileSync(claim, "utf8");
+  } catch {
+    return false;
+  }
+  const lines = content.split("\n").filter((l) => l.trim() !== "");
+  if (Number(lines[0]) !== process.pid) return false;
+  const kept = lines.filter((l, i) => i < 2 || l.trim() !== "ask: 1");
+  if (withDoor) kept.push("ask: 1");
+  const tmp = `${claim}.door.tmp`;
+  try {
+    writeFileSync(tmp, `${kept.join("\n")}\n`);
+    renameSync(tmp, claim);
+    return true;
+  } catch (err) {
+    console.error(`sidecar: the claim ${claim} could not be rewritten: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+let doorOpen = false;
+/** Open the door: retried briefly while the engine has not handed the claim over yet. */
+function openTheDoor(triesLeft = 50) {
+  if (stopping() || doorOpen) return;
+  if (rewriteClaim(true)) {
+    doorOpen = true;
+    console.error(`sidecar: the ask door is open (ask: 1) for session ${spec.session}`);
+    return;
+  }
+  if (triesLeft > 0) setTimeout(() => openTheDoor(triesLeft - 1), 100).unref();
+}
+/** Close the door: the claim no longer declares it, so an ask from now on reads `CannotAsk`. */
+function closeTheDoor() {
+  if (!doorOpen) return;
+  doorOpen = false;
+  rewriteClaim(false);
+  console.error(`sidecar: the ask door is closed for session ${spec.session}`);
+}
+
+/** **A turn of this session was OPENED for the slot on `thread`** — a `turn_start` transcript entry,
+ *  which is how the engine attributes the session's later activity to one slot (must-fix, design
+ *  review round 4 CQ #1 / TQ #3 / IR #5: one persona session serves many threads). Written for every
+ *  opener: the trigger's message, a continuation, an ask. */
+function markTurn(thread) {
+  if (!spec.session || !thread) return;
+  transcript.push({ kind: "turn_start", at: new Date().toISOString(), data: { thread } });
+}
+
+// An ask left from an earlier process of this session was never delivered — not a question for
+// this one, which starts with its own message.
+for (const stale of drainAskFiles()) {
+  console.error(`sidecar: an ask for thread ${stale.thread} from an earlier process was dropped`);
+}
+
+function userMessage(text) {
+  return {
+    type: "user",
+    message: { role: "user", content: text },
+    parent_tool_use_id: null,
+    session_id: realSessionId ?? "",
+  };
+}
+
+/** **The input of one `query()`, as a stream the sidecar owns** (nxf 6j6v.558h): `firstText` first,
+ *  then every ask the door delivers — each one AT A TURN BOUNDARY, as a turn of its own.
+ *
+ *  AT THE BOUNDARY, NOT MID-TURN, and that is a measured fact rather than a preference. Staged on
+ *  the real sidecar (Claude Code 2.1.310, the pinned SDK, 2026-10-25): a user message yielded while a
+ *  turn is running is NOT queued to the turn's end — the runtime attaches it to the running turn's
+ *  next tool result, where the model read it as text that "came through the tool result, not an
+ *  actual user turn" and ignored it, twice out of two. The design's own fallback for exactly this
+ *  (epic 6j6v.nmc9, "Cutover assumptions") is what this does: an ask waits for the running turn's
+ *  `result` and is then the next user turn, which the model reads as one.
+ *
+ *  It CLOSES at the first `result` with no ask pending (must-fix, design review round 3 TQ #5 /
+ *  IR #3, round 4 TQ #8 / IR #6): before its last drain it withdraws the door from the claim, so an
+ *  ask arriving after that reads `CannotAsk` and counts nothing, and any ask file present at that
+ *  instant is yielded as one final turn rather than burned. A stop closes it at once. The caller
+ *  tells it about each `result` through `resultArrived`. */
+function turnStream(firstText, firstThread) {
+  let results = 0;
+  let yielded = 0;
+  let notify = null;
+  const wake = () => {
+    const n = notify;
+    notify = null;
+    if (n) n();
+  };
+  stop.signal.addEventListener("abort", wake, { once: true });
+  const open = (thread, text) => {
+    markTurn(thread);
+    yielded += 1;
+    return userMessage(text);
+  };
+  async function* prompt() {
+    streamOpen = true;
+    try {
+      yield open(firstThread, firstText);
+      for (;;) {
+        if (stopping()) return;
+        // A turn is running while fewer results than turns have come back: an ask waits for it.
+        if (results >= yielded) {
+          if (askQueue.length > 0) {
+            const ask = askQueue.shift();
+            yield open(ask.thread, ask.text);
+            continue;
+          }
+          // The first result with no ask pending: the door is withdrawn from the claim FIRST, so an
+          // ask from now on reads `CannotAsk`, and what arrived meanwhile is the one final turn.
+          closeTheDoor();
+          streamOpen = false;
+          for (const ask of drainAskFiles()) yield open(ask.thread, ask.text);
+          return;
+        }
+        await new Promise((resolve) => {
+          notify = resolve;
+          askArrived = wake;
+        });
+      }
+    } finally {
+      streamOpen = false;
+    }
+  }
+  return {
+    prompt: prompt(),
+    resultArrived() {
+      results += 1;
+      wake();
+    },
+    /** The query is over whatever the stream thought: nothing more is delivered into it. */
+    close() {
+      streamOpen = false;
+      results = Number.MAX_SAFE_INTEGER;
+      wake();
+    },
+  };
+}
 
 const systemPrompt = spec.useClaudeCodePreset
   ? { type: "preset", preset: "claude_code", append: spec.systemPrompt }
@@ -419,6 +631,44 @@ let retriedRuntime = 0;
 
 /** Sleep, for the backoff between runtime retries. Bounded by [`retryDelay`]; nothing else in this
  *  file waits. */
+/** The last tool call that came back as an error — what the end's cause names when nothing else
+ *  went wrong (nxf 6j6v.558h). ONLY its exit status, never its output: the cause travels into the
+ *  coordinator's escalation, which is posted in a thread, and a tool's output can carry anything
+ *  the session handled. */
+let lastToolFailure = null;
+function noteToolFailure(msg) {
+  if (msg?.type !== "user" || !Array.isArray(msg.message?.content)) return;
+  for (const block of msg.message.content) {
+    if (block?.type !== "tool_result" || block.is_error !== true) continue;
+    const text = Array.isArray(block.content)
+      ? block.content.map((c) => (typeof c?.text === "string" ? c.text : "")).join(" ")
+      : String(block.content ?? "");
+    const code = /exit code (\d+)/i.exec(text);
+    lastToolFailure = code ? `exit code ${code[1]}` : "an error";
+  }
+}
+
+/** **Why this turn ended, in words** (nxf 6j6v.558h) — what `nxc session ended --cause` carries, so
+ *  the coordinator that takes the slot up, and the escalation it may end in, can say it. Capped like
+ *  every other text this file hands the engine. */
+function causeOfTheEnd() {
+  const attempts = retriedRuntime + 1;
+  let cause;
+  if (stopping()) cause = "told to stop (SIGTERM)";
+  else if (boundary) cause = `on hold at an availability boundary (${boundary.limit})`;
+  else if (runtimeFailed && !agentEverThought) {
+    cause =
+      `the runtime never ran this session — ${attempts} attempt${attempts === 1 ? "" : "s"}, ` +
+      `last error: ${failures.toError()}`;
+  } else if (failures.hasFailed()) cause = `ended without answering — ${failures.toError()}`;
+  else if (remindOutcome === "unanswered") {
+    cause = `reminded that thread ${spec.replyThread} is waiting on its answer and ended again without one`;
+  } else if (remindOutcome === "answered") cause = "answered after a reminder";
+  else cause = "ended";
+  if (lastToolFailure && !stopping()) cause += `; its last tool call failed with ${lastToolFailure}`;
+  return capFailureReply(cause);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -559,12 +809,27 @@ async function remindOnce() {
   // that asked it to stop. Removed on every exit path, like the timer.
   const onStop = () => abortController.abort();
   stop.signal.addEventListener("abort", onStop, { once: true });
+  let turnsOfTheReminder = null;
   try {
+    // A stream like the main turn's (nxf 6j6v.558h): an ask that arrives during the reminder is
+    // drained into the reminder's own input rather than lost.
+    const turns = turnStream(reminderMessage(), spec.replyThread);
+    turnsOfTheReminder = turns;
+    let reminderResults = 0;
     for await (const msg of query({
-      prompt: reminderMessage(),
+      prompt: turns.prompt,
       options: { ...options, resume: realSessionId, abortController },
     })) {
       if (msg.session_id) realSessionId = msg.session_id;
+      if (msg.type === "result") {
+        // The reminder's own result is the reminder's business, a warning at most; an error on a
+        // turn an ASK opened after it feeds the run's failure, as one on the main turn does.
+        if (msg.is_error === true && reminderResults > 0) {
+          recordFatal(resultFailure(msg), "the asked turn");
+        }
+        reminderResults += 1;
+        turns.resultArrived();
+      }
       if (process.env.NXC_SIDECAR_DEBUG) console.error(JSON.stringify(msg));
       if (!spec.session) continue;
       const entries = normalizer.push(msg);
@@ -581,6 +846,7 @@ async function remindOnce() {
     // failure and propagates as before.
     if (!abortController.signal.aborted) throw err;
   } finally {
+    turnsOfTheReminder?.close();
     clearTimeout(bound);
     stop.signal.removeEventListener("abort", onStop);
     // The transcript of the reminder is kept whichever way the round ended — an ABANDONED one is
@@ -1024,7 +1290,24 @@ function announceInterruption() {
  *  forward-compatibility shape `bindRealSession` handles for `session bind`. */
 function announceSessionEnd() {
   if (!spec.session) return;
+  // **With its cause** (nxf 6j6v.558h): `--cause` and `--attempts` are what the slot's coordinator
+  // reads when it takes the slot up, and what its escalation names verbatim if it cannot. An `nxc`
+  // older than the flags refuses them; the end is announced without them then, as before.
+  const attempts = String(retriedRuntime + 1);
+  const withCause = ["session", "ended", spec.session, "--cause", causeOfTheEnd(), "--attempts", attempts];
   try {
+    try {
+      execFileSync("nxc", withCause, {
+        env: { ...process.env, ...spec.env },
+        timeout: NXC_CALL_TIMEOUT_MS,
+        stdio: ["ignore", "inherit", "pipe"],
+      });
+      return;
+    } catch (err) {
+      const stderr = err.stderr ? err.stderr.toString() : "";
+      if (!isFlagNotImplementedYet(err.status, stderr, "--cause")) throw err;
+      console.error(`sidecar: nxc session ended --cause skipped (flag not implemented yet): ${err.message}`);
+    }
     execFileSync("nxc", ["session", "ended", spec.session], {
       env: { ...process.env, ...spec.env },
       timeout: NXC_CALL_TIMEOUT_MS,
@@ -1100,13 +1383,20 @@ for (let attempt = 0; ; attempt++) {
   lastAssistantError = null;
   lastResultText = null;
   normalizer.forgetRateLimit();
+  let turnsOfThisAttempt = null;
   try {
     // The stop door is handed to the MAIN turn as its `abortController` (nxf 6j6v.b9nf). It is not
     // a bound — nothing in this file fires it on a clock, and the turn's length stays the caller's
     // business (cutting it short was the defect of nxf 6j6v.jwgc); it fires on SIGTERM and on
     // nothing else. The reminder round has a controller of its own, with a timer, and listens to
     // this one — see `remindOnce`.
-    for await (const msg of query({ prompt: spec.message, options: { ...options, abortController: stop } })) {
+    // **The main turn reads a stream the sidecar owns** (nxf 6j6v.558h): `spec.message` first, then
+    // every ask the door delivers, closed at the first `result` with no ask pending — see
+    // `turnStream`. The door is declared once the stream exists to deliver into.
+    const turns = turnStream(spec.message, spec.replyThread);
+    turnsOfThisAttempt = turns;
+    openTheDoor();
+    for await (const msg of query({ prompt: turns.prompt, options: { ...options, abortController: stop } })) {
       // Confirmed on @anthropic-ai/claude-agent-sdk 0.3.215: every SDKMessage variant (system/init,
       // assistant, result, ...) carries a top-level `session_id` string — see sdk.d.ts. The *last*
       // message's session_id wins, which in practice is the same real UUID throughout one query().
@@ -1122,6 +1412,10 @@ for (let attempt = 0; ; attempt++) {
       // A terminal result that declares itself an error. NOT `break`ed on: the stream is allowed to
       // finish so the transcript keeps every entry of the attempt that failed, which is the one
       // whose transcript is worth the most.
+      // The tool call that failed last, for the cause the end announces (nxf 6j6v.558h: a child
+      // killed under the session — exit 137 — was carried nowhere).
+      noteToolFailure(msg);
+      if (msg.type === "result") turns.resultArrived();
       if (msg.type === "result" && msg.is_error === true) {
         failure = resultFailure(msg);
         // Where `SDKResultError` actually carries the runtime's own sentences — it has no `result`
@@ -1146,6 +1440,8 @@ for (let attempt = 0; ; attempt++) {
     }
   } catch (err) {
     failure = err;
+  } finally {
+    turnsOfThisAttempt?.close();
   }
   // **A STOP ENDS THE LOOP, whatever the attempt looked like** (nxf 6j6v.b9nf). The abort surfaces
   // as a thrown `AbortError` — the same shape a torn stream has — and it must be neither RETRIED
