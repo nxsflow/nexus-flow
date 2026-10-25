@@ -674,6 +674,23 @@ steht `false` — die durchgespielte Sitzung dieser Anleitung protokolliert ihre
 Sitzungen zu starten, es gibt also nirgends einen Prozess zu befragen — und unter dem ausgelieferten
 Sidecar steht `true`.
 
+**Ein Slot, den sein Koordinator wieder aufnimmt, sagt RECOVERING.** Wenn die Sitzung eines
+koordinierten Slots verstummt, ohne Antwort endet oder nie startet, handelt der Koordinator, bevor
+jemand gefragt wird: Er fragt die laufende Sitzung (sobald sie an diesem Slot 20 Minuten still war),
+setzt die beendete in derselben Sitzung fort oder startet den Slot mit seiner ursprünglichen Aufgabe
+neu — drei Versuche insgesamt und höchstens zwei bis sechs Stunden für eine Sitzung, die immer
+wieder mit `--progress` antwortet. `recovery` sagt, wie weit er kam (`attempt`, `of`, `action`, `at`,
+`last_activity`, `next_look`), `stale` steht daneben auf `false`, und die Zeile sagt es anstelle von
+„nothing is coming“:
+
+```text
+m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 1/3 at 2026-10-18T10:20:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:40:00Z
+```
+
+Sind die Versuche aufgebraucht, eskaliert der Koordinator im Namen des Mitglieds, mit dem Schritt,
+der Ursache, jedem Versuch, der letzten Aktivität, der Sitzung und der Arbeitskopie — und der Slot
+sagt dann STRANDED, wie unten.
+
 **Ein Slot, dessen Sitzung nicht antworten wird, sagt stattdessen STRANDED** — und warum, und was
 daraufhin geschah. `stranded` nennt den Befund (`observed`, 1–5: nie gestartet, nie angebunden, ohne
 Antwort geendet, kein lebender Prozess, Start aufgegeben), wann er festgehalten wurde und was aus der
@@ -700,8 +717,9 @@ m-01M0…  #review  waiting on ab12/verifier — ABANDONED: nothing has been hea
 ```
 
 **Und die Operation sagt, wo sie hängt.** `hangs_at` nennt den tiefsten Slot unter der Operation,
-der eskaliert, als gestrandet erfasst oder aufgegeben ist, mit dem Thread, dessen Tick ihn
-koordiniert, und was mit ihm geschieht (`recovery`: `watched`, `never_started`, `abandoned`). Bei
+der wiederaufgenommen wird, eskaliert, als gestrandet erfasst oder aufgegeben ist, mit dem Thread,
+dessen Tick ihn koordiniert, und was mit ihm geschieht (`recovery`: `recovering`, `watched`,
+`never_started`, `abandoned`). Bei
 Gleichstand auf einer Ebene gewinnt der Slot mit der ältesten Aktivität, dann die kleinste
 Thread-ID:
 
