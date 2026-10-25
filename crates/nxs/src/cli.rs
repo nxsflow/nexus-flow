@@ -370,6 +370,15 @@ enum SyncAction {
         /// both for this one run and is NOT persisted.
         #[arg(long)]
         remote: Option<String>,
+        /// Reach the relay with a BEARER token read from stdin — one line, its newline taken off —
+        /// instead of the userinfo in the relay URL, as `nxs sync snapshot --bearer-stdin` does.
+        /// The token never goes on the command line or into the environment, and no output quotes
+        /// it; the relay URL must then carry no userinfo. A token the relay refuses from the start
+        /// (401/403) is a `forbidden` error. A token that runs out DURING the pass is
+        /// `token_expired`, exit code 75: every batch pushed and page pulled before it is recorded,
+        /// so the same command with a fresh token resumes there.
+        #[arg(long)]
+        bearer_stdin: bool,
     },
     /// Show or set the GLOBAL default relay endpoint (`~/.nexusflow/config.toml`, or
     /// `~/.nexusflow-<name>/` for a development BUILD that `NXS_SERVICE_INSTANCE` names), used by
@@ -819,9 +828,18 @@ fn dispatch(cli: &Cli) -> Result<()> {
             // directory no longer exists, and resolving it would fail with the very `no_workspace`
             // error the prune is meant to clear.
             SyncAction::Unregister { path } => sync::unregister_verb(cli.json, path.as_deref()),
-            SyncAction::Run { remote } => {
+            SyncAction::Run {
+                remote,
+                bearer_stdin,
+            } => {
+                // Read before anything else is touched, as `snapshot` does.
+                let bearer = if *bearer_stdin {
+                    Some(sync::read_bearer_from_stdin()?)
+                } else {
+                    None
+                };
                 let ws = resolve(db)?;
-                sync::run(cli.json, &ws, remote.as_deref())
+                sync::run(cli.json, &ws, remote.as_deref(), bearer.as_ref())
             }
             SyncAction::Snapshot {
                 file,

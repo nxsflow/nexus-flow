@@ -256,6 +256,22 @@ quotes it. The relay URL must then carry no user and password — the two togeth
 anything is sent — and a relay that refuses the token (401 or 403) is a `forbidden` error naming the
 status. Without the flag the verb uses whatever the relay URL carries, as before.
 
+`nxs sync run --bearer-stdin` runs the pass itself the same way — the step a based snapshot needs
+first, because it refuses while this machine holds ops it has not pushed. A first push can be long,
+and a short-lived token can run out in the middle of it. That costs nothing: every pass writes its
+position to `.nxs/sync.toml` after each batch the relay acknowledges and each page it applies, so
+a token that the relay accepted and then refuses part-way ends the pass as `token_expired`, exit
+code 75, and the same command with a fresh token carries on from the last acknowledged batch:
+
+```bash
+get-my-token | nxs sync run --bearer-stdin      # exit 75: token expired, run again with a fresh one
+get-my-token | nxs sync run --bearer-stdin      # resumes; pushes only what was never acknowledged
+get-my-token | nxs sync snapshot board.snapshot --based --bearer-stdin
+```
+
+A token refused on the very first request is `forbidden` (exit 1), as for the snapshot: nothing
+tells an expired token from a wrong one before the relay has accepted it once.
+
 An app that embeds nxs — a hosted board that starts cold — does the same through
 `nxs_sync::snapshot::{export, import}`: export from a replica that is in sync (the export confirms
 the position with the relay), store the bytes where the app trusts them, and on the next cold start

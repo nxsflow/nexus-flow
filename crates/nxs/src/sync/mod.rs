@@ -1115,6 +1115,77 @@ pub fn run_pass_announcing(
     remote: &str,
     hello: Option<&MachineHello>,
 ) -> Result<PassOutcome> {
+    pass(ws, remote, hello, None)
+}
+
+/// [`run_pass`] as a person, with `bearer` and no other credential (6j6v.2tn0) — the library seam
+/// under `nxs sync run --bearer-stdin`, for an importer that pushes a person's stream under a
+/// short-lived token.
+///
+/// The pass records its position in `.nxs/sync.toml` after EVERY push batch the relay acknowledged
+/// and EVERY pull page it applied (as every pass does), so a token that runs out part-way loses
+/// nothing: the pass ends as [`ErrorKind::TokenExpired`] and the same call with a fresh token
+/// resumes at the last acknowledged batch. How the relay's refusal reads:
+///
+/// - a `401` on the FIRST request (the prefix registration) is [`ErrorKind::Forbidden`] — the token
+///   was never accepted, and nothing tells an expired one from a wrong one;
+/// - a `401` after the relay accepted it in this pass is [`ErrorKind::TokenExpired`] — it was good
+///   moments ago, so it ran out (or was withdrawn, which a fresh token answers the same way);
+/// - a `403` anywhere is [`ErrorKind::Forbidden`]: the token is accepted, and may not do this.
+///
+/// A `remote` with a userinfo is a [`ErrorKind::Validation`] error before any request.
+pub fn run_pass_with_bearer(
+    ws: &Workspace,
+    remote: &str,
+    bearer: &engine::Bearer,
+) -> Result<PassOutcome> {
+    pass(ws, remote, None, Some(bearer))
+}
+
+/// Writes the watermarks to `.nxs/sync.toml` every time the engine reports one moved (6j6v.2tn0).
+struct SaveEachStep<'a> {
+    ws: &'a Workspace,
+    meta: &'a mut SyncMeta,
+}
+
+impl engine::Checkpoint for SaveEachStep<'_> {
+    fn reached(&mut self, marks: &Watermarks) -> std::result::Result<(), engine::SyncError> {
+        self.meta.pushed_through = marks.pushed_through;
+        self.meta.pulled_through = marks.pulled_through;
+        save(self.ws, self.meta).map_err(|e| {
+            engine::SyncError::Storage(format!("recording the sync position: {}", e.msg))
+        })
+    }
+}
+
+/// The refusal of a bearer as the error a caller branches on — see [`run_pass_with_bearer`].
+/// `accepted` is whether the relay took this token earlier in the pass.
+fn bearer_refused(status: u16, accepted: bool) -> NxfError {
+    match (status, accepted) {
+        (401, true) => NxfError::new(
+            ErrorKind::TokenExpired,
+            "token expired, run again with a fresh one — the relay accepted the bearer token read \
+             from stdin at the start of this pass and refused it part-way (HTTP 401); every batch \
+             it acknowledged before is recorded in .nxs/sync.toml, so the next run resumes there",
+        ),
+        (401, false) => NxfError::forbidden(
+            "the relay refused the bearer token read from stdin (HTTP 401): it is missing, expired \
+             or not accepted — get a new token and run the pass again",
+        ),
+        (status, _) => NxfError::forbidden(format!(
+            "the relay refused the bearer token read from stdin (HTTP {status}): it is accepted, \
+             but may not sync this stream"
+        )),
+    }
+}
+
+/// The one body behind [`run_pass_announcing`] and [`run_pass_with_bearer`].
+fn pass(
+    ws: &Workspace,
+    remote: &str,
+    hello: Option<&MachineHello>,
+    bearer: Option<&engine::Bearer>,
+) -> Result<PassOutcome> {
     let mut meta = load(ws)?.ok_or_else(|| {
         NxfError::validation("workspace is not bound to a stream; run `nxs sync bind` first")
     })?;
@@ -1129,7 +1200,11 @@ pub fn run_pass_announcing(
         pushed_through: meta.pushed_through,
         pulled_through: meta.pulled_through,
     };
-    let transport = HttpTransport::new(remote);
+    let transport = match bearer {
+        Some(bearer) => HttpTransport::bearer_only(remote, bearer)
+            .map_err(|e| NxfError::validation(e.to_string()))?,
+        None => HttpTransport::new(remote),
+    };
 
     // Step 0 (bab/§8): register this replica's prefix. A relay reassignment remaps the local store
     // in place BEFORE any merge and we adopt the new prefix for future mints.
@@ -1140,12 +1215,18 @@ pub fn run_pass_announcing(
         &ws.replica.replica_uuid,
         &transport,
     )
-    .map_err(|e| NxfError::io(format!("prefix registration failed: {e}")))?;
+    .map_err(|e| match (bearer, e.refused_status()) {
+        // Only where the bearer was given: without it the pass answers as it always has.
+        (Some(_), Some(status)) => bearer_refused(status, false),
+        _ => NxfError::io(format!("prefix registration failed: {e}")),
+    })?;
     if let Some(new_prefix) = &reassigned {
         workspace::adopt_prefix(ws, new_prefix)?;
     }
 
-    let result = engine::sync(
+    // Every position the pass reaches is written down as it is reached (6j6v.2tn0): a pass that is
+    // killed, or whose token runs out, keeps every batch the relay acknowledged before.
+    let result = engine::sync_checkpointed(
         &mut store,
         ws.replica.site_id,
         &stream,
@@ -1153,10 +1234,15 @@ pub fn run_pass_announcing(
         &transport,
         SYNC_PAGE_LIMIT,
         &WallClockBudget::starting_now(PASS_WALL_CLOCK_BUDGET),
+        &mut SaveEachStep {
+            ws,
+            meta: &mut meta,
+        },
     );
 
-    // Persist whatever durably moved BEFORE propagating any error (the engine advances the
-    // watermarks per durable batch), so a mid-pass transport failure still records real progress.
+    // And once more at the end, BEFORE propagating any error — the checkpoints already hold it,
+    // so this changes nothing unless a checkpoint itself failed; kept so the ordering this
+    // function's doc pins holds whichever way the pass ended.
     meta.pushed_through = marks.pushed_through;
     meta.pulled_through = marks.pulled_through;
     save(ws, &meta)?;
@@ -1166,7 +1252,11 @@ pub fn run_pass_announcing(
     if let (Err(engine::SyncError::OpTooLarge { .. }), Some(hello)) = (&result, hello) {
         let _ = transport.announce(&stream, hello);
     }
-    let outcome = result.map_err(|e| NxfError::io(format!("sync failed: {e}")))?;
+    let outcome = result.map_err(|e| match (bearer, e.refused_status()) {
+        // The registration above went through under this token, so a 401 now means it ran out.
+        (Some(_), Some(status)) => bearer_refused(status, true),
+        _ => NxfError::io(format!("sync failed: {e}")),
+    })?;
 
     let presence = hello.map(|hello| match transport.announce(&stream, hello) {
         Ok(Announced::Recorded) => PresenceNote::Recorded,
@@ -1363,14 +1453,22 @@ pub fn downgraded(outcome: &PassOutcome) -> Option<String> {
 ///
 /// Thin by design: resolve the endpoint, delegate the pass itself to [`run_pass`] (the ONE
 /// implementation the daemon also calls), then render the outcome.
-pub fn run(json: bool, ws: &Workspace, remote: Option<&str>) -> Result<()> {
+pub fn run(
+    json: bool,
+    ws: &Workspace,
+    remote: Option<&str>,
+    bearer: Option<&engine::Bearer>,
+) -> Result<()> {
     let meta = load(ws)?.ok_or_else(|| {
         NxfError::validation("workspace is not bound to a stream; run `nxs sync bind` first")
     })?;
 
     let remote = resolve_endpoint(remote, &meta)?;
 
-    let outcome = run_pass(ws, &remote)?;
+    let outcome = match bearer {
+        Some(bearer) => run_pass_with_bearer(ws, &remote, bearer)?,
+        None => run_pass(ws, &remote)?,
+    };
 
     if json {
         println!(

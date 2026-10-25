@@ -17,6 +17,10 @@ pub enum ErrorKind {
     Conflict,
     Io,
     Verification,
+    /// A bearer token the relay accepted and then stopped accepting mid-pass (6j6v.2tn0): it ran
+    /// out. Its own kind — and its own exit code in `nxs` — because the answer is not "fix
+    /// something" but "run it again with a fresh token": the progress made under it is kept.
+    TokenExpired,
 }
 
 impl ErrorKind {
@@ -30,6 +34,7 @@ impl ErrorKind {
             ErrorKind::Conflict => "conflict",
             ErrorKind::Io => "io",
             ErrorKind::Verification => "verification",
+            ErrorKind::TokenExpired => "token_expired",
         }
     }
 }
@@ -114,5 +119,12 @@ mod tests {
         let e = NxfError::forbidden("not a member of channel c-1");
         assert_eq!(e.kind, ErrorKind::Forbidden);
         assert_eq!(e.msg, "not a member of channel c-1");
+    }
+
+    #[test]
+    fn token_expired_kind_has_the_stable_string_form() {
+        // 6j6v.2tn0: a bearer that the relay accepted and then refused mid-pass. Its own kind, so a
+        // caller branches on "run again with a fresh token" without string-matching the message.
+        assert_eq!(ErrorKind::TokenExpired.as_str(), "token_expired");
     }
 }
