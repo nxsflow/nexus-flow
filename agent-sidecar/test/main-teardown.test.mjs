@@ -2308,10 +2308,11 @@ async function runSidecarWithTheDoor(t, opts, drive) {
 const ASK_TEXT = "Coordinator of thread thread-77: I have seen no activity from you for 20 minutes.";
 
 /** The door's whole round trip: the sidecar declares `ask: 1` in its claim once its handler is in
- *  place; SIGUSR2 with an ask file delivers the ask as the NEXT user message while the running turn
- *  is still running (the stub has it before the turn ends) and removes the file; SIGUSR2 without a
- *  file is a no-op; the asked turn opens with a `turn_start` for its thread; and the door is
- *  withdrawn from the claim before the process ends. */
+ *  place; SIGUSR2 with an ask file takes the file and HOLDS the ask while the running turn runs —
+ *  the runtime does not get it mid-turn, where the real one attaches it to a tool result (staged
+ *  2026-10-25) — and delivers it as the next user turn once that turn's `result` is in; SIGUSR2
+ *  without a file is a no-op; the asked turn opens with a `turn_start` for its thread; and the door
+ *  is withdrawn from the claim before the process ends. */
 test("SIGUSR2 with an ask file yields the ask as the next user message; without one it is a no-op", async (t) => {
   const run = await runSidecarWithTheDoor(
     t,
@@ -2329,17 +2330,18 @@ test("SIGUSR2 with an ask file yields the ask as the next user message; without 
       await waitFor("the empty signal to be absorbed", () => true);
       ask("01jask0000000000000000000a", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask to reach the runtime", () => later().length === 1);
-      assert.equal(later()[0].prompt, ASK_TEXT, "the ask's text, verbatim");
-      assert.equal(later()[0].doorOpen, true, "delivered mid-turn, the door still open");
-      assert.ok(
-        !existsSync(join(dir, "s-1.ask.01jask0000000000000000000a.json")),
-        "the ask file is taken",
-      );
-      assert.ok(!existsSync(join(dir, "release.txt")), "and the turn it was asked in is still running");
+      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000a.json")));
+      assert.deepEqual(later(), [], "held while the turn runs: the runtime has not got it");
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
+  const delivered = readFileSync(join(dirname(run.claimPath), "later-prompts.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l));
+  assert.equal(delivered.length, 1, "delivered once the turn's result was in");
+  assert.equal(delivered[0].prompt, ASK_TEXT, "the ask's text, verbatim");
+  assert.equal(delivered[0].doorOpen, true, "as a turn of its own, the door still open");
   assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
   assert.equal(run.signal, null, "SIGUSR2 never killed it");
   assert.equal(run.query.prompt, "hi", "the trigger's message opens the main turn");
@@ -2421,12 +2423,20 @@ test("an ask during the reminder round is delivered into the reminder", async (t
       await waitFor("the reminder to be running", () => existsSync(join(dir, "hanging.txt")));
       ask("01jask0000000000000000000c", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask to reach the reminder", () => later().length === 1);
-      assert.equal(later()[0].round, 1, "into the reminder's round");
+      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000c.json")));
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
   assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  const delivered = readFileSync(join(dirname(run.claimPath), "later-prompts.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l));
+  assert.deepEqual(
+    delivered.map((d) => [d.round, d.prompt]),
+    [[1, ASK_TEXT]],
+    "into the reminder's own round",
+  );
   assert.equal(run.queries.length, 2, "the main turn and the reminder");
 });
 
@@ -2447,7 +2457,7 @@ test("an error on the asked turn sets the cause the end announces", async (t) =>
       await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
       ask("01jask0000000000000000000d", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask to reach the runtime", () => later().length === 1);
+      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000d.json")));
       writeFileSync(join(dir, "release.txt"), "");
     },
   );

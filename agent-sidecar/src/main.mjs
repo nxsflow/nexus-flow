@@ -134,7 +134,7 @@ process.on("SIGUSR2", () => {
   if (asks.length === 0) return;
   console.error(
     `sidecar: session ${spec.session} was asked (${asks.map((a) => a.thread).join(", ")}) — ` +
-      "it is delivered when the running turn reaches its boundary",
+      "it is delivered as the next turn, once the running one reaches its result",
   );
   askQueue.push(...asks);
   askArrived();
@@ -212,48 +212,54 @@ function userMessage(text) {
 }
 
 /** **The input of one `query()`, as a stream the sidecar owns** (nxf 6j6v.558h): `firstText` first,
- *  then every ask the door delivers. It CLOSES at the first `result` with no ask pending (must-fix,
- *  design review round 3 TQ #5 / IR #3, round 4 TQ #8 / IR #6): before its last drain it withdraws
- *  the door from the claim, so an ask arriving after that reads `CannotAsk` and counts nothing, and
- *  any ask file present at that instant is yielded as one final turn rather than burned. A stop
- *  closes it at once. The caller tells it about each `result` through `resultArrived`. */
+ *  then every ask the door delivers — each one AT A TURN BOUNDARY, as a turn of its own.
+ *
+ *  AT THE BOUNDARY, NOT MID-TURN, and that is a measured fact rather than a preference. Staged on
+ *  the real sidecar (Claude Code 2.1.310, the pinned SDK, 2026-10-25): a user message yielded while a
+ *  turn is running is NOT queued to the turn's end — the runtime attaches it to the running turn's
+ *  next tool result, where the model read it as text that "came through the tool result, not an
+ *  actual user turn" and ignored it, twice out of two. The design's own fallback for exactly this
+ *  (epic 6j6v.nmc9, "Cutover assumptions") is what this does: an ask waits for the running turn's
+ *  `result` and is then the next user turn, which the model reads as one.
+ *
+ *  It CLOSES at the first `result` with no ask pending (must-fix, design review round 3 TQ #5 /
+ *  IR #3, round 4 TQ #8 / IR #6): before its last drain it withdraws the door from the claim, so an
+ *  ask arriving after that reads `CannotAsk` and counts nothing, and any ask file present at that
+ *  instant is yielded as one final turn rather than burned. A stop closes it at once. The caller
+ *  tells it about each `result` through `resultArrived`. */
 function turnStream(firstText, firstThread) {
   let results = 0;
+  let yielded = 0;
   let notify = null;
-  /** The threads of the messages yielded and not yet begun: the SDK hands a message to the runtime
-   *  at once, and the runtime queues it to the end of the turn that is running — so its turn, and
-   *  its `turn_start`, begin at the next `result`. */
-  const waiting = [];
   const wake = () => {
     const n = notify;
     notify = null;
     if (n) n();
   };
   stop.signal.addEventListener("abort", wake, { once: true });
-  const deliver = (ask) => {
-    waiting.push(ask.thread);
-    return userMessage(ask.text);
+  const open = (thread, text) => {
+    markTurn(thread);
+    yielded += 1;
+    return userMessage(text);
   };
   async function* prompt() {
     streamOpen = true;
     try {
-      markTurn(firstThread);
-      yield userMessage(firstText);
-      let seen = 0;
+      yield open(firstThread, firstText);
       for (;;) {
         if (stopping()) return;
-        if (askQueue.length > 0) {
-          yield deliver(askQueue.shift());
-          continue;
-        }
-        if (results > seen) {
-          seen = results;
-          if (waiting.length > 0) continue;
+        // A turn is running while fewer results than turns have come back: an ask waits for it.
+        if (results >= yielded) {
+          if (askQueue.length > 0) {
+            const ask = askQueue.shift();
+            yield open(ask.thread, ask.text);
+            continue;
+          }
           // The first result with no ask pending: the door is withdrawn from the claim FIRST, so an
           // ask from now on reads `CannotAsk`, and what arrived meanwhile is the one final turn.
           closeTheDoor();
           streamOpen = false;
-          for (const ask of [...askQueue.splice(0), ...drainAskFiles()]) yield deliver(ask);
+          for (const ask of drainAskFiles()) yield open(ask.thread, ask.text);
           return;
         }
         await new Promise((resolve) => {
@@ -269,7 +275,6 @@ function turnStream(firstText, firstThread) {
     prompt: prompt(),
     resultArrived() {
       results += 1;
-      if (waiting.length > 0) markTurn(waiting.shift());
       wake();
     },
     /** The query is over whatever the stream thought: nothing more is delivered into it. */
