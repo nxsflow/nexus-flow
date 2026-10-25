@@ -2761,28 +2761,26 @@ mod tests {
         // collide. This one does: eight threads, eight connections, released at once on a barrier,
         // each racing for a DIFFERENT scope against the same 'default' row. Mirrors
         // consolidation_claim.rs's `only_one_of_eight_genuinely_concurrent_racers_wins`.
-        use std::sync::{Arc, Barrier};
+        use std::sync::Arc;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
 
         const RACERS: usize = 8;
-        let barrier = Arc::new(Barrier::new(RACERS));
-        let handles: Vec<_> = (0..RACERS)
-            .map(|i| {
-                let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+        let barrier = Arc::new(RaceGate::new(RACERS));
+        // Every connection is opened HERE, one after the other, and moved into its racer — nothing
+        // fallible runs between a racer's start and its gate (nxf 6j6v.6n9m). Eight first opens of
+        // a fresh file racing each other are not what this test is about, and one of them failing
+        // used to strand the other seven on the barrier for good.
+        let stores: Vec<_> = (0..RACERS)
+            .map(|i| racer_store(&path, i as i64 + 1))
+            .collect();
+        let handles: Vec<_> = stores
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut store)| {
+                let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
-                    let mut store = ChatStore::open(&path, i as i64 + 1).unwrap();
-                    // `ChatStore::open` delegates straight to `Substrate::open`
-                    // (foundation/store.rs:85), which already sets `PRAGMA busy_timeout=5000` — and
-                    // foundation's own `open_sets_a_busy_timeout_so_a_locked_db_waits_not_fails`
-                    // pins that. Set it again anyway so this test does not depend on that detail
-                    // holding elsewhere: a writer that meets a locked db under real contention waits
-                    // rather than erroring with SQLITE_BUSY.
-                    store
-                        .connection()
-                        .execute_batch("PRAGMA busy_timeout=5000;")
-                        .unwrap();
                     let scope = WorkScope::Thread(format!("th-{i}"));
                     barrier.wait();
                     store.acquire_working_tree(&scope, NOW, EXPIRES).unwrap()
@@ -2801,9 +2799,13 @@ mod tests {
         );
     }
 
-    /// Open a store on `path` that waits for a busy writer instead of erroring — the same
-    /// belt-and-braces `only_one_of_eight_genuinely_concurrent_racers_acquires` applies, for the
-    /// same reason (`ChatStore::open` already sets it; this does not depend on that holding).
+    /// Open a store on `path` that waits for a busy writer instead of erroring. `ChatStore::open`
+    /// delegates straight to `Substrate::open`, which already sets `PRAGMA busy_timeout=5000` — and
+    /// foundation's own `open_sets_a_busy_timeout_so_a_locked_db_waits_not_fails` pins that. Set
+    /// again anyway so the racer tests do not depend on that detail holding elsewhere.
+    ///
+    /// Call it on the TEST thread and move the store into its racer (nxf 6j6v.6n9m): an open that
+    /// fails inside a racer, before its gate, leaves the others waiting for a party that is gone.
     fn racer_store(path: &str, device: i64) -> ChatStore {
         let store = ChatStore::open(path, device).unwrap();
         store
@@ -2811,6 +2813,89 @@ mod tests {
             .execute_batch("PRAGMA busy_timeout=5000;")
             .unwrap();
         store
+    }
+
+    /// How long a party of a [`RaceGate`] waits for the others. A round of any racer test here takes
+    /// milliseconds, seconds on a loaded CI runner; this is only ever reached when a party is never
+    /// coming.
+    const RACE_GATE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// A reusable barrier that gives up (nxf 6j6v.6n9m). The racer tests below used
+    /// `std::sync::Barrier`, which waits forever: one party that panics before it reaches `wait` —
+    /// a failed open, a SQLITE_BUSY unwrapped — leaves every other party, and the test thread
+    /// joining them, blocked for good. That is how three of them held CI's `quality-gates` for two
+    /// hours with nothing in the log. Here the parties left behind panic once the deadline passes,
+    /// so the same defect is a test FAILURE that names itself.
+    struct RaceGate {
+        parties: usize,
+        deadline: std::time::Duration,
+        /// `(arrived in this round, round number)`.
+        state: std::sync::Mutex<(usize, u64)>,
+        turned: std::sync::Condvar,
+    }
+
+    impl RaceGate {
+        fn new(parties: usize) -> RaceGate {
+            RaceGate::with_deadline(parties, RACE_GATE_DEADLINE)
+        }
+
+        fn with_deadline(parties: usize, deadline: std::time::Duration) -> RaceGate {
+            RaceGate {
+                parties,
+                deadline,
+                state: std::sync::Mutex::new((0, 0)),
+                turned: std::sync::Condvar::new(),
+            }
+        }
+
+        fn wait(&self) {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let round = state.1;
+            state.0 += 1;
+            if state.0 == self.parties {
+                *state = (0, round + 1);
+                self.turned.notify_all();
+                return;
+            }
+            let (state, waited) = self
+                .turned
+                .wait_timeout_while(state, self.deadline, |s| s.1 == round)
+                .unwrap_or_else(|e| e.into_inner());
+            if waited.timed_out() {
+                let arrived = state.0;
+                drop(state);
+                panic!(
+                    "race gate: only {arrived} of {} parties arrived within {:?} — one of them \
+                     failed before reaching the gate",
+                    self.parties, self.deadline
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_race_gate_whose_other_party_never_arrives_fails_its_waiter_instead_of_holding_it() {
+        use std::time::{Duration, Instant};
+
+        let gate = std::sync::Arc::new(RaceGate::with_deadline(2, Duration::from_millis(200)));
+        let waiter = {
+            let gate = std::sync::Arc::clone(&gate);
+            std::thread::spawn(move || gate.wait())
+        };
+        // Bounded here as well, so that a gate which waits forever makes THIS test fail rather
+        // than hang the way the three racers did.
+        let started = Instant::now();
+        while !waiter.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the waiter is still blocked 30s after its 200ms deadline — the gate waits forever"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            waiter.join().is_err(),
+            "a party left waiting past the deadline must fail (panic), not return as if the race ran"
+        );
     }
 
     #[test]
@@ -2836,7 +2921,7 @@ mod tests {
         // `the_hand_over_is_one_transaction_so_a_naive_split_shows_up_as_a_second_commit`, next
         // door, which counts commits instead of racing them.
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Barrier};
+        use std::sync::Arc;
 
         const RACERS: usize = 3;
         const ROUNDS: usize = 60;
@@ -2852,8 +2937,8 @@ mod tests {
 
         // Every round is lined up by two barriers: `start` releases the racers and the releaser at
         // once, `finish` holds them until the main thread has rebuilt the round's state.
-        let start = Arc::new(Barrier::new(RACERS + 2));
-        let finish = Arc::new(Barrier::new(RACERS + 2));
+        let start = Arc::new(RaceGate::new(RACERS + 2));
+        let finish = Arc::new(RaceGate::new(RACERS + 2));
         let violations = Arc::new(AtomicUsize::new(0));
         let refused_by_the_promoted_area = Arc::new(AtomicUsize::new(0));
         let promoted = Arc::new(AtomicUsize::new(0));
@@ -2866,8 +2951,8 @@ mod tests {
                 Arc::clone(&promoted),
             );
             let holder = holder.clone();
+            let mut store = racer_store(&path, 1);
             std::thread::spawn(move || {
-                let mut store = racer_store(&path, 1);
                 for _ in 0..ROUNDS {
                     start.wait();
                     let taken = store
@@ -2886,8 +2971,8 @@ mod tests {
                     Arc::clone(&violations),
                     Arc::clone(&refused_by_the_promoted_area),
                 );
+                let mut store = racer_store(&path, i as i64 + 2);
                 std::thread::spawn(move || {
-                    let mut store = racer_store(&path, i as i64 + 2);
                     let scope = WorkScope::Thread(format!("th-racer-{i}"));
                     for _ in 0..ROUNDS {
                         start.wait();
@@ -4063,7 +4148,7 @@ mod tests {
         // therefore pins the serialised order end to end, and this pins the overlapped one where
         // the decision actually gets made.
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Barrier};
+        use std::sync::Arc;
 
         const RELEASERS: usize = 4;
         const ROUNDS: usize = 40;
@@ -4072,13 +4157,13 @@ mod tests {
         let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
         let holder = WorkScope::Thread("th-holder".to_string());
 
-        let start = Arc::new(Barrier::new(RELEASERS + 1));
-        let finish = Arc::new(Barrier::new(RELEASERS + 1));
+        let start = Arc::new(RaceGate::new(RELEASERS + 1));
+        let finish = Arc::new(RaceGate::new(RELEASERS + 1));
         let handed_over = Arc::new(AtomicUsize::new(0));
         let entries_taken = Arc::new(AtomicUsize::new(0));
         // A releaser's error is CARRIED to the main thread rather than unwrapped where it happens:
-        // a panic between the two barriers leaves everybody else waiting on `finish` forever, and a
-        // regression that hangs CI for its whole timeout says far less than one that fails.
+        // a panic between the two gates leaves everybody else waiting on `finish` until the gate
+        // gives up, and a gate timeout says far less about the regression than the error itself.
         let errors: Arc<std::sync::Mutex<Vec<String>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -4091,8 +4176,8 @@ mod tests {
                     Arc::clone(&errors),
                 );
                 let holder = holder.clone();
+                let mut store = racer_store(&path, i as i64 + 1);
                 std::thread::spawn(move || {
-                    let mut store = racer_store(&path, i as i64 + 1);
                     for _ in 0..ROUNDS {
                         start.wait();
                         match store.release_working_tree_and_take_next(&holder, NOW, EXPIRES) {
@@ -4384,7 +4469,7 @@ mod tests {
         // it for the same row at the same time, which is exactly what a fairness gate on the
         // trigger path makes ordinary rather than exotic.
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Barrier};
+        use std::sync::Arc;
 
         const RECLAIMERS: usize = 4;
         const ROUNDS: usize = 40;
@@ -4399,12 +4484,12 @@ mod tests {
         let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
         let holder = WorkScope::Thread("th-holder".to_string());
 
-        let start = Arc::new(Barrier::new(RECLAIMERS + 1));
-        let finish = Arc::new(Barrier::new(RECLAIMERS + 1));
+        let start = Arc::new(RaceGate::new(RECLAIMERS + 1));
+        let finish = Arc::new(RaceGate::new(RECLAIMERS + 1));
         let handed_over = Arc::new(AtomicUsize::new(0));
         let entries_taken = Arc::new(AtomicUsize::new(0));
         // Carried rather than unwrapped in the thread — see the release-side test for why a panic
-        // between two barriers is a hang instead of a failure.
+        // between two gates says less than the error it panicked on.
         let errors: Arc<std::sync::Mutex<Vec<String>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -4416,8 +4501,8 @@ mod tests {
                     Arc::clone(&entries_taken),
                     Arc::clone(&errors),
                 );
+                let mut store = racer_store(&path, i as i64 + 1);
                 std::thread::spawn(move || {
-                    let mut store = racer_store(&path, i as i64 + 1);
                     for _ in 0..ROUNDS {
                         start.wait();
                         // Each reclaimer reads the row for itself, exactly as its production caller
