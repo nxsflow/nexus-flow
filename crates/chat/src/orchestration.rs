@@ -15499,15 +15499,23 @@ pub fn resume_interrupted(
         .as_deref()
         .and_then(|t| store.thread_quorum(t, ctx.now).ok().flatten())
         .and_then(|q| q.channel_id);
-    // **Stamped BEFORE the trigger** (nxf 6j6v.cn4p). A resumed session can run straight into the
-    // next window and announce a NEW hold while the start is still in progress; the store keeps one
-    // standing hold per session, so with the old one still standing the new announcement was a
-    // no-op — and the stamp afterwards then closed the only hold there was, leaving nothing on hold
-    // and nothing coming. Closed first, the announcement lands as a hold of its own.
-    //
-    // What the later stamp protected is kept the other way round: a start that FAILS reopens the
-    // hold below, so a hold is never closed over a session nothing was put back to work in.
-    stamp_taken_up(ctx, store, hold.id, &mut warnings);
+    // **Marked as being taken up BEFORE the trigger, and still standing** (nxf 6j6v.cn4p). A
+    // resumed session can run straight into the next window and announce a NEW hold while this
+    // start is still in progress. With the old hold plainly standing that announcement was folded
+    // into it, and the stamp below then closed the only hold there was — nothing on hold, nothing
+    // coming. The mark makes such an announcement supersede the old hold instead
+    // ([`ChatStore::record_interruption`]), while the hold itself stays standing until the start
+    // has succeeded: a process killed before the spawn, or a start that fails, leaves it where the
+    // next resume finds it, and the member window below stays paused for the whole spawn.
+    if let Err(e) = store.mark_interruption_taking_up(hold.id, ctx.now) {
+        let detail = format!(
+            "the hold {} could not be marked as being taken up: {e}; a new hold its session \
+             announces during this start may be folded into it",
+            hold.id
+        );
+        eprintln!("warning: {detail}");
+        warnings.push(FailedConsequence::step_unanswered(None, detail));
+    }
     let started = role_resume(
         ctx,
         store,
@@ -15543,6 +15551,11 @@ pub fn resume_interrupted(
                      flush"
                 );
             }
+            // Stamped AFTER the trigger, for `note_the_park_was_resumed`'s reason: what the stamp
+            // records is that somebody was actually put back to work. A hold closed before a spawn
+            // that then failed would be a hold nothing ever comes back to. By id, so a hold the
+            // session announced during the start (which superseded this one) is not touched.
+            stamp_taken_up(ctx, store, hold.id, &mut warnings);
             Ok(receipt(ResumeOutcome::Resumed, None, warnings))
         }
         // **A failure here PROPAGATES, and is deliberately not reclassified.** The single-process
@@ -15555,19 +15568,8 @@ pub fn resume_interrupted(
         // lost race costs is an error instead of an outcome, on a path whose pre-check makes it
         // rare, and the refusal did its job either way.
         //
-        // **The hold stamped above is reopened first**, for `note_the_park_was_resumed`'s reason:
-        // what the stamp records is that somebody was actually put back to work, and a hold closed
-        // over a start that failed would be a hold nothing ever comes back to.
-        Err(e) => {
-            if let Err(re) = store.reopen_interruption(hold.id) {
-                eprintln!(
-                    "warning: the resume of session {session} failed, and its hold {} could not \
-                     be reopened: {re}",
-                    hold.id
-                );
-            }
-            Err(e)
-        }
+        // **The hold is left standing**, never stamped here: nothing was put back to work.
+        Err(e) => Err(e),
     }
 }
 

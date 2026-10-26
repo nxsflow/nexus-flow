@@ -62,6 +62,8 @@ struct RecordingWorker {
     meanwhile: Mutex<Option<Meanwhile>>,
     /// Fail the next start with a transient error.
     fail_next: Mutex<bool>,
+    /// Panic in the next start — a process that dies after the resume began and before the spawn.
+    panic_next: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingWorker {
@@ -85,6 +87,12 @@ impl RecordingWorker {
 
 impl Worker for RecordingWorker {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        if self
+            .panic_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("the process died before the session was spawned");
+        }
         let meanwhile = self.meanwhile.lock().unwrap().take();
         if let Some(meanwhile) = meanwhile {
             meanwhile(&req);
@@ -208,22 +216,27 @@ fn operation_interrupted(engine: &Engine, root: &str) -> bool {
     op.interrupted
 }
 
-/// What the background service would do, from its own connection — the way a second process acts
-/// on the workspace while the first is in the middle of a start.
-fn announce_from_another_process(root: &Path, session: &str, until: &str) {
+/// Run `f` against the workspace from a connection of its own, as the background service or a
+/// second terminal would — the way another process acts while the first is in the middle of a start.
+fn in_another_process<R>(
+    root: &Path,
+    worker: &dyn Worker,
+    now: &str,
+    f: impl FnOnce(&orchestration::Ctx<'_>, &mut nexus_chat::store::ChatStore) -> R,
+) -> R {
     let ws = Workspace::resolve(None, root).expect("resolve workspace");
     let db_path = ws.db_path_str().expect("db path");
     let origin = nexus_chat::workspace::origin_of(&ws).to_string();
     let mut store = ws.open_chat_store().expect("open chat store");
     let defs = Definitions::resolve(root).expect("declarations");
     let ctx = orchestration::Ctx {
-        now: NOW,
+        now,
         origin: &origin,
-        actor: "o/coder",
+        actor: "o/human",
         session: None,
         hop: 0,
         defs: &defs,
-        worker: &RecordingWorker::default(),
+        worker,
         timer: &DryTimer,
         namer: &nexus_chat::naming::DryNamer,
         db_path: &db_path,
@@ -232,15 +245,22 @@ fn announce_from_another_process(root: &Path, session: &str, until: &str) {
         machines: None,
         peers: None,
     };
-    orchestration::session_interrupted(
-        &ctx,
-        &mut store,
-        session,
-        "rate_limit",
-        Some(until),
-        "You've hit your weekly limit · resets Nov 4 at 5pm",
-    )
-    .expect("the new hold is announced");
+    f(&ctx, &mut store)
+}
+
+/// The resumed session's runtime announcing that the model went away again.
+fn announce_from_another_process(root: &Path, session: &str, until: &str) {
+    in_another_process(root, &RecordingWorker::default(), NOW, |ctx, store| {
+        orchestration::session_interrupted(
+            ctx,
+            store,
+            session,
+            "rate_limit",
+            Some(until),
+            "You've hit your weekly limit · resets Nov 4 at 5pm",
+        )
+        .expect("the new hold is announced");
+    });
 }
 
 fn standing_holds(root: &Path) -> Vec<nexus_chat::interruption::Interruption> {
@@ -343,18 +363,47 @@ fn of_several_holds_in_one_operation_the_oldest_is_taken_first_and_its_thread_na
 
 #[test]
 fn the_session_scope_still_names_exactly_one_session() {
-    let (_tmp, engine, worker) = team();
+    let (tmp, engine, worker) = team();
     let _root = commission(&engine, "review");
     let (r1, r2) = (worker.first_of("r1"), worker.first_of("r2"));
     hit_the_limit(&engine, "r2", &r2.internal_session, UNTIL);
     hit_the_limit(&engine, "r1", &r1.internal_session, UNTIL);
 
     let by_session = resume(&engine, ResumeScope::Session(&r1.internal_session), true);
+    assert_eq!(by_session.outcome, ResumeOutcome::Resumed);
     assert_eq!(
         by_session.session.as_deref(),
         Some(r1.internal_session.as_str()),
         "--session is not widened to the operation"
     );
+    let standing = standing_holds(tmp.path());
+    assert_eq!(
+        standing
+            .iter()
+            .map(|h| h.session.as_str())
+            .collect::<Vec<_>>(),
+        [r2.internal_session.as_str()],
+        "r1's hold is the one taken up, r2's — the OLDER one — still stands"
+    );
+}
+
+#[test]
+fn a_step_thread_names_its_whole_operation_too() {
+    // Any thread of the operation, not only the root: a step thread resolves to the root and from
+    // there to every hold beneath it — here the OTHER member's.
+    let (_tmp, engine, worker) = team();
+    let _root = commission(&engine, "review");
+    let (r1, r2) = (worker.first_of("r1"), worker.first_of("r2"));
+    hit_the_limit(&engine, "r2", &r2.internal_session, UNTIL);
+
+    let r1_thread = r1.reply_thread.clone().expect("r1 owes an answer");
+    let via_sibling = resume(&engine, ResumeScope::Thread(&r1_thread), true);
+    assert_eq!(via_sibling.outcome, ResumeOutcome::Resumed);
+    assert_eq!(
+        via_sibling.session.as_deref(),
+        Some(r2.internal_session.as_str())
+    );
+    assert_eq!(via_sibling.thread, r2.reply_thread);
 }
 
 #[test]
@@ -432,4 +481,190 @@ fn a_resume_whose_start_fails_leaves_the_hold_standing() {
         ResumeOutcome::Resumed,
         "and the next resume takes it up"
     );
+}
+
+#[test]
+fn a_resume_stays_inside_the_operation_its_thread_belongs_to() {
+    let (_tmp, engine, worker) = team();
+    let coding = commission(&engine, "coding");
+    let review = commission(&engine, "review");
+    let (coder, r1) = (worker.first_of("coder"), worker.first_of("r1"));
+
+    // Only the review run is on hold.
+    hit_the_limit(&engine, "r1", &r1.internal_session, UNTIL);
+    assert!(operation_interrupted(&engine, &review));
+    assert!(
+        !operation_interrupted(&engine, &coding),
+        "a hold in another operation does not mark this one"
+    );
+    let elsewhere = resume(&engine, ResumeScope::Thread(&coding), true);
+    assert_eq!(
+        elsewhere.outcome,
+        ResumeOutcome::NothingOnHold,
+        "the coding root does not reach into the review run: {elsewhere:?}"
+    );
+    assert_eq!(worker.starts_of("r1").len(), 1, "and nothing was started");
+
+    // Both on hold: each root takes up its own.
+    hit_the_limit(&engine, "coder", &coder.internal_session, UNTIL);
+    let a = resume(&engine, ResumeScope::Thread(&coding), true);
+    assert_eq!(a.session.as_deref(), Some(coder.internal_session.as_str()));
+    assert_eq!(a.thread, coder.reply_thread);
+    let b = resume(&engine, ResumeScope::Thread(&review), true);
+    assert_eq!(b.session.as_deref(), Some(r1.internal_session.as_str()));
+    assert_eq!(b.thread, r1.reply_thread);
+}
+
+#[test]
+fn a_re_hit_during_a_start_that_then_fails_leaves_exactly_the_new_hold() {
+    let (tmp, engine, worker) = team();
+    let root = commission(&engine, "coding");
+    let coder = worker.first_of("coder");
+    hit_the_limit(&engine, "coder", &coder.internal_session, UNTIL);
+    let old = standing_holds(tmp.path());
+
+    let path: PathBuf = tmp.path().to_path_buf();
+    let session = coder.internal_session.clone();
+    *worker.meanwhile.lock().unwrap() = Some(Box::new(move |_: &TriggerRequest| {
+        announce_from_another_process(&path, &session, NEXT_UNTIL);
+    }));
+    *worker.fail_next.lock().unwrap() = true;
+    engine
+        .resume_interrupted(
+            caller("o/human", NOW),
+            ResumeRequest {
+                scope: ResumeScope::Thread(&root),
+                force: true,
+            },
+        )
+        .expect_err("the start fails");
+
+    let standing = standing_holds(tmp.path());
+    assert_eq!(standing.len(), 1, "{standing:?}");
+    assert_ne!(standing[0].id, old[0].id, "the old hold stays closed");
+    assert_eq!(standing[0].until.as_deref(), Some(NEXT_UNTIL));
+}
+
+#[test]
+fn a_second_resumer_during_the_first_ones_start_does_not_undo_it() {
+    // Two ways back arrive at once — a person and the service. The first starts the session; the
+    // second arrives inside that start, on a worker whose starts fail. Whatever the second decides
+    // (today the slot's claim keeps it out: `BeingRecovered`), it must not undo the first: what
+    // stands afterwards is the hold taken up and nothing on hold.
+    let (tmp, engine, worker) = team();
+    let root = commission(&engine, "coding");
+    let coder = worker.first_of("coder");
+    hit_the_limit(&engine, "coder", &coder.internal_session, UNTIL);
+
+    let path: PathBuf = tmp.path().to_path_buf();
+    let second: Arc<Mutex<Option<String>>> = Arc::default();
+    let seen = second.clone();
+    let root_b = root.clone();
+    *worker.meanwhile.lock().unwrap() = Some(Box::new(move |_: &TriggerRequest| {
+        let failing = RecordingWorker::default();
+        *failing.fail_next.lock().unwrap() = true;
+        let failed = in_another_process(&path, &failing, NOW, |ctx, store| {
+            orchestration::resume_interrupted(
+                ctx,
+                store,
+                ResumeRequest {
+                    scope: ResumeScope::Thread(&root_b),
+                    force: true,
+                },
+            )
+            .map(|r| r.outcome)
+        });
+        *seen.lock().unwrap() = Some(format!("{failed:?}"));
+    }));
+
+    let first = resume(&engine, ResumeScope::Thread(&root), true);
+    assert_eq!(first.outcome, ResumeOutcome::Resumed);
+    let second = second.lock().unwrap().clone();
+    assert!(
+        second
+            .as_deref()
+            .is_some_and(|o| !o.contains("NothingOnHold")),
+        "the premise: the second resumer ran during the start and still found the hold: {second:?}"
+    );
+    assert_eq!(
+        standing_holds(tmp.path()),
+        vec![],
+        "the first resumer's take-up stands"
+    );
+    assert!(!operation_interrupted(&engine, &root));
+}
+
+#[test]
+fn a_resume_that_dies_before_the_spawn_leaves_the_hold_standing() {
+    // A SIGINT, an OOM kill, a panic: the resume began and nothing was started. The hold must still
+    // be there for the next resume — "nothing on hold" here is exactly the cn4p symptom.
+    let (tmp, engine, worker) = team();
+    let root = commission(&engine, "coding");
+    let coder = worker.first_of("coder");
+    hit_the_limit(&engine, "coder", &coder.internal_session, UNTIL);
+    let before = standing_holds(tmp.path());
+    worker
+        .panic_next
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resume(&engine, ResumeScope::Thread(&root), true)
+    }));
+    assert!(
+        died.is_err(),
+        "the premise: the resume died inside the start"
+    );
+    drop(engine);
+
+    let after = standing_holds(tmp.path());
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, before[0].id, "the same hold still stands");
+
+    // …and the next process takes it up.
+    let next = in_another_process(tmp.path(), worker.as_ref(), NOW, |ctx, store| {
+        orchestration::resume_interrupted(
+            ctx,
+            store,
+            ResumeRequest {
+                scope: ResumeScope::Thread(&root),
+                force: true,
+            },
+        )
+        .expect("the resume decides")
+    });
+    assert_eq!(next.outcome, ResumeOutcome::Resumed);
+    assert!(standing_holds(tmp.path()).is_empty());
+}
+
+#[test]
+fn a_hold_belongs_to_the_operation_its_session_is_recorded_on_for_both_readers() {
+    // The shape where the board's per-row marks and the operation flag could part: a session whose
+    // recorded thread lies in ANOTHER operation than the thread it was commissioned on (a session
+    // resumed elsewhere). The pinned answer: the hold belongs to the operation of the thread the
+    // session is recorded on — the board marks THAT operation, and its root's resume takes it up;
+    // the other operation is neither marked nor reaches it.
+    let (tmp, engine, worker) = team();
+    let coding = commission(&engine, "coding");
+    let review = commission(&engine, "review");
+    let coder = worker.first_of("coder");
+    let r1 = worker.first_of("r1");
+    let coder_thread = coder.reply_thread.clone().expect("the step owes an answer");
+    {
+        let ws = Workspace::resolve(None, tmp.path()).expect("resolve workspace");
+        let mut store = ws.open_chat_store().expect("open chat store");
+        store
+            .record_session_thread(&r1.internal_session, Some(&coder_thread))
+            .expect("the session now stands in the coding run");
+    }
+    hit_the_limit(&engine, "r1", &r1.internal_session, UNTIL);
+
+    assert!(operation_interrupted(&engine, &coding));
+    assert!(!operation_interrupted(&engine, &review));
+    assert_eq!(
+        resume(&engine, ResumeScope::Thread(&review), true).outcome,
+        ResumeOutcome::NothingOnHold
+    );
+    let taken = resume(&engine, ResumeScope::Thread(&coding), true);
+    assert_eq!(taken.session.as_deref(), Some(r1.internal_session.as_str()));
+    assert_eq!(taken.thread.as_deref(), Some(coder_thread.as_str()));
 }

@@ -547,7 +547,12 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              resumed_at TEXT,
              -- What the resume did with the hold (nxf 6j6v.558h, rung B): `resumed`,
              -- `provider_cannot_resume`, `tree_moved_asked`, `not_yet`.
-             outcome    TEXT
+             outcome    TEXT,
+             -- When a resume began starting the session again (nxf 6j6v.cn4p). The hold STILL
+             -- STANDS while this is set — it is closed only once the start succeeded — and a new
+             -- announcement for the session supersedes it instead of being swallowed by the
+             -- one-open index. See `ChatStore::record_interruption`.
+             taking_up_at TEXT
          );
          CREATE INDEX IF NOT EXISTS session_interruption_open
              ON session_interruption(session, id);
@@ -735,6 +740,13 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     // wrote it; the next tick that meets the same refusal writes it again with one, and the only
     // cost in between is one `PARK REFUSED` line missing for a tick. Idempotent, like its
     // neighbours: the guard skips the whole thing on every open after the first.
+    // **When a resume began taking a hold up** (nxf 6j6v.cn4p): the same in-place,
+    // column-presence-guarded add, NOT part of `upgraded` — no reducer writes this device-local
+    // table. An existing row reads NULL, "no resume has begun", which is what every hold standing
+    // across an upgrade is.
+    if !column_exists(conn, "session_interruption", "taking_up_at")? {
+        conn.execute_batch("ALTER TABLE session_interruption ADD COLUMN taking_up_at TEXT;")?;
+    }
     if !column_exists(conn, "park_refusals", "occasion")? {
         conn.execute_batch(
             "ALTER TABLE park_refusals ADD COLUMN occasion TEXT NOT NULL DEFAULT '';
