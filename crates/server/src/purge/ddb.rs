@@ -35,9 +35,10 @@ use super::{
 };
 use crate::registry::StreamLease;
 use crate::store::StoreError;
-use crate::store_ddb::{
-    block_on, build_client, ddb_code_err, lease_sk, DynamoDbPrefixRegistry, SWEEP_PARTITION,
-};
+use crate::store_ddb::{block_on, build_client, ddb_code_err, DynamoDbPrefixRegistry};
+// The lease-sweep seam's two names; without `test-seams` they warn in the shipped build (907m).
+#[cfg(feature = "test-seams")]
+use crate::store_ddb::{lease_sk, SWEEP_PARTITION};
 
 /// `BatchWriteItem`'s ceiling.
 pub const BATCH: usize = 25;
