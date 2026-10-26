@@ -730,6 +730,13 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     if !column_exists(conn, "working_tree_lease", "contended_since")? {
         conn.execute_batch("ALTER TABLE working_tree_lease ADD COLUMN contended_since TEXT;")?;
     }
+    // **When a resume began taking a hold up** (nxf 6j6v.cn4p): the same in-place,
+    // column-presence-guarded add, NOT part of `upgraded` — no reducer writes this device-local
+    // table. An existing row reads NULL, "no resume has begun", which is what every hold standing
+    // across an upgrade is.
+    if !column_exists(conn, "session_interruption", "taking_up_at")? {
+        conn.execute_batch("ALTER TABLE session_interruption ADD COLUMN taking_up_at TEXT;")?;
+    }
     // **Which occasion refused the park** (fix round 1 of nxf 6j6v.8bv9): a store built from an
     // earlier commit of this branch has `park_refusals` WITHOUT it, and `CREATE TABLE IF NOT EXISTS`
     // above is a no-op for it. Same in-place, column-presence-guarded add as the ones above, and NOT
@@ -740,13 +747,6 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     // wrote it; the next tick that meets the same refusal writes it again with one, and the only
     // cost in between is one `PARK REFUSED` line missing for a tick. Idempotent, like its
     // neighbours: the guard skips the whole thing on every open after the first.
-    // **When a resume began taking a hold up** (nxf 6j6v.cn4p): the same in-place,
-    // column-presence-guarded add, NOT part of `upgraded` — no reducer writes this device-local
-    // table. An existing row reads NULL, "no resume has begun", which is what every hold standing
-    // across an upgrade is.
-    if !column_exists(conn, "session_interruption", "taking_up_at")? {
-        conn.execute_batch("ALTER TABLE session_interruption ADD COLUMN taking_up_at TEXT;")?;
-    }
     if !column_exists(conn, "park_refusals", "occasion")? {
         conn.execute_batch(
             "ALTER TABLE park_refusals ADD COLUMN occasion TEXT NOT NULL DEFAULT '';

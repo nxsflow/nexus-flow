@@ -133,10 +133,10 @@ fn interruption_at(r: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<Inter
 impl ChatStore {
     /// **Record that a session stopped at an availability boundary.**
     ///
-    /// **Idempotent while the hold stands and no resume is taking it up**, on the session alone: a teardown that is retried, or a
-    /// runtime that announces twice, must not leave one interruption looking like two — a reader
-    /// counting rows would report an operation as having been knocked over repeatedly when the
-    /// model went away once. The FIRST announcement wins and keeps its instant, for exactly
+    /// **Idempotent while the hold stands and no resume is taking it up**, on the session alone:
+    /// a teardown that is retried, or a runtime that announces twice, must not leave one
+    /// interruption looking like two — a reader counting rows would report an operation as having
+    /// been knocked over repeatedly when the model went away once. The FIRST announcement wins and keeps its instant, for exactly
     /// [`ChatStore::mark_session_ended`]'s reason: what a later stamp would say is nothing new.
     ///
     /// **ONE STATEMENT, and the database enforces the rule** (independent review of PR #476,
@@ -444,6 +444,90 @@ mod tests {
         // …and neither has an id this workspace never minted, which is the same answer on purpose:
         // both mean "there is nothing on hold here", which is what the caller asked.
         assert_eq!(s.current_interruption("m-nobody").unwrap(), None);
+    }
+
+    /// **A store from before `taking_up_at` is upgraded in place, once, and keeps its holds** (nxf
+    /// 6j6v.cn4p, pass-2 review TQ #1). Every other test here builds a fresh store, where the
+    /// guarded ALTER never runs.
+    #[test]
+    fn a_session_interruption_table_without_taking_up_at_is_upgraded_in_place() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("chat.db");
+        let path = path.to_str().unwrap();
+        {
+            // The v0.221.0 shape: `outcome` present, `taking_up_at` absent, one hold standing.
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_interruption(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL,
+                     at TEXT NOT NULL, limit_name TEXT NOT NULL, until TEXT,
+                     detail TEXT NOT NULL, resumed_at TEXT, outcome TEXT);
+                 INSERT INTO session_interruption(session, at, limit_name, until, detail)
+                 VALUES ('m-s1', '2026-09-12T09:53:52Z', 'seven_day',
+                         '2026-09-14T12:00:00Z', 'old');",
+            )
+            .unwrap();
+        }
+        let has_column = |s: &ChatStore| -> bool {
+            s.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('session_interruption')
+                      WHERE name = 'taking_up_at'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        // Opened twice: the second open finds the column and skips the ALTER.
+        drop(ChatStore::open(path, 1).expect("the first open upgrades"));
+        let mut s = ChatStore::open(path, 1).expect("the second open is a no-op upgrade");
+        assert!(has_column(&s));
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(standing.len(), 1, "the old hold still stands");
+        assert_eq!(standing[0].detail, "old");
+        let old = standing[0].id;
+
+        // …and the new behaviour works on the upgraded table.
+        s.mark_interruption_taking_up(old, "2026-09-14T12:00:01Z")
+            .unwrap();
+        let new = s
+            .record_interruption("m-s1", "seven_day", None, "new", "2026-09-14T12:00:02Z")
+            .unwrap();
+        assert_ne!(new, old);
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(standing.iter().map(|h| h.id).collect::<Vec<_>>(), [new]);
+    }
+
+    /// **A mark left by a failed start costs one fresh row, never a second standing hold** (pass-2
+    /// review TQ #2 and Integrity #1): the start failed, the mark stayed, and the ORIGINAL teardown
+    /// announces again.
+    #[test]
+    fn a_mark_left_by_a_failed_start_turns_a_retried_teardown_into_one_new_row() {
+        let mut s = store();
+        let old = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        s.mark_interruption_taking_up(old, "2026-09-14T12:00:01Z")
+            .unwrap();
+        // The start failed: nothing stamps, nothing clears the mark.
+        let retried = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        assert_ne!(retried, old, "the cost the mark's doc names: a fresh row");
+        let again = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        assert_eq!(
+            again, retried,
+            "the fresh row is unmarked, so the next retry reuses it"
+        );
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(
+            standing.iter().map(|h| h.id).collect::<Vec<_>>(),
+            [retried],
+            "exactly one hold stands"
+        );
     }
 
     #[test]

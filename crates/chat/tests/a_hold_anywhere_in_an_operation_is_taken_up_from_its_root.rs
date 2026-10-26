@@ -668,3 +668,46 @@ fn a_hold_belongs_to_the_operation_its_session_is_recorded_on_for_both_readers()
     assert_eq!(taken.session.as_deref(), Some(r1.internal_session.as_str()));
     assert_eq!(taken.thread.as_deref(), Some(coder_thread.as_str()));
 }
+
+#[test]
+fn a_mark_that_cannot_be_written_is_reported_and_the_resume_goes_on() {
+    // The store refuses the mark (injected with a trigger, as a full disk or a locked file would).
+    // The resume still takes the hold up — the mark only protects a re-hit during the start — and
+    // says on its receipt what it could not record.
+    let (tmp, engine, worker) = team();
+    let root = commission(&engine, "coding");
+    let coder = worker.first_of("coder");
+    hit_the_limit(&engine, "coder", &coder.internal_session, UNTIL);
+    {
+        let ws = Workspace::resolve(None, tmp.path()).expect("resolve workspace");
+        let store = ws.open_chat_store().expect("open chat store");
+        store
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_the_mark BEFORE UPDATE OF taking_up_at
+                   ON session_interruption
+                 BEGIN SELECT RAISE(ABORT, 'injected: the mark cannot be written'); END;",
+            )
+            .expect("the fault is injected");
+    }
+
+    let resumed = resume(&engine, ResumeScope::Thread(&root), true);
+    assert_eq!(resumed.outcome, ResumeOutcome::Resumed, "{resumed:?}");
+    assert_eq!(
+        worker.starts_of("coder").len(),
+        2,
+        "the session was started"
+    );
+    assert!(
+        resumed
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("could not be marked as being taken up")),
+        "the receipt names the mark it could not write: {:?}",
+        resumed.warnings
+    );
+    assert!(
+        standing_holds(tmp.path()).is_empty(),
+        "and the hold is taken up"
+    );
+}
