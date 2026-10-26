@@ -1306,7 +1306,7 @@ fn split_credentials(configured: String) -> (String, Option<String>, Secret) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::protocol::MachineSeen;
     use nexus_flow_core::model::EdgeKind;
@@ -1462,6 +1462,115 @@ mod tests {
             b.get_item("aaaa.0001").unwrap().unwrap().title.as_deref(),
             Some("A-one")
         );
+    }
+
+    // ---- historical same-site collisions (6j6v.htz7) -------------------------------------------
+
+    /// A source whose log carries the evidence shape of 6j6v.htz7 (app-foundations, Lamport
+    /// 1226-1228, one site): three ops on one item, each sharing its `(lamport, site)` with an
+    /// archive op of another item — written by two processes of one site with a stale clock,
+    /// before 6j6v.fc5p. Reproduced the way it happened: two handles of site 7 that both start from
+    /// the same log and then each write three ops, so their coordinates coincide. The source holds
+    /// both halves under the degraded index a pre-fc5p log has, the other item's ops first.
+    pub(crate) fn source_with_the_evidence_shape() -> Store {
+        let (log, archives) = the_evidence_shape();
+        let mut source = Store::open_in_memory(7);
+        source
+            .connection()
+            .execute_batch(
+                "DROP INDEX ops_lamport_site; CREATE INDEX ops_lamport_site ON ops(lamport, site);",
+            )
+            .unwrap();
+        source.apply(&log);
+        source.apply(&archives);
+        assert_eq!(
+            source.op_count() as usize,
+            log.len() + 3,
+            "the source holds all six"
+        );
+        source
+    }
+
+    /// The two halves of [`source_with_the_evidence_shape`]: the log up to and including the three
+    /// ops on `af.9z2b`, and the three archive ops that share their coordinates.
+    pub(crate) fn the_evidence_shape() -> (Vec<Op>, Vec<Op>) {
+        let mut writer = Store::open_in_memory(7);
+        for id in ["af.zg3y", "af.267m", "af.a0gw", "af.9z2b"] {
+            writer.create_item(id, "task", id, "alice");
+        }
+        for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+            writer.set_field(id, "status", Some("closed".into()), "alice");
+        }
+        let mut stale = Store::open_in_memory(7);
+        stale.apply(&writer.export());
+        let base = writer.op_count() as usize;
+        for (field, value) in [
+            ("title", "renamed"),
+            ("priority", "1"),
+            ("status", "claimed"),
+        ] {
+            writer.set_field("af.9z2b", field, Some(value.into()), "alice");
+        }
+        for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+            stale.set_field(id, "archived", Some("2026-10-01T00:00:00Z".into()), "alice");
+        }
+        let archives: Vec<Op> = stale.export().into_iter().skip(base).collect();
+        let others: Vec<Op> = writer.export().into_iter().skip(base).collect();
+        let coordinates = |ops: &[Op]| ops.iter().map(|o| (o.lamport, o.site)).collect::<Vec<_>>();
+        assert_eq!(
+            coordinates(&archives),
+            coordinates(&others),
+            "three pairs on three shared coordinates, the evidence shape"
+        );
+
+        (writer.export(), archives)
+    }
+
+    pub(crate) fn archived(store: &Store) -> Vec<(String, Option<String>)> {
+        store
+            .list_items()
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.id, i.archived))
+            .collect()
+    }
+
+    /// The regression of 6j6v.htz7, through a real sync pass: a FRESH replica that pulls such a
+    /// stream keeps all six ops and shows the source's board — the three items archived — where it
+    /// used to drop each archive op as a collision and show them unarchived, for good.
+    #[test]
+    fn a_fresh_replica_of_a_stream_with_historical_collisions_shows_the_sources_board() {
+        let stream = StreamId("s".into());
+        let mut source = source_with_the_evidence_shape();
+        let relay = MemTransport::new();
+        let mut ms = Watermarks::default();
+        sync(&mut source, 7, &stream, &mut ms, &relay, 100, &Unbounded).unwrap();
+
+        let mut fresh = Store::open_in_memory(9);
+        let mut mf = Watermarks::default();
+        let outcome = sync(&mut fresh, 9, &stream, &mut mf, &relay, 100, &Unbounded).unwrap();
+
+        assert_eq!(outcome.pulled as i64, source.op_count());
+        assert_eq!(
+            fresh.op_count(),
+            source.op_count(),
+            "no op of a pair is dropped"
+        );
+        assert_eq!(
+            fresh.export(),
+            source.export(),
+            "the same log, in the same order"
+        );
+        assert_eq!(archived(&fresh), archived(&source));
+        assert!(
+            archived(&fresh)
+                .iter()
+                .filter(|(id, _)| id != "af.9z2b")
+                .all(|(_, at)| at.is_some()),
+            "the three items are archived on the fresh replica: {:?}",
+            archived(&fresh)
+        );
+        assert_eq!(materialized(&fresh), materialized(&source));
     }
 
     // ---- silent downgrade, counted (6j6v.pzkb) ------------------------------------------------
