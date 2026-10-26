@@ -2616,3 +2616,37 @@ test("an nxc that does not know --cause still hears the end", () => {
   assert.equal(ends.length, 2, "tried with the cause, then without");
   assert.deepEqual(ends[1].argv, ["session", "ended", "s-1"]);
 });
+
+// ---- a tool call that runs long is on the record while it runs (nxf 6j6v.j6yk) ---------------------
+
+/** The `nxc` calls the fake has logged so far, while the sidecar still runs. */
+function callsIn(dir) {
+  const log = join(dir, "calls.log");
+  return (existsSync(log) ? readFileSync(log, "utf8") : "")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line));
+}
+
+/** **A tool call that is still running is flushed while it runs** — the slot's coordinator reads an
+ *  open `tool_use` as work and an ask can only reach the session once the call returns, so the call
+ *  has to be on the record before it returns, not 32 entries later. The stub holds the stream inside
+ *  the call (after its `tool_use`, before its `tool_result`); the `tool_use` reaches `nxc transcript
+ *  append` while it is held, and the rest of the turn flushes at its `result` as before. */
+test("a tool call still running is put on the record before it returns", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    { messages: [init, toolUse, toolResult, result], hangAt: 2, holdUntilReleased: true },
+    async ({ dir, waitFor }) => {
+      await waitFor("the call to be running", () => existsSync(join(dir, "hanging.txt")));
+      await waitFor("the open call to be flushed", () =>
+        appends(callsIn(dir)).some((a) => a.entries.some((e) => e.kind === "tool_use" && e.toolUseId === "toolu_1")),
+      );
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  const flushes = appends(run.calls);
+  assert.deepEqual(flushes[0].entries.map((e) => e.kind), ["session_init", "tool_use"], "flushed while the call ran");
+  assert.deepEqual(flushes[1].entries.map((e) => e.kind), ["tool_result", "result"], "the rest at the turn's result");
+});
