@@ -2241,6 +2241,112 @@ mod tests {
         assert_eq!(board(&based), board(&replayed));
     }
 
+    /// Push all of `store`'s own ops and pull everything — as many passes as the paging needs.
+    fn drained(store: &mut Store, site: i64, marks: &mut Watermarks, relay: &dyn Transport) {
+        loop {
+            let moved = pass(store, site, marks, relay);
+            if moved.pushed == 0 && moved.pulled == 0 {
+                return;
+            }
+        }
+    }
+
+    /// A stream whose log carries historical same-site collisions (6j6v.htz7), through both
+    /// snapshot formats: the writer of the snapshot is itself a fresh replica of that stream, so
+    /// it has to hold the source's board for the snapshot to carry it — and a replica started from
+    /// either format shows the source's board, the three items archived.
+    #[test]
+    fn a_snapshot_of_a_stream_with_historical_collisions_starts_a_replica_on_the_sources_board() {
+        use crate::engine::tests::{archived, source_with_the_evidence_shape};
+        let relay = Relay::new(7, 0);
+        let mut source = source_with_the_evidence_shape();
+        drained(&mut source, 7, &mut Watermarks::default(), &relay);
+
+        let (writer, marks) = caught_up(&relay, 12);
+        assert_eq!(
+            writer.op_count(),
+            source.op_count(),
+            "the writer dropped nothing"
+        );
+        assert_eq!(board(&writer), board(&source));
+
+        let based_bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+        let mut based = Store::open_in_memory(14);
+        import(
+            &mut based,
+            &based_bytes,
+            &stream(),
+            &relay,
+            &signers(&writer),
+        )
+        .unwrap();
+        assert_eq!(
+            board(&based),
+            board(&source),
+            "a based replica shows the source"
+        );
+        assert_eq!(archived(&based), archived(&source));
+
+        let with_log = export(&writer, 12, &stream(), &marks, &relay).unwrap();
+        let mut whole = Store::open_in_memory(15);
+        import(&mut whole, &with_log, &stream(), &relay, &signers(&writer)).unwrap();
+        assert_eq!(
+            state(&whole),
+            state(&source),
+            "a with-log replica holds the source's log"
+        );
+        assert_eq!(whole.export(), source.export(), "in the source's order");
+    }
+
+    /// The pair straddles a based snapshot: the ops on `af.9z2b` are folded into it, the archive
+    /// ops sharing their coordinates come in its tail. The based replica holds no op below its
+    /// position, so the tail meets nothing in its log; what decides is the fold, and the two halves
+    /// write different items, so all six land — as on the source, and as on a replica that replays
+    /// the whole stream, which is where the collision does meet the log.
+    #[test]
+    fn a_collision_that_straddles_a_based_snapshot_folds_to_the_sources_board() {
+        use crate::engine::tests::{archived, the_evidence_shape};
+        let relay = Relay::new(8, 0);
+        let (log, archives) = the_evidence_shape();
+        let mut source = Store::open_in_memory(7);
+        source
+            .connection()
+            .execute_batch(
+                "DROP INDEX ops_lamport_site; CREATE INDEX ops_lamport_site ON ops(lamport, site);",
+            )
+            .unwrap();
+        source.apply(&log);
+        let mut source_marks = Watermarks::default();
+        drained(&mut source, 7, &mut source_marks, &relay);
+
+        let (writer, marks) = caught_up(&relay, 12);
+        let bytes = export_based(&writer, 12, &stream(), &marks, &relay, FLOW_ONLY).unwrap();
+
+        source.apply(&archives);
+        drained(&mut source, 7, &mut source_marks, &relay);
+
+        let mut based = Store::open_in_memory(14);
+        let mut based_marks = import(&mut based, &bytes, &stream(), &relay, &signers(&writer))
+            .unwrap()
+            .marks;
+        drained(&mut based, 14, &mut based_marks, &relay);
+        assert_eq!(board(&based), board(&source));
+        assert!(
+            archived(&based)
+                .iter()
+                .filter(|(id, _)| id != "af.9z2b")
+                .all(|(_, at)| at.is_some()),
+            "{:?}",
+            archived(&based)
+        );
+        let (replayed, _) = caught_up(&relay, 15);
+        assert_eq!(
+            board(&replayed),
+            board(&source),
+            "a replica that replays the whole stream"
+        );
+    }
+
     /// A based replica's first write beats the state it imported (spec §3, L1) — the clock floor
     /// travels in the snapshot, and the local store has no ops to read it off.
     #[test]

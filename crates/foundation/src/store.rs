@@ -22,8 +22,10 @@ enum Ingest {
     /// Op already in the log → no-op (idempotent union).
     AlreadySeen,
     /// The op's `(lamport, site)` coordinate is already held by a DIFFERENT op, so the log refused
-    /// it (6j6v.fc5p) — see [`schema::ensure_op_coordinate_index`]. On [`Store::apply`] it means two
-    /// replicas share a `site_id`. On the local path it means a RECEIVED op claims this replica's
+    /// it (6j6v.fc5p) — see [`schema::ensure_op_coordinate_index`]. On [`Store::apply`] it means a
+    /// received op claims a coordinate one of this replica's OWN ops holds: two replicas share a
+    /// `site_id`, or the op is forged. A coordinate only received ops hold is history and is never
+    /// refused (6j6v.htz7). On the local path it means a RECEIVED op claims this replica's
     /// site on the very number the clock hands out next, above
     /// [`CLOCK_CEILING`](crate::model::CLOCK_CEILING) (6j6v.m19v); the local write then steps over
     /// it rather than losing the write — see `build_and_ingest`.
@@ -513,38 +515,44 @@ impl Store {
     /// it and never taken from anything the op carries. An op already in the log keeps the verdict
     /// it was first recorded with: a re-delivery changes nothing, its verdict included.
     fn ingest_in_txn(&mut self, op: &Op, provenance: Provenance) -> Ingest {
-        let inserted = self
-            .conn
-            .execute(
-                "INSERT OR IGNORE INTO ops
-                 (op_id, lamport, site, domain, target_kind, target_id, field, op_type, value, author,
-                  wall_clock, key_id, sig, provenance)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                params![
-                    op.op_id, op.lamport, op.site, op.domain, op.target_kind, op.target_id,
-                    op.field, op.op_type, op.value, op.author, op.wall_clock, op.key_id, op.sig,
-                    provenance.as_str()
-                ],
-            )
-            .unwrap();
-        if inserted == 0 {
+        let own = provenance == Provenance::Own;
+        // On a log whose coordinate index is degraded (it holds a historical same-site collision,
+        // see [`schema::ensure_op_coordinate_index`]) nothing refuses a coordinate any more, so the
+        // two refusals that must survive it are asked for here (6j6v.htz7): a local op on a
+        // coordinate anyone holds — the step-over of 6j6v.m19v rests on it — and a received op on
+        // a coordinate one of this replica's OWN ops holds, which is a shared site or a forgery,
+        // never history. Two index lookups, and only on such a log.
+        if !self.coordinate_index_unique() && coordinate_refused(&self.conn, op, own) {
+            return Ingest::Collided;
+        }
+        if insert_op(&self.conn, op, provenance) == 0 {
             // `OR IGNORE` skips a row for EITHER uniqueness constraint on the log, and the two mean
             // opposite things (6j6v.fc5p): the primary key means "this exact op is already here",
             // the honest no-op of an idempotent union; `ops_lamport_site` means "a DIFFERENT op
-            // already holds this coordinate", which is a broken invariant. Telling them apart is
-            // what keeps the second from being reported as the first — the silence this item is
-            // about. One keyed lookup, and only on the path that already decided not to fold.
+            // already holds this coordinate". Telling them apart is what keeps the second from
+            // being reported as the first. One keyed lookup, and only on the path that already
+            // decided not to fold.
             let known: bool = self
                 .conn
                 .query_row("SELECT 1 FROM ops WHERE op_id=?1", [&op.op_id], |_| Ok(()))
                 .optional()
                 .unwrap()
                 .is_some();
-            return if known {
-                Ingest::AlreadySeen
-            } else {
-                Ingest::Collided
-            };
+            if known {
+                return Ingest::AlreadySeen;
+            }
+            if coordinate_refused(&self.conn, op, own) {
+                return Ingest::Collided;
+            }
+            // A RECEIVED op on a coordinate only other received ops hold: a collision in its
+            // origin's own history, written before 6j6v.fc5p made a replica mint past a taken
+            // coordinate (6j6v.htz7). The origin keeps both ops, so this replica keeps both too —
+            // refusing one would show a different board than the source, for good, since the log
+            // is append-only and the relay will not deliver the op again. The index takes the
+            // shape such a log calls for, as it does on the source and on an image's load.
+            degrade_coordinate_index(&self.conn).unwrap();
+            let inserted = insert_op(&self.conn, op, provenance);
+            assert_eq!(inserted, 1, "a degraded coordinate index refuses nothing");
         }
         // Capture the op's rowid NOW, before the fold runs its own INSERTs into the views (which
         // would move `last_insert_rowid`). This is the snapshot boundary the watermark tracks.
@@ -571,6 +579,21 @@ impl Store {
         }
     }
 
+    /// Whether the coordinate index is UNIQUE — false once the log holds a historical same-site
+    /// collision ([`schema::ensure_op_coordinate_index`]). Read from the schema on every ask, so a
+    /// sibling process that degraded it is seen.
+    fn coordinate_index_unique(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT \"unique\" FROM pragma_index_list('ops') WHERE name = 'ops_lamport_site'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .unwrap()
+            == Some(1)
+    }
+
     pub fn op_count(&self) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
@@ -585,13 +608,19 @@ impl Store {
             .pragma_query_value(None, "data_version", |r| r.get(0))
     }
 
-    /// Export the full op log (the sync payload).
+    /// Export the full op log (the sync payload), in the CRDT order `(lamport, site)` — and, between
+    /// the ops of a historical same-site collision, in the order this log holds them (`rowid`,
+    /// 6j6v.htz7). That last key is the fold's tie-break: [`refold`](Self::refold) folds in this
+    /// order, and an equal version beats nothing, so the op held first keeps a register both write
+    /// — the same op ingest kept, and the same one every replica of the stream kept, because the
+    /// origin pushes in its `rowid` order.
     pub fn export(&self) -> Vec<Op> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT op_id, lamport, site, domain, target_kind, target_id, field, op_type,
-                        value, author, wall_clock, key_id, sig FROM ops ORDER BY lamport, site",
+                        value, author, wall_clock, key_id, sig FROM ops
+                 ORDER BY lamport, site, rowid",
             )
             .unwrap();
         stmt.query_map([], |r| {
@@ -670,16 +699,21 @@ impl Store {
     /// [`refold`]).
     ///
     /// **The returned vec also carries an op the log REFUSED** (6j6v.fc5p): one whose
-    /// `(lamport, site)` coordinate is already held by a different op. That is a broken
-    /// precondition rather than a forward-compat case — two replicas minting the same coordinate
-    /// means they share a `site_id`, which 63 bits of ULID entropy make unreachable between real
-    /// replicas (`workspace::fresh_replica`) and which the prefix registry already treats as a
-    /// detectable, repairable misconfiguration. It rides the same channel because the honest
-    /// statement about both is identical — *this store did not take this op into its views* — and
-    /// because the alternative, letting `INSERT OR IGNORE` skip it as though it were a re-delivery,
-    /// is precisely the silence this item exists to remove. Nothing is lost globally: the op still
-    /// stands in its origin's log and on the relay, and `pulled_through` is a scan cursor, so a
-    /// re-pull redelivers it once the site collision is repaired.
+    /// `(lamport, site)` coordinate is already held by one of this replica's OWN ops. That is a
+    /// broken precondition rather than a forward-compat case — another replica minting this
+    /// replica's coordinates means the two share a `site_id`, which 63 bits of ULID entropy make
+    /// unreachable between real replicas (`workspace::fresh_replica`), or that the op is forged. It
+    /// rides the same channel because the honest statement about both is identical — *this store
+    /// did not take this op into its views* — and because the alternative, letting `INSERT OR
+    /// IGNORE` skip it as though it were a re-delivery, is precisely the silence fc5p removed.
+    ///
+    /// **A coordinate only received ops hold is NOT refused** (6j6v.htz7). Two ops of one foreign
+    /// site on one coordinate are that site's own history: logs written before fc5p carry such
+    /// pairs, their origin keeps both, and a replica that refused the second would show a
+    /// different board for good — the log is append-only and the relay never delivers the op again.
+    /// So the op is taken in and folded, and the coordinate index loses its uniqueness as it has on
+    /// the origin ([`schema::ensure_op_coordinate_index`]). Between the two, the fold keeps the one
+    /// this log holds first — the order the origin pushed them in; see [`export`](Self::export).
     ///
     /// **Clock semantics**: after each foreign op the clock is advanced to `max(clock, op.lamport)`;
     /// the next local write then calls `tick()` (`+1`). This is the standard Lamport rule — the pair
@@ -1470,6 +1504,58 @@ fn first_free_coordinate(conn: &Connection, site: i64, taken: i64) -> rusqlite::
             AND NOT EXISTS(SELECT 1 FROM ops n WHERE n.site = ?1 AND n.lamport = o.lamport + 1)",
         [site, taken],
         |r| r.get(0),
+    )
+}
+
+/// Append `op` to the log with this replica's verdict on it; the number of rows inserted — 0 when
+/// either uniqueness constraint skipped it.
+fn insert_op(conn: &Connection, op: &Op, provenance: Provenance) -> usize {
+    conn.execute(
+        "INSERT OR IGNORE INTO ops
+         (op_id, lamport, site, domain, target_kind, target_id, field, op_type, value, author,
+          wall_clock, key_id, sig, provenance)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![
+            op.op_id,
+            op.lamport,
+            op.site,
+            op.domain,
+            op.target_kind,
+            op.target_id,
+            op.field,
+            op.op_type,
+            op.value,
+            op.author,
+            op.wall_clock,
+            op.key_id,
+            op.sig,
+            provenance.as_str()
+        ],
+    )
+    .unwrap()
+}
+
+/// Whether the log refuses `op`'s coordinate (6j6v.htz7): for a local op (`own`), when any other op
+/// holds it; for a received one, when one of this replica's own ops does. A coordinate only
+/// received ops hold is history, and is shared.
+fn coordinate_refused(conn: &Connection, op: &Op, own: bool) -> bool {
+    let sql = if own {
+        "SELECT 1 FROM ops WHERE lamport = ?1 AND site = ?2 AND op_id <> ?3"
+    } else {
+        "SELECT 1 FROM ops WHERE lamport = ?1 AND site = ?2 AND op_id <> ?3 AND provenance = 'own'"
+    };
+    conn.query_row(sql, params![op.lamport, op.site, op.op_id], |_| Ok(()))
+        .optional()
+        .unwrap()
+        .is_some()
+}
+
+/// Rebuild the coordinate index without its uniqueness, inside the caller's transaction — the shape
+/// [`schema::ensure_op_coordinate_index`] gives a log that holds a collision.
+fn degrade_coordinate_index(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS ops_lamport_site;
+         CREATE INDEX ops_lamport_site ON ops(lamport, site);",
     )
 }
 
@@ -2640,6 +2726,138 @@ mod tests {
             s.apply(std::slice::from_ref(&mine)).is_empty(),
             "the idempotent union is untouched by the distinction"
         );
+    }
+
+    /// A log written before 6j6v.fc5p, received by a FRESH replica (6j6v.htz7): two ops of ONE
+    /// foreign site on one `(lamport, site)`. The source keeps both — its index is not unique — so
+    /// the replica keeps both too, and shows the source's board: neither is refused, and the index
+    /// takes the shape that log calls for, as an image does on load.
+    #[test]
+    fn a_fresh_replica_keeps_both_ops_of_a_historical_same_site_collision() {
+        let (mut fresh, _) = tally_store(9);
+        assert_eq!(coordinate_index_shape(fresh.connection()), Some(true));
+        let not_folded = fresh.apply(&[
+            tally_op("x1", "a", "first", 4, 1),
+            tally_op("x2", "b", "second", 4, 1),
+        ]);
+        assert!(
+            not_folded.is_empty(),
+            "both ops were taken in and folded: {not_folded:?}"
+        );
+        assert_eq!(
+            fresh.op_count(),
+            2,
+            "the second op of the pair is not dropped"
+        );
+        assert_eq!(
+            tally_rows(&fresh),
+            [
+                ("a".to_string(), "first".to_string(), 4, 1),
+                ("b".to_string(), "second".to_string(), 4, 1)
+            ]
+        );
+        assert_eq!(
+            coordinate_index_shape(fresh.connection()),
+            Some(false),
+            "the index is degraded, as on the source"
+        );
+        // A re-delivery of either is still the silent no-op of an idempotent union.
+        assert!(fresh
+            .apply(&[tally_op("x2", "b", "second", 4, 1)])
+            .is_empty());
+        assert_eq!(fresh.op_count(), 2);
+    }
+
+    /// The tie-break between the two ops of such a pair, when they write the SAME register: the one
+    /// the log holds FIRST wins, at ingest and on every refold. That is what the source shows — it
+    /// folded them in the order it appended them, which is the order it pushes them (`rowid`), so
+    /// every replica pulling its stream receives them in that order too. An equal version beats
+    /// nothing, so the second arrival leaves the register alone; the refold reads the log in
+    /// `(lamport, site, rowid)` order and lands on the same value.
+    #[test]
+    fn of_two_ops_on_one_coordinate_the_one_the_log_holds_first_wins_and_a_refold_agrees() {
+        // Ordered so that op_id order and log order disagree — a tie-break on op_id would pick "b".
+        let pair = [
+            tally_op("x9", "a", "held-first", 4, 1),
+            tally_op("x1", "a", "held-second", 4, 1),
+        ];
+        let (mut fresh, _) = tally_store(9);
+        fresh.apply(&pair);
+        assert_eq!(fresh.op_count(), 2);
+        assert_eq!(tally_rows(&fresh)[0].1, "held-first");
+        fresh.refold();
+        assert_eq!(
+            tally_rows(&fresh)[0].1,
+            "held-first",
+            "a refold reads the pair in log order and agrees with the ingest"
+        );
+        let order: Vec<String> = fresh.export().into_iter().map(|o| o.op_id).collect();
+        assert_eq!(order, ["x9", "x1"], "export carries the pair in log order");
+    }
+
+    /// The net is not given up for this replica's OWN coordinates: a received op on a coordinate
+    /// one of this replica's own ops holds is still refused — that is two replicas sharing a site
+    /// (or a forgery), never history — even once a historical collision has degraded the index.
+    #[test]
+    fn a_received_op_on_a_coordinate_an_own_op_holds_is_still_refused_on_a_degraded_log() {
+        let (mut s, _) = tally_store(1);
+        s.apply(&[
+            tally_op("h1", "z", "one", 2, 5),
+            tally_op("h2", "y", "two", 2, 5),
+        ]);
+        assert_eq!(coordinate_index_shape(s.connection()), Some(false));
+        s.emit(
+            "tally",
+            "tally",
+            "t.1",
+            "v",
+            "set",
+            Some("mine".into()),
+            "u",
+        );
+        let mine = s
+            .export()
+            .into_iter()
+            .find(|o| o.target_id == "t.1")
+            .unwrap();
+        let impostor = Op {
+            op_id: "forged".into(),
+            target_id: "t.2".into(),
+            ..mine.clone()
+        };
+        let refused = s.apply(std::slice::from_ref(&impostor));
+        assert_eq!(refused.len(), 1, "the refusal is reported");
+        assert!(!s.holds_op("forged"), "and the log kept its own op alone");
+    }
+
+    /// On a degraded log the local write still steps over a coordinate a received op squats — the
+    /// UNIQUE index that used to refuse it is gone there, so the step-over cannot rest on it.
+    #[test]
+    fn a_squatted_local_coordinate_is_stepped_over_on_a_degraded_log_too() {
+        use crate::model::CLOCK_CEILING;
+        let (mut s, _) = tally_store(1);
+        s.apply(&[
+            tally_op("h1", "z", "one", 2, 5),
+            tally_op("h2", "y", "two", 2, 5),
+            tally_op("push", "t.9", "x", CLOCK_CEILING, 9),
+            tally_op("squat-1", "t.8", "x", CLOCK_CEILING + 1, 1),
+        ]);
+        assert_eq!(coordinate_index_shape(s.connection()), Some(false));
+        s.emit(
+            "tally",
+            "tally",
+            "t.1",
+            "v",
+            "set",
+            Some("mine".into()),
+            "u",
+        );
+        let mine = s
+            .export()
+            .into_iter()
+            .find(|o| o.target_id == "t.1")
+            .unwrap();
+        assert_eq!((mine.lamport, mine.site), (CLOCK_CEILING + 2, 1));
     }
 
     /// A fresh log gets the coordinate index as UNIQUE. Pinned because everything above rests on
