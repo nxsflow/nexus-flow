@@ -593,3 +593,133 @@ fn the_owed_row_to_spawn_latency_is_far_inside_the_grace() {
         "{took:?}"
     );
 }
+
+// ---- a session inside one tool call (nxf 6j6v.j6yk) ---------------------------------------------
+
+/// The session's flush, as the sidecar makes it: `nxc transcript append` with JSON lines on stdin.
+fn append(root: &Path, now: &str, session: &str, lines: &[String]) {
+    nxc(root, now, "dry")
+        .env("NXC_SESSION", session)
+        .args(["transcript", "append", "--session", session])
+        .write_stdin(lines.join("\n") + "\n")
+        .assert()
+        .success();
+}
+
+/// One transcript line in the sidecar's wire shape.
+fn line(kind: &str, secs: i64, id: Option<&str>, data: Value) -> String {
+    serde_json::json!({ "kind": kind, "at": at(secs), "toolUseId": id, "data": data }).to_string()
+}
+
+/// A live session on the review slot, bound, its turn on the slot begun.
+fn a_live_turn(root: &Path) -> (String, String, String, Child) {
+    let (thread, slot, s) = commission(root, "review");
+    let child = stand_in(root, &s);
+    bind(root, &at(5), &s);
+    append(
+        root,
+        &at(6),
+        &s,
+        &[line(
+            "turn_start",
+            6,
+            None,
+            serde_json::json!({ "thread": slot }),
+        )],
+    );
+    (thread, slot, s, child)
+}
+
+/// **A session in one tool call longer than three ask intervals, in real processes** — a live
+/// process, its open `tool_use` flushed through a real `nxc transcript append`, looked at by real
+/// `nxc tick`s under the sidecar worker for four ask intervals: no rung is taken and nothing is
+/// escalated.
+#[test]
+fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, slot, s, child) = a_live_turn(root);
+    append(
+        root,
+        &at(60),
+        &s,
+        &[line(
+            "tool_use",
+            60,
+            Some("toolu_watch"),
+            serde_json::json!({ "name": "Bash", "input": { "command": "gh run watch" } }),
+        )],
+    );
+    let mut secs = 600;
+    while secs <= 60 + 4 * nexus_chat::ladder::SILENCE_SECS {
+        tick(root, &at(secs), &thread);
+        secs += 600;
+    }
+    assert!(rungs(root).is_empty(), "{:?}", rungs(root));
+    assert_eq!(escalations_in(root, &slot), 0);
+    kill_hard(child);
+}
+
+/// **…and one that is really silent is still asked** — its one call returned, nothing since.
+#[test]
+fn a_live_session_with_no_call_open_is_still_asked_after_twenty_minutes() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, _slot, s, child) = a_live_turn(root);
+    append(
+        root,
+        &at(70),
+        &s,
+        &[
+            line(
+                "tool_use",
+                60,
+                Some("toolu_read"),
+                serde_json::json!({ "name": "Read", "input": {} }),
+            ),
+            line(
+                "tool_result",
+                70,
+                Some("toolu_read"),
+                serde_json::json!({ "content": "ok", "isError": false }),
+            ),
+        ],
+    );
+    tick(
+        root,
+        &at(70 + nexus_chat::ladder::SILENCE_SECS - 1),
+        &thread,
+    );
+    assert!(rungs(root).is_empty(), "not yet");
+    tick(root, &at(70 + nexus_chat::ladder::SILENCE_SECS), &thread);
+    let taken: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
+    assert_eq!(taken, vec!["asked".to_string()]);
+    kill_hard(child);
+}
+
+/// **A tool call that outlives its own bound, in real processes** — escalated once, no ask taken.
+#[test]
+fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, slot, s, child) = a_live_turn(root);
+    append(
+        root,
+        &at(60),
+        &s,
+        &[line(
+            "tool_use",
+            60,
+            Some("toolu_watch"),
+            serde_json::json!({ "name": "Bash", "input": {} }),
+        )],
+    );
+    let bound = nexus_chat::ladder::TOOL_CALL_BOUND_SECS;
+    tick(root, &at(60 + bound - 1), &thread);
+    assert_eq!(escalations_in(root, &slot), 0, "not yet");
+    tick(root, &at(60 + bound), &thread);
+    assert_eq!(escalations_in(root, &slot), 1);
+    let taken: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
+    assert_eq!(taken, vec!["escalated".to_string()], "no ask was spent");
+    kill_hard(child);
+}
