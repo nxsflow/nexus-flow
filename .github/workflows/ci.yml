@@ -939,6 +939,28 @@ jobs:
         if: github.event_name != 'pull_request'
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
 
+  # The relay as a consumer installs it (6j6v.907m): foundations' hosted-engine image runs
+  # `cargo install --locked --git … nxs-server --features dynamodb --bin nxf-relay`. `cargo install`
+  # drops the dev-dependencies, so a feature that names one fails there and nowhere else — every
+  # other job builds inside the workspace, where dev-dependencies resolve, and the release binaries
+  # carry no `dynamodb`. That broke 0.217.0 through 0.220.0 unnoticed; this runs the consumer's
+  # command on the tree. ubuntu-latest has the C toolchain and `cmake` aws-lc-sys needs.
+  relay-install-dynamodb:
+    runs-on: ubuntu-latest
+    # A cold release build of the relay with the AWS SDK is ~10 min; three times that is a hang.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo install nxf-relay --features dynamodb, as a consumer does
+        run: cargo install --locked --path crates/server --features dynamodb --bin nxf-relay --root "$RUNNER_TEMP/relay"
+      - name: The installed relay runs
+        run: |
+          out=$("$RUNNER_TEMP/relay/bin/nxf-relay" --help 2>&1 || true)
+          echo "$out"
+          grep -q "nxf-relay purge" <<<"$out"
+
   # The dependency vulnerability gate (6j6v.2dn0): `cargo xtask deps audit` runs cargo deny over
   # deny.toml, checks that no recorded exception has expired, and runs npm audit for the npm
   # packages that ship — every check, every failure named. The same command runs DAILY in
