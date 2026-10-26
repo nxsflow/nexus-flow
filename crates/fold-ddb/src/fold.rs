@@ -38,13 +38,13 @@
 //! references"), kept as a function of the rows for every id-shaped custom value — what a hosted
 //! `list --ref` reads ([`crate::records::referrers`]).
 //!
-//! # What the server cannot see
+//! # Collisions on one coordinate
 //!
-//! A local replica refuses an op whose `(lamport, site)` another op already holds ("collided") and
-//! folds only the first. The op table has no index on the coordinate, so the server folds both.
-//! Registers still keep the first arrival — an equal version beats nothing — and only an add or a
-//! note of the second op is extra. Such ops predate fc5p, which made a replica mint past a taken
-//! coordinate.
+//! Logs written before fc5p, which made a replica mint past a taken coordinate, carry pairs of ops
+//! of one site on one `(lamport, site)`. The op table has no index on the coordinate, so the server
+//! folds both — as the pair's origin does, and as a fresh local replica does since 6j6v.htz7.
+//! Registers keep the first arrival — an equal version beats nothing — and the stream carries the
+//! pair in the order its origin holds it, so the server keeps the register its origin keeps.
 
 use crate::board;
 use crate::layout::{

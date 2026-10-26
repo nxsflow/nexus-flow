@@ -1489,3 +1489,62 @@ fn engine_field_entry_writes_return_the_stored_form_and_refuse_at_the_seam() {
         "no refused write changed the list"
     );
 }
+
+/// 6j6v.htz7 at the Engine seam: a FRESH workspace takes in a stream whose log carries a
+/// historical same-site collision — the evidence shape, three ops on one item each sharing its
+/// `(lamport, site)` with an archive op of another, written by two handles of one site with a stale
+/// clock before 6j6v.fc5p — the way `nxs sync` takes it in (`Store::apply`, in stream order). What
+/// the products read through `Engine` is the source's board: the three items archived, the other
+/// item's three changes there too.
+#[test]
+fn a_fresh_workspace_of_a_stream_with_historical_collisions_reads_as_its_source() {
+    use nexus_flow_core::store::Store;
+    let mut writer = Store::open_in_memory(7);
+    for id in ["af.zg3y", "af.267m", "af.a0gw", "af.9z2b"] {
+        writer.create_item(id, "task", id, ACTOR);
+    }
+    for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+        writer.set_field(id, "status", Some("closed".into()), ACTOR);
+    }
+    let mut stale = Store::open_in_memory(7);
+    stale.apply(&writer.export());
+    let base = writer.op_count() as usize;
+    for (field, value) in [
+        ("title", "renamed"),
+        ("priority", "1"),
+        ("status", "claimed"),
+    ] {
+        writer.set_field("af.9z2b", field, Some(value.into()), ACTOR);
+    }
+    for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+        stale.set_field(id, "archived", Some(NOW.into()), ACTOR);
+    }
+    // The stream as the source pushes it: its log in the order it holds it, the writer's half first.
+    let mut stream = writer.export();
+    stream.extend(stale.export().into_iter().skip(base));
+    let coordinates = |ops: &[nexus_flow_core::model::Op]| {
+        ops.iter().map(|o| (o.lamport, o.site)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        coordinates(&stream[base..base + 3]),
+        coordinates(&stream[base + 3..]),
+        "three pairs on three shared coordinates"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace::init_flow(tmp.path(), "issue-tracker").unwrap();
+    ws.open_store().unwrap().apply(&stream);
+
+    let engine = Engine::open(None, tmp.path()).unwrap();
+    let mut archived: Vec<String> = engine
+        .archived()
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    archived.sort();
+    assert_eq!(archived, ["af.267m", "af.a0gw", "af.zg3y"]);
+    let other = engine.show("af.9z2b").unwrap().item;
+    assert_eq!(other.title.as_deref(), Some("renamed"));
+    assert_eq!(other.status.as_deref(), Some("claimed"));
+}

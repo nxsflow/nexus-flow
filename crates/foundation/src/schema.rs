@@ -484,6 +484,14 @@ fn index_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
 /// retroactively restore it. Which shape a database got is readable (`PRAGMA index_list(ops)`) and
 /// pinned by a test. Duplicates never disappear from an append-only log, so the degraded state is
 /// stable rather than a retry loop; the existence check short-circuits it after the first open.
+///
+/// **A replica of such a log degrades too** (6j6v.htz7). A fresh replica — a clone, a bind, a
+/// hosted replica — starts with the UNIQUE shape, and the first received op that shares its
+/// coordinate with another RECEIVED op (never with one of its own) rebuilds the index without the
+/// uniqueness, inside the write that takes that op in (`Store::apply`). An image does the same on
+/// load. So every replica of a stream holds what its origin holds; on a degraded log the two
+/// refusals that still matter — a local op on a taken coordinate, a received op on one of this
+/// replica's own — are asked for explicitly instead.
 pub(crate) fn ensure_op_coordinate_index(conn: &Connection) -> rusqlite::Result<()> {
     if index_exists(conn, "ops_lamport_site")? {
         return Ok(());

@@ -22,8 +22,10 @@ enum Ingest {
     /// Op already in the log → no-op (idempotent union).
     AlreadySeen,
     /// The op's `(lamport, site)` coordinate is already held by a DIFFERENT op, so the log refused
-    /// it (6j6v.fc5p) — see [`schema::ensure_op_coordinate_index`]. On [`Store::apply`] it means two
-    /// replicas share a `site_id`. On the local path it means a RECEIVED op claims this replica's
+    /// it (6j6v.fc5p) — see [`schema::ensure_op_coordinate_index`]. On [`Store::apply`] it means a
+    /// received op claims a coordinate one of this replica's OWN ops holds: two replicas share a
+    /// `site_id`, or the op is forged. A coordinate only received ops hold is history and is never
+    /// refused (6j6v.htz7). On the local path it means a RECEIVED op claims this replica's
     /// site on the very number the clock hands out next, above
     /// [`CLOCK_CEILING`](crate::model::CLOCK_CEILING) (6j6v.m19v); the local write then steps over
     /// it rather than losing the write — see `build_and_ingest`.
@@ -697,16 +699,21 @@ impl Store {
     /// [`refold`]).
     ///
     /// **The returned vec also carries an op the log REFUSED** (6j6v.fc5p): one whose
-    /// `(lamport, site)` coordinate is already held by a different op. That is a broken
-    /// precondition rather than a forward-compat case — two replicas minting the same coordinate
-    /// means they share a `site_id`, which 63 bits of ULID entropy make unreachable between real
-    /// replicas (`workspace::fresh_replica`) and which the prefix registry already treats as a
-    /// detectable, repairable misconfiguration. It rides the same channel because the honest
-    /// statement about both is identical — *this store did not take this op into its views* — and
-    /// because the alternative, letting `INSERT OR IGNORE` skip it as though it were a re-delivery,
-    /// is precisely the silence this item exists to remove. Nothing is lost globally: the op still
-    /// stands in its origin's log and on the relay, and `pulled_through` is a scan cursor, so a
-    /// re-pull redelivers it once the site collision is repaired.
+    /// `(lamport, site)` coordinate is already held by one of this replica's OWN ops. That is a
+    /// broken precondition rather than a forward-compat case — another replica minting this
+    /// replica's coordinates means the two share a `site_id`, which 63 bits of ULID entropy make
+    /// unreachable between real replicas (`workspace::fresh_replica`), or that the op is forged. It
+    /// rides the same channel because the honest statement about both is identical — *this store
+    /// did not take this op into its views* — and because the alternative, letting `INSERT OR
+    /// IGNORE` skip it as though it were a re-delivery, is precisely the silence fc5p removed.
+    ///
+    /// **A coordinate only received ops hold is NOT refused** (6j6v.htz7). Two ops of one foreign
+    /// site on one coordinate are that site's own history: logs written before fc5p carry such
+    /// pairs, their origin keeps both, and a replica that refused the second would show a
+    /// different board for good — the log is append-only and the relay never delivers the op again.
+    /// So the op is taken in and folded, and the coordinate index loses its uniqueness as it has on
+    /// the origin ([`schema::ensure_op_coordinate_index`]). Between the two, the fold keeps the one
+    /// this log holds first — the order the origin pushed them in; see [`export`](Self::export).
     ///
     /// **Clock semantics**: after each foreign op the clock is advanced to `max(clock, op.lamport)`;
     /// the next local write then calls `tick()` (`+1`). This is the standard Lamport rule — the pair

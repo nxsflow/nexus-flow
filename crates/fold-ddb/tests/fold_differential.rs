@@ -259,6 +259,90 @@ fn a_snapshot_of_a_local_replica_starts_a_server_stream_with_the_same_rows() {
     assert!(folder.is_current(&mark));
 }
 
+/// The hosted path of 6j6v.htz7: a stream whose log carries historical same-site collisions — the
+/// evidence shape, three ops on one item each sharing its `(lamport, site)` with an archive op of
+/// another, plus one pair on the SAME register — folded by the server in stream order answers as
+/// its source and as a fresh local replica of the stream: every op of every pair lands, and on the
+/// shared register the op the stream carries first keeps it (an equal version beats nothing).
+#[test]
+fn a_stream_with_historical_same_site_collisions_folds_on_the_server_as_on_its_source() {
+    let mut writer = Store::open_in_memory(7);
+    for id in ["af.zg3y", "af.267m", "af.a0gw", "af.9z2b"] {
+        writer.create_item(id, "task", id, "alice");
+    }
+    for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+        writer.set_field(id, "status", Some("closed".into()), "alice");
+    }
+    // A second handle of the same site with the same log: its clock mints the writer's numbers.
+    let mut stale = Store::open_in_memory(7);
+    stale.apply(&writer.export());
+    let base = writer.op_count() as usize;
+    for (field, value) in [
+        ("title", "renamed"),
+        ("priority", "1"),
+        ("status", "claimed"),
+        ("description", "held first"),
+    ] {
+        writer.set_field("af.9z2b", field, Some(value.into()), "alice");
+    }
+    for id in ["af.zg3y", "af.267m", "af.a0gw"] {
+        stale.set_field(id, "archived", Some("2026-10-01T00:00:00Z".into()), "alice");
+    }
+    stale.set_field(
+        "af.9z2b",
+        "description",
+        Some("held second".into()),
+        "alice",
+    );
+    let second: Vec<_> = stale.export().into_iter().skip(base).collect();
+
+    // The source: a pre-fc5p log, its index not unique, the writer's half held first.
+    let mut source = Store::open_in_memory(7);
+    source
+        .connection()
+        .execute_batch(
+            "DROP INDEX ops_lamport_site; CREATE INDEX ops_lamport_site ON ops(lamport, site);",
+        )
+        .unwrap();
+    source.apply(&writer.export());
+    source.apply(&second);
+    assert_eq!(source.op_count() as usize, base + 8, "four pairs, all held");
+
+    // The stream carries the source's ops in the order it pushes them; the server folds them so,
+    // and so does a fresh local replica that pulls it.
+    let stream: Vec<(i64, _)> = source
+        .export()
+        .into_iter()
+        .enumerate()
+        .map(|(i, op)| (i as i64 + 1, op))
+        .collect();
+    let folder = Folder::platform().unwrap();
+    let t = MemTable::new("stream-1");
+    ready(folder.fold_batch(&t, &stream)).unwrap();
+    let mut fresh = Store::open_in_memory(9);
+    fresh.apply(&stream.iter().map(|(_, op)| op.clone()).collect::<Vec<_>>());
+
+    for table in TaskReducer.view_tables() {
+        assert_eq!(
+            served_rows(&t, &folder, table),
+            sqlite_rows(&source, table),
+            "{table}: the server answers as the source"
+        );
+        assert_eq!(
+            sqlite_rows(&fresh, table),
+            sqlite_rows(&source, table),
+            "{table}: and so does a fresh local replica"
+        );
+    }
+    let item = fresh.get_item("af.9z2b").unwrap().unwrap();
+    assert_eq!(item.description.as_deref(), Some("held first"));
+    assert_eq!(
+        dated_ids(&t, Dated::Archived).len(),
+        3,
+        "the three items are archived on the server"
+    );
+}
+
 #[test]
 fn the_watermark_only_moves_forward() {
     let folder = Folder::platform().unwrap();
