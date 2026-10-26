@@ -374,6 +374,45 @@ const transcript = [];
  *  and so an unclean death (SIGKILL, a crash between flushes) can cost at most this many entries
  *  plus the open block — the threshold BOUNDS that hole, it does not remove it. */
 const FLUSH_THRESHOLD = 32;
+/** **A tool call still running after this long is put on the record** (nxf 6j6v.j6yk). The slot's
+ *  coordinator reads an open `tool_use` of the main conversation as work — an ask reaches a session
+ *  only at its turn's end, so it must not be spent on one that is inside a call — and it can only
+ *  read what was flushed. Left to `FLUSH_THRESHOLD`, a session watching a one-hour CI run sat with
+ *  its call unflushed and was asked three times and escalated while it worked. A timer rather than
+ *  a flush at every `tool_use`: most calls return well inside it, and those cost no extra `nxc`. */
+const OPEN_TOOL_CALL_FLUSH_MS = 2_000;
+/** The main conversation's calls whose result has not come back yet, by `tool_use` id. */
+const openToolCalls = new Set();
+let openToolCallFlush = null;
+
+/** Keep `openToolCalls` with the entries just buffered, and flush once a call they opened is still
+ *  running {@link OPEN_TOOL_CALL_FLUSH_MS} later. A subagent's own calls are not tracked: the `Task`
+ *  call that spawned it is, and it is open for as long as the subagent works. */
+function watchToolCalls(entries) {
+  let opened = false;
+  for (const entry of entries) {
+    if (entry.parentToolUseId) continue;
+    if (entry.kind === "tool_use" && entry.toolUseId) {
+      openToolCalls.add(entry.toolUseId);
+      opened = true;
+    } else if (entry.kind === "tool_result" && entry.toolUseId) {
+      openToolCalls.delete(entry.toolUseId);
+    } else if (entry.kind === "result") {
+      openToolCalls.clear();
+    }
+  }
+  if (openToolCalls.size === 0) {
+    clearTimeout(openToolCallFlush);
+    openToolCallFlush = null;
+  } else if (opened && openToolCallFlush === null) {
+    openToolCallFlush = setTimeout(() => {
+      openToolCallFlush = null;
+      if (openToolCalls.size > 0) flushTranscript();
+    }, OPEN_TOOL_CALL_FLUSH_MS);
+    // A pending flush never keeps a finished process alive: teardown's own final flush takes it.
+    openToolCallFlush.unref();
+  }
+}
 
 /** Tripped by the FIRST flush failure, never reset — the first-failure latch (nxf 6j6v.jwgc).
  *
@@ -835,6 +874,7 @@ async function remindOnce() {
       const entries = normalizer.push(msg);
       if (entries.length === 0) continue;
       transcript.push(...entries);
+      watchToolCalls(entries);
       if (entries.some((entry) => entry.kind === "result") || transcript.length >= FLUSH_THRESHOLD) {
         flushTranscript();
       }
@@ -1432,8 +1472,10 @@ for (let attempt = 0; ; attempt++) {
       const entries = normalizer.push(msg);
       if (entries.length === 0) continue;
       transcript.push(...entries);
+      watchToolCalls(entries);
       // A `result` entry is a turn boundary: flush there so a complete turn is durable promptly, and
-      // otherwise only when the buffer has grown past the threshold.
+      // otherwise only when the buffer has grown past the threshold — or when a call it opened is
+      // still running a moment later (`watchToolCalls`).
       if (entries.some((entry) => entry.kind === "result") || transcript.length >= FLUSH_THRESHOLD) {
         flushTranscript();
       }

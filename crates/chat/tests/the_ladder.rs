@@ -450,6 +450,28 @@ impl Team {
         self.entry(session, "assistant", when, "{\"text\":\"working\"}");
     }
 
+    /// `session`'s main conversation called the tool `name` at `when` — a `tool_use` with its id.
+    fn tool_call(&self, session: &str, id: &str, name: &str, when: &str) {
+        self.entry_with_id(
+            session,
+            "tool_use",
+            id,
+            when,
+            &format!("{{\"name\":\"{name}\",\"input\":{{}}}}"),
+        );
+    }
+
+    /// The call `id` of `session` returned at `when` — its `tool_result`.
+    fn tool_returned(&self, session: &str, id: &str, when: &str) {
+        self.entry_with_id(
+            session,
+            "tool_result",
+            id,
+            when,
+            "{\"content\":\"ok\",\"isError\":false}",
+        );
+    }
+
     fn entry(&self, session: &str, kind: &str, when: &str, data: &str) {
         self.store()
             .connection()
@@ -458,6 +480,18 @@ impl Team {
                  VALUES (?1, (SELECT COALESCE(MAX(seq), -1) + 1 FROM agent_transcript
                                WHERE internal_session = ?1), ?2, ?3, ?4)",
                 rusqlite::params![session, kind, when, data],
+            )
+            .expect("transcript entry");
+    }
+
+    fn entry_with_id(&self, session: &str, kind: &str, id: &str, when: &str, data: &str) {
+        self.store()
+            .connection()
+            .execute(
+                "INSERT INTO agent_transcript(internal_session, seq, kind, tool_use_id, at, data)
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), -1) + 1 FROM agent_transcript
+                               WHERE internal_session = ?1), ?2, ?3, ?4, ?5)",
+                rusqlite::params![session, kind, id, when, data],
             )
             .expect("transcript entry");
     }
@@ -1039,6 +1073,101 @@ fn silence_is_per_slot_work_after_ys_own_turn_counts_for_y() {
     team.tick(&at(1_250), &x);
     let asked: Vec<String> = team.worker.asks().into_iter().map(|a| a.thread).collect();
     assert_eq!(asked, vec![x.clone()], "X asked; Y's own work counts for Y");
+}
+
+// ---- a session inside one tool call (nxf 6j6v.j6yk) ---------------------------------------------
+
+/// **A session inside one tool call is working, not silent** (nxf 6j6v.j6yk; field case: the merger
+/// watching a ~1 h CI run on 0.220.0 was asked three times and escalated while it worked). Its last
+/// entry is a `tool_use` with no `tool_result`; an ask would only reach it at the turn's end, so the
+/// coordinator neither asks nor escalates while the call runs — here for four ask intervals. Once
+/// the call returns, silence counts again from its result.
+#[test]
+fn a_session_inside_one_tool_call_longer_than_three_ask_intervals_is_neither_asked_nor_escalated() {
+    use nexus_chat::ladder::SILENCE_SECS;
+    let team = team();
+    let thread = team
+        .commission(T0, "coder", "Merge it and watch the push run.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(1));
+    team.tool_call(&session, "toolu_watch", "Bash", &at(60));
+    let mut now = 300;
+    while now <= 60 + 4 * SILENCE_SECS {
+        team.tick(&at(now), &thread);
+        now += 300;
+    }
+    assert!(
+        team.worker.asks().is_empty(),
+        "a session inside a tool call is not asked: {:?}",
+        team.worker.asks()
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+    assert!(team.log(&thread, "coder").is_empty());
+    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 0);
+    assert!(team.status_of(&at(now), &thread).recovery.is_none());
+    // The call returns; from its result on the session is as silent as anybody else.
+    team.tool_returned(&session, "toolu_watch", &at(now));
+    team.tick(&at(now + SILENCE_SECS - 1), &thread);
+    assert!(team.worker.asks().is_empty(), "not yet");
+    team.tick(&at(now + SILENCE_SECS), &thread);
+    assert_eq!(team.worker.asks().len(), 1, "asked once the call is over");
+}
+
+/// **A session that is really silent is still asked and escalated as before** — none of its calls
+/// is open: one returned, and one has no result on record but the model spoke after it, so it is
+/// over too. Asked three times, then escalated once.
+#[test]
+fn a_session_with_no_tool_call_open_is_still_asked_three_times_and_escalated() {
+    let team = team();
+    let thread = team
+        .commission(T0, "coder", "Add a --since flag.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(1));
+    team.tool_call(&session, "toolu_read", "Read", &at(30));
+    team.tool_returned(&session, "toolu_read", &at(40));
+    team.tool_call(&session, "toolu_lost", "Bash", &at(50));
+    team.work(&session, &at(60));
+    let mut now = 300;
+    while now <= 7_200 {
+        team.tick(&at(now), &thread);
+        now += 300;
+    }
+    assert_eq!(team.worker.asks().len(), 3, "{:?}", team.worker.asks());
+    assert_eq!(escalations(&team.messages(&thread)).len(), 1);
+}
+
+/// **A tool call that outlives its own bound is hung** — and an ask cannot reach a session inside
+/// it, so none is spent: the coordinator escalates once, naming the call and the bound.
+#[test]
+fn a_tool_call_that_outlives_its_bound_is_escalated_as_hung_without_an_ask() {
+    use nexus_chat::ladder::TOOL_CALL_BOUND_SECS;
+    let team = team();
+    let thread = team
+        .commission(T0, "coder", "Merge it and watch the push run.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(1));
+    team.tool_call(&session, "toolu_watch", "Bash", &at(60));
+    team.tick(&at(60 + TOOL_CALL_BOUND_SECS - 1), &thread);
+    assert!(escalations(&team.messages(&thread)).is_empty(), "not yet");
+    team.tick(&at(60 + TOOL_CALL_BOUND_SECS), &thread);
+    let escalated = escalations(&team.messages(&thread));
+    assert_eq!(escalated.len(), 1, "{:?}", team.messages(&thread));
+    assert!(
+        escalated[0].contains("tool call")
+            && escalated[0].contains("Bash")
+            && escalated[0].contains(&at(60)),
+        "{}",
+        escalated[0]
+    );
+    assert!(team.worker.asks().is_empty(), "no ask was spent on it");
+    team.tick(&at(60 + TOOL_CALL_BOUND_SECS + 600), &thread);
+    assert_eq!(escalations(&team.messages(&thread)).len(), 1, "once");
 }
 
 // ---- `--progress` ---------------------------------------------------------------------------------
