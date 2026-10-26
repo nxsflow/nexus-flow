@@ -35,7 +35,11 @@ postgres = [
 # `tokio/time` is required, not incidental: the registry's bounded retry after a
 # TransactionConflict sleeps between attempts (see store_ddb::claim_with_retry). (`sha2`, which
 # derives an op's claim key, is in every build since 6j6v.f6yb; see below.)
-dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "tokio/time", "nxs-fold-ddb/dynamodb"]
+# Never name a dev-dependency here (`nxs-fold-ddb/dynamodb` did, 6j6v.907m): `cargo install` drops
+# the dev-dependencies, so a consumer's `cargo install nxs-server --features dynamodb` failed with
+# "does not have a dependency named". The DynamoDB suite turns fold-ddb's feature on itself, as the
+# `dynamodb-local` CI job does: `--features nxs-server/dynamodb,nxs-fold-ddb/dynamodb`.
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:aws-config", "tokio/time"]
 # Test seams on the production types (`DynamoDbOpStore::with_before_write`, 6j6v.r3jf). Off in every
 # shipped build: only this package's own dev-dependency on itself (below) turns it on, so the
 # integration tests can hold an append between choosing its seq and sending its write while the
@@ -119,5 +123,7 @@ assert_cmd = "2"
 # the feature is unified into the library only when tests are built.
 nxs-server = { path = ".", features = ["test-seams"] }
 # The purge's identity gate must refuse the board-fold table named as the registry (6j6v.f6yb DoD),
-# so the DynamoDB suite creates that table exactly as `nxs_fold_ddb::ddb::create_table` does.
+# so the DynamoDB suite creates that table exactly as `nxs_fold_ddb::ddb::create_table` does. That
+# function needs fold-ddb's own `dynamodb` feature, which the suite's command line names (see the
+# `dynamodb` feature above for why this package's feature must not).
 nxs-fold-ddb = { path = "../fold-ddb" }
