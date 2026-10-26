@@ -49,6 +49,8 @@ concurrency:
 jobs:
   facade-semver:
     runs-on: ubuntu-latest
+    # Normally a few minutes; the margin covers a cold cargo cache (6j6v.6n9m).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:

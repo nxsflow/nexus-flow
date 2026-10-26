@@ -28,6 +28,8 @@ permissions:
 jobs:
   dependency-audit:
     runs-on: ubuntu-latest
+    # Normally about a minute; the margin covers a cold cargo-deny install, as in ci.yml (6j6v.6n9m).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

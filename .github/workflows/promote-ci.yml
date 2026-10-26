@@ -39,6 +39,8 @@ concurrency:
 jobs:
   promote-quality-gates:
     runs-on: ubuntu-latest
+    # Normally under a minute; a hang costs ten minutes, not GitHub's six hours (6j6v.6n9m).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
