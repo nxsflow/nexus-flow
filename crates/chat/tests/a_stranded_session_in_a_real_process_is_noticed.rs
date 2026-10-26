@@ -295,11 +295,6 @@ fn escalations_in(root: &Path, thread: &str) -> usize {
         .count()
 }
 
-/// **AC 2 (a), field case 1 in real processes** — the session's process ends owing an answer and NO
-/// substitute is posted (a coordinated slot's teardown posts none). A look at `ended + 120 s` does
-/// not record and escalate: its coordinator CONTINUES the same session — the real sidecar worker
-/// starts the sidecar on the same internal session, resuming the runtime session it bound, told
-/// which thread waits and what the task was. The transcript is intact.
 /// The stub appends each spec as one line, but a concurrent reader can see that append half done —
 /// a spec past 4 KiB was read cut at column 4096 on CI (nxf 6j6v.b53g). A line without its newline is
 /// still being written, so `started` must leave it for the next poll instead of parsing it.
@@ -318,6 +313,11 @@ fn a_spec_line_the_stub_is_still_appending_is_not_read_yet() {
     assert_eq!(got[0]["session"], "one");
 }
 
+/// **AC 2 (a), field case 1 in real processes** — the session's process ends owing an answer and NO
+/// substitute is posted (a coordinated slot's teardown posts none). A look at `ended + 120 s` does
+/// not record and escalate: its coordinator CONTINUES the same session — the real sidecar worker
+/// starts the sidecar on the same internal session, resuming the runtime session it bound, told
+/// which thread waits and what the task was. The transcript is intact.
 #[test]
 fn a_session_that_ended_owing_an_answer_is_continued_in_the_same_session() {
     let tmp = workspace();

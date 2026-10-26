@@ -2758,7 +2758,7 @@ mod tests {
     fn only_one_of_eight_genuinely_concurrent_racers_acquires() {
         // PR review finding 3: the two-connection test above proves the DATABASE decides, but issues
         // its acquires one after the other from a single thread — it never actually lets two writers
-        // collide. This one does: eight threads, eight connections, released at once on a barrier,
+        // collide. This one does: eight threads, eight connections, released at once on a gate,
         // each racing for a DIFFERENT scope against the same 'default' row. Mirrors
         // consolidation_claim.rs's `only_one_of_eight_genuinely_concurrent_racers_wins`.
         use std::sync::Arc;
@@ -2767,11 +2767,11 @@ mod tests {
         let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
 
         const RACERS: usize = 8;
-        let barrier = Arc::new(RaceGate::new(RACERS));
+        let gate = Arc::new(RaceGate::new(RACERS));
         // Every connection is opened HERE, one after the other, and moved into its racer — nothing
         // fallible runs between a racer's start and its gate (nxf 6j6v.6n9m). Eight first opens of
         // a fresh file racing each other are not what this test is about, and one of them failing
-        // used to strand the other seven on the barrier for good.
+        // used to strand the other seven at the gate for good.
         let stores: Vec<_> = (0..RACERS)
             .map(|i| racer_store(&path, i as i64 + 1))
             .collect();
@@ -2779,10 +2779,10 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, mut store)| {
-                let barrier = Arc::clone(&barrier);
+                let gate = Arc::clone(&gate);
                 std::thread::spawn(move || {
                     let scope = WorkScope::Thread(format!("th-{i}"));
-                    barrier.wait();
+                    gate.wait();
                     store.acquire_working_tree(&scope, NOW, EXPIRES).unwrap()
                 })
             })
@@ -2874,6 +2874,53 @@ mod tests {
     }
 
     #[test]
+    fn a_race_gate_releases_no_party_before_all_have_arrived_round_after_round() {
+        // The racer tests reuse one gate for 40 and 60 rounds, so it must hold every party until
+        // the last one arrives, and start over afterwards. The test thread is the last party of
+        // each round and arrives late on purpose: a gate that lets a waiter through early, or that
+        // stays open after its first round, shows up as a worker that sees fewer arrivals than
+        // there are parties. The deadline is short, so a gate that never opens fails this test too.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        const WORKERS: usize = 3;
+        const ROUNDS: usize = 5;
+        let gate = Arc::new(RaceGate::with_deadline(
+            WORKERS + 1,
+            Duration::from_secs(10),
+        ));
+        let arrived: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..ROUNDS).map(|_| AtomicUsize::new(0)).collect());
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let (gate, arrived) = (Arc::clone(&gate), Arc::clone(&arrived));
+                std::thread::spawn(move || {
+                    (0..ROUNDS)
+                        .map(|round| {
+                            arrived[round].fetch_add(1, Ordering::SeqCst);
+                            gate.wait();
+                            arrived[round].load(Ordering::SeqCst)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for round in 0..ROUNDS {
+            std::thread::sleep(Duration::from_millis(50));
+            arrived[round].fetch_add(1, Ordering::SeqCst);
+            gate.wait();
+        }
+        for worker in workers {
+            assert_eq!(
+                worker.join().expect("a worker passed every round"),
+                vec![WORKERS + 1; ROUNDS],
+                "each round, every worker must see all parties arrived when the gate lets it through"
+            );
+        }
+    }
+
+    #[test]
     fn a_race_gate_whose_other_party_never_arrives_fails_its_waiter_instead_of_holding_it() {
         use std::time::{Duration, Instant};
 
@@ -2935,7 +2982,7 @@ mod tests {
         let path = tmp.path().join("db.sqlite").to_str().unwrap().to_string();
         let holder = WorkScope::Thread("th-holder".to_string());
 
-        // Every round is lined up by two barriers: `start` releases the racers and the releaser at
+        // Every round is lined up by two gates: `start` releases the racers and the releaser at
         // once, `finish` holds them until the main thread has rebuilt the round's state.
         let start = Arc::new(RaceGate::new(RACERS + 2));
         let finish = Arc::new(RaceGate::new(RACERS + 2));
