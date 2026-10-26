@@ -110,14 +110,20 @@ impl Interruption {
 const INTERRUPTION_COLS: &str = "id, session, at, limit_name, until, detail, resumed_at";
 
 fn interruption_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Interruption> {
+    interruption_at(r, 0)
+}
+
+/// [`interruption_from_row`] for a row whose [`INTERRUPTION_COLS`] start at column `from` — a join
+/// that selects something in front of them.
+fn interruption_at(r: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<Interruption> {
     Ok(Interruption {
-        id: r.get(0)?,
-        session: r.get(1)?,
-        at: r.get(2)?,
-        limit: r.get(3)?,
-        until: r.get(4)?,
-        detail: r.get(5)?,
-        resumed_at: r.get(6)?,
+        id: r.get(from)?,
+        session: r.get(from + 1)?,
+        at: r.get(from + 2)?,
+        limit: r.get(from + 3)?,
+        until: r.get(from + 4)?,
+        detail: r.get(from + 5)?,
+        resumed_at: r.get(from + 6)?,
     })
 }
 
@@ -229,13 +235,39 @@ impl ChatStore {
     /// interruptions_among) beside it: what bounds this read is how many holds are STANDING, which
     /// is the bound `standing_interruptions` already had, and there is no id list to bind.
     pub(crate) fn interrupted_threads(&self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(self
+            .placed_holds()?
+            .into_iter()
+            .map(|(thread, _)| thread)
+            .collect())
+    }
+
+    /// **Every standing hold with the thread its session stands on**, oldest first (nxf
+    /// 6j6v.cn4p) — the ONE read behind both questions about an operation: whether `nxc status`
+    /// calls it interrupted, and which hold `nxc resume --thread` takes up.
+    ///
+    /// Both readers intersect this with the operation's threads, so the two answers cannot drift:
+    /// an operation the board marks interrupted is one whose root the resume finds a hold under, and
+    /// the other way round. [`interrupted_threads`](ChatStore::interrupted_threads) is its
+    /// projection for the same reason.
+    ///
+    /// A hold whose session names no thread is in no operation and is left out — the join's silent
+    /// arm, documented on `interrupted_threads`. Bounded by how many holds STAND, as the standing
+    /// list is.
+    pub(crate) fn placed_holds(&self) -> Result<Vec<(String, Interruption)>> {
         let conn = self.connection();
-        let mut st = conn.prepare(
-            "SELECT m.thread FROM session_interruption i
+        let cols = INTERRUPTION_COLS
+            .split(", ")
+            .map(|c| format!("i.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut st = conn.prepare(&format!(
+            "SELECT m.thread, {cols} FROM session_interruption i
                JOIN session_map m ON m.internal_id = i.session
-              WHERE i.resumed_at IS NULL AND m.thread IS NOT NULL",
-        )?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+              WHERE i.resumed_at IS NULL AND m.thread IS NOT NULL
+              ORDER BY i.id",
+        ))?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, interruption_at(r, 1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -282,6 +314,24 @@ impl ChatStore {
         let n = self.connection().execute(
             "UPDATE session_interruption SET resumed_at = ?2 WHERE id = ?1 AND resumed_at IS NULL",
             params![id, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// **Undo a stamp** — the resume that stamped hold `id` before its start, and whose start then
+    /// failed, puts the hold back (nxf 6j6v.cn4p).
+    ///
+    /// Only while no OTHER hold stands over the same session: one standing hold per session is the
+    /// rule `session_interruption_one_open` enforces, and a hold announced since is the newer truth.
+    /// Returns whether the hold stands again.
+    pub fn reopen_interruption(&mut self, id: i64) -> Result<bool> {
+        let n = self.connection().execute(
+            "UPDATE session_interruption SET resumed_at = NULL
+              WHERE id = ?1 AND resumed_at IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM session_interruption o
+                                WHERE o.session = session_interruption.session
+                                  AND o.resumed_at IS NULL)",
+            params![id],
         )?;
         Ok(n > 0)
     }

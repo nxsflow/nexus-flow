@@ -4214,6 +4214,10 @@ pub fn status(
     // thread. An empty table (every workspace where nothing has ever been interrupted) is one
     // indexed read that finds nothing.
     let interruptions = interruptions_for(store, &sessions)?;
+    // The threads a hold stands on (nxf 6j6v.cn4p) — one statement over the standing list, the
+    // read `nxc resume --thread` takes its hold from, so an operation's `interrupted` below and the
+    // resume of its root answer the same question.
+    let held_threads = store.interrupted_threads()?;
     // Unresumed parked work (nxf 6j6v.s9ex) — the ninth bulk read, guarded by
     // [`crate::store::ChatStore::any_parked_work`] rather than folded into the bundle below: unlike
     // its eight siblings this is not read per THREAD at all, it is attributed once per OPERATION
@@ -4324,8 +4328,11 @@ pub fn status(
         // row that has it, and unlike `needs_decision` there is no measured case of a reader having
         // to walk a tree to find one. If that changes, this is where the flag joins its neighbours.
         let dead_end = threads.iter().any(|t| t.state == ThreadState::Orphaned);
-        // Derived from the same rows as its two neighbours, for their reason (nxf 6j6v.npy3).
-        let interrupted = threads.iter().any(|t| t.interrupted.is_some());
+        // **One predicate with `nxc resume --thread`** (nxf 6j6v.cn4p): a hold stands on a session
+        // of a thread of this operation. Derived from the per-row marks, as it was (nxf 6j6v.npy3),
+        // it could read `true` while resuming the root found nothing — the measured 2026-10-25
+        // case — because the two looked for the hold through different sessions.
+        let interrupted = ids.iter().any(|id| held_threads.contains(*id));
         // The facts that mean somebody or something is still ENGAGED here, and nothing else —
         // see [`StatusOperation::live`] for why the root's `awaiting_human` was struck out of this
         // sum by nxf 6j6v.1vxs.
