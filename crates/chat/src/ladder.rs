@@ -45,6 +45,10 @@ use crate::worker::{AskOutcome, SessionAsk, TriggerError};
 /// **Silence on a slot that earns an ask** — 20 minutes with no transcript activity attributed to
 /// the slot, no progress and no ask (owner guideline B of 2026-10-23).
 pub const SILENCE_SECS: i64 = 1_200;
+/// **The bound of one tool call** (nxf 6j6v.j6yk) — how long a live session may sit inside a single
+/// tool call before the call counts as hung. Generous on purpose: a step that watches CI waits on a
+/// run of 60–80 minutes, and the quality gates alone may take 150.
+pub const TOOL_CALL_BOUND_SECS: i64 = 10_800;
 /// **How long a claim holds** before another look may take the slot — a rung's trigger is a process
 /// spawn, seconds; renewed every half of it while the trigger runs.
 pub const CLAIM_SECS: i64 = 60;
@@ -639,6 +643,25 @@ impl ChatStore {
     /// slot. `None` when the slot has no turn of its own on record — its silence is then counted from
     /// its trigger.
     pub(crate) fn slot_last_activity(&self, session: &str, thread: &str) -> Result<Option<String>> {
+        let Some((start, end)) = self.slot_turn(session, thread)? else {
+            return Ok(None);
+        };
+        let conn = self.connection();
+        let mut st = conn.prepare(
+            "SELECT at FROM agent_transcript
+              WHERE internal_session = ?1 AND seq >= ?2 AND (?3 IS NULL OR seq < ?3)
+                AND at IS NOT NULL",
+        )?;
+        let ats = st
+            .query_map(params![session, start, end], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
+    }
+
+    /// **The span of the slot's own turn** in `session`'s transcript: from the newest `turn_start {
+    /// thread }` of THAT slot (inclusive) up to the next `turn_start` of any other slot (exclusive,
+    /// `None` while there is none). `None` when the slot has no turn of its own on record.
+    fn slot_turn(&self, session: &str, thread: &str) -> Result<Option<(i64, Option<i64>)>> {
         let conn = self.connection();
         let start: Option<i64> = conn.query_row(
             "SELECT MAX(seq) FROM agent_transcript
@@ -657,15 +680,48 @@ impl ChatStore {
             params![session, start, thread],
             |r| r.get(0),
         )?;
-        let mut st = conn.prepare(
-            "SELECT at FROM agent_transcript
-              WHERE internal_session = ?1 AND seq >= ?2 AND (?3 IS NULL OR seq < ?3)
-                AND at IS NOT NULL",
-        )?;
-        let ats = st
-            .query_map(params![session, start, end], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
+        Ok(Some((start, end)))
+    }
+
+    /// **The tool call the slot's turn is inside** (nxf 6j6v.j6yk), when there is one: the oldest
+    /// `tool_use` of the main conversation in the slot's turn that has no `tool_result` on record
+    /// and that the model has not spoken past. A model message after a call means its result came
+    /// back — the model only speaks again once it has it — so a call whose result the transcript
+    /// lost is not held open for ever by that loss. A subagent's own calls are not the session's: the
+    /// `Task` call that spawned it is, and is open while the subagent works.
+    pub(crate) fn slot_open_tool_call(
+        &self,
+        session: &str,
+        thread: &str,
+    ) -> Result<Option<OpenToolCall>> {
+        let Some((start, end)) = self.slot_turn(session, thread)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT u.at, COALESCE(json_extract(u.data, '$.name'), '') FROM agent_transcript u
+                  WHERE u.internal_session = ?1 AND u.seq >= ?2 AND (?3 IS NULL OR u.seq < ?3)
+                    AND u.kind = 'tool_use' AND u.parent_tool_use_id IS NULL
+                    AND u.tool_use_id IS NOT NULL AND u.at IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM agent_transcript r
+                                     WHERE r.internal_session = ?1 AND r.kind = 'tool_result'
+                                       AND r.tool_use_id = u.tool_use_id)
+                    AND NOT EXISTS (SELECT 1 FROM agent_transcript m
+                                     WHERE m.internal_session = ?1 AND m.seq > u.seq
+                                       AND m.parent_tool_use_id IS NULL
+                                       AND m.kind IN ('assistant', 'thinking', 'result', 'error',
+                                                      'turn_start'))
+                  ORDER BY u.seq LIMIT 1",
+                params![session, start, end],
+                |r| {
+                    Ok(OpenToolCall {
+                        since: r.get(0)?,
+                        tool: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// The newest hold of `session`, standing or not, with the outcome its resume recorded.
@@ -744,6 +800,13 @@ impl ChatStore {
         )?;
         Ok(())
     }
+}
+
+/// **A tool call still running** — when it began and which tool it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenToolCall {
+    pub since: String,
+    pub tool: String,
 }
 
 /// A hold as the ladder reads it — [`crate::interruption::Interruption`] plus its outcome. A word
@@ -917,6 +980,39 @@ fn live(
 ) -> Result<()> {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
     let session = row.session.as_deref().unwrap_or_default();
+    let recheck = after(
+        ctx.now,
+        crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
+        "the next look",
+    )?;
+    // **Inside one tool call the session is working, not silent** (nxf 6j6v.j6yk): an ask reaches it
+    // only at its turn's end, so none is spent and nothing is escalated while the call runs — until
+    // the call outlives its own bound, when it is hung and no ask could be heard either.
+    if let Some(call) = store.slot_open_tool_call(session, t)? {
+        let bound = after(&call.since, TOOL_CALL_BOUND_SECS, "the tool call's bound")?;
+        if !reached(ctx.now, &bound) {
+            let next = if earlier(&bound, &recheck) {
+                bound
+            } else {
+                recheck
+            };
+            arm(ctx, store, t, h, &next, findings);
+            return Ok(());
+        }
+        let occasion = Occasion {
+            observed: Observation::Silent,
+            judged_from: call.since.clone(),
+            detail: format!(
+                "its process is alive but has been inside one tool call ({}) since {} — past the \
+                 bound of {} h for a single tool call, so the call is taken as hung; an ask would \
+                 only reach the session once the call returns",
+                call.tool,
+                call.since,
+                TOOL_CALL_BOUND_SECS / 3600
+            ),
+        };
+        return escalate(ctx, store, row, coordinator, occasion, findings);
+    }
     if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
         return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
@@ -934,11 +1030,6 @@ fn live(
     .unwrap_or(row.trigger_clock.as_str())
     .to_string();
     let due = after(&quiet_since, SILENCE_SECS, "the silence clock")?;
-    let recheck = after(
-        ctx.now,
-        crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
-        "the next look",
-    )?;
     // An ask this host cannot deliver is not retried every cadence: the slot waits for its end.
     let door_closed = store.slot_recovery_log(t, h)?.last().is_some_and(|r| {
         r.action == RecoveryAction::Asked.as_str()
