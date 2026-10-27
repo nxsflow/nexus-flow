@@ -3190,6 +3190,28 @@ mod tests {
         Err(crate::error::NxfError::io("database is locked (injected)"))
     }
 
+    /// **An engine identity is owed nothing** (nxf 6j6v.3eqa): `owe_durably` answers `Ok` for one
+    /// and writes no row — the synthesizer answers for the engine, and rule 1 excludes it anyway.
+    #[test]
+    fn an_engine_identity_is_owed_durably_without_a_row() {
+        let mut scene = scene();
+        let rows = |store: &ChatStore| -> i64 {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM owed_starts", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = rows(&scene.store);
+        let mut store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+        let engine = format!("{}/__synthesizer", scene.origin);
+        let findings = {
+            let ctx = scene.ctx(T0, "pm", None);
+            owe_durably(&ctx, &mut store, &scene.rec.thread, &engine, "m-session").unwrap()
+        };
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(rows(&store), before, "no row was written");
+    }
+
     /// **AC 6 (d), build item 5**: a transient error is retried on at most three sweeps, a further
     /// look is armed after each failed attempt, and then the escalation is given up — and nothing is
     /// armed after that.

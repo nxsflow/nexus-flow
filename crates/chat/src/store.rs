@@ -924,9 +924,12 @@ impl ChatStore {
     }
 
     /// **Refuse this handle's next `n` message posts as a store another process holds would** —
-    /// `u32::MAX` for every one (nxf 6j6v.3eqa). A test seam: the post is the one write whose
+    /// [`ChatStore::EVERY_POST`] for every one (nxf 6j6v.3eqa). A test seam: the post is the one write whose
     /// refusal cannot be injected from SQL, since a view insert that fails inside the substrate's
     /// own transaction is not handed back. Nothing is written for a refused post.
+    #[doc(hidden)]
+    pub const EVERY_POST: u32 = u32::MAX;
+
     #[doc(hidden)]
     pub fn refuse_next_posts(&self, n: u32) {
         self.refused_posts
@@ -937,7 +940,7 @@ impl ChatStore {
         use std::sync::atomic::Ordering::Relaxed;
         match self.refused_posts.load(Relaxed) {
             0 => false,
-            u32::MAX => true,
+            Self::EVERY_POST => true,
             n => {
                 self.refused_posts.store(n - 1, Relaxed);
                 true

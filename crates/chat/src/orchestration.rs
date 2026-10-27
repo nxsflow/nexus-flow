@@ -925,8 +925,7 @@ pub fn trigger_role(
         // channel's members still share one claim (they share a root), and the acquire and release
         // ends still name the same area, now trivially — the key IS the root and
         // [`ChatStore::work_scope_threads`] is that root's subtree.
-        let claim_thread = lease_claim_root(store, thread)?;
-        let scope = resolve_scope(claim_thread.as_deref(), &internal_session);
+        let scope = claim_scope(store, thread, &internal_session)?;
         // Whether THIS operation is one of the parked ones. A trigger belonging to any other
         // operation leaves this gate exactly as it found it, which is what keeps `anything_parked`
         // above a cheap pre-filter rather than a change of behaviour for unrelated work.
@@ -934,37 +933,17 @@ pub fn trigger_role(
             && !matches!(scope, WorkScope::Session(_))
             && !store.parked_work(&scope.key())?.is_empty();
         if (needs_the_copy || resumes_parked_work) && !matches!(scope, WorkScope::Session(_)) {
-            let entry = QueuedTrigger {
-                // Ignored on the way in — `enqueue_working_tree`'s AUTOINCREMENT assigns the real
-                // one and hands it back.
-                id: 0,
-                scope_key: scope.key(),
-                role: decl.handle.clone(),
-                session: internal_session.clone(),
-                // The BELONGS-TO thread, which is what `scope_key` above is derived from and what a
-                // re-fire has to run in. The obligation half (`reply_thread`) is deliberately not
-                // frozen here: `coordinator_commission` decides it from the thread's quorum
-                // register AT
-                // TRIGGER TIME, and re-deriving it when this entry is fired is the same discipline
-                // that makes the entry store raw inputs instead of a composed prompt (nxf 6j6v.fe0f
-                // owns that re-derivation).
-                thread: thread.map(str::to_string),
-                message: message.to_string(),
-                // The choice from ABOVE the role, stored as it arrived and NOT collapsed with
-                // `decl.effective_model()`: the entry carries raw inputs, and the role's own half is
-                // re-read from the catalogue when this is fired, exactly as it would have been now.
-                model: model_override,
+            let entry = queued_entry(
+                &scope,
+                &decl.handle,
+                &internal_session,
+                thread,
+                message,
+                model_override,
                 depth,
-                // The ORDERING key, and a raw input like every other field here: an entry that came
-                // back out `Urgent` and went back in as something else would lose the one judgement
-                // the queue's order exists to honour (nxf 6j6v.fe0f re-fires through this very
-                // function, so a promoted entry can be queued again).
                 priority,
-                // `None` for a trigger meeting the queue for the first time — `enqueue_working_tree`
-                // then stamps `ctx.now`. `Some` only for a promotion that lost the race again, which
-                // keeps the place in line it already waited for.
-                enqueued_at: queued_since.map(str::to_string),
-            };
+                queued_since,
+            );
             if let Some((behind, position, findings)) =
                 acquire_or_queue(ctx, store, &scope, &entry)?
             {
@@ -6532,11 +6511,16 @@ fn coordinator_commission_in(
     // this call fails, and the message is posted only after it — so no message is ever posted with
     // nobody behind it. Only its look is best-effort, reported on this receipt.
     let mut owed_findings = Vec::new();
+    // A row that cannot be written takes the expectation declared for it back with it.
     if let Some(c) = &slot_coordinator {
         declare(store)?;
-        owed_findings.extend(crate::stranded::owe_the_slot(
-            ctx, store, &thread, &owed_role, &c.thread,
-        )?);
+        match crate::stranded::owe_the_slot(ctx, store, &thread, &owed_role, &c.thread) {
+            Ok(findings) => owed_findings.extend(findings),
+            Err(e) => {
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
+                return Err(e);
+            }
+        }
     }
 
     // **The session id, minted and held — BEFORE the obligation below it** (independent review of
@@ -6619,9 +6603,13 @@ fn coordinator_commission_in(
         &req.continue_session,
         &handed_to,
     ) {
-        owed_findings.extend(crate::stranded::owe_durably(
-            ctx, store, owed_on, &owed_role, internal,
-        )?);
+        match crate::stranded::owe_durably(ctx, store, owed_on, &owed_role, internal) {
+            Ok(findings) => owed_findings.extend(findings),
+            Err(e) => {
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
+                return Err(e);
+            }
+        }
     }
 
     // **The message, once somebody is behind it** (nxf 6j6v.3eqa). The obligation above is durable
@@ -6647,24 +6635,9 @@ fn coordinator_commission_in(
     let receipt = match posted {
         Ok(receipt) => receipt,
         Err(e) => {
-            // Taken back through the lock, since the lock is the likely reason the post failed:
-            // otherwise the expectation and the row stay on a thread with no message and hold the
-            // working copy of an enclosing operation until its lease runs out. A take-back that
-            // still fails is said, and its leftovers are the sweep's. What stays either way is the
-            // opened thread, empty, and an uncoordinated slot's pending session — harmless, and
-            // what a queued commission leaves too.
+            // Taken back, so nobody is left owing on a thread with no message in it.
             if declared_here.is_some() {
-                let taken_back = through_the_lock(|| {
-                    store.try_set_expects_reply_from(&thread, "[]", &ctx.caller_handle())
-                })
-                .and_then(|()| through_the_lock(|| store.forget_owed_start(&thread, &owed_role)));
-                if let Err(back) = taken_back {
-                    eprintln!(
-                        "warning: the message to {} could not be posted, and the obligation \
-                         written for it on thread {thread} could not be taken back: {back}",
-                        req.role
-                    );
-                }
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
             }
             return Err(e);
         }
@@ -6811,66 +6784,33 @@ fn coordinator_commission_in(
                 err.msg = warning;
                 return Err(err);
             }
-            // **A start that waiting can fix is retried** (nxf 6j6v.3eqa) — on the schedule of a
-            // queued start whose start failed ([`note_the_failed_start`]): recorded, retried by the
-            // tick one and two minutes on, and given up at [`MAX_START_ATTEMPTS`], when the ladder's
-            // rung D takes the slot up as `start_given_up`. Measured on 2026-10-25: a direct send
-            // whose start met "database is locked" sat posted with nobody behind it, and nothing
-            // retried it.
-            if let TriggerError::Failed(inner) = &e {
-                if start_failure_is_transient(inner) {
-                    let scope = lease_claim_root(store, Some(&thread))
-                        .ok()
-                        .flatten()
-                        .map(|root| resolve_scope(Some(&root), &internal))
-                        .unwrap_or_else(|| resolve_scope(None, &internal));
-                    let entry = QueuedTrigger {
-                        id: 0,
-                        scope_key: scope.key(),
-                        role: decl.handle.clone(),
-                        session: internal.clone(),
-                        thread: Some(thread.clone()),
-                        message: wake.clone(),
-                        model: req.model,
-                        // What the trigger records against the session: one hop deeper than its
-                        // caller (`ChainMove::Deeper`), which `fire_queued_trigger` reads back.
-                        depth: hop.get() + 1,
-                        priority: req.priority,
-                        enqueued_at: None,
-                    };
-                    let what = format!(
-                        "the message to {} is posted and its obligation recorded, but",
-                        req.role
-                    );
-                    // Recorded and retried, but reported in the class and reason every caller of
-                    // this seam already branches on — a step that did not start, because its
-                    // trigger failed — with the retry named in its detail.
-                    let retry = note_the_failed_start(ctx, store, &entry, &what, inner);
-                    let mut warnings = vec![FailedConsequence::step_skipped(
-                        Some(&thread),
-                        Some(&internal),
-                        wake_skip_reason(&e),
-                        retry.detail,
-                    )];
-                    warnings.extend(owed_findings);
-                    return Ok(TriggerReceipt {
-                        handed_to: None,
-                        message_id: receipt.message_id,
-                        session: internal.clone(),
-                        channel,
-                        queued_behind: None,
-                        queue_position: None,
-                        spawned: false,
-                        warnings,
-                        thread,
-                    });
-                }
-            }
             // **A step that did not start** — the same class, the same record and the same reason
             // taxonomy as everywhere else in this module (nxf 6j6v.93zd), which is what closes nxf
             // 6j6v.6m6x: WHY this did not start is now a value on the receipt rather than a phrase
             // inside a sentence.
+            //
+            // **One that waiting can fix is retried as well** (nxf 6j6v.3eqa), and the receipt says
+            // when, in the same class and reason ([`retry_a_failed_direct_start`]).
             let reason = wake_skip_reason(&e);
+            let detail = match &e {
+                TriggerError::Failed(inner) if start_failure_is_transient(inner) => {
+                    retry_a_failed_direct_start(
+                        ctx,
+                        store,
+                        FailedDirectStart {
+                            decl: &decl,
+                            session: &internal,
+                            thread: &thread,
+                            message: &wake,
+                            model: req.model,
+                            depth: hop.get() + 1,
+                            priority: req.priority,
+                        },
+                        inner,
+                    )
+                }
+                _ => warning,
+            };
             Ok(TriggerReceipt {
                 handed_to: None,
                 message_id: receipt.message_id,
@@ -6883,7 +6823,7 @@ fn coordinator_commission_in(
                     Some(&thread),
                     Some(&internal),
                     reason,
-                    warning,
+                    detail,
                 )],
                 thread,
             })
@@ -6893,6 +6833,133 @@ fn coordinator_commission_in(
         receipt.warnings.extend(owed_findings);
     }
     result
+}
+
+/// **The claim area a trigger on `thread` competes under** — the root of its operation (nxf
+/// 6j6v.8y6t), or the session alone for a trigger that belongs to no thread. One derivation for the
+/// working-copy queue and the failed-start record, so a retry is kept under the area its start
+/// would have queued under.
+fn claim_scope(store: &ChatStore, thread: Option<&str>, session: &str) -> Result<WorkScope> {
+    let claim_thread = lease_claim_root(store, thread)?;
+    Ok(resolve_scope(claim_thread.as_deref(), session))
+}
+
+/// **A trigger's raw inputs, as the working-copy queue and the failed-start record keep them** —
+/// built in one place for both, so the two cannot come to store different things.
+#[allow(clippy::too_many_arguments)]
+fn queued_entry(
+    scope: &WorkScope,
+    role: &str,
+    session: &str,
+    thread: Option<&str>,
+    message: &str,
+    model: Option<Model>,
+    depth: u32,
+    priority: Priority,
+    queued_since: Option<&str>,
+) -> QueuedTrigger {
+    QueuedTrigger {
+        // Ignored on the way in — `enqueue_working_tree`'s AUTOINCREMENT assigns the real one and
+        // hands it back.
+        id: 0,
+        scope_key: scope.key(),
+        role: role.to_string(),
+        session: session.to_string(),
+        // The BELONGS-TO thread, which is what `scope_key` above is derived from and what a re-fire
+        // has to run in. The obligation half (`reply_thread`) is deliberately not frozen here:
+        // `coordinator_commission` decides it from the thread's quorum register AT TRIGGER TIME,
+        // and re-deriving it when this entry is fired is the same discipline that makes the entry
+        // store raw inputs instead of a composed prompt (nxf 6j6v.fe0f owns that re-derivation).
+        thread: thread.map(str::to_string),
+        message: message.to_string(),
+        // The choice from ABOVE the role, stored as it arrived and NOT collapsed with
+        // `decl.effective_model()`: the entry carries raw inputs, and the role's own half is
+        // re-read from the catalogue when this is fired, exactly as it would have been now.
+        model,
+        depth,
+        // The ORDERING key, and a raw input like every other field here: an entry that came back
+        // out `Urgent` and went back in as something else would lose the one judgement the queue's
+        // order exists to honour (nxf 6j6v.fe0f re-fires through this very function, so a promoted
+        // entry can be queued again).
+        priority,
+        // `None` for a trigger meeting the queue for the first time — `enqueue_working_tree` then
+        // stamps `ctx.now`. `Some` only for a promotion that lost the race again, which keeps the
+        // place in line it already waited for.
+        enqueued_at: queued_since.map(str::to_string),
+    }
+}
+
+/// What [`retry_a_failed_direct_start`] records: the direct send's trigger, as it was asked for.
+struct FailedDirectStart<'a> {
+    decl: &'a RoleDecl,
+    session: &'a str,
+    thread: &'a str,
+    message: &'a str,
+    model: Option<Model>,
+    /// What the trigger records against the session: one hop deeper than its caller
+    /// (`ChainMove::Deeper`), which `fire_queued_trigger` reads back.
+    depth: u32,
+    priority: Priority,
+}
+
+/// **A direct send's start that waiting can fix is retried** (nxf 6j6v.3eqa) — on the schedule of
+/// a queued start whose start failed ([`note_the_failed_start`]): recorded, retried by the tick one
+/// and two minutes on, and given up at [`MAX_START_ATTEMPTS`]. A coordinated slot's coordinator
+/// then takes it up as `start_given_up` (rung D); an uncoordinated one stays recorded for `nxc
+/// status` to show and `withdraw` to discard, as a given-up queued start does. Measured on
+/// 2026-10-25: a direct send whose start met "database is locked" sat posted with nobody behind
+/// it, and nothing retried it.
+///
+/// Returns the detail the receipt carries — the retry and its instant, or why there is none.
+fn retry_a_failed_direct_start(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    start: FailedDirectStart<'_>,
+    e: &NxfError,
+) -> String {
+    let scope = claim_scope(store, Some(start.thread), start.session).unwrap_or_else(|why| {
+        eprintln!(
+            "warning: the claim area of thread {} could not be read ({why}); the retry of \
+             session {} is kept under the session alone",
+            start.thread, start.session
+        );
+        resolve_scope(None, start.session)
+    });
+    let entry = queued_entry(
+        &scope,
+        &start.decl.handle,
+        start.session,
+        Some(start.thread),
+        start.message,
+        start.model,
+        start.depth,
+        start.priority,
+        None,
+    );
+    let what = format!(
+        "the message to {} is posted and its obligation recorded, but",
+        start.decl.handle
+    );
+    note_the_failed_start(ctx, store, &entry, &what, e).detail
+}
+
+/// **Take back the obligation of a message that could not be posted** (nxf 6j6v.3eqa), or of one
+/// whose owed row could not be written — the
+/// expectation cleared and the owed row forgotten, both through the lock, since the lock is the
+/// likely reason the post failed: left behind, they stay on a thread with no message and hold the
+/// working copy of an enclosing operation until its lease runs out. A take-back that still fails is
+/// said, and its leftovers are the sweep's. What stays either way is the opened thread, empty, and
+/// an uncoordinated slot's pending session — harmless, and what a queued commission leaves too.
+fn take_the_obligation_back(ctx: &Ctx, store: &mut ChatStore, thread: &str, owed_role: &str) {
+    let taken_back =
+        through_the_lock(|| store.try_set_expects_reply_from(thread, "[]", &ctx.caller_handle()))
+            .and_then(|()| through_the_lock(|| store.forget_owed_start(thread, owed_role)));
+    if let Err(back) = taken_back {
+        eprintln!(
+            "warning: the message to {owed_role} could not be posted, and the obligation written \
+             for it on thread {thread} could not be taken back: {back}"
+        );
+    }
 }
 
 /// **Which machine a NEW persona chat runs on** (nxf 6j6v.1c6k) — `None` when no machine is

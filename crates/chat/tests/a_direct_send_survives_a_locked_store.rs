@@ -578,7 +578,7 @@ fn expects(team: &Team, thread: &str) -> Vec<String> {
 /// nothing, and what it wrote for the obligation is taken back — no row, no expectation — so no
 /// owed slot is left on a thread with no message in it.
 fn a_post_that_never_gets_the_lock_takes_the_obligation_back(team: &Team) {
-    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(ChatStore::EVERY_POST));
 
     let e = refused.expect_err("the send fails");
     assert_eq!(e.kind, ErrorKind::Io, "{e}");
@@ -627,7 +627,7 @@ fn an_obligation_that_cannot_be_taken_back_stays_and_the_sweep_leaves_it_alone_i
          BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
     ));
 
-    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(ChatStore::EVERY_POST));
 
     let e = refused.expect_err("the send fails");
     assert!(
@@ -713,7 +713,7 @@ fn a_take_back_that_meets_the_lock_once_is_tried_again() {
          END;"
     ));
 
-    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(ChatStore::EVERY_POST));
 
     assert!(refused.is_err());
     assert_eq!(
@@ -722,4 +722,148 @@ fn a_take_back_that_meets_the_lock_once_is_tried_again() {
         "the take-back met the lock"
     );
     assert_eq!(owed_rows(&team), Vec::new(), "and got through on its retry");
+}
+
+// ---- the uncoordinated slot's owed row -----------------------------------------------------------
+
+fn uncoordinated_team() -> Team {
+    team_with(Hand {
+        uncoordinated: true,
+        ..Hand::default()
+    })
+}
+
+/// A slot nobody coordinates writes its row (`owe_durably`) before the message too: met by the lock
+/// once, it is retried inside the send, the row is there with its session and no coordinator, and
+/// pm starts once.
+#[test]
+fn an_uncoordinated_owed_row_that_meets_the_lock_once_is_retried_inside_the_send() {
+    let team = uncoordinated_team();
+    lock_the_next_insert_into(&team, "owed_starts");
+
+    let receipt = team.send(T0);
+
+    assert_eq!(
+        team.count("SELECT n FROM injected_locks"),
+        0,
+        "the write met the lock"
+    );
+    let session = receipt.session.clone().expect("a session was minted");
+    assert_eq!(owed_rows(&team), vec![(Some(session.clone()), None)]);
+    let started = team.worker.started();
+    assert_eq!(started.len(), 1, "pm started once");
+    assert_eq!(started[0].internal_session, session);
+}
+
+/// Never getting the lock, it fails the send loudly before the message: nothing posted, nothing
+/// started, and the expectation declared for it taken back. What stays is what the code says
+/// stays: the empty thread and the pending session minted for it.
+#[test]
+fn an_uncoordinated_owed_row_that_never_gets_the_lock_fails_the_send_and_posts_nothing() {
+    let team = uncoordinated_team();
+    team.sql(&format!(
+        "CREATE TRIGGER lock_owed_starts BEFORE INSERT ON owed_starts
+         BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
+    ));
+
+    let e = team.try_send(T0, |_| {}).expect_err("the send fails");
+
+    assert_eq!(e.kind, ErrorKind::Io, "{e}");
+    assert!(e.to_string().contains(LOCKED), "{e}");
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM messages"),
+        0,
+        "nothing posted"
+    );
+    assert!(team.worker.started().is_empty(), "nothing started");
+    let thread = the_only_thread(&team);
+    assert_eq!(
+        expects(&team, &thread),
+        Vec::<String>::new(),
+        "no expectation left"
+    );
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM session_map WHERE role = 'pm'"),
+        1,
+        "the pending session stays, as documented"
+    );
+}
+
+/// The same for a coordinated slot: an `open_slot` that never gets the lock takes the expectation
+/// declared before it back.
+#[test]
+fn a_coordinated_owed_row_that_never_gets_the_lock_leaves_no_expectation() {
+    let team = team();
+    team.sql(&format!(
+        "CREATE TRIGGER lock_owed_starts BEFORE INSERT ON owed_starts
+         BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
+    ));
+
+    assert!(team.try_send(T0, |_| {}).is_err());
+
+    let thread = the_only_thread(&team);
+    assert_eq!(expects(&team, &thread), Vec::<String>::new());
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM session_map WHERE role = 'pm'"),
+        0,
+        "never minted"
+    );
+}
+
+/// An uncoordinated slot whose start fails on `io` is retried on the same schedule; given up, it is
+/// NOT re-commissioned — nothing coordinates it — and stays recorded for `nxc status` and
+/// `withdraw`, as a given-up queued start does.
+#[test]
+fn an_uncoordinated_start_that_never_gets_through_stays_recorded_and_is_not_recommissioned() {
+    let team = uncoordinated_team();
+    team.worker.fail_next(u32::MAX);
+
+    let receipt = team.send(T0);
+    let session = receipt.session.clone().expect("a session was minted");
+    let thread = receipt.thread_id.clone();
+    team.tick(&at(60), &thread);
+    team.tick(&at(180), &thread);
+    assert_eq!(
+        team.failed_start(&session),
+        Some((MAX_START_ATTEMPTS, None))
+    );
+
+    team.tick(&at(600), &thread);
+    assert_eq!(
+        team.worker.refusals(),
+        MAX_START_ATTEMPTS,
+        "nothing tried it again"
+    );
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM recovery_log"),
+        0,
+        "no rung"
+    );
+    assert_eq!(
+        team.failed_start(&session),
+        Some((MAX_START_ATTEMPTS, None)),
+        "the record stays for status and withdraw"
+    );
+}
+
+/// A coordinated slot whose BIND fails after the post — the mint went through — says so as the
+/// mint does, and leaves the slot owed with its message and no session.
+#[test]
+fn a_coordinated_slot_whose_bind_fails_after_the_post_says_it_is_posted() {
+    let team = team();
+    team.sql(&format!(
+        "CREATE TRIGGER no_bind BEFORE UPDATE OF session ON owed_starts
+         BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
+    ));
+
+    let e = team.try_send(T0, |_| {}).expect_err("the send fails");
+
+    assert!(
+        e.to_string().contains("is posted") && e.to_string().contains("do not send it again"),
+        "{e}"
+    );
+    assert_eq!(team.count("SELECT COUNT(*) FROM messages"), 1);
+    let rows = owed_rows(&team);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, None, "owed with no session");
 }
