@@ -2915,6 +2915,36 @@ fn start_the_steps_whose_turn_has_come(ctx: &Ctx, store: &mut ChatStore) -> Resu
 /// for `nxc status` to show and `withdraw` to discard, and nothing retries it.
 pub const MAX_START_ATTEMPTS: u32 = 3;
 
+/// **How long a write on the way to a start waits for a store another process holds** (nxf
+/// 6j6v.3eqa) — beyond the store's own busy timeout, three more tries this far apart, in
+/// milliseconds.
+///
+/// Measured on 2026-10-25: while a coding run compiled and ran its tests, two of the owner's sends
+/// to `pm` met "database is locked" on the obligation's write, and another send in another
+/// workspace panicked on it. A store held for longer than every wait together fails the call.
+const LOCKED_WRITE_BACKOFF_MS: [u64; 3] = [200, 800, 2_000];
+
+/// **Write through a lock another process holds** (nxf 6j6v.3eqa) — `write` again after each wait
+/// of [`LOCKED_WRITE_BACKOFF_MS`] while it fails with an `io` error, and that error once the waits
+/// are spent.
+///
+/// Asked of the KIND, as [`start_failure_is_transient`] asks it: every store error is `io`, a lock
+/// included. So an `io` failure that waiting does not fix costs the waits and ends in the same
+/// error. `write` must be one that may simply run again: a refused `BEGIN IMMEDIATE` writes nothing
+/// ([`ChatStore::try_post_message`] and its siblings), and the store's upserts converge.
+pub(crate) fn through_the_lock<T>(mut write: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut waits = LOCKED_WRITE_BACKOFF_MS.iter();
+    loop {
+        match write() {
+            Err(e) if e.kind == crate::error::ErrorKind::Io => match waits.next() {
+                Some(ms) => std::thread::sleep(std::time::Duration::from_millis(*ms)),
+                None => return Err(e),
+            },
+            done => return done,
+        }
+    }
+}
+
 /// **How far apart the retries of a failed start are**, in seconds: the n-th failure is retried
 /// `n ×` this later — one minute after the first, two after the second. Its own constant rather than
 /// a borrowed liveness cadence (review of PR #32, Code Quality #5): the two answer different
@@ -5848,11 +5878,12 @@ pub fn ensure_dm_channel(
     facade::check_no_sep("handle", b)?;
     let author = format!("{origin}/{actor}");
     let cid = dm_channel_id(a, b);
-    store.set_channel_field(&cid, "kind", CHANNEL_KIND_DIRECT, &author);
-    store.set_channel_field(&cid, "origin", origin, &author);
+    // Fallible (nxf 6j6v.3eqa): a store another process holds is an `io` error, never a panic.
+    store.try_set_channel_field(&cid, "kind", CHANNEL_KIND_DIRECT, &author)?;
+    store.try_set_channel_field(&cid, "origin", origin, &author)?;
     for handle in [a, b] {
         if !store.is_member(&cid, handle)? {
-            store.add_member(&cid, handle, &author);
+            store.try_add_member(&cid, handle, &author)?;
         }
     }
     Ok(cid)
@@ -6369,15 +6400,20 @@ fn coordinator_commission_in(
     // answer is simply the same call again with `--machine` — see [`designate_new_chat`].
     let designation = designate_new_chat(ctx, &decl, &req, coordinator)?;
 
+    // **Every write on the way to the start goes through the lock** (nxf 6j6v.3eqa): another
+    // process holding the store is waited for ([`through_the_lock`]), and one that holds it for
+    // longer fails this call as an `io` error — never a panic.
     let channel = match req.channel {
         Some(c) => c.to_string(),
-        None => ensure_dm_channel(
-            store,
-            ctx.origin,
-            ctx.actor,
-            &ctx.caller_handle(),
-            &ctx.qualify(req.role),
-        )?,
+        None => through_the_lock(|| {
+            ensure_dm_channel(
+                store,
+                ctx.origin,
+                ctx.actor,
+                &ctx.caller_handle(),
+                &ctx.qualify(req.role),
+            )
+        })?,
     };
     // **THE THREAD, and the coordinator is where it is opened** (nxf 6j6v.ntp9). A caller that has
     // already opened one hands it in — the supervisor must, because its member thread has to hang
@@ -6399,7 +6435,7 @@ fn coordinator_commission_in(
         None => {
             let parent = ambient_parent(ctx, store);
             (
-                open_child_thread(ctx, store, &channel, parent.as_deref()),
+                through_the_lock(|| open_child_thread(ctx, store, &channel, parent.as_deref()))?,
                 true,
             )
         }
@@ -6408,37 +6444,18 @@ fn coordinator_commission_in(
     // bqe0 §3.1 names beside `send --to <channel>`. Same `INSERT OR IGNORE` under the same root, so
     // a commission INSIDE a running chain (a channel's flow step, a re-commission out of a review)
     // binds nothing and inherits the version its operation already runs under.
-    store.freeze_declarations(&store.thread_root(&thread)?, ctx.now, ctx.defs)?;
+    through_the_lock(|| {
+        store.freeze_declarations(&store.thread_root(&thread)?, ctx.now, ctx.defs)
+    })?;
     let refs = with_working_copy(ctx, with_return_address(ctx, req.refs));
-    let receipt = facade::send(
-        store,
-        facade::SendRequest {
-            now: ctx.now,
-            origin: ctx.origin,
-            actor: ctx.actor,
-            channel: &channel,
-            body: req.body,
-            kind: req.kind,
-            priority: req.priority,
-            disposition: req.disposition,
-            thread: Some(&thread),
-            refs,
-        },
-    )?;
 
-    // **AFTER the opening message is posted, because that message IS the derivation's input** (nxf
-    // 6j6v.e76c). The commissioned run reads the thread back; commissioning it a line earlier would
-    // race it against an empty thread.
-    if opened_here {
-        commission_thread_name(ctx, &thread);
-    }
     // **A child a SESSION opened inherits a bound** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, "an
     // orphaned child wakes its parent"): its own `nxc send` used to open a round with no deadline
     // at all (t7y5), so a child that hung held its parent for as long as nobody looked.
     if opened_here && ctx.session.is_some() {
         if let Some(parent) = store.thread_parent(&thread)? {
             let bound = child_bound(ctx, store, &parent)?;
-            store.set_deadline(&thread, &bound, &ctx.caller_handle());
+            through_the_lock(|| store.try_set_deadline(&thread, &bound, &ctx.caller_handle()))?;
         }
     }
 
@@ -6448,7 +6465,9 @@ fn coordinator_commission_in(
     // replica's key.
     let designated = designation.as_ref().and_then(|a| a.machine.clone());
     if let Some(m) = &designated {
-        store.set_thread_machine(&thread, &m.machine_id, &ctx.caller_handle());
+        through_the_lock(|| {
+            store.try_set_thread_machine(&thread, &m.machine_id, &ctx.caller_handle())
+        })?;
     }
     let handed_to = designated.clone().filter(|m| !m.here);
 
@@ -6479,7 +6498,9 @@ fn coordinator_commission_in(
     let declare = |store: &mut ChatStore| {
         let expects_json =
             serde_json::to_string(std::slice::from_ref(&owed_role)).expect("expects serialize");
-        store.set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle());
+        through_the_lock(|| {
+            store.try_set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle())
+        })
     };
     // **The obligation is the slot** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A). A COORDINATED slot
     // is owed from the instant it is opened: the expectation, then the row with no session and its
@@ -6487,13 +6508,17 @@ fn coordinator_commission_in(
     // owed, with a clock and a look, which the sweep records as `never_started` and its coordinator
     // takes up. That reverses, for a coordinated slot only, the order the paragraph below the mint
     // gives for every other slot: the orphaned expectation it guards against is precisely what the
-    // row exists to notice. Best-effort, reported on this receipt.
+    // row exists to notice.
+    //
+    // **Durable, and before the message** (nxf 6j6v.3eqa): the row is written through the lock or
+    // this call fails, and the message is posted only after it — so no message is ever posted with
+    // nobody behind it. Only its look is best-effort, reported on this receipt.
     let mut owed_findings = Vec::new();
     if let Some(c) = &slot_coordinator {
-        declare(store);
+        declare(store)?;
         owed_findings.extend(crate::stranded::owe_the_slot(
             ctx, store, &thread, &owed_role, &c.thread,
-        ));
+        )?);
     }
 
     // **The session id, minted and held — BEFORE the obligation below it** (independent review of
@@ -6512,14 +6537,27 @@ fn coordinator_commission_in(
     // one id, which is what keeps everything below this line one path.
     // A chat handed to another machine mints no session HERE: the session belongs to the machine
     // that runs the persona, and that machine mints its own when it picks the order up.
-    let (internal, resume_real) = match &req.continue_session {
-        _ if handed_to.is_some() => (String::new(), None),
-        Some(c) => (c.internal.clone(), c.real.clone()),
-        None => {
-            let internal = store.mint_session_id();
-            store.create_pending_session(&internal, req.role)?;
-            (internal, None)
-        }
+    //
+    // **Where the mint stands against the message** (nxf 6j6v.3eqa). A slot WITHOUT a coordinator
+    // mints before the message: nothing would take up a mint that failed after it, so a failure
+    // fails the call with nothing posted. A COORDINATED slot is owed already, above, so it mints
+    // after the message: a mint that fails there leaves the slot owed WITH its commissioning
+    // message, which is what its coordinator re-commissions it from (field case 3,
+    // `the_obligation_is_the_slot.rs`).
+    let mint = |store: &mut ChatStore| -> Result<(String, Option<String>)> {
+        Ok(match &req.continue_session {
+            _ if handed_to.is_some() => (String::new(), None),
+            Some(c) => (c.internal.clone(), c.real.clone()),
+            None => {
+                let internal = store.mint_session_id();
+                through_the_lock(|| store.create_pending_session(&internal, req.role))?;
+                (internal, None)
+            }
+        })
+    };
+    let minted_first = match slot_coordinator {
+        None => Some(mint(store)?),
+        Some(_) => None,
     };
 
     // Every commission declares, on its own thread, that it expects a reply from the role it just
@@ -6544,9 +6582,91 @@ fn coordinator_commission_in(
         None
     } else {
         if slot_coordinator.is_none() {
-            declare(store);
+            declare(store)?;
         }
         Some(thread.as_str())
+    };
+
+    // A slot nobody coordinates keeps cut 1a's record exactly (nxf 6j6v.ccvy): written for a MINTED
+    // session that owes an answer, right after the register says so, so a slot whose trigger never
+    // runs still has a clock and a look. A continued session mints nothing here: the trigger funnel
+    // below writes its row with the trigger's own instant. A chat handed to another machine has no
+    // session here, and its row is that machine's.
+    //
+    // **Durable, and before the message** (nxf 6j6v.3eqa), as the open above: written through the
+    // lock or this call fails.
+    if let (Some((internal, _)), Some(owed_on), None, None) = (
+        &minted_first,
+        declared_here,
+        &req.continue_session,
+        &handed_to,
+    ) {
+        owed_findings.extend(crate::stranded::owe_durably(
+            ctx, store, owed_on, &owed_role, internal,
+        )?);
+    }
+
+    // **The message, once somebody is behind it** (nxf 6j6v.3eqa). The obligation above is durable
+    // before this post; a post that cannot get through the lock fails the call, and the obligation
+    // it would have stood behind goes with it.
+    let posted = through_the_lock(|| {
+        facade::send(
+            store,
+            facade::SendRequest {
+                now: ctx.now,
+                origin: ctx.origin,
+                actor: ctx.actor,
+                channel: &channel,
+                body: req.body,
+                kind: req.kind,
+                priority: req.priority,
+                disposition: req.disposition,
+                thread: Some(&thread),
+                refs: refs.clone(),
+            },
+        )
+    });
+    let receipt = match posted {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            // Taken back, best-effort: the store still refusing is the likely reason the post
+            // failed, so a take-back that fails too is said and left to the sweep, which finds no
+            // commissioning message on the slot.
+            if declared_here.is_some() {
+                let taken_back = store
+                    .try_set_expects_reply_from(&thread, "[]", &ctx.caller_handle())
+                    .and_then(|()| store.forget_owed_start(&thread, &owed_role));
+                if let Err(back) = taken_back {
+                    eprintln!(
+                        "warning: the message to {} could not be posted, and the obligation \
+                         written for it on thread {thread} could not be taken back: {back}",
+                        req.role
+                    );
+                }
+            }
+            return Err(e);
+        }
+    };
+    // **AFTER the opening message is posted, because that message IS the derivation's input** (nxf
+    // 6j6v.e76c). The commissioned run reads the thread back; commissioning it a line earlier would
+    // race it against an empty thread.
+    if opened_here {
+        commission_thread_name(ctx, &thread);
+    }
+
+    // **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn) — for a
+    // coordinated slot, after the message (see `mint` above); the trigger funnel below then marks
+    // it triggered. Durable (nxf 6j6v.3eqa): written through the lock or this call fails, and the
+    // slot stays owed with its message for its coordinator.
+    let (internal, resume_real) = match minted_first {
+        Some(minted) => minted,
+        None => {
+            let minted = mint(store)?;
+            owed_findings.extend(crate::stranded::bind(
+                ctx, store, &thread, &owed_role, &minted.0,
+            )?);
+            minted
+        }
     };
 
     // **Handed over, not started** (nxf 6j6v.1c6k). The message, the chat's machine and the
@@ -6572,23 +6692,6 @@ fn coordinator_commission_in(
         if let Some(m) = ctx.machines {
             claim_here(m, &thread, &receipt.message_id, ctx.db_path);
         }
-    }
-
-    // **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn) — the minted
-    // session, or the continued one; the trigger funnel below then marks it triggered.
-    //
-    // A slot nobody coordinates keeps cut 1a's record exactly (nxf 6j6v.ccvy): written for a MINTED
-    // session that owes an answer, right after the register says so, so a slot whose trigger never
-    // runs still has a clock and a look. A continued session mints nothing here: the trigger funnel
-    // below writes its row with the trigger's own instant. Best-effort, reported on this receipt.
-    match (&slot_coordinator, declared_here, &req.continue_session) {
-        (Some(_), _, _) => owed_findings.extend(crate::stranded::bind(
-            ctx, store, &thread, &owed_role, &internal,
-        )),
-        (None, Some(owed_on), None) => owed_findings.extend(crate::stranded::owe(
-            ctx, store, owed_on, &owed_role, &internal, false, None,
-        )),
-        _ => {}
     }
 
     // **The task, as the role will read it** (nxf 6j6v.ntp9). The caller's own words are what was
@@ -6672,6 +6775,53 @@ fn coordinator_commission_in(
                 let mut err = NxfError::from(e);
                 err.msg = warning;
                 return Err(err);
+            }
+            // **A start that waiting can fix is retried** (nxf 6j6v.3eqa) — on the schedule of a
+            // queued start whose start failed ([`note_the_failed_start`]): recorded, retried by the
+            // tick one and two minutes on, and given up at [`MAX_START_ATTEMPTS`], when the ladder's
+            // rung D takes the slot up as `start_given_up`. Measured on 2026-10-25: a direct send
+            // whose start met "database is locked" sat posted with nobody behind it, and nothing
+            // retried it.
+            if let TriggerError::Failed(inner) = &e {
+                if start_failure_is_transient(inner) {
+                    let scope = lease_claim_root(store, Some(&thread))
+                        .ok()
+                        .flatten()
+                        .map(|root| resolve_scope(Some(&root), &internal))
+                        .unwrap_or_else(|| resolve_scope(None, &internal));
+                    let entry = QueuedTrigger {
+                        id: 0,
+                        scope_key: scope.key(),
+                        role: decl.handle.clone(),
+                        session: internal.clone(),
+                        thread: Some(thread.clone()),
+                        message: wake.clone(),
+                        model: req.model,
+                        // What the trigger records against the session: one hop deeper than its
+                        // caller (`ChainMove::Deeper`), which `fire_queued_trigger` reads back.
+                        depth: hop.get() + 1,
+                        priority: req.priority,
+                        enqueued_at: None,
+                    };
+                    let what = format!(
+                        "the message to {} is posted and its obligation recorded, but",
+                        req.role
+                    );
+                    let mut warnings =
+                        vec![note_the_failed_start(ctx, store, &entry, &what, inner)];
+                    warnings.extend(owed_findings);
+                    return Ok(TriggerReceipt {
+                        handed_to: None,
+                        message_id: receipt.message_id,
+                        session: internal.clone(),
+                        channel,
+                        queued_behind: None,
+                        queue_position: None,
+                        spawned: false,
+                        warnings,
+                        thread,
+                    });
+                }
             }
             // **A step that did not start** — the same class, the same record and the same reason
             // taxonomy as everywhere else in this module (nxf 6j6v.93zd), which is what closes nxf
@@ -7386,10 +7536,12 @@ pub fn open_child_thread(
     store: &mut ChatStore,
     channel_id: &str,
     parent: Option<&str>,
-) -> String {
+) -> Result<String> {
     let author = ctx.caller_handle();
     store.set_wall_clock(ctx.now);
-    store.open_new_thread(
+    // Fallible (nxf 6j6v.3eqa): a store another process holds is an `io` error, with no thread
+    // opened, never a panic.
+    store.try_open_new_thread(
         &crate::model::ThreadRoot {
             origin: ctx.origin.to_string(),
             channel_id: channel_id.to_string(),
@@ -8320,7 +8472,7 @@ fn open_flow_step(
     // The member's OWN thread, hung under the channel thread — stamped through the one function
     // that writes a tree edge (nxf 6j6v.a71h §3.1). The parent is named explicitly rather than
     // resolved from the ambient session, which is exactly the split that helper was given.
-    let member_thread = open_child_thread(sup, store, req.channel_id, Some(req.channel_thread));
+    let member_thread = open_child_thread(sup, store, req.channel_id, Some(req.channel_thread))?;
     if let Some(deadline) = req.deadline {
         store.set_deadline(&member_thread, deadline, &opener);
     }

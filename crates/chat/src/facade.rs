@@ -3963,7 +3963,9 @@ pub fn send(store: &mut ChatStore, mut req: SendRequest) -> Result<SendReceipt> 
         refs: req.refs,
         body: req.body.to_string(),
     };
-    let message_id = store.post_message(&env);
+    // Fallible (nxf 6j6v.3eqa): a store another process holds is an `io` error here, with nothing
+    // posted, never a panic.
+    let message_id = store.try_post_message(&env)?;
     Ok(SendReceipt {
         message_id,
         thread_id: env.thread_id,

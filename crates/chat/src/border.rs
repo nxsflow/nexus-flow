@@ -654,7 +654,7 @@ pub fn commission(
     let target = format!("{}/{}", far.prefix, to.persona);
     let channel = orch::ensure_dm_channel(store, ctx.origin, ctx.actor, &caller, &target)?;
     let parent = orch::ambient_parent(ctx, store);
-    let thread = orch::open_child_thread(ctx, store, &channel, parent.as_deref());
+    let thread = orch::open_child_thread(ctx, store, &channel, parent.as_deref())?;
     let mut refs = orch::with_return_address(ctx, refs);
     refs.border = Some(BorderRef {
         from: here.clone(),

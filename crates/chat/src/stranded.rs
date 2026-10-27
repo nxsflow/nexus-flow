@@ -1202,7 +1202,8 @@ pub(crate) fn assess(ctx: &Ctx, store: &ChatStore, thread: &str, role: &str) -> 
 /// before its session is minted. The same clauses, with the two that read the expectation answered
 /// for the one this site is about to write: the slot will be open for `role` (clause 2), and when no
 /// `machine` register names a machine, this site writes the expectation (clause 3). The
-/// commissioning message is already posted (clause 5).
+/// commissioning message is the one this site posts once the slot is owed (clause 5): since nxf
+/// 6j6v.3eqa the row is written BEFORE the message, so no message is posted with nobody behind it.
 pub(crate) fn assess_at_open(
     ctx: &Ctx,
     store: &ChatStore,
@@ -1223,7 +1224,7 @@ pub(crate) fn assess_at_open(
         Some(_) => executes_here(ctx, store, thread)?,
         None => true,
     };
-    if !executes_here || store.acting_messages_in_thread(thread)?.is_empty() {
+    if !executes_here {
         return Ok(None);
     }
     let opener = store.thread_quorum(thread, ctx.now)?.and_then(|q| q.opener);
@@ -1604,9 +1605,10 @@ pub(crate) fn arm_first_look(
     }
 }
 
-/// The finding for an obligation row that could not be written. Best-effort, everywhere: a store
-/// error is a finding, never a failed commission — the row only adds a judgement on top of what the
-/// commission already did, and a slot without one keeps today's behaviour.
+/// The finding for an obligation row that could not be written by the trigger funnel ([`owe`],
+/// [`touch`]), where a store error is a finding and never a failed start. The rows a commission
+/// writes BEFORE its message ([`owe_the_slot`], [`bind`], [`owe_durably`]) are not best-effort: they
+/// are written through the lock or the commission fails (nxf 6j6v.3eqa).
 fn not_owed(
     thread: &str,
     role: &str,
@@ -1630,37 +1632,62 @@ fn not_owed(
 /// before any mint, at the two places a coordinated slot is opened (`coordinator_commission_in`,
 /// which every flow step, parallel member and direct commission passes through). `coordinator` is
 /// [`coordinator_of`]'s thread.
+///
+/// **The row is durable** (nxf 6j6v.3eqa): written through the lock, or `Err` and the commission
+/// fails before its message is posted. Only the look is best-effort, a finding.
 pub(crate) fn owe_the_slot(
     ctx: &Ctx,
     store: &mut ChatStore,
     thread: &str,
     role: &str,
     coordinator: &str,
-) -> Vec<FailedConsequence> {
-    if let Err(e) = store.open_slot(thread, role, coordinator, ctx.now) {
-        return not_owed(thread, role, None, &e);
-    }
-    arm_first_look(ctx, store, thread, role, ctx.now)
+) -> Result<Vec<FailedConsequence>> {
+    crate::orchestration::through_the_lock(|| store.open_slot(thread, role, coordinator, ctx.now))?;
+    Ok(arm_first_look(ctx, store, thread, role, ctx.now)
         .into_iter()
-        .collect()
+        .collect())
 }
 
 /// **The mint fills the slot's session** (nxf 6j6v.kgfn) and moves its clock; the look moves with
-/// it. Nothing for a slot that has no row.
+/// it. Nothing for a slot that has no row. Durable, as [`owe_the_slot`] (nxf 6j6v.3eqa).
 pub(crate) fn bind(
     ctx: &Ctx,
     store: &mut ChatStore,
     thread: &str,
     role: &str,
     session: &str,
-) -> Vec<FailedConsequence> {
-    match store.bind_owed_session(thread, role, session, ctx.now) {
-        Ok(true) => arm_first_look(ctx, store, thread, role, ctx.now)
+) -> Result<Vec<FailedConsequence>> {
+    let bound = crate::orchestration::through_the_lock(|| {
+        store.bind_owed_session(thread, role, session, ctx.now)
+    })?;
+    Ok(if bound {
+        arm_first_look(ctx, store, thread, role, ctx.now)
             .into_iter()
-            .collect(),
-        Ok(false) => Vec::new(),
-        Err(e) => not_owed(thread, role, Some(session), &e),
+            .collect()
+    } else {
+        Vec::new()
+    })
+}
+
+/// **The mint of a slot nobody coordinates writes its row** — cut 1a's row, untriggered, kept
+/// exactly as it was, and durable as [`owe_the_slot`] (nxf 6j6v.3eqa): written through the lock or
+/// `Err`, so the commission fails before its message is posted.
+pub(crate) fn owe_durably(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    role: &str,
+    session: &str,
+) -> Result<Vec<FailedConsequence>> {
+    if crate::orchestration::is_engine_identity(role) {
+        return Ok(Vec::new());
     }
+    crate::orchestration::through_the_lock(|| {
+        store.record_owed_start(thread, role, session, ctx.now, false, None)
+    })?;
+    Ok(arm_first_look(ctx, store, thread, role, ctx.now)
+        .into_iter()
+        .collect())
 }
 
 /// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write the
