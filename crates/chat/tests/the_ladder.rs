@@ -1027,6 +1027,69 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
     assert!(posted[0].contains("wall-clock timeout"), "{}", posted[0]);
 }
 
+/// **A look inside the grace arms the grace's end** (nxf 6j6v.yts5, the judge's half). A rung that
+/// did nothing — its start refused `already_running` — arms the next look one cadence out, which
+/// replaces the one its trigger armed at the grace. That look finds the new clock's grace not yet
+/// reached; it must arm the grace's end, or nothing looks at the slot again.
+#[test]
+fn a_look_inside_the_grace_arms_the_graces_end_and_the_slot_is_taken_up() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    *team.worker.refuse.lock().unwrap() = Some("already_running");
+    team.tick(&at(130), &thread);
+    assert_eq!(team.book.held_look(&thread, "coder"), Some(at(190)));
+
+    team.tick(&at(190), &thread);
+
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(250)),
+        "the end of the grace on the clock the refused trigger moved"
+    );
+    let mut now = 250;
+    while team.worker.of("coder").len() < 2 {
+        team.tick(&at(now), &thread);
+        let next = team
+            .book
+            .held_look(&thread, "coder")
+            .map(|l| secs_of(&l))
+            .unwrap_or_else(|| panic!("no look held at +{now}s"));
+        if team.worker.of("coder").len() < 2 {
+            assert!(next > now, "the held look at +{next}s is not after +{now}s");
+        }
+        now = next;
+        assert!(now < 1_000, "taken up within minutes");
+    }
+}
+
+/// The same for the second look: a look that arrives between the two — the service's one look for
+/// the slot replaced by an earlier one — arms the second look's instant again.
+#[test]
+fn a_look_between_the_two_looks_arms_the_second() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    team.tick(&at(120), &thread);
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(180)),
+        "the first look on unchanged evidence arms the second"
+    );
+    // Something armed an earlier look for the slot, replacing the second one in the service's book.
+    team.book
+        .looks
+        .lock()
+        .unwrap()
+        .push((format!("{thread}-coder"), at(150)));
+
+    team.tick(&at(150), &thread);
+
+    assert_eq!(team.book.held_look(&thread, "coder"), Some(at(180)));
+    assert!(escalations(&team.messages(&thread)).is_empty());
+}
+
 /// **The ceiling fires at the ceiling, whatever the look judges** — here a slot whose continued
 /// session went on hold until an instant five hours out: rung B leaves a hold that names its
 /// instant to the resume, and before this nothing looked at the slot until then.
@@ -1061,6 +1124,70 @@ fn the_ceiling_fires_at_the_ceiling_while_the_slot_is_held() {
 
     let posted = escalations(&team.messages(&thread));
     assert_eq!(posted.len(), 1, "rung E at the ceiling: {posted:?}");
+    assert!(posted[0].contains("ceiling"), "{}", posted[0]);
+}
+
+/// **No look reaches past the ceiling.** A live session's next look is one cadence out; thirty
+/// seconds before the ceiling that would land thirty seconds past it, and the ceiling would fire
+/// late. The look is armed AT the ceiling instead, and fires there.
+#[test]
+fn a_look_that_would_land_past_the_ceiling_is_armed_at_it() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    team.tick(&at(130), &thread);
+    assert_eq!(team.log(&thread, "coder")[0].0, "continued");
+    team.worker.run(&session);
+    let ceiling = 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS;
+    team.turn(&session, &thread, &at(ceiling - 45));
+    team.work(&session, &at(ceiling - 40));
+
+    team.tick(&at(ceiling - 30), &thread);
+
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(ceiling)),
+        "one cadence out would be past the ceiling"
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+
+    team.tick(&at(ceiling), &thread);
+
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(posted[0].contains("ceiling"), "{}", posted[0]);
+}
+
+/// **The ceiling fires inside a grace too.** A second continue thirty seconds before the ceiling
+/// moves the slot's clock, so the look at the ceiling finds the new clock's grace not yet reached —
+/// a look that waits. It escalates all the same.
+#[test]
+fn the_ceiling_fires_at_the_ceiling_while_the_look_waits_out_a_grace() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    team.tick(&at(130), &thread);
+    let ceiling = 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS;
+    team.ended(&at(ceiling - 150), &session, None);
+    team.tick(&at(ceiling - 30), &thread);
+    assert_eq!(
+        team.log(&thread, "coder")
+            .iter()
+            .filter(|(a, _)| a == "continued")
+            .count(),
+        2,
+        "continued again inside the episode"
+    );
+    assert_eq!(team.book.held_look(&thread, "coder"), Some(at(ceiling)));
+
+    team.tick(&at(ceiling), &thread);
+
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "{posted:?}");
     assert!(posted[0].contains("ceiling"), "{}", posted[0]);
 }
 
