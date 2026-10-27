@@ -1533,6 +1533,16 @@ pub(crate) fn arm_look(
     at: &str,
 ) -> Option<FailedConsequence> {
     let slot = look_key(thread, role);
+    // **No look past the ladder's ceiling** (nxf 6j6v.yts5): the service keeps one look per slot,
+    // so the ceiling fires at the ceiling only if no look armed during the episode reaches beyond
+    // it. One already reached is left alone — the look that reached it escalated.
+    let ceiling = store
+        .owed_start(thread, role)
+        .ok()
+        .flatten()
+        .and_then(|row| crate::ladder::ceiling_instant(store, &row).ok().flatten())
+        .filter(|c| earlier(ctx.now, c) && earlier(c, at));
+    let at = ceiling.as_deref().unwrap_or(at);
     // The finding names the slot's session when it has one, so the receipt of whoever started it
     // can tell its own look from another's (`open_flow_step` keeps exactly those).
     let unarmed = |error: &str| {
@@ -1789,6 +1799,11 @@ pub(crate) enum Judgement {
     Live,
     /// A coordinated slot whose owed session has a standing hold — the ladder's rung B decides.
     Held,
+    /// Owed, nothing running for it, and its evidence not yet due — inside a grace, or between the
+    /// two looks. Its look is ARMED for the instant it is due (nxf 6j6v.yts5): a judgement that
+    /// waits never leaves the slot with nothing to wake it. Nothing to record for a slot nobody
+    /// coordinates; for a coordinated one the ladder still asks its ceiling.
+    Pending,
 }
 
 /// **The sweep** — the sixth workspace-wide step of every tick (nxf 6j6v.ccvy). Records every owed
@@ -1967,7 +1982,7 @@ fn judge_candidates(
         // bad row cannot stop every later one from being judged on every tick.
         let judged = judge(ctx, store, &row, q, &facts, findings, coordinated.is_some()).and_then(
             |j| match (j, &coordinated) {
-                (Judgement::Nothing, _) => Ok(Vec::new()),
+                (Judgement::Nothing, _) | (Judgement::Pending, None) => Ok(Vec::new()),
                 // **A coordinated slot is never merely recorded** (nxf 6j6v.558h): its coordinator
                 // runs one rung of the ladder on what the look saw, and escalates only last.
                 (j, Some(c)) => crate::ladder::climb(ctx, store, &row, c, j),
@@ -2180,6 +2195,12 @@ pub(crate) fn abandoned_words(reason: &str) -> String {
 }
 
 /// Rules 1-6 for one obligation. Drops the first look whenever the evidence no longer holds.
+///
+/// **Every judgement that waits arms its look** (nxf 6j6v.yts5): a [`Judgement::Pending`] has armed
+/// the instant its evidence is due. A [`Judgement::Nothing`] is a slot this sweep does not look at
+/// now — its operation held, its round finished with, already recorded on this clock, abandoned,
+/// or its answer still coming by another route, whose own clock (the queue's release, the retry's
+/// tick, the hold's resume, the sub-round) moves it on.
 fn judge(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -2250,6 +2271,16 @@ fn judge(
         }
         return Ok(Judgement::Nothing);
     }
+    // **A rung of the ladder that failed is tried again at the next look** (nxf 6j6v.yts5): its
+    // start is known not to have happened, so neither a grace nor two looks have anything to wait
+    // for. Before, the failure's own look found the new clock's grace not yet reached and armed
+    // nothing — measured: 5.5 h with nothing looking.
+    if coordinated {
+        if let Some(retry) = crate::ladder::retry_of_a_failed_rung(store, row)? {
+            store.drop_stranded_suspect(t, h)?;
+            return Ok(retry);
+        }
+    }
     // Rule 6: the grace on the judged instant.
     let grace = STRANDED_GRACE_SECS;
     // A start that failed and was given up: one look at its last attempt + grace.
@@ -2257,7 +2288,7 @@ fn judge(
         let due = after(&f.last_failed_at, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
             findings.extend(arm_look(ctx, store, t, h, &due));
-            return Ok(Judgement::Nothing);
+            return Ok(Judgement::Pending);
         }
         return Ok(Judgement::Record {
             observed: Observation::StartGivenUp,
@@ -2277,7 +2308,7 @@ fn judge(
         let due = after(&ended, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
             findings.extend(arm_look(ctx, store, t, h, &due));
-            return Ok(Judgement::Nothing);
+            return Ok(Judgement::Pending);
         }
         store.drop_stranded_suspect(t, h)?;
         return Ok(Judgement::Record {
@@ -2292,7 +2323,8 @@ fn judge(
     // No end: two looks on unchanged evidence, from the clock.
     let first_due = after(&row.trigger_clock, grace, "the stranded grace")?;
     if !reached(ctx.now, &first_due) {
-        return Ok(Judgement::Nothing);
+        findings.extend(arm_look(ctx, store, t, h, &first_due));
+        return Ok(Judgement::Pending);
     }
     // A slot whose session was never minted has neither (nxf 6j6v.kgfn).
     let (bound, entries) = match s {
@@ -2317,7 +2349,7 @@ fn judge(
     let Some(suspect) = store.stranded_suspect(t, h)? else {
         store.put_stranded_suspect(t, h, &fresh)?;
         second_look(store, findings);
-        return Ok(Judgement::Nothing);
+        return Ok(Judgement::Pending);
     };
     // The tuple is load-bearing: the session, its bind and its transcript must be what the first
     // look saw. Anything moved — RESET, and look again one cadence out.
@@ -2327,7 +2359,7 @@ fn judge(
     {
         store.put_stranded_suspect(t, h, &fresh)?;
         second_look(store, findings);
-        return Ok(Judgement::Nothing);
+        return Ok(Judgement::Pending);
     }
     let second_due = after(
         &suspect.first_seen,
@@ -2335,7 +2367,8 @@ fn judge(
         "the second stranded look",
     )?;
     if !reached(ctx.now, &second_due) {
-        return Ok(Judgement::Nothing);
+        findings.extend(arm_look(ctx, store, t, h, &second_due));
+        return Ok(Judgement::Pending);
     }
     store.drop_stranded_suspect(t, h)?;
     let (observed, detail) = if !row.triggered {
