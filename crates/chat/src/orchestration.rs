@@ -15148,8 +15148,8 @@ pub fn session_interrupted(
 pub enum ResumeScope<'a> {
     /// The session that stopped, by its internal id.
     Session(&'a str),
-    /// Any thread of the operation that stopped. The hold is looked up across the thread's own
-    /// sessions.
+    /// Any thread of the operation that stopped, its root included. The hold is looked up across
+    /// every session of that operation, oldest hold first (nxf 6j6v.cn4p).
     Thread(&'a str),
 }
 
@@ -15499,6 +15499,23 @@ pub fn resume_interrupted(
         .as_deref()
         .and_then(|t| store.thread_quorum(t, ctx.now).ok().flatten())
         .and_then(|q| q.channel_id);
+    // **Marked as being taken up BEFORE the trigger, and still standing** (nxf 6j6v.cn4p). A
+    // resumed session can run straight into the next window and announce a NEW hold while this
+    // start is still in progress. With the old hold plainly standing that announcement was folded
+    // into it, and the stamp below then closed the only hold there was — nothing on hold, nothing
+    // coming. The mark makes such an announcement supersede the old hold instead
+    // ([`ChatStore::record_interruption`]), while the hold itself stays standing until the start
+    // has succeeded: a process killed before the spawn, or a start that fails, leaves it where the
+    // next resume finds it, and the member window below stays paused for the whole spawn.
+    if let Err(e) = store.mark_interruption_taking_up(hold.id, ctx.now) {
+        let detail = format!(
+            "the hold {} could not be marked as being taken up: {e}; a new hold its session \
+             announces during this start may be folded into it",
+            hold.id
+        );
+        eprintln!("warning: {detail}");
+        warnings.push(FailedConsequence::step_unanswered(None, detail));
+    }
     let started = role_resume(
         ctx,
         store,
@@ -15536,7 +15553,8 @@ pub fn resume_interrupted(
             }
             // Stamped AFTER the trigger, for `note_the_park_was_resumed`'s reason: what the stamp
             // records is that somebody was actually put back to work. A hold closed before a spawn
-            // that then failed would be a hold nothing ever comes back to.
+            // that then failed would be a hold nothing ever comes back to. By id, so a hold the
+            // session announced during the start (which superseded this one) is not touched.
             stamp_taken_up(ctx, store, hold.id, &mut warnings);
             Ok(receipt(ResumeOutcome::Resumed, None, warnings))
         }
@@ -15549,16 +15567,12 @@ pub fn resume_interrupted(
         // it would be paying in the currency this crate has already decided not to spend. What a
         // lost race costs is an error instead of an outcome, on a path whose pre-check makes it
         // rare, and the refusal did its job either way.
+        //
+        // **The hold is left standing**, never stamped here: nothing was put back to work.
         Err(e) => Err(e),
     }
 }
 
-/// The hold a [`ResumeScope`] names, or `None` when nothing is on hold there.
-///
-/// A thread resolves through the sessions recorded ON it, newest first — which is the session that
-/// was working when the window closed. It deliberately does NOT walk the whole operation: a thread
-/// is what a human reads off `nxc status`, and taking up "some session somewhere under this root"
-/// would start work the person did not point at.
 /// [`ResumeOutcome::BeingRecovered`] when the slot `session` owes on `thread` is claimed by its
 /// coordinator at `ctx.now`; `None` when it is free or has no row.
 fn being_recovered(
@@ -15609,6 +15623,23 @@ fn note_the_hold_outcome(store: &mut ChatStore, hold: i64, outcome: crate::ladde
     }
 }
 
+/// The hold a [`ResumeScope`] names, or `None` when nothing is on hold there.
+///
+/// **A thread names its whole OPERATION** (nxf 6j6v.cn4p): the hold may stand on any session of
+/// any thread from the thread's root down. The id a person has is the one `nxc status` shows them,
+/// and for a channel run that is the root — which has no session of its own, since every step runs
+/// on a thread beneath it. Resolving only the sessions recorded ON the given thread answered
+/// `nothing_on_hold` there while the board marked the same operation interrupted: measured on
+/// 2026-10-25, a coder on hold from its first turn that `--force` could not reach.
+///
+/// **The oldest standing hold is taken first**, the work-list order
+/// [`ChatStore::standing_interruptions`] keeps; the receipt names its session and thread, and the
+/// next resume of the same root takes the next one.
+///
+/// **One predicate with the board.** The holds are read through [`ChatStore::placed_holds`], the
+/// read `nxc status` derives an operation's `interrupted` from, over the same tree
+/// ([`ChatStore::thread_root`] resolves to the root status does). So an operation the board calls
+/// interrupted is one this finds a hold in, and nothing else is.
 fn standing_hold(
     store: &ChatStore,
     scope: ResumeScope<'_>,
@@ -15616,12 +15647,18 @@ fn standing_hold(
     match scope {
         ResumeScope::Session(session) => store.current_interruption(session),
         ResumeScope::Thread(thread) => {
-            for row in store.sessions_in_thread(thread)?.into_iter().rev() {
-                if let Some(hold) = store.current_interruption(&row.internal_id)? {
-                    return Ok(Some(hold));
-                }
+            let holds = store.placed_holds()?;
+            if holds.is_empty() {
+                return Ok(None);
             }
-            Ok(None)
+            let operation: std::collections::HashSet<String> = store
+                .thread_subtree(&store.thread_root(thread)?)?
+                .into_iter()
+                .collect();
+            Ok(holds
+                .into_iter()
+                .find(|(on, _)| operation.contains(on))
+                .map(|(_, hold)| hold))
         }
     }
 }

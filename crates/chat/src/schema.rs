@@ -547,7 +547,12 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              resumed_at TEXT,
              -- What the resume did with the hold (nxf 6j6v.558h, rung B): `resumed`,
              -- `provider_cannot_resume`, `tree_moved_asked`, `not_yet`.
-             outcome    TEXT
+             outcome    TEXT,
+             -- When a resume began starting the session again (nxf 6j6v.cn4p). The hold STILL
+             -- STANDS while this is set — it is closed only once the start succeeded — and a new
+             -- announcement for the session supersedes it instead of being swallowed by the
+             -- one-open index. See `ChatStore::record_interruption`.
+             taking_up_at TEXT
          );
          CREATE INDEX IF NOT EXISTS session_interruption_open
              ON session_interruption(session, id);
@@ -724,6 +729,13 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     // the benign direction — a park happens later than it might have, never earlier.
     if !column_exists(conn, "working_tree_lease", "contended_since")? {
         conn.execute_batch("ALTER TABLE working_tree_lease ADD COLUMN contended_since TEXT;")?;
+    }
+    // **When a resume began taking a hold up** (nxf 6j6v.cn4p): the same in-place,
+    // column-presence-guarded add, NOT part of `upgraded` — no reducer writes this device-local
+    // table. An existing row reads NULL, "no resume has begun", which is what every hold standing
+    // across an upgrade is.
+    if !column_exists(conn, "session_interruption", "taking_up_at")? {
+        conn.execute_batch("ALTER TABLE session_interruption ADD COLUMN taking_up_at TEXT;")?;
     }
     // **Which occasion refused the park** (fix round 1 of nxf 6j6v.8bv9): a store built from an
     // earlier commit of this branch has `park_refusals` WITHOUT it, and `CREATE TABLE IF NOT EXISTS`

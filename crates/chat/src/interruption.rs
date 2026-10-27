@@ -108,26 +108,35 @@ impl Interruption {
 /// The columns, in the one order [`interruption_from_row`] reads them back in — written once so the
 /// three statements that hand it a row cannot drift into three different column orders.
 const INTERRUPTION_COLS: &str = "id, session, at, limit_name, until, detail, resumed_at";
+/// [`INTERRUPTION_COLS`] for a statement that joins `session_interruption` as `i` — same order.
+const INTERRUPTION_COLS_QUALIFIED: &str =
+    "i.id, i.session, i.at, i.limit_name, i.until, i.detail, i.resumed_at";
 
 fn interruption_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Interruption> {
+    interruption_at(r, 0)
+}
+
+/// [`interruption_from_row`] for a row whose [`INTERRUPTION_COLS`] start at column `from` — a join
+/// that selects something in front of them.
+fn interruption_at(r: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<Interruption> {
     Ok(Interruption {
-        id: r.get(0)?,
-        session: r.get(1)?,
-        at: r.get(2)?,
-        limit: r.get(3)?,
-        until: r.get(4)?,
-        detail: r.get(5)?,
-        resumed_at: r.get(6)?,
+        id: r.get(from)?,
+        session: r.get(from + 1)?,
+        at: r.get(from + 2)?,
+        limit: r.get(from + 3)?,
+        until: r.get(from + 4)?,
+        detail: r.get(from + 5)?,
+        resumed_at: r.get(from + 6)?,
     })
 }
 
 impl ChatStore {
     /// **Record that a session stopped at an availability boundary.**
     ///
-    /// **Idempotent while the hold stands**, on the session alone: a teardown that is retried, or a
-    /// runtime that announces twice, must not leave one interruption looking like two — a reader
-    /// counting rows would report an operation as having been knocked over repeatedly when the
-    /// model went away once. The FIRST announcement wins and keeps its instant, for exactly
+    /// **Idempotent while the hold stands and no resume is taking it up**, on the session alone:
+    /// a teardown that is retried, or a runtime that announces twice, must not leave one
+    /// interruption looking like two — a reader counting rows would report an operation as having
+    /// been knocked over repeatedly when the model went away once. The FIRST announcement wins and keeps its instant, for exactly
     /// [`ChatStore::mark_session_ended`]'s reason: what a later stamp would say is nothing new.
     ///
     /// **ONE STATEMENT, and the database enforces the rule** (independent review of PR #476,
@@ -139,8 +148,10 @@ impl ChatStore {
     /// uses and the same discipline [`mark_interruption_resumed`](ChatStore::
     /// mark_interruption_resumed) has always had as a single conditional `UPDATE`.
     ///
-    /// A session that was resumed and interrupted AGAIN appends a new row, which is the case the
-    /// list exists for: a week-long window can close twice over one piece of work, and the second
+    /// A session that was resumed and interrupted AGAIN appends a new row — and so does one that
+    /// re-hits the window WHILE its resume is still starting it, which supersedes the hold the
+    /// resume marked (nxf 6j6v.cn4p, see the body). That is the case the list exists for: a
+    /// week-long window can close twice over one piece of work, and the second
     /// time is not the first time. The index is PARTIAL for exactly that reason.
     ///
     /// Returns the row id of the hold now standing — the fresh one, or the one already there. The
@@ -154,12 +165,29 @@ impl ChatStore {
         detail: &str,
         now: &str,
     ) -> Result<i64> {
-        self.connection().execute(
+        // **A hold a resume is taking up is superseded, not repeated** (nxf 6j6v.cn4p). A resumed
+        // session that runs straight into the next window announces while its resume is still
+        // starting it, so the old hold still stands. Swallowed by the one-open index, that
+        // announcement was lost, and the resume's stamp afterwards closed the only hold there was.
+        // So a hold whose `taking_up_at` is set is closed here, and the new one recorded, in ONE
+        // transaction: nothing in between can see the session with no hold at all. A hold no resume
+        // has begun on is the retried-teardown case above and is still reused.
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute(
+            "UPDATE session_interruption SET resumed_at = ?2
+              WHERE session = ?1 AND resumed_at IS NULL AND taking_up_at IS NOT NULL",
+            params![session, now],
+        )?;
+        tx.execute(
             "INSERT INTO session_interruption(session, at, limit_name, until, detail)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT DO NOTHING",
             params![session, now, limit, until, detail],
         )?;
+        tx.commit()?;
         // Read back rather than trusting `last_insert_rowid`: on a conflict nothing was inserted and
         // that function still answers with whatever this connection last wrote, which would be a row
         // belonging to another session entirely.
@@ -229,13 +257,38 @@ impl ChatStore {
     /// interruptions_among) beside it: what bounds this read is how many holds are STANDING, which
     /// is the bound `standing_interruptions` already had, and there is no id list to bind.
     pub(crate) fn interrupted_threads(&self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(self
+            .placed_holds()?
+            .into_iter()
+            .map(|(thread, _)| thread)
+            .collect())
+    }
+
+    /// **Every standing hold with the thread its session stands on**, oldest first (nxf
+    /// 6j6v.cn4p) — the ONE read behind both questions about an operation: whether `nxc status`
+    /// calls it interrupted, and which hold `nxc resume --thread` takes up.
+    ///
+    /// Both readers intersect this with the operation's threads, so the two answers cannot drift:
+    /// an operation the board marks interrupted is one whose root the resume finds a hold under, and
+    /// the other way round. [`interrupted_threads`](ChatStore::interrupted_threads) is its
+    /// projection for the same reason.
+    ///
+    /// A hold whose session names no thread is in no operation and is left out — the join's silent
+    /// arm, documented on `interrupted_threads`.
+    ///
+    /// **Whole-table, filtered by the caller in memory**, and that is on purpose: both `nxc status`
+    /// (every call) and `nxc resume --thread` read ALL standing holds and intersect. What bounds the
+    /// read is how many holds STAND — none at all in a workspace where nothing is interrupted, a
+    /// handful where a window closed — not how big the board is, so there is no id list to bind.
+    pub(crate) fn placed_holds(&self) -> Result<Vec<(String, Interruption)>> {
         let conn = self.connection();
-        let mut st = conn.prepare(
-            "SELECT m.thread FROM session_interruption i
+        let mut st = conn.prepare(&format!(
+            "SELECT m.thread, {INTERRUPTION_COLS_QUALIFIED} FROM session_interruption i
                JOIN session_map m ON m.internal_id = i.session
-              WHERE i.resumed_at IS NULL AND m.thread IS NOT NULL",
-        )?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+              WHERE i.resumed_at IS NULL AND m.thread IS NOT NULL
+              ORDER BY i.id",
+        ))?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, interruption_at(r, 1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -284,6 +337,27 @@ impl ChatStore {
             params![id, now],
         )?;
         Ok(n > 0)
+    }
+
+    /// **Say that a resume has begun starting the session of hold `id`** (nxf 6j6v.cn4p).
+    ///
+    /// The hold keeps standing — it is closed by [`mark_interruption_resumed`](ChatStore::
+    /// mark_interruption_resumed) once the start succeeded — so a process that dies between this
+    /// and the spawn, or a start that fails, leaves it exactly where a resume can find it again.
+    /// What the mark changes is the one thing that must change before the spawn: a new
+    /// announcement for the session SUPERSEDES this hold ([`record_interruption`](ChatStore::
+    /// record_interruption)) instead of being folded into it.
+    ///
+    /// Never cleared on a failed start: a second resumer whose start lost to the first's would
+    /// otherwise unset the mark under a session that is running. A mark left on a hold nothing
+    /// took up costs at most a fresh row for a later announcement, never a second standing hold.
+    pub fn mark_interruption_taking_up(&mut self, id: i64, now: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE session_interruption SET taking_up_at = ?2
+              WHERE id = ?1 AND resumed_at IS NULL AND taking_up_at IS NULL",
+            params![id, now],
+        )?;
+        Ok(())
     }
 }
 
@@ -370,6 +444,129 @@ mod tests {
         // …and neither has an id this workspace never minted, which is the same answer on purpose:
         // both mean "there is nothing on hold here", which is what the caller asked.
         assert_eq!(s.current_interruption("m-nobody").unwrap(), None);
+    }
+
+    /// **A store from before `taking_up_at` is upgraded in place, once, and keeps its holds** (nxf
+    /// 6j6v.cn4p, pass-2 review TQ #1). Every other test here builds a fresh store, where the
+    /// guarded ALTER never runs.
+    #[test]
+    fn a_session_interruption_table_without_taking_up_at_is_upgraded_in_place() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("chat.db");
+        let path = path.to_str().unwrap();
+        {
+            // The v0.221.0 shape: `outcome` present, `taking_up_at` absent, one hold standing.
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_interruption(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL,
+                     at TEXT NOT NULL, limit_name TEXT NOT NULL, until TEXT,
+                     detail TEXT NOT NULL, resumed_at TEXT, outcome TEXT);
+                 INSERT INTO session_interruption(session, at, limit_name, until, detail)
+                 VALUES ('m-s1', '2026-09-12T09:53:52Z', 'seven_day',
+                         '2026-09-14T12:00:00Z', 'old');",
+            )
+            .unwrap();
+        }
+        let has_column = |s: &ChatStore| -> bool {
+            s.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('session_interruption')
+                      WHERE name = 'taking_up_at'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        // Opened twice: the second open finds the column and skips the ALTER.
+        drop(ChatStore::open(path, 1).expect("the first open upgrades"));
+        let mut s = ChatStore::open(path, 1).expect("the second open is a no-op upgrade");
+        assert!(has_column(&s));
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(standing.len(), 1, "the old hold still stands");
+        assert_eq!(standing[0].detail, "old");
+        let old = standing[0].id;
+
+        // …and the new behaviour works on the upgraded table.
+        s.mark_interruption_taking_up(old, "2026-09-14T12:00:01Z")
+            .unwrap();
+        let new = s
+            .record_interruption("m-s1", "seven_day", None, "new", "2026-09-14T12:00:02Z")
+            .unwrap();
+        assert_ne!(new, old);
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(standing.iter().map(|h| h.id).collect::<Vec<_>>(), [new]);
+    }
+
+    /// **A mark left by a failed start costs one fresh row, never a second standing hold** (pass-2
+    /// review TQ #2 and Integrity #1): the start failed, the mark stayed, and the ORIGINAL teardown
+    /// announces again.
+    #[test]
+    fn a_mark_left_by_a_failed_start_turns_a_retried_teardown_into_one_new_row() {
+        let mut s = store();
+        let old = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        s.mark_interruption_taking_up(old, "2026-09-14T12:00:01Z")
+            .unwrap();
+        // The start failed: nothing stamps, nothing clears the mark.
+        let retried = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        assert_ne!(retried, old, "the cost the mark's doc names: a fresh row");
+        let again = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        assert_eq!(
+            again, retried,
+            "the fresh row is unmarked, so the next retry reuses it"
+        );
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(
+            standing.iter().map(|h| h.id).collect::<Vec<_>>(),
+            [retried],
+            "exactly one hold stands"
+        );
+    }
+
+    #[test]
+    fn an_announcement_while_a_resume_takes_the_hold_up_supersedes_it() {
+        // nxf 6j6v.cn4p: the resumed session re-hits the limit before its resume stamped the old
+        // hold. The new hold must stand, and the old one be closed — in the same write.
+        let mut s = store();
+        let old = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        s.mark_interruption_taking_up(old, "2026-09-14T12:00:01Z")
+            .unwrap();
+        assert_eq!(
+            s.current_interruption("m-s1").unwrap().map(|h| h.id),
+            Some(old),
+            "a hold being taken up still STANDS"
+        );
+        let new = s
+            .record_interruption(
+                "m-s1",
+                "seven_day",
+                Some("2026-09-21T12:00:00Z"),
+                "b",
+                "2026-09-14T12:00:02Z",
+            )
+            .unwrap();
+        assert_ne!(new, old);
+        let standing = s.standing_interruptions().unwrap();
+        assert_eq!(standing.len(), 1);
+        assert_eq!(standing[0].id, new);
+        assert_eq!(standing[0].until.as_deref(), Some("2026-09-21T12:00:00Z"));
+        // The resume's own stamp, by id, afterwards touches nothing.
+        assert!(!s
+            .mark_interruption_resumed(old, "2026-09-14T12:00:03Z")
+            .unwrap());
+        assert_eq!(
+            s.current_interruption("m-s1").unwrap().map(|h| h.id),
+            Some(new)
+        );
     }
 
     #[test]

@@ -427,6 +427,13 @@ system, and the runtime states the reset instant. Run the verb by hand to go ear
 starts it although the window is not up, which is what you want with a second account. If the
 runtime named no instant at all, nothing will take the operation up on its own and the line says so.
 
+**Any thread of the operation will do, the root included** — the id `nxc status` shows you. The
+hold may stand on any session of the operation, from that root down: for a channel run it is a step
+running on a thread of its own beneath the root. When several sessions of one operation are on
+hold, the one that has waited longest is taken up first and the line names its thread; run the verb
+again for the next. `nxc status` calls an operation `INTERRUPTED` exactly when this finds a hold in
+it. `--session` still names one session and nothing else.
+
 **The session continues with its own transcript**, rather than starting over. That is not a
 convenience, it is the safety argument: the transcript carries every command the session ran *and
 what that command returned*, so a session that already created a ticket sees the id it got back and

@@ -461,6 +461,14 @@ System, und die Laufzeit nennt die Rücksetzzeit. Von Hand läuft der Befehl, um
 Konto. Hat die Laufzeit gar keine Zeit genannt, nimmt nichts den Vorgang von allein auf, und die
 Zeile sagt das.
 
+**Jeder Faden des Vorgangs reicht, die Wurzel eingeschlossen** — die Kennung, die `nxc status`
+zeigt. Der Haltezustand kann auf jeder Sitzung des Vorgangs stehen, von dieser Wurzel abwärts: bei
+einem Kanal-Lauf ist das ein Schritt, der auf einem eigenen Faden unter der Wurzel läuft. Stehen
+mehrere Sitzungen eines Vorgangs, wird die zuerst aufgenommen, die am längsten wartet, und die Zeile
+nennt ihren Faden; ein weiterer Aufruf nimmt die nächste. `nxc status` nennt einen Vorgang genau dann
+`INTERRUPTED`, wenn dieser Befehl darin einen Haltezustand findet. `--session` nennt weiterhin genau
+eine Sitzung.
+
 **Die Sitzung macht mit ihrer eigenen Mitschrift weiter**, statt von vorn anzufangen. Das ist keine
 Bequemlichkeit, sondern die Sicherheitsbegründung: die Mitschrift trägt jeden Befehl *und dessen
 Ergebnis*, also sieht eine Sitzung, die ein Ticket schon angelegt hat, die Kennung, die sie
