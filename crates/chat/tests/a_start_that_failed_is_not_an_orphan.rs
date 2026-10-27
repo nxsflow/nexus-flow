@@ -298,10 +298,12 @@ fn tick(tmp: &TempDir, worker: &FlakyWorker, now: &str, thread_id: &str) -> Tick
     tick_with(tmp, worker, &DryTimer, now, thread_id)
 }
 
-/// A timer that records what it was asked to arm: (thread, instant).
+/// A timer that records what it was asked to arm: (thread, instant) — and, apart, the stranded
+/// looks: (slot, instant).
 #[derive(Default)]
 struct RecordingTimer {
     armed: Mutex<Vec<(String, String)>>,
+    looks: Mutex<Vec<(String, String)>>,
 }
 
 impl Timer for RecordingTimer {
@@ -311,6 +313,19 @@ impl Timer for RecordingTimer {
             .unwrap()
             .push((thread_id.to_string(), deadline.to_string()));
         Ok(TimerHandle(format!("recorded:{thread_id}")))
+    }
+
+    fn schedule_stranded_look(
+        &self,
+        slot: &str,
+        _thread: &str,
+        deadline: &str,
+    ) -> NxfResult<TimerHandle> {
+        self.looks
+            .lock()
+            .unwrap()
+            .push((slot.to_string(), deadline.to_string()));
+        Ok(TimerHandle(format!("look:{slot}")))
     }
 
     fn cancel(&self, _handle: &TimerHandle) -> NxfResult<()> {
@@ -537,6 +552,81 @@ fn a_start_refused_for_a_reason_waiting_cannot_fix_is_not_retried() {
     let op = operation(&engine, "2026-10-08T18:00:00Z", &second);
     assert_eq!(op.start_failed.len(), 1);
     assert_eq!(op.start_failed[0].retry_at, None);
+}
+
+/// **A start given up by the release is never silent** (nxf 6j6v.yts5). The release is not a tick,
+/// so no sweep follows it — and the look the slot's trigger armed when it was queued was spent while
+/// it waited. The give-up arms the slot's look one grace out, and that look escalates it to its
+/// sender in the member's name.
+#[test]
+fn a_start_the_release_gives_up_arms_its_slots_look_and_that_look_escalates_it() {
+    let (tmp, engine, worker) = team();
+    let (second, finisher) = a_finishing_chain_with_a_round_queued(&engine, &worker);
+    worker.fail_next(1, ErrorKind::Validation);
+    worker.mark_gone(&finisher);
+    let timer = RecordingTimer::default();
+    let receipt = with_compute(&tmp, &worker, &timer, NOW, "finisher", |ctx, store| {
+        orchestration::session_ended(ctx, store, &finisher)
+    });
+    assert_eq!(start_failures(&receipt.warnings).len(), 1);
+
+    let look = timer
+        .looks
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(slot, _)| slot.ends_with("-coder"))
+        .cloned();
+    let (slot, at) = look.expect("the give-up arms the coder slot's look");
+    assert_eq!(at, "2026-10-08T16:41:00Z", "the give-up plus one grace");
+
+    let slot_thread = slot.trim_end_matches("-coder").to_string();
+    tick(&tmp, &worker, &at, &slot_thread);
+    let escalated: Vec<String> = store(&tmp)
+        .messages_in_thread(&slot_thread)
+        .expect("messages")
+        .into_iter()
+        .filter(|m| m.kind == "escalation")
+        .map(|m| m.sender)
+        .collect();
+    assert_eq!(escalated.len(), 1, "escalated once: {escalated:?}");
+    assert!(escalated[0].ends_with("/coder"), "{escalated:?}");
+    assert_eq!(worker.started("coder"), 1, "and never started again");
+    let _ = second;
+}
+
+/// `f` through the compute layer under the workspace's own origin, with `timer`.
+fn with_compute<R>(
+    tmp: &TempDir,
+    worker: &FlakyWorker,
+    timer: &dyn Timer,
+    now: &str,
+    actor: &str,
+    f: impl FnOnce(&orchestration::Ctx, &mut nexus_chat::store::ChatStore) -> NxfResult<R>,
+) -> R {
+    let ws = Workspace::resolve(None, tmp.path()).expect("resolve workspace");
+    let db_path = ws.db_path_str().expect("db path");
+    let origin = nexus_chat::workspace::origin_of(&ws).to_string();
+    let mut store = ws.open_chat_store().expect("open chat store");
+    let defs = Definitions::resolve(tmp.path()).expect("declarations");
+    let ctx = orchestration::Ctx {
+        now,
+        origin: &origin,
+        actor,
+        session: None,
+        hop: 0,
+        defs: &defs,
+        worker,
+        timer,
+        namer: &nexus_chat::naming::DryNamer,
+        db_path: &db_path,
+        project_claude_md: None,
+        module_primes: None,
+        machines: None,
+        peers: None,
+    };
+    f(&ctx, &mut store).expect("the call succeeds")
 }
 
 // ---- (4) an orphan can be discarded ---------------------------------------------------------------
