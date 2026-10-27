@@ -925,8 +925,7 @@ pub fn trigger_role(
         // channel's members still share one claim (they share a root), and the acquire and release
         // ends still name the same area, now trivially — the key IS the root and
         // [`ChatStore::work_scope_threads`] is that root's subtree.
-        let claim_thread = lease_claim_root(store, thread)?;
-        let scope = resolve_scope(claim_thread.as_deref(), &internal_session);
+        let scope = claim_scope(store, thread, &internal_session)?;
         // Whether THIS operation is one of the parked ones. A trigger belonging to any other
         // operation leaves this gate exactly as it found it, which is what keeps `anything_parked`
         // above a cheap pre-filter rather than a change of behaviour for unrelated work.
@@ -934,37 +933,17 @@ pub fn trigger_role(
             && !matches!(scope, WorkScope::Session(_))
             && !store.parked_work(&scope.key())?.is_empty();
         if (needs_the_copy || resumes_parked_work) && !matches!(scope, WorkScope::Session(_)) {
-            let entry = QueuedTrigger {
-                // Ignored on the way in — `enqueue_working_tree`'s AUTOINCREMENT assigns the real
-                // one and hands it back.
-                id: 0,
-                scope_key: scope.key(),
-                role: decl.handle.clone(),
-                session: internal_session.clone(),
-                // The BELONGS-TO thread, which is what `scope_key` above is derived from and what a
-                // re-fire has to run in. The obligation half (`reply_thread`) is deliberately not
-                // frozen here: `coordinator_commission` decides it from the thread's quorum
-                // register AT
-                // TRIGGER TIME, and re-deriving it when this entry is fired is the same discipline
-                // that makes the entry store raw inputs instead of a composed prompt (nxf 6j6v.fe0f
-                // owns that re-derivation).
-                thread: thread.map(str::to_string),
-                message: message.to_string(),
-                // The choice from ABOVE the role, stored as it arrived and NOT collapsed with
-                // `decl.effective_model()`: the entry carries raw inputs, and the role's own half is
-                // re-read from the catalogue when this is fired, exactly as it would have been now.
-                model: model_override,
+            let entry = queued_entry(
+                &scope,
+                &decl.handle,
+                &internal_session,
+                thread,
+                message,
+                model_override,
                 depth,
-                // The ORDERING key, and a raw input like every other field here: an entry that came
-                // back out `Urgent` and went back in as something else would lose the one judgement
-                // the queue's order exists to honour (nxf 6j6v.fe0f re-fires through this very
-                // function, so a promoted entry can be queued again).
                 priority,
-                // `None` for a trigger meeting the queue for the first time — `enqueue_working_tree`
-                // then stamps `ctx.now`. `Some` only for a promotion that lost the race again, which
-                // keeps the place in line it already waited for.
-                enqueued_at: queued_since.map(str::to_string),
-            };
+                queued_since,
+            );
             if let Some((behind, position, findings)) =
                 acquire_or_queue(ctx, store, &scope, &entry)?
             {
@@ -2914,6 +2893,50 @@ fn start_the_steps_whose_turn_has_come(ctx: &Ctx, store: &mut ChatStore) -> Resu
 /// kind, and starting it again and again would only hide that — so past the bound the record stays
 /// for `nxc status` to show and `withdraw` to discard, and nothing retries it.
 pub const MAX_START_ATTEMPTS: u32 = 3;
+
+/// **How long a write on the way to a start waits for a store another process holds** (nxf
+/// 6j6v.3eqa) — beyond the store's own busy timeout, three more tries this far apart, in
+/// milliseconds.
+///
+/// Measured on 2026-10-25: while a coding run compiled and ran its tests, two of the owner's sends
+/// to `pm` met "database is locked" on the obligation's write, and another send in another
+/// workspace panicked on it. A store held for longer than every wait together fails the call.
+const LOCKED_WRITE_BACKOFF_MS: [u64; 3] = [200, 800, 2_000];
+
+/// **Write through a lock another process holds** (nxf 6j6v.3eqa) — `write` again after each wait
+/// of [`LOCKED_WRITE_BACKOFF_MS`] while it fails with an `io` error, and that error once the waits
+/// are spent.
+///
+/// Asked of the KIND, as [`start_failure_is_transient`] asks it: every store error is `io`, a lock
+/// included. So an `io` failure that waiting does not fix costs the waits and ends in the same
+/// error. `write` must be one that may simply run again: a refused `BEGIN IMMEDIATE` writes nothing
+/// ([`ChatStore::try_post_message`] and its siblings), and the store's upserts converge.
+pub(crate) fn through_the_lock<T>(write: impl FnMut() -> Result<T>) -> Result<T> {
+    through_the_lock_with(&LOCKED_WRITE_BACKOFF_MS, std_sleep_ms, write)
+}
+
+fn std_sleep_ms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// [`through_the_lock`]'s body, with its waits and its sleep handed in — the seam its own tests
+/// count attempts and waits through without sleeping.
+fn through_the_lock_with<T>(
+    waits: &[u64],
+    mut sleep: impl FnMut(u64),
+    mut write: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut waits = waits.iter();
+    loop {
+        match write() {
+            Err(e) if e.kind == crate::error::ErrorKind::Io => match waits.next() {
+                Some(ms) => sleep(*ms),
+                None => return Err(e),
+            },
+            done => return done,
+        }
+    }
+}
 
 /// **How far apart the retries of a failed start are**, in seconds: the n-th failure is retried
 /// `n ×` this later — one minute after the first, two after the second. Its own constant rather than
@@ -5848,11 +5871,12 @@ pub fn ensure_dm_channel(
     facade::check_no_sep("handle", b)?;
     let author = format!("{origin}/{actor}");
     let cid = dm_channel_id(a, b);
-    store.set_channel_field(&cid, "kind", CHANNEL_KIND_DIRECT, &author);
-    store.set_channel_field(&cid, "origin", origin, &author);
+    // Fallible (nxf 6j6v.3eqa): a store another process holds is an `io` error, never a panic.
+    store.try_set_channel_field(&cid, "kind", CHANNEL_KIND_DIRECT, &author)?;
+    store.try_set_channel_field(&cid, "origin", origin, &author)?;
     for handle in [a, b] {
         if !store.is_member(&cid, handle)? {
-            store.add_member(&cid, handle, &author);
+            store.try_add_member(&cid, handle, &author)?;
         }
     }
     Ok(cid)
@@ -6369,15 +6393,20 @@ fn coordinator_commission_in(
     // answer is simply the same call again with `--machine` — see [`designate_new_chat`].
     let designation = designate_new_chat(ctx, &decl, &req, coordinator)?;
 
+    // **Every write on the way to the start goes through the lock** (nxf 6j6v.3eqa): another
+    // process holding the store is waited for ([`through_the_lock`]), and one that holds it for
+    // longer fails this call as an `io` error — never a panic.
     let channel = match req.channel {
         Some(c) => c.to_string(),
-        None => ensure_dm_channel(
-            store,
-            ctx.origin,
-            ctx.actor,
-            &ctx.caller_handle(),
-            &ctx.qualify(req.role),
-        )?,
+        None => through_the_lock(|| {
+            ensure_dm_channel(
+                store,
+                ctx.origin,
+                ctx.actor,
+                &ctx.caller_handle(),
+                &ctx.qualify(req.role),
+            )
+        })?,
     };
     // **THE THREAD, and the coordinator is where it is opened** (nxf 6j6v.ntp9). A caller that has
     // already opened one hands it in — the supervisor must, because its member thread has to hang
@@ -6397,9 +6426,13 @@ fn coordinator_commission_in(
     let (thread, opened_here) = match req.thread {
         Some(t) => (t.to_string(), false),
         None => {
+            // A send that fails after this leaves the thread behind, empty: an error now rather
+            // than a panic, and the one residue of a store that stays locked (nxf 6j6v.3eqa).
             let parent = ambient_parent(ctx, store);
             (
-                open_child_thread(ctx, store, &channel, parent.as_deref()),
+                through_the_lock(|| {
+                    try_open_child_thread(ctx, store, &channel, parent.as_deref())
+                })?,
                 true,
             )
         }
@@ -6408,37 +6441,18 @@ fn coordinator_commission_in(
     // bqe0 §3.1 names beside `send --to <channel>`. Same `INSERT OR IGNORE` under the same root, so
     // a commission INSIDE a running chain (a channel's flow step, a re-commission out of a review)
     // binds nothing and inherits the version its operation already runs under.
-    store.freeze_declarations(&store.thread_root(&thread)?, ctx.now, ctx.defs)?;
+    through_the_lock(|| {
+        store.freeze_declarations(&store.thread_root(&thread)?, ctx.now, ctx.defs)
+    })?;
     let refs = with_working_copy(ctx, with_return_address(ctx, req.refs));
-    let receipt = facade::send(
-        store,
-        facade::SendRequest {
-            now: ctx.now,
-            origin: ctx.origin,
-            actor: ctx.actor,
-            channel: &channel,
-            body: req.body,
-            kind: req.kind,
-            priority: req.priority,
-            disposition: req.disposition,
-            thread: Some(&thread),
-            refs,
-        },
-    )?;
 
-    // **AFTER the opening message is posted, because that message IS the derivation's input** (nxf
-    // 6j6v.e76c). The commissioned run reads the thread back; commissioning it a line earlier would
-    // race it against an empty thread.
-    if opened_here {
-        commission_thread_name(ctx, &thread);
-    }
     // **A child a SESSION opened inherits a bound** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, "an
     // orphaned child wakes its parent"): its own `nxc send` used to open a round with no deadline
     // at all (t7y5), so a child that hung held its parent for as long as nobody looked.
     if opened_here && ctx.session.is_some() {
         if let Some(parent) = store.thread_parent(&thread)? {
             let bound = child_bound(ctx, store, &parent)?;
-            store.set_deadline(&thread, &bound, &ctx.caller_handle());
+            through_the_lock(|| store.try_set_deadline(&thread, &bound, &ctx.caller_handle()))?;
         }
     }
 
@@ -6448,7 +6462,9 @@ fn coordinator_commission_in(
     // replica's key.
     let designated = designation.as_ref().and_then(|a| a.machine.clone());
     if let Some(m) = &designated {
-        store.set_thread_machine(&thread, &m.machine_id, &ctx.caller_handle());
+        through_the_lock(|| {
+            store.try_set_thread_machine(&thread, &m.machine_id, &ctx.caller_handle())
+        })?;
     }
     let handed_to = designated.clone().filter(|m| !m.here);
 
@@ -6479,7 +6495,9 @@ fn coordinator_commission_in(
     let declare = |store: &mut ChatStore| {
         let expects_json =
             serde_json::to_string(std::slice::from_ref(&owed_role)).expect("expects serialize");
-        store.set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle());
+        through_the_lock(|| {
+            store.try_set_expects_reply_from(&thread, &expects_json, &ctx.caller_handle())
+        })
     };
     // **The obligation is the slot** (nxf 6j6v.kgfn; epic 6j6v.nmc9 section A). A COORDINATED slot
     // is owed from the instant it is opened: the expectation, then the row with no session and its
@@ -6487,13 +6505,22 @@ fn coordinator_commission_in(
     // owed, with a clock and a look, which the sweep records as `never_started` and its coordinator
     // takes up. That reverses, for a coordinated slot only, the order the paragraph below the mint
     // gives for every other slot: the orphaned expectation it guards against is precisely what the
-    // row exists to notice. Best-effort, reported on this receipt.
+    // row exists to notice.
+    //
+    // **Durable, and before the message** (nxf 6j6v.3eqa): the row is written through the lock or
+    // this call fails, and the message is posted only after it — so no message is ever posted with
+    // nobody behind it. Only its look is best-effort, reported on this receipt.
     let mut owed_findings = Vec::new();
+    // A row that cannot be written takes the expectation declared for it back with it.
     if let Some(c) = &slot_coordinator {
-        declare(store);
-        owed_findings.extend(crate::stranded::owe_the_slot(
-            ctx, store, &thread, &owed_role, &c.thread,
-        ));
+        declare(store)?;
+        match crate::stranded::owe_the_slot(ctx, store, &thread, &owed_role, &c.thread) {
+            Ok(findings) => owed_findings.extend(findings),
+            Err(e) => {
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
+                return Err(e);
+            }
+        }
     }
 
     // **The session id, minted and held — BEFORE the obligation below it** (independent review of
@@ -6512,14 +6539,27 @@ fn coordinator_commission_in(
     // one id, which is what keeps everything below this line one path.
     // A chat handed to another machine mints no session HERE: the session belongs to the machine
     // that runs the persona, and that machine mints its own when it picks the order up.
-    let (internal, resume_real) = match &req.continue_session {
-        _ if handed_to.is_some() => (String::new(), None),
-        Some(c) => (c.internal.clone(), c.real.clone()),
-        None => {
-            let internal = store.mint_session_id();
-            store.create_pending_session(&internal, req.role)?;
-            (internal, None)
-        }
+    //
+    // **Where the mint stands against the message** (nxf 6j6v.3eqa). A slot WITHOUT a coordinator
+    // mints before the message: nothing would take up a mint that failed after it, so a failure
+    // fails the call with nothing posted. A COORDINATED slot is owed already, above, so it mints
+    // after the message: a mint that fails there leaves the slot owed WITH its commissioning
+    // message, which is what its coordinator re-commissions it from (field case 3,
+    // `the_obligation_is_the_slot.rs`).
+    let mint = |store: &mut ChatStore| -> Result<(String, Option<String>)> {
+        Ok(match &req.continue_session {
+            _ if handed_to.is_some() => (String::new(), None),
+            Some(c) => (c.internal.clone(), c.real.clone()),
+            None => {
+                let internal = store.mint_session_id();
+                through_the_lock(|| store.create_pending_session(&internal, req.role))?;
+                (internal, None)
+            }
+        })
+    };
+    let minted_first = match slot_coordinator {
+        None => Some(mint(store)?),
+        Some(_) => None,
     };
 
     // Every commission declares, on its own thread, that it expects a reply from the role it just
@@ -6544,9 +6584,97 @@ fn coordinator_commission_in(
         None
     } else {
         if slot_coordinator.is_none() {
-            declare(store);
+            declare(store)?;
         }
         Some(thread.as_str())
+    };
+
+    // A slot nobody coordinates keeps cut 1a's record exactly (nxf 6j6v.ccvy): written for a MINTED
+    // session that owes an answer, right after the register says so, so a slot whose trigger never
+    // runs still has a clock and a look. A continued session mints nothing here: the trigger funnel
+    // below writes its row with the trigger's own instant. A chat handed to another machine has no
+    // session here, and its row is that machine's.
+    //
+    // **Durable, and before the message** (nxf 6j6v.3eqa), as the open above: written through the
+    // lock or this call fails.
+    if let (Some((internal, _)), Some(owed_on), None, None) = (
+        &minted_first,
+        declared_here,
+        &req.continue_session,
+        &handed_to,
+    ) {
+        match crate::stranded::owe_durably(ctx, store, owed_on, &owed_role, internal) {
+            Ok(findings) => owed_findings.extend(findings),
+            Err(e) => {
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
+                return Err(e);
+            }
+        }
+    }
+
+    // **The message, once somebody is behind it** (nxf 6j6v.3eqa). The obligation above is durable
+    // before this post; a post that cannot get through the lock fails the call, and the obligation
+    // it would have stood behind goes with it.
+    let posted = through_the_lock(|| {
+        facade::send(
+            store,
+            facade::SendRequest {
+                now: ctx.now,
+                origin: ctx.origin,
+                actor: ctx.actor,
+                channel: &channel,
+                body: req.body,
+                kind: req.kind,
+                priority: req.priority,
+                disposition: req.disposition,
+                thread: Some(&thread),
+                refs: refs.clone(),
+            },
+        )
+    });
+    let receipt = match posted {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            // Taken back, so nobody is left owing on a thread with no message in it.
+            if declared_here.is_some() {
+                take_the_obligation_back(ctx, store, &thread, &owed_role);
+            }
+            return Err(e);
+        }
+    };
+    // **AFTER the opening message is posted, because that message IS the derivation's input** (nxf
+    // 6j6v.e76c). The commissioned run reads the thread back; commissioning it a line earlier would
+    // race it against an empty thread.
+    if opened_here {
+        commission_thread_name(ctx, &thread);
+    }
+
+    // **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn) — for a
+    // coordinated slot, after the message (see `mint` above); the trigger funnel below then marks
+    // it triggered. Durable (nxf 6j6v.3eqa): written through the lock or this call fails, and the
+    // slot stays owed with its message for its coordinator.
+    let (internal, resume_real) = match minted_first {
+        Some(minted) => minted,
+        None => {
+            // The message is posted and the slot owed when this fails, so the error says so: a
+            // caller that sends again opens a second commission of the same task.
+            let posted_and_owed = |mut e: NxfError| {
+                e.msg = format!(
+                    "the message to {role} is posted on thread {thread} and its slot is owed, but \
+                     its session could not be started: {msg} — its coordinator takes the slot \
+                     up; do not send it again",
+                    role = req.role,
+                    msg = e.msg
+                );
+                e
+            };
+            let minted = mint(store).map_err(posted_and_owed)?;
+            owed_findings.extend(
+                crate::stranded::bind(ctx, store, &thread, &owed_role, &minted.0)
+                    .map_err(posted_and_owed)?,
+            );
+            minted
+        }
     };
 
     // **Handed over, not started** (nxf 6j6v.1c6k). The message, the chat's machine and the
@@ -6572,23 +6700,6 @@ fn coordinator_commission_in(
         if let Some(m) = ctx.machines {
             claim_here(m, &thread, &receipt.message_id, ctx.db_path);
         }
-    }
-
-    // **The mint fills the slot's session and moves its clock** (nxf 6j6v.kgfn) — the minted
-    // session, or the continued one; the trigger funnel below then marks it triggered.
-    //
-    // A slot nobody coordinates keeps cut 1a's record exactly (nxf 6j6v.ccvy): written for a MINTED
-    // session that owes an answer, right after the register says so, so a slot whose trigger never
-    // runs still has a clock and a look. A continued session mints nothing here: the trigger funnel
-    // below writes its row with the trigger's own instant. Best-effort, reported on this receipt.
-    match (&slot_coordinator, declared_here, &req.continue_session) {
-        (Some(_), _, _) => owed_findings.extend(crate::stranded::bind(
-            ctx, store, &thread, &owed_role, &internal,
-        )),
-        (None, Some(owed_on), None) => owed_findings.extend(crate::stranded::owe(
-            ctx, store, owed_on, &owed_role, &internal, false, None,
-        )),
-        _ => {}
     }
 
     // **The task, as the role will read it** (nxf 6j6v.ntp9). The caller's own words are what was
@@ -6677,7 +6788,29 @@ fn coordinator_commission_in(
             // taxonomy as everywhere else in this module (nxf 6j6v.93zd), which is what closes nxf
             // 6j6v.6m6x: WHY this did not start is now a value on the receipt rather than a phrase
             // inside a sentence.
+            //
+            // **One that waiting can fix is retried as well** (nxf 6j6v.3eqa), and the receipt says
+            // when, in the same class and reason ([`retry_a_failed_direct_start`]).
             let reason = wake_skip_reason(&e);
+            let detail = match &e {
+                TriggerError::Failed(inner) if start_failure_is_transient(inner) => {
+                    retry_a_failed_direct_start(
+                        ctx,
+                        store,
+                        FailedDirectStart {
+                            decl: &decl,
+                            session: &internal,
+                            thread: &thread,
+                            message: &wake,
+                            model: req.model,
+                            depth: hop.get() + 1,
+                            priority: req.priority,
+                        },
+                        inner,
+                    )
+                }
+                _ => warning,
+            };
             Ok(TriggerReceipt {
                 handed_to: None,
                 message_id: receipt.message_id,
@@ -6690,7 +6823,7 @@ fn coordinator_commission_in(
                     Some(&thread),
                     Some(&internal),
                     reason,
-                    warning,
+                    detail,
                 )],
                 thread,
             })
@@ -6700,6 +6833,133 @@ fn coordinator_commission_in(
         receipt.warnings.extend(owed_findings);
     }
     result
+}
+
+/// **The claim area a trigger on `thread` competes under** — the root of its operation (nxf
+/// 6j6v.8y6t), or the session alone for a trigger that belongs to no thread. One derivation for the
+/// working-copy queue and the failed-start record, so a retry is kept under the area its start
+/// would have queued under.
+fn claim_scope(store: &ChatStore, thread: Option<&str>, session: &str) -> Result<WorkScope> {
+    let claim_thread = lease_claim_root(store, thread)?;
+    Ok(resolve_scope(claim_thread.as_deref(), session))
+}
+
+/// **A trigger's raw inputs, as the working-copy queue and the failed-start record keep them** —
+/// built in one place for both, so the two cannot come to store different things.
+#[allow(clippy::too_many_arguments)]
+fn queued_entry(
+    scope: &WorkScope,
+    role: &str,
+    session: &str,
+    thread: Option<&str>,
+    message: &str,
+    model: Option<Model>,
+    depth: u32,
+    priority: Priority,
+    queued_since: Option<&str>,
+) -> QueuedTrigger {
+    QueuedTrigger {
+        // Ignored on the way in — `enqueue_working_tree`'s AUTOINCREMENT assigns the real one and
+        // hands it back.
+        id: 0,
+        scope_key: scope.key(),
+        role: role.to_string(),
+        session: session.to_string(),
+        // The BELONGS-TO thread, which is what `scope_key` above is derived from and what a re-fire
+        // has to run in. The obligation half (`reply_thread`) is deliberately not frozen here:
+        // `coordinator_commission` decides it from the thread's quorum register AT TRIGGER TIME,
+        // and re-deriving it when this entry is fired is the same discipline that makes the entry
+        // store raw inputs instead of a composed prompt (nxf 6j6v.fe0f owns that re-derivation).
+        thread: thread.map(str::to_string),
+        message: message.to_string(),
+        // The choice from ABOVE the role, stored as it arrived and NOT collapsed with
+        // `decl.effective_model()`: the entry carries raw inputs, and the role's own half is
+        // re-read from the catalogue when this is fired, exactly as it would have been now.
+        model,
+        depth,
+        // The ORDERING key, and a raw input like every other field here: an entry that came back
+        // out `Urgent` and went back in as something else would lose the one judgement the queue's
+        // order exists to honour (nxf 6j6v.fe0f re-fires through this very function, so a promoted
+        // entry can be queued again).
+        priority,
+        // `None` for a trigger meeting the queue for the first time — `enqueue_working_tree` then
+        // stamps `ctx.now`. `Some` only for a promotion that lost the race again, which keeps the
+        // place in line it already waited for.
+        enqueued_at: queued_since.map(str::to_string),
+    }
+}
+
+/// What [`retry_a_failed_direct_start`] records: the direct send's trigger, as it was asked for.
+struct FailedDirectStart<'a> {
+    decl: &'a RoleDecl,
+    session: &'a str,
+    thread: &'a str,
+    message: &'a str,
+    model: Option<Model>,
+    /// What the trigger records against the session: one hop deeper than its caller
+    /// (`ChainMove::Deeper`), which `fire_queued_trigger` reads back.
+    depth: u32,
+    priority: Priority,
+}
+
+/// **A direct send's start that waiting can fix is retried** (nxf 6j6v.3eqa) — on the schedule of
+/// a queued start whose start failed ([`note_the_failed_start`]): recorded, retried by the tick one
+/// and two minutes on, and given up at [`MAX_START_ATTEMPTS`]. A coordinated slot's coordinator
+/// then takes it up as `start_given_up` (rung D); an uncoordinated one stays recorded for `nxc
+/// status` to show and `withdraw` to discard, as a given-up queued start does. Measured on
+/// 2026-10-25: a direct send whose start met "database is locked" sat posted with nobody behind
+/// it, and nothing retried it.
+///
+/// Returns the detail the receipt carries — the retry and its instant, or why there is none.
+fn retry_a_failed_direct_start(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    start: FailedDirectStart<'_>,
+    e: &NxfError,
+) -> String {
+    let scope = claim_scope(store, Some(start.thread), start.session).unwrap_or_else(|why| {
+        eprintln!(
+            "warning: the claim area of thread {} could not be read ({why}); the retry of \
+             session {} is kept under the session alone",
+            start.thread, start.session
+        );
+        resolve_scope(None, start.session)
+    });
+    let entry = queued_entry(
+        &scope,
+        &start.decl.handle,
+        start.session,
+        Some(start.thread),
+        start.message,
+        start.model,
+        start.depth,
+        start.priority,
+        None,
+    );
+    let what = format!(
+        "the message to {} is posted and its obligation recorded, but",
+        start.decl.handle
+    );
+    note_the_failed_start(ctx, store, &entry, &what, e).detail
+}
+
+/// **Take back the obligation of a message that could not be posted** (nxf 6j6v.3eqa), or of one
+/// whose owed row could not be written — the
+/// expectation cleared and the owed row forgotten, both through the lock, since the lock is the
+/// likely reason the post failed: left behind, they stay on a thread with no message and hold the
+/// working copy of an enclosing operation until its lease runs out. A take-back that still fails is
+/// said, and its leftovers are the sweep's. What stays either way is the opened thread, empty, and
+/// an uncoordinated slot's pending session — harmless, and what a queued commission leaves too.
+fn take_the_obligation_back(ctx: &Ctx, store: &mut ChatStore, thread: &str, owed_role: &str) {
+    let taken_back =
+        through_the_lock(|| store.try_set_expects_reply_from(thread, "[]", &ctx.caller_handle()))
+            .and_then(|()| through_the_lock(|| store.forget_owed_start(thread, owed_role)));
+    if let Err(back) = taken_back {
+        eprintln!(
+            "warning: the message to {owed_role} could not be posted, and the obligation written \
+             for it on thread {thread} could not be taken back: {back}"
+        );
+    }
 }
 
 /// **Which machine a NEW persona chat runs on** (nxf 6j6v.1c6k) — `None` when no machine is
@@ -7387,9 +7647,21 @@ pub fn open_child_thread(
     channel_id: &str,
     parent: Option<&str>,
 ) -> String {
+    try_open_child_thread(ctx, store, channel_id, parent)
+        .unwrap_or_else(|e| panic!("opening a thread on channel {channel_id}: {e}"))
+}
+
+/// [`open_child_thread`], with a store another process holds handed back as an `io` error — no
+/// thread opened — instead of a panic (nxf 6j6v.3eqa).
+pub(crate) fn try_open_child_thread(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    channel_id: &str,
+    parent: Option<&str>,
+) -> Result<String> {
     let author = ctx.caller_handle();
     store.set_wall_clock(ctx.now);
-    store.open_new_thread(
+    store.try_open_new_thread(
         &crate::model::ThreadRoot {
             origin: ctx.origin.to_string(),
             channel_id: channel_id.to_string(),
@@ -18631,6 +18903,61 @@ fn lapsed_step_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A write through the lock is tried once more after each wait, and no more** (nxf
+    /// 6j6v.3eqa): an `io` failure that lasts is given back after every wait was spent, in order.
+    #[test]
+    fn a_write_that_keeps_meeting_the_lock_is_tried_once_per_wait_and_then_given_back() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done: Result<()> = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                Err(NxfError::io("database is locked"))
+            },
+        );
+        assert_eq!(done.unwrap_err().kind, crate::error::ErrorKind::Io);
+        assert_eq!(tries, 4, "the first try and one per wait");
+        assert_eq!(slept, vec![1, 2, 3], "each wait once, in order");
+    }
+
+    /// One that gets through on a later try returns what it wrote, and waits no further.
+    #[test]
+    fn a_write_that_gets_through_on_its_second_try_waits_once() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                if tries == 1 {
+                    Err(NxfError::io("database is locked"))
+                } else {
+                    Ok(tries)
+                }
+            },
+        );
+        assert_eq!(done.unwrap(), 2);
+        assert_eq!(slept, vec![1]);
+    }
+
+    /// A failure that is not `io` — the call itself is wrong — is handed back at once: waiting
+    /// cannot change it.
+    #[test]
+    fn a_write_refused_for_anything_but_io_is_not_tried_again() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done: Result<()> = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                Err(NxfError::validation("no such role"))
+            },
+        );
+        assert_eq!(done.unwrap_err().kind, crate::error::ErrorKind::Validation);
+        assert_eq!((tries, slept.len()), (1, 0));
+    }
 
     /// **The stored occasion and the JSON spell it the same way.** `as_str` is what a refused park
     /// is stamped with and what the tick compares a row against; the serde tag is what a receipt

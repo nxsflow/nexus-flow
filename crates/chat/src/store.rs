@@ -720,6 +720,8 @@ fn is_degraded(kind: Option<&str>, member_count: usize) -> bool {
 
 pub struct ChatStore {
     inner: Substrate,
+    /// How many of the next message posts [`ChatStore::refuse_next_posts`] refuses (nxf 6j6v.3eqa).
+    refused_posts: std::sync::atomic::AtomicU32,
 }
 
 /// **A thread's parent, unless the thread came in across the border** (nxf 6j6v.4gp2) — the
@@ -746,7 +748,10 @@ impl ChatStore {
         inner.register_reducer(Box::new(MessageReducer));
         // A fresh in-memory log has no base, so the based refusal is unreachable here.
         Self::materialize_views(&mut inner, upgraded).expect("a fresh in-memory store has no base");
-        ChatStore { inner }
+        ChatStore {
+            inner,
+            refused_posts: std::sync::atomic::AtomicU32::new(0),
+        }
     }
 
     pub fn open(path: &str, site: i64) -> rusqlite::Result<ChatStore> {
@@ -754,7 +759,10 @@ impl ChatStore {
         let upgraded = schema::try_apply_chat_views(inner.connection())?;
         inner.register_reducer(Box::new(MessageReducer));
         Self::materialize_views(&mut inner, upgraded)?;
-        Ok(ChatStore { inner })
+        Ok(ChatStore {
+            inner,
+            refused_posts: std::sync::atomic::AtomicU32::new(0),
+        })
     }
 
     /// Bind chat's views to the shared log after opening. Steady state is the O(1)
@@ -911,10 +919,47 @@ impl ChatStore {
     /// whatever coordinate it brings (see `MessageReducer::message`). Under the golden switch the
     /// id stays the deterministic counter — readable output over binding, for tests only.
     pub fn post_message(&mut self, env: &MessageEnvelope) -> String {
+        self.try_post_message(env)
+            .unwrap_or_else(|e| panic!("posting a message: {e}"))
+    }
+
+    /// **Refuse this handle's next `n` message posts as a store another process holds would** —
+    /// [`ChatStore::EVERY_POST`] for every one (nxf 6j6v.3eqa). A test seam: the post is the one write whose
+    /// refusal cannot be injected from SQL, since a view insert that fails inside the substrate's
+    /// own transaction is not handed back. Nothing is written for a refused post.
+    #[doc(hidden)]
+    pub const EVERY_POST: u32 = u32::MAX;
+
+    #[doc(hidden)]
+    pub fn refuse_next_posts(&self, n: u32) {
+        self.refused_posts
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn take_a_refused_post(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.refused_posts.load(Relaxed) {
+            0 => false,
+            Self::EVERY_POST => true,
+            n => {
+                self.refused_posts.store(n - 1, Relaxed);
+                true
+            }
+        }
+    }
+
+    /// [`post_message`](Self::post_message), with a write lock that could not be taken handed back
+    /// instead of a panic (nxf 6j6v.3eqa) — nothing is posted then, and the caller may post again.
+    pub fn try_post_message(&mut self, env: &MessageEnvelope) -> crate::error::Result<String> {
+        if self.take_a_refused_post() {
+            return Err(NxfError::io(
+                "database is locked (the post was refused by `ChatStore::refuse_next_posts`)",
+            ));
+        }
         let value = serde_json::to_string(env).expect("envelope serializes");
         if nxs_foundation::workspace::deterministic_ids_enabled() {
             let message_id = self.mint_id("m-", "messages");
-            self.inner.emit(
+            self.inner.try_emit(
                 DOMAIN_MESSAGE,
                 KIND_MESSAGE,
                 &message_id,
@@ -922,10 +967,10 @@ impl ChatStore {
                 OP_POST,
                 Some(value),
                 &env.sender,
-            );
-            return message_id;
+            )?;
+            return Ok(message_id);
         }
-        self.inner.emit_owned(
+        Ok(self.inner.try_emit_owned(
             DOMAIN_MESSAGE,
             KIND_MESSAGE,
             OWNED_ID_PREFIX,
@@ -933,20 +978,31 @@ impl ChatStore {
             OP_POST,
             Some(value),
             &env.sender,
-        )
+        )?)
     }
 
     /// Open a NEW thread and return its id — `m-` followed by the open op's own id, so the root
     /// belongs to that op (6j6v.vvw6), exactly as a message belongs to its post. The deterministic
     /// counter under the golden switch, as [`post_message`](Self::post_message).
     pub fn open_new_thread(&mut self, root: &ThreadRoot, author: &str) -> String {
+        self.try_open_new_thread(root, author)
+            .unwrap_or_else(|e| panic!("opening a thread: {e}"))
+    }
+
+    /// [`open_new_thread`](Self::open_new_thread), with a write lock that could not be taken handed
+    /// back instead of a panic (nxf 6j6v.3eqa) — no thread is opened then.
+    pub fn try_open_new_thread(
+        &mut self,
+        root: &ThreadRoot,
+        author: &str,
+    ) -> crate::error::Result<String> {
         if nxs_foundation::workspace::deterministic_ids_enabled() {
             let thread_id = self.mint_thread_id();
-            self.open_thread(&thread_id, root, author);
-            return thread_id;
+            self.try_open_thread(&thread_id, root, author)?;
+            return Ok(thread_id);
         }
         let value = serde_json::to_string(root).expect("thread root serializes");
-        self.inner.emit_owned(
+        Ok(self.inner.try_emit_owned(
             DOMAIN_MESSAGE,
             KIND_THREAD,
             OWNED_ID_PREFIX,
@@ -954,10 +1010,23 @@ impl ChatStore {
             OP_OPEN,
             Some(value),
             author,
-        )
+        )?)
     }
 
     pub fn set_channel_field(&mut self, channel_id: &str, field: &str, value: &str, author: &str) {
+        self.try_set_channel_field(channel_id, field, value, author)
+            .unwrap_or_else(|e| panic!("setting channel field {field}: {e}"))
+    }
+
+    /// [`set_channel_field`](Self::set_channel_field), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_set_channel_field(
+        &mut self,
+        channel_id: &str,
+        field: &str,
+        value: &str,
+        author: &str,
+    ) -> crate::error::Result<()> {
         // The reducer's is_foldable whitelists CHANNEL_FIELDS for (KIND_CHANNEL, OP_SET); a field
         // not on that list can never fold (the applier's generated column name relies on the same
         // whitelist for injection-safety). Fail loudly here so a typo'd field is a caller-visible
@@ -966,7 +1035,7 @@ impl ChatStore {
             CHANNEL_FIELDS.contains(&field),
             "unknown channel field: {field}"
         );
-        self.inner.emit(
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_CHANNEL,
             channel_id,
@@ -974,7 +1043,8 @@ impl ChatStore {
             OP_SET,
             Some(value.to_string()),
             author,
-        );
+        )?;
+        Ok(())
     }
 
     pub fn set_profile_field(&mut self, handle: &str, field: &str, value: &str, author: &str) {
@@ -996,6 +1066,18 @@ impl ChatStore {
     }
 
     pub fn add_member(&mut self, channel_id: &str, handle: &str, author: &str) {
+        self.try_add_member(channel_id, handle, author)
+            .unwrap_or_else(|e| panic!("adding a channel member: {e}"))
+    }
+
+    /// [`add_member`](Self::add_member), with a write lock that could not be taken handed back
+    /// instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_add_member(
+        &mut self,
+        channel_id: &str,
+        handle: &str,
+        author: &str,
+    ) -> crate::error::Result<()> {
         // A SEP byte inside either component would make the reducer's `channel{SEP}handle` split2
         // parse ambiguously (or, for a handle/channel_id that itself contains further SEPs, produce
         // >2 parts and fail entirely) — the composite id would silently never fold, corrupting the
@@ -1008,7 +1090,7 @@ impl ChatStore {
             "membership id must not contain the U+001F separator: {channel_id:?} / {handle:?}"
         );
         let tid = format!("{channel_id}{SEP}{handle}");
-        self.inner.emit(
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_MEMBERSHIP,
             &tid,
@@ -1016,7 +1098,8 @@ impl ChatStore {
             OP_ADD,
             None,
             author,
-        );
+        )?;
+        Ok(())
     }
 
     /// Remove `handle` from `channel_id`, tombstoning every add-tag currently observed for it
@@ -1064,8 +1147,20 @@ impl ChatStore {
     /// site)` (6j6v.vvw6), so a later open never moves a thread and every replica keeps the same
     /// root whatever order the opens arrive in. New threads go through `open_new_thread`.
     pub fn open_thread(&mut self, thread_id: &str, root: &ThreadRoot, author: &str) {
+        self.try_open_thread(thread_id, root, author)
+            .unwrap_or_else(|e| panic!("opening thread {thread_id}: {e}"))
+    }
+
+    /// [`open_thread`](Self::open_thread), with a write lock that could not be taken handed back
+    /// instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_open_thread(
+        &mut self,
+        thread_id: &str,
+        root: &ThreadRoot,
+        author: &str,
+    ) -> crate::error::Result<()> {
         let value = serde_json::to_string(root).expect("thread root serializes");
-        self.inner.emit(
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_THREAD,
             thread_id,
@@ -1073,12 +1168,25 @@ impl ChatStore {
             OP_OPEN,
             Some(value),
             author,
-        );
+        )?;
+        Ok(())
     }
 
     /// Set/clear who a thread expects a reply from (a keep-if-beats LWW register, spec §3.5).
     pub fn set_expects_reply_from(&mut self, thread_id: &str, value: &str, author: &str) {
-        self.inner.emit(
+        self.try_set_expects_reply_from(thread_id, value, author)
+            .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
+    }
+
+    /// [`set_expects_reply_from`](Self::set_expects_reply_from), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_set_expects_reply_from(
+        &mut self,
+        thread_id: &str,
+        value: &str,
+        author: &str,
+    ) -> crate::error::Result<()> {
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_THREAD,
             thread_id,
@@ -1086,7 +1194,8 @@ impl ChatStore {
             OP_SET,
             Some(value.to_string()),
             author,
-        );
+        )?;
+        Ok(())
     }
 
     /// Set a thread's `deadline` (absolute RFC3339, spec §2.1/§3.1) — a sparse keep-if-beats LWW
@@ -1097,7 +1206,19 @@ impl ChatStore {
     /// this writes, and `member_deadline.rs` for the per-member clock that shadows it on a channel
     /// member's thread.
     pub fn set_deadline(&mut self, thread_id: &str, deadline: &str, author: &str) {
-        self.inner.emit(
+        self.try_set_deadline(thread_id, deadline, author)
+            .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
+    }
+
+    /// [`set_deadline`](Self::set_deadline), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_set_deadline(
+        &mut self,
+        thread_id: &str,
+        deadline: &str,
+        author: &str,
+    ) -> crate::error::Result<()> {
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_THREAD,
             thread_id,
@@ -1105,7 +1226,8 @@ impl ChatStore {
             OP_SET,
             Some(deadline.to_string()),
             author,
-        );
+        )?;
+        Ok(())
     }
 
     /// Set a thread's display `name` (nxf 6j6v.e76c) — the third keep-if-beats LWW register, on the
@@ -1131,7 +1253,19 @@ impl ChatStore {
     /// register, on the same fold path as the three above. The store only stores it: which machine,
     /// and whether it may be named at all, is [`crate::machine`]'s.
     pub fn set_thread_machine(&mut self, thread_id: &str, machine_id: &str, author: &str) {
-        self.inner.emit(
+        self.try_set_thread_machine(thread_id, machine_id, author)
+            .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
+    }
+
+    /// [`set_thread_machine`](Self::set_thread_machine), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
+    pub fn try_set_thread_machine(
+        &mut self,
+        thread_id: &str,
+        machine_id: &str,
+        author: &str,
+    ) -> crate::error::Result<()> {
+        self.inner.try_emit(
             DOMAIN_MESSAGE,
             KIND_THREAD,
             thread_id,
@@ -1139,7 +1273,8 @@ impl ChatStore {
             OP_SET,
             Some(machine_id.to_string()),
             author,
-        );
+        )?;
+        Ok(())
     }
 
     /// The machine a chat runs on, and whether the op that named it may carry an action here
