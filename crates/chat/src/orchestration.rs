@@ -6435,7 +6435,9 @@ fn coordinator_commission_in(
         None => {
             let parent = ambient_parent(ctx, store);
             (
-                through_the_lock(|| open_child_thread(ctx, store, &channel, parent.as_deref()))?,
+                through_the_lock(|| {
+                    try_open_child_thread(ctx, store, &channel, parent.as_deref())
+                })?,
                 true,
             )
         }
@@ -7536,11 +7538,21 @@ pub fn open_child_thread(
     store: &mut ChatStore,
     channel_id: &str,
     parent: Option<&str>,
+) -> String {
+    try_open_child_thread(ctx, store, channel_id, parent)
+        .unwrap_or_else(|e| panic!("opening a thread on channel {channel_id}: {e}"))
+}
+
+/// [`open_child_thread`], with a store another process holds handed back as an `io` error — no
+/// thread opened — instead of a panic (nxf 6j6v.3eqa).
+pub(crate) fn try_open_child_thread(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    channel_id: &str,
+    parent: Option<&str>,
 ) -> Result<String> {
     let author = ctx.caller_handle();
     store.set_wall_clock(ctx.now);
-    // Fallible (nxf 6j6v.3eqa): a store another process holds is an `io` error, with no thread
-    // opened, never a panic.
     store.try_open_new_thread(
         &crate::model::ThreadRoot {
             origin: ctx.origin.to_string(),
@@ -8472,7 +8484,7 @@ fn open_flow_step(
     // The member's OWN thread, hung under the channel thread — stamped through the one function
     // that writes a tree edge (nxf 6j6v.a71h §3.1). The parent is named explicitly rather than
     // resolved from the ambient session, which is exactly the split that helper was given.
-    let member_thread = open_child_thread(sup, store, req.channel_id, Some(req.channel_thread))?;
+    let member_thread = open_child_thread(sup, store, req.channel_id, Some(req.channel_thread));
     if let Some(deadline) = req.deadline {
         store.set_deadline(&member_thread, deadline, &opener);
     }
