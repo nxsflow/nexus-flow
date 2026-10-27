@@ -583,17 +583,25 @@ fn a_start_the_release_gives_up_arms_its_slots_look_and_that_look_escalates_it()
 
     let slot_thread = slot.trim_end_matches("-coder").to_string();
     tick(&tmp, &worker, &at, &slot_thread);
-    let escalated: Vec<String> = store(&tmp)
+    let escalated: Vec<(String, String)> = store(&tmp)
         .messages_in_thread(&slot_thread)
         .expect("messages")
         .into_iter()
         .filter(|m| m.kind == "escalation")
-        .map(|m| m.sender)
+        .map(|m| (m.sender, m.body))
         .collect();
     assert_eq!(escalated.len(), 1, "escalated once: {escalated:?}");
-    assert!(escalated[0].ends_with("/coder"), "{escalated:?}");
+    assert!(escalated[0].0.ends_with("/coder"), "{escalated:?}");
+    assert!(
+        escalated[0].1.contains("its start failed 1 times"),
+        "the escalation names the failed start: {}",
+        escalated[0].1
+    );
     assert_eq!(worker.started("coder"), 1, "and never started again");
-    let _ = second;
+    assert!(
+        store(&tmp).thread_root(&slot_thread).unwrap() == second,
+        "the slot is the queued round's"
+    );
 }
 
 /// `f` through the compute layer under the workspace's own origin, with `timer`.
