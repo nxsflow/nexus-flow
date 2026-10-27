@@ -1536,13 +1536,8 @@ pub(crate) fn arm_look(
     // **No look past the ladder's ceiling** (nxf 6j6v.yts5): the service keeps one look per slot,
     // so the ceiling fires at the ceiling only if no look armed during the episode reaches beyond
     // it. One already reached is left alone — the look that reached it escalated.
-    let ceiling = store
-        .owed_start(thread, role)
-        .ok()
-        .flatten()
-        .and_then(|row| crate::ladder::ceiling_instant(store, &row).ok().flatten())
-        .filter(|c| earlier(ctx.now, c) && earlier(c, at));
-    let at = ceiling.as_deref().unwrap_or(at);
+    let ceiling = ceiling_of_the_slot(store, thread, role);
+    let at = clamped_to_the_ceiling(ctx.now, at, ceiling.as_deref());
     // The finding names the slot's session when it has one, so the receipt of whoever started it
     // can tell its own look from another's (`open_flow_step` keeps exactly those).
     let unarmed = |error: &str| {
@@ -1571,6 +1566,31 @@ pub(crate) fn arm_look(
             None
         }
         Err(e) => Some(unarmed(&e.to_string())),
+    }
+}
+
+/// The ceiling of the slot's episode under way, for [`arm_look`]'s clamp. A read that fails arms the
+/// look unclamped — said on stderr, since the ceiling may then fire late.
+fn ceiling_of_the_slot(store: &ChatStore, thread: &str, role: &str) -> Option<String> {
+    let read = store.owed_start(thread, role).and_then(|row| match row {
+        Some(row) => crate::ladder::ceiling_instant(store, &row),
+        None => Ok(None),
+    });
+    read.unwrap_or_else(|e| {
+        eprintln!(
+            "warning: the ceiling of the slot of {role} on thread {thread} could not be read: {e}; \
+             its look is armed unclamped, and the ceiling may fire late"
+        );
+        None
+    })
+}
+
+/// `at`, or the `ceiling` when that falls strictly between `now` and `at`. A ceiling already
+/// reached is left alone: the look that reached it escalated.
+fn clamped_to_the_ceiling<'a>(now: &str, at: &'a str, ceiling: Option<&'a str>) -> &'a str {
+    match ceiling {
+        Some(c) if earlier(now, c) && earlier(c, at) => c,
+        _ => at,
     }
 }
 
@@ -1785,7 +1805,9 @@ pub(crate) fn outstanding_has(outstanding: &[String], role: &str) -> bool {
 
 /// What the sweep decided about one candidate.
 pub(crate) enum Judgement {
-    /// Not stranded, or not yet — nothing to record.
+    /// A slot this sweep does not look at now — its operation held, its round finished with, already
+    /// recorded on this clock, abandoned, or its answer still coming by another route — and it arms
+    /// nothing. A slot that is owed and merely not yet due is [`Judgement::Pending`].
     Nothing,
     /// Stranded: record it with this observation, judged from this instant. For a COORDINATED slot
     /// (nxf 6j6v.558h) this is the occasion of a rung instead of a record.
@@ -2952,6 +2974,76 @@ mod tests {
             "no row without its marker"
         );
         assert!(!s.owed_backfill_done().unwrap());
+    }
+
+    /// The clamp's edges (nxf 6j6v.yts5): only a ceiling strictly between now and the look moves it.
+    #[test]
+    fn a_look_is_clamped_only_to_a_ceiling_still_ahead_of_it() {
+        let (now, ceiling, later) = (T0, T1, T2);
+        assert_eq!(clamped_to_the_ceiling(now, later, Some(ceiling)), ceiling);
+        assert_eq!(
+            clamped_to_the_ceiling(now, ceiling, Some(ceiling)),
+            ceiling,
+            "a look at the ceiling stays"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(now, T1, Some(T2)),
+            T1,
+            "a look before the ceiling stays"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(T1, T2, Some(T0)),
+            T2,
+            "a ceiling already reached is left alone"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(now, later, None),
+            later,
+            "no episode, no clamp"
+        );
+    }
+
+    /// The slot's ceiling: none without a row or an episode, the episode plus the floor with one,
+    /// and none — the look unclamped — when the row cannot be read.
+    #[test]
+    fn the_ceiling_of_a_slot_is_its_episodes_and_an_unreadable_row_clamps_nothing() {
+        let mut s = ChatStore::open_in_memory(1);
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier"),
+            None,
+            "no row"
+        );
+        s.open_slot("m-t", "ws/verifier", "m-chan", T0).unwrap();
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier"),
+            None,
+            "no episode"
+        );
+        s.connection()
+            .execute(
+                "UPDATE owed_starts SET recovery_started_at = ?1 WHERE thread = 'm-t'",
+                [T0],
+            )
+            .unwrap();
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier"),
+            Some(
+                after(
+                    T0,
+                    crate::ladder::RECOVERY_CEILING_FLOOR_SECS,
+                    "the expected ceiling"
+                )
+                .unwrap()
+            )
+        );
+        s.connection()
+            .execute_batch("DROP TABLE owed_starts;")
+            .unwrap();
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier"),
+            None,
+            "an unreadable row clamps nothing"
+        );
     }
 
     #[test]

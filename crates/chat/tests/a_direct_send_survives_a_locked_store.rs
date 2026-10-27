@@ -895,6 +895,41 @@ fn an_uncoordinated_start_that_never_gets_through_is_escalated_to_its_sender_not
     );
 }
 
+/// **The retry of a failed rung is the ladder's alone** (nxf 6j6v.yts5): a slot nobody coordinates
+/// is judged by the grace and the two looks even when a `failed:` rung stands on its clock — say,
+/// from a coordinator that has since handed it over. Its first look waits out the grace.
+#[test]
+fn an_uncoordinated_slot_with_a_failed_rung_on_its_clock_waits_out_its_grace() {
+    let team = uncoordinated_team();
+    let receipt = team.send(T0);
+    let thread = receipt.thread_id.clone();
+    team.sql(&format!(
+        "INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail)
+         VALUES ('{thread}', '{}/pm', '{}', 'recommissioned', 1, NULL,
+                 'failed: io: injected', 'a rung of another coordinator')",
+        team.origin,
+        at(0)
+    ));
+
+    team.tick(&at(60), &thread);
+
+    assert_eq!(
+        team.store()
+            .messages_in_thread(&thread)
+            .expect("messages")
+            .into_iter()
+            .filter(|m| m.kind == "escalation")
+            .count(),
+        0,
+        "not recorded at once"
+    );
+    assert_eq!(
+        team.book.held_look(&thread, "pm"),
+        Some(at(120)),
+        "the grace's end"
+    );
+}
+
 /// **The failed start's own record goes through the lock** (nxf 6j6v.yts5, from the review of
 /// 3eqa): the lock that failed the start is the likely one to meet its record and its retry
 /// instant as well. Each refused once, both get through, and the retry is still scheduled — and

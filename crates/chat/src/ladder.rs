@@ -459,6 +459,21 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// The slot's newest rung, `None` before its first.
+    pub(crate) fn newest_rung(&self, thread: &str, role: &str) -> Result<Option<RecoveryLogRow>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {LOG_COLS} FROM recovery_log WHERE thread = ?1 AND role = ?2
+                      ORDER BY id DESC LIMIT 1"
+                ),
+                params![thread, role],
+                log_from_row,
+            )
+            .optional()?)
+    }
+
     /// The newest row of every slot among `threads` — `status`'s one read.
     pub(crate) fn newest_recovery_by_threads(
         &self,
@@ -1169,7 +1184,7 @@ pub(crate) fn retry_of_a_failed_rung(
     store: &ChatStore,
     row: &OwedStart,
 ) -> Result<Option<Judgement>> {
-    let Some(last) = store.slot_recovery_log(&row.thread, &row.role)?.pop() else {
+    let Some(last) = store.newest_rung(&row.thread, &row.role)? else {
         return Ok(None);
     };
     let Some(why) = last
@@ -1182,10 +1197,9 @@ pub(crate) fn retry_of_a_failed_rung(
     if earlier(&last.at, &row.trigger_clock) {
         return Ok(None);
     }
-    let observed = if last.action == RecoveryAction::Continued.as_str() {
-        Observation::EndedWithoutAnswer
-    } else {
-        Observation::NeverStarted
+    let observed = match RecoveryAction::parse(&last.action) {
+        Some(RecoveryAction::Continued) => Observation::EndedWithoutAnswer,
+        _ => Observation::NeverStarted,
     };
     Ok(Some(Judgement::Record {
         observed,

@@ -979,6 +979,95 @@ fn a_recommission_whose_start_fails_on_a_prime_timeout_is_retried_at_the_next_lo
     assert!(escalations(&team.messages(&thread)).is_empty());
 }
 
+/// **A failed continue is continued again at the next look** (nxf 6j6v.yts5): the session bound and
+/// wrote, so the rung after an end is a continue, and the retry asks for that rung again — the SAME
+/// session resumed, never a fresh one.
+#[test]
+fn a_continue_whose_start_fails_is_continued_again_at_the_next_look_and_answered() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    *team.worker.refuse.lock().unwrap() = Some("prime_timeout");
+
+    team.tick(&at(130), &thread);
+
+    assert_eq!(
+        team.worker.of("coder").len(),
+        1,
+        "the continue did not start"
+    );
+    assert_eq!(team.book.held_look(&thread, "coder"), Some(at(190)));
+
+    team.tick(&at(190), &thread);
+
+    let log = team.log(&thread, "coder");
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[0].0, "continued");
+    assert!(log[0]
+        .1
+        .as_deref()
+        .is_some_and(|o| o.starts_with("failed:")));
+    assert_eq!(
+        log[1],
+        ("continued".to_string(), Some("triggered".to_string())),
+        "continued again, not re-commissioned"
+    );
+    let detail: String = team
+        .store()
+        .connection()
+        .query_row(
+            "SELECT detail FROM recovery_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        detail.contains("its continued at") && detail.contains("could not be started"),
+        "the retry's occasion is the failed continue: {detail}"
+    );
+    let again = team.worker.last("coder");
+    assert_eq!(again.internal_session, session, "the same session");
+    assert_eq!(
+        again.resume_real.as_deref(),
+        Some(format!("real-{session}").as_str())
+    );
+    team.reply(&at(200), "coder", &session, &thread, "built");
+    let owed = team
+        .store()
+        .thread_quorum(&thread, &at(200))
+        .unwrap()
+        .is_some_and(|q| q.outstanding.contains(&team.q("coder")));
+    assert!(!owed, "answered");
+}
+
+/// **A failed rung older than the slot's clock is not retried at once.** A later trigger moved the
+/// clock after the failure, so the failure says nothing about the start now owed: the look waits
+/// out the grace on the new clock, as for any start.
+#[test]
+fn a_failed_rung_older_than_the_slots_clock_waits_out_the_new_clocks_grace() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    *team.worker.refuse.lock().unwrap() = Some("prime_timeout");
+    team.tick(&at(130), &thread);
+    // A later trigger owed the slot again at +200 — the clock moves past the failed rung.
+    team.sql(&format!(
+        "UPDATE owed_starts SET trigger_clock = '{}' WHERE thread = '{thread}'",
+        at(200)
+    ));
+
+    team.tick(&at(210), &thread);
+
+    assert_eq!(team.worker.of("coder").len(), 1, "nothing started at once");
+    assert_eq!(team.log(&thread, "coder").len(), 1, "no second rung");
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(320)),
+        "the grace on the new clock"
+    );
+}
+
 /// A re-commission that never starts is escalated by the looks the service actually holds — each
 /// one replacing the last, as its book does — within the budget, long before the slot's deadline;
 /// and never without a look armed while the slot is owed.
