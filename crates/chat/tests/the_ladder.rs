@@ -2446,7 +2446,13 @@ fn a_trigger_slower_than_the_claim_keeps_it_and_a_look_past_the_in_flight_guard_
     // leave it blocked for ever. What the looks saw is collected, the gate released, then read.
     let (renewed, starts_meanwhile) = std::thread::scope(|scope| {
         let first = scope.spawn(|| team.tick(&at(130), &thread));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // **An upper bound, not a timing assumption** (nxf 6j6v.yts5). The wait ends the moment the
+        // renewal passes the horizon — 26 renewals from +130 s — and each renewal is a connection
+        // and a committed write: measured 4.6 s on an idle machine and up to 6.9 s with the CPU
+        // oversubscribed twice. The bound of 10 s it had left a margin of two, and the test's one
+        // recorded failure came in a full-file run that took 64 s instead of the usual 15 — so the
+        // bound is generous now: it decides nothing on any run that is going to pass.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let renewed_past =
             |secs: i64| claimed_until().is_some_and(|u| u.as_str() > at(secs).as_str());
         let mut renewed = false;
