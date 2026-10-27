@@ -63,6 +63,8 @@ struct Hand {
     running: Mutex<HashSet<String>>,
     failing: Mutex<u32>,
     refused: Mutex<u32>,
+    /// Takes the ask capability away, so nothing coordinates the slots it serves.
+    uncoordinated: bool,
 }
 
 impl Hand {
@@ -102,7 +104,7 @@ impl Worker for Hand {
         true
     }
     fn asks_sessions(&self) -> bool {
-        true
+        !self.uncoordinated
     }
     fn stop_session(&self, _internal_session: &str) -> Result<SessionStop, String> {
         Ok(SessionStop::Requested)
@@ -152,6 +154,10 @@ fn role(handle: &str) -> RoleDecl {
 }
 
 fn team() -> Team {
+    team_with(Hand::default())
+}
+
+fn team_with(worker: Hand) -> Team {
     let tmp = TempDir::new().unwrap();
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
     let defs = Definitions::new(vec![role("pm")], Vec::new()).expect("catalogue");
@@ -160,7 +166,7 @@ fn team() -> Team {
     let origin = nexus_chat::workspace::origin_of(&ws).to_string();
     Team {
         tmp,
-        worker: Arc::new(Hand::default()),
+        worker: Arc::new(worker),
         origin,
     }
 }
@@ -365,7 +371,8 @@ fn an_owed_row_write_that_meets_the_lock_once_is_retried_inside_the_send() {
     );
 }
 
-/// A write that never gets the lock fails the SEND, loudly — and nothing is posted that nobody is
+/// A write that never gets the lock fails the SEND, loudly — the COORDINATED slot's `open_slot`,
+/// which runs before the message is posted — and nothing is posted that nobody is
 /// behind.
 #[test]
 fn an_owed_row_write_that_never_gets_the_lock_fails_the_send_and_posts_nothing() {
@@ -506,7 +513,9 @@ fn a_send_into_a_store_another_process_holds_fails_loudly_and_never_panics() {
     let threads_before = team.count("SELECT COUNT(*) FROM threads");
 
     // Taken once the send's store is open — an open that meets the lock fails on its own, before
-    // anything is written, which is not the case under test.
+    // anything is written, which is not the case under test. The first write that meets it is the
+    // conversation's (`ensure_dm_channel`), so nothing at all is written; a post refused AFTER the
+    // obligation was written is the take-back tests' case below.
     let holder = rusqlite::Connection::open(team.db_path()).unwrap();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         team.try_send(&at(60), |store| {
@@ -533,4 +542,184 @@ fn a_send_into_a_store_another_process_holds_fails_loudly_and_never_panics() {
         "no thread is left behind with no message in it"
     );
     assert_eq!(team.worker.started().len(), 1, "nothing else was started");
+}
+
+// ---- the take-back -------------------------------------------------------------------------------
+
+/// The thread of the one send in a fresh team, and its owed rows' `(session, coordinator)`.
+fn the_only_thread(team: &Team) -> String {
+    team.store()
+        .connection()
+        .query_row("SELECT thread_id FROM threads", [], |r| r.get(0))
+        .expect("one thread was opened")
+}
+
+fn owed_rows(team: &Team) -> Vec<(Option<String>, Option<String>)> {
+    let store = team.store();
+    let mut st = store
+        .connection()
+        .prepare("SELECT session, coordinator FROM owed_starts")
+        .unwrap();
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn expects(team: &Team, thread: &str) -> Vec<String> {
+    team.store()
+        .thread_quorum(thread, T0)
+        .expect("quorum reads")
+        .map(|q| q.expects)
+        .unwrap_or_default()
+}
+
+/// A refused post, once the obligation is written: the send fails with the lock and posts
+/// nothing, and what it wrote for the obligation is taken back — no row, no expectation — so no
+/// owed slot is left on a thread with no message in it.
+fn a_post_that_never_gets_the_lock_takes_the_obligation_back(team: &Team) {
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+
+    let e = refused.expect_err("the send fails");
+    assert_eq!(e.kind, ErrorKind::Io, "{e}");
+    assert!(
+        e.to_string().contains(LOCKED),
+        "the error names the lock: {e}"
+    );
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM messages"),
+        0,
+        "nothing posted"
+    );
+    let thread = the_only_thread(team);
+    assert_eq!(owed_rows(team), Vec::new(), "the owed row is taken back");
+    assert_eq!(
+        expects(team, &thread),
+        Vec::<String>::new(),
+        "and the expectation"
+    );
+    assert!(!team.owed_by_pm(T0, &thread), "pm owes nothing there");
+    assert!(team.worker.started().is_empty(), "nothing was started");
+}
+
+#[test]
+fn a_coordinated_slot_whose_post_never_gets_the_lock_is_taken_back() {
+    a_post_that_never_gets_the_lock_takes_the_obligation_back(&team());
+}
+
+#[test]
+fn an_uncoordinated_slot_whose_post_never_gets_the_lock_is_taken_back() {
+    a_post_that_never_gets_the_lock_takes_the_obligation_back(&team_with(Hand {
+        uncoordinated: true,
+        ..Hand::default()
+    }));
+}
+
+/// The take-back itself refused: the send still fails with the POST's error, and the row it could
+/// not delete stays — coordinated although its thread holds no message, which is
+/// `assess_at_open` answering for the message this call was about to post. Inside its grace the
+/// sweep leaves it alone: no record, no rung, no start.
+#[test]
+fn an_obligation_that_cannot_be_taken_back_stays_and_the_sweep_leaves_it_alone_inside_its_grace() {
+    let team = team();
+    team.sql(&format!(
+        "CREATE TRIGGER keep_owed_starts BEFORE DELETE ON owed_starts
+         BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
+    ));
+
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+
+    let e = refused.expect_err("the send fails");
+    assert!(
+        e.to_string().contains("refuse_next_posts"),
+        "the error is the post's, not the take-back's: {e}"
+    );
+    assert_eq!(team.count("SELECT COUNT(*) FROM messages"), 0);
+    let rows = owed_rows(&team);
+    assert_eq!(rows.len(), 1, "the row could not be taken back: {rows:?}");
+    assert_eq!(rows[0].0, None, "no session was ever minted for it");
+    assert!(
+        rows[0].1.is_some(),
+        "the slot was coordinated on a thread with no message yet"
+    );
+
+    let thread = the_only_thread(&team);
+    team.tick(&at(60), &thread);
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM recovery_log"),
+        0,
+        "no rung"
+    );
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM stranded_sessions"),
+        0,
+        "no record"
+    );
+    assert!(team.worker.started().is_empty(), "nothing started");
+}
+
+// ---- the coordinated slot's order ----------------------------------------------------------------
+
+/// A coordinated slot mints AFTER its message. A mint that fails there fails the send — saying the
+/// message is posted, so the caller does not send it twice — and leaves the slot owed WITH its
+/// commissioning message, which is what rung D re-commissions it from.
+#[test]
+fn a_coordinated_slot_whose_mint_fails_after_the_post_stays_owed_and_is_recommissioned() {
+    let team = team();
+    team.sql(&format!(
+        "CREATE TRIGGER no_pm_mint BEFORE INSERT ON session_map WHEN NEW.role = 'pm'
+         BEGIN SELECT RAISE(FAIL, '{LOCKED} (injected)'); END;"
+    ));
+
+    let refused = team.try_send(T0, |_| {});
+
+    let e = refused.expect_err("the send fails");
+    assert!(
+        e.to_string().contains("is posted") && e.to_string().contains("do not send it again"),
+        "the error says the message is posted: {e}"
+    );
+    assert_eq!(
+        team.count("SELECT COUNT(*) FROM messages"),
+        1,
+        "the message is posted"
+    );
+    let thread = the_only_thread(&team);
+    let rows = owed_rows(&team);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, None, "owed with no session");
+    assert!(rows[0].1.is_some(), "and coordinated");
+    team.sql("DROP TRIGGER no_pm_mint;");
+
+    team.tick(&at(120), &thread);
+    team.tick(&at(180), &thread);
+    let started = team.worker.started();
+    assert_eq!(started.len(), 1, "rung D started the slot afresh");
+    assert_eq!(started[0].reply_thread.as_deref(), Some(thread.as_str()));
+}
+
+/// The take-back goes through the lock too: its delete refused ONCE is tried again, and the row
+/// is gone — the lock that refused the post is the likely one to meet the take-back as well.
+#[test]
+fn a_take_back_that_meets_the_lock_once_is_tried_again() {
+    let team = team();
+    team.sql(&format!(
+        "CREATE TABLE injected_locks(n INTEGER NOT NULL);
+         INSERT INTO injected_locks VALUES (1);
+         CREATE TRIGGER lock_the_take_back BEFORE DELETE ON owed_starts
+           WHEN (SELECT n FROM injected_locks) > 0
+         BEGIN
+           UPDATE injected_locks SET n = n - 1;
+           SELECT RAISE(FAIL, '{LOCKED} (injected)');
+         END;"
+    ));
+
+    let refused = team.try_send(T0, |store| store.refuse_next_posts(u32::MAX));
+
+    assert!(refused.is_err());
+    assert_eq!(
+        team.count("SELECT n FROM injected_locks"),
+        0,
+        "the take-back met the lock"
+    );
+    assert_eq!(owed_rows(&team), Vec::new(), "and got through on its retry");
 }

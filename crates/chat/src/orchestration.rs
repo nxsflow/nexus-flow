@@ -2932,12 +2932,26 @@ const LOCKED_WRITE_BACKOFF_MS: [u64; 3] = [200, 800, 2_000];
 /// included. So an `io` failure that waiting does not fix costs the waits and ends in the same
 /// error. `write` must be one that may simply run again: a refused `BEGIN IMMEDIATE` writes nothing
 /// ([`ChatStore::try_post_message`] and its siblings), and the store's upserts converge.
-pub(crate) fn through_the_lock<T>(mut write: impl FnMut() -> Result<T>) -> Result<T> {
-    let mut waits = LOCKED_WRITE_BACKOFF_MS.iter();
+pub(crate) fn through_the_lock<T>(write: impl FnMut() -> Result<T>) -> Result<T> {
+    through_the_lock_with(&LOCKED_WRITE_BACKOFF_MS, std_sleep_ms, write)
+}
+
+fn std_sleep_ms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// [`through_the_lock`]'s body, with its waits and its sleep handed in — the seam its own tests
+/// count attempts and waits through without sleeping.
+fn through_the_lock_with<T>(
+    waits: &[u64],
+    mut sleep: impl FnMut(u64),
+    mut write: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut waits = waits.iter();
     loop {
         match write() {
             Err(e) if e.kind == crate::error::ErrorKind::Io => match waits.next() {
-                Some(ms) => std::thread::sleep(std::time::Duration::from_millis(*ms)),
+                Some(ms) => sleep(*ms),
                 None => return Err(e),
             },
             done => return done,
@@ -6433,6 +6447,8 @@ fn coordinator_commission_in(
     let (thread, opened_here) = match req.thread {
         Some(t) => (t.to_string(), false),
         None => {
+            // A send that fails after this leaves the thread behind, empty: an error now rather
+            // than a panic, and the one residue of a store that stays locked (nxf 6j6v.3eqa).
             let parent = ambient_parent(ctx, store);
             (
                 through_the_lock(|| {
@@ -6631,13 +6647,17 @@ fn coordinator_commission_in(
     let receipt = match posted {
         Ok(receipt) => receipt,
         Err(e) => {
-            // Taken back, best-effort: the store still refusing is the likely reason the post
-            // failed, so a take-back that fails too is said and left to the sweep, which finds no
-            // commissioning message on the slot.
+            // Taken back through the lock, since the lock is the likely reason the post failed:
+            // otherwise the expectation and the row stay on a thread with no message and hold the
+            // working copy of an enclosing operation until its lease runs out. A take-back that
+            // still fails is said, and its leftovers are the sweep's. What stays either way is the
+            // opened thread, empty, and an uncoordinated slot's pending session — harmless, and
+            // what a queued commission leaves too.
             if declared_here.is_some() {
-                let taken_back = store
-                    .try_set_expects_reply_from(&thread, "[]", &ctx.caller_handle())
-                    .and_then(|()| store.forget_owed_start(&thread, &owed_role));
+                let taken_back = through_the_lock(|| {
+                    store.try_set_expects_reply_from(&thread, "[]", &ctx.caller_handle())
+                })
+                .and_then(|()| through_the_lock(|| store.forget_owed_start(&thread, &owed_role)));
                 if let Err(back) = taken_back {
                     eprintln!(
                         "warning: the message to {} could not be posted, and the obligation \
@@ -6663,10 +6683,23 @@ fn coordinator_commission_in(
     let (internal, resume_real) = match minted_first {
         Some(minted) => minted,
         None => {
-            let minted = mint(store)?;
-            owed_findings.extend(crate::stranded::bind(
-                ctx, store, &thread, &owed_role, &minted.0,
-            )?);
+            // The message is posted and the slot owed when this fails, so the error says so: a
+            // caller that sends again opens a second commission of the same task.
+            let posted_and_owed = |mut e: NxfError| {
+                e.msg = format!(
+                    "the message to {role} is posted on thread {thread} and its slot is owed, but \
+                     its session could not be started: {msg} — its coordinator takes the slot \
+                     up; do not send it again",
+                    role = req.role,
+                    msg = e.msg
+                );
+                e
+            };
+            let minted = mint(store).map_err(posted_and_owed)?;
+            owed_findings.extend(
+                crate::stranded::bind(ctx, store, &thread, &owed_role, &minted.0)
+                    .map_err(posted_and_owed)?,
+            );
             minted
         }
     };
@@ -18803,6 +18836,61 @@ fn lapsed_step_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A write through the lock is tried once more after each wait, and no more** (nxf
+    /// 6j6v.3eqa): an `io` failure that lasts is given back after every wait was spent, in order.
+    #[test]
+    fn a_write_that_keeps_meeting_the_lock_is_tried_once_per_wait_and_then_given_back() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done: Result<()> = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                Err(NxfError::io("database is locked"))
+            },
+        );
+        assert_eq!(done.unwrap_err().kind, crate::error::ErrorKind::Io);
+        assert_eq!(tries, 4, "the first try and one per wait");
+        assert_eq!(slept, vec![1, 2, 3], "each wait once, in order");
+    }
+
+    /// One that gets through on a later try returns what it wrote, and waits no further.
+    #[test]
+    fn a_write_that_gets_through_on_its_second_try_waits_once() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                if tries == 1 {
+                    Err(NxfError::io("database is locked"))
+                } else {
+                    Ok(tries)
+                }
+            },
+        );
+        assert_eq!(done.unwrap(), 2);
+        assert_eq!(slept, vec![1]);
+    }
+
+    /// A failure that is not `io` — the call itself is wrong — is handed back at once: waiting
+    /// cannot change it.
+    #[test]
+    fn a_write_refused_for_anything_but_io_is_not_tried_again() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let done: Result<()> = through_the_lock_with(
+            &[1, 2, 3],
+            |ms| slept.push(ms),
+            || {
+                tries += 1;
+                Err(NxfError::validation("no such role"))
+            },
+        );
+        assert_eq!(done.unwrap_err().kind, crate::error::ErrorKind::Validation);
+        assert_eq!((tries, slept.len()), (1, 0));
+    }
 
     /// **The stored occasion and the JSON spell it the same way.** `as_str` is what a refused park
     /// is stamped with and what the tick compares a row against; the serde tag is what a receipt

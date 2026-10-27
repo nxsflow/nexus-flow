@@ -720,6 +720,8 @@ fn is_degraded(kind: Option<&str>, member_count: usize) -> bool {
 
 pub struct ChatStore {
     inner: Substrate,
+    /// How many of the next message posts [`ChatStore::refuse_next_posts`] refuses (nxf 6j6v.3eqa).
+    refused_posts: std::sync::atomic::AtomicU32,
 }
 
 /// **A thread's parent, unless the thread came in across the border** (nxf 6j6v.4gp2) — the
@@ -746,7 +748,10 @@ impl ChatStore {
         inner.register_reducer(Box::new(MessageReducer));
         // A fresh in-memory log has no base, so the based refusal is unreachable here.
         Self::materialize_views(&mut inner, upgraded).expect("a fresh in-memory store has no base");
-        ChatStore { inner }
+        ChatStore {
+            inner,
+            refused_posts: std::sync::atomic::AtomicU32::new(0),
+        }
     }
 
     pub fn open(path: &str, site: i64) -> rusqlite::Result<ChatStore> {
@@ -754,7 +759,10 @@ impl ChatStore {
         let upgraded = schema::try_apply_chat_views(inner.connection())?;
         inner.register_reducer(Box::new(MessageReducer));
         Self::materialize_views(&mut inner, upgraded)?;
-        Ok(ChatStore { inner })
+        Ok(ChatStore {
+            inner,
+            refused_posts: std::sync::atomic::AtomicU32::new(0),
+        })
     }
 
     /// Bind chat's views to the shared log after opening. Steady state is the O(1)
@@ -915,9 +923,36 @@ impl ChatStore {
             .unwrap_or_else(|e| panic!("posting a message: {e}"))
     }
 
+    /// **Refuse this handle's next `n` message posts as a store another process holds would** —
+    /// `u32::MAX` for every one (nxf 6j6v.3eqa). A test seam: the post is the one write whose
+    /// refusal cannot be injected from SQL, since a view insert that fails inside the substrate's
+    /// own transaction is not handed back. Nothing is written for a refused post.
+    #[doc(hidden)]
+    pub fn refuse_next_posts(&self, n: u32) {
+        self.refused_posts
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn take_a_refused_post(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.refused_posts.load(Relaxed) {
+            0 => false,
+            u32::MAX => true,
+            n => {
+                self.refused_posts.store(n - 1, Relaxed);
+                true
+            }
+        }
+    }
+
     /// [`post_message`](Self::post_message), with a write lock that could not be taken handed back
     /// instead of a panic (nxf 6j6v.3eqa) — nothing is posted then, and the caller may post again.
     pub fn try_post_message(&mut self, env: &MessageEnvelope) -> crate::error::Result<String> {
+        if self.take_a_refused_post() {
+            return Err(NxfError::io(
+                "database is locked (the post was refused by `ChatStore::refuse_next_posts`)",
+            ));
+        }
         let value = serde_json::to_string(env).expect("envelope serializes");
         if nxs_foundation::workspace::deterministic_ids_enabled() {
             let message_id = self.mint_id("m-", "messages");
@@ -1140,8 +1175,8 @@ impl ChatStore {
             .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
     }
 
-    /// [`set_expects_reply_from`](Self::set_expects_reply_from), with a write lock that could not be taken handed back
-    /// instead of a panic (nxf 6j6v.3eqa).
+    /// [`set_expects_reply_from`](Self::set_expects_reply_from), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
     pub fn try_set_expects_reply_from(
         &mut self,
         thread_id: &str,
@@ -1172,8 +1207,8 @@ impl ChatStore {
             .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
     }
 
-    /// [`set_deadline`](Self::set_deadline), with a write lock that could not be taken handed back
-    /// instead of a panic (nxf 6j6v.3eqa).
+    /// [`set_deadline`](Self::set_deadline), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
     pub fn try_set_deadline(
         &mut self,
         thread_id: &str,
@@ -1219,8 +1254,8 @@ impl ChatStore {
             .unwrap_or_else(|e| panic!("writing a register of thread {thread_id}: {e}"))
     }
 
-    /// [`set_thread_machine`](Self::set_thread_machine), with a write lock that could not be taken handed back
-    /// instead of a panic (nxf 6j6v.3eqa).
+    /// [`set_thread_machine`](Self::set_thread_machine), with a write lock that could not be taken
+    /// handed back instead of a panic (nxf 6j6v.3eqa).
     pub fn try_set_thread_machine(
         &mut self,
         thread_id: &str,
