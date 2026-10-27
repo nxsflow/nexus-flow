@@ -298,6 +298,34 @@ impl Store {
         value: Option<String>,
         author: &str,
     ) -> String {
+        self.try_emit(
+            domain,
+            target_kind,
+            target_id,
+            field,
+            op_type,
+            value,
+            author,
+        )
+        .unwrap_or_else(|e| panic!("{}", lock_not_taken(&e)))
+    }
+
+    /// [`emit`](Self::emit), with the write lock's refusal handed back instead of a panic (nxf
+    /// 6j6v.3eqa). The one failure it returns is `BEGIN IMMEDIATE` not getting the lock within the
+    /// connection's busy timeout — "database is locked" — and NOTHING is written then, so the caller
+    /// may simply write again. Measured on 2026-10-25: `nxc send` panicked on exactly that while a
+    /// build held the board, and left a thread behind with no message in it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_emit(
+        &mut self,
+        domain: &str,
+        target_kind: &str,
+        target_id: &str,
+        field: &str,
+        op_type: &str,
+        value: Option<String>,
+        author: &str,
+    ) -> rusqlite::Result<String> {
         let (op_id, ingest) = self.build_and_ingest(
             domain,
             target_kind,
@@ -306,12 +334,12 @@ impl Store {
             op_type,
             value,
             author,
-        );
+        )?;
         debug_assert!(
             matches!(ingest, Ingest::Folded),
             "emit must only build fresh, foldable ops (is the domain's reducer registered?)"
         );
-        op_id
+        Ok(op_id)
     }
 
     /// [`emit`](Self::emit) an op whose `target_id` is minted FROM the op's own id: `prefix`
@@ -334,6 +362,23 @@ impl Store {
         value: Option<String>,
         author: &str,
     ) -> String {
+        self.try_emit_owned(domain, target_kind, prefix, field, op_type, value, author)
+            .unwrap_or_else(|e| panic!("{}", lock_not_taken(&e)))
+    }
+
+    /// [`emit_owned`](Self::emit_owned), with the write lock's refusal handed back instead of a
+    /// panic — see [`try_emit`](Self::try_emit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_emit_owned(
+        &mut self,
+        domain: &str,
+        target_kind: &str,
+        prefix: &str,
+        field: &str,
+        op_type: &str,
+        value: Option<String>,
+        author: &str,
+    ) -> rusqlite::Result<String> {
         let (op_id, ingest) = self.build_and_ingest(
             domain,
             target_kind,
@@ -342,12 +387,12 @@ impl Store {
             op_type,
             value,
             author,
-        );
+        )?;
         debug_assert!(
             matches!(ingest, Ingest::Folded),
             "emit_owned must only build fresh, foldable ops (is the domain's reducer registered?)"
         );
-        format!("{prefix}{op_id}")
+        Ok(format!("{prefix}{op_id}"))
     }
 
     /// Build + persist one LOCAL op that this build deliberately does **not** fold into any view —
@@ -374,15 +419,17 @@ impl Store {
         value: Option<String>,
         author: &str,
     ) -> String {
-        let (op_id, ingest) = self.build_and_ingest(
-            domain,
-            target_kind,
-            Target::Given(target_id),
-            field,
-            op_type,
-            value,
-            author,
-        );
+        let (op_id, ingest) = self
+            .build_and_ingest(
+                domain,
+                target_kind,
+                Target::Given(target_id),
+                field,
+                op_type,
+                value,
+                author,
+            )
+            .unwrap_or_else(|e| panic!("{}", lock_not_taken(&e)));
         debug_assert!(
             matches!(ingest, Ingest::Deferred),
             "emit_unfolded must build an op no registered reducer folds — this one materialized"
@@ -405,7 +452,7 @@ impl Store {
         op_type: &str,
         value: Option<String>,
         author: &str,
-    ) -> (String, Ingest) {
+    ) -> rusqlite::Result<(String, Ingest)> {
         // Forward-compat invariant 1 (6j6v.xsf3): author identity is stamped on EVERY op at
         // append. A blank author is not a small blemish — it is the one defect this log cannot
         // repair, because attribution on an append-only history can never be backfilled, and the
@@ -429,7 +476,10 @@ impl Store {
         // coordinate — the very lost update this exists to close. IMMEDIATE for the same reason
         // `migrate` uses it: a DEFERRED transaction takes the write lock only at its first WRITE,
         // by which time the `MAX` it read may be stale.
-        self.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        //
+        // **The one refusal handed back** (nxf 6j6v.3eqa): the lock not taken within the busy
+        // timeout. Nothing has been written at this point, so the caller may write again.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
         self.refresh_clock();
         let op_id = ulid::Ulid::new().to_string();
         let target_id = match target {
@@ -490,7 +540,7 @@ impl Store {
             }
         };
         self.conn.execute_batch("COMMIT").unwrap();
-        (op_id, ingest)
+        Ok((op_id, ingest))
     }
 
     /// [`ingest_in_txn`](Self::ingest_in_txn) with its own `BEGIN IMMEDIATE`/`COMMIT` around it —
@@ -1493,6 +1543,15 @@ fn fold(conn: &Connection, reducer: &dyn Reducer, op: &Op) {
     crate::change::apply_sqlite(conn, &reducer.changes(op)).unwrap();
 }
 
+/// The panic of an infallible write whose lock was not taken — said in words, because the
+/// `unwrap` it replaces said only `Err(SqliteFailure(...))`.
+fn lock_not_taken(e: &rusqlite::Error) -> String {
+    format!(
+        "a local write could not take the database's write lock: {e} — callers that must not \
+         panic on this write through `try_emit`"
+    )
+}
+
 /// The first Lamport number at or above `taken` that no op on `site` holds, given that `taken` is
 /// held — the end of the squatted run that starts there, plus one (6j6v.m19v, review of PR #489).
 /// One query however long the run: among the run's ops, the lowest one whose successor number is
@@ -2187,6 +2246,47 @@ mod tests {
             CLOCK_CEILING + 2,
             "a sibling seeds from this replica's own ops"
         );
+    }
+
+    /// **A write that cannot take the lock returns the lock, it does not panic** (nxf 6j6v.3eqa).
+    /// Measured on 2026-10-25: an `nxc send` panicked on "database is locked" while a build held the
+    /// board, and left a thread behind with no message in it. The fallible write gives the caller
+    /// the error with nothing written, and the same handle writes again once the lock is gone.
+    #[test]
+    fn a_write_that_cannot_take_the_lock_returns_the_error_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let path = path.to_str().unwrap();
+        let mut s = Store::open(path, 1).unwrap();
+        demo_table(&s);
+        s.register_reducer(Box::new(DemoReducer {
+            folds: Arc::new(AtomicUsize::new(0)),
+        }));
+        s.connection()
+            .execute_batch("PRAGMA busy_timeout=20")
+            .unwrap();
+        let holder = Connection::open(path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let refused = s.try_emit("demo", "demo", "d.1", "x", "set", None, "u");
+        let e = refused.expect_err("the lock is held by another connection");
+        assert_eq!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "the error is the lock: {e}"
+        );
+        let owned = s.try_emit_owned("demo", "demo", "d-", "x", "set", None, "u");
+        assert!(owned.is_err(), "the owned write is refused the same way");
+
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            s.op_count(),
+            0,
+            "nothing was written while the lock was held"
+        );
+        s.try_emit("demo", "demo", "d.1", "x", "set", None, "u")
+            .expect("the same handle writes once the lock is gone");
+        assert_eq!(s.op_count(), 1);
     }
 
     /// A log that already holds such an op — pulled by a build before this fix, or by any process
