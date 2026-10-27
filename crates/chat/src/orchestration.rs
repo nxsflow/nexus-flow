@@ -6809,8 +6809,16 @@ fn coordinator_commission_in(
                         "the message to {} is posted and its obligation recorded, but",
                         req.role
                     );
-                    let mut warnings =
-                        vec![note_the_failed_start(ctx, store, &entry, &what, inner)];
+                    // Recorded and retried, but reported in the class and reason every caller of
+                    // this seam already branches on — a step that did not start, because its
+                    // trigger failed — with the retry named in its detail.
+                    let retry = note_the_failed_start(ctx, store, &entry, &what, inner);
+                    let mut warnings = vec![FailedConsequence::step_skipped(
+                        Some(&thread),
+                        Some(&internal),
+                        wake_skip_reason(&e),
+                        retry.detail,
+                    )];
                     warnings.extend(owed_findings);
                     return Ok(TriggerReceipt {
                         handed_to: None,
