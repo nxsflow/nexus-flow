@@ -183,6 +183,9 @@ impl Worker for Hand {
 
 // ---- the timer ------------------------------------------------------------------------------------
 
+/// The service's book of looks, as these tests read it: the newest look filed under a slot is the one
+/// it holds. That is the replace-on-arm contract of `nxs_service::timers::arm`
+/// (`crates/service/src/timers.rs`, `pub fn arm`), which this fake mirrors rather than calls.
 #[derive(Default)]
 struct Book {
     looks: Mutex<Vec<(String, String)>>,
@@ -1206,6 +1209,88 @@ fn the_ceiling_fires_at_the_ceiling_while_the_slot_is_held() {
         team.book.held_look(&thread, "coder"),
         Some(at(ceiling)),
         "the look the service holds is the ceiling's"
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+
+    team.tick(&at(ceiling), &thread);
+
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "rung E at the ceiling: {posted:?}");
+    assert!(posted[0].contains("ceiling"), "{}", posted[0]);
+    assert!(
+        posted[0].contains(&format!("while on hold until {}", at(5 * 3_600)))
+            && posted[0].contains("a resume may still answer"),
+        "the escalation says the hold still stands: {}",
+        posted[0]
+    );
+}
+
+/// **A hold naming no instant whose grace would land past the ceiling** — rung B's other branch: the
+/// hold's grace is armed, clamped to the ceiling, and the ceiling fires there before the grace ends.
+#[test]
+fn a_hold_naming_no_instant_whose_grace_lands_past_the_ceiling_escalates_at_the_ceiling() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    team.tick(&at(130), &thread);
+    assert_eq!(team.log(&thread, "coder")[0].0, "continued");
+    let ceiling = 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS;
+    team.interrupted(&at(ceiling - 60), &session, None);
+
+    team.tick(&at(ceiling - 30), &thread);
+
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(ceiling)),
+        "the hold's grace ends past the ceiling, so the look is the ceiling's"
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+
+    team.tick(&at(ceiling), &thread);
+
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "rung E at the ceiling: {posted:?}");
+    assert!(posted[0].contains("ceiling"), "{}", posted[0]);
+    assert!(
+        !posted[0].contains("while on hold until"),
+        "a hold naming no instant names none: {}",
+        posted[0]
+    );
+}
+
+/// **The ceiling fires while the answer is still coming by another route** (nxf 6j6v.yts5, review
+/// round 1): a coordinated slot in an open episode whose start failed and whose retry is due only
+/// past the ceiling. The sweep leaves a still-coming slot to that other clock — and that clock would
+/// fire an hour too late. The ceiling's look is armed, and the slot escalates at the ceiling.
+#[test]
+fn a_coordinated_slot_whose_retry_is_due_past_the_ceiling_escalates_at_the_ceiling() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    team.tick(&at(130), &thread);
+    assert_eq!(team.log(&thread, "coder")[0].0, "continued");
+    let ceiling = 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS;
+    team.sql(&format!(
+        "INSERT INTO failed_starts(session, scope_key, role, thread, message, model, depth,
+             priority, enqueued_at, first_failed_at, last_failed_at, attempts, error, retry_at,
+             in_flight_until)
+         VALUES ('{session}', 'scope', '{role}', '{thread}', 'build', NULL, 1, 0, '{t}', '{t}',
+             '{t}', 1, 'prime_timeout', '{retry}', NULL)",
+        role = team.q("coder"),
+        t = at(200),
+        retry = at(ceiling + 3_600),
+    ));
+
+    team.tick(&at(250), &thread);
+
+    assert_eq!(
+        team.book.held_look(&thread, "coder"),
+        Some(at(ceiling)),
+        "the slot's look is the ceiling's, not the retry's an hour past it"
     );
     assert!(escalations(&team.messages(&thread)).is_empty());
 
