@@ -2985,6 +2985,9 @@ fn start_failure_is_transient(e: &NxfError) -> bool {
 /// visible and retried; neither may turn a failed start into a failed release, which has already
 /// committed. A record that could not be written is named in the finding, because without it
 /// `withdraw` cannot find the entry either.
+///
+/// **The record and its retry instant go through the lock** (nxf 6j6v.yts5) — the lock that failed
+/// the start is the likely one to meet them too, and a record lost to it is a start nothing retries.
 fn note_the_failed_start(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -2998,7 +3001,8 @@ fn note_the_failed_start(
         Some(Ok(root)) => format!("`nxc withdraw --thread {root}` discards it"),
         _ => "`nxc withdraw --thread <the operation's first thread>` discards it".to_string(),
     };
-    let next = match store.record_failed_start(entry, &e.to_string(), ctx.now) {
+    let next = match through_the_lock(|| store.record_failed_start(entry, &e.to_string(), ctx.now))
+    {
         Err(write) => format!(
             "recording it for `nxc status` and `withdraw` failed ({write}), so neither will find \
              it and nothing starts it again"
@@ -3048,8 +3052,7 @@ fn schedule_the_retry(
         "the retry of a failed start",
     )
     .map_err(|e| format!("its retry instant could not be computed ({e})"))?;
-    store
-        .schedule_failed_start_retry(&entry.session, &at)
+    through_the_lock(|| store.schedule_failed_start_retry(&entry.session, &at))
         .map_err(|e| format!("its retry could not be recorded ({e})"))?;
     if let Some(t) = entry.thread.as_deref() {
         if let Err(arm) = ctx.timer.schedule(t, &at, &crate::timer::tick_command(t)) {

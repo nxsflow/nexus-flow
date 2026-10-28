@@ -1533,6 +1533,14 @@ pub(crate) fn arm_look(
     at: &str,
 ) -> Option<FailedConsequence> {
     let slot = look_key(thread, role);
+    // **No look past the ladder's ceiling** (nxf 6j6v.yts5): the service keeps one look per slot,
+    // so the ceiling fires at the ceiling only if no look armed during the episode reaches beyond
+    // it. One already reached is left alone — the look that reached it escalated.
+    let (ceiling, unread) = match ceiling_of_the_slot(store, thread, role) {
+        Ok(ceiling) => (ceiling, None),
+        Err(e) => (None, Some(e)),
+    };
+    let at = clamped_to_the_ceiling(ctx.now, at, ceiling.as_deref());
     // The finding names the slot's session when it has one, so the receipt of whoever started it
     // can tell its own look from another's (`open_flow_step` keeps exactly those).
     let unarmed = |error: &str| {
@@ -1547,8 +1555,29 @@ pub(crate) fn arm_look(
         Ok(t) => t,
         Err(e) => return Some(unarmed(&e.to_string())),
     };
+    // A ceiling that could not be read arms the look unclamped, and the ceiling may then fire late —
+    // a finding on the receipt like a look not armed at all, since nobody reads the stderr of a
+    // scheduled tick.
+    let late = |error: &crate::error::NxfError| {
+        let session = store
+            .owed_start(thread, role)
+            .ok()
+            .flatten()
+            .and_then(|r| r.session);
+        let detail = format!(
+            "the ceiling of the slot {slot} (owing on thread {thread}) could not be read: {error}; \
+             its look is armed for {at} unclamped, and the ceiling may fire late"
+        );
+        eprintln!("warning: {detail}");
+        FailedConsequence::stranded(
+            ConsequenceClass::TickUnscheduled,
+            Some(thread),
+            session.as_deref(),
+            detail,
+        )
+    };
     match ctx.timer.schedule_stranded_look(&slot, &target, at) {
-        Ok(_) => None,
+        Ok(_) => unread.as_ref().map(late),
         // **A service that is down is said once, by the call, not once per look** — the service
         // backend writes the look into the book and THEN refuses, so the look is durable and will
         // be honoured when a service starts; the `service_not_running` finding the outermost verbs
@@ -1558,9 +1587,27 @@ pub(crate) fn arm_look(
                 "warning: the look at slot {slot} is booked for {at}, and nothing attends this \
                  workspace to honour it yet: {e}"
             );
-            None
+            unread.as_ref().map(late)
         }
         Err(e) => Some(unarmed(&e.to_string())),
+    }
+}
+
+/// The ceiling of the slot's episode under way, for [`arm_look`]'s clamp — `None` with no row or no
+/// episode. A read that fails is [`arm_look`]'s finding: it arms the look unclamped.
+fn ceiling_of_the_slot(store: &ChatStore, thread: &str, role: &str) -> Result<Option<String>> {
+    store.owed_start(thread, role).and_then(|row| match row {
+        Some(row) => crate::ladder::ceiling_instant(store, &row),
+        None => Ok(None),
+    })
+}
+
+/// `at`, or the `ceiling` when that falls strictly between `now` and `at`. A ceiling already
+/// reached is left alone: the look that reached it escalated.
+fn clamped_to_the_ceiling<'a>(now: &str, at: &'a str, ceiling: Option<&'a str>) -> &'a str {
+    match ceiling {
+        Some(c) if earlier(now, c) && earlier(c, at) => c,
+        _ => at,
     }
 }
 
@@ -1775,7 +1822,10 @@ pub(crate) fn outstanding_has(outstanding: &[String], role: &str) -> bool {
 
 /// What the sweep decided about one candidate.
 pub(crate) enum Judgement {
-    /// Not stranded, or not yet — nothing to record.
+    /// A slot nothing is owed on now — its thread held, its round finished with, already recorded on
+    /// this clock, or abandoned — and it arms nothing. A slot whose answer is still coming by another
+    /// route is [`Judgement::Coming`]; one that is owed and merely not yet due is
+    /// [`Judgement::Pending`].
     Nothing,
     /// Stranded: record it with this observation, judged from this instant. For a COORDINATED slot
     /// (nxf 6j6v.558h) this is the occasion of a rung instead of a record.
@@ -1789,6 +1839,16 @@ pub(crate) enum Judgement {
     Live,
     /// A coordinated slot whose owed session has a standing hold — the ladder's rung B decides.
     Held,
+    /// Owed, nothing running for it, and its evidence not yet due — inside a grace, or between the
+    /// two looks. Its look is ARMED for the instant it is due (nxf 6j6v.yts5): a judgement that
+    /// waits never leaves the slot with nothing to wake it. Nothing to record for a slot nobody
+    /// coordinates; for a coordinated one the ladder still asks its ceiling.
+    Pending,
+    /// Its answer is still coming by another route — the queue, a retry due, its own sub-round, a
+    /// delivery held — whose own clock moves it on. Nothing to record for a slot nobody coordinates.
+    /// **For a coordinated one in an open episode the ladder asks its ceiling and arms its look
+    /// there** (nxf 6j6v.yts5): that other clock may fire past the ceiling, or never.
+    Coming,
 }
 
 /// **The sweep** — the sixth workspace-wide step of every tick (nxf 6j6v.ccvy). Records every owed
@@ -1967,7 +2027,9 @@ fn judge_candidates(
         // bad row cannot stop every later one from being judged on every tick.
         let judged = judge(ctx, store, &row, q, &facts, findings, coordinated.is_some()).and_then(
             |j| match (j, &coordinated) {
-                (Judgement::Nothing, _) => Ok(Vec::new()),
+                (Judgement::Nothing, _) | (Judgement::Pending | Judgement::Coming, None) => {
+                    Ok(Vec::new())
+                }
                 // **A coordinated slot is never merely recorded** (nxf 6j6v.558h): its coordinator
                 // runs one rung of the ladder on what the look saw, and escalates only last.
                 (j, Some(c)) => crate::ladder::climb(ctx, store, &row, c, j),
@@ -2180,6 +2242,15 @@ pub(crate) fn abandoned_words(reason: &str) -> String {
 }
 
 /// Rules 1-6 for one obligation. Drops the first look whenever the evidence no longer holds.
+///
+/// **Every judgement that waits arms its look** (nxf 6j6v.yts5): a [`Judgement::Pending`] has armed
+/// the instant its evidence is due. A [`Judgement::Coming`] waits on another route's clock (the
+/// queue's release, the retry's tick, the sub-round, the held delivery), and for a coordinated slot
+/// in an open episode the ladder arms the CEILING's look and escalates there — the one place the
+/// ceiling is asked of a slot this sweep does not otherwise act on ([`crate::ladder::climb`]). A
+/// [`Judgement::Nothing`] is a slot nothing is owed on — its thread held (nothing may act on it), its
+/// round finished with, already recorded on this clock (an escalation ended its episode), or
+/// abandoned (never nudged, never escalated) — and neither arms a look nor asks the ceiling.
 fn judge(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -2225,7 +2296,10 @@ fn judge(
             store.drop_stranded_suspect(t, h)?;
             return Ok(Judgement::Held);
         }
-        Some(_) => return not_now(store),
+        Some(_) => {
+            store.drop_stranded_suspect(t, h)?;
+            return Ok(Judgement::Coming);
+        }
         None => {}
     }
     // **An abandoned slot is never nudged** (nxf 6j6v.kgfn): its record is the row's reason, and
@@ -2250,6 +2324,16 @@ fn judge(
         }
         return Ok(Judgement::Nothing);
     }
+    // **A rung of the ladder that failed is tried again at the next look** (nxf 6j6v.yts5): its
+    // start is known not to have happened, so neither a grace nor two looks have anything to wait
+    // for. Before, the failure's own look found the new clock's grace not yet reached and armed
+    // nothing — measured: 5.5 h with nothing looking.
+    if coordinated {
+        if let Some(retry) = crate::ladder::retry_of_a_failed_rung(store, row)? {
+            store.drop_stranded_suspect(t, h)?;
+            return Ok(retry);
+        }
+    }
     // Rule 6: the grace on the judged instant.
     let grace = STRANDED_GRACE_SECS;
     // A start that failed and was given up: one look at its last attempt + grace.
@@ -2257,7 +2341,7 @@ fn judge(
         let due = after(&f.last_failed_at, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
             findings.extend(arm_look(ctx, store, t, h, &due));
-            return Ok(Judgement::Nothing);
+            return Ok(Judgement::Pending);
         }
         return Ok(Judgement::Record {
             observed: Observation::StartGivenUp,
@@ -2277,7 +2361,7 @@ fn judge(
         let due = after(&ended, grace, "the stranded grace")?;
         if !reached(ctx.now, &due) {
             findings.extend(arm_look(ctx, store, t, h, &due));
-            return Ok(Judgement::Nothing);
+            return Ok(Judgement::Pending);
         }
         store.drop_stranded_suspect(t, h)?;
         return Ok(Judgement::Record {
@@ -2292,7 +2376,8 @@ fn judge(
     // No end: two looks on unchanged evidence, from the clock.
     let first_due = after(&row.trigger_clock, grace, "the stranded grace")?;
     if !reached(ctx.now, &first_due) {
-        return Ok(Judgement::Nothing);
+        findings.extend(arm_look(ctx, store, t, h, &first_due));
+        return Ok(Judgement::Pending);
     }
     // A slot whose session was never minted has neither (nxf 6j6v.kgfn).
     let (bound, entries) = match s {
@@ -2317,7 +2402,7 @@ fn judge(
     let Some(suspect) = store.stranded_suspect(t, h)? else {
         store.put_stranded_suspect(t, h, &fresh)?;
         second_look(store, findings);
-        return Ok(Judgement::Nothing);
+        return Ok(Judgement::Pending);
     };
     // The tuple is load-bearing: the session, its bind and its transcript must be what the first
     // look saw. Anything moved — RESET, and look again one cadence out.
@@ -2327,7 +2412,7 @@ fn judge(
     {
         store.put_stranded_suspect(t, h, &fresh)?;
         second_look(store, findings);
-        return Ok(Judgement::Nothing);
+        return Ok(Judgement::Pending);
     }
     let second_due = after(
         &suspect.first_seen,
@@ -2335,7 +2420,8 @@ fn judge(
         "the second stranded look",
     )?;
     if !reached(ctx.now, &second_due) {
-        return Ok(Judgement::Nothing);
+        findings.extend(arm_look(ctx, store, t, h, &second_due));
+        return Ok(Judgement::Pending);
     }
     store.drop_stranded_suspect(t, h)?;
     let (observed, detail) = if !row.triggered {
@@ -2919,6 +3005,105 @@ mod tests {
             "no row without its marker"
         );
         assert!(!s.owed_backfill_done().unwrap());
+    }
+
+    /// The clamp's edges (nxf 6j6v.yts5): only a ceiling strictly between now and the look moves it.
+    #[test]
+    fn a_look_is_clamped_only_to_a_ceiling_still_ahead_of_it() {
+        let (now, ceiling, later) = (T0, T1, T2);
+        assert_eq!(clamped_to_the_ceiling(now, later, Some(ceiling)), ceiling);
+        assert_eq!(
+            clamped_to_the_ceiling(now, ceiling, Some(ceiling)),
+            ceiling,
+            "a look at the ceiling stays"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(now, T1, Some(T2)),
+            T1,
+            "a look before the ceiling stays"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(T1, T2, Some(T0)),
+            T2,
+            "a ceiling already reached is left alone"
+        );
+        assert_eq!(
+            clamped_to_the_ceiling(now, later, None),
+            later,
+            "no episode, no clamp"
+        );
+    }
+
+    /// The slot's ceiling: none without a row or an episode, the episode plus the floor with one,
+    /// and an error when the row cannot be read.
+    #[test]
+    fn the_ceiling_of_a_slot_is_its_episodes_and_an_unreadable_row_is_an_error() {
+        let mut s = ChatStore::open_in_memory(1);
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier").unwrap(),
+            None,
+            "no row"
+        );
+        s.open_slot("m-t", "ws/verifier", "m-chan", T0).unwrap();
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier").unwrap(),
+            None,
+            "no episode"
+        );
+        s.connection()
+            .execute(
+                "UPDATE owed_starts SET recovery_started_at = ?1 WHERE thread = 'm-t'",
+                [T0],
+            )
+            .unwrap();
+        assert_eq!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier").unwrap(),
+            Some(
+                after(
+                    T0,
+                    crate::ladder::RECOVERY_CEILING_FLOOR_SECS,
+                    "the expected ceiling"
+                )
+                .unwrap()
+            )
+        );
+        s.connection()
+            .execute_batch("DROP TABLE owed_starts;")
+            .unwrap();
+        assert!(
+            ceiling_of_the_slot(&s, "m-t", "ws/verifier").is_err(),
+            "an unreadable row"
+        );
+    }
+
+    /// **A ceiling that cannot be read is a finding** (nxf 6j6v.yts5, review round 1): the look is
+    /// still armed, unclamped, and the receipt says the ceiling may fire late — not only stderr.
+    #[test]
+    fn a_look_whose_ceiling_cannot_be_read_is_armed_unclamped_and_said_on_the_receipt() {
+        let mut scene = scene();
+        let (thread, role) = (scene.rec.thread.clone(), scene.rec.role.clone());
+        let ctx_store = std::mem::replace(&mut scene.store, ChatStore::open_in_memory(1));
+        ctx_store
+            .connection()
+            .execute_batch("DROP TABLE owed_starts;")
+            .unwrap();
+        let ctx = scene.ctx(T1, "service", None);
+
+        let finding = arm_look(&ctx, &ctx_store, &thread, &role, T2);
+
+        let finding = finding.expect("an unread ceiling is a finding");
+        assert_eq!(finding.class, ConsequenceClass::TickUnscheduled);
+        assert!(
+            finding.detail.contains("ceiling") && finding.detail.contains("may fire late"),
+            "{}",
+            finding.detail
+        );
+        let slot = look_key(&thread, &role);
+        assert_eq!(
+            scene.looks.0.lock().unwrap().last(),
+            Some(&format!("{slot}@{T2}")),
+            "armed all the same, unclamped"
+        );
     }
 
     #[test]

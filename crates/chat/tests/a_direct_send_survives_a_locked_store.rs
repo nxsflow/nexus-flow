@@ -111,9 +111,27 @@ impl Worker for Hand {
     }
 }
 
-/// A timer that accepts everything and runs nothing: the test drives every tick itself.
+/// A timer that accepts everything and runs nothing: the test drives every tick itself. It keeps
+/// the stranded looks it was asked for, so a test can read which one the service would hold.
 #[derive(Default)]
-struct Book;
+struct Book {
+    looks: Mutex<Vec<(String, String)>>,
+}
+
+impl Book {
+    /// The look the service holds for the slot of `handle` on `thread` — the last one armed, as its
+    /// book keeps one per slot.
+    fn held_look(&self, thread: &str, handle: &str) -> Option<String> {
+        let slot = format!("{thread}-{handle}");
+        self.looks
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, at)| at.clone())
+    }
+}
 
 impl Timer for Book {
     fn schedule(&self, thread_id: &str, _deadline: &str, _command: &str) -> NxfResult<TimerHandle> {
@@ -129,8 +147,12 @@ impl Timer for Book {
         &self,
         slot: &str,
         _thread: &str,
-        _deadline: &str,
+        deadline: &str,
     ) -> NxfResult<TimerHandle> {
+        self.looks
+            .lock()
+            .unwrap()
+            .push((slot.to_string(), deadline.to_string()));
         Ok(TimerHandle(format!("look:{slot}")))
     }
     fn cancel(&self, _handle: &TimerHandle) -> NxfResult<()> {
@@ -143,6 +165,7 @@ impl Timer for Book {
 struct Team {
     tmp: TempDir,
     worker: Arc<Hand>,
+    book: Arc<Book>,
     origin: String,
 }
 
@@ -167,6 +190,7 @@ fn team_with(worker: Hand) -> Team {
     Team {
         tmp,
         worker: Arc::new(worker),
+        book: Arc::new(Book::default()),
         origin,
     }
 }
@@ -201,7 +225,6 @@ impl Team {
         let mut store = self.store();
         prepare(&store);
         let defs = Definitions::resolve(self.tmp.path()).expect("declarations");
-        let book = Book;
         let ctx = orchestration::Ctx {
             now,
             origin: &self.origin,
@@ -210,7 +233,7 @@ impl Team {
             hop: 0,
             defs: &defs,
             worker: self.worker.as_ref(),
-            timer: &book,
+            timer: self.book.as_ref(),
             namer: &nexus_chat::naming::DryNamer,
             db_path: &db_path,
             project_claude_md: None,
@@ -811,10 +834,11 @@ fn a_coordinated_owed_row_that_never_gets_the_lock_leaves_no_expectation() {
 }
 
 /// An uncoordinated slot whose start fails on `io` is retried on the same schedule; given up, it is
-/// NOT re-commissioned — nothing coordinates it — and stays recorded for `nxc status` and
-/// `withdraw`, as a given-up queued start does.
+/// NOT re-commissioned — nothing coordinates it — but it is never silent either (nxf 6j6v.yts5): the
+/// give-up arms the slot's look one grace out, and that look escalates it to its sender in the
+/// member's name. The record stays for `nxc status` and `withdraw`.
 #[test]
-fn an_uncoordinated_start_that_never_gets_through_stays_recorded_and_is_not_recommissioned() {
+fn an_uncoordinated_start_that_never_gets_through_is_escalated_to_its_sender_not_recommissioned() {
     let team = uncoordinated_team();
     team.worker.fail_next(u32::MAX);
 
@@ -827,8 +851,14 @@ fn an_uncoordinated_start_that_never_gets_through_stays_recorded_and_is_not_reco
         team.failed_start(&session),
         Some((MAX_START_ATTEMPTS, None))
     );
+    let look = team
+        .book
+        .held_look(&thread, "pm")
+        .expect("the give-up arms a look");
+    assert_eq!(look, at(300), "the give-up plus one grace");
 
-    team.tick(&at(600), &thread);
+    team.tick(&look, &thread);
+
     assert_eq!(
         team.worker.refusals(),
         MAX_START_ATTEMPTS,
@@ -839,11 +869,122 @@ fn an_uncoordinated_start_that_never_gets_through_stays_recorded_and_is_not_reco
         0,
         "no rung"
     );
+    let escalated: Vec<(String, String)> = team
+        .store()
+        .messages_in_thread(&thread)
+        .expect("messages")
+        .into_iter()
+        .filter(|m| m.kind == "escalation")
+        .map(|m| (m.sender, m.body))
+        .collect();
+    assert_eq!(escalated.len(), 1, "{escalated:?}");
+    assert_eq!(
+        escalated[0].0,
+        format!("{}/pm", team.origin),
+        "in the member's name"
+    );
+    assert!(
+        escalated[0].1.contains("its start failed 3 times"),
+        "{}",
+        escalated[0].1
+    );
     assert_eq!(
         team.failed_start(&session),
         Some((MAX_START_ATTEMPTS, None)),
         "the record stays for status and withdraw"
     );
+}
+
+/// **The retry of a failed rung is the ladder's alone** (nxf 6j6v.yts5): a slot nobody coordinates
+/// is judged by the grace and the two looks even when a `failed:` rung stands on its clock — say,
+/// from a coordinator that has since handed it over. Its first look waits out the grace.
+#[test]
+fn an_uncoordinated_slot_with_a_failed_rung_on_its_clock_waits_out_its_grace() {
+    let team = uncoordinated_team();
+    let receipt = team.send(T0);
+    let thread = receipt.thread_id.clone();
+    team.sql(&format!(
+        "INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail)
+         VALUES ('{thread}', '{}/pm', '{}', 'recommissioned', 1, NULL,
+                 'failed: io: injected', 'a rung of another coordinator')",
+        team.origin,
+        at(0)
+    ));
+
+    team.tick(&at(60), &thread);
+
+    assert_eq!(
+        team.store()
+            .messages_in_thread(&thread)
+            .expect("messages")
+            .into_iter()
+            .filter(|m| m.kind == "escalation")
+            .count(),
+        0,
+        "not recorded at once"
+    );
+    assert_eq!(
+        team.book.held_look(&thread, "pm"),
+        Some(at(120)),
+        "the grace's end"
+    );
+}
+
+/// **The failed start's own record goes through the lock** (nxf 6j6v.yts5, from the review of
+/// 3eqa): the lock that failed the start is the likely one to meet its record and its retry
+/// instant as well. Each refused once, both get through, and the retry is still scheduled — and
+/// started.
+#[test]
+fn a_lock_held_across_the_start_and_the_record_still_leaves_a_scheduled_retry() {
+    let team = team();
+    team.worker.fail_next(1);
+    team.sql(&format!(
+        "CREATE TABLE record_locks(n INTEGER NOT NULL);
+         INSERT INTO record_locks VALUES (1);
+         CREATE TRIGGER lock_the_record BEFORE INSERT ON failed_starts
+           WHEN (SELECT n FROM record_locks) > 0
+         BEGIN
+           UPDATE record_locks SET n = n - 1;
+           SELECT RAISE(FAIL, '{LOCKED} (injected)');
+         END;
+         CREATE TABLE retry_locks(n INTEGER NOT NULL);
+         INSERT INTO retry_locks VALUES (1);
+         CREATE TRIGGER lock_the_retry BEFORE UPDATE OF retry_at ON failed_starts
+           WHEN (SELECT n FROM retry_locks) > 0 AND NEW.retry_at IS NOT NULL
+         BEGIN
+           UPDATE retry_locks SET n = n - 1;
+           SELECT RAISE(FAIL, '{LOCKED} (injected)');
+         END;"
+    ));
+
+    let receipt = team.send(T0);
+
+    let session = receipt.session.clone().expect("a session was minted");
+    assert_eq!(
+        team.count("SELECT n FROM record_locks"),
+        0,
+        "the record met the lock"
+    );
+    assert_eq!(
+        team.count("SELECT n FROM retry_locks"),
+        0,
+        "the retry met the lock"
+    );
+    assert_eq!(
+        team.failed_start(&session),
+        Some((1, Some(at(60)))),
+        "recorded, with its retry"
+    );
+
+    team.tick(&at(60), &thread_of(&receipt));
+
+    let started = team.worker.started();
+    assert_eq!(started.len(), 1, "the retry started pm");
+    assert_eq!(started[0].internal_session, session);
+}
+
+fn thread_of(receipt: &surface::SendToReceipt) -> String {
+    receipt.thread_id.clone()
 }
 
 /// A coordinated slot whose BIND fails after the post — the mint went through — says so as the

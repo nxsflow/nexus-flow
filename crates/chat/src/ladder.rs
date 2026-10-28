@@ -203,20 +203,30 @@ impl RungOutcome {
     }
 }
 
-/// A log row's outcome as a person reads it: the typed word in words, a refusal or failure with
-/// its error, and a word this build does not know verbatim.
+/// A log row's outcome as a person reads it: the typed word in words, and anything else — a
+/// refusal or a failure with its error ([`failed_outcome`]), a word this build does not know —
+/// verbatim, which already reads as words.
 fn outcome_words(raw: Option<&str>) -> String {
     match raw {
         None => "still in flight".to_string(),
         Some(raw) => match RungOutcome::parse(raw) {
             Some(o) => o.words().to_string(),
-            None => match raw.split_once(": ") {
-                Some(("refused", why)) => format!("refused: {why}"),
-                Some(("failed", why)) => format!("failed: {why}"),
-                _ => raw.to_string(),
-            },
+            None => raw.to_string(),
         },
     }
+}
+
+/// The marker a failed rung's outcome carries before its error.
+const FAILED: &str = "failed: ";
+
+/// **The outcome of a rung whose trigger failed** — `failed: <error>`, read back by [`failure_of`].
+fn failed_outcome(why: &str) -> String {
+    format!("{FAILED}{why}")
+}
+
+/// The error of a failed rung's outcome, `None` for any other outcome.
+fn failure_of(outcome: &str) -> Option<&str> {
+    outcome.strip_prefix(FAILED)
 }
 
 /// **What a resume did with a hold** — `session_interruption.outcome`, written by
@@ -457,6 +467,21 @@ impl ChatStore {
             .query_map(params![thread, role], log_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The slot's newest rung, `None` before its first.
+    pub(crate) fn newest_rung(&self, thread: &str, role: &str) -> Result<Option<RecoveryLogRow>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {LOG_COLS} FROM recovery_log WHERE thread = ?1 AND role = ?2
+                      ORDER BY id DESC LIMIT 1"
+                ),
+                params![thread, role],
+                log_from_row,
+            )
+            .optional()?)
     }
 
     /// The newest row of every slot among `threads` — `status`'s one read.
@@ -914,6 +939,24 @@ pub(crate) fn climb(
     let mut findings = Vec::new();
     match judgement {
         Judgement::Nothing => {}
+        // **The ceiling, whatever the look judged** (nxf 6j6v.yts5): a slot waiting out a grace is
+        // still in its episode.
+        Judgement::Pending => {
+            if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
+                escalate(ctx, store, row, coordinator, ceiling, &mut findings)?;
+            }
+        }
+        // ... and a slot whose answer is still coming by another route: that route's clock may fire
+        // past the ceiling, so the slot's look is armed AT the ceiling — the one look the sweep arms
+        // for a slot it otherwise leaves alone, and only while an episode is under way.
+        Judgement::Coming => match ceiling_reached(store, row, ctx.now)? {
+            Some(ceiling) => escalate(ctx, store, row, coordinator, ceiling, &mut findings)?,
+            None => {
+                if let Some(at) = ceiling_instant(store, row)? {
+                    arm(ctx, store, &row.thread, &row.role, &at, &mut findings);
+                }
+            }
+        },
         Judgement::Live => live(ctx, store, row, coordinator, &mut findings)?,
         Judgement::Held => held(ctx, store, row, coordinator, &mut findings)?,
         Judgement::Record {
@@ -1067,10 +1110,27 @@ fn held(
     coordinator: &CoordinatorRef,
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<()> {
-    let Some(session) = row.session.as_deref() else {
-        return Ok(());
+    let hold = match row.session.as_deref() {
+        Some(session) => store.latest_hold(session)?,
+        None => None,
     };
-    let Some(hold) = store.latest_hold(session)? else {
+    // **The ceiling holds over a hold too** (nxf 6j6v.yts5): one that names its instant is the
+    // resume's to take up, and the ceiling still fires at the ceiling — so its look is armed there,
+    // and its escalation says the hold still stands.
+    if let Some(mut ceiling) = ceiling_reached(store, row, ctx.now)? {
+        if let Some(until) = hold
+            .as_ref()
+            .filter(|h| h.resumed_at.is_none())
+            .and_then(|h| h.until.as_deref())
+        {
+            ceiling.detail = format!(
+                "{}; ceiling reached while on hold until {until}; a resume may still answer",
+                ceiling.detail
+            );
+        }
+        return escalate(ctx, store, row, coordinator, ceiling, findings);
+    }
+    let (Some(session), Some(hold)) = (row.session.as_deref(), hold) else {
         return Ok(());
     };
     let waits_on_nobody = hold.until.is_none()
@@ -1078,6 +1138,9 @@ fn held(
         && matches!(hold.outcome, None | Some(Ok(HoldOutcome::NotYet)))
         && !ctx.worker.session_is_running(session);
     if !waits_on_nobody {
+        if let Some(ceiling) = ceiling_instant(store, row)? {
+            arm(ctx, store, &row.thread, &row.role, &ceiling, findings);
+        }
         return Ok(());
     }
     let due = after(&hold.at, STRANDED_GRACE_SECS, "the hold's grace")?;
@@ -1114,19 +1177,72 @@ fn declared_window(store: &ChatStore, thread: &str) -> Result<Option<i64>> {
 /// its first attempt has reached `clamp(3 × window, 2 h, 6 h)`, `None` before that or with no
 /// episode under way.
 fn ceiling_reached(store: &ChatStore, row: &OwedStart, now: &str) -> Result<Option<Occasion>> {
-    let Some(started) = row.recovery_started_at.as_deref() else {
+    let (Some(started), Some(at)) = (
+        row.recovery_started_at.as_deref(),
+        ceiling_instant(store, row)?,
+    ) else {
         return Ok(None);
     };
-    let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
-    if !reached(now, &after(started, ceiling, "the recovery ceiling")?) {
+    if !reached(now, &at) {
         return Ok(None);
     }
+    let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
     Ok(Some(Occasion {
         observed: Observation::Silent,
         judged_from: started.to_string(),
         detail: format!(
             "its recovery began at {started} and reached the ceiling of {} h without an answer",
             ceiling / 3600
+        ),
+    }))
+}
+
+/// **The instant the episode under way reaches its ceiling** — `None` with no episode under way.
+/// What [`ceiling_reached`] compares against, and what no armed look may reach beyond
+/// ([`crate::stranded::arm_look`]).
+pub(crate) fn ceiling_instant(store: &ChatStore, row: &OwedStart) -> Result<Option<String>> {
+    let Some(started) = row.recovery_started_at.as_deref() else {
+        return Ok(None);
+    };
+    let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
+    after(started, ceiling, "the recovery ceiling").map(Some)
+}
+
+/// **The retry of a rung whose trigger failed** (nxf 6j6v.yts5) — the judgement of the slot's next
+/// look when its newest rung, run on this clock or after it, failed: the start is known not to
+/// have happened, so the look acts at once rather than waiting a grace and two looks for a process
+/// that was never started. A failed continue asks for the rung after an end again; a failed
+/// re-commission is a slot that never started. `None` when the newest rung did not fail.
+pub(crate) fn retry_of_a_failed_rung(
+    store: &ChatStore,
+    row: &OwedStart,
+) -> Result<Option<Judgement>> {
+    let Some(last) = store.newest_rung(&row.thread, &row.role)? else {
+        return Ok(None);
+    };
+    let Some(why) = last.outcome.as_deref().and_then(failure_of) else {
+        return Ok(None);
+    };
+    if earlier(&last.at, &row.trigger_clock) {
+        return Ok(None);
+    }
+    let observed = match RecoveryAction::parse(&last.action) {
+        // A failed continue: the rung after an end is asked for again, and finds the continue.
+        Some(RecoveryAction::Continued) => Observation::EndedWithoutAnswer,
+        // A failed re-commission: no session was started for the slot.
+        Some(RecoveryAction::Recommissioned) => Observation::NeverStarted,
+        // Never settled failed: an ask settles asked, no process or cannot ask (`fire_the_rung`),
+        // and an escalation or a progress row starts nothing. Read as a slot that never started, so
+        // a row this build did not write still ends in a re-commission rather than in nothing.
+        Some(RecoveryAction::Asked | RecoveryAction::Escalated | RecoveryAction::Progress)
+        | None => Observation::NeverStarted,
+    };
+    Ok(Some(Judgement::Record {
+        observed,
+        judged_from: last.at.clone(),
+        detail: format!(
+            "its {} at {} could not be started ({why}), so the next look tries again",
+            last.action, last.at
         ),
     }))
 }
@@ -1353,7 +1469,7 @@ fn under_the_claim(
     match &done {
         Done::Acted(o) | Done::Nothing(o) => store.settle_rung_as(log, *o)?,
         Done::Refused(why) => store.settle_rung(log, &format!("refused: {why}"))?,
-        Done::Failed(why) => store.settle_rung(log, &format!("failed: {why}"))?,
+        Done::Failed(why) => store.settle_rung(log, &failed_outcome(why))?,
     }
     after_the_rung(ctx, store, row, rung, &done, opened_the_episode, findings)?;
     Ok(Some(done))
