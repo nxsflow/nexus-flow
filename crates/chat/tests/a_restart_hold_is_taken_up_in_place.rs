@@ -98,6 +98,7 @@ fn workspace(worker: Arc<HostWorker>) -> (TempDir, Engine) {
             role("rival", true),
             role("third", true),
             role("helper", true),
+            role("planner", false),
             role("pm", false),
         ],
         vec![],
@@ -913,4 +914,262 @@ fn status_names_the_restart_hold_that_pins_the_copy_and_drops_it_past_the_bound(
         None,
         "past the bound it pins nothing"
     );
+}
+
+// ---- C.3: the drift question, skipped exactly while the copy did not change hands ----------------
+
+fn resume_at(engine: &Engine, now: &str, session: &str) -> ResumeOutcome {
+    resume(engine, now, session).outcome
+}
+
+fn is_tree_moved(outcome: &ResumeOutcome) -> bool {
+    matches!(outcome, ResumeOutcome::TreeMoved { .. })
+}
+
+/// **DoD 13, second half**: the lease row still names the operation and was not re-acquired after
+/// the hold — the take-up continues in place WITHOUT the question, although the tree differs from
+/// the commission's anchor by the coder's own branch, commit and uncommitted file.
+#[test]
+fn a_take_up_with_the_copy_still_the_operations_resumes_without_the_drift_question() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, _thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    stopped_by_a_restart(&engine, NOW, UNTIL, &session);
+
+    let outcome = resume_at(&engine, UNTIL, &session);
+
+    assert_eq!(outcome, ResumeOutcome::Resumed);
+    assert_eq!(
+        worker.triggers_for("coder").len(),
+        2,
+        "the same session, started again"
+    );
+    the_work_is_in_place(root);
+}
+
+/// **DoD 15, the ABA case**: the lease left the operation and came back to the same scope AFTER the
+/// hold was written. The row names the operation again, but the copy changed hands in between —
+/// so the question is asked.
+#[test]
+fn a_copy_that_left_and_came_back_after_the_hold_asks_the_drift_question() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, _thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let (holder, _) = lease_row(root).unwrap();
+    stopped_by_a_restart(&engine, NOW, UNTIL, &session);
+    {
+        let mut store = common::open_store(root);
+        store
+            .connection()
+            .execute("DELETE FROM working_tree_lease", [])
+            .unwrap();
+        let scope = nexus_chat::working_tree::WorkScope::parse(&holder).unwrap();
+        assert!(store
+            .acquire_working_tree(&scope, "2026-10-27T10:01:00Z", "2026-10-27T12:01:00Z")
+            .unwrap());
+    }
+    assert_eq!(
+        lease_row(root).map(|l| l.0),
+        Some(holder),
+        "the premise: ours again"
+    );
+
+    let outcome = resume_at(&engine, UNTIL, &session);
+
+    assert!(is_tree_moved(&outcome), "{outcome:?}");
+}
+
+/// The coder's operation, past the hold's bound with no resume, swept to the rival WITHOUT a park:
+/// its base was never recorded (`NoBaseRecorded`), so the copy goes on unparked. The rival then
+/// commits in the tree. Returns the coder's session.
+fn handed_on_after_the_bound(
+    root: &std::path::Path,
+    engine: &Engine,
+    worker: &HostWorker,
+    parked: bool,
+) -> String {
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, engine, worker);
+    if !parked {
+        common::open_store(root)
+            .connection()
+            .execute("DELETE FROM operation_base", [])
+            .unwrap();
+    }
+    stopped_by_a_restart(
+        engine,
+        "2026-10-27T11:59:00Z",
+        "2026-10-27T12:01:30Z",
+        &session,
+    );
+    tick(root, worker, "2026-10-27T12:02:01Z", &thread);
+    assert_eq!(
+        worker.triggers_for("rival").len(),
+        1,
+        "the premise: handed on"
+    );
+    std::fs::write(root.join("rival.rs"), "fn rival() {}\n").unwrap();
+    git(root, &["add", "rival.rs"]);
+    git(root, &["commit", "-q", "-m", "the rival's commit"]);
+    session
+}
+
+/// **DoD 13 (b)**: handed on UNPARKED, and the rival committed — a late take-up asks the question.
+#[test]
+fn a_late_take_up_after_an_unparked_hand_on_asks_the_drift_question() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let session = handed_on_after_the_bound(root, &engine, &worker, false);
+
+    let outcome = resume_at(&engine, "2026-10-27T12:03:00Z", &session);
+
+    assert!(is_tree_moved(&outcome), "{outcome:?}");
+    assert_eq!(worker.triggers_for("coder").len(), 1, "nothing was started");
+}
+
+/// **DoD 13 (a)**: handed on AND PARKED — the park protects the work, not the question: no
+/// `TreeMoved`, the take-up queues behind the new holder, and once that holder is done the parked
+/// work is restored and the session continues on it.
+#[test]
+fn a_late_take_up_after_a_parked_hand_on_queues_and_gets_its_parked_work_back() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let session = handed_on_after_the_bound(root, &engine, &worker, true);
+    assert_eq!(
+        git(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main",
+        "the premise: the coder's tree was parked"
+    );
+
+    let outcome = resume_at(&engine, "2026-10-27T12:03:00Z", &session);
+
+    assert!(!is_tree_moved(&outcome), "{outcome:?}");
+    assert_eq!(
+        worker.triggers_for("coder").len(),
+        1,
+        "queued, not started into the rival's tree"
+    );
+    assert!(
+        common::open_store(root)
+            .list_working_tree_queue()
+            .unwrap()
+            .iter()
+            .any(|q| q.session == session),
+        "the take-up waits behind the rival"
+    );
+
+    // The rival finishes; the coder's take-up starts, with its parked work restored.
+    let rival = worker.triggers_for("rival")[0].clone();
+    engine
+        .reply_thread(
+            Caller {
+                session: Some(&rival.internal_session),
+                actor: Some("rival"),
+                now: Some("2026-10-27T12:04:00Z"),
+            },
+            nexus_chat::surface::ReplyThreadRequest {
+                machine: None,
+                thread: rival.reply_thread.as_deref().unwrap(),
+                body: "done",
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+        .unwrap();
+    engine
+        .session_ended(
+            caller_at("rival", "2026-10-27T12:04:00Z"),
+            &rival.internal_session,
+        )
+        .unwrap();
+    assert_eq!(worker.triggers_for("coder").len(), 2, "the take-up started");
+    assert_eq!(
+        git(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "fix/the-coders-branch",
+        "on its own branch again"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("half-done.rs")).unwrap(),
+        "fn half() {}\n",
+        "its uncommitted work is back"
+    );
+}
+
+/// **DoD 14**: an operation that needs no working copy — a planner — never had the copy, so nothing
+/// of its own is in the tree. A foreign commit after its commission is not its drift: the take-up
+/// resumes without the question. (The control below asks it under a window hold.)
+#[test]
+fn a_planning_shaped_operation_resumes_after_a_restart_without_the_drift_question() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let session = a_planner_beside_a_foreign_commit(root, &engine, &worker);
+    stopped_by_a_restart(&engine, NOW, UNTIL, &session);
+
+    let outcome = resume_at(&engine, UNTIL, &session);
+
+    assert_eq!(outcome, ResumeOutcome::Resumed);
+}
+
+#[test]
+fn the_same_planner_under_a_window_hold_is_asked_the_drift_question() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let session = a_planner_beside_a_foreign_commit(root, &engine, &worker);
+    engine
+        .session_interrupted(
+            caller_at("planner", NOW),
+            &session,
+            "five_hour",
+            Some(UNTIL),
+            "q",
+        )
+        .unwrap();
+    engine
+        .session_ended(caller_at("planner", NOW), &session)
+        .unwrap();
+
+    let outcome = resume_at(&engine, UNTIL, &session);
+
+    assert!(is_tree_moved(&outcome), "{outcome:?}");
+}
+
+/// A planner commissioned in a repository, and a commit by somebody else after it. Returns the
+/// planner's session.
+fn a_planner_beside_a_foreign_commit(
+    root: &std::path::Path,
+    engine: &Engine,
+    worker: &HostWorker,
+) -> String {
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join(".gitignore"), ".nxs/\n*.log\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let (session, _thread) = commission(engine, worker, "planner", NOW);
+    assert_eq!(
+        lease_row(root),
+        None,
+        "the premise: a planner takes no copy"
+    );
+    std::fs::write(root.join("theirs.rs"), "fn theirs() {}\n").unwrap();
+    git(root, &["add", "theirs.rs"]);
+    git(root, &["commit", "-q", "-m", "a coding chain's commit"]);
+    session
 }

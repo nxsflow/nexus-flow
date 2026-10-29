@@ -15909,7 +15909,16 @@ pub fn resume_interrupted(
     // brings it back, and asking both questions would report the park's own commit as drift every
     // single time. Where nothing was parked, this is the only thing that can notice that another
     // chain has been through the checkout.
-    if let Some(drift) = the_tree_moved_under_the_hold(ctx, store, thread.as_deref())? {
+    //
+    // **And not while a restart's session comes back to a copy nobody else had** (nxf 6j6v.wxz0,
+    // C.3): measured against the commission's anchor, its own branch, commits and uncommitted files
+    // ARE drift, and the question would stop every resume of every restart.
+    let unmoved = the_copy_did_not_change_hands(ctx, store, &hold, thread.as_deref())?;
+    let drifted = match unmoved {
+        true => None,
+        false => the_tree_moved_under_the_hold(ctx, store, thread.as_deref())?,
+    };
+    if let Some(drift) = drifted {
         // **Asked once, and recorded** (nxf 6j6v.558h, rung B): a hold whose moved tree was put
         // to the root reads `needs_decision` until somebody answers, and a second resume of the
         // same hold — the background job and a human both arriving — does not ask again.
@@ -16227,6 +16236,56 @@ fn the_tree_moved_under_the_hold(
     };
     let drift = now.drift_from(&then);
     Ok(drift.any().then_some(drift))
+}
+
+/// **May a restart hold's take-up skip the drift question?** (nxf 6j6v.wxz0, C.3 as corrected by the
+/// round-3 disposition) — only while nobody else can have been through the tree.
+///
+/// True when the hold [`resumes_in_place`](crate::interruption::Interruption::resumes_in_place),
+/// names an `until`, and EITHER
+///
+/// * the session's operation never needed the working copy ([`needs_working_tree`] is false — a
+///   planner, a researcher, a direct consult): nothing of its own is in the tree, and a coding
+///   chain's commit beside it is not its drift. Without this clause every such session would be
+///   asked at every self-update, because every commission is stamped with an anchor; OR
+/// * the lease row still names the operation's claim scope AND its `acquired` stamp is no later
+///   than the hold: the copy did not leave and come back in between (the ABA case).
+///
+/// Everything else — a window hold, a hold with no `until`, a copy handed on (the guard on the copy
+/// lapsed: a Mac asleep through the update, a resume by hand a day later) — is asked as before. A
+/// copy that was handed on AND parked is answered by the park ([`the_tree_moved_under_the_hold`]
+/// returns `None` for parked work), so the question there is asked only of an unparked hand-on.
+fn the_copy_did_not_change_hands(
+    ctx: &Ctx,
+    store: &ChatStore,
+    hold: &crate::interruption::Interruption,
+    thread: Option<&str>,
+) -> Result<bool> {
+    let Some(thread) = thread else {
+        return Ok(false);
+    };
+    if !hold.resumes_in_place() || hold.until.is_none() {
+        return Ok(false);
+    }
+    // The role's own declaration, as the operation is bound to it: an unknown role is asked, which
+    // is the direction this question already fails in.
+    if let Some(role) = store.session_role(&hold.session)? {
+        let frozen = operation_declarations(ctx, store, thread)?;
+        let ctx = &with_declarations(ctx, frozen.as_ref());
+        if let Ok(decl) = ctx.defs.role(&role) {
+            if !needs_working_tree(ctx, store, decl, Some(thread))? {
+                return Ok(true);
+            }
+        }
+    }
+    let scope =
+        crate::working_tree::resolve_scope(lease_claim_root(store, Some(thread))?.as_deref(), "");
+    Ok(match store.working_tree_lease_since()? {
+        Some((holder, acquired)) => {
+            holder == scope.key() && crate::stranded::reached(&hold.at, &acquired)
+        }
+        None => false,
+    })
 }
 
 /// **Put the question back to the thread that started the operation** — the owner's rule of
