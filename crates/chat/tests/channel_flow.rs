@@ -1412,6 +1412,9 @@ fn a_new_pass_advances_on_its_own_answer_even_while_the_previous_pass_is_still_o
         "first cut",
     ]));
     let b1 = slots(&tmp, &board).into_iter().next_back().unwrap();
+    // The session started for `b1` — the straggler answers from it, not from whichever reviewer
+    // session is newest by then (nxf 6j6v.f5rf: a session answers only the slot it serves).
+    let b1_session = session_of(&tmp, "reviewer");
 
     // The requester asks again while the reviewer is still working: pass two mints its own step one.
     json_of(persona(&tmp, "pm", &pm).args([
@@ -1442,15 +1445,13 @@ fn a_new_pass_advances_on_its_own_answer_even_while_the_previous_pass_is_still_o
     assert_ne!(b2, b1, "a fresh slot for pass two, not pass one's");
 
     // The straggler finally answers. It belongs to no live pass, so it is a clean no-op.
-    let late = json_of(
-        persona(&tmp, "reviewer", &session_of(&tmp, "reviewer")).args([
-            "--json",
-            "reply",
-            "--thread",
-            &b1,
-            "late review of the old request",
-        ]),
-    );
+    let late = json_of(persona(&tmp, "reviewer", &b1_session).args([
+        "--json",
+        "reply",
+        "--thread",
+        &b1,
+        "late review of the old request",
+    ]));
     assert!(
         late["completed"].is_null(),
         "a straggler from a finished-with pass delivers nothing: {late}"

@@ -1447,7 +1447,7 @@ fn refuse_a_thread_this_session_does_not_serve(
     if !store.session_is_ours(session)? {
         return Ok(());
     }
-    if store.session_serves(session, &ctx.caller_handle(), thread)? {
+    if store.session_serves(session, thread)? {
         return Ok(());
     }
     let own = match store.session_thread(session)? {

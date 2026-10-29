@@ -206,7 +206,7 @@ impl ChatStore {
             .is_some())
     }
 
-    /// **Whether session `internal_id`, speaking as `handle`, serves `thread`** (nxf 6j6v.f5rf) —
+    /// **Whether session `internal_id` serves `thread`** (nxf 6j6v.f5rf) —
     /// the one question a reply from a session is bound by.
     ///
     /// A session serves the threads it was put in motion on — triggered into, resumed into,
@@ -216,15 +216,15 @@ impl ChatStore {
     /// particular NOT every thread its handle owes an answer on: two rounds of the same reviewers
     /// open at once are two sessions per handle, and each serves its own slot only.
     ///
-    /// The spoken-in half is keyed on `handle` as sender too, so a message that merely carries this
-    /// session's id as a reference does not enrol a thread. One indexed seek per half.
-    pub fn session_serves(&self, internal_id: &str, handle: &str, thread: &str) -> Result<bool> {
+    /// The spoken-in half reads the return address a post carries (`refs.session_id`, stamped from
+    /// the posting session), whatever name it was posted under. One indexed seek per half.
+    pub fn session_serves(&self, internal_id: &str, thread: &str) -> Result<bool> {
         Ok(self.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?3)
+            "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?2)
                  OR EXISTS(SELECT 1 FROM messages m
-                            WHERE m.thread_id = ?3 AND m.sender = ?2
+                            WHERE m.thread_id = ?2
                               AND json_extract(m.refs, '$.session_id') = ?1)",
-            params![internal_id, handle, thread],
+            params![internal_id, thread],
             |r| r.get(0),
         )?)
     }

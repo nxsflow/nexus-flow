@@ -174,7 +174,7 @@ pub fn open_for_session(
             q.outstanding.iter().any(|h| h == handle) || q.opener.as_deref() == Some(handle);
         if let (Some(s), true) = (bound, related) {
             if standing_in != Some(q.thread_id.as_str())
-                && !store.session_serves(s, handle, &q.thread_id)?
+                && !store.session_serves(s, &q.thread_id)?
             {
                 continue;
             }
