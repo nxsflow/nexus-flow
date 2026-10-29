@@ -1,8 +1,0 @@
----
-type: fixed
-facade: none
----
-[en]
-A persona's reply now lands only in a conversation its own session serves. Before, when two review rounds of the same reviewers were open at once, each reviewer was woken with both rounds' threads listed as open, and a reviewer could post its verdict, and its send-back mark, into the other round, about a change it had never read. Now a session is woken naming only the threads it serves: the one it was started for, any it was resumed, continued or re-commissioned into, and any it opened itself. A bare `nxc reply` chooses among those only. `nxc reply --thread <id>` and `nxc reply --progress` from a session are refused when the session does not serve that thread, and the refusal names the thread it does serve. A reply typed at a terminal, outside any session, is unchanged.
-[de]
-Die Antwort einer Persona landet jetzt nur noch in einem Gespräch, das ihre eigene Sitzung bedient. Bisher wurde jeder Prüfer, wenn zwei Prüfrunden derselben Prüfer gleichzeitig offen waren, mit den Fäden beider Runden als offen geweckt, und ein Prüfer konnte sein Urteil samt Rücksendemarke in die andere Runde schreiben, über eine Änderung, die er nie gelesen hatte. Jetzt nennt das Wecken einer Sitzung nur die Fäden, die sie bedient: den, für den sie gestartet wurde, jeden, in den sie wieder aufgenommen, fortgesetzt oder neu beauftragt wurde, und jeden, den sie selbst eröffnet hat. Ein `nxc reply` ohne Faden wählt nur unter diesen. `nxc reply --thread <id>` und `nxc reply --progress` aus einer Sitzung werden abgelehnt, wenn die Sitzung diesen Faden nicht bedient, und die Ablehnung nennt den Faden, den sie bedient. Eine Antwort, die außerhalb jeder Sitzung am Terminal eingegeben wird, bleibt unverändert.
