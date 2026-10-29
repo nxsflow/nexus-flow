@@ -782,6 +782,53 @@ function readReplyDebt() {
   }
 }
 
+/** **Does a hold stand over THIS session right now?** (nxf 6j6v.wxz0) — `nxc session state
+ *  <session> --json`, whose entry for `spec.session` carries the standing hold at `interrupted`.
+ *
+ *  Answers the hold (`{limit}`) or `null`. `null` is also the answer for every way the question can
+ *  fail — an older `nxc` that does not know `session state`, output that does not parse, a store
+ *  that stays locked — which is the fail-safe direction `readReplyDebt` takes too: the teardown then
+ *  falls through to today's behaviour, where the engine's `--if-unanswered` gate decides.
+ *
+ *  A failed call is asked again, a few times, because the restart that sent this stop is writing
+ *  holds into the same store at that moment (round-2 IR #8). Bounded well inside the restart's
+ *  grace, so a store that stays locked costs at most `HOLD_READ_BUDGET_MS`, never the teardown. An
+ *  `nxc` that does not know the verb is not asked again: that answer does not change. */
+const HOLD_READ_ATTEMPTS = 4;
+const HOLD_READ_SPACING_MS = 250;
+const HOLD_READ_BUDGET_MS = 15_000;
+function readStandingHold() {
+  const deadline = Date.now() + HOLD_READ_BUDGET_MS;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const out = execFileSync("nxc", ["session", "state", spec.session, "--json"], {
+        env: { ...process.env, ...spec.env },
+        encoding: "utf8",
+        timeout: NXC_CALL_TIMEOUT_MS,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const mine = (JSON.parse(out).sessions ?? []).find((s) => s.session === spec.session);
+      const hold = mine?.interrupted;
+      return hold && hold.resumed_at == null ? { limit: hold.limit } : null;
+    } catch (err) {
+      const stderr = err?.stderr ? err.stderr.toString() : "";
+      if (err instanceof SyntaxError || /unrecognized subcommand|unexpected argument/.test(stderr)) {
+        console.error(`sidecar: could not read whether a hold stands over ${spec.session}: ${err?.message ?? err}`);
+        return null;
+      }
+      if (attempt >= HOLD_READ_ATTEMPTS || Date.now() + HOLD_READ_SPACING_MS > deadline) {
+        if (stderr) process.stderr.write(stderr);
+        console.error(
+          `sidecar: could not read whether a hold stands over ${spec.session} after ${attempt} ` +
+            `attempts: ${err?.message ?? err}`,
+        );
+        return null;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HOLD_READ_SPACING_MS);
+    }
+  }
+}
+
 /** The text a reminded session is resumed with. It says the same two things the session's own system
  *  prompt says (nxf 6j6v.553s part 1: a turn ends in exactly two ways) — deliberately, because the
  *  measured failure is not a session that was never told, it is a session that was told and missed
@@ -1091,6 +1138,19 @@ function postFailureReply() {
   // output that does not parse, and in that state the cheap mistake is a post the engine refuses
   // while the expensive one is a round left hanging.
   if (stopping()) {
+    // **A HOLD THAT STANDS SAYS THE SESSION IS COMING BACK** (nxf 6j6v.wxz0). A planned service
+    // restart records a `service_restart` hold for this session and THEN sends the stop, and the
+    // new service takes it up again in place — so a substitute here would be a false alarm that
+    // discharges the round it is about to continue. Any standing hold counts: a window hold means
+    // the same. No hold — a `kill` from outside a restart — is today's path, below.
+    const hold = readStandingHold();
+    if (hold) {
+      console.error(
+        `sidecar: posting nothing for thread ${spec.replyThread} — told to stop while a hold ` +
+          `stands (${hold.limit}) — the service takes this session up again`,
+      );
+      return;
+    }
     const debt = readReplyDebt();
     if (debt && !debt.owes) {
       console.error(
