@@ -1567,6 +1567,95 @@ pub fn live_sessions_in(workspace_root: &Path) -> Vec<String> {
     live
 }
 
+/// **The live sessions of a workspace, sorted by the process group they run in** (nxf 6j6v.wxz0) —
+/// what a planned service restart asks before it holds and stops anything.
+///
+/// The restart's `bootout` SIGTERMs the service's whole process group, and the sidecar is spawned
+/// into that group (no `process_group(0)`, unlike the hurdle runner), so a session in it dies with
+/// the service and is the restart's to hold and stop. One in another group — started by a terminal
+/// `nxc`, or by another instance attending the same workspace — is not touched by the bootout, and
+/// a stop would abort work nothing is about to kill.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupedSessions {
+    /// Live, provably the session's own process, and in the group asked about.
+    pub ours: Vec<String>,
+    /// Live, in another group.
+    pub others: Vec<String>,
+    /// Live and in the group asked about, but the claim cannot prove the process is the session's
+    /// ([`ClaimHolder::Unverifiable`]): no hold is recorded for it and no signal sent — the same
+    /// refusal [`Worker::stop_session`] makes.
+    pub unverifiable: Vec<String>,
+    /// Live, but its process group could not be read for a reason other than the process being
+    /// gone — the session and the `errno`.
+    pub unreadable: Vec<(String, i32)>,
+}
+
+/// [`GroupedSessions`] for `workspace_root` against process group `pgid`, each list sorted. The same
+/// claim files and the same parse ([`a_session_claim`], [`who_holds`]) [`live_sessions_in`] reads, so
+/// what a claim proves is decided in one place. A pid that is gone between the two reads is in none
+/// of the lists.
+pub fn live_sessions_in_group(workspace_root: &Path, pgid: i32) -> GroupedSessions {
+    let mut grouped = GroupedSessions::default();
+    let Ok(entries) = std::fs::read_dir(agent_logs_dir(workspace_root)) else {
+        return grouped;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("pid") {
+            continue;
+        }
+        let Some(session) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(claim) = claim_in(&path) else {
+            continue;
+        };
+        let holder = who_holds(&claim);
+        if !matches!(holder, ClaimHolder::TheSession | ClaimHolder::Unverifiable) {
+            continue;
+        }
+        match process_group_of(claim.pid) {
+            Ok(group) if group != pgid => grouped.others.push(session),
+            Ok(_) if holder == ClaimHolder::TheSession => grouped.ours.push(session),
+            Ok(_) => grouped.unverifiable.push(session),
+            Err(None) => {}
+            Err(Some(errno)) => grouped.unreadable.push((session, errno)),
+        }
+    }
+    grouped.ours.sort();
+    grouped.others.sort();
+    grouped.unverifiable.sort();
+    grouped.unreadable.sort();
+    grouped
+}
+
+/// `getpgid(pid)`: the group, or `Err(None)` when the process is gone (`ESRCH`), or
+/// `Err(Some(errno))` for any other refusal — which is reported, never read as "gone".
+#[cfg(unix)]
+fn process_group_of(pid: u32) -> std::result::Result<i32, Option<i32>> {
+    // SAFETY: `getpgid` reads another process's group id and touches no memory of this process; a
+    // bad pid is an errno, not UB. `pid` came through `a_signalable_pid`, so it names one process.
+    let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+    if group >= 0 {
+        return Ok(group);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Err(None),
+        other => Err(Some(other.unwrap_or(0))),
+    }
+}
+
+/// No process group can be read here; every session is "gone" to this question, so a restart on
+/// such a platform holds and stops nothing — it has no launchd bootout to protect against either.
+#[cfg(not(unix))]
+fn process_group_of(_pid: u32) -> std::result::Result<i32, Option<i32>> {
+    Err(None)
+}
+
 /// **What a `.pid` claim has to say before anything asks the operating system about it** (nxf
 /// 6j6v.b9nf, fix round 2 of that item's review) — the pid half of the ONE parse every reader of
 /// these files shares ([`a_session_claim`]), so that what `stop_session` refuses and what the
@@ -2775,6 +2864,107 @@ mod tests {
         fn drop(&mut self) {
             self.kill_and_reap();
         }
+    }
+
+    /// **Which live sessions are the restarted instance's** (nxf 6j6v.wxz0, DoD 8's reader): a
+    /// session in the service's process group dies with it at the restart's bootout and is the
+    /// hook's to hold and stop; one in another group — a terminal `nxc`, another instance — is
+    /// left alone. The "service" here is this test process, whose group the first child inherits.
+    #[cfg(unix)]
+    #[test]
+    fn live_sessions_are_sorted_by_the_process_group_they_run_in() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = agent_logs_dir(tmp.path());
+        std::fs::create_dir_all(&logs).unwrap();
+        let claim = |session: &str, contents: String| {
+            std::fs::write(logs.join(format!("{session}.pid")), contents).unwrap();
+        };
+        let ours = LiveProcess::spawn();
+        claim("m-ours", session_claim_for(ours.pid()));
+        let elsewhere = LiveProcess(
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        claim("m-elsewhere", session_claim_for(elsewhere.pid()));
+        // A bare pid in our group: alive, but not provably the session's — never held.
+        let old_format = LiveProcess::spawn();
+        claim("m-old-format", format!("{}\n", old_format.pid()));
+        let mut gone = LiveProcess::spawn();
+        claim("m-gone", session_claim_for(gone.pid()));
+        gone.kill_and_reap();
+
+        // SAFETY: `getpgid(0)` asks for this process's own group and touches no memory.
+        let pgid = unsafe { libc::getpgid(0) };
+        let grouped = live_sessions_in_group(tmp.path(), pgid);
+
+        assert_eq!(grouped.ours, ["m-ours"]);
+        assert_eq!(grouped.others, ["m-elsewhere"]);
+        assert_eq!(grouped.unverifiable, ["m-old-format"]);
+        assert!(grouped.unreadable.is_empty(), "{:?}", grouped.unreadable);
+    }
+
+    /// **A service under `setsid()`** (round-2 IR #7): its sessions sit in ANOTHER session than the
+    /// caller asking `getpgid` about them. Each one is either sorted as the service's or reported
+    /// `unreadable` with its errno — never dropped silently into "neither".
+    #[cfg(unix)]
+    #[test]
+    fn a_service_in_a_session_of_its_own_still_has_its_sessions_found() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = agent_logs_dir(tmp.path());
+        std::fs::create_dir_all(&logs).unwrap();
+        let pid_file = tmp.path().join("child.pid");
+        // The "service": a shell in a new session (and so a new group) that starts one child in
+        // its group, writes the child's pid, and waits.
+        let mut service = Command::new("sh");
+        service
+            .arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pid_file.display()))
+            .stdin(Stdio::null());
+        // SAFETY: `setsid` in the forked child before exec; it touches only that child's state.
+        unsafe {
+            service.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let service = LiveProcess(service.spawn().unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let child: u32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the service never started its child"
+            );
+            std::thread::yield_now();
+        };
+        std::fs::write(logs.join("m-child.pid"), session_claim_for(child)).unwrap();
+        // SAFETY: as above — a read of another process's group, no memory touched.
+        let pgid = unsafe { libc::getpgid(service.pid() as libc::pid_t) };
+        assert!(pgid > 0, "the service's group reads");
+
+        let grouped = live_sessions_in_group(tmp.path(), pgid);
+
+        let found = grouped.ours == ["m-child"]
+            || grouped
+                .unreadable
+                .iter()
+                .any(|(s, errno)| s == "m-child" && *errno != 0);
+        assert!(found, "{grouped:?}");
+        // SAFETY: the child is a `sleep` this test started; signalling it touches no memory here.
+        unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) };
     }
 
     #[test]
