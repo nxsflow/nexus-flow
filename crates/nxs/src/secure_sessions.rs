@@ -209,18 +209,25 @@ mod tests {
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
+        // Reaped as it goes, the way a parent reaps: this test process IS the child's parent, and
+        // an unreaped zombie still reads as alive on Linux for the whole grace.
+        let pid = child.id();
+        let reaper = std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         let logs = nexus_chat::worker::agent_logs_dir(&root);
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(
             logs.join(format!("{session}.pid")),
-            nexus_chat::worker::session_claim_for(child.id()),
+            nexus_chat::worker::session_claim_for(pid),
         )
         .unwrap();
 
         let report = prepare_with(&home, &RestartCause::DaemonInstall, hook(tmp.path()));
 
-        let _ = child.kill();
-        let _ = child.wait();
+        // SAFETY: a signal to the child this test started (already gone if the stop landed).
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let _ = reaper.join();
         assert_eq!(
             report
                 .held

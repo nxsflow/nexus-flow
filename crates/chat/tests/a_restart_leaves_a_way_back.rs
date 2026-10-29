@@ -21,7 +21,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as StdCommand, Stdio};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -285,8 +285,15 @@ fn the_coders_work_is_in_place(root: &Path) {
 /// A process standing in for a session, with its claim written the way the sidecar writes it.
 /// It runs until it is killed; `on_term` is the shell its SIGTERM trap runs (`""` ignores it, and
 /// `None` keeps the default — the process dies at once).
+///
+/// **Reaped by a thread of its own, the way a parent reaps** (CI on Linux, round 4): this test
+/// process is the session's parent, and a child that exited at its stop and was never waited for is
+/// a zombie — which still answers `kill(pid, 0)` and, on Linux, still shows its start time in
+/// `/proc`, so it would read as a live session for the whole grace. The service that really starts
+/// sessions is a different process from the restart's hook.
 struct Session {
-    child: Child,
+    pid: u32,
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Session {
@@ -310,15 +317,22 @@ impl Session {
         if own_group {
             cmd.process_group(0);
         }
-        let child = cmd.spawn().expect("start the stand-in session");
+        let mut child = cmd.spawn().expect("start the stand-in session");
+        let pid = child.id();
         let logs = nexus_chat::worker::agent_logs_dir(root);
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(
             logs.join(format!("{session}.pid")),
-            nexus_chat::worker::session_claim_for(child.id()),
+            nexus_chat::worker::session_claim_for(pid),
         )
         .unwrap();
-        Session { child }
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = exited.clone();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        Session { pid, exited }
     }
 
     /// A sidecar-shaped session: on SIGTERM it runs the sidecar's teardown — bind, a transcript
@@ -349,18 +363,38 @@ impl Session {
     }
 
     fn pid(&self) -> u32 {
-        self.child.id()
+        self.pid
     }
 
     fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        !self.exited.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether the process exits within `bound` — its reaper's word, not a single look.
+    fn has_exited_within(&mut self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        while self.is_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !self.is_alive()
+    }
+
+    /// SIGKILL, and wait for the reaper to see it go.
+    fn kill_hard(&mut self) {
+        if self.is_alive() {
+            // SAFETY: a signal to the child this test started; it touches no memory here.
+            unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.is_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.kill_hard();
     }
 }
 
@@ -583,7 +617,10 @@ fn a_restart_holds_the_session_and_it_comes_back_in_its_own_tree() {
         appears(&root.join(format!("torn-down-{session}"))),
         "the teardown ran inside the grace"
     );
-    assert!(!running.is_alive());
+    assert!(
+        running.has_exited_within(Duration::from_secs(10)),
+        "it exited after its teardown"
+    );
     let until = report.until.clone().expect("the receipt names until");
     assert_eq!(until, at(60 + 20 + SERVICE_RESTART_MARGIN_SECS));
     // The teardown's three acts landed: bound, flushed, ended.
@@ -831,8 +868,7 @@ fn a_session_the_hook_missed_is_left_where_the_stranded_sweep_finds_it() {
     });
     assert!(report.is_empty());
     // The bootout's SIGKILL.
-    missed.child.kill().unwrap();
-    missed.child.wait().unwrap();
+    missed.kill_hard();
 
     let s = store(root);
     assert!(s.resolve_real(&session).unwrap().is_some(), "bound");
