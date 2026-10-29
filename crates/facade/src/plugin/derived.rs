@@ -374,7 +374,58 @@ impl Ranking {
     }
 }
 
+/// The rules of a field key on a custom field in the per-type order of `ty` (6j6v.z19s): the field
+/// is declared in `[fields]`, applies to `ty` (an `on` that names it, or none), and holds one
+/// value — a list field holds several entries, so it cannot rank. Any type of value else ranks by
+/// the field key's compare rule; a `datetime` is stored normalised, so it ranks in time order.
+fn validate_custom_key(
+    scope: &str,
+    ty: &str,
+    key: &RankKey,
+    fields: &BTreeMap<String, FieldDecl>,
+) -> std::result::Result<(), String> {
+    let field = &key.field;
+    let Some(decl) = fields.get(field) else {
+        return Err(format!(
+            "{scope}ranking key '{field}' names no field the ranking can read; valid: {}, or a \
+             custom field of [fields] declared on '{ty}'",
+            crate::record::RANKABLE_FIELDS.join(", ")
+        ));
+    };
+    if decl.list {
+        return Err(format!(
+            "{scope}ranking key '{field}' is a list field — a list holds several entries, so it \
+             cannot rank"
+        ));
+    }
+    if !decl.on.is_empty() && !decl.on.iter().any(|t| t == ty) {
+        return Err(format!(
+            "{scope}ranking key '{field}' names a custom field that applies only to {}, not to \
+             '{ty}' — it would read null on every '{ty}'",
+            decl.on.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 impl RankSpec {
+    /// The rules of the field keys on custom fields in this policy's per-type orders (6j6v.z19s),
+    /// checked against the plugin's `[fields]` after [`validate_in`](Self::validate_in) for the
+    /// policy under the TOML section `section`, which the errors name.
+    pub(crate) fn validate_custom_in(
+        &self,
+        section: &str,
+        fields: &BTreeMap<String, FieldDecl>,
+    ) -> std::result::Result<(), String> {
+        for (ty, o) in &self.by_type {
+            let scope = format!("[{section}.{ty}] ");
+            for key in o.order.iter().filter(|k| k.is_custom()) {
+                validate_custom_key(&scope, ty, key, fields)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Every order of this policy with the scope its errors name: the default order (an empty
     /// scope), then each per-type order (`[section.<type>] `).
     pub(crate) fn orders(&self, section: &str) -> Vec<(String, &Vec<RankKey>)> {
@@ -389,10 +440,20 @@ impl RankSpec {
 
     /// Whether any order of this policy holds a derived key.
     pub fn has_derived(&self) -> bool {
+        self.keys().any(RankKey::is_derived)
+    }
+
+    /// Whether any order of this policy holds a key whose values the read layer computes once per
+    /// query rather than reads off the row: a derived key, or a custom-field key (6j6v.z19s).
+    pub(crate) fn has_computed(&self) -> bool {
+        self.keys().any(RankKey::is_computed)
+    }
+
+    /// Every key of every order of this policy.
+    fn keys(&self) -> impl Iterator<Item = &RankKey> {
         self.order
             .iter()
             .chain(self.by_type.values().flat_map(|o| o.order.iter()))
-            .any(RankKey::is_derived)
     }
 }
 
@@ -400,6 +461,25 @@ impl RankKey {
     /// Whether this is a derived key (`related`, `count` or `sum`) rather than a field key.
     pub fn is_derived(&self) -> bool {
         self.related.is_some() || self.count.is_some() || self.sum.is_some()
+    }
+
+    /// Whether this is a field key on a field the row does not carry
+    /// ([`RANKABLE_FIELDS`](crate::record::RANKABLE_FIELDS)) — in a loaded plugin, a custom field
+    /// of `[fields]` declared on the type of the per-type order that holds the key (6j6v.z19s). Its
+    /// value is the item's own custom value, read with the custom values.
+    pub fn is_custom(&self) -> bool {
+        !self.is_derived()
+            && !self.field.is_empty()
+            && !crate::record::RANKABLE_FIELDS.contains(&self.field.as_str())
+    }
+
+    /// Whether the read layer computes this key's values once per query ([`is_derived`] or
+    /// [`is_custom`]) instead of the comparator reading them off the row.
+    ///
+    /// [`is_derived`]: Self::is_derived
+    /// [`is_custom`]: Self::is_custom
+    pub(crate) fn is_computed(&self) -> bool {
+        self.is_derived() || self.is_custom()
     }
 
     /// The key as its errors name it: `'<field>'` for a field key, its kind and edge for a derived

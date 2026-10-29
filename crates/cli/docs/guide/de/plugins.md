@@ -177,8 +177,8 @@ Der `type` entscheidet, was ein Wert sein darf:
   `+02:00`. Gespeichert wird derselbe Zeitpunkt in UTC auf ganze Sekunden:
   `--set occurred_on=2026-10-12T10:30:00+02:00` speichert `2026-10-12T08:30:00Z`. Ein reines Datum
   oder eine Uhrzeit ohne Zone wird abgelehnt. Weil jeder Wert dieselbe Form hat, sortieren
-  `datetime`-Werte überall zeitlich, wo ein Feld gelesen wird, etwa im `of = { field = "..." }`
-  eines Ranking-Schlüssels. Der eingegebene Offset bleibt nicht erhalten.
+  `datetime`-Werte überall zeitlich, wo ein Feld gelesen wird, etwa in einem Feldschlüssel des
+  Rankings oder im `of = { field = "..." }` eines Ranking-Schlüssels. Der eingegebene Offset bleibt nicht erhalten.
 - `enum`: einer der deklarierten `values`.
 
 ### Listenfelder
@@ -305,8 +305,21 @@ Ein Plugin deklariert unter `[ranking.next]`, wie `next` rankt, und unter `[rank
 
 Ein Schlüssel ist ein **Feldschlüssel**, etwa `{ field = "priority", dir = "asc" }`. Mit einer
 `precedence`-Liste rankt ein Feldschlüssel stattdessen nach der Position des Werts in dieser
-Liste. In einer Reihenfolge pro Typ, oder in der Standard-`order` von `[ranking.list]`, kann ein
-Schlüssel auch ein **abgeleiteter Schlüssel** sein, der ein Item nach seinen Nachbarn im Graphen
+Liste. In einer Reihenfolge pro Typ kann ein Feldschlüssel auch ein eigenes Feld nennen, das für
+diesen Typ deklariert ist (jeden Typ außer einem Listenfeld). Er rankt nach dem eigenen Wert des
+Items: als Zahlen, wenn beide Werte ganze Zahlen sind, sonst als Text, sodass ein `datetime`-Feld
+in zeitlicher Reihenfolge rankt. `nulls` setzt die Items ohne Wert:
+
+```toml
+[ranking.list.note]
+order = [ { field = "occurred_on", dir = "desc", nulls = "last" } ]
+```
+
+listet Notizen mit der neuesten zuerst, die Notizen ohne Datum zuletzt, und bei Gleichstand
+entscheidet die Id. Ein eigenes Feld, das nicht deklariert ist, nicht für den Typ deklariert ist
+oder ein Listenfeld ist, wird beim Laden abgelehnt, ebenso ein eigenes Feld in einer
+Standard-`order`. In einer Reihenfolge pro Typ, oder in der Standard-`order` von
+`[ranking.list]`, kann ein Schlüssel auch ein **abgeleiteter Schlüssel** sein, der ein Item nach seinen Nachbarn im Graphen
 rankt:
 
 ```toml
