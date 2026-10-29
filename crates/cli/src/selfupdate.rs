@@ -485,6 +485,20 @@ fn service_ancestor(
     None
 }
 
+/// **The service's pid, when this process runs inside a session the running service started** (nxf
+/// 6j6v.c92y) — the guard a restart asks before it boots the service out from under its own caller.
+/// Shared with `nxs sync daemon install` (nxf 6j6v.wxz0), so the two restarts guard the same way.
+pub fn inside_the_service(home: &nxs_service::ServiceHome) -> Option<u32> {
+    let hb = nxs_service::heartbeat::read_from(&home.heartbeat())
+        .ok()
+        .flatten()?;
+    // Only a heartbeat whose process is PROVEN alive names a pid worth walking to; a stale one's
+    // pid may belong to anything by now.
+    (nxs_service::heartbeat::state(Some(&hb)) == nxs_service::ServiceState::Running)
+        .then_some(hb.pid)
+        .and_then(|pid| service_ancestor(std::process::id(), Some(pid), parent_pid))
+}
+
 /// A launchd handle on demand — asked for only when there is something to restart.
 type CtlFactory =
     Box<dyn Fn() -> std::result::Result<Box<dyn nxs_service::launchd::LaunchCtl>, String>>;
@@ -528,16 +542,7 @@ impl ServiceAt {
             fallback_path_env: nxs_service::launchd::service_path(
                 std::env::var("PATH").ok().as_deref(),
             ),
-            service_ancestor: Box::new(|home: &nxs_service::ServiceHome| {
-                let hb = nxs_service::heartbeat::read_from(&home.heartbeat())
-                    .ok()
-                    .flatten()?;
-                // Only a heartbeat whose process is PROVEN alive names a pid worth walking to; a
-                // stale one's pid may belong to anything by now.
-                (nxs_service::heartbeat::state(Some(&hb)) == nxs_service::ServiceState::Running)
-                    .then_some(hb.pid)
-                    .and_then(|pid| service_ancestor(std::process::id(), Some(pid), parent_pid))
-            }),
+            service_ancestor: Box::new(inside_the_service),
             ctl: Box::new(real_ctl),
             this_program: nxs_service::program::running_program(),
             this_version: env!("CARGO_PKG_VERSION").to_string(),

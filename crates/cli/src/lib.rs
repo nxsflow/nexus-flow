@@ -21,7 +21,8 @@ mod output;
 mod plugin;
 mod selfupdate;
 pub use selfupdate::{
-    prepared_words, register_restart_preparation, PrepareForRestart, RestartCause,
+    inside_the_service, prepared_words, register_restart_preparation, PrepareForRestart,
+    RestartCause,
 };
 mod signature;
 mod sync;
