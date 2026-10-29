@@ -70,6 +70,7 @@ pub mod park;
 pub mod persona;
 pub mod persona_migration;
 pub mod precondition;
+pub mod restart;
 pub mod role;
 pub mod schema;
 pub mod session_map;

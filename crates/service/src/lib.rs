@@ -45,6 +45,7 @@ pub mod machine;
 pub mod orders;
 pub mod program;
 pub mod registry;
+pub mod restart;
 pub mod timers;
 pub mod wake;
 
