@@ -4326,6 +4326,17 @@ fn session_cmd(json: bool, db: Option<&str>, action: &SessionAction) -> Result<(
             until,
             detail,
         } => {
+            // **A restart hold is recorded only through the Engine seam the restart's hook calls**
+            // (nxf 6j6v.wxz0). It pins the working copy until its `until` plus a margin, so one
+            // forged here with a far-future `until` would pin the copy for good.
+            if limit == crate::interruption::SERVICE_RESTART_LIMIT {
+                return Err(NxfError::validation(format!(
+                    "`--limit {}` is recorded only by a planned service restart (`nxs \
+                     self-update`, `nxs sync daemon install`), never by a runtime callback — \
+                     nothing was recorded",
+                    crate::interruption::SERVICE_RESTART_LIMIT
+                )));
+            }
             let cli_ctx = CliCtx::resolve(db, hop())?;
             let mut store = open(db)?;
             let r = crate::orchestration::session_interrupted(
