@@ -81,6 +81,18 @@ pub const SERVICE_RESTART_MARGIN_SECS: i64 = 30;
 /// 6j6v.wxz0) — named because the bound on `until` is the grace plus one of these.
 pub const SERVICE_RESTART_POLL_SECS: i64 = 1;
 
+/// launchd's default `ExitTimeOut` — the plist sets none. An assumption, see
+/// [`SERVICE_RESTART_MARGIN_SECS`].
+const LAUNCHD_EXIT_TIMEOUT_SECS: i64 = 20;
+
+// The bound the margin's doc states, checked where the constants live: the hook returns at most one
+// poll after the grace, launchd escalates to SIGKILL after its exit timeout, and only then may a
+// hold fall due — so the old service can never fire a resume into its own process group.
+const _: () = assert!(
+    SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_POLL_SECS + LAUNCHD_EXIT_TIMEOUT_SECS
+        < SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_MARGIN_SECS
+);
+
 /// **One interruption** — a session stopped at an availability boundary, as the store keeps it.
 ///
 /// Every field but [`resumed_at`](Interruption::resumed_at) is stated by the RUNTIME, through
@@ -781,18 +793,6 @@ mod tests {
         assert!(
             !standing.resumes_in_place(),
             "a session already under a window hold stays on the window-hold path"
-        );
-    }
-
-    #[test]
-    fn the_bound_on_a_hold_is_the_whole_grace_plus_the_margin_and_outlasts_the_hook() {
-        // The arithmetic the constants' doc states (DoD 11's design bound): the hook returns at most
-        // one poll after the grace, launchd's default exit timeout is 20 s, and the hold falls due
-        // after both.
-        const LAUNCHD_EXIT_TIMEOUT_SECS: i64 = 20;
-        assert!(
-            SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_POLL_SECS + LAUNCHD_EXIT_TIMEOUT_SECS
-                < SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_MARGIN_SECS
         );
     }
 

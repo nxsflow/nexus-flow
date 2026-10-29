@@ -2121,6 +2121,9 @@ mod tests {
 
         use nxs_service::restart::{PreparedSession, RestartPreparation};
 
+        /// What a scripted preparation saw, per call: the cause, and how many launchd verbs had run.
+        type PrepareCalls = Rc<RefCell<Vec<(String, usize)>>>;
+
         const INSTALLED_PATH: &str = "/opt/homebrew/bin:/Users/u/.nvm/bin:/usr/bin:/bin";
         const UPDATER_PATH: &str = "/usr/bin:/bin";
 
@@ -2341,7 +2344,7 @@ mod tests {
                 ancestor: Option<u32>,
                 ctl_refused: bool,
                 report: RestartPreparation,
-            ) -> (ServiceAt, Rc<RefCell<Vec<(String, usize)>>>) {
+            ) -> (ServiceAt, PrepareCalls) {
                 let (mut svc, _) = self.svc_with(spy, ancestor, ctl_refused);
                 let calls = Rc::new(RefCell::new(Vec::new()));
                 let seen = calls.clone();

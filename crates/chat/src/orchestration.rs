@@ -3653,7 +3653,7 @@ pub(crate) fn an_in_place_hold_stands_over(
 ) -> Result<Option<String>> {
     let mut pinned: Option<String> = None;
     for (thread, hold) in store.placed_holds()? {
-        if !hold.resumes_in_place() || !threads.iter().any(|t| *t == thread) {
+        if !hold.resumes_in_place() || !threads.contains(&thread) {
             continue;
         }
         let Some(until) = hold.until else {
@@ -19161,24 +19161,10 @@ fn lapsed_step_findings(
 mod tests {
     use super::*;
 
-    /// A worker that answers the liveness question from a fixed set — for the guard's truth table.
-    struct Answering(Vec<String>);
-
-    impl Worker for Answering {
-        fn trigger(&self, _req: crate::worker::TriggerRequest) -> crate::worker::TriggerResult {
-            Err(crate::worker::disabled_error().into())
-        }
-        fn session_is_running(&self, internal_session: &str) -> bool {
-            self.0.iter().any(|s| s == internal_session)
-        }
-        fn answers_liveness(&self) -> bool {
-            true
-        }
-    }
-
     /// **The guard on the copy, one row per kind of hold** (nxf 6j6v.wxz0, must-fix 5): what keeps a
     /// holder's copy where it is during a restart's gap, and what lets it go. The per-site tests in
     /// `tests/a_restart_leaves_a_way_back.rs` prove each reader asks it; this proves what it answers.
+    #[cfg(unix)]
     #[test]
     fn the_copy_is_pinned_exactly_while_an_in_place_hold_is_inside_its_bound() {
         const AT: &str = "2026-10-27T10:00:00Z";
@@ -19186,8 +19172,30 @@ mod tests {
         let defs = Definitions::default();
         let timer = crate::timer::DisabledTimer;
         let namer = crate::naming::DryNamer;
+        // The real sidecar worker over a workspace with no claims (nothing runs), or with the claim
+        // of a live child for `m-s1` (it runs) — the liveness read the guard's first half makes.
+        let idle = tempfile::TempDir::new().unwrap();
+        let busy = tempfile::TempDir::new().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let logs = crate::worker::agent_logs_dir(busy.path());
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("m-s1.pid"),
+            crate::worker::session_claim_for(child.id()),
+        )
+        .unwrap();
         let guard = |store: &ChatStore, running: &[&str], now: &str| {
-            let worker = Answering(running.iter().map(|s| s.to_string()).collect());
+            let worker = crate::worker::SidecarWorker {
+                sidecar: std::path::PathBuf::new(),
+                cwd: match running.is_empty() {
+                    true => idle.path().to_path_buf(),
+                    false => busy.path().to_path_buf(),
+                },
+            };
             let ctx = Ctx {
                 now,
                 origin: "local",
@@ -19249,6 +19257,8 @@ mod tests {
             guard(&a_store_with(Some("seven_day"), Some(UNTIL)), &[], AT),
             CopyInUse::Free
         );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// **A write through the lock is tried once more after each wait, and no more** (nxf
