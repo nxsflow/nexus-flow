@@ -205,7 +205,15 @@ may answer, so carrying an id it was handed minutes ago is bookkeeping it should
 With more than one open it is required again — you owe your commissioner an answer *and* the role
 you consulted has come back to you, and the engine will not guess which you meant. It does not have
 to be worked out: the message that woke you names each open conversation with the command it takes,
-and so does the refusal if you try the short form anyway. The id-bearing form is always allowed.
+and so does the refusal if you try the short form anyway.
+
+**A session answers only the conversations it serves.** Run from a session the engine started, a
+reply goes to the thread that session was put to work on, to one it was resumed, continued or
+re-commissioned into, or to one it opened itself — and nowhere else, with or without `--thread`. A
+second round of the same persona is another session's work: its thread is never listed in your wake,
+a bare reply never resolves to it, and `--thread` naming it is refused with the thread you do serve.
+The same holds for `--progress`. Outside any session — a person at a terminal — every thread may be
+named, as before.
 
 ```console
 $ NXC_ACTOR=coder nxc reply --thread m-00000000000000000000000001 "Added the flag and a test; branch feat/export-since." --json

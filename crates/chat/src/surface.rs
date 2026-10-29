@@ -1026,6 +1026,7 @@ pub fn reply_in_thread(
     store: &mut ChatStore,
     req: ReplyThreadRequest,
 ) -> Result<ReplyReceipt> {
+    refuse_a_thread_this_session_does_not_serve(ctx, store, req.thread)?;
     refuse_a_reply_the_supervisor_is_finished_with(ctx, store, req.thread)?;
     refuse_a_finished_claim_while_your_own_round_runs(ctx, store, &req)?;
     // **An acceptance that would move nothing is refused rather than posted** (nxf 6j6v.am8j). It
@@ -1090,6 +1091,9 @@ pub fn reply_progress(
             "a progress note needs one line saying what is still being done",
         ));
     }
+    // A progress restarts the silence clock of the slot it lands on, so a stranger's would keep
+    // another session's slot looking alive (nxf 6j6v.f5rf).
+    refuse_a_thread_this_session_does_not_serve(ctx, store, thread)?;
     let channel = store
         .thread_channel(thread)
         .or_else(|| store.thread_channel_via_message(thread))
@@ -1411,6 +1415,57 @@ fn refuse_a_finished_claim_while_your_own_round_runs(
     )))
 }
 
+/// **Refuse a reply from a session into a thread that session does not serve** (nxf 6j6v.f5rf).
+///
+/// Measured in this workspace on 2026-10-25 and twice on 2026-10-27, and in another on 2026-10-25:
+/// a reviewer session started for one review round posted its verdict, and its send-back mark,
+/// into another round of the same three reviewers. The agent named that thread itself, with
+/// `--thread`, because its wake had listed it — and nothing checked that the thread was not its
+/// own. Only the synthesiser reading the text stood between that and a merge.
+///
+/// So the binding is the engine's: a caller that is a session this store minted may answer only a
+/// thread it serves ([`ChatStore::session_serves`]) — the one it was put to work on, one it was
+/// resumed, continued or re-commissioned into, or one it opened itself. A send-back mark is a
+/// reply's kind, so it is refused with it and can land nowhere but the reply's own thread.
+///
+/// A caller with no session, or with a session id this store never minted, is bound by nothing
+/// here: a human at a terminal answers wherever they choose, exactly as before.
+///
+/// FIRST of the refusals, ahead of [`refuse_a_reply_the_supervisor_is_finished_with`]: a stranger's
+/// slot is refused for being a stranger's, not for whatever state its own round is in.
+///
+/// [`settle_if_unanswered`] does not run this, for its neighbour's reason: the teardown settles the
+/// thread its runtime was started for, and refusing it there could leave that thread owing forever.
+fn refuse_a_thread_this_session_does_not_serve(
+    ctx: &Ctx,
+    store: &ChatStore,
+    thread: &str,
+) -> Result<()> {
+    let Some(session) = ctx.session else {
+        return Ok(());
+    };
+    if !store.session_is_ours(session)? {
+        return Ok(());
+    }
+    if store.session_serves(session, thread)? {
+        return Ok(());
+    }
+    let own = match store.session_thread(session)? {
+        Some(own) => format!(
+            "it was put to work on thread {own}, and that is where its answer goes: `nxc reply \
+             --thread {own} -`"
+        ),
+        None => "it was put to work on no thread this workspace records".to_string(),
+    };
+    // `Forbidden` for its neighbours' reason: nothing about the call is malformed.
+    Err(NxfError::forbidden(format!(
+        "thread {thread} is not a conversation this session serves — {own}. A reply goes only to \
+         a thread its own session serves: another session of the same persona answers {thread}, \
+         and a verdict written here would land on work this session never read. If what you \
+         hold concerns that other work, say so in your own answer."
+    )))
+}
+
 /// **Refuse a reply into a round the channel supervisor has already closed** (nxf 6j6v.0vd9).
 ///
 /// # What this refuses, and what it measured
@@ -1708,7 +1763,13 @@ fn reply_in_thread_inner(
             let wake = orchestration::wake_message(
                 req.body,
                 req.escalate,
-                &orchestration::reply_guidance(store, ctx.now, &resumed_handle, Some(req.thread)),
+                &orchestration::reply_guidance(
+                    store,
+                    ctx.now,
+                    &resumed_handle,
+                    Some(&addr),
+                    Some(req.thread),
+                ),
             );
             // What is HELD if the caller turns out to be mid-turn (nxf 6j6v.gn8b) — the raw facts,
             // for the reason `orchestration::reply`'s own site states: the delivery is composed

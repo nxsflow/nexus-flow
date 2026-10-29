@@ -3033,9 +3033,10 @@ fn reply_progress(json: bool, db: Option<&str>, thread: Option<&str>, body: &str
     let thread = match thread {
         Some(named) => named,
         None => {
-            resolved = crate::addressees::sole_open_thread(
+            resolved = crate::addressees::sole_open_thread_for_session(
                 &store,
                 &ctx.caller_handle(),
+                ctx.session,
                 crate::facade::parent_thread_of(&store, ctx.session).as_deref(),
                 ctx.now,
             )?;
@@ -3081,9 +3082,10 @@ fn reply_thread(json: bool, db: Option<&str>, args: ReplyArgs<'_>) -> Result<()>
     let thread = match thread {
         Some(named) => named,
         None => {
-            resolved = crate::addressees::sole_open_thread(
+            resolved = crate::addressees::sole_open_thread_for_session(
                 &store,
                 &ctx.caller_handle(),
+                ctx.session,
                 crate::facade::parent_thread_of(&store, ctx.session).as_deref(),
                 ctx.now,
             )?;

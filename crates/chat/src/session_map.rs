@@ -181,7 +181,64 @@ impl ChatStore {
             "UPDATE session_map SET thread = ?1 WHERE internal_id = ?2",
             params![thread, internal_id],
         )?;
+        // …and kept, which the position is not (nxf 6j6v.f5rf): see [`session_serves`]. Only for a
+        // session this store minted, the same no-op contract as the update above.
+        self.connection().execute(
+            "INSERT OR IGNORE INTO session_threads(session, thread)
+             SELECT internal_id, ?1 FROM session_map WHERE internal_id = ?2",
+            params![thread, internal_id],
+        )?;
         Ok(())
+    }
+
+    /// Whether `internal_id` names a session this store minted — the precondition for binding its
+    /// replies to the threads it serves (nxf 6j6v.f5rf). A session id this workspace does not know
+    /// binds nothing: there is no record to bind it by.
+    pub fn session_is_ours(&self, internal_id: &str) -> Result<bool> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT 1 FROM session_map WHERE internal_id = ?1",
+                [internal_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// **Whether session `internal_id` serves `thread`** (nxf 6j6v.f5rf) —
+    /// the one question a reply from a session is bound by.
+    ///
+    /// A session serves the threads it was put in motion on — triggered into, resumed into,
+    /// continued or re-commissioned into by its coordinator, all of which go through
+    /// [`record_session_thread`](ChatStore::record_session_thread) — and the threads it spoke in
+    /// itself: the consultation it opened, carrying its own return address. Nothing else. In
+    /// particular NOT every thread its handle owes an answer on: two rounds of the same reviewers
+    /// open at once are two sessions per handle, and each serves its own slot only.
+    ///
+    /// The spoken-in half reads the return address a post carries (`refs.session_id`, stamped from
+    /// the posting session), whatever name it was posted under. One indexed seek per half.
+    ///
+    /// **The invariant that half stands on** (review of f5rf, Integrity #2): a session can put its
+    /// own id on a post only in a thread it is already allowed into. Its `nxc reply` is refused
+    /// before anything is posted unless the thread passes this check, and `nxc send` — whose
+    /// `--ref session_id=` an agent may set — always opens a NEW thread. A verb that ever posts into
+    /// an EXISTING thread with caller-chosen refs must run this check first, or it widens what the
+    /// session serves. A post this store cannot vouch for (a peer's, signed by a key it does not
+    /// trust, nxf 6j6v.pzkb) enrols nothing: it is held to [`crate::store::acts`], as every other
+    /// read that follows a return address is.
+    pub fn session_serves(&self, internal_id: &str, thread: &str) -> Result<bool> {
+        let vouched = crate::store::acts("m");
+        Ok(self.connection().query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?2)
+                     OR EXISTS(SELECT 1 FROM messages m
+                                WHERE m.thread_id = ?2 AND {vouched}
+                                  AND json_extract(m.refs, '$.session_id') = ?1)"
+            ),
+            params![internal_id, thread],
+            |r| r.get(0),
+        )?)
     }
 
     /// The thread `internal_id` is currently working in, or `None` when it names no session of ours

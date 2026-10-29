@@ -793,6 +793,24 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
     crate::stranded::rebuild_pre_slot_tables(conn)?;
     conn.execute_batch(crate::stranded::STRANDED_DDL)?;
     crate::stranded::add_ladder_columns(conn)?;
+    // **Every thread a session was put in motion on** (nxf 6j6v.f5rf): `session_map.thread` is
+    // only the LATEST position, and a session that consulted somebody and was resumed with the
+    // answer stands in the consultation while it still owes its own commission. A reply from a
+    // session is bound to the threads it serves, so it needs all of them. Device-local for
+    // `session_map`'s reason. A store from before the table gets the one position it knew, once —
+    // the table's absence is the marker.
+    let session_threads_existed = table_exists(conn, "session_threads")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_threads(
+             session TEXT NOT NULL, thread TEXT NOT NULL, PRIMARY KEY(session, thread)
+         );",
+    )?;
+    if !session_threads_existed {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO session_threads(session, thread)
+             SELECT internal_id, thread FROM session_map WHERE thread IS NOT NULL;",
+        )?;
+    }
     Ok(upgraded)
 }
 
@@ -1186,6 +1204,44 @@ mod tests {
             .unwrap();
         assert_eq!(depth, 0);
         try_apply_chat_views(&conn).unwrap(); // second apply must not fail on a duplicate column
+    }
+
+    #[test]
+    fn a_store_from_before_session_threads_keeps_each_sessions_known_position_once() {
+        // nxf 6j6v.f5rf: a reply from a session is bound to the threads it serves. A session alive
+        // across the upgrade must not lose the one it was working on — and a row written after the
+        // backfill must not be re-derived from a position that has moved since.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_map(
+                 internal_id TEXT PRIMARY KEY, role TEXT NOT NULL, real_sdk_id TEXT, created TEXT,
+                 depth INTEGER NOT NULL DEFAULT 0, thread TEXT
+             );
+             INSERT INTO session_map(internal_id, role, thread) VALUES('s-old', 'coder', 't-own');
+             INSERT INTO session_map(internal_id, role) VALUES('s-nowhere', 'coder');",
+        )
+        .unwrap();
+        try_apply_chat_views(&conn).unwrap();
+        let rows = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT session, thread FROM session_threads ORDER BY session, thread")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(rows(&conn), vec![("s-old".into(), "t-own".into())]);
+
+        conn.execute_batch(
+            "UPDATE session_map SET thread = 't-moved' WHERE internal_id = 's-old';
+             DELETE FROM session_threads;",
+        )
+        .unwrap();
+        try_apply_chat_views(&conn).unwrap();
+        assert!(
+            rows(&conn).is_empty(),
+            "the backfill runs once, when the table is created, never on a later open"
+        );
     }
 
     #[test]

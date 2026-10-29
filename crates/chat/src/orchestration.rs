@@ -816,15 +816,19 @@ pub fn trigger_role(
     // could not pass it on. Read back from the record — the thread where this persona is still
     // outstanding — exactly as `fire_queued_trigger` reproduces a parked obligation.
     let owed_on_the_way_back = match (reply_thread, chain) {
-        (None, ChainMove::Unwind) => {
-            crate::addressees::open_for(store, &ctx.qualify(&decl.handle), thread, ctx.now)
-                .ok()
-                .and_then(|open| {
-                    open.into_iter()
-                        .find(|a| a.relation == crate::addressees::Relation::Owed)
-                        .map(|a| a.thread_id)
-                })
-        }
+        (None, ChainMove::Unwind) => crate::addressees::open_for_session(
+            store,
+            &ctx.qualify(&decl.handle),
+            Some(&internal_session),
+            thread,
+            ctx.now,
+        )
+        .ok()
+        .and_then(|open| {
+            open.into_iter()
+                .find(|a| a.relation == crate::addressees::Relation::Owed)
+                .map(|a| a.thread_id)
+        }),
         _ => None,
     };
     // **The obligation record** (nxf 6j6v.ccvy), from the CALLER's own `reply_thread` ONLY — never
@@ -5446,7 +5450,7 @@ pub(crate) fn ladder_recommission(
     let wake = wake_message(
         body,
         false,
-        &reply_guidance(store, ctx.now, role, Some(thread)),
+        &reply_guidance(store, ctx.now, role, Some(&internal), Some(thread)),
     );
     let admission = trigger_role(
         ctx,
@@ -6711,7 +6715,13 @@ fn coordinator_commission_in(
     let wake = wake_message(
         req.body,
         false,
-        &reply_guidance(store, ctx.now, &ctx.qualify(req.role), Some(&thread)),
+        &reply_guidance(
+            store,
+            ctx.now,
+            &ctx.qualify(req.role),
+            Some(&internal),
+            Some(&thread),
+        ),
     );
 
     // NOT `?` (nxf 6j6v.hpv8). By this point the message is posted, the thread's obligation (if
@@ -7218,7 +7228,13 @@ pub(crate) fn serve_chat(
         .map(|m| m.body.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let guidance = reply_guidance(store, ctx.now, &chat.persona, Some(&chat.thread));
+    let guidance = reply_guidance(
+        store,
+        ctx.now,
+        &chat.persona,
+        existing.as_ref().map(|e| e.internal_id.as_str()),
+        Some(&chat.thread),
+    );
     // A hand-back among them announces itself first, exactly as on the ordinary resume (nxf
     // 6j6v.gk9j) — the model reads the body, and that is where it has to learn it is being asked
     // for help rather than handed a result.
@@ -7273,9 +7289,17 @@ pub(crate) fn serve_chat(
     } else {
         body
     };
-    let wake = wake_message(&body, escalated, &guidance);
     let internal = store.mint_session_id();
     store.create_pending_session(&internal, &chat.handle)?;
+    // Named again for the session just minted (nxf 6j6v.f5rf): it serves this chat and nothing else.
+    let guidance = reply_guidance(
+        store,
+        ctx.now,
+        &chat.persona,
+        Some(&internal),
+        Some(&chat.thread),
+    );
+    let wake = wake_message(&body, escalated, &guidance);
     store.freeze_declarations(&store.thread_root(&chat.thread)?, ctx.now, ctx.defs)?;
     let started = trigger_role(
         ctx,
@@ -7453,6 +7477,9 @@ pub(crate) fn wake_message(body: &str, escalated: bool, guidance: &str) -> Strin
 ///
 /// **`handle` is the QUALIFIED identity being woken**, and `standing_in` the thread this wake lands
 /// in — see [`crate::addressees::open_for`] for why a position contributes a shape no register can.
+/// `session` is the session being woken (nxf 6j6v.f5rf): the block names only what THAT session
+/// serves, never another session's slot of the same handle — see
+/// [`crate::addressees::open_for_session`].
 ///
 /// **Nothing open says nothing at all**, and that is deliberate rather than a gap. The old sentence
 /// named a thread unconditionally, which on the direct resume meant naming one the woken session
@@ -7470,9 +7497,10 @@ pub(crate) fn reply_guidance(
     store: &ChatStore,
     now: &str,
     handle: &str,
+    session: Option<&str>,
     standing_in: Option<&str>,
 ) -> String {
-    match crate::addressees::open_for(store, handle, standing_in, now) {
+    match crate::addressees::open_for_session(store, handle, session, standing_in, now) {
         Ok(open) => crate::addressees::render_for_a_wake(&open),
         // A read that FAILED is not a read that found nothing, and neither is worth a sentence
         // naming a thread this session may not owe: the answer still travels, whole, which is the
@@ -11415,7 +11443,13 @@ fn supervisor_hand_out_next_turn(
             // `handle` is the member's own QUALIFIED identity — the one the re-declaration above
             // just put back into `expects_reply_from`, so the block this composes names the very
             // obligation that was declared a few lines up.
-            &reply_guidance(store, ctx.now, &handle, Some(&member.thread_id)),
+            &reply_guidance(
+                store,
+                ctx.now,
+                &handle,
+                Some(session.as_str()),
+                Some(&member.thread_id),
+            ),
         );
         // The forwarded turn, posted by the supervisor into the member's own thread — the member
         // must be able to read what it was asked without being told to go and look somewhere else.
@@ -12999,7 +13033,13 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
             let woken_with = wake_message(
                 req.body,
                 req.kind == MessageKind::Escalation,
-                &reply_guidance(store, ctx.now, &resumed_handle, Some(landed_in)),
+                &reply_guidance(
+                    store,
+                    ctx.now,
+                    &resumed_handle,
+                    Some(&addr),
+                    Some(landed_in),
+                ),
             );
             let body = woken_with.as_str();
             // What is HELD if the caller turns out to be mid-turn (nxf 6j6v.gn8b): the RAW facts,
@@ -15120,6 +15160,7 @@ pub fn deliver_held(ctx: &Ctx, store: &mut ChatStore, session: &str) -> Result<D
             .flatten()
             .map(|role| ctx.qualify(&role))
             .unwrap_or_default(),
+        Some(session),
         stands_on,
     );
     let body = crate::collecting::compose_collected_wake(

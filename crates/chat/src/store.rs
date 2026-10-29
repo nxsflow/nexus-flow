@@ -3180,6 +3180,8 @@ pub(crate) mod tests {
             "recovery_log",
             // The obligation a queued trigger carried (nxf 6j6v.558h): this machine's queue.
             "queued_obligations",
+            // Every thread a session of this machine was put in motion on (nxf 6j6v.f5rf).
+            "session_threads",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store
@@ -5274,6 +5276,55 @@ pub(crate) mod tests {
         );
         local.trust_key(peer.key_id(), "peer", "").unwrap();
         assert!(local.thread_machine("t-1").unwrap().unwrap().acts);
+    }
+
+    /// A post in `thread` carrying `session`'s return address, as the session's own post does.
+    fn a_post_from(store: &mut ChatStore, thread: &str, session: &str) -> String {
+        store.set_channel_field("c-1", "kind", "group", "local/a");
+        store.post_message(&MessageEnvelope {
+            origin: "local".into(),
+            channel_id: "c-1".into(),
+            sender: "local/pm".into(),
+            kind: MessageKind::Task,
+            priority: Priority::Normal,
+            disposition: Disposition::InTurn,
+            thread_id: Some(thread.into()),
+            refs: Refs {
+                session_id: Some(session.into()),
+                ..Refs::default()
+            },
+            body: "which hook owns the retry?".into(),
+        })
+    }
+
+    /// nxf 6j6v.f5rf: a session serves a thread it posted in itself — the consultation it opened —
+    /// on that post alone, with nothing in `session_threads`; and no thread it never spoke in.
+    #[test]
+    fn a_session_serves_a_thread_its_own_post_carries_and_no_other() {
+        let mut store = ChatStore::open_in_memory(1);
+        store.create_pending_session("s-coder", "coder").unwrap();
+        a_post_from(&mut store, "t-asked", "s-coder");
+        let recorded: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM session_threads", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0, "the position half plays no part here");
+        assert!(store.session_serves("s-coder", "t-asked").unwrap());
+        assert!(!store.session_serves("s-coder", "t-elsewhere").unwrap());
+        assert!(!store.session_serves("s-other", "t-asked").unwrap());
+    }
+
+    /// …and a post this store cannot vouch for, naming the session, enrols nothing (nxf 6j6v.pzkb):
+    /// otherwise anybody who can reach the relay could widen what a local session may answer.
+    #[test]
+    fn a_post_nobody_here_can_vouch_for_does_not_make_a_session_serve_its_thread() {
+        let mut local = ChatStore::open_in_memory(1);
+        local.create_pending_session("s-coder", "coder").unwrap();
+        let mut peer = peer_after(&local);
+        a_post_from(&mut peer, "t-planted", "s-coder");
+        local.apply(&written_by(&peer));
+        assert_eq!(local.messages_in_thread("t-planted").unwrap().len(), 1);
+        assert!(!local.session_serves("s-coder", "t-planted").unwrap());
     }
 
     /// The return address names a session on THIS machine that a reply resumes — never one a
