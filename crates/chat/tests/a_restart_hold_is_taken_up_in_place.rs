@@ -32,6 +32,8 @@ const DETAIL: &str = "nxs self-update 0.221.0 -> 0.222.0 restarted the backgroun
 
 #[derive(Default)]
 struct HostWorker {
+    /// Every start of these roles fails, as a start that cannot reach its runtime does.
+    failing: Mutex<HashSet<String>>,
     seen: Mutex<Vec<TriggerRequest>>,
     running: Mutex<HashSet<String>>,
     /// The tree its sessions write to — the workspace root, as the sidecar's.
@@ -52,6 +54,11 @@ impl HostWorker {
 
 impl Worker for HostWorker {
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
+        if self.failing.lock().unwrap().contains(&req.role.handle) {
+            return Err(nexus_chat::worker::TriggerError::Failed(
+                nexus_chat::error::NxfError::io("the runtime could not be reached (stub)"),
+            ));
+        }
         self.seen.lock().unwrap().push(req);
         Ok(TriggerOutcome::Accepted)
     }
@@ -86,7 +93,13 @@ fn workspace(worker: Arc<HostWorker>) -> (TempDir, Engine) {
     *worker.dir.lock().unwrap() = Some(tmp.path().to_path_buf());
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
     let defs = Definitions::new(
-        vec![role("coder", true), role("rival", true), role("pm", false)],
+        vec![
+            role("coder", true),
+            role("rival", true),
+            role("third", true),
+            role("helper", true),
+            role("pm", false),
+        ],
         vec![],
     )
     .expect("catalogue");
@@ -173,9 +186,14 @@ fn commission(engine: &Engine, worker: &HostWorker, to: &str, now: &str) -> (Str
 
 /// What the restart's hook records for one session, through the Engine seam.
 fn restart_hold(engine: &Engine, session: &str, until: Option<&str>) {
+    restart_hold_at(engine, NOW, session, until);
+}
+
+/// [`restart_hold`] recorded at `at`.
+fn restart_hold_at(engine: &Engine, at: &str, session: &str, until: Option<&str>) {
     engine
         .session_interrupted(
-            caller_at("coder", NOW),
+            caller_at("coder", at),
             session,
             SERVICE_RESTART_LIMIT,
             until,
@@ -416,4 +434,439 @@ fn the_same_early_resume_of_a_window_hold_parks_the_tree_and_hands_it_on() {
         1,
         "and the copy went on"
     );
+}
+
+// ---- C.4: the copy is pinned through the gap, at every reader -----------------------------------
+//
+// The coder holds the copy with no declared window, so its lease runs to the two-hour bound:
+// commissioned at NOW, it expires at 12:00:00. Each leg below records the restart's hold, lets the
+// session end the way its teardown does, and then reaches ONE reader of the guard in the gap.
+
+/// The tick the background service runs, through the compute layer (it is no verb on the handle).
+fn tick(
+    root: &std::path::Path,
+    worker: &HostWorker,
+    now: &str,
+    thread: &str,
+) -> nexus_chat::orchestration::TickReceipt {
+    use nexus_chat::workspace::ChatWorkspaceExt;
+    let ws = nexus_chat::workspace::Workspace::resolve(None, root).expect("resolve workspace");
+    let db_path = ws.db_path_str().expect("db path");
+    let origin = nexus_chat::workspace::origin_of(&ws).to_string();
+    let mut store = ws.open_chat_store().expect("open chat store");
+    let defs = Definitions::resolve(root).expect("declarations");
+    let ctx = nexus_chat::orchestration::Ctx {
+        now,
+        origin: &origin,
+        actor: "service",
+        session: None,
+        hop: 0,
+        defs: &defs,
+        worker,
+        timer: &nexus_chat::timer::DryTimer,
+        namer: &nexus_chat::naming::DryNamer,
+        db_path: &db_path,
+        project_claude_md: None,
+        module_primes: None,
+        machines: None,
+        peers: None,
+    };
+    nexus_chat::orchestration::tick(
+        &ctx,
+        &mut store,
+        nexus_chat::orchestration::TickRequest { thread_id: thread },
+    )
+    .expect("tick")
+}
+
+/// The restart's hold and the teardown's end, at `at`, with `until` 150 s later.
+fn stopped_by_a_restart(engine: &Engine, at: &str, until: &str, session: &str) {
+    restart_hold_at(engine, at, session, Some(until));
+    engine
+        .session_ended(caller_at("coder", at), session)
+        .expect("its teardown announces the end");
+}
+
+/// Nothing moved: the work is in place, the lease row is the one given, nobody else started, and no
+/// refused park is on record.
+fn nothing_moved(
+    root: &std::path::Path,
+    worker: &HostWorker,
+    lease: &(String, String),
+    receipt: &nexus_chat::orchestration::TickReceipt,
+) {
+    the_work_is_in_place(root);
+    assert_eq!(
+        lease_row(root).as_ref(),
+        Some(lease),
+        "the lease row is unchanged"
+    );
+    assert!(worker.triggers_for("rival").is_empty(), "nothing handed on");
+    assert!(
+        receipt.parked.is_none() && receipt.handed_on.is_none() && receipt.working_tree.is_none(),
+        "the tick moved nothing: {receipt:?}"
+    );
+    assert!(
+        !receipt
+            .warnings
+            .iter()
+            .any(|w| format!("{:?}", w.class).contains("Park")
+                || format!("{:?}", w.class).contains("Unparked")),
+        "no park finding: {:?}",
+        receipt.warnings
+    );
+    assert!(
+        common::open_store(root)
+            .connection()
+            .query_row("SELECT COUNT(*) FROM park_refusals", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap()
+            == 0,
+        "no PARK REFUSED row"
+    );
+}
+
+/// **The tick's own park** (`park_step` → `park_an_interrupted_holder` → the funnel
+/// `park_the_interrupted_tree`), on a lease still inside its bound: the round-2 High. A window hold
+/// in this state is parked and handed on; a restart hold is not an occasion at all.
+#[test]
+fn a_tick_in_the_gap_does_not_park_the_holder_on_its_hold() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let lease = lease_row(root).unwrap();
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T10:01:00Z",
+        "2026-10-27T10:03:30Z",
+        &session,
+    );
+
+    let r = tick(root, &worker, "2026-10-27T10:02:00Z", &thread);
+
+    nothing_moved(root, &worker, &lease, &r);
+}
+
+/// **The sweep** (`sweep_expired_working_tree`): the lease ran out inside the gap, and nothing has
+/// a process — a sweep would reclaim it. Its warning names the hold instead of a process.
+#[test]
+fn a_sweep_in_the_gap_does_not_reclaim_an_expired_lease_on_a_restart_hold() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let lease = lease_row(root).unwrap();
+    assert_eq!(
+        lease.1, "2026-10-27T12:00:00Z",
+        "the premise: the two-hour bound"
+    );
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T11:59:00Z",
+        "2026-10-27T12:01:30Z",
+        &session,
+    );
+
+    let r = tick(root, &worker, "2026-10-27T12:00:30Z", &thread);
+
+    nothing_moved(root, &worker, &lease, &r);
+}
+
+/// **…and once `until + MARGIN` has passed with no resume, the ordinary reclaim applies**: the
+/// service never came back, the copy goes to whoever waits, and the hold is still visible.
+#[test]
+fn past_the_holds_bound_the_copy_goes_to_whoever_waits_and_the_hold_stays_visible() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T11:59:00Z",
+        "2026-10-27T12:01:30Z",
+        &session,
+    );
+    tick(root, &worker, "2026-10-27T12:00:30Z", &thread);
+    assert!(
+        worker.triggers_for("rival").is_empty(),
+        "pinned inside the bound"
+    );
+
+    tick(root, &worker, "2026-10-27T12:02:01Z", &thread);
+
+    assert_eq!(
+        worker.triggers_for("rival").len(),
+        1,
+        "the rival has the copy now"
+    );
+    let standing = common::open_store(root)
+        .current_interruption(&session)
+        .unwrap()
+        .expect("the hold still stands");
+    assert_eq!(standing.limit, SERVICE_RESTART_LIMIT);
+}
+
+/// **A fresh commission arriving in the gap** (`expired_but_still_writing`, the acquire path): the
+/// lease has expired and nothing runs, so its compare-and-swap would take it. It queues instead.
+#[test]
+fn a_commission_arriving_in_the_gap_queues_behind_the_held_copy() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, _thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let lease = lease_row(root).unwrap();
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T11:59:00Z",
+        "2026-10-27T12:01:30Z",
+        &session,
+    );
+
+    let receipt = engine
+        .send_to(
+            caller_at("pm", "2026-10-27T12:00:30Z"),
+            SendToRequest {
+                machine: None,
+                to: "third",
+                body: "a new piece of work",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+        .expect("commissioned");
+
+    assert!(
+        worker.triggers_for("third").is_empty(),
+        "not started into the held copy"
+    );
+    assert!(
+        receipt.queued_behind.is_some(),
+        "it waits behind the holder: {receipt:?}"
+    );
+    the_work_is_in_place(root);
+    assert_eq!(lease_row(root), Some(lease));
+}
+
+/// **The stranded escalation's park** (`park_the_stranded_holder`): the holder handed its task back,
+/// the rival waited past the park deadline — the occasion stands, and the hold keeps the copy.
+#[test]
+fn an_escalated_holder_on_a_restart_hold_is_not_parked_past_the_deadline() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    engine
+        .reply_thread(
+            Caller {
+                session: Some(&session),
+                actor: Some("coder"),
+                now: Some("2026-10-27T10:05:00Z"),
+            },
+            nexus_chat::surface::ReplyThreadRequest {
+                machine: None,
+                thread: &thread,
+                body: "which API did you mean?",
+                escalate: true,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+        .expect("the escalation is posted");
+    // The first look notices the contention and starts its clock.
+    tick(root, &worker, "2026-10-27T10:06:00Z", &thread);
+    let lease = lease_row(root).unwrap();
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T10:35:00Z",
+        "2026-10-27T10:37:30Z",
+        &session,
+    );
+
+    let r = tick(root, &worker, "2026-10-27T10:36:30Z", &thread);
+
+    nothing_moved(root, &worker, &lease, &r);
+}
+
+/// **A failed start's retry in the gap** (`hand_on_a_copy_nothing_runs_in`): a helper the holder's
+/// operation commissioned failed to start, and its retry falls in the gap. It takes the holder's own
+/// lease, fails again — and nothing runs in the area, so the copy would be handed on.
+#[test]
+fn a_failed_retry_in_the_gap_does_not_hand_the_held_copy_on() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let lease = lease_row(root).unwrap();
+    // The coder commissions a helper inside its own operation, and the helper's start fails. Its
+    // failed-start record is written as the release path writes one, due again at 10:02:00 — in
+    // the gap.
+    worker.failing.lock().unwrap().insert("helper".into());
+    let sent = engine
+        .send_to(
+            Caller {
+                session: Some(&session),
+                actor: Some("coder"),
+                now: Some(NOW),
+            },
+            SendToRequest {
+                machine: None,
+                to: "helper",
+                body: "help",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+        .expect("the helper is commissioned");
+    {
+        let mut store = common::open_store(root);
+        let helper: String = store
+            .connection()
+            .query_row(
+                "SELECT internal_id FROM session_map WHERE role LIKE '%helper' ORDER BY rowid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the helper's session was minted");
+        let entry = nexus_chat::working_tree::QueuedTrigger {
+            id: 0,
+            scope_key: lease.0.clone(),
+            role: "helper".into(),
+            session: helper.clone(),
+            thread: Some(sent.thread_id.clone()),
+            message: "help".into(),
+            model: None,
+            depth: 1,
+            priority: nexus_chat::model::Priority::Normal,
+            enqueued_at: None,
+        };
+        store
+            .record_failed_start(&entry, "the runtime could not be reached", NOW)
+            .unwrap();
+        store
+            .schedule_failed_start_retry(&helper, "2026-10-27T10:02:00Z")
+            .unwrap();
+    }
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T10:01:00Z",
+        "2026-10-27T10:03:30Z",
+        &session,
+    );
+
+    let r = tick(root, &worker, "2026-10-27T10:02:00Z", &thread);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.detail.contains("a retry of a failed start was due")),
+        "the premise: the retry ran in the gap and failed: {:?}",
+        r.warnings
+    );
+
+    the_work_is_in_place(root);
+    assert_eq!(
+        lease_row(root).map(|l| l.0),
+        Some(lease.0),
+        "still the holder's"
+    );
+    assert!(worker.triggers_for("rival").is_empty(), "nothing handed on");
+}
+
+/// **The funnel itself** (`park_the_interrupted_tree`): a second session of the holder's operation
+/// is on a WINDOW hold — a park waiting to happen — while the coder is on the restart's hold. The
+/// window hold is an occasion, and the park it reaches must still see the coder coming back.
+#[test]
+fn a_window_hold_beside_a_restart_hold_does_not_park_the_shared_copy() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    engine
+        .send_to(
+            Caller {
+                session: Some(&session),
+                actor: Some("coder"),
+                now: Some(NOW),
+            },
+            SendToRequest {
+                machine: None,
+                to: "helper",
+                body: "help",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+        .expect("the helper is commissioned inside the coder's operation");
+    let helper = worker.triggers_for("helper")[0].internal_session.clone();
+    engine
+        .session_interrupted(
+            caller_at("helper", NOW),
+            &helper,
+            "seven_day",
+            Some("2026-11-01T00:00:00Z"),
+            "weekly limit",
+        )
+        .unwrap();
+    engine
+        .session_ended(caller_at("helper", NOW), &helper)
+        .unwrap();
+    let lease = lease_row(root).unwrap();
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T10:01:00Z",
+        "2026-10-27T10:03:30Z",
+        &session,
+    );
+
+    let r = tick(root, &worker, "2026-10-27T10:02:00Z", &thread);
+
+    nothing_moved(root, &worker, &lease, &r);
+}
+
+/// **An in-place hold is not an occasion of the tick's park** (`park_an_interrupted_holder`'s
+/// filter): a refusal that occasion recorded earlier is forgotten once only a restart hold stands —
+/// a mark that says "retrying" is only true while something is retrying.
+#[test]
+fn a_restart_hold_does_not_keep_an_old_refused_park_retrying() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    let (holder, _) = lease_row(root).unwrap();
+    common::open_store(root)
+        .note_park_refusal(
+            &holder,
+            &nexus_chat::park::ParkRefusal::MidSequence("a rebase was in progress".into()),
+            nexus_chat::orchestration::ParkOccasion::AvailabilityBoundary,
+            NOW,
+        )
+        .unwrap();
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T10:01:00Z",
+        "2026-10-27T10:03:30Z",
+        &session,
+    );
+
+    tick(root, &worker, "2026-10-27T10:02:00Z", &thread);
+
+    assert_eq!(
+        common::open_store(root).park_refusal(&holder).unwrap(),
+        None,
+        "no availability-boundary park is waiting to happen, so its refusal is not kept"
+    );
+    the_work_is_in_place(root);
 }

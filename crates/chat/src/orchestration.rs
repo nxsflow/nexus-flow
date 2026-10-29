@@ -1964,9 +1964,11 @@ fn expired_but_still_writing(
         return Ok(None);
     };
     let threads = store.work_scope_threads(&held)?;
-    match sessions_still_running(ctx, store, &threads) {
-        Ok(running) if running.is_empty() => Ok(None),
-        Ok(_) => Ok(Some(holder_key)),
+    // A session a planned restart stopped is coming back to this tree, and pins it like a live
+    // process (nxf 6j6v.wxz0, C.4).
+    match the_copy_is_still_in_use(ctx, store, &threads) {
+        Ok(CopyInUse::Free) => Ok(None),
+        Ok(CopyInUse::Running(_) | CopyInUse::OnRestartHold { .. }) => Ok(Some(holder_key)),
         // **A read that FAILED is not a chain that is finished** (review of PR #376, Integrity #1 /
         // Code Quality #2). This arm used to fall in with the `None` above, on a doc claim that it
         // was "fail-open in the same direction as the sweep" — and that claim was simply false: the
@@ -2793,16 +2795,20 @@ fn owes_inside_its_window(ctx: &Ctx, store: &ChatStore, threads: &[String]) -> R
 /// a session killed so hard that it never announced its end holds the next step until the lease's
 /// bound, or until `withdraw` takes the operation back. A wait that is visible in the queue is the
 /// failure this module prefers to a collision in the copy.
+///
+/// **In BOTH branches a session a planned restart stopped counts as present** (nxf 6j6v.wxz0, C.4):
+/// it has ended, so neither liveness nor the unended sessions see it, and it comes back to this very
+/// tree at its hold's `until`.
 fn a_session_is_in_the_copy(ctx: &Ctx, store: &ChatStore, threads: &[String]) -> Result<bool> {
     if ctx.worker.answers_liveness() {
-        return Ok(!sessions_still_running(ctx, store, threads)?.is_empty());
+        return Ok(the_copy_is_still_in_use(ctx, store, threads)? != CopyInUse::Free);
     }
     for thread in threads {
         if !store.unended_sessions_in_thread(thread)?.is_empty() {
             return Ok(true);
         }
     }
-    Ok(false)
+    Ok(an_in_place_hold_stands_over(store, threads, ctx.now)?.is_some())
 }
 
 /// **Every ordered run `thread` is a step of**, innermost first: one `(channel thread, step slot)`
@@ -3235,7 +3241,9 @@ fn hand_on_a_copy_nothing_runs_in(
             return Ok(None);
         };
         let threads = store.work_scope_threads(&scope)?;
-        if !sessions_still_running(ctx, store, &threads)?.is_empty() {
+        // Nothing runs in the area — unless a session a planned restart stopped is coming back
+        // to this tree (nxf 6j6v.wxz0, C.4).
+        if the_copy_is_still_in_use(ctx, store, &threads)? != CopyInUse::Free {
             return Ok(None);
         }
         Ok(Some(release_and_fire(
@@ -3579,6 +3587,94 @@ fn sessions_still_running(ctx: &Ctx, store: &ChatStore, threads: &[String]) -> R
     Ok(running)
 }
 
+/// **Is anything still using the working copy under a claim area?** (nxf 6j6v.wxz0, C.4) — the ONE
+/// answer every site reads before it parks, hands on or reclaims a holder's copy.
+///
+/// An enum and not a bool, because the readers say different things about the two ways a copy is in
+/// use: the sweep names the live process or the hold in its warning, and the acquire path keeps its
+/// fail-closed arm for a read that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CopyInUse {
+    /// Nothing runs in it and no session is coming back to it in place.
+    Free,
+    /// These sessions still have a live process ([`sessions_still_running`]).
+    Running(Vec<String>),
+    /// **A planned service restart stopped the holder's session, and it comes back to this tree**
+    /// at `until` ([`an_in_place_hold_stands_over`]). Its process is gone and its end announced, so
+    /// a liveness read finds the copy free — which in the restart's gap is exactly when a chain
+    /// queued behind the lease would be handed the checkout, and the in-place resume would then
+    /// continue in a foreign tree.
+    OnRestartHold {
+        /// When the hold falls due.
+        until: String,
+    },
+}
+
+/// [`CopyInUse`] for `threads` at `ctx.now`: a live process first, then a standing in-place hold.
+///
+/// vh0z's "a recovering slot keeps the lease" is the general rule of which the second half is the
+/// restart-shaped case; that rule widens THIS function, not its readers.
+pub(crate) fn the_copy_is_still_in_use(
+    ctx: &Ctx,
+    store: &ChatStore,
+    threads: &[String],
+) -> Result<CopyInUse> {
+    let running = sessions_still_running(ctx, store, threads)?;
+    if !running.is_empty() {
+        return Ok(CopyInUse::Running(running));
+    }
+    Ok(
+        match an_in_place_hold_stands_over(store, threads, ctx.now)? {
+            Some(until) => CopyInUse::OnRestartHold { until },
+            None => CopyInUse::Free,
+        },
+    )
+}
+
+/// **The `until` of an in-place hold standing over `threads` and still inside its bound**, or `None`
+/// (nxf 6j6v.wxz0, C.4).
+///
+/// Read off the STANDING HOLDS of the threads ([`ChatStore::placed_holds`], the read
+/// [`holder_is_provably_dead`] already makes) — never off the unended sessions, because an
+/// interrupted session HAS ended: its sidecar announced `session ended`, so a predicate over unended
+/// sessions would be false for every clean exit.
+///
+/// A hold counts when it [`resumes_in_place`](crate::interruption::Interruption::resumes_in_place),
+/// names an `until`, and `now` is no later than `until` plus [`SERVICE_RESTART_MARGIN_SECS`]. The
+/// bound is what keeps a service that never came back from wedging the workspace: past it the
+/// ordinary reclaim applies and the hold stays visible in `nxc status`. A hold with no `until` is
+/// not counted. The latest `until` wins where several stand.
+///
+/// [`SERVICE_RESTART_MARGIN_SECS`]: crate::interruption::SERVICE_RESTART_MARGIN_SECS
+pub(crate) fn an_in_place_hold_stands_over(
+    store: &ChatStore,
+    threads: &[String],
+    now: &str,
+) -> Result<Option<String>> {
+    let mut pinned: Option<String> = None;
+    for (thread, hold) in store.placed_holds()? {
+        if !hold.resumes_in_place() || !threads.iter().any(|t| *t == thread) {
+            continue;
+        }
+        let Some(until) = hold.until else {
+            continue;
+        };
+        let bound = crate::stranded::after(
+            &until,
+            crate::interruption::SERVICE_RESTART_MARGIN_SECS,
+            "a service-restart hold's bound",
+        )?;
+        // Past the bound (as instants: the bound has not "reached" `now`).
+        if !crate::stranded::reached(&bound, now) {
+            continue;
+        }
+        if pinned.as_deref().is_none_or(|p| p < until.as_str()) {
+            pinned = Some(until);
+        }
+    }
+    Ok(pinned)
+}
+
 /// What a tick's sweep reclaimed — **and what it did with the holder's work first** (nxf
 /// 6j6v.8bv9).
 ///
@@ -3812,13 +3908,22 @@ fn sweep_expired_working_tree(
         );
         return Ok(SweepStep::default());
     };
-    let running = sessions_still_running(ctx, store, &store.work_scope_threads(&scope)?)?;
-    if !running.is_empty() {
+    let in_use = the_copy_is_still_in_use(ctx, store, &store.work_scope_threads(&scope)?)?;
+    if in_use != CopyInUse::Free {
+        let why = match &in_use {
+            CopyInUse::OnRestartHold { until } => format!(
+                "a session in it was stopped by a planned service restart and comes back to this \
+                 tree — on a service-restart hold until {until}"
+            ),
+            CopyInUse::Running(running) => {
+                format!("it still has a live process ({})", running.join(", "))
+            }
+            CopyInUse::Free => unreachable!("matched above"),
+        };
         eprintln!(
             "warning: the chain holding this workspace's working copy (`{holder}`) is past its \
-             bound ({expires}) but still has a live process ({}), so the working copy is NOT being \
-             reclaimed — a commission is waiting behind it and will start when that chain finishes",
-            running.join(", ")
+             bound ({expires}) but {why}, so the working copy is NOT being reclaimed — a \
+             commission is waiting behind it and will start when that chain finishes"
         );
         // **Look again on the LIVENESS clock, not one lease-bound out** (review of PR #376, Code
         // Quality #1 / Integrity #2). This branch used to re-arm at `now + WORKING_TREE_LEASE_BOUND`
@@ -4966,10 +5071,10 @@ fn park_the_stranded_holder(
         return Ok(None); // the sweep is the one place that says this out loud
     };
     let claim_thread = store.work_scope_threads(&scope)?;
-    let running = sessions_still_running(ctx, store, &claim_thread)?;
-    if !running.is_empty() {
-        // Not a finding: this is the guard working, and the sweep beside it already prints the
-        // "past its bound and still writing" line for the same holder.
+    // Not a finding: this is the guard working, and the sweep beside it already prints the "past
+    // its bound and still writing" line for the same holder. A session a planned restart stopped
+    // is coming back to this tree, and counts the same (nxf 6j6v.wxz0, C.4).
+    if the_copy_is_still_in_use(ctx, store, &claim_thread)? != CopyInUse::Free {
         return Ok(None);
     }
     // The claim ROOT, which is what the scope key names since nxf 6j6v.8y6t — not "some thread in
@@ -16283,8 +16388,10 @@ fn park_the_interrupted_tree(
         return Ok(None);
     }
     // The guard a park may never be without. It is also why this runs a grace after the
-    // announcement rather than inside it: the announcing process is alive while it speaks.
-    if !sessions_still_running(ctx, store, &claim_threads)?.is_empty() {
+    // announcement rather than inside it: the announcing process is alive while it speaks. And a
+    // session a planned restart stopped comes back to this very tree (nxf 6j6v.wxz0, C.4) — the
+    // funnel both the resume's secure step and the tick's park go through.
+    if the_copy_is_still_in_use(ctx, store, &claim_threads)? != CopyInUse::Free {
         return Ok(None);
     }
     let why = format!(
@@ -16366,6 +16473,11 @@ fn park_an_interrupted_holder(
         // session that is running again is not stopped at anything: none of the three is a park
         // waiting to happen, so none of them keeps a refusal "retrying".
         if hold.is_due(ctx.now) || ctx.worker.session_is_running(&hold.session) {
+            continue;
+        }
+        // **A hold that comes back in place is not a park waiting to happen** (nxf 6j6v.wxz0): its
+        // session resumes in this tree, so it must not keep a `PARK REFUSED` row "retrying" either.
+        if hold.resumes_in_place() {
             continue;
         }
         let Some(thread) = store.session_thread(&hold.session)? else {
@@ -18989,6 +19101,96 @@ fn lapsed_step_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker that answers the liveness question from a fixed set — for the guard's truth table.
+    struct Answering(Vec<String>);
+
+    impl Worker for Answering {
+        fn trigger(&self, _req: crate::worker::TriggerRequest) -> crate::worker::TriggerResult {
+            Err(crate::worker::disabled_error().into())
+        }
+        fn session_is_running(&self, internal_session: &str) -> bool {
+            self.0.iter().any(|s| s == internal_session)
+        }
+        fn answers_liveness(&self) -> bool {
+            true
+        }
+    }
+
+    /// **The guard on the copy, one row per kind of hold** (nxf 6j6v.wxz0, must-fix 5): what keeps a
+    /// holder's copy where it is during a restart's gap, and what lets it go. The per-site tests in
+    /// `tests/a_restart_leaves_a_way_back.rs` prove each reader asks it; this proves what it answers.
+    #[test]
+    fn the_copy_is_pinned_exactly_while_an_in_place_hold_is_inside_its_bound() {
+        const AT: &str = "2026-10-27T10:00:00Z";
+        const UNTIL: &str = "2026-10-27T10:02:30Z";
+        let defs = Definitions::default();
+        let timer = crate::timer::DisabledTimer;
+        let namer = crate::naming::DryNamer;
+        let guard = |store: &ChatStore, running: &[&str], now: &str| {
+            let worker = Answering(running.iter().map(|s| s.to_string()).collect());
+            let ctx = Ctx {
+                now,
+                origin: "local",
+                actor: "carsten",
+                session: None,
+                hop: 0,
+                defs: &defs,
+                worker: &worker,
+                timer: &timer,
+                namer: &namer,
+                db_path: ":memory:",
+                project_claude_md: None,
+                module_primes: None,
+                machines: None,
+                peers: None,
+            };
+            the_copy_is_still_in_use(&ctx, store, &["t-claim".to_string()]).unwrap()
+        };
+        let a_store_with = |limit: Option<&str>, until: Option<&str>| {
+            let mut s = ChatStore::open_in_memory(1);
+            s.create_pending_session("m-s1", "coder").unwrap();
+            s.record_session_thread("m-s1", Some("t-claim")).unwrap();
+            if let Some(limit) = limit {
+                s.record_interruption("m-s1", limit, until, "d", AT)
+                    .unwrap();
+            }
+            s
+        };
+        let restart = crate::interruption::SERVICE_RESTART_LIMIT;
+
+        // Nothing on hold, nothing running: free.
+        assert_eq!(guard(&a_store_with(None, None), &[], AT), CopyInUse::Free);
+        // A live process: running, whatever stands.
+        assert_eq!(
+            guard(&a_store_with(None, None), &["m-s1"], AT),
+            CopyInUse::Running(vec!["m-s1".to_string()])
+        );
+        // An in-place hold inside `until + MARGIN`: pinned, up to and including the bound.
+        let pinned = CopyInUse::OnRestartHold {
+            until: UNTIL.to_string(),
+        };
+        let held = a_store_with(Some(restart), Some(UNTIL));
+        assert_eq!(guard(&held, &[], AT), pinned);
+        assert_eq!(guard(&held, &[], UNTIL), pinned);
+        assert_eq!(
+            guard(&held, &[], "2026-10-27T10:03:00Z"),
+            pinned,
+            "the bound"
+        );
+        // …and free one second past it: the service never came back.
+        assert_eq!(guard(&held, &[], "2026-10-27T10:03:01Z"), CopyInUse::Free);
+        // An in-place hold with no `until`: neither pinned nor skipped.
+        assert_eq!(
+            guard(&a_store_with(Some(restart), None), &[], AT),
+            CopyInUse::Free
+        );
+        // A window hold: free — its tree is secured and handed on.
+        assert_eq!(
+            guard(&a_store_with(Some("seven_day"), Some(UNTIL)), &[], AT),
+            CopyInUse::Free
+        );
+    }
 
     /// **A write through the lock is tried once more after each wait, and no more** (nxf
     /// 6j6v.3eqa): an `io` failure that lasts is given back after every wait was spent, in order.

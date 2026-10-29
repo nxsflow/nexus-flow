@@ -659,6 +659,61 @@ fn with_a_worker_that_does_not_answer_liveness_an_unended_session_holds_the_next
     );
 }
 
+/// **A step a planned service restart stopped still has its hands in the copy** (nxf 6j6v.wxz0,
+/// C.4): its session was stopped and announced its end, and it comes back to this tree at `until`
+/// — so the step after it waits through the gap, and starts once the hold's bound has passed with
+/// no resume. `restart_until` is the hold's `until`, recorded at [`LATER_STILL`].
+fn a_restart_hold_holds_the_next_step_through_the_gap(answers_liveness: bool) {
+    const RESTART_UNTIL: &str = "2026-10-10T01:08:20Z";
+    /// Inside `until + SERVICE_RESTART_MARGIN_SECS`.
+    const IN_THE_GAP: &str = "2026-10-10T01:08:50Z";
+    /// One second past it: the service never came back.
+    const PAST_THE_BOUND: &str = "2026-10-10T01:08:51Z";
+    let (tmp, engine, worker) = team_with(&[ORDERED], answers_liveness);
+    let (builder, builder_thread) = a_holder_at_work(&engine, &worker);
+    an_ordered_round_queued_with_both_steps(&tmp, &engine, &worker);
+    the_holder_lets_go(&engine, &worker, &builder, &builder_thread);
+    let coder = worker.last_for("coder");
+    let (cs, ct) = (coder.internal_session, coder.reply_thread.unwrap());
+    answer(&engine, &cs, &ct, LATER_STILL, "built T6");
+    engine
+        .session_interrupted(
+            caller("coder", LATER_STILL),
+            &cs,
+            nexus_chat::interruption::SERVICE_RESTART_LIMIT,
+            Some(RESTART_UNTIL),
+            "nxs self-update 0.221.0 -> 0.222.0 restarted the background service",
+        )
+        .expect("the restart's hold is recorded");
+    end(&engine, &worker, "coder", &cs, LATER_STILL);
+    assert_eq!(
+        worker.started("verifier"),
+        0,
+        "the coder's session comes back to this tree, so the step after it waits"
+    );
+    tick(&tmp, &worker, IN_THE_GAP, &ct);
+    assert_eq!(worker.started("verifier"), 0, "…for the whole gap");
+
+    tick(&tmp, &worker, PAST_THE_BOUND, &ct);
+    assert_eq!(
+        worker.started("verifier"),
+        1,
+        "past the hold's bound the step after it starts"
+    );
+}
+
+#[test]
+fn a_step_on_a_restart_hold_holds_the_next_step_through_the_gap() {
+    a_restart_hold_holds_the_next_step_through_the_gap(true);
+}
+
+/// The same with a worker that cannot answer liveness, whose branch reads the UNENDED sessions —
+/// where an interrupted session, which has ended, is invisible (round-3 CQ #3 / TQ #6).
+#[test]
+fn a_step_on_a_restart_hold_holds_the_next_step_with_a_worker_that_cannot_answer_liveness() {
+    a_restart_hold_holds_the_next_step_through_the_gap(false);
+}
+
 /// The same order, declared as `steps:` rather than as `flow: sequential` (review of PR #38, Test
 /// Quality #1).
 #[test]
