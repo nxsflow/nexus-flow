@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
-use nexus_chat::interruption::{SERVICE_RESTART_LIMIT, SERVICE_RESTART_MARGIN_SECS};
+use nexus_chat::interruption::SERVICE_RESTART_LIMIT;
 use nexus_chat::orchestration::{Caller, ResumeOutcome, ResumeRequest, ResumeScope};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::surface::{SendToRefs, SendToRequest};
