@@ -259,10 +259,15 @@ pub fn sole_open_thread_for_session(
         1 => Ok(open[0].thread_id.clone()),
         0 if bound => Err(NxfError::validation(match standing_in {
             Some(own) => format!(
-                "nothing this session serves is waiting for an answer: it was put to work on                  thread {own}, and that conversation no longer takes one. A reply goes only to a                  thread its own session serves, never to another round of {handle} — read how                  yours stands with `nxc threads show {own}`."
+                "nothing this session serves is waiting for an answer: it was put to work on \
+                 thread {own}, and that conversation no longer takes one. A reply goes only to a \
+                 thread its own session serves, never to another round of {handle} — read how \
+                 yours stands with `nxc threads show {own}`."
             ),
             None => format!(
-                "nothing this session serves is waiting for an answer, so there is nothing a                  bare `nxc reply` could answer. A reply goes only to a thread its own session                  serves, never to another round of {handle}."
+                "nothing this session serves is waiting for an answer, so there is nothing a \
+                 bare `nxc reply` could answer. A reply goes only to a thread its own session \
+                 serves, never to another round of {handle}."
             ),
         })),
         0 => Err(NxfError::validation(format!(
@@ -423,6 +428,49 @@ mod tests {
         );
         s.set_expects_reply_from("t-consulted", r#"["local/frontend"]"#, "local/coder");
         s
+    }
+
+    /// nxf 6j6v.f5rf: another session of the same handle, put to work elsewhere, sees neither of
+    /// the two conversations the handle has open — and its bare reply is refused naming its own
+    /// thread, in one readable sentence. A session id this store never minted binds nothing.
+    #[test]
+    fn a_session_sees_only_what_it_serves_and_an_unknown_one_sees_what_its_handle_owes() {
+        let mut s = store_with_two_open_conversations();
+        s.create_pending_session("s-other", "coder").unwrap();
+        s.record_session_thread("s-other", Some("t-elsewhere"))
+            .unwrap();
+        let now = "2026-09-08T10:00:02Z";
+
+        let bound =
+            open_for_session(&s, "local/coder", Some("s-other"), Some("t-elsewhere"), now).unwrap();
+        assert!(bound.is_empty(), "{bound:?}");
+        let err = sole_open_thread_for_session(
+            &s,
+            "local/coder",
+            Some("s-other"),
+            Some("t-elsewhere"),
+            now,
+        )
+        .unwrap_err();
+        assert!(err.msg.contains("t-elsewhere"), "{}", err.msg);
+        assert!(
+            !err.msg.contains("t-owed") && !err.msg.contains("t-consulted"),
+            "never another session's conversation: {}",
+            err.msg
+        );
+        assert!(
+            !err.msg.contains("  "),
+            "one sentence, no source indentation inside it: {:?}",
+            err.msg
+        );
+
+        let unknown = open_for_session(&s, "local/coder", Some("s-ghost"), None, now).unwrap();
+        assert_eq!(
+            unknown,
+            open_for(&s, "local/coder", None, now).unwrap(),
+            "a session this store never minted reads as no session at all"
+        );
+        assert_eq!(unknown.len(), 2);
     }
 
     #[test]

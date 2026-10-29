@@ -218,12 +218,24 @@ impl ChatStore {
     ///
     /// The spoken-in half reads the return address a post carries (`refs.session_id`, stamped from
     /// the posting session), whatever name it was posted under. One indexed seek per half.
+    ///
+    /// **The invariant that half stands on** (review of f5rf, Integrity #2): a session can put its
+    /// own id on a post only in a thread it is already allowed into. Its `nxc reply` is refused
+    /// before anything is posted unless the thread passes this check, and `nxc send` — whose
+    /// `--ref session_id=` an agent may set — always opens a NEW thread. A verb that ever posts into
+    /// an EXISTING thread with caller-chosen refs must run this check first, or it widens what the
+    /// session serves. A post this store cannot vouch for (a peer's, signed by a key it does not
+    /// trust, nxf 6j6v.pzkb) enrols nothing: it is held to [`crate::store::acts`], as every other
+    /// read that follows a return address is.
     pub fn session_serves(&self, internal_id: &str, thread: &str) -> Result<bool> {
+        let vouched = crate::store::acts("m");
         Ok(self.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?2)
-                 OR EXISTS(SELECT 1 FROM messages m
-                            WHERE m.thread_id = ?2
-                              AND json_extract(m.refs, '$.session_id') = ?1)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?2)
+                     OR EXISTS(SELECT 1 FROM messages m
+                                WHERE m.thread_id = ?2 AND {vouched}
+                                  AND json_extract(m.refs, '$.session_id') = ?1)"
+            ),
             params![internal_id, thread],
             |r| r.get(0),
         )?)

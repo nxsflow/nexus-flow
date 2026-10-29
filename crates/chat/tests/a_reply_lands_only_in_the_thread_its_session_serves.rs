@@ -259,6 +259,10 @@ fn a_reply_naming_a_thread_the_session_does_not_serve_is_refused() {
         err.contains(b.slot("test-quality")) && err.contains(a.slot("test-quality")),
         "the refusal names the thread asked for and the one this session serves: {err}"
     );
+    assert!(
+        !err.contains("  "),
+        "one readable sentence, no source indentation inside it: {err:?}"
+    );
     assert_eq!(
         messages_in(&tmp, b.slot("test-quality")),
         before,
@@ -404,4 +408,23 @@ fn a_session_resumed_into_its_own_consultation_still_answers_its_commission() {
         "done on the coder's behalf",
     ]));
     assert_eq!(messages_in(&tmp, &own), before + 1);
+}
+
+#[test]
+fn a_session_id_this_workspace_never_minted_binds_nothing() {
+    // An `NXC_SESSION` this store has no record of — another workspace's, a stale shell's — has no
+    // record to bind it by, and the reply goes where it is named, as before this item.
+    let tmp = workspace();
+    let (_a, b) = two_rounds(&tmp);
+    let before = messages_in(&tmp, b.slot("integrity"));
+    json_of(
+        persona(&tmp, "integrity", "m-not-a-session-of-this-store").args([
+            "--json",
+            "reply",
+            "--thread",
+            b.slot("integrity"),
+            "an answer from a session nobody here started",
+        ]),
+    );
+    assert_eq!(messages_in(&tmp, b.slot("integrity")), before + 1);
 }

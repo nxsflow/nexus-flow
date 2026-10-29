@@ -906,6 +906,114 @@ fn an_ended_session_that_wrote_nothing_is_recommissioned_not_continued() {
     assert_eq!(team.log(&thread, "coder")[0].0, "recommissioned");
 }
 
+// ---- whom a recovered slot's reply belongs to (nxf 6j6v.f5rf) ----------------------------------
+
+/// `role`'s session `session` answers in `thread` — the reply's own result, refusal included.
+fn a_reply_from(
+    team: &Team,
+    now: &str,
+    role: &str,
+    session: &str,
+    thread: &str,
+    body: &str,
+) -> NxfResult<orchestration::ReplyReceipt> {
+    team.with(now, role, Some(session), |ctx, store| {
+        surface::reply_in_thread(
+            ctx,
+            store,
+            ReplyThreadRequest {
+                machine: None,
+                thread,
+                body,
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+    })
+}
+
+/// **A re-commissioned session serves the slot it was re-commissioned into** (nxf 6j6v.f5rf, review
+/// TQ #1). The fresh session never posted there and is not where the slot was first opened from, so
+/// only the record its trigger writes makes it the slot's — without it the answer is refused and the
+/// slot stays owed for good. A session of ANOTHER commission of the same persona is refused there.
+#[test]
+fn a_recommissioned_session_answers_its_slot_and_another_commissions_session_may_not() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    let old = team.worker.last("coder").internal_session;
+    let other = team.commission(T0, "coder", "Something else.").thread_id;
+    let stranger = team.worker.last("coder").internal_session;
+    assert_ne!(stranger, old);
+
+    team.tick(&at(130), &thread);
+    assert_eq!(team.log(&thread, "coder")[0].0, "recommissioned");
+    let fresh = team.worker.last("coder");
+    assert_ne!(fresh.internal_session, old, "a NEW session");
+    assert_eq!(fresh.reply_thread.as_deref(), Some(thread.as_str()));
+
+    let before = team.messages(&thread).len();
+    let refused = a_reply_from(&team, &at(200), "coder", &stranger, &thread, "mine, really")
+        .expect_err("another commission's session does not serve this slot");
+    assert_eq!(refused.kind, nxs_foundation::error::ErrorKind::Forbidden);
+    assert!(
+        refused.msg.contains(&thread) && refused.msg.contains(&other),
+        "it names the slot asked for and the one the session serves: {}",
+        refused.msg
+    );
+    assert_eq!(team.messages(&thread).len(), before, "nothing written");
+
+    a_reply_from(
+        &team,
+        &at(210),
+        "coder",
+        &fresh.internal_session,
+        &thread,
+        "done: --since is in",
+    )
+    .expect("the re-commissioned session answers its slot");
+    team.tick(&at(211), &thread);
+    assert_eq!(team.ladder(&thread, "coder"), None, "the slot is answered");
+    // The replaced session still serves the slot it was started for — its own thread (DoD 2).
+    assert!(team.store().session_serves(&old, &thread).unwrap());
+}
+
+/// **`--progress` is bound like a reply** (nxf 6j6v.f5rf, review TQ #2): a progress from another
+/// commission's session is refused, and the slot it named keeps its silence clock and its messages —
+/// a stranger's "still working" must not keep somebody else's slot looking alive. The session's own
+/// progress is taken as before.
+#[test]
+fn a_progress_from_another_commissions_session_is_refused_and_moves_nothing() {
+    let team = team();
+    let thread = team
+        .commission(T0, "coder", "Add a --since flag.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.tick(&at(1_200), &thread);
+    let asked = team.ladder(&thread, "coder").unwrap();
+    assert!(asked.asked_at.is_some(), "an ask is pending: {asked:?}");
+    team.commission(T0, "coder", "Something else.");
+    let stranger = team.worker.last("coder").internal_session;
+    let before = team.messages(&thread);
+
+    let refused = team
+        .with(&at(1_300), "coder", Some(&stranger), |ctx, store| {
+            surface::reply_progress(ctx, store, &thread, "running the suite")
+        })
+        .expect_err("another commission's session does not serve this slot");
+    assert_eq!(refused.kind, nxs_foundation::error::ErrorKind::Forbidden);
+    assert_eq!(team.messages(&thread), before, "nothing written");
+    assert_eq!(
+        team.ladder(&thread, "coder").unwrap(),
+        asked,
+        "the silence clock, the ask and the budget are untouched"
+    );
+
+    let r = team.progress(&at(1_310), "coder", &session, &thread, "running the suite");
+    assert!(r.counted, "the slot's own session is taken: {r:?}");
+}
+
 // ---- a re-commission whose start fails (nxf 6j6v.yts5) ------------------------------------------
 
 /// The slot of a coder whose session ended having written nothing — the ladder's next rung for it
