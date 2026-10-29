@@ -20,6 +20,9 @@ mod onboarding;
 mod output;
 mod plugin;
 mod selfupdate;
+pub use selfupdate::{
+    prepared_words, register_restart_preparation, PrepareForRestart, RestartCause,
+};
 mod signature;
 mod sync;
 mod validate;
@@ -687,8 +690,16 @@ where
 /// including the binary currently running, regardless of which name invoked it. Returns the shared
 /// error envelope on failure so the umbrella renders it through its own `error::emit`; success and
 /// `--json` output are byte-identical to the `nxf` path bar the brand on human lines.
-pub fn self_update(json: bool, check: bool, channel: Option<&str>) -> Result<()> {
-    selfupdate::run("nxs", json, check, channel)
+///
+/// `prepare_for_restart` secures every running agent session of the service's instance before the
+/// service is restarted onto the new binary (nxf 6j6v.wxz0) — see [`selfupdate::PrepareForRestart`].
+pub fn self_update(
+    json: bool,
+    check: bool,
+    channel: Option<&str>,
+    prepare_for_restart: selfupdate::PrepareForRestart,
+) -> Result<()> {
+    selfupdate::run("nxs", json, check, channel, prepare_for_restart)
 }
 
 fn dispatch(cli: &Cli) -> Result<()> {
@@ -919,7 +930,13 @@ fn dispatch(cli: &Cli) -> Result<()> {
             if !cli.json {
                 eprintln!("note: `nxf self-update` is deprecated — use `nxs self-update` instead.");
             }
-            crate::selfupdate::run("nxf", cli.json, *check, channel.as_deref())
+            crate::selfupdate::run(
+                "nxf",
+                cli.json,
+                *check,
+                channel.as_deref(),
+                crate::selfupdate::registered_preparation(),
+            )
         }
         Command::Guide { topic } => commands::guide(cli.json, topic.as_deref()),
     }

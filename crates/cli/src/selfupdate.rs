@@ -91,6 +91,7 @@ pub fn run(
     json: bool,
     check: bool,
     channel: Option<&str>,
+    prepare_for_restart: PrepareForRestart,
 ) -> crate::error::Result<()> {
     let cfg_dir = user_config_dir()?;
     let (channel, machine_id) = ensure_install_identity(&cfg_dir, channel).map_err(to_nxf)?;
@@ -112,7 +113,7 @@ pub fn run(
 
     // The background service beside the binary (nxf 6j6v.c92y). `None` only when no service home
     // resolves at all, which is a machine with nothing to restart.
-    let svc = ServiceAt::ambient();
+    let svc = ServiceAt::ambient(prepare_for_restart);
 
     // `--check` never mutates anything: report the version decision and stop. It may say whether
     // the update WOULD restart the service, looked up without touching launchd; a lookup that fails
@@ -201,6 +202,10 @@ pub fn run(
     // fails loudly if the directory is not writable rather than dangling anything.
     let dir = install_dir_of_running_exe()?;
     let before = file_identity(&dir.join(REAL_BINARY));
+    let cause = RestartCause::SelfUpdate {
+        from: current.to_string(),
+        to: resp.version.clone(),
+    };
     if let Err(e) = install_from(&agent, resp, pubkey, &dir, &base_url) {
         // A step AFTER the swap may have failed, with the new binary already in place (review of
         // PR #41, Integrity #5): restart the service onto it anyway, then report the error.
@@ -209,6 +214,7 @@ pub fn run(
             file_identity(&dir.join(REAL_BINARY)),
             &dir,
             svc.as_ref(),
+            &cause,
         )
         .print();
         return Err(to_nxf(e));
@@ -227,6 +233,7 @@ pub fn run(
         ),
         updated_json(current, &resp.version, &channel),
         svc.as_ref(),
+        &cause,
     );
     for l in &out.stdout {
         println!("{l}");
@@ -304,6 +311,71 @@ fn with_service_alias(mut body: serde_json::Value, note: Option<&str>) -> serde_
 /// 2026-10-09), so the advice and the attempt cannot describe two different things.
 const SERVICE_RESTART_COMMAND: &str = "nxs sync daemon install";
 
+/// **What restarted the background service** (nxf 6j6v.wxz0) — handed to the preparation, whose
+/// holds carry it as their detail. Its `Display` is that detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartCause {
+    /// `nxs self-update` swapped the binary the service runs.
+    SelfUpdate { from: String, to: String },
+    /// `nxs sync daemon install` re-installed the service.
+    DaemonInstall,
+}
+
+impl std::fmt::Display for RestartCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestartCause::SelfUpdate { from, to } => write!(
+                f,
+                "nxs self-update {from} -> {to} restarted the background service"
+            ),
+            RestartCause::DaemonInstall => {
+                write!(
+                    f,
+                    "nxs sync daemon install restarted the background service"
+                )
+            }
+        }
+    }
+}
+
+/// **Secure every running agent session of the instance before its restart** (nxf 6j6v.wxz0): put
+/// each on a `service_restart` hold, stop it, and wait a grace for it to go. Injected, because this
+/// crate does not link the chat engine that knows what a session is; the multicall binary passes
+/// the real one. Never refuses — whatever it reports, the restart proceeds.
+pub type PrepareForRestart = Box<
+    dyn Fn(&nxs_service::ServiceHome, &RestartCause) -> nxs_service::restart::RestartPreparation,
+>;
+
+/// The preparation `nxf self-update` — the deprecated alias this crate dispatches itself — runs
+/// with: the one the multicall binary registered ([`register_restart_preparation`]), or none.
+static REGISTERED: std::sync::OnceLock<
+    fn(&nxs_service::ServiceHome, &RestartCause) -> nxs_service::restart::RestartPreparation,
+> = std::sync::OnceLock::new();
+
+/// **Hand this crate the preparation for the one path that cannot be given it as an argument** —
+/// `nxf self-update`, the deprecated alias this crate dispatches on its own. The canonical `nxs
+/// self-update` passes it to [`crate::self_update`] directly. A second registration is ignored.
+pub fn register_restart_preparation(
+    prepare: fn(
+        &nxs_service::ServiceHome,
+        &RestartCause,
+    ) -> nxs_service::restart::RestartPreparation,
+) {
+    let _ = REGISTERED.set(prepare);
+}
+
+/// The registered preparation, or one that prepares nothing and says why.
+pub(crate) fn registered_preparation() -> PrepareForRestart {
+    match REGISTERED.get() {
+        Some(prepare) => Box::new(*prepare),
+        None => Box::new(|_, _| {
+            nxs_service::restart::RestartPreparation::nothing(
+                "this binary does not link the chat engine, so no session was put on hold",
+            )
+        }),
+    }
+}
+
 /// **What `self-update` did, or would do, to the background service beside the binary** (nxf
 /// 6j6v.c92y).
 ///
@@ -326,6 +398,9 @@ enum ServiceRestart {
         instance: String,
         confirmed: bool,
         state: Option<String>,
+        /// What the preparation did to the instance's sessions before the bootout (nxf
+        /// 6j6v.wxz0).
+        prepared: nxs_service::restart::RestartPreparation,
     },
     /// Not attempted: this update runs inside a process the service started (`service_pid` is among
     /// its ancestors), and the restart's `bootout` would take this update down with it — between
@@ -338,6 +413,10 @@ enum ServiceRestart {
         instance: String,
         error: String,
         after: AfterFailure,
+        /// What the preparation did before the attempt — `None` when launchd could not even be
+        /// reached, which is checked first so nothing is held or stopped for a restart that cannot
+        /// happen (nxf 6j6v.wxz0).
+        prepared: Option<nxs_service::restart::RestartPreparation>,
     },
 }
 
@@ -434,12 +513,14 @@ struct ServiceAt {
     /// The binary asking — for the stale-process note, which only that binary can judge.
     this_program: Option<PathBuf>,
     this_version: String,
+    /// Secures the instance's sessions before the bootout ([`PrepareForRestart`]).
+    prepare_for_restart: PrepareForRestart,
 }
 
 impl ServiceAt {
     /// The ambient instance — the one `nxs sync daemon install` from this binary addresses, which
     /// for an installed binary is always production (nxf 6j6v.cvpy). `None` when no home resolves.
-    fn ambient() -> Option<ServiceAt> {
+    fn ambient(prepare_for_restart: PrepareForRestart) -> Option<ServiceAt> {
         let home = nxs_service::ServiceHome::resolve().ok()?;
         Some(ServiceAt {
             home,
@@ -460,6 +541,7 @@ impl ServiceAt {
             ctl: Box::new(real_ctl),
             this_program: nxs_service::program::running_program(),
             this_version: env!("CARGO_PKG_VERSION").to_string(),
+            prepare_for_restart,
         })
     }
 
@@ -486,7 +568,12 @@ impl ServiceAt {
     /// against it, so a machine with no service, or one whose service runs another build, never so
     /// much as constructs one. Never an error: by now the update has succeeded, and a courtesy
     /// beside it must not be able to fail it.
-    fn restart(&self, install_dir: &Path) -> Option<ServiceRestart> {
+    ///
+    /// **Before the bootout, the instance's sessions are secured** (nxf 6j6v.wxz0): put on hold,
+    /// stopped, and given a grace — [`PrepareForRestart`]. After the guard and after launchd was
+    /// reached, so nothing is held or stopped for a restart that is not going to happen; and
+    /// whatever it reports, the restart proceeds. Its bootout is the kill for what is still alive.
+    fn restart(&self, install_dir: &Path, cause: &RestartCause) -> Option<ServiceRestart> {
         let plist = self.plist()?;
         if !runs_binary(&self.home, &plist, &install_dir.join(REAL_BINARY)) {
             return None;
@@ -507,9 +594,11 @@ impl ServiceAt {
                     instance,
                     error,
                     after: AfterFailure::Untouched,
+                    prepared: None,
                 })
             }
         };
+        let prepared = (self.prepare_for_restart)(&self.home, cause);
         Some(
             match nxs_service::launchd::restart_with(
                 &self.home,
@@ -522,6 +611,7 @@ impl ServiceAt {
                         instance,
                         confirmed: true,
                         state,
+                        prepared,
                     }
                 }
                 Ok(nxs_service::launchd::Bootstrapped::Unconfirmed(_)) => {
@@ -529,6 +619,7 @@ impl ServiceAt {
                         instance,
                         confirmed: false,
                         state: None,
+                        prepared,
                     }
                 }
                 Err(e) => ServiceRestart::Failed {
@@ -542,6 +633,7 @@ impl ServiceAt {
                     },
                     instance,
                     error: e.msg,
+                    prepared: Some(prepared),
                 },
             },
         )
@@ -661,11 +753,13 @@ fn with_service_restart(
             instance,
             confirmed,
             state,
+            prepared,
         } => serde_json::json!({
             "instance": instance,
             "status": "restarted",
             "confirmed": confirmed,
             "state": state,
+            "prepared": prepared,
         }),
         ServiceRestart::Skipped {
             instance,
@@ -681,13 +775,23 @@ fn with_service_restart(
             instance,
             error,
             after,
-        } => serde_json::json!({
-            "instance": instance,
-            "status": "failed",
-            "error": error,
-            "service": after.as_str(),
-            "command": SERVICE_RESTART_COMMAND,
-        }),
+            prepared,
+        } => {
+            let mut failed = serde_json::json!({
+                "instance": instance,
+                "status": "failed",
+                "error": error,
+                "service": after.as_str(),
+                "command": SERVICE_RESTART_COMMAND,
+            });
+            if let (Some(prepared), Some(map)) = (prepared, failed.as_object_mut()) {
+                map.insert(
+                    "prepared".into(),
+                    serde_json::to_value(prepared).unwrap_or_default(),
+                );
+            }
+            failed
+        }
     };
     map.insert("service_restart".into(), value);
     body
@@ -723,21 +827,25 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
             instance,
             confirmed: true,
             state,
+            prepared,
         } => Line::Result(format!(
             "restarted the {instance} background service on the updated binary — launchd holds \
-             the new job{}; `nxs sync daemon status` shows whether it is passing",
+             the new job{}; `nxs sync daemon status` shows whether it is passing{}",
             state
                 .as_deref()
                 .map(|s| format!(" (state: {s})"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            prepared_words(prepared)
         )),
         ServiceRestart::Restarted {
             instance,
             confirmed: false,
+            prepared,
             ..
         } => Line::Result(format!(
             "restarted the {instance} background service on the updated binary (launchd could not \
-             be read back to confirm it — `nxs sync daemon status` says what it holds)"
+             be read back to confirm it — `nxs sync daemon status` says what it holds){}",
+            prepared_words(prepared)
         )),
         ServiceRestart::Skipped {
             instance,
@@ -753,6 +861,7 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
             instance,
             error,
             after: AfterFailure::Untouched,
+            ..
         } => Line::Note(format!(
             "the update succeeded, but the {instance} background service could not be restarted \
              ({error}); launchd was not asked to stop it, so it keeps running the previous build. \
@@ -762,6 +871,7 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
             instance,
             error,
             after: AfterFailure::StillLoaded,
+            ..
         } => Line::Note(format!(
             "the update succeeded, but restarting the {instance} background service failed \
              ({error}); launchd still holds a job under its label, which may be the previous \
@@ -771,6 +881,7 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
             instance,
             error,
             after: AfterFailure::Stopped,
+            ..
         } => Line::Note(format!(
             "the update succeeded, but restarting the {instance} background service failed \
              ({error}) after its previous job had been stopped — the service is NOT running now, \
@@ -781,12 +892,82 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
             instance,
             error,
             after: AfterFailure::Unknown,
+            ..
         } => Line::Note(format!(
             "the update succeeded, but restarting the {instance} background service failed \
              ({error}), and launchd could not be read to tell whether it is still running. Run \
              `{SERVICE_RESTART_COMMAND}` to (re)start it on the updated binary."
         )),
     }
+}
+
+/// **What the restart did to the instance's sessions, in words** (nxf 6j6v.wxz0) — appended to the
+/// restart's line: what it put on hold, what it left to the bootout, what it left alone, and what
+/// it could not do. Empty when it touched nothing.
+pub fn prepared_words(prepared: &nxs_service::restart::RestartPreparation) -> String {
+    use nxs_service::restart::PreparedSession;
+    let names = |sessions: &[PreparedSession]| -> String {
+        sessions
+            .iter()
+            .map(|p| p.session.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !prepared.held.is_empty() {
+        parts.push(format!(
+            "put on hold and stopped first, taken up again in place at {}: {}",
+            prepared.until.as_deref().unwrap_or("its hold's instant"),
+            names(&prepared.held)
+        ));
+    }
+    if !prepared.stopped.is_empty() {
+        parts.push(format!(
+            "on hold but still running at the end of the grace, so ended by the restart: {}",
+            names(&prepared.stopped)
+        ));
+    }
+    if !prepared.unrecorded.is_empty() {
+        parts.push(format!(
+            "stopped without a hold — {}",
+            prepared
+                .unrecorded
+                .iter()
+                .map(|t| format!("{} ({})", t.session, t.error))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if !prepared.left_alone.is_empty() {
+        parts.push(format!(
+            "left alone, not started by this service: {}",
+            names(&prepared.left_alone)
+        ));
+    }
+    if !prepared.unverifiable.is_empty() {
+        parts.push(format!(
+            "not touched, their process could not be proven theirs: {}",
+            names(&prepared.unverifiable)
+        ));
+    }
+    if !prepared.unreadable.is_empty() {
+        parts.push(format!(
+            "not touched, their process group could not be read: {}",
+            prepared
+                .unreadable
+                .iter()
+                .map(|t| format!("{} ({})", t.session, t.error))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if parts.is_empty() {
+        return match &prepared.note {
+            Some(note) => format!(". No session was put on hold: {note}"),
+            None => String::new(),
+        };
+    }
+    format!(". Sessions — {}", parts.join("; "))
 }
 
 /// The note naming sibling instances that run this binary and were not restarted.
@@ -873,8 +1054,9 @@ fn updated_output(
     human: String,
     body: serde_json::Value,
     svc: Option<&ServiceAt>,
+    cause: &RestartCause,
 ) -> Output {
-    let restart = svc.and_then(|s| s.restart(install_dir));
+    let restart = svc.and_then(|s| s.restart(install_dir, cause));
     let alias = svc.and_then(|s| s.alias_note(install_dir));
     let siblings = svc.map(|s| s.siblings_on(install_dir)).unwrap_or_default();
     let mut out = Output::default();
@@ -928,12 +1110,13 @@ fn partial_swap_output(
     after: Option<(u64, u64)>,
     install_dir: &Path,
     svc: Option<&ServiceAt>,
+    cause: &RestartCause,
 ) -> Output {
     let mut out = Output::default();
     if after.is_none() || before == after {
         return out;
     }
-    if let Some(r) = svc.and_then(|s| s.restart(install_dir)) {
+    if let Some(r) = svc.and_then(|s| s.restart(install_dir, cause)) {
         let line = match service_restart_line(&r) {
             Line::Result(l) | Line::Note(l) => l,
         };
@@ -1927,9 +2110,11 @@ mod tests {
     #[cfg(unix)]
     mod restart {
         use crate::selfupdate::*;
-        use std::cell::Cell;
+        use std::cell::{Cell, RefCell};
         use std::rc::Rc;
         use std::sync::{Arc, Mutex};
+
+        use nxs_service::restart::{PreparedSession, RestartPreparation};
 
         const INSTALLED_PATH: &str = "/opt/homebrew/bin:/Users/u/.nvm/bin:/usr/bin:/bin";
         const UPDATER_PATH: &str = "/usr/bin:/bin";
@@ -2135,6 +2320,7 @@ mod tests {
                         }),
                         this_program: Some(resolved(&self.binary)),
                         this_version: "0.207.0".into(),
+                        prepare_for_restart: Box::new(|_, _| RestartPreparation::default()),
                     },
                     asked,
                 )
@@ -2142,8 +2328,35 @@ mod tests {
             fn svc(&self, spy: &Arc<SpyCtl>) -> (ServiceAt, Rc<Cell<usize>>) {
                 self.svc_with(spy, None, false)
             }
+            /// [`Self::svc_with`] with a scripted preparation: it records the cause it was handed
+            /// and how many launchd verbs had run when it was called, and answers `report`.
+            fn svc_preparing(
+                &self,
+                spy: &Arc<SpyCtl>,
+                ancestor: Option<u32>,
+                ctl_refused: bool,
+                report: RestartPreparation,
+            ) -> (ServiceAt, Rc<RefCell<Vec<(String, usize)>>>) {
+                let (mut svc, _) = self.svc_with(spy, ancestor, ctl_refused);
+                let calls = Rc::new(RefCell::new(Vec::new()));
+                let seen = calls.clone();
+                let spy = spy.clone();
+                svc.prepare_for_restart = Box::new(move |_, cause| {
+                    seen.borrow_mut()
+                        .push((cause.to_string(), spy.verbs().len()));
+                    report.clone()
+                });
+                (svc, calls)
+            }
             fn running(&self, spy: &SpyCtl) {
                 spy.preload(&self.home.instance().label(), &self.plist());
+            }
+        }
+
+        fn cause() -> RestartCause {
+            RestartCause::SelfUpdate {
+                from: "0.206.1".into(),
+                to: "0.207.0".into(),
             }
         }
 
@@ -2154,7 +2367,128 @@ mod tests {
                 "updated nxs 0.206.1 -> 0.207.0 (channel beta)".into(),
                 updated_json("0.206.1", "0.207.0", "beta"),
                 Some(svc),
+                &cause(),
             )
+        }
+
+        fn session(id: &str) -> PreparedSession {
+            PreparedSession {
+                workspace: "/work/a".into(),
+                session: id.into(),
+            }
+        }
+
+        /// **The restart secures the instance's sessions FIRST** (nxf 6j6v.wxz0, section A): the
+        /// preparation runs before any launchd verb, is handed the cause, and what it did rides the
+        /// receipt — `prepared` under `--json`, and in words on the human line. A straggler is left
+        /// to the bootout: the restart's verbs are bootout + bootstrap, with no kill of its own.
+        #[test]
+        fn the_restart_prepares_the_sessions_before_the_bootout_and_reports_what_it_did() {
+            let m = Machine::new().installed();
+            let binary = m.binary.clone();
+            let m = m.alias_to(&binary);
+            let spy = Arc::new(SpyCtl::default());
+            m.running(&spy);
+            let report = RestartPreparation {
+                held: vec![session("m-held")],
+                stopped: vec![session("m-straggler")],
+                left_alone: vec![session("m-terminal")],
+                ..RestartPreparation::default()
+            };
+            let (svc, calls) = m.svc_preparing(&spy, None, false, report.clone());
+
+            let out = updated(&svc, &m.dir, true);
+
+            assert_eq!(
+                *calls.borrow(),
+                vec![(
+                    "nxs self-update 0.206.1 -> 0.207.0 restarted the background service".into(),
+                    0
+                )],
+                "prepared once, with the cause, before any launchd verb ran"
+            );
+            let verbs = spy.verbs();
+            assert!(verbs.iter().any(|v| v.starts_with("bootout ")), "{verbs:?}");
+            assert!(
+                verbs.iter().any(|v| v.starts_with("bootstrap ")),
+                "{verbs:?}"
+            );
+            assert!(
+                !verbs.iter().any(|v| v.starts_with("kill")),
+                "the hook sends no kill — the bootout is the kill: {verbs:?}"
+            );
+            let body = receipt(&out);
+            let prepared = &body["service_restart"]["prepared"];
+            assert_eq!(prepared["held"][0]["session"], "m-held", "{body}");
+            assert_eq!(prepared["stopped"][0]["session"], "m-straggler", "{body}");
+            assert_eq!(prepared["left_alone"][0]["session"], "m-terminal", "{body}");
+
+            let Line::Result(line) = service_restart_line(&svc.restart(&m.dir, &cause()).unwrap())
+            else {
+                panic!("a restart is part of the result");
+            };
+            assert!(line.contains("m-held"), "{line}");
+            assert!(line.contains("m-straggler"), "{line}");
+            assert!(line.contains("m-terminal"), "{line}");
+        }
+
+        /// An update run inside a service session restarts nothing — and so prepares nothing: no
+        /// hold and no stop for a restart that is not going to happen.
+        #[test]
+        fn a_skipped_restart_prepares_nothing() {
+            let m = Machine::new().installed();
+            let binary = m.binary.clone();
+            let m = m.alias_to(&binary);
+            let spy = Arc::new(SpyCtl::default());
+            m.running(&spy);
+            let (svc, calls) =
+                m.svc_preparing(&spy, Some(4242), false, RestartPreparation::default());
+
+            let outcome = svc.restart(&m.dir, &cause()).unwrap();
+
+            assert!(
+                matches!(outcome, ServiceRestart::Skipped { .. }),
+                "{outcome:?}"
+            );
+            assert!(calls.borrow().is_empty(), "nothing was prepared");
+        }
+
+        /// No launchd handle, no restart — and so nothing is held or stopped for one.
+        #[test]
+        fn a_restart_that_cannot_reach_launchd_prepares_nothing() {
+            let m = Machine::new().installed();
+            let binary = m.binary.clone();
+            let m = m.alias_to(&binary);
+            let spy = Arc::new(SpyCtl::default());
+            m.running(&spy);
+            let (svc, calls) = m.svc_preparing(&spy, None, true, RestartPreparation::default());
+
+            let outcome = svc.restart(&m.dir, &cause()).unwrap();
+
+            assert!(
+                matches!(
+                    outcome,
+                    ServiceRestart::Failed {
+                        after: AfterFailure::Untouched,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+            assert!(calls.borrow().is_empty(), "nothing was prepared");
+        }
+
+        /// The cause, in the words a hold's detail carries.
+        #[test]
+        fn a_restart_cause_says_what_restarted_the_service() {
+            assert_eq!(
+                RestartCause::DaemonInstall.to_string(),
+                "nxs sync daemon install restarted the background service"
+            );
+            assert_eq!(
+                cause().to_string(),
+                "nxs self-update 0.206.1 -> 0.207.0 restarted the background service"
+            );
         }
 
         fn receipt(out: &Output) -> serde_json::Value {
@@ -2175,7 +2509,7 @@ mod tests {
             m.running(&spy);
             let (svc, asked) = m.svc(&spy);
 
-            let outcome = svc.restart(&m.dir);
+            let outcome = svc.restart(&m.dir, &cause());
 
             assert_eq!(
                 outcome,
@@ -2183,6 +2517,7 @@ mod tests {
                     instance: "nexus-flow".into(),
                     confirmed: true,
                     state: Some("running".into()),
+                    prepared: RestartPreparation::default(),
                 })
             );
             assert_eq!(asked.get(), 1, "one launchd handle, for one restart");
@@ -2261,7 +2596,7 @@ mod tests {
 
             let bare = Machine::new();
             let (svc, asked) = bare.svc(&spy);
-            assert_eq!(svc.restart(&bare.dir), None);
+            assert_eq!(svc.restart(&bare.dir, &cause()), None);
             assert_eq!(
                 updated(&svc, &bare.dir, false),
                 Output {
@@ -2281,7 +2616,7 @@ mod tests {
             let uninstalled = uninstalled.alias_to(&binary);
             let (svc, asked) = uninstalled.svc(&spy);
             assert_eq!(
-                svc.restart(&uninstalled.dir),
+                svc.restart(&uninstalled.dir, &cause()),
                 None,
                 "an alias without a plist is an uninstalled service, and restarting it would \
                  re-install it"
@@ -2341,7 +2676,7 @@ mod tests {
                 let spy = Arc::new(spy);
                 m.running(&spy);
                 let (svc, _) = m.svc_with(&spy, None, refused);
-                let outcome = svc.restart(&m.dir).unwrap();
+                let outcome = svc.restart(&m.dir, &cause()).unwrap();
                 let ServiceRestart::Failed { after, .. } = &outcome else {
                     panic!("{outcome:?}");
                 };
@@ -2517,13 +2852,14 @@ mod tests {
                 ..SpyCtl::default()
             });
             let (svc, _) = m.svc(&spy);
-            let outcome = svc.restart(&m.dir).unwrap();
+            let outcome = svc.restart(&m.dir, &cause()).unwrap();
             assert_eq!(
                 outcome,
                 ServiceRestart::Restarted {
                     instance: "nexus-flow".into(),
                     confirmed: false,
                     state: None,
+                    prepared: RestartPreparation::default(),
                 }
             );
             let Line::Result(line) = service_restart_line(&outcome) else {
@@ -2584,7 +2920,13 @@ mod tests {
 
             let before = file_identity(&m.binary);
             assert_eq!(
-                partial_swap_output(before, file_identity(&m.binary), &m.dir, Some(&svc)),
+                partial_swap_output(
+                    before,
+                    file_identity(&m.binary),
+                    &m.dir,
+                    Some(&svc),
+                    &cause(),
+                ),
                 Output::default(),
                 "nothing was swapped, so nothing restarts"
             );
@@ -2593,7 +2935,7 @@ mod tests {
             atomic_replace(&m.binary, b"the next nxs").unwrap();
             let after = file_identity(&m.binary);
             assert_ne!(before, after, "an atomic swap is a new file");
-            let out = partial_swap_output(before, after, &m.dir, Some(&svc));
+            let out = partial_swap_output(before, after, &m.dir, Some(&svc), &cause());
             assert_eq!(spy.bootstraps().len(), 1, "{:?}", spy.verbs());
             assert!(
                 out.stdout.is_empty(),
