@@ -41,7 +41,7 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
     let receipt = receipt(&installed.bootstrapped, &home.instance().label());
     let (prepared_json, prepared_line) = match &prepared {
         InstallPreparation::Prepared(report) => (
-            serde_json::to_value(report).unwrap_or_default(),
+            serde_json::to_value(report.as_ref()).unwrap_or_default(),
             nexus_flow_cli::prepared_words(report),
         ),
         InstallPreparation::InsideTheService(service_pid) => (
@@ -351,7 +351,7 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InstallPreparation {
     /// What the preparation did — [`nexus_flow_cli::prepared_words`] says it in words.
-    Prepared(nxs_service::restart::RestartPreparation),
+    Prepared(Box<nxs_service::restart::RestartPreparation>),
     /// Not prepared: this install runs inside a process the service started (`service_pid`).
     InsideTheService(u32),
 }
@@ -369,10 +369,10 @@ pub(crate) fn prepare_the_install(
 ) -> InstallPreparation {
     match inside {
         Some(service_pid) => InstallPreparation::InsideTheService(service_pid),
-        None => InstallPreparation::Prepared(prepare(
+        None => InstallPreparation::Prepared(Box::new(prepare(
             home,
             &nexus_flow_cli::RestartCause::DaemonInstall,
-        )),
+        ))),
     }
 }
 
