@@ -3529,6 +3529,15 @@ fn status(
             if op.interrupted {
                 marks.push("INTERRUPTED");
             }
+            // **Why a copy with nothing running in it is not moving** (nxf 6j6v.wxz0): a planned
+            // restart stopped a session of this operation, which comes back to the same tree.
+            let pinned = op
+                .pinned_by_restart_hold
+                .as_ref()
+                .map(|until| format!("working tree kept for a restart until {until}"));
+            if let Some(pinned) = &pinned {
+                marks.push(pinned);
+            }
             // **The mark that says why a working copy is not moving** (nxf 6j6v.8bv9): its park was
             // refused for a reason somebody can fix, and the claim is held until they do. Capitals,
             // like the other two marks that ask a human to look; the line under the header says

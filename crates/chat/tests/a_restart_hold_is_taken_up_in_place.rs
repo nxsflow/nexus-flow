@@ -870,3 +870,47 @@ fn a_restart_hold_does_not_keep_an_old_refused_park_retrying() {
     );
     the_work_is_in_place(root);
 }
+
+/// **`nxc status` names the hold that pins the copy** (round-3 IR #4, must-fix 9): in the gap the
+/// lease may have expired and nothing runs, so without it the holder reads like an operation that
+/// holds nothing — while the copy is kept for it. Read from the same guard the readers ask.
+#[test]
+fn status_names_the_restart_hold_that_pins_the_copy_and_drops_it_past_the_bound() {
+    let dir = TempDir::new().unwrap();
+    let _log = TimerLog::open(dir.path());
+    let worker = Arc::new(HostWorker::default());
+    let (tmp, engine) = workspace(worker.clone());
+    let root = tmp.path();
+    let (session, thread) = a_coder_at_work_with_a_rival_waiting(root, &engine, &worker);
+    stopped_by_a_restart(
+        &engine,
+        "2026-10-27T11:59:00Z",
+        "2026-10-27T12:01:30Z",
+        &session,
+    );
+    let op_root = common::open_store(root).thread_root(&thread).unwrap();
+    let pinned = |now: &str| {
+        engine
+            .status(
+                nexus_chat::facade::Reader::Handle("o/human"),
+                now,
+                nexus_chat::facade::StatusScope::Workspace,
+            )
+            .unwrap()
+            .operations
+            .into_iter()
+            .find(|op| op.root == op_root)
+            .expect("the coder's operation is listed")
+            .pinned_by_restart_hold
+    };
+
+    assert_eq!(
+        pinned("2026-10-27T12:00:30Z").as_deref(),
+        Some("2026-10-27T12:01:30Z")
+    );
+    assert_eq!(
+        pinned("2026-10-27T12:02:01Z"),
+        None,
+        "past the bound it pins nothing"
+    );
+}
