@@ -173,8 +173,8 @@ The `type` decides what a value may be:
   `+02:00`. It is stored as the same moment in UTC at whole seconds:
   `--set occurred_on=2026-10-12T10:30:00+02:00` stores `2026-10-12T08:30:00Z`. A plain date or a
   time without a zone is refused. Because every value has the same shape, `datetime` values sort
-  in time order wherever a field is read, such as a ranking key's `of = { field = "..." }`. The
-  offset you typed is not kept.
+  in time order wherever a field is read, such as a ranking field key or a ranking key's
+  `of = { field = "..." }`. The offset you typed is not kept.
 - `enum`: one of the declared `values`.
 
 ### List fields
@@ -292,7 +292,19 @@ A plugin declares how `next` ranks under `[ranking.next]` and how `list --sort r
 - `types = [...]` says how the types stand against each other once some have their own order.
 
 A key is a **field key**, such as `{ field = "priority", dir = "asc" }`. With a `precedence` list,
-a field key ranks by the value's position in that list instead. In a per-type order, or in the
+a field key ranks by the value's position in that list instead. In a per-type order, a field key
+can also name a custom field declared on that type (any type but a list field). It ranks by the
+item's own value: as numbers when both values are whole numbers, otherwise as text, so a `datetime`
+field ranks in time order. `nulls` places the items without a value:
+
+```toml
+[ranking.list.note]
+order = [ { field = "occurred_on", dir = "desc", nulls = "last" } ]
+```
+
+lists notes newest first, the notes without a date last, and the id breaks ties. A custom field
+that is not declared, not declared on the type, or a list field is refused at load, and so is a
+custom field in a default `order`. In a per-type order, or in the
 `[ranking.list]` default `order`, a key can also be a **derived key**, which ranks an item by its
 neighbours in the graph:
 

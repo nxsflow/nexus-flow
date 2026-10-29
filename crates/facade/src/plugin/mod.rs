@@ -387,8 +387,11 @@ const LIST_SECTION: &str = "ranking.list";
 impl RankSpec {
     /// The key rules, checked in the default order and in every per-type order (6j6v.z9jk):
     ///
-    /// - a key's `field` must be one the ranking can read ([`RANKABLE_FIELDS`]); any other name
-    ///   reads as null on every item, so the key would never decide;
+    /// - a key's `field` in the default order must be one the ranking can read
+    ///   ([`RANKABLE_FIELDS`]); any other name reads as null on every item, so the key would never
+    ///   decide. A per-type order may also name a custom field (6j6v.z19s), which only the
+    ///   check that knows the plugin's `[fields]` can hold (`validate_custom_in`) — the load runs
+    ///   both;
     /// - a `precedence` (enum-index) key must not ALSO set a non-default `dir`/`nulls` (Code review
     ///   #2). A precedence key orders strictly by the value's position in its list and ignores
     ///   `dir`/`nulls`, so setting them is a silent no-op that signals a misunderstanding — caught
@@ -413,9 +416,14 @@ impl RankSpec {
                 if key.is_derived() {
                     continue;
                 }
-                if !crate::record::RANKABLE_FIELDS.contains(&key.field.as_str()) {
+                // A per-type order may name a custom field (6j6v.z19s); that it is declared, on
+                // the type, and not a list is checked against `[fields]` (`validate_custom_in`).
+                // A default order ranks every type, so it may not.
+                if key.is_custom() && scope.is_empty() {
                     return Err(format!(
-                        "{scope}ranking key '{}' names no field the ranking can read; valid: {}",
+                        "ranking key '{}' names no field the ranking can read; valid: {}. A custom \
+                         field of [fields] ranks only in a per-type order [{section}.<type>] of a \
+                         type it is declared on",
                         key.field,
                         crate::record::RANKABLE_FIELDS.join(", ")
                     ));
@@ -939,6 +947,7 @@ fn load_registration(reg: &PluginRegistration) -> Result<PluginConfig> {
     ] {
         spec.validate_in(section)
             .and_then(|()| spec.validate_types_in(section, &cfg.types.list))
+            .and_then(|()| spec.validate_custom_in(section, &cfg.fields))
             .map_err(|e| {
                 NxfError::validation(format!(
                     "plugin '{}' has an invalid [{section}]: {e}",
@@ -1994,9 +2003,107 @@ mod tests {
         let err = refused("[ranking.next]\norder = [ { field = \"priorty\" } ]");
         assert_eq!(err.kind, crate::error::ErrorKind::Validation);
         assert!(err.msg.contains("'priorty'"), "{}", err.msg);
-        // A custom field is not rankable yet either: the ranking reads canonical fields only.
+        // A canonical field the ranking does not read stays refused.
         let err = refused("[ranking.next]\norder = [ { field = \"description\" } ]");
         assert!(err.msg.contains("'description'"), "{}", err.msg);
+    }
+
+    /// A plugin whose `note` orders, under both sections, are the field key `key`, with the custom
+    /// fields `fields` declared beside them (6j6v.z19s).
+    fn with_note_key(fields: &str, key: &str) -> String {
+        format!(
+            r#"
+            [ranking.next]
+            types = ["note"]
+            order = [ {{ field = "priority" }} ]
+            [ranking.next.note]
+            order = [ {key} ]
+            [ranking.list]
+            types = ["note"]
+            [ranking.list.note]
+            order = [ {key} ]
+            {fields}
+            "#
+        )
+    }
+
+    #[test]
+    fn a_custom_field_declared_on_the_type_ranks_as_a_plain_key_in_its_per_type_orders() {
+        // 6j6v.z19s: every scalar type, scoped `on` the type or unscoped.
+        for ty in ["datetime", "date", "text", "longtext", "ref"] {
+            let extra = if ty == "ref" {
+                "targets = [\"note\"]"
+            } else {
+                ""
+            };
+            let fields = format!("[fields.at]\ntype = \"{ty}\"\non = [\"note\"]\n{extra}");
+            let key = r#"{ field = "at", dir = "desc", nulls = "last" }"#;
+            let cfg = load_with_ranking(&with_note_key(&fields, key))
+                .unwrap_or_else(|e| panic!("a {ty} field on the type ranks: {}", e.msg));
+            let order = cfg.ranking.list.order_for(Some("note"));
+            assert_eq!(order[0].field, "at");
+            assert_eq!(order[0].dir, Dir::Desc);
+        }
+        let fields = "[fields.kind]\ntype = \"enum\"\nvalues = [\"a\", \"b\"]";
+        let key = r#"{ field = "kind", precedence = ["b", "a"] }"#;
+        load_with_ranking(&with_note_key(fields, key))
+            .expect("an unscoped enum field ranks, as a precedence key too");
+    }
+
+    #[test]
+    fn a_custom_field_key_not_declared_on_the_type_or_a_list_field_is_refused_at_load() {
+        let key = r#"{ field = "at", dir = "desc" }"#;
+        // Undeclared: the error names the table, the field and what would be valid.
+        let err = refused(&with_note_key("", key));
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{}", err.msg);
+        assert!(
+            err.msg.contains("[ranking.next.note]") && err.msg.contains("'at'"),
+            "names the table and the field: {}",
+            err.msg
+        );
+        // Declared, but on another type: it would read null on every note.
+        let fields = "[fields.at]\ntype = \"datetime\"\non = [\"action\"]";
+        let err = refused(&with_note_key(fields, key));
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{}", err.msg);
+        assert!(
+            err.msg.contains("'at'") && err.msg.contains("'note'") && err.msg.contains("action"),
+            "names the field, the type and where the field applies: {}",
+            err.msg
+        );
+        // A list field holds several entries, not one value to compare.
+        let fields = "[fields.at]\ntype = \"text\"\nlist = true\non = [\"note\"]";
+        let err = refused(&with_note_key(fields, key));
+        assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{}", err.msg);
+        assert!(
+            err.msg.contains("'at'") && err.msg.contains("list field"),
+            "says it is a list field: {}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn a_custom_field_key_in_a_default_order_is_refused_at_load() {
+        // A default order ranks items of every type, and a custom field applies to some: only a
+        // per-type order may name one (6j6v.z19s).
+        for (section, base) in [
+            ("ranking.next", ""),
+            (
+                "ranking.list",
+                "[ranking.next]\norder = [ { field = \"priority\" } ]\n",
+            ),
+        ] {
+            let ranking = format!(
+                "{base}[{section}]\norder = [ {{ field = \"at\" }} ]\n\
+                 [fields.at]\ntype = \"datetime\"\non = [\"note\"]"
+            );
+            let err = refused(&ranking);
+            assert_eq!(err.kind, crate::error::ErrorKind::Validation, "{}", err.msg);
+            assert!(
+                err.msg.contains("'at'") && err.msg.contains("per-type order"),
+                "{section}: points at the per-type order: {}",
+                err.msg
+            );
+        }
     }
 
     #[test]

@@ -105,8 +105,9 @@ pub(super) fn cmp_dval(a: &DVal, b: &DVal, dir: Dir, nulls: Nulls) -> Ordering {
     }
 }
 
-/// The derived values of one query: for each ranked row, one value per key of the order it ranks
-/// by, aligned with that order (a field key's position holds [`DVal::Null`] and is never read).
+/// The computed values of one query: for each ranked row, one value per key of the order it ranks
+/// by, aligned with that order — a derived key's, a custom-field key's (6j6v.z19s); a canonical
+/// field key's position holds [`DVal::Null`] and is never read.
 #[derive(Debug, Default)]
 pub(super) struct Derived {
     values: HashMap<String, Vec<DVal>>,
@@ -200,16 +201,19 @@ fn list_joined<'b>(board: &'b ListBoard, graph: &'b RankingGraph, id: &str) -> O
 /// The derived side of one query, decided before any read: the type chain the ranked rows' orders
 /// read the rank of (leaves first), and what the derived keys in play read.
 struct Plan<'c> {
+    cfg: &'c PluginConfig,
+    verb: Verb,
     spec: &'c RankSpec,
     chain: Vec<Node>,
     needs: Needs,
 }
 
-/// The [`Plan`] for ranking `ranked` under `verb` — `None` when the policy has no derived key.
+/// The [`Plan`] for ranking `ranked` under `verb` — `None` when the policy has no derived key and
+/// no custom-field key (6j6v.z19s).
 fn plan<'c>(cfg: &'c PluginConfig, verb: Verb, ranked: &[ItemRow]) -> Option<Plan<'c>> {
     let ranking = &cfg.ranking;
     let spec = ranking.spec(verb);
-    if !spec.has_derived() {
+    if !spec.has_computed() {
         return None;
     }
 
@@ -224,21 +228,20 @@ fn plan<'c>(cfg: &'c PluginConfig, verb: Verb, ranked: &[ItemRow]) -> Option<Pla
         }
     }
 
-    // Every derived key in play.
+    // Every computed key in play.
     let mut keys: Vec<&RankKey> = Vec::new();
     for ty in &ranked_types {
-        keys.extend(spec.order_for(*ty).iter().filter(|k| k.is_derived()));
+        keys.extend(spec.order_for(*ty).iter().filter(|k| k.is_computed()));
     }
-    for (v, ty) in &chain {
-        keys.extend(
-            ranking.spec(*v).by_type[ty]
-                .order
-                .iter()
-                .filter(|k| k.is_derived()),
-        );
-    }
+    keys.extend(chain_keys(cfg, &chain));
     let needs = Needs::of(&keys);
-    Some(Plan { spec, chain, needs })
+    Some(Plan {
+        cfg,
+        verb,
+        spec,
+        chain,
+        needs,
+    })
 }
 
 impl Plan<'_> {
@@ -273,6 +276,7 @@ impl Plan<'_> {
     /// every `[ranking.list]` type of the chain the board does not list itself (`held`).
     fn reads(&self, held: impl Fn(&str) -> bool) -> RankingReads {
         let mut reads = self.needs.reads();
+        reads.custom |= graph_custom(self.cfg, &self.chain, self.verb, &held);
         reads.list_types = self
             .chain
             .iter()
@@ -479,7 +483,7 @@ pub(super) fn compute_list(
 /// type lands in [`RankingReads::list_types`], whose live items a reader puts in the graph.
 pub(super) fn reads_for_next(cfg: &PluginConfig) -> Result<Option<RankingReads>> {
     let spec = cfg.ranking.spec(Verb::Next);
-    if !spec.has_derived() {
+    if !spec.has_computed() {
         return Ok(None);
     }
     let orders: Vec<&[RankKey]> = std::iter::once(spec.order.as_slice())
@@ -487,7 +491,10 @@ pub(super) fn reads_for_next(cfg: &PluginConfig) -> Result<Option<RankingReads>>
         .collect();
     // `next`'s own per-type orders start the chain: an order there may read another's rank.
     let starts = spec.by_type.keys().map(|ty| (Verb::Next, ty.clone()));
-    Ok(Some(chain_reads(cfg, &orders, starts, |_| false).0))
+    let reads = chain_reads(cfg, Verb::Next, &orders, starts, |_| false).0;
+    // Custom-field keys alone read the tickets' own custom values, which every board's records
+    // carry (6j6v.z19s): no graph to read.
+    Ok((reads != RankingReads::default()).then_some(reads))
 }
 
 /// What the store-free `list` `q` asks for reads (6j6v.xkr7): its listed types (`None`: every
@@ -517,7 +524,7 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
         return reads;
     }
     let spec = cfg.ranking.spec(Verb::List);
-    if !spec.has_derived() {
+    if !spec.has_computed() {
         return reads;
     }
     let orders: Vec<&[RankKey]> = match &types {
@@ -534,7 +541,7 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
         .flat_map(|keys| cfg.ranking.rank_deps(keys, Verb::List))
         .collect();
     let held = |ty: &str| types.as_ref().is_none_or(|t| t.contains(ty));
-    let (graph, reads_next) = chain_reads(cfg, &orders, starts, held);
+    let (graph, reads_next) = chain_reads(cfg, Verb::List, &orders, starts, held);
     // Without `now` a chain that reads a `next` rank answers `validation` where a ranked row
     // needs it, as on the store path — reading `next`'s board for it would be wasted.
     reads.next = reads_next && q.now.is_some();
@@ -544,11 +551,12 @@ pub(super) fn reads_for_list(cfg: &PluginConfig, q: &ListQuery) -> ListReads {
     reads
 }
 
-/// The reads of `orders` and of every order down the type chain from `starts`, the chain's
-/// `[ranking.list]` types not `held` among them, and whether that chain holds a `[ranking.next]`
-/// order.
+/// The reads of `orders` — the orders a store-free `verb` may rank by — and of every order down the
+/// type chain from `starts`, the chain's `[ranking.list]` types not `held` among them, and whether
+/// that chain holds a `[ranking.next]` order.
 fn chain_reads(
     cfg: &PluginConfig,
+    verb: Verb,
     orders: &[&[RankKey]],
     starts: impl IntoIterator<Item = Node>,
     held: impl Fn(&str) -> bool,
@@ -561,23 +569,49 @@ fn chain_reads(
     let mut keys: Vec<&RankKey> = orders
         .iter()
         .flat_map(|o| o.iter())
-        .filter(|k| k.is_derived())
+        .filter(|k| k.is_computed())
         .collect();
-    for (v, ty) in &chain {
-        keys.extend(
-            cfg.ranking.spec(*v).by_type[ty]
-                .order
-                .iter()
-                .filter(|k| k.is_derived()),
-        );
-    }
+    keys.extend(chain_keys(cfg, &chain));
     let mut reads = Needs::of(&keys).reads();
+    reads.custom |= graph_custom(cfg, &chain, verb, &held);
     reads.list_types = chain
         .iter()
         .filter(|(v, ty)| *v == Verb::List && !held(ty))
         .map(|(_, ty)| ty.clone())
         .collect();
     (reads, chain.iter().any(|(v, _)| *v == Verb::Next))
+}
+
+/// The computed keys of the orders of `chain`.
+fn chain_keys<'c>(
+    cfg: &'c PluginConfig,
+    chain: &'c [Node],
+) -> impl Iterator<Item = &'c RankKey> + 'c {
+    chain
+        .iter()
+        .flat_map(|(v, ty)| cfg.ranking.spec(*v).by_type[ty].order.iter())
+        .filter(|k| k.is_computed())
+}
+
+/// Whether a custom-field key (6j6v.z19s) of an order of `chain` ranks rows a store-free board of
+/// `verb` holds only in its graph, so their custom values are read from it: under `next`, the
+/// listed items of a `[ranking.list]` type; under `list`, `next`'s tickets, and the listed items of
+/// a type the board does not list itself (not `held`). The rows a board holds itself — `next`'s
+/// candidates, `list`'s listed items — carry their custom values in their records.
+fn graph_custom(
+    cfg: &PluginConfig,
+    chain: &[Node],
+    verb: Verb,
+    held: impl Fn(&str) -> bool,
+) -> bool {
+    chain.iter().any(|(v, ty)| {
+        let in_graph = *v != verb || (*v == Verb::List && !held(ty));
+        in_graph
+            && cfg.ranking.spec(*v).by_type[ty]
+                .order
+                .iter()
+                .any(RankKey::is_custom)
+    })
 }
 
 /// Depth-first post-order over the type chain: every order a node reads the rank of lands before
@@ -605,6 +639,8 @@ struct Needs {
     labels: bool,
     /// An `of` reads a custom field.
     custom: bool,
+    /// A custom-field key ranks (6j6v.z19s): the subjects' own custom values.
+    own_custom: bool,
 }
 
 impl Needs {
@@ -618,6 +654,7 @@ impl Needs {
             }
         };
         for key in keys {
+            needs.own_custom |= key.is_custom();
             if let Some(edge) = &key.related {
                 add(&mut needs, EdgeKind::parse(edge));
                 if let Some(RankOf::Field(of)) = &key.of {
@@ -707,7 +744,8 @@ struct Context<'a> {
     neighbours: HashMap<String, ItemRow>,
     /// The labels of the neighbours, when a count filters on one.
     labels: BTreeMap<String, Vec<String>>,
-    /// The custom fields of the neighbours, when an `of` reads one.
+    /// The custom fields of the neighbours, when an `of` reads one, and of the subjects, when a
+    /// custom-field key ranks them.
     custom: BTreeMap<String, BTreeMap<String, String>>,
     /// The dense rank of each order of the chain computed so far: `node → id → rank`.
     ranks: HashMap<Node, HashMap<String, i64>>,
@@ -830,7 +868,8 @@ impl<'a> Context<'a> {
             .into_iter()
             .filter_map(|id| rows(id).map(|j| (id.to_string(), j.item.clone())))
             .collect();
-        if needs.labels || needs.custom {
+        let custom = needs.custom || needs.own_custom;
+        if needs.labels || custom {
             let mut ids: BTreeSet<&str> = self.neighbours.keys().map(String::as_str).collect();
             ids.extend(self.subjects.keys().copied());
             ids.extend(self.mentioners.values().flatten().map(|i| i.id.as_str()));
@@ -839,7 +878,7 @@ impl<'a> Context<'a> {
                 if needs.labels && !j.labels.is_empty() {
                     self.labels.insert(id.to_string(), j.labels.to_vec());
                 }
-                if needs.custom && !j.custom.is_empty() {
+                if custom && !j.custom.is_empty() {
                     self.custom.insert(id.to_string(), j.custom.clone());
                 }
             }
@@ -880,7 +919,8 @@ impl<'a> Context<'a> {
             .filter(|i| i.deleted.as_deref() != Some("1"))
             .map(|i| (i.id.clone(), i))
             .collect();
-        if needs.labels || needs.custom {
+        let custom = needs.custom || needs.own_custom;
+        if needs.labels || custom {
             let mut ids: BTreeSet<&str> = self.neighbours.keys().map(String::as_str).collect();
             ids.extend(self.subjects.keys().copied());
             ids.extend(self.mentioners.values().flatten().map(|i| i.id.as_str()));
@@ -888,7 +928,7 @@ impl<'a> Context<'a> {
             if needs.labels {
                 self.labels = store.labels_of_bulk(&ids)?;
             }
-            if needs.custom {
+            if custom {
                 self.custom = store.custom_fields_of_bulk(&ids)?;
             }
         }
@@ -909,6 +949,8 @@ impl<'a> Context<'a> {
             .map(|key| {
                 if key.related.is_some() {
                     self.related(key, verb, item)
+                } else if key.is_custom() {
+                    self.own_custom(key, item)
                 } else if key.is_derived() {
                     let n: usize = counts_of(key).iter().map(|c| self.count(c, item)).sum();
                     DVal::Num(i64::try_from(n).unwrap_or(i64::MAX))
@@ -917,6 +959,22 @@ impl<'a> Context<'a> {
                 }
             })
             .collect()
+    }
+
+    /// A custom-field key's value for `item` (6j6v.z19s): its own custom value, compared as a field
+    /// key compares it — numeric when it parses as an integer — or, with a `precedence` list, the
+    /// value's position in it.
+    fn own_custom(&self, key: &RankKey, item: &ItemRow) -> DVal {
+        let raw = self
+            .custom
+            .get(&item.id)
+            .and_then(|c| c.get(&key.field))
+            .map(String::as_str);
+        if key.precedence.is_empty() {
+            DVal::of_raw(raw.map(str::to_string))
+        } else {
+            DVal::Num(i64::try_from(key.precedence_ordinal(raw)).unwrap_or(i64::MAX))
+        }
     }
 
     /// A `related` key's value for `item`: `of` read on each live neighbour over the edge (of the

@@ -75,10 +75,12 @@ pub fn items_value(items: &[ItemRow]) -> serde_json::Value {
     serde_json::Value::Array(sorted.into_iter().map(item_value).collect())
 }
 
-/// Every field name [`raw_field`] reads — so every field a ranking key can sort on. A plugin's
-/// ranking key naming anything else is refused at load (6j6v.z9jk): `raw_field` would return
-/// `None` for every item and the key would never decide. A custom field ranks only as a
-/// neighbour's value, `related ... of = { field = ... }` (6j6v.x0wf), never as a field key.
+/// Every field name [`raw_field`] reads — so every canonical field a ranking key can sort on. A
+/// plugin's ranking key naming anything else is refused at load (6j6v.z9jk): `raw_field` would
+/// return `None` for every item and the key would never decide. The one exception is a custom
+/// field of `[fields]`: a field key in a per-type order of a type it is declared on ranks by the
+/// item's own custom value (6j6v.z19s), and `related ... of = { field = ... }` by a neighbour's
+/// (6j6v.x0wf).
 pub const RANKABLE_FIELDS: &[&str] = &[
     "id",
     "type",

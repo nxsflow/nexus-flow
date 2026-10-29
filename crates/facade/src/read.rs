@@ -2648,8 +2648,8 @@ fn keys_cmp(a: &ItemRow, b: &ItemRow, keys: &[RankKey]) -> std::cmp::Ordering {
 }
 
 /// `keys` in declared order WITHOUT the id tiebreak: a field key over the rows, a derived key
-/// (6j6v.x0wf) over the rows' derived values `va`/`vb`, aligned with `keys`. A row without values
-/// reads null on every derived key. The dense rank of a type (spec §4) is this order's ties.
+/// (6j6v.x0wf) or a custom-field key (6j6v.z19s) over the rows' computed values `va`/`vb`, aligned
+/// with `keys`. A row without values reads null on every such key. The dense rank of a type (spec §4) is this order's ties.
 fn keys_cmp_values(
     a: &ItemRow,
     b: &ItemRow,
@@ -2659,7 +2659,7 @@ fn keys_cmp_values(
 ) -> std::cmp::Ordering {
     const NULL: derived::DVal = derived::DVal::Null;
     for (n, key) in keys.iter().enumerate() {
-        let c = if key.is_derived() {
+        let c = if key.is_computed() {
             let x = va.and_then(|v| v.get(n)).unwrap_or(&NULL);
             let y = vb.and_then(|v| v.get(n)).unwrap_or(&NULL);
             derived::cmp_dval(x, y, key.dir, key.nulls)
@@ -3175,7 +3175,9 @@ impl Neighbour {
 
 /// What the store-free `next` of `cfg` reads beyond the active tickets' records — the
 /// [`RankingReads`] a reader fills [`ActiveBoard::ranking`] for — or `None` when `[ranking.next]`
-/// declares no derived ranking key (6j6v.1c5s). It does not depend on the board.
+/// declares no derived ranking key (6j6v.1c5s) and no custom-field key that a row of its type chain
+/// ranks by: a custom-field key reads the ticket's own custom values, which its record carries
+/// (6j6v.z19s). It does not depend on the board.
 ///
 /// A `[ranking.next]` that reads, directly or down its type chain, the rank of a type only
 /// `[ranking.list]` orders names that type in [`RankingReads::list_types`] (6j6v.xkr7): that rank
@@ -3328,33 +3330,32 @@ pub fn active_board(store: &Store) -> Result<ActiveBoard> {
 /// rank of a type only `[ranking.list]` orders too, from the graph's listed items (6j6v.xkr7). It
 /// is refused with `validation` when the board carries no graph, or one read for less than
 /// [`next_ranking_reads`] names: ranking without those edges would order apart from the store path
-/// in silence.
+/// in silence. A custom-field key (6j6v.z19s) reads the tickets' own custom values, so it needs no
+/// graph.
 pub fn next_active(cfg: &PluginConfig, board: &ActiveBoard, now: &str) -> Result<Vec<ItemRow>> {
     crate::validate::iso_date(now)?;
+    let empty = RankingGraph::default();
     let graph = match next_ranking_reads(cfg)? {
-        None => None,
-        Some(needed) => Some(
-            board
-                .ranking
-                .as_ref()
-                .filter(|g| g.reads.covers(&needed))
-                .ok_or_else(|| {
-                    NxfError::validation(format!(
-                        "plugin '{}' ranks `next` by derived ranking keys, and the board was read \
+        // Nothing beyond the tickets' records — custom-field keys alone read the tickets' own
+        // custom values (6j6v.z19s) — so the board's graph, or none.
+        None => board.ranking.as_ref().unwrap_or(&empty),
+        Some(needed) => board
+            .ranking
+            .as_ref()
+            .filter(|g| g.reads.covers(&needed))
+            .ok_or_else(|| {
+                NxfError::validation(format!(
+                    "plugin '{}' ranks `next` by derived ranking keys, and the board was read \
                          without the graph they read — fill `ActiveBoard::ranking` for \
                          `next_ranking_reads` (`read::with_ranking` from a store, \
                          `records::with_ranking` from the folded tables)",
-                        cfg.name
-                    ))
-                })?,
-        ),
+                    cfg.name
+                ))
+            })?,
     };
     let candidates = board.board.lanes(now).candidates;
     let items = board.items(candidates.iter().map(|c| &c.id));
-    let derived = match graph {
-        Some(graph) => derived::compute_active(cfg, board, graph, &items)?,
-        None => None,
-    };
+    let derived = derived::compute_active(cfg, board, graph, &items)?;
     Ok(next_lane(
         cfg,
         candidates,
