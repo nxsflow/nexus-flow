@@ -73,7 +73,11 @@ fn the_runtime_callback_refuses_the_service_restart_limit() {
         .args(["send", "--to", "coder", "--no-ref", "--json", "build it"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let session: String = nexus_chat::workspace::Workspace::resolve(None, root)
         .and_then(|ws| {
             use nexus_chat::workspace::ChatWorkspaceExt;

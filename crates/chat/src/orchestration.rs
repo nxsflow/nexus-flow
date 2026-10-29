@@ -15414,6 +15414,43 @@ pub fn session_interrupted(
     store.record_interruption(internal_session, limit, until, detail, ctx.now)?;
     let thread = store.session_thread(internal_session)?;
     let mut warnings = Vec::new();
+    // **A hold that comes back in place arms no near firing** (nxf 6j6v.wxz0, C.1). That firing
+    // secures the tree and hands the checkout on, and a restart's session resumes in the same tree
+    // a grace later. Which hold STANDS is read after the write, because the write keeps a standing
+    // window hold rather than repeating it: such a session stays on the window-hold path.
+    if store
+        .current_interruption(internal_session)?
+        .is_some_and(|standing| standing.resumes_in_place())
+    {
+        let armed_for = match until {
+            Some(until) => match ctx.timer.schedule_resume(internal_session, until) {
+                Ok(_) => Some(until.to_string()),
+                Err(e) => {
+                    warnings.push(FailedConsequence::tick_unscheduled(
+                        internal_session,
+                        &e.msg,
+                    ));
+                    None
+                }
+            },
+            None => {
+                warnings.push(FailedConsequence::tick_unscheduled(
+                    internal_session,
+                    "a service-restart hold with no instant stated arms no resume — nothing \
+                     takes it up on its own; `nxc resume --thread <id>` is the way back",
+                ));
+                None
+            }
+        };
+        return Ok(InterruptionReceipt {
+            session: internal_session.to_string(),
+            thread,
+            limit: limit.to_string(),
+            until: until.map(str::to_string),
+            armed_for,
+            warnings,
+        });
+    }
     // **Armed for the GRACE and not for `until`**, even when `until` is known and far away. What
     // fires then does the half of the way back that cannot wait — securing the working copy, so a
     // week-long window does not hold this workspace's checkout for a week — and re-arms itself for
@@ -15688,7 +15725,12 @@ pub fn resume_interrupted(
     // automatic return, which is the honest consequence of nobody having said when it lifts.
     if !hold.is_due(ctx.now) && !req.force {
         note_the_hold_outcome(store, hold.id, crate::ladder::HoldOutcome::NotYet);
-        secure_the_interrupted_tree(ctx, store, thread.as_deref(), &mut warnings);
+        // **A hold that comes back in place secures nothing** (nxf 6j6v.wxz0, C.2): the same
+        // session resumes in the same tree at `until`, and a park would move the tree out from
+        // under it. An early `nxc resume` by a human is told `NotYet`; `--force` takes it up now.
+        if !hold.resumes_in_place() {
+            secure_the_interrupted_tree(ctx, store, thread.as_deref(), &mut warnings);
+        }
         let armed_for = hold.until.as_deref().and_then(|until| {
             match ctx.timer.schedule_resume(&session, until) {
                 Ok(_) => Some(until.to_string()),
