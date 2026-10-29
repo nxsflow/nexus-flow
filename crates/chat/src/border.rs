@@ -1099,10 +1099,16 @@ fn start_persona(
          shared with it; what you commission to answer it stays in this workspace.\n\n{}",
         first.body
     );
-    let guidance = orch::reply_guidance(store, ctx.now, &participant, Some(&row.thread_id));
-    let wake = orch::wake_message(&body, false, &guidance);
     let internal = store.mint_session_id();
     store.create_pending_session(&internal, &row.persona)?;
+    let guidance = orch::reply_guidance(
+        store,
+        ctx.now,
+        &participant,
+        Some(&internal),
+        Some(&row.thread_id),
+    );
+    let wake = orch::wake_message(&body, false, &guidance);
     let hop = orch::checked_hop(stamp.hop)?;
     orch::trigger_role(
         ctx,
@@ -1460,7 +1466,8 @@ fn wake_with_cancellation(
     let caller = ctx.qualify(&store.session_role(session)?.unwrap_or_default());
     let body = format!("Withdrawn: {why}. Thread {} is closed.", row.thread_id);
     let hop = orch::resolve_hop(ctx, store)?;
-    let guidance = orch::reply_guidance(store, ctx.now, &caller, Some(&row.thread_id));
+    let guidance =
+        orch::reply_guidance(store, ctx.now, &caller, Some(session), Some(&row.thread_id));
     let wake = orch::wake_message(&body, true, &guidance);
     let hold = crate::collecting::Held {
         thread_id: row.thread_id.clone(),
@@ -1560,7 +1567,7 @@ fn deliver(
         .flatten()
         .map(|r| ctx.qualify(&r))
         .unwrap_or_default();
-    let guidance = orch::reply_guidance(store, ctx.now, &handle, Some(thread));
+    let guidance = orch::reply_guidance(store, ctx.now, &handle, Some(session), Some(thread));
     let wake = orch::wake_message(&body, escalated, &guidance);
     let hold = crate::collecting::Held {
         thread_id: thread.to_string(),

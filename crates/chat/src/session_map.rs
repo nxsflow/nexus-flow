@@ -181,7 +181,52 @@ impl ChatStore {
             "UPDATE session_map SET thread = ?1 WHERE internal_id = ?2",
             params![thread, internal_id],
         )?;
+        // …and kept, which the position is not (nxf 6j6v.f5rf): see [`session_serves`]. Only for a
+        // session this store minted, the same no-op contract as the update above.
+        self.connection().execute(
+            "INSERT OR IGNORE INTO session_threads(session, thread)
+             SELECT internal_id, ?1 FROM session_map WHERE internal_id = ?2",
+            params![thread, internal_id],
+        )?;
         Ok(())
+    }
+
+    /// Whether `internal_id` names a session this store minted — the precondition for binding its
+    /// replies to the threads it serves (nxf 6j6v.f5rf). A session id this workspace does not know
+    /// binds nothing: there is no record to bind it by.
+    pub fn session_is_ours(&self, internal_id: &str) -> Result<bool> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT 1 FROM session_map WHERE internal_id = ?1",
+                [internal_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// **Whether session `internal_id`, speaking as `handle`, serves `thread`** (nxf 6j6v.f5rf) —
+    /// the one question a reply from a session is bound by.
+    ///
+    /// A session serves the threads it was put in motion on — triggered into, resumed into,
+    /// continued or re-commissioned into by its coordinator, all of which go through
+    /// [`record_session_thread`](ChatStore::record_session_thread) — and the threads it spoke in
+    /// itself: the consultation it opened, carrying its own return address. Nothing else. In
+    /// particular NOT every thread its handle owes an answer on: two rounds of the same reviewers
+    /// open at once are two sessions per handle, and each serves its own slot only.
+    ///
+    /// The spoken-in half is keyed on `handle` as sender too, so a message that merely carries this
+    /// session's id as a reference does not enrol a thread. One indexed seek per half.
+    pub fn session_serves(&self, internal_id: &str, handle: &str, thread: &str) -> Result<bool> {
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_threads WHERE session = ?1 AND thread = ?3)
+                 OR EXISTS(SELECT 1 FROM messages m
+                            WHERE m.thread_id = ?3 AND m.sender = ?2
+                              AND json_extract(m.refs, '$.session_id') = ?1)",
+            params![internal_id, handle, thread],
+            |r| r.get(0),
+        )?)
     }
 
     /// The thread `internal_id` is currently working in, or `None` when it names no session of ours

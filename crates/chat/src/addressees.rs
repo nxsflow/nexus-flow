@@ -20,7 +20,8 @@
 //! * the id-free form holds only while exactly ONE addressee is open;
 //! * with several, `reply` demands an id — and the coordinator has already named them, in the same
 //!   message that woke the session;
-//! * the id-BEARING form is always allowed, including when only one is open.
+//! * the id-BEARING form is allowed whenever the thread is one the caller may answer, including
+//!   when only one is open — for a session, one it serves (nxf 6j6v.f5rf).
 //!
 //! # Where the answer comes from
 //!
@@ -46,11 +47,14 @@
 //! this pays for having no second derivation of "who owes what", and it is the cost `status`
 //! already pays on every refresh.
 //!
-//! **Keyed on the qualified HANDLE, not on a session**, and that is the safe direction rather than
-//! a shortcut. `expects_reply_from` and `threads.opener` both hold qualified identities, so this is
-//! one derivation for a human at a terminal and for a spawned persona alike. Where a handle really
-//! does have two live sessions with two commissions, both are open and the id-free form is refused —
-//! which is the correct answer for a form whose whole precondition is that there is only one.
+//! **Derived from the qualified HANDLE, then bound to the SESSION** (nxf 6j6v.f5rf).
+//! `expects_reply_from` and `threads.opener` both hold qualified identities, so the derivation is
+//! one for a human at a terminal and for a spawned persona alike. It used to stop there, on the
+//! reading that two live sessions of one handle would merely make the id-free form refuse. In the
+//! field they did worse: two review rounds of the same reviewers were open at once, the wake of each
+//! session named the other round's slot beside its own, and the session answered both — a verdict
+//! on a change it never read. So a caller that is a session this store minted sees only the threads
+//! that session serves ([`open_for_session`]); a caller with no session sees what its handle owes.
 
 use crate::error::{NxfError, Result};
 use crate::store::ChatStore;
@@ -134,12 +138,47 @@ pub fn open_for(
     standing_in: Option<&str>,
     now: &str,
 ) -> Result<Vec<Addressee>> {
+    open_for_session(store, handle, None, standing_in, now)
+}
+
+/// [`open_for`], **bound to one session** (nxf 6j6v.f5rf) — what a session may answer, rather than
+/// what its handle may.
+///
+/// Keyed on the handle alone, two rounds of the same reviewers open at once read as two
+/// conversations for each reviewer, and the wake of the later round's session named the earlier
+/// round's slot beside its own. Measured 2026-10-25 and twice on 2026-10-27: the session answered
+/// both, and a verdict landed on a change it never read. With `session` given and minted by this
+/// store, a thread counts only when that session serves it ([`ChatStore::session_serves`]) or it
+/// is where the session is standing. `None`, or a session this store does not know, is a caller
+/// nothing binds — a human at a terminal — and reads exactly as [`open_for`] always did.
+pub fn open_for_session(
+    store: &ChatStore,
+    handle: &str,
+    session: Option<&str>,
+    standing_in: Option<&str>,
+    now: &str,
+) -> Result<Vec<Addressee>> {
+    let bound = match session {
+        Some(s) if store.session_is_ours(s)? => Some(s),
+        _ => None,
+    };
     let mut owed = Vec::new();
     let mut consulted = Vec::new();
     let mut standing = None;
     let mut quorums = store.thread_quorums_all(now)?;
     quorums.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     for q in quorums {
+        // Asked only of a thread this handle has something to do with, so the seek runs a handful
+        // of times rather than once per board in the workspace.
+        let related =
+            q.outstanding.iter().any(|h| h == handle) || q.opener.as_deref() == Some(handle);
+        if let (Some(s), true) = (bound, related) {
+            if standing_in != Some(q.thread_id.as_str())
+                && !store.session_serves(s, handle, &q.thread_id)?
+            {
+                continue;
+            }
+        }
         if q.outstanding.iter().any(|h| h == handle) {
             owed.push(Addressee {
                 thread_id: q.thread_id.clone(),
@@ -197,9 +236,35 @@ pub fn sole_open_thread(
     standing_in: Option<&str>,
     now: &str,
 ) -> Result<String> {
-    let open = open_for(store, handle, standing_in, now)?;
+    sole_open_thread_for_session(store, handle, None, standing_in, now)
+}
+
+/// [`sole_open_thread`], **bound to one session** (nxf 6j6v.f5rf): it chooses among the threads
+/// [`open_for_session`] gives that session, so an id-free reply is never resolved to another
+/// session's slot of the same handle. When nothing the session serves is open, the refusal names
+/// the thread it is standing in rather than pointing the caller anywhere else.
+pub fn sole_open_thread_for_session(
+    store: &ChatStore,
+    handle: &str,
+    session: Option<&str>,
+    standing_in: Option<&str>,
+    now: &str,
+) -> Result<String> {
+    let open = open_for_session(store, handle, session, standing_in, now)?;
+    let bound = match session {
+        Some(s) => store.session_is_ours(s)?,
+        None => false,
+    };
     match open.len() {
         1 => Ok(open[0].thread_id.clone()),
+        0 if bound => Err(NxfError::validation(match standing_in {
+            Some(own) => format!(
+                "nothing this session serves is waiting for an answer: it was put to work on                  thread {own}, and that conversation no longer takes one. A reply goes only to a                  thread its own session serves, never to another round of {handle} — read how                  yours stands with `nxc threads show {own}`."
+            ),
+            None => format!(
+                "nothing this session serves is waiting for an answer, so there is nothing a                  bare `nxc reply` could answer. A reply goes only to a thread its own session                  serves, never to another round of {handle}."
+            ),
+        })),
         0 => Err(NxfError::validation(format!(
             "no conversation is waiting for {handle}, so there is nothing a bare `nxc reply` could \
              answer. Name the thread you mean: `nxc reply --thread <id> -` — `nxc status` \

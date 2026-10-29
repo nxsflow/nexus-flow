@@ -214,7 +214,16 @@ Sind mehrere offen, ist die Flagge wieder Pflicht — Sie schulden Ihrem Auftrag
 *und* die konsultierte Rolle hat sich gemeldet, und die Engine rät nicht, welches Sie meinten. Sie
 müssen es auch nicht herleiten: die Nachricht, die Sie geweckt hat, nennt jedes offene Gespräch mit
 dem Befehl, der es beantwortet, und die Ablehnung tut dasselbe, falls Sie die Kurzform trotzdem
-versuchen. Die Form mit Id ist immer erlaubt.
+versuchen.
+
+**Eine Sitzung beantwortet nur die Gespräche, die sie bedient.** Aus einer Sitzung, die die Engine
+gestartet hat, geht eine Antwort an den Faden, für den diese Sitzung gestartet wurde, an einen, in den
+sie wieder aufgenommen, fortgesetzt oder neu beauftragt wurde, oder an einen, den sie selbst eröffnet
+hat — und nirgendwohin sonst, mit oder ohne `--thread`. Eine zweite Runde derselben Persona ist die
+Arbeit einer anderen Sitzung: ihr Faden steht nie in Ihrem Wecken, eine Antwort ohne Faden löst nie
+auf ihn auf, und `--thread` mit seiner Id wird abgelehnt, mit dem Faden, den Sie bedienen. Dasselbe
+gilt für `--progress`. Außerhalb jeder Sitzung — ein Mensch am Terminal — darf jeder Faden genannt
+werden, wie bisher.
 
 ```console
 $ NXC_ACTOR=coder nxc reply --thread m-00000000000000000000000001 "Added the flag and a test; branch feat/export-since." --json

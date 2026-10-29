@@ -3180,6 +3180,8 @@ pub(crate) mod tests {
             "recovery_log",
             // The obligation a queued trigger carried (nxf 6j6v.558h): this machine's queue.
             "queued_obligations",
+            // Every thread a session of this machine was put in motion on (nxf 6j6v.f5rf).
+            "session_threads",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store
