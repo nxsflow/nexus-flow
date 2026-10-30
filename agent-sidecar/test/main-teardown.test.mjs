@@ -2262,6 +2262,8 @@ test("a stop that arrives during the reminder round is honoured there too", asyn
  */
 async function runSidecarWithTheDoor(t, opts, drive) {
   const { dir, argv, env, collect } = scratch(t, opts);
+  // What the scratch directory holds before the child starts — a file in the way, say.
+  opts.prepare?.(dir);
   const child = spawn(process.execPath, argv, { env, stdio: ["pipe", "pipe", "pipe"] });
   t.after(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -2543,6 +2545,38 @@ test("model output writes the pulse once per 30 s, not per token", async (t) => 
   );
   assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
   assert.equal(pulseOf(dirname(run.claimPath)), first, "two more deltas inside 30 s: never rewritten");
+});
+
+/** **A pulse that cannot be written is logged once and never fatal — and is tried again**
+ *  (review of d1ey, TQ #1 / IR #1). A directory in the temp file's place makes every write fail:
+ *  the one at start and the first delta's. The run goes on, says so exactly once, and once the
+ *  obstacle is gone the next model output pulses — a transient failure must not leave a live model
+ *  reading as stale for the rest of the run. */
+test("a pulse write that fails is logged once, is not fatal, and is retried at the next output", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, textDelta("a"), textDelta("b"), textDelta("c"), result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+      prepare: (dir) => mkdirSync(join(dir, "s-1.alive.tmp")),
+    },
+    async ({ dir, waitFor }) => {
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      assert.equal(pulseOf(dir), null, "neither the start's write nor the first delta's got through");
+      rmSync(join(dir, "s-1.alive.tmp"), { recursive: true });
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.equal(run.stderr.split("could not be written").length - 1, 1, `logged exactly once; stderr:\n${run.stderr}`);
+  assert.match(
+    pulseOf(dirname(run.claimPath)) ?? "",
+    /^\d{4}-\d{2}-\d{2}T/,
+    "a later delta pulsed once the obstacle was gone",
+  );
 });
 
 /** **Drained at the yield, not at the signal** (design 8nx4 section 3): the engine may withdraw an

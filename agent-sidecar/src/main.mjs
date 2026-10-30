@@ -103,21 +103,31 @@ let askArrived = () => {};
  *  (`tool_progress`, `api_retry`, `keep_alive`, …) never pulse: a runtime that is alive while its
  *  model produces nothing is exactly what the coordinator must find. Created EMPTY at process start,
  *  so a fresh or resumed process reads "no output yet" until its first. Written atomically (a temp
- *  file and a rename, as the claim is); a failed write is logged once and never fatal — the engine
- *  then reads a stale pulse, which costs a nudge, not the run. */
+ *  file and a rename, as the claim is). A failed write is never fatal and is logged ONCE per run, but
+ *  never given up (review of d1ey, IR #1): the throttle is re-armed, so the next model output tries
+ *  again — a transient failure (a rename refused on Windows) must not leave a live model reading
+ *  as stale until the process ends. While writes fail, the engine reads a stale pulse. */
 const PULSE_SECS = 30;
 const pulsePath = logsDir && spec.session ? join(logsDir, `${spec.session}.alive`) : null;
 let lastPulseMs = 0;
-let pulseBroken = false;
+let pulseFailureLogged = false;
+/** Whether the write landed. */
 function writePulse(content) {
-  if (!pulsePath || pulseBroken) return;
+  if (!pulsePath) return true;
   const tmp = `${pulsePath}.tmp`;
   try {
     writeFileSync(tmp, content);
     renameSync(tmp, pulsePath);
+    return true;
   } catch (err) {
-    pulseBroken = true;
-    console.error(`sidecar: the pulse ${pulsePath} could not be written and is given up for this run: ${err?.message ?? err}`);
+    if (!pulseFailureLogged) {
+      pulseFailureLogged = true;
+      console.error(
+        `sidecar: the pulse ${pulsePath} could not be written (tried again at the next model output, ` +
+          `not logged again): ${err?.message ?? err}`,
+      );
+    }
+    return false;
   }
 }
 /** Called for every message that passes `isAgentOutput`; writes only once per PULSE_SECS. */
@@ -125,7 +135,7 @@ function notePulse() {
   const now = Date.now();
   if (now - lastPulseMs < PULSE_SECS * 1000) return;
   lastPulseMs = now;
-  writePulse(`${new Date(now).toISOString()}\n`);
+  if (!writePulse(`${new Date(now).toISOString()}\n`)) lastPulseMs = 0;
 }
 
 /** Every ask file of this session present now, oldest first — read, removed, returned. A file that
@@ -1539,8 +1549,10 @@ for (let attempt = 0; ; attempt++) {
       if (msg.session_id) realSessionId = msg.session_id;
       // The MODEL produced something — see `isAgentOutput` for why this is not "a message arrived",
       // and why `session_id` was never the test (a resumed spec has one before the first frame).
-      if (isAgentOutput(msg)) agentEverThought = true;
-      if (isAgentOutput(msg)) notePulse();
+      if (isAgentOutput(msg)) {
+        agentEverThought = true;
+        notePulse();
+      }
       // **The two structured signals an availability boundary leaves** (nxf 6j6v.npy3). Captured
       // here rather than read back off the transcript, because the teardown branches on them and a
       // decision must rest on a fact about the run. The third — the rejected `rate_limit_event` —

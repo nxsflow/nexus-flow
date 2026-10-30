@@ -830,6 +830,13 @@ pub trait Worker: Send + Sync {
 /// **What a session's pulse says** (nxf 6j6v.pszd cut 1) — see [`Worker::session_pulse`]. The
 /// sidecar writes it to `.nxs/agent-logs/<session>.alive`: created empty at process start, then one
 /// RFC3339 line for the model's latest output.
+///
+/// **A pulse says nothing about whether a process is alive.** The file outlives the process that
+/// wrote it, as the claim beside it does: after the process ends, `At` still names that process's
+/// last output, and it reads exactly like a live one's until the session's next process empties it
+/// at its start. A reader asks [`Worker::session_is_running`] first and reads the pulse only for a
+/// session that runs (review of d1ey, CQ #2 / IR #2). A stale `At` does not prove the model is
+/// silent either: the sidecar's write can fail, and it is retried only at the next model output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pulse {
@@ -2182,6 +2189,11 @@ impl Worker for SidecarWorker {
     /// **The pulse** (nxf 6j6v.pszd cut 1): `<session>.alive` beside the claim, as the sidecar
     /// writes it — no file is `Unreported`, a line that is not an RFC3339 instant (the empty file
     /// it creates at start, or anything unreadable as one) is `NoneYet`.
+    ///
+    /// A file that exists but cannot be READ (permissions, an I/O error) is `Unreported` too, and
+    /// deliberately unlogged (review of d1ey, IR #3): it is the blind side, on which the ladder
+    /// keeps today's transcript-only rule, and this is asked at every look of every session, where
+    /// a stateless worker has no "once" to log it under.
     fn session_pulse(&self, internal_session: &str) -> Pulse {
         let path = agent_logs_dir(&self.cwd).join(format!("{internal_session}.alive"));
         match std::fs::read_to_string(&path) {
