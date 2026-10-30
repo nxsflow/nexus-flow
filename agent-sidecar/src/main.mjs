@@ -81,9 +81,10 @@ process.on("SIGTERM", () => {
 
 /** **The ask door** (nxf 6j6v.558h, epic 6j6v.nmc9 section B, rung A): the engine's coordinator
  *  asks a running session something by writing `<session>.ask.<ulid>.json` (`{at, thread, role,
- *  text}`) beside this process's spec and sending it SIGUSR2. The handler reads every such file in
- *  ulid order, removes it, and queues its text; the running turn's input stream (`turnStream`) yields
- *  it as the next user message, which the SDK delivers when the current assistant turn ends.
+ *  text}`) beside this process's spec and sending it SIGUSR2. The handler only wakes the running
+ *  turn's input stream (`turnStream`); at the turn's `result` the stream reads every such file in
+ *  ulid order, removes it, and yields its text as the next user message (nxf 6j6v.pszd cut 1: a file
+ *  the engine withdrew before then is never delivered).
  *
  *  INSTALLED BEFORE THE DOOR IS DECLARED, and that order is the whole safety argument (must-fix,
  *  design review round 3 IR #2): Node's default for SIGUSR2 TERMINATES the process, so the engine
@@ -95,6 +96,47 @@ process.on("SIGTERM", () => {
 const logsDir = arg("--spec") ? dirname(arg("--spec")) : null;
 const askQueue = [];
 let askArrived = () => {};
+
+/** **The pulse** (nxf 6j6v.pszd cut 1, design 8nx4 section 1): the instant this session's MODEL last
+ *  produced output — `assistant` or `stream_event`, the `isAgentOutput` whitelist — written to
+ *  `<session>.alive` beside the claim at most once per PULSE_SECS. Runtime heartbeats
+ *  (`tool_progress`, `api_retry`, `keep_alive`, …) never pulse: a runtime that is alive while its
+ *  model produces nothing is exactly what the coordinator must find. Created EMPTY at process start,
+ *  so a fresh or resumed process reads "no output yet" until its first. Written atomically (a temp
+ *  file and a rename, as the claim is). A failed write is never fatal and is logged ONCE per run, but
+ *  never given up (review of d1ey, IR #1): the throttle is re-armed, so the next model output tries
+ *  again — a transient failure (a rename refused on Windows) must not leave a live model reading
+ *  as stale until the process ends. While writes fail, the engine reads a stale pulse. */
+const PULSE_SECS = 30;
+const pulsePath = logsDir && spec.session ? join(logsDir, `${spec.session}.alive`) : null;
+let lastPulseMs = 0;
+let pulseFailureLogged = false;
+/** Whether the write landed. */
+function writePulse(content) {
+  if (!pulsePath) return true;
+  const tmp = `${pulsePath}.tmp`;
+  try {
+    writeFileSync(tmp, content);
+    renameSync(tmp, pulsePath);
+    return true;
+  } catch (err) {
+    if (!pulseFailureLogged) {
+      pulseFailureLogged = true;
+      console.error(
+        `sidecar: the pulse ${pulsePath} could not be written (tried again at the next model output, ` +
+          `not logged again): ${err?.message ?? err}`,
+      );
+    }
+    return false;
+  }
+}
+/** Called for every message that passes `isAgentOutput`; writes only once per PULSE_SECS. */
+function notePulse() {
+  const now = Date.now();
+  if (now - lastPulseMs < PULSE_SECS * 1000) return;
+  lastPulseMs = now;
+  if (!writePulse(`${new Date(now).toISOString()}\n`)) lastPulseMs = 0;
+}
 
 /** Every ask file of this session present now, oldest first — read, removed, returned. A file that
  *  cannot be read is removed too: an ask nobody can deliver must not be found by a later turn. */
@@ -134,13 +176,9 @@ let streamOpen = false;
 
 process.on("SIGUSR2", () => {
   if (!streamOpen) return;
-  const asks = drainAskFiles();
-  if (asks.length === 0) return;
-  console.error(
-    `sidecar: session ${spec.session} was asked (${asks.map((a) => a.thread).join(", ")}) — ` +
-      "it is delivered as the next turn, once the running one reaches its result",
-  );
-  askQueue.push(...asks);
+  // Drained at the YIELD, not here (nxf 6j6v.pszd cut 1): the engine may withdraw an ask that life
+  // overtook before the running turn ends, and a file taken here could not be withdrawn.
+  console.error(`sidecar: session ${spec.session} was signalled — any ask is delivered at the running turn's result`);
   askArrived();
 });
 
@@ -205,6 +243,8 @@ function markTurn(thread) {
 for (const stale of drainAskFiles()) {
   console.error(`sidecar: an ask for thread ${stale.thread} from an earlier process was dropped`);
 }
+// A pulse left from an earlier process of this session is not this one's life.
+writePulse("");
 
 function userMessage(text) {
   return {
@@ -254,6 +294,7 @@ function turnStream(firstText, firstThread) {
         if (stopping()) return;
         // A turn is running while fewer results than turns have come back: an ask waits for it.
         if (results >= yielded) {
+          if (askQueue.length === 0) askQueue.push(...drainAskFiles());
           if (askQueue.length > 0) {
             const ask = askQueue.shift();
             yield open(ask.thread, ask.text);
@@ -911,6 +952,7 @@ async function remindOnce() {
       options: { ...options, resume: realSessionId, abortController },
     })) {
       if (msg.session_id) realSessionId = msg.session_id;
+      if (isAgentOutput(msg)) notePulse();
       if (msg.type === "result") {
         // The reminder's own result is the reminder's business, a warning at most; an error on a
         // turn an ASK opened after it feeds the run's failure, as one on the main turn does.
@@ -1507,7 +1549,10 @@ for (let attempt = 0; ; attempt++) {
       if (msg.session_id) realSessionId = msg.session_id;
       // The MODEL produced something — see `isAgentOutput` for why this is not "a message arrived",
       // and why `session_id` was never the test (a resumed spec has one before the first frame).
-      if (isAgentOutput(msg)) agentEverThought = true;
+      if (isAgentOutput(msg)) {
+        agentEverThought = true;
+        notePulse();
+      }
       // **The two structured signals an availability boundary leaves** (nxf 6j6v.npy3). Captured
       // here rather than read back off the transcript, because the teardown branches on them and a
       // decision must rest on a fact about the run. The third — the rejected `rate_limit_event` —

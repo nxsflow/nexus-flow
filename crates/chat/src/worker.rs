@@ -799,6 +799,54 @@ pub trait Worker: Send + Sync {
         let _ = ask;
         AskOutcome::CannotAsk
     }
+
+    /// **When this session's MODEL last produced output** (nxf 6j6v.pszd cut 1, design 8nx4
+    /// section 1) — the pulse its runtime writes for model output only, never for a runtime
+    /// heartbeat, at most once per 30 s. See [`Pulse`] for the three readings.
+    ///
+    /// **The default is [`Pulse::Unreported`]**: a host that writes no pulse keeps today's
+    /// transcript-only silence clock, and must not be read as a model that produced nothing.
+    ///
+    /// Must return promptly and must not call back into the engine — [`Worker`]'s two rules.
+    fn session_pulse(&self, internal_session: &str) -> Pulse {
+        let _ = internal_session;
+        Pulse::Unreported
+    }
+
+    /// **Take back every ask still waiting for this session** (nxf 6j6v.pszd cut 1, design 8nx4
+    /// section 3) — a nudge that life overtook, or one the session answered by replying. An ask
+    /// is delivered only at the running turn's `result`, so one withdrawn before then is never
+    /// read. Idempotent: nothing to withdraw is `Ok`.
+    ///
+    /// **The default is the no-op `Ok`**: a host that has no ask door has no ask to take back.
+    ///
+    /// Must return promptly and must not call back into the engine — [`Worker`]'s two rules.
+    fn withdraw_asks(&self, internal_session: &str) -> std::result::Result<(), String> {
+        let _ = internal_session;
+        Ok(())
+    }
+}
+
+/// **What a session's pulse says** (nxf 6j6v.pszd cut 1) — see [`Worker::session_pulse`]. The
+/// sidecar writes it to `.nxs/agent-logs/<session>.alive`: created empty at process start, then one
+/// RFC3339 line for the model's latest output.
+///
+/// **A pulse says nothing about whether a process is alive.** The file outlives the process that
+/// wrote it, as the claim beside it does: after the process ends, `At` still names that process's
+/// last output, and it reads exactly like a live one's until the session's next process empties it
+/// at its start. A reader asks [`Worker::session_is_running`] first and reads the pulse only for a
+/// session that runs (review of d1ey, CQ #2 / IR #2). A stale `At` does not prove the model is
+/// silent either: the sidecar's write can fail, and it is retried only at the next model output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Pulse {
+    /// No pulse file: an older sidecar, or a host with no sidecar. The ladder keeps today's rule.
+    Unreported,
+    /// The file exists and names no instant: the process started and its model has produced
+    /// nothing yet.
+    NoneYet,
+    /// The model's last output, RFC3339, as the sidecar wrote it.
+    At(String),
 }
 
 /// **One ask a coordinator puts to a running session** (nxf 6j6v.558h) — what
@@ -1005,6 +1053,16 @@ impl Worker for BoundedWorker {
     /// ask writes a file and sends a signal (nxf 6j6v.558h).
     fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
         self.inner.ask_session(ask)
+    }
+
+    /// Forwarded, not bounded (nxf 6j6v.pszd): a conforming pulse is one file read.
+    fn session_pulse(&self, internal_session: &str) -> Pulse {
+        self.inner.session_pulse(internal_session)
+    }
+
+    /// Forwarded, not bounded (nxf 6j6v.pszd): a conforming withdrawal unlinks files.
+    fn withdraw_asks(&self, internal_session: &str) -> std::result::Result<(), String> {
+        self.inner.withdraw_asks(internal_session)
     }
 
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
@@ -2126,6 +2184,62 @@ impl Worker for SidecarWorker {
     /// process, so an older sidecar, or one still starting, answers `CannotAsk` and is left alone.
     fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
         self.ask_session_by(ask, signal_to_ask)
+    }
+
+    /// **The pulse** (nxf 6j6v.pszd cut 1): `<session>.alive` beside the claim, as the sidecar
+    /// writes it — no file is `Unreported`, a line that is not an RFC3339 instant (the empty file
+    /// it creates at start, or anything unreadable as one) is `NoneYet`.
+    ///
+    /// A file that exists but cannot be READ (permissions, an I/O error) is `Unreported` too, and
+    /// deliberately unlogged (review of d1ey, IR #3): it is the blind side, on which the ladder
+    /// keeps today's transcript-only rule, and this is asked at every look of every session, where
+    /// a stateless worker has no "once" to log it under.
+    fn session_pulse(&self, internal_session: &str) -> Pulse {
+        let path = agent_logs_dir(&self.cwd).join(format!("{internal_session}.alive"));
+        match std::fs::read_to_string(&path) {
+            Err(_) => Pulse::Unreported,
+            Ok(content) => {
+                let line = content.trim();
+                if time::OffsetDateTime::parse(line, &time::format_description::well_known::Rfc3339)
+                    .is_ok()
+                {
+                    Pulse::At(line.to_string())
+                } else {
+                    Pulse::NoneYet
+                }
+            }
+        }
+    }
+
+    /// **The withdrawal** (nxf 6j6v.pszd cut 1): every `<session>.ask.*.json` the door wrote is
+    /// unlinked; the sidecar drains them only at the running turn's `result`, so one removed before
+    /// then is never delivered. A file already gone is not a failure — the sidecar may have drained
+    /// it in between, which is the race the withdrawal loses by design.
+    fn withdraw_asks(&self, internal_session: &str) -> std::result::Result<(), String> {
+        let logs = agent_logs_dir(&self.cwd);
+        let prefix = format!("{internal_session}.ask.");
+        let entries = match std::fs::read_dir(&logs) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", logs.display())),
+        };
+        let mut failed = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(".json") {
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        failed.push(format!("{name}: {e}"));
+                    }
+                }
+            }
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(failed.join("; "))
+        }
     }
 
     /// **The declared hurdle, run where the sessions run** (nxf 6j6v.n92p): `sh -c <command>` in
@@ -3498,6 +3612,93 @@ mod tests {
             2,
             "the undelivered ask took its file back"
         );
+    }
+
+    // ---- the pulse and the withdrawn ask (nxf 6j6v.pszd cut 1) ----------------------------------
+
+    fn sidecar_worker_at(root: &std::path::Path) -> SidecarWorker {
+        SidecarWorker {
+            sidecar: root.join("stub.mjs"),
+            cwd: root.to_path_buf(),
+        }
+    }
+
+    /// **The pulse file's three readings** (design 8nx4 section 1): no file is an older sidecar
+    /// (`Unreported`); a file that names no instant is a process whose model has produced nothing
+    /// yet (`NoneYet`) — and so is one whose content does not parse; an RFC3339 line is the model's
+    /// last output, verbatim (`At`).
+    #[test]
+    fn the_pulse_file_reads_unreported_none_yet_and_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = sidecar_worker_at(tmp.path());
+        let logs = agent_logs_dir(tmp.path());
+        assert_eq!(
+            w.session_pulse("s-1"),
+            Pulse::Unreported,
+            "no directory at all"
+        );
+        std::fs::create_dir_all(&logs).unwrap();
+        assert_eq!(w.session_pulse("s-1"), Pulse::Unreported, "no file");
+        std::fs::write(logs.join("s-1.alive"), "").unwrap();
+        assert_eq!(w.session_pulse("s-1"), Pulse::NoneYet);
+        std::fs::write(logs.join("s-1.alive"), "2026-10-27T10:00:30.000Z\n").unwrap();
+        assert_eq!(
+            w.session_pulse("s-1"),
+            Pulse::At("2026-10-27T10:00:30.000Z".into())
+        );
+        assert_eq!(
+            w.session_pulse("s-2"),
+            Pulse::Unreported,
+            "another session's pulse is not this one's"
+        );
+        std::fs::write(logs.join("s-1.alive"), "garbage\n").unwrap();
+        assert_eq!(
+            w.session_pulse("s-1"),
+            Pulse::NoneYet,
+            "an unparsable instant is no output"
+        );
+    }
+
+    /// **The engine withdraws a nudge** (design 8nx4 section 3): only this session's ask files go,
+    /// never another session's and never its claim — and a second withdrawal, or one with no
+    /// directory at all, is the same `Ok`.
+    #[test]
+    fn withdraw_asks_removes_only_this_sessions_ask_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = sidecar_worker_at(tmp.path());
+        let logs = agent_logs_dir(tmp.path());
+        assert_eq!(
+            w.withdraw_asks("s-1"),
+            Ok(()),
+            "no directory: nothing to withdraw"
+        );
+        std::fs::create_dir_all(&logs).unwrap();
+        for f in [
+            "s-1.ask.01a.json",
+            "s-1.ask.01b.json",
+            "s-2.ask.01c.json",
+            "s-1.pid",
+            "s-1.alive",
+            "s-10.ask.01d.json",
+        ] {
+            std::fs::write(logs.join(f), "{}").unwrap();
+        }
+        w.withdraw_asks("s-1").unwrap();
+        let mut left: Vec<_> = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "s-1.alive".to_string(),
+                "s-1.pid".to_string(),
+                "s-10.ask.01d.json".to_string(),
+                "s-2.ask.01c.json".to_string(),
+            ]
+        );
+        assert_eq!(w.withdraw_asks("s-1"), Ok(()), "idempotent");
     }
 
     // ---- the declared-hurdle seam (nxf 6j6v.n92p) ---------------------------------------------
