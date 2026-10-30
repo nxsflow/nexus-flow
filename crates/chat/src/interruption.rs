@@ -46,6 +46,53 @@ use rusqlite::{params, OptionalExtension};
 use crate::error::Result;
 use crate::store::ChatStore;
 
+/// **The limit a planned service restart records** (nxf 6j6v.wxz0) — `nxs self-update` and `nxs sync
+/// daemon install` stop every running session of the restarted instance, and each one is put on a
+/// hold under this name before its stop is sent.
+///
+/// It is the one limit the RUNTIME never states: it is written only through the Engine seam the
+/// restart's hook calls, and `nxc session interrupted --limit service_restart` is refused, because
+/// a hold under this name pins the working copy ([`Interruption::resumes_in_place`]) and a forged
+/// one with a far-future `until` would pin it for good.
+pub const SERVICE_RESTART_LIMIT: &str = "service_restart";
+
+/// **How long a planned restart waits for the instance's sessions to wind down** before its
+/// `bootout` kills what is left (nxf 6j6v.wxz0) — long enough for a sidecar's teardown to bind its
+/// runtime session, flush its transcript and announce its end.
+pub const SERVICE_RESTART_GRACE_SECS: i64 = 120;
+
+/// **What a restart hold's `until` adds to the grace, and the slack of the copy's pin** (nxf
+/// 6j6v.wxz0).
+///
+/// `until` is measured from the hook's start, so a hold can fall due at the earliest when the hook
+/// has run its whole grace plus one poll ([`SERVICE_RESTART_POLL_SECS`]). After that the `bootout`
+/// SIGTERMs the old service, which installs no handler and dies at the first signal; launchd's
+/// escalation to SIGKILL after its default 20 s exit timeout (the plist sets none) is the worst
+/// case. 120 + 1 + 20 < 150: the old service is dead before any hold it recorded falls due, so it
+/// can never fire the resume into its own process group. The margin also covers `bootout`'s 2.25 s
+/// retry schedule and the new service's first tick.
+///
+/// **Assumed, not tested**: launchd's 20 s default `ExitTimeOut`, that its SIGKILL reaches the
+/// leftover process group, and how long `bootout` blocks are launchd's behaviour, which only a real
+/// `launchctl` run on macOS shows. The tests prove the arithmetic on the receipt, not launchd.
+pub const SERVICE_RESTART_MARGIN_SECS: i64 = 30;
+
+/// **How often the restart's hook looks at the instance's sessions** during the grace (nxf
+/// 6j6v.wxz0) — named because the bound on `until` is the grace plus one of these.
+pub const SERVICE_RESTART_POLL_SECS: i64 = 1;
+
+/// launchd's default `ExitTimeOut` — the plist sets none. An assumption, see
+/// [`SERVICE_RESTART_MARGIN_SECS`].
+const LAUNCHD_EXIT_TIMEOUT_SECS: i64 = 20;
+
+// The bound the margin's doc states, checked where the constants live: the hook returns at most one
+// poll after the grace, launchd escalates to SIGKILL after its exit timeout, and only then may a
+// hold fall due — so the old service can never fire a resume into its own process group.
+const _: () = assert!(
+    SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_POLL_SECS + LAUNCHD_EXIT_TIMEOUT_SECS
+        < SERVICE_RESTART_GRACE_SECS + SERVICE_RESTART_MARGIN_SECS
+);
+
 /// **One interruption** — a session stopped at an availability boundary, as the store keeps it.
 ///
 /// Every field but [`resumed_at`](Interruption::resumed_at) is stated by the RUNTIME, through
@@ -86,6 +133,18 @@ impl Interruption {
     /// it is asked in one place rather than spelled as an `is_none` at each of them.
     pub fn on_hold(&self) -> bool {
         self.resumed_at.is_none()
+    }
+
+    /// **Does this hold's session come back to the tree exactly as it left it?** (nxf 6j6v.wxz0)
+    ///
+    /// The ONE definition, read in two kinds of place: the hold's own branches (no near firing, no
+    /// park on an early resume, no drift question while the copy did not change hands) and the guard
+    /// on the copy that every site reads before it parks, hands on or reclaims a holder's checkout.
+    /// True for a planned service restart and nothing else: its gap is 150 s during which nobody
+    /// else may take the checkout, so the same session resumes in the same tree. A window hold may
+    /// last a week, and its tree is secured and handed on.
+    pub fn resumes_in_place(&self) -> bool {
+        self.limit == SERVICE_RESTART_LIMIT
     }
 
     /// **Has the boundary fallen by `now`?** — what decides whether the way back is open.
@@ -689,6 +748,52 @@ mod tests {
         assert!(!open.is_due("2026-09-14T11:59:59Z"));
         assert!(open.is_due("2026-09-14T12:00:00Z"), "due AT the instant");
         assert!(open.is_due("2026-09-20T00:00:00Z"));
+    }
+
+    /// **Which hold comes back in place** (nxf 6j6v.wxz0, DoD 3's unit half): a planned service
+    /// restart writes over whatever stands, and what stands afterwards decides the path.
+    #[test]
+    fn a_service_restart_hold_over_a_hold_being_taken_up_comes_back_in_place() {
+        let mut s = store();
+        let window = s
+            .record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        s.mark_interruption_taking_up(window, "2026-09-14T12:00:01Z")
+            .unwrap();
+        s.record_interruption(
+            "m-s1",
+            SERVICE_RESTART_LIMIT,
+            Some("2026-09-14T12:02:31Z"),
+            "nxs self-update 0.1.0 -> 0.2.0 restarted the background service",
+            "2026-09-14T12:00:01Z",
+        )
+        .unwrap();
+        let standing = s.current_interruption("m-s1").unwrap().unwrap();
+        assert!(
+            standing.resumes_in_place(),
+            "the window hold was being taken up, so the restart's hold supersedes it"
+        );
+    }
+
+    #[test]
+    fn a_service_restart_hold_over_a_standing_window_hold_keeps_the_window_path() {
+        let mut s = store();
+        s.record_interruption("m-s1", "seven_day", Some("2026-09-14T12:00:00Z"), "a", NOW)
+            .unwrap();
+        s.record_interruption(
+            "m-s1",
+            SERVICE_RESTART_LIMIT,
+            Some("2026-09-12T09:56:22Z"),
+            "nxs sync daemon install restarted the background service",
+            NOW,
+        )
+        .unwrap();
+        let standing = s.current_interruption("m-s1").unwrap().unwrap();
+        assert_eq!(standing.limit, "seven_day");
+        assert!(
+            !standing.resumes_in_place(),
+            "a session already under a window hold stays on the window-hold path"
+        );
     }
 
     #[test]

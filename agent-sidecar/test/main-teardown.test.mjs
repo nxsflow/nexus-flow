@@ -2063,7 +2063,7 @@ test("a withdrawal's stop posts nothing in the session's name — the thread is 
   // THE TEARDOWN THAT RAN, in its order — and the one step that did not.
   assert.deepEqual(
     verbs(calls),
-    ["session bind", "transcript append", "status --thread", "session ended"],
+    ["session bind", "transcript append", "session state", "status --thread", "session ended"],
     `stderr:\n${stderr}`,
   );
   assert.deepEqual(calls[0].argv, ["session", "bind", "s-1", "real-1"], "the runtime session is bound, so a resume can find it");
@@ -2120,7 +2120,7 @@ test("a second SIGTERM during the stop neither kills the process nor starts a se
   );
   assert.deepEqual(
     verbs(calls),
-    ["session bind", "transcript append", "status --thread", "session ended"],
+    ["session bind", "transcript append", "session state", "status --thread", "session ended"],
     `one teardown, in its order; stderr:\n${stderr}`,
   );
 });
@@ -2158,7 +2158,7 @@ test("a SIGTERM that settled nothing still speaks for a thread that owes an answ
   assert.match(stderr, /this SIGTERM settled nothing/);
   assert.deepEqual(
     verbs(calls),
-    ["session bind", "transcript append", "status --thread", "reply --thread", "session ended"],
+    ["session bind", "transcript append", "session state", "status --thread", "reply --thread", "session ended"],
     `stderr:\n${stderr}`,
   );
 });
@@ -2242,6 +2242,8 @@ test("a stop that arrives during the reminder round is honoured there too", asyn
       "status --thread",
       // The reminder round's own `turn_start` (nxf 6j6v.558h), flushed as the round is abandoned.
       "transcript append",
+      // Whether a hold stands over the stopped session (nxf 6j6v.wxz0) — none here.
+      "session state",
       "status --thread",
       "reply --thread",
       "session ended",
@@ -2649,4 +2651,124 @@ test("a tool call still running is put on the record before it returns", async (
   const flushes = appends(run.calls);
   assert.deepEqual(flushes[0].entries.map((e) => e.kind), ["session_init", "tool_use"], "flushed while the call ran");
   assert.deepEqual(flushes[1].entries.map((e) => e.kind), ["tool_result", "result"], "the rest at the turn's result");
+});
+
+// ---- a hold stands: an UNCOORDINATED slot told to stop posts nothing (nxf 6j6v.wxz0, section D) ---
+//
+// A planned service restart (`nxs self-update`, `nxs sync daemon install`) records a
+// `service_restart` hold for every session of the instance and THEN sends the stop. A coordinated
+// slot already posts no substitute; an uncoordinated one — a worker without asks, a border inbound,
+// a chat another machine executes — still did, and the substitute discharged a round whose session
+// is coming back. Now the teardown asks the board first. Every case: a real sidecar, a real SIGTERM,
+// a fake `nxc` on PATH recording argv.
+
+/** `nxc session state <session> --json`, with or without a standing hold over `session`
+ *  (this sidecar's own `s-1` unless said otherwise). */
+function sessionState({ hold, session = "s-1" }) {
+  return JSON.stringify({
+    sessions: [
+      {
+        session,
+        role: "local/tester",
+        state: "running",
+        ...(hold
+          ? {
+              interrupted: {
+                id: 7,
+                session,
+                at: "2026-10-27T10:00:00Z",
+                limit: hold,
+                until: "2026-10-27T10:02:30Z",
+                detail: "nxs self-update 0.221.0 -> 0.222.0 restarted the background service",
+                resumed_at: null,
+              },
+            }
+          : {}),
+      },
+    ],
+    worker_answers_liveness: true,
+  });
+}
+
+async function stopAnUncoordinatedSession(t, nxc) {
+  return runSidecarAndStopIt(t, {
+    messages: [init, toolUse, toolResult],
+    hangAt: 3,
+    spec: { replyThread: "thread-77" },
+    nxcStdout: { "status --thread": board({ owes: true }), ...(nxc.stdout ?? {}) },
+    nxcFailures: nxc.failures ?? {},
+    nxcDelays: nxc.delays ?? {},
+  });
+}
+
+test("(a) a session told to stop while a restart hold stands posts NO substitute and still announces its end", async (t) => {
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: "service_restart" }) },
+  });
+  assert.deepEqual(replyCalls(calls), [], `no substitute while a hold stands; stderr:\n${stderr}`);
+  assert.ok(verbs(calls).includes("session ended"), "the end is still announced");
+  assert.match(stderr, /told to stop while a hold stands \(service_restart\)/);
+  const asked = calls.find((c) => c.argv[0] === "session" && c.argv[1] === "state");
+  assert.deepEqual(asked?.argv, ["session", "state", "s-1", "--json"], "it asks about its own session");
+});
+
+test("(b) with no hold on record, a session told to stop still speaks for a thread that owes", async (t) => {
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: null }) },
+  });
+  assert.equal(replyCalls(calls).length, 1, `the substitute goes out as today; stderr:\n${stderr}`);
+  assert.match(stderr, /this SIGTERM settled nothing/);
+});
+
+test("(c) an nxc that does not know `session state` reads as no hold — the substitute goes out", async (t) => {
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    failures: {
+      "session state": { status: 2, stderr: "error: unrecognized subcommand 'state'\n" },
+    },
+  });
+  assert.equal(replyCalls(calls).length, 1, `stderr:\n${stderr}`);
+  assert.equal(
+    calls.filter((c) => c.argv[0] === "session" && c.argv[1] === "state").length,
+    1,
+    "an nxc that does not know the verb is asked once, not retried",
+  );
+});
+
+test("(c) a locked database is retried, bounded, and then reads as no hold — the substitute goes out", async (t) => {
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    failures: { "session state": { status: 1, stderr: "error: io: database is locked\n" } },
+    delays: { "session state": 50 },
+  });
+  const asked = calls.filter((c) => c.argv[0] === "session" && c.argv[1] === "state").length;
+  assert.ok(asked >= 2, `a locked store is asked again (asked ${asked}); stderr:\n${stderr}`);
+  assert.ok(asked <= 5, `and the retry is bounded (asked ${asked})`);
+  assert.equal(replyCalls(calls).length, 1, `stderr:\n${stderr}`);
+});
+
+test("(c) unparseable output reads as no hold — the substitute goes out", async (t) => {
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": "not json at all" },
+  });
+  assert.equal(replyCalls(calls).length, 1, `stderr:\n${stderr}`);
+});
+
+test("a hold over ANOTHER session does not silence this one — the substitute goes out", async (t) => {
+  // The board is asked about `s-1` and answers about `s-2` only: the hold is not this session's,
+  // so nothing says it is coming back.
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: "service_restart", session: "s-2" }) },
+  });
+  assert.equal(replyCalls(calls).length, 1, `the substitute goes out; stderr:\n${stderr}`);
+  assert.doesNotMatch(stderr, /told to stop while a hold stands/);
+});
+
+test("a WINDOW hold silences the substitute too — any standing hold means the session is coming back", async (t) => {
+  // Deliberate: the hold record says the same thing whatever its limit, and a substitute would
+  // discharge a round its session is coming back to. Pinned so that narrowing it to
+  // `service_restart` is a decision somebody takes, not a drift.
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: "seven_day" }) },
+  });
+  assert.deepEqual(replyCalls(calls), [], `stderr:\n${stderr}`);
+  assert.match(stderr, /told to stop while a hold stands \(seven_day\)/);
 });

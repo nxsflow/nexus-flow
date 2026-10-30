@@ -3529,6 +3529,15 @@ fn status(
             if op.interrupted {
                 marks.push("INTERRUPTED");
             }
+            // **Why a copy with nothing running in it is not moving** (nxf 6j6v.wxz0): a planned
+            // restart stopped a session of this operation, which comes back to the same tree.
+            let pinned = op
+                .pinned_by_restart_hold
+                .as_ref()
+                .map(|until| format!("working tree kept for a restart until {until}"));
+            if let Some(pinned) = &pinned {
+                marks.push(pinned);
+            }
             // **The mark that says why a working copy is not moving** (nxf 6j6v.8bv9): its park was
             // refused for a reason somebody can fix, and the claim is held until they do. Capitals,
             // like the other two marks that ask a human to look; the line under the header says
@@ -4326,6 +4335,17 @@ fn session_cmd(json: bool, db: Option<&str>, action: &SessionAction) -> Result<(
             until,
             detail,
         } => {
+            // **A restart hold is recorded only through the Engine seam the restart's hook calls**
+            // (nxf 6j6v.wxz0). It pins the working copy until its `until` plus a margin, so one
+            // forged here with a far-future `until` would pin the copy for good.
+            if limit == crate::interruption::SERVICE_RESTART_LIMIT {
+                return Err(NxfError::validation(format!(
+                    "`--limit {}` is recorded only by a planned service restart (`nxs \
+                     self-update`, `nxs sync daemon install`), never by a runtime callback — \
+                     nothing was recorded",
+                    crate::interruption::SERVICE_RESTART_LIMIT
+                )));
+            }
             let cli_ctx = CliCtx::resolve(db, hop())?;
             let mut store = open(db)?;
             let r = crate::orchestration::session_interrupted(

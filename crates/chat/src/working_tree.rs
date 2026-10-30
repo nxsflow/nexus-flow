@@ -1014,6 +1014,24 @@ impl ChatStore {
             .optional()?)
     }
 
+    /// **Who holds the lease row and SINCE WHEN** — `(scope_key, acquired)`, expired or not (nxf
+    /// 6j6v.wxz0).
+    ///
+    /// `acquired` is kept across an inherit and restamped when another scope takes the row
+    /// ([`Self::acquire_working_tree`]), so a row naming a scope with an `acquired` no later than
+    /// some instant says the copy has not changed hands since then — the comparison a restart
+    /// hold's take-up makes before it skips the drift question.
+    pub fn working_tree_lease_since(&self) -> Result<Option<(String, String)>> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT scope_key, acquired FROM working_tree_lease WHERE tree = 'default'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// **When this device first saw the lease CONTENDED** (nxf 6j6v.de9s) — both halves standing at
     /// once: the holding area has handed its task back, and something else is waiting in the queue.
     ///

@@ -158,6 +158,10 @@ fn every_suite_that_builds_its_own_nxc_command_says_which_timer_it_wants() {
     // here in the same commit, which is the moment somebody looks at whether it pins the timer —
     // and that look is the thing a counter was standing in for.
     let expected = [
+        // nxf 6j6v.wxz0: a sidecar-shaped session runs its teardown — bind, flush, `session ended`
+        // — from a shell trap, so the trap names the `nxc` binary by path. It pins
+        // `NXC_TIMER=dry` in `nxc_env()`, which every process in that file is started with.
+        "crates/chat/tests/a_restart_leaves_a_way_back.rs",
         "crates/chat/tests/golden.rs",
         "crates/chat/tests/working_tree_two_process_e2e.rs",
         // nxf 6j6v.k8zq: `nxs prime --persona` spans all three modules, so its proof drives all

@@ -1119,6 +1119,18 @@ pub struct StatusOperation {
     /// Empty for every operation where no start failed, and omitted from `--json` then.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub start_failed: Vec<crate::working_tree::FailedStart>,
+    /// **The working copy is kept for this operation by a planned restart's hold, until this
+    /// instant** (nxf 6j6v.wxz0) — a session of the holder's claim area was stopped by `nxs
+    /// self-update` or `nxs sync daemon install` and comes back to the same tree at the hold's
+    /// `until`, so nothing parks, hands on or reclaims the copy before then.
+    ///
+    /// The `until` of that hold; the copy is kept up to `until` plus
+    /// [`crate::interruption::SERVICE_RESTART_MARGIN_SECS`]. Read from the same guard every park
+    /// and reclaim asks, against the lease ROW — in the gap the lease may have run out and nothing
+    /// runs, so [`holds_working_tree`](Self::holds_working_tree) can read `false` while the copy is
+    /// kept. `None` for every other operation, and omitted from `--json` then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_by_restart_hold: Option<String>,
 }
 
 /// **An unanswered hand-back that holds the working copy, as `nxc status` shows it** (nxf
@@ -4236,6 +4248,7 @@ pub fn status(
     // Queued commissions whose start failed (nxf 6j6v.br25) — one statement over a table that is
     // empty unless a start failed, attributed by the root of the thread each one owes its answer on.
     let start_failed = failed_starts_for(store, &forest.root_of)?;
+    let restart_pin = restart_pin_of(store, now)?;
     // Answers held for a commissioner still mid-turn (nxf 6j6v.4gp2) — the twelfth read, one
     // statement over `pending_wakes`, which is empty unless an answer is on its way to a busy
     // session. It keeps such a sub-round "in flight" on its parent's row; see
@@ -4402,6 +4415,11 @@ pub fn status(
                 park_refused: refused_here,
                 withdrawn: withdrawn_here,
                 start_failed: start_failed_here,
+                pinned_by_restart_hold: restart_pin.as_ref().and_then(|(claim, until)| {
+                    ids.iter()
+                        .any(|id| claim.iter().any(|t| t == id))
+                        .then(|| until.clone())
+                }),
             });
         }
     }
@@ -4788,6 +4806,24 @@ fn park_refusals_for(
         }
     }
     Ok(by_root)
+}
+
+/// **The claim area the lease ROW names, and the `until` of the restart hold that keeps the copy
+/// there** (nxf 6j6v.wxz0), or `None` — [`StatusOperation::pinned_by_restart_hold`]'s one read.
+/// The ROW and not [`ChatStore::working_tree_holder`], which reads an expired lease as free: the
+/// gap is exactly when the lease may have run out.
+fn restart_pin_of(store: &ChatStore, now: &str) -> Result<Option<(Vec<String>, String)>> {
+    let Some((holder, _)) = store.working_tree_lease_row()? else {
+        return Ok(None);
+    };
+    let Some(scope) = crate::working_tree::WorkScope::parse(&holder) else {
+        return Ok(None);
+    };
+    let claim = store.work_scope_threads(&scope)?;
+    Ok(
+        crate::orchestration::an_in_place_hold_stands_over(store, &claim, now)?
+            .map(|until| (claim, until)),
+    )
 }
 
 /// **The failed starts of this report's operations, attributed by ROOT** (nxf 6j6v.br25) — each

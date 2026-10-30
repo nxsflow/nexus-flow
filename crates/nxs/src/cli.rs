@@ -514,6 +514,10 @@ pub fn command() -> clap::Command {
 pub fn run() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
     say_if_the_service_program_is_gone();
+    // **The restart's hook, for the one self-update path this crate does not dispatch** (nxf
+    // 6j6v.wxz0): the deprecated `nxf self-update` runs inside `nexus-flow-cli`, which cannot link
+    // the chat engine — so it is handed the hook here, before the persona is routed.
+    nexus_flow_cli::register_restart_preparation(crate::secure_sessions::prepare_for_restart);
     match program_name(&args).as_deref() {
         Some("nxf") => return route(PERSONA_FLOW, || nexus_flow_cli::run_from(args)),
         Some("nxm") => return route(PERSONA_MEMORY, || nexus_memory::run_from(args)),
@@ -922,9 +926,12 @@ fn dispatch(cli: &Cli) -> Result<()> {
         // the hidden `nxf self-update` (nexus-flow-gel). It returns the SHARED error envelope, so it
         // flows through the umbrella's normal error rendering with no type mapping. `init`-style
         // `--db` does not apply (this updates the install, not a workspace), so it is ignored here.
-        Command::SelfUpdate { channel, check } => {
-            nexus_flow_cli::self_update(cli.json, *check, channel.as_deref())
-        }
+        Command::SelfUpdate { channel, check } => nexus_flow_cli::self_update(
+            cli.json,
+            *check,
+            channel.as_deref(),
+            Box::new(crate::secure_sessions::prepare_for_restart),
+        ),
         // The MCP seam (#76u). `--db`/`NXS_DB` still applies as the lower-level store override; the
         // per-instance default is the launch `--workspace`/`NXS_WORKSPACE` (MCP hosts have no cwd).
         #[cfg(feature = "mcp")]

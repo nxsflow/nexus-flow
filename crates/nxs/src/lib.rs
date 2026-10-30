@@ -41,6 +41,7 @@ pub mod migrate;
 pub mod migrate_beads;
 pub mod peers;
 pub mod prime;
+pub mod secure_sessions;
 pub mod selfheal;
 pub mod setup;
 pub mod sigpipe;

@@ -25,10 +25,34 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
     // to act on rather than a re-derivation after the fact. The sentence itself is
     // `nxs_service`'s, because five paths owe it — see its doc.
     let ignored = nxs_service::ignored_instance_env();
+    // **The sessions the install's bootout would kill are secured first** (nxf 6j6v.wxz0, section
+    // F) — after asking whether launchd may be touched at all (a refusal writes nothing, and so must
+    // hold and stop nothing either), and not from inside a session the service started, which would
+    // stop its own caller. Never a refusal: the install proceeds whatever the preparation says.
+    nxs_service::launchd::RealCtl::for_login_session(home_rule(allow_redirected_home))?;
+    let prepared = prepare_the_install(
+        &home,
+        nexus_flow_cli::inside_the_service(&home),
+        &crate::secure_sessions::prepare_for_restart,
+    );
     let installed = nxs_service::launchd::install_for(&home, home_rule(allow_redirected_home))?;
     warn_if_installed_from_a_build_tree();
     let instance = home.instance().name();
     let receipt = receipt(&installed.bootstrapped, &home.instance().label());
+    let (prepared_json, prepared_line) = match &prepared {
+        InstallPreparation::Prepared(report) => (
+            serde_json::to_value(report.as_ref()).unwrap_or_default(),
+            nexus_flow_cli::prepared_words(report),
+        ),
+        InstallPreparation::InsideTheService(service_pid) => (
+            serde_json::json!({ "skipped": "inside-service", "service_pid": service_pid }),
+            format!(
+                "No session was put on hold: this install runs inside a process the service \
+                 started (pid {service_pid}), and holding and stopping the service's sessions \
+                 would stop it too"
+            ),
+        ),
+    };
     if json {
         println!(
             "{}",
@@ -45,6 +69,7 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
                 // because a message only a terminal reader meets is a breadcrumb this repo keeps
                 // closing.
                 "instance_env_ignored": ignored,
+                "prepared": prepared_json,
             })
         );
     } else {
@@ -54,6 +79,9 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
             home.root().display()
         );
         println!("{}", receipt.line);
+        if !prepared_line.is_empty() {
+            println!("{prepared_line}");
+        }
     }
     if let Some(note) = &ignored {
         eprintln!("note: {note}");
@@ -188,6 +216,10 @@ fn warn_if_installed_from_a_build_tree() {
 /// bootstrap is not a failure — it is an install nobody could read back, which is exactly what
 /// `nxs sync daemon status` is for. What is NOT dropped is the `Err`: a bootstrap that failed all
 /// five attempts still reaches `bind`'s warning with the precondition it named.
+///
+/// **No restart hook here** (nxf 6j6v.wxz0, section F): this runs only when no service is installed
+/// yet (the autostart from `nxs init` / `sync bind`), so no session can be the old service's child
+/// and there is nothing for a bootout to kill.
 #[cfg(target_os = "macos")]
 pub fn install_quiet() -> Result<()> {
     nxs_service::launchd::install().map(|_| ())
@@ -308,5 +340,87 @@ mod tests {
     fn the_flag_maps_to_exactly_one_rule_each_way() {
         assert_eq!(home_rule(false), HomeRule::MustBeTheLoginSessions);
         assert_eq!(home_rule(true), HomeRule::RedirectedIsAllowed);
+    }
+}
+
+/// **The install's first act: secure the sessions its bootout would kill** (nxf 6j6v.wxz0, section
+/// F) — or, run from inside a session the service started, do NOT: the preparation would hold and
+/// stop its own caller (round-2 IR #5, self-update's ancestor guard).
+// Read only by the macOS `install`; the decision itself is platform-free so it is tested everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InstallPreparation {
+    /// What the preparation did — [`nexus_flow_cli::prepared_words`] says it in words.
+    Prepared(Box<nxs_service::restart::RestartPreparation>),
+    /// Not prepared: this install runs inside a process the service started (`service_pid`).
+    InsideTheService(u32),
+}
+
+/// [`InstallPreparation`] for `home`: `inside` is the service's pid when it is an ancestor of this
+/// process. Never a refusal — the install proceeds whatever this says.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn prepare_the_install(
+    home: &nxs_service::ServiceHome,
+    inside: Option<u32>,
+    prepare: &dyn Fn(
+        &nxs_service::ServiceHome,
+        &nexus_flow_cli::RestartCause,
+    ) -> nxs_service::restart::RestartPreparation,
+) -> InstallPreparation {
+    match inside {
+        Some(service_pid) => InstallPreparation::InsideTheService(service_pid),
+        None => InstallPreparation::Prepared(Box::new(prepare(
+            home,
+            &nexus_flow_cli::RestartCause::DaemonInstall,
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn scripted(
+        calls: &RefCell<Vec<String>>,
+    ) -> impl Fn(
+        &nxs_service::ServiceHome,
+        &nexus_flow_cli::RestartCause,
+    ) -> nxs_service::restart::RestartPreparation
+           + '_ {
+        move |_, cause| {
+            calls.borrow_mut().push(cause.to_string());
+            nxs_service::restart::RestartPreparation::default()
+        }
+    }
+
+    /// **DoD 5's ordering half**: the install prepares first, with the install as the cause.
+    #[test]
+    fn the_install_prepares_the_instance_with_daemon_install_as_the_cause() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = nxs_service::ServiceHome::at(tmp.path());
+        let calls = RefCell::new(Vec::new());
+
+        let prepared = prepare_the_install(&home, None, &scripted(&calls));
+
+        assert!(matches!(prepared, InstallPreparation::Prepared(_)));
+        assert_eq!(
+            *calls.borrow(),
+            ["nxs sync daemon install restarted the background service"]
+        );
+    }
+
+    /// **Round-2 IR #5**: from inside a session the service started, the install prepares nothing —
+    /// it would hold and SIGTERM its own caller — and says so.
+    #[test]
+    fn an_install_from_inside_the_service_prepares_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = nxs_service::ServiceHome::at(tmp.path());
+        let calls = RefCell::new(Vec::new());
+
+        let prepared = prepare_the_install(&home, Some(4242), &scripted(&calls));
+
+        assert_eq!(prepared, InstallPreparation::InsideTheService(4242));
+        assert!(calls.borrow().is_empty());
     }
 }
