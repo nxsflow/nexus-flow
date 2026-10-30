@@ -3771,6 +3771,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(w.subprocess_sample("s-1", since), None, "somebody else");
+        // A pid that has exited: the session is gone.
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let dead = exited.id();
+        exited.wait().unwrap();
+        std::fs::write(logs.join("s-1.pid"), session_claim_for(dead)).unwrap();
+        assert_eq!(w.subprocess_sample("s-1", since), None, "gone");
         // The old format: a bare pid, nothing to verify it against.
         std::fs::write(logs.join("s-1.pid"), format!("{me}\n")).unwrap();
         assert_eq!(w.subprocess_sample("s-1", since), None, "unverifiable");

@@ -90,11 +90,15 @@ fn descendants(pid: u32) -> Option<Vec<u32>> {
     // `pid` itself must be readable, or the answer is None (not "no children").
     crate::heartbeat::process_started_at(pid)?;
     let mut out = Vec::new();
+    // A pid reused between two listings could reappear deeper in the tree; each is walked once.
+    let mut seen = std::collections::HashSet::from([pid]);
     let mut frontier = vec![pid];
     while let Some(p) = frontier.pop() {
         let Ok(p) = libc::pid_t::try_from(p) else {
             continue;
         };
+        // At most 1,024 children PER PARENT are listed; the rest are cut off silently. A cut-off
+        // list only shrinks the sample, which is the generous direction.
         let mut buf = vec![0 as libc::pid_t; 1024];
         let bytes = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
         // SAFETY: `buf` is an owned buffer of exactly `bytes` bytes that outlives the call; the call
@@ -104,7 +108,7 @@ fn descendants(pid: u32) -> Option<Vec<u32>> {
             continue;
         }
         for &c in buf.iter().take((n as usize).min(buf.len())) {
-            if c > 0 {
+            if c > 0 && seen.insert(c as u32) {
                 out.push(c as u32);
                 frontier.push(c as u32);
             }
@@ -137,7 +141,8 @@ fn cpu_units(pid: u32) -> Option<u64> {
 fn descendants(pid: u32) -> Option<Vec<u32>> {
     // `pid` itself must be readable, or the answer is None (not "no children").
     std::fs::metadata(format!("/proc/{pid}")).ok()?;
-    let mut parent_of = Vec::new();
+    let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::new();
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(p) = entry
             .file_name()
@@ -152,14 +157,16 @@ fn descendants(pid: u32) -> Option<Vec<u32>> {
             .as_deref()
             .and_then(stat_fields)
         {
-            parent_of.push((p, f.ppid));
+            children_of.entry(f.ppid).or_default().push(p);
         }
     }
     let mut out = Vec::new();
+    // One snapshot of the table cannot hold a cycle, but each pid is walked once regardless.
+    let mut seen = std::collections::HashSet::from([pid]);
     let mut frontier = vec![pid];
     while let Some(p) = frontier.pop() {
-        for &(c, pp) in &parent_of {
-            if pp == p {
+        for &c in children_of.get(&p).into_iter().flatten() {
+            if seen.insert(c) {
                 out.push(c);
                 frontier.push(c);
             }
@@ -200,5 +207,68 @@ mod tests {
                 cpu_ticks: 24
             })
         );
+    }
+
+    /// A line that cannot be read is NO answer — never a zero counter or a ppid of 0, which would
+    /// attach the process to the wrong parent or freeze its CPU.
+    #[test]
+    fn stat_fields_refuses_a_line_it_cannot_read() {
+        for (line, why) in [
+            ("42 a S 7 1 1 0 -1 0 0 0 0 0 11 13", "no ')' at all"),
+            ("42 (a) S 7 1 1 0 -1 0 0 0 0 0 11", "truncated before stime"),
+            ("42 (a) S 7 1 1 0 -1 0 0 0 0 0", "truncated before utime"),
+            ("42 (a)", "nothing after the comm"),
+            ("42 (a) S x 1 1 0 -1 0 0 0 0 0 11 13", "ppid not a number"),
+            ("42 (a) S 7 1 1 0 -1 0 0 0 0 0 u 13", "utime not a number"),
+            ("42 (a) S 7 1 1 0 -1 0 0 0 0 0 11 -1", "stime negative"),
+            (
+                "42 (a) S 7 1 1 0 -1 0 0 0 0 0 18446744073709551615 1",
+                "utime + stime overflows",
+            ),
+        ] {
+            assert_eq!(stat_fields(line), None, "{why}: {line}");
+        }
+    }
+
+    /// The slack is the whole of the rule, so its edges are pinned: a process that started up to
+    /// `START_TIME_SLACK` before the call is counted, one second more is not.
+    #[test]
+    fn started_under_admits_exactly_the_slack_before_since() {
+        use crate::heartbeat::START_TIME_SLACK;
+        use std::time::Duration;
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let second = Duration::from_secs(1);
+        assert!(started_under(Some(since), since), "started at since");
+        assert!(started_under(Some(since + second), since), "after since");
+        assert!(
+            started_under(Some(since - START_TIME_SLACK), since),
+            "exactly the slack before"
+        );
+        assert!(
+            started_under(Some(since - START_TIME_SLACK + second), since),
+            "inside the slack"
+        );
+        assert!(
+            !started_under(Some(since - START_TIME_SLACK - second), since),
+            "one second past the slack"
+        );
+        assert_eq!(
+            START_TIME_SLACK,
+            Duration::from_secs(60),
+            "the slack itself"
+        );
+    }
+
+    /// A start that cannot be read is COUNTED, whatever `since` is — the generous side.
+    #[test]
+    fn started_under_counts_an_unreadable_start() {
+        use std::time::Duration;
+        for since in [
+            SystemTime::UNIX_EPOCH,
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(86_400 * 365),
+        ] {
+            assert!(started_under(None, since), "{since:?}");
+        }
     }
 }
