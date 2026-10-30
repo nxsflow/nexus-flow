@@ -2310,7 +2310,8 @@ async function runSidecarWithTheDoor(t, opts, drive) {
 const ASK_TEXT = "Coordinator of thread thread-77: I have seen no activity from you for 20 minutes.";
 
 /** The door's whole round trip: the sidecar declares `ask: 1` in its claim once its handler is in
- *  place; SIGUSR2 with an ask file takes the file and HOLDS the ask while the running turn runs —
+ *  place; SIGUSR2 with an ask file leaves the file where it is while the running turn runs (drained
+ *  at the yield, nxf 6j6v.pszd cut 1, so the engine can still withdraw it) —
  *  the runtime does not get it mid-turn, where the real one attaches it to a tool result (staged
  *  2026-10-25) — and delivers it as the next user turn once that turn's `result` is in; SIGUSR2
  *  without a file is a no-op; the asked turn opens with a `turn_start` for its thread; and the door
@@ -2325,18 +2326,23 @@ test("SIGUSR2 with an ask file yields the ask as the next user message; without 
       spec: { replyThread: "thread-77", coordinated: true },
       nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
     },
-    async ({ dir, child, claim, waitFor, read, later, ask }) => {
+    async ({ dir, child, claim, stderr, waitFor, read, later, ask }) => {
       await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
       await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
       child.kill("SIGUSR2");
-      await waitFor("the empty signal to be absorbed", () => true);
+      await waitFor("the empty signal to be absorbed", () => stderr().includes("was signalled"));
       ask("01jask0000000000000000000a", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000a.json")));
+      await waitFor("the second signal to be handled", () => stderr().split("was signalled").length - 1 >= 2);
+      assert.ok(
+        existsSync(join(dir, "s-1.ask.01jask0000000000000000000a.json")),
+        "the file is still there while the turn runs: drained at the yield, not at the signal",
+      );
       assert.deepEqual(later(), [], "held while the turn runs: the runtime has not got it");
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
+  assert.ok(!existsSync(join(dirname(run.claimPath), "s-1.ask.01jask0000000000000000000a.json")), "gone after the yield");
   const delivered = readFileSync(join(dirname(run.claimPath), "later-prompts.log"), "utf8")
     .split("\n")
     .filter((l) => l.trim() !== "")
@@ -2361,11 +2367,13 @@ test("SIGUSR2 with an ask file yields the ask as the next user message; without 
   assert.deepEqual(replyCalls(run.calls), [], "coordinated: nothing is posted in its name");
 });
 
-/** **The door closes BEFORE the last drain** (must-fix, design review round 3 TQ #5 / IR #3, round 4
- *  TQ #8 / IR #6): at the first `result` with no ask pending, `ask: 1` leaves the claim — so an ask
- *  from then on reads `CannotAsk` at the engine and counts nothing — and only then are the files
- *  present drained, as one final turn. */
-test("the door is withdrawn from the claim before the final drain, and a late ask is one final turn", async (t) => {
+/** **An ask file present at the result is read there, signal or not** (nxf 6j6v.pszd cut 1: drained
+ *  at the YIELD, so the file, not the signal, is what counts), as a turn of its own with the door
+ *  still open; and at the first `result` with no ask pending, `ask: 1` leaves the claim before the
+ *  process ends (must-fix, design review round 3 TQ #5 / IR #3, round 4 TQ #8 / IR #6). The final
+ *  drain after the close still catches a file written in between; that window is one synchronous
+ *  step of `turnStream` and is not reachable from outside the process. */
+test("an ask file present at the result is yielded there without a signal, and the door is withdrawn before the end", async (t) => {
   const run = await runSidecarWithTheDoor(
     t,
     {
@@ -2378,8 +2386,7 @@ test("the door is withdrawn from the claim before the final drain, and a late as
     async ({ dir, claim, waitFor, read, ask }) => {
       await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
       await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
-      // An ask whose signal never came — the race at the close: its file is there when the turn's
-      // result arrives.
+      // An ask whose signal never came: its file is there when the turn's result arrives.
       ask("01jask0000000000000000000b", "thread-77", ASK_TEXT);
       writeFileSync(join(dir, "release.txt"), "");
     },
@@ -2388,8 +2395,8 @@ test("the door is withdrawn from the claim before the final drain, and a late as
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l) => JSON.parse(l));
-  assert.equal(delivered.length, 1, "the late ask is delivered");
-  assert.equal(delivered[0].doorOpen, false, "AFTER the door left the claim");
+  assert.equal(delivered.length, 1, "the unsignalled ask is delivered");
+  assert.equal(delivered[0].doorOpen, true, "at the yield, as an ask of its own: the door still open");
   assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
   const order = ["the ask door is open", "the ask door is closed", "sidecar done"].map((line) =>
     run.stderr.indexOf(line),
@@ -2401,7 +2408,7 @@ test("the door is withdrawn from the claim before the final drain, and a late as
       .flatMap((a) => a.entries)
       .filter((e) => e.kind === "turn_start").length,
     2,
-    "the late ask was delivered as one final turn, with its own turn_start",
+    "the ask was delivered as one turn, with its own turn_start",
   );
 });
 
@@ -2421,11 +2428,12 @@ test("an ask during the reminder round is delivered into the reminder", async (t
       spec: { replyThread: "thread-77", coordinated: true },
       nxcStdout: { "status --thread": owes },
     },
-    async ({ dir, child, waitFor, later, ask }) => {
+    async ({ dir, child, stderr, waitFor, later, ask }) => {
       await waitFor("the reminder to be running", () => existsSync(join(dir, "hanging.txt")));
       ask("01jask0000000000000000000c", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000c.json")));
+      await waitFor("the signal to be handled", () => stderr().includes("was signalled"));
+      assert.ok(existsSync(join(dir, "s-1.ask.01jask0000000000000000000c.json")), "taken at the yield, not the signal");
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
@@ -2454,12 +2462,12 @@ test("an error on the asked turn sets the cause the end announces", async (t) =>
       spec: { replyThread: "thread-77", coordinated: true },
       nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
     },
-    async ({ dir, child, claim, waitFor, read, later, ask }) => {
+    async ({ dir, child, claim, stderr, waitFor, read, ask }) => {
       await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
       await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
       ask("01jask0000000000000000000d", "thread-77", ASK_TEXT);
       child.kill("SIGUSR2");
-      await waitFor("the ask file to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000d.json")));
+      await waitFor("the signal to be handled", () => stderr().includes("was signalled"));
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
@@ -2467,6 +2475,110 @@ test("an error on the asked turn sets the cause the end announces", async (t) =>
   assert.ok(ended, `stderr:\n${run.stderr}`);
   const cause = ended.argv[ended.argv.indexOf("--cause") + 1];
   assert.match(cause, /ended without answering — .*error_during_execution/, cause);
+});
+
+// ---- the pulse (nxf 6j6v.pszd cut 1; design 8nx4 section 1) -------------------------------------
+
+/** The pulse file of the scratch session: `null` while there is none, its trimmed content else. */
+const pulseOf = (dir) => {
+  const p = join(dir, "s-1.alive");
+  return existsSync(p) ? readFileSync(p, "utf8").trim() : null;
+};
+
+/** Runtime heartbeats (`sdk.d.ts`): the runtime saying it is alive, never the model producing. */
+const toolProgress = {
+  type: "tool_progress",
+  session_id: "real-1",
+  tool_use_id: "t1",
+  tool_name: "Bash",
+  elapsed_time_seconds: 30,
+};
+const keepAlive = { type: "keep_alive", session_id: "real-1" };
+
+/** **Only the model pulses**: a stream of `tool_progress`, `api_retry` and `keep_alive` with no
+ *  `assistant` or `stream_event` leaves the file the sidecar created at its start EMPTY — the
+ *  engine reads that as "started, no output yet" (`Pulse::NoneYet`). */
+test("runtime heartbeats alone never write a pulse: the file stays empty (NoneYet)", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolProgress, apiRetry, keepAlive, toolProgress, result],
+      hangAt: 5,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, waitFor }) => {
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      assert.equal(pulseOf(dir), "", "created at start, no instant: no model output yet");
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.equal(pulseOf(dirname(run.claimPath)), "", "and still none after the turn's result");
+});
+
+/** **At most once per PULSE_SECS, not per token.** The stream holds between the first delta and
+ *  the next two long enough for the clock to move: a writer that pulsed per message would leave a
+ *  LATER instant behind; the throttled one keeps the first delta's. */
+test("model output writes the pulse once per 30 s, not per token", async (t) => {
+  let first = null;
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, textDelta("a"), textDelta("b"), textDelta("c"), result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, waitFor }) => {
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      first = pulseOf(dir);
+      assert.match(first, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/, "an RFC3339 instant after the first delta");
+      // The clock must move between the first delta and the next: deliberate, and short.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.equal(pulseOf(dirname(run.claimPath)), first, "two more deltas inside 30 s: never rewritten");
+});
+
+/** **Drained at the yield, not at the signal** (design 8nx4 section 3): the engine may withdraw an
+ *  ask that life overtook before the running turn ends (`Worker::withdraw_asks`); a file it removed
+ *  before the turn's `result` is never delivered. */
+test("an ask file removed before the turn's result is never yielded", async (t) => {
+  const run = await runSidecarWithTheDoor(
+    t,
+    {
+      messages: [init, toolUse, toolResult, result],
+      hangAt: 2,
+      holdUntilReleased: true,
+      spec: { replyThread: "thread-77", coordinated: true },
+      nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
+    },
+    async ({ dir, child, claim, stderr, waitFor, read, ask }) => {
+      await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
+      await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
+      ask("01jask0000000000000000000b", "thread-77", ASK_TEXT);
+      child.kill("SIGUSR2");
+      const file = join(dir, "s-1.ask.01jask0000000000000000000b.json");
+      await waitFor("the signal to be handled", () => /session s-1 was (asked|signalled)/.test(stderr()));
+      assert.ok(existsSync(file), "drained at the yield, not at the signal: the file is still there");
+      rmSync(file); // the engine withdraws it (Worker::withdraw_asks)
+      writeFileSync(join(dir, "release.txt"), "");
+    },
+  );
+  assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+  assert.ok(!existsSync(join(dirname(run.claimPath), "later-prompts.log")), "a withdrawn ask is not delivered");
+  assert.equal(
+    appends(run.calls)
+      .flatMap((a) => a.entries)
+      .filter((e) => e.kind === "turn_start").length,
+    1,
+    "no turn was opened for it",
+  );
 });
 
 // ---- the cause on `session ended` (nxf 6j6v.558h, B.8) ---------------------------------------------
@@ -2587,16 +2699,19 @@ test("a malformed ask file is dropped and the turn goes on", async (t) => {
       spec: { replyThread: "thread-77", coordinated: true },
       nxcStdout: { "status --thread": JSON.stringify({ operations: [] }) },
     },
-    async ({ dir, child, claim, waitFor, read }) => {
+    async ({ dir, child, claim, stderr, waitFor, read }) => {
       await waitFor("the door to be declared", () => read(claim).includes("ask: 1"));
       await waitFor("the turn to be running", () => existsSync(join(dir, "hanging.txt")));
       writeFileSync(join(dir, "s-1.ask.01jask0000000000000000000e.json"), JSON.stringify({ thread: 7 }));
       writeFileSync(join(dir, "s-1.ask.01jask0000000000000000000f.json"), "not json");
       child.kill("SIGUSR2");
-      await waitFor("both files to be taken", () => !existsSync(join(dir, "s-1.ask.01jask0000000000000000000e.json")) && !existsSync(join(dir, "s-1.ask.01jask0000000000000000000f.json")));
+      await waitFor("the signal to be handled", () => stderr().includes("was signalled"));
       writeFileSync(join(dir, "release.txt"), "");
     },
   );
+  for (const name of ["s-1.ask.01jask0000000000000000000e.json", "s-1.ask.01jask0000000000000000000f.json"]) {
+    assert.ok(!existsSync(join(dirname(run.claimPath), name)), `${name} was taken at the yield`);
+  }
   assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
   assert.match(run.stderr, /is not of the engine's shape and is dropped/);
   assert.match(run.stderr, /could not be read and is dropped/);

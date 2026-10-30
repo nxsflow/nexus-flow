@@ -99,6 +99,13 @@ const DEFAULTED: &[&str] = &[
     // `stop_session` do: a delegator that forwards `asks_sessions` and rests on the default
     // `CannotAsk` here would claim the door and then never open it.
     "ask_session",
+    // **The tenth and eleventh, added here in the same change that added them to the trait** (nxf
+    // 6j6v.pszd cut 1). The pulse is the one liveness signal a delegator resting on the default
+    // `Unreported` would silently turn back into today's transcript-only silence clock, and the
+    // withdrawal is the act a delegator resting on the no-op would turn into a stale "no sign of
+    // life" delivered to a session that is working.
+    "session_pulse",
+    "withdraw_asks",
 ];
 
 struct Implementor {
@@ -116,7 +123,7 @@ const IMPLEMENTORS: &[Implementor] = &[
         name: "BoundedWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself,
+            ForItself, ForItself, ForItself,
         ],
         why: "A DELEGATOR: it wraps a host-supplied worker to bound `trigger`. Anything it does not \
               forward is answered for a third party that may well know better, so it forwards. \
@@ -136,11 +143,17 @@ const IMPLEMENTORS: &[Implementor] = &[
               would have every slot read as uncoordinated, and the ninth is its act: a delegator \
               resting on `CannotAsk` would claim the door and never open it. Neither \
               is bounded on its own thread — a conforming `stop_session` DELIVERS a signal and \
-              returns, which is the same local-state promise the reads make.",
+              returns, which is the same local-state promise the reads make. The tenth and \
+              eleventh are the ask door's other half (nxf 6j6v.pszd): a host whose sessions pulse \
+              would be read as `Unreported` and lose the one signal of a model that is streaming, \
+              and a host that can take a nudge back would be reported as having withdrawn nothing. \
+              Both are a file read or an unlink — local state again.",
     },
     Implementor {
         name: "DryWorker",
         answers: &[
+            OnTheDefault,
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -166,13 +179,15 @@ const IMPLEMENTORS: &[Implementor] = &[
               can stop nothing, for the reason it starts nothing: there is no process of its own to \
               signal, and a `true` here would have a withdrawal believe a stop was delivered to a \
               session that goes on running. And it asks nothing, for the same reason: there is no \
-              running session of its own to reach, and `CannotAsk` is the truth of the act.",
+              running session of its own to reach, and `CannotAsk` is the truth of the act. It \
+              reads no pulse because no session of its own writes one — `Unreported` is the truth \
+              — and it has no ask of its own to withdraw, so the no-op `Ok` is the truth too.",
     },
     Implementor {
         name: "SidecarWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself,
+            ForItself, ForItself, ForItself,
         ],
         why: "The only worker in this crate that owns real processes. Liveness comes off the pid \
               file its own `SessionLock` already writes at every trigger — same file, same parse, \
@@ -199,13 +214,17 @@ const IMPLEMENTORS: &[Implementor] = &[
               share. The eighth is that condition once more: the ask door is a file beside the \
               spec and a signal through the same pid claim, so it can be asked exactly where the \
               stop can be sent, and the ninth writes that file and sends that signal — only to a \
-              claim that declares `ask: 1`, which the sidecar writes after its handler is installed.",
+              claim that declares `ask: 1`, which the sidecar writes after its handler is installed. \
+              The tenth reads the `<session>.alive` file its own sidecar writes beside that claim \
+              (nxf 6j6v.pszd), and the eleventh unlinks the ask files the ninth wrote — the \
+              sidecar drains them only at the running turn's result, so one taken back before \
+              then is never delivered.",
     },
     Implementor {
         name: "LazyWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself,
+            ForItself, ForItself, ForItself,
         ],
         why: "A DELEGATOR, and the one this gate exists for: `cli.rs` resolves the worker per call \
               from the environment, so EVERY command-line call passes through it. It forwarded only \
@@ -222,11 +241,16 @@ const IMPLEMENTORS: &[Implementor] = &[
               the FOURTH instance of this class at this wrapper, caught by review rather than by \
               this gate, because a new defaulted method does not add its own row above. The sixth \
               and seventh were added here in the same change that added them to the trait, so \
-              this row is the gate for them rather than the apology. The eighth and ninth likewise.",
+              this row is the gate for them rather than the apology. The eighth and ninth likewise, \
+              and the tenth and eleventh (nxf 6j6v.pszd) — a pulse resting on `Unreported` here \
+              would leave the shipped path on today's silence clock while every test of the \
+              sidecar worker passed.",
     },
     Implementor {
         name: "DisabledWorker",
         answers: &[
+            OnTheDefault,
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -246,7 +270,9 @@ const IMPLEMENTORS: &[Implementor] = &[
               a handle that refuses to start anything has no directory it starts things in. And it continues nothing for the reason it starts nothing. \
               And it stops nothing on the same ground: a session it never started is not its to \
               signal, and the named refusal is the truth rather than a decline. And it asks nothing: a \
-              session it never started is not one it can reach, so `CannotAsk` is the truth.",
+              session it never started is not one it can reach, so `CannotAsk` is the truth. \
+              And a session it never started writes it no pulse and left it no ask, so \
+              `Unreported` and the no-op are the truth as well.",
     },
 ];
 

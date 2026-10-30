@@ -1565,6 +1565,28 @@ impl crate::worker::Worker for LazyWorker {
         }
     }
 
+    /// The pulse, forwarded in the same change that added it to the trait (nxf 6j6v.pszd). A
+    /// selection failure is `Unreported` — a worker that could not be built read no pulse, and the
+    /// ladder then keeps today's transcript-only rule rather than believing a silent model.
+    fn session_pulse(&self, internal_session: &str) -> crate::worker::Pulse {
+        match crate::worker::select_worker(self.cwd.clone()) {
+            Ok(w) => w.session_pulse(internal_session),
+            Err(_) => crate::worker::Pulse::Unreported,
+        }
+    }
+
+    /// The withdrawal, forwarded with the pulse (nxf 6j6v.pszd). A selection failure is reported
+    /// as the failure it is: an `Ok` would say the nudge was taken back when nothing was touched.
+    fn withdraw_asks(&self, internal_session: &str) -> std::result::Result<(), String> {
+        match crate::worker::select_worker(self.cwd.clone()) {
+            Ok(w) => w.withdraw_asks(internal_session),
+            Err(e) => Err(format!(
+                "no worker could be selected to withdraw the asks of session {internal_session}: {}",
+                e.msg
+            )),
+        }
+    }
+
     /// The act behind the question one method up, forwarded with it (nxf 6j6v.b9nf). A selection
     /// failure is reported AS the refusal it is, in `run_precondition`'s shape below: there is no
     /// safe `Ok` to fall back to — an `Ok` here means "delivered", and a caller would wait on a
