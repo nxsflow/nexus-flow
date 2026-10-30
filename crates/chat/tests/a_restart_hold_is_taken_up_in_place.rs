@@ -273,10 +273,13 @@ fn a_restart_hold_with_no_until_arms_nothing_and_says_so() {
 
 // ---- the working copy: a git checkout the coder holds, with a rival queued behind it ------------
 
+/// `git` in `root`, under the pinned test `$HOME` — so neither the developer's `~/.gitconfig` nor
+/// anything else under their home reaches the repository these tests build.
 fn git(root: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
+        .envs(nxs_test_support::pinned_home_env())
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
