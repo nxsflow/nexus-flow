@@ -989,3 +989,143 @@ fn the_copy_is_pinned_through_the_gap_and_released_past_the_bound() {
     let row = status_thread(root, &at(141), &slot);
     assert_eq!(row["interrupted"]["limit"], SERVICE_RESTART_LIMIT, "{row}");
 }
+
+// ---- the hook's failure branches: nothing is ever reported held without a hold on record ---------
+
+/// **A hold that cannot be written** — here the engine refuses it, because the claim names a session
+/// this workspace never minted (the same `could not record` branch an unwritable store takes). The
+/// stop is still sent, and the session is reported `unrecorded` with the reason — never `held` or
+/// `stopped`, which would claim a hold that is not on record.
+#[test]
+fn a_session_whose_hold_cannot_be_written_is_stopped_and_reported_unrecorded() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let mut ghost = Session::start(root, "m-never-minted", None, false);
+
+    let report = secure(root, &at(60), 2, &|_| {});
+
+    assert!(
+        report.held.is_empty() && report.stopped.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.unrecorded.len(), 1, "{report:?}");
+    assert_eq!(report.unrecorded[0].session, "m-never-minted");
+    assert!(
+        report.unrecorded[0].error.contains("m-never-minted"),
+        "the reason is the engine's: {:?}",
+        report.unrecorded[0].error
+    );
+    assert!(
+        ghost.has_exited_within(Duration::from_secs(10)),
+        "the stop was still delivered"
+    );
+}
+
+/// **A session first seen after the hard deadline** (the hook's own IR #6 rule): no hold is written
+/// for it — the bound on `until` would no longer hold — but it is still stopped, and reported
+/// `unrecorded` with the reason. With an injected clock that advances one poll per wait, and a
+/// straggler that keeps the hook polling up to its deadline.
+#[test]
+fn a_session_first_seen_past_the_deadline_is_stopped_without_a_hold() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (_, stubborn) = commission(root, T0, "alpha");
+    let (_, late) = commission(root, T0, "beta");
+    let _s = Session::start(root, &stubborn, Some(""), false);
+    let late_one: Mutex<Option<Session>> = Mutex::new(None);
+    let root_buf: PathBuf = root.to_path_buf();
+    const GRACE: i64 = 3;
+    // Polls 1..=3 run at +0 s, +1 s, +2 s; poll 4 runs at +3 s — the deadline.
+    let on_poll = |n: u32| {
+        if n == GRACE as u32 + 1 {
+            *late_one.lock().unwrap() = Some(Session::start(&root_buf, &late, None, false));
+        }
+    };
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("NXC_TIMER_LOG", root.join("timer.log"));
+    let offset = std::cell::Cell::new(time::Duration::ZERO);
+    let base = parse(&at(60)) + time::Duration::milliseconds(300);
+    let clock = || base + offset.get();
+    let sleep = |d: Duration| offset.set(offset.get() + d);
+    let workspaces = [root.to_path_buf()];
+
+    let report = secure_the_instance(SecureTheInstance {
+        workspaces: &workspaces,
+        pgid: own_group(),
+        detail: DETAIL,
+        grace_secs: GRACE,
+        margin_secs: SERVICE_RESTART_MARGIN_SECS,
+        poll: Duration::from_secs(1),
+        timer: TimerConfig::Dry,
+        clock: &clock,
+        sleep: &sleep,
+        on_poll: &on_poll,
+    });
+    std::env::remove_var("NXC_TIMER_LOG");
+
+    assert_eq!(report.unrecorded.len(), 1, "{report:?}");
+    assert_eq!(report.unrecorded[0].session, late);
+    assert!(
+        report.unrecorded[0].error.contains("grace had run out"),
+        "{:?}",
+        report.unrecorded[0].error
+    );
+    assert!(
+        store(root).current_interruption(&late).unwrap().is_none(),
+        "no hold row"
+    );
+    assert!(
+        late_one
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("the late session was started")
+            .has_exited_within(Duration::from_secs(10)),
+        "it was still stopped"
+    );
+    assert_eq!(
+        report.stopped,
+        [prepared(root, &stubborn)],
+        "the straggler is unchanged"
+    );
+}
+
+/// **A claim that cannot prove its process is the session's** (IR #10) — an old-format bare pid, in
+/// the service's group: it is reported `unverifiable`, no hold is recorded, and no signal is sent.
+#[test]
+fn an_unverifiable_claim_is_reported_and_neither_held_nor_signalled() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (_, session) = commission(root, T0, "alpha");
+    let signalled = root.join(format!("signalled-{session}"));
+    let mut old = Session::start(
+        root,
+        &session,
+        Some(&format!("touch {}", signalled.display())),
+        false,
+    );
+    // The claim as a build from before identity recording wrote it: the pid and nothing else.
+    std::fs::write(
+        nexus_chat::worker::agent_logs_dir(root).join(format!("{session}.pid")),
+        format!("{}\n", old.pid()),
+    )
+    .unwrap();
+
+    let report = secure(root, &at(60), 2, &|_| {});
+
+    assert_eq!(
+        report.unverifiable,
+        [prepared(root, &session)],
+        "{report:?}"
+    );
+    assert!(report.held.is_empty() && report.stopped.is_empty() && report.unrecorded.is_empty());
+    assert!(
+        store(root)
+            .current_interruption(&session)
+            .unwrap()
+            .is_none(),
+        "never held"
+    );
+    assert!(old.is_alive(), "still running");
+    assert!(!signalled.exists(), "never signalled");
+}
