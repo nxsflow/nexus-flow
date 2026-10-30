@@ -1633,10 +1633,25 @@ pub fn live_sessions_in_group(workspace_root: &Path, pgid: i32) -> GroupedSessio
     grouped
 }
 
+/// **Stop one session of the workspace at `workspace_root`** — [`Worker::stop_session`] as the
+/// sidecar worker answers it, for a caller that has no worker of its own to ask: the restart's hook.
+/// It reads the session's claim, proves the process is the session's, and sends one SIGTERM.
+pub fn stop_session_in(
+    workspace_root: &Path,
+    internal_session: &str,
+) -> std::result::Result<SessionStop, String> {
+    SidecarWorker {
+        sidecar: PathBuf::new(),
+        cwd: workspace_root.to_path_buf(),
+    }
+    .stop_session(internal_session)
+}
+
 /// `getpgid(pid)`: the group, or `Err(None)` when the process is gone (`ESRCH`), or
-/// `Err(Some(errno))` for any other refusal — which is reported, never read as "gone".
+/// `Err(Some(errno))` for any other refusal — which is reported, never read as "gone". The one
+/// wrapper of the call in the suite: the restart's hook reads the service's own group through it.
 #[cfg(unix)]
-fn process_group_of(pid: u32) -> std::result::Result<i32, Option<i32>> {
+pub fn process_group_of(pid: u32) -> std::result::Result<i32, Option<i32>> {
     // SAFETY: `getpgid` reads another process's group id and touches no memory of this process; a
     // bad pid is an errno, not UB. `pid` came through `a_signalable_pid`, so it names one process.
     let group = unsafe { libc::getpgid(pid as libc::pid_t) };
@@ -1652,7 +1667,7 @@ fn process_group_of(pid: u32) -> std::result::Result<i32, Option<i32>> {
 /// No process group can be read here; every session is "gone" to this question, so a restart on
 /// such a platform holds and stops nothing — it has no launchd bootout to protect against either.
 #[cfg(not(unix))]
-fn process_group_of(_pid: u32) -> std::result::Result<i32, Option<i32>> {
+pub fn process_group_of(_pid: u32) -> std::result::Result<i32, Option<i32>> {
     Err(None)
 }
 

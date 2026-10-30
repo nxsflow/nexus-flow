@@ -25,8 +25,6 @@ use std::time::Duration;
 
 use nxs_service::restart::{PreparedSession, RestartPreparation, SessionTrouble};
 
-use crate::worker::Worker;
-
 use crate::timer::TimerConfig;
 
 /// Everything one preparation needs. The clock, the sleep and the poll hook are injected so a test
@@ -81,19 +79,17 @@ pub fn secure_the_instance(req: SecureTheInstance<'_>) -> RestartPreparation {
         .replace_nanosecond(0)
         .unwrap_or_else(|_| (req.clock)());
     let deadline = start + time::Duration::seconds(req.grace_secs);
-    let until = start + time::Duration::seconds(req.grace_secs + req.margin_secs);
-    let until_text = rfc3339(until);
+    let until = rfc3339(start + time::Duration::seconds(req.grace_secs + req.margin_secs));
     let mut report = RestartPreparation {
         started_at: Some(rfc3339(start)),
-        until: Some(until_text.clone()),
+        until: Some(until.clone()),
         ..RestartPreparation::default()
     };
-    // Per session: the workspace it runs in and whether its hold was recorded.
-    let mut seen: BTreeMap<(String, String), bool> = BTreeMap::new();
+    // Every session of the instance seen so far, by (workspace, session), and what became of it.
+    let mut seen: BTreeMap<(String, String), Secured> = BTreeMap::new();
     let mut engines: BTreeMap<PathBuf, crate::error::Result<crate::engine::Engine>> =
         BTreeMap::new();
     let mut polls = 0u32;
-    let mut first = true;
     let stragglers = loop {
         polls += 1;
         (req.on_poll)(polls);
@@ -101,78 +97,30 @@ pub fn secure_the_instance(req: SecureTheInstance<'_>) -> RestartPreparation {
         for root in req.workspaces {
             let workspace = root.display().to_string();
             let grouped = crate::worker::live_sessions_in_group(root, req.pgid);
-            if first {
-                let prepared = |sessions: &[String], into: &mut Vec<PreparedSession>| {
-                    into.extend(sessions.iter().map(|session| PreparedSession {
-                        workspace: workspace.clone(),
-                        session: session.clone(),
-                    }));
-                };
-                prepared(&grouped.others, &mut report.left_alone);
-                prepared(&grouped.unverifiable, &mut report.unverifiable);
-                report
-                    .unreadable
-                    .extend(
-                        grouped
-                            .unreadable
-                            .iter()
-                            .map(|(session, errno)| SessionTrouble {
-                                workspace: workspace.clone(),
-                                session: session.clone(),
-                                error: format!(
-                                    "its process group could not be read: {}",
-                                    std::io::Error::from_raw_os_error(*errno)
-                                ),
-                            }),
-                    );
+            if polls == 1 {
+                note_what_is_not_ours(&mut report, &workspace, &grouped);
             }
             for session in grouped.ours {
-                live.push((workspace.clone(), session.clone()));
-                let key = (workspace.clone(), session.clone());
+                let key = (workspace.clone(), session);
+                live.push(key.clone());
                 if seen.contains_key(&key) {
                     continue;
                 }
-                let recorded = if (req.clock)() >= deadline {
-                    Err(
-                        "the grace had run out before the session was seen, so no hold was \
-                         recorded for it"
-                            .to_string(),
-                    )
-                } else {
-                    let engine = engines
-                        .entry(root.clone())
-                        .or_insert_with(|| open_engine(root, &req.timer));
-                    hold(engine, &session, &until_text, req.detail, (req.clock)())
-                };
-                // The stop is sent either way: the bootout would kill the session regardless, and a
-                // stop at least lets it tear down.
-                let stopped = crate::worker::SidecarWorker {
-                    sidecar: PathBuf::new(),
-                    cwd: root.clone(),
-                }
-                .stop_session(&session);
-                if let Err(e) = recorded {
+                let past_the_grace = (req.clock)() >= deadline;
+                let engine = engines
+                    .entry(root.clone())
+                    .or_insert_with(|| open_engine(root, &req.timer));
+                let secured = secure_one(&req, root, engine, &key.1, &until, past_the_grace);
+                if let Secured::Unrecorded(why) = &secured {
                     report.unrecorded.push(SessionTrouble {
-                        workspace: workspace.clone(),
-                        session: session.clone(),
-                        error: match stopped {
-                            Err(stop) => format!("{e}; and its stop failed: {stop}"),
-                            Ok(_) => e,
-                        },
+                        workspace: key.0.clone(),
+                        session: key.1.clone(),
+                        error: why.clone(),
                     });
-                    seen.insert(key, false);
-                } else {
-                    if let Err(stop) = stopped {
-                        eprintln!(
-                            "warning: session {session} is on the restart's hold, but its stop \
-                             could not be sent ({stop}); the restart's bootout ends it"
-                        );
-                    }
-                    seen.insert(key, true);
                 }
+                seen.insert(key, secured);
             }
         }
-        first = false;
         if live.is_empty() {
             break Vec::new();
         }
@@ -181,8 +129,8 @@ pub fn secure_the_instance(req: SecureTheInstance<'_>) -> RestartPreparation {
         }
         (req.sleep)(req.poll);
     };
-    for (key, recorded) in seen {
-        if !recorded {
+    for (key, secured) in seen {
+        if secured != Secured::Held {
             continue;
         }
         let prepared = PreparedSession {
@@ -196,6 +144,84 @@ pub fn secure_the_instance(req: SecureTheInstance<'_>) -> RestartPreparation {
     }
     report.returned_at = Some(rfc3339((req.clock)()));
     report
+}
+
+/// What [`secure_one`] did for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Secured {
+    /// Its hold is on record and its stop was sent.
+    Held,
+    /// No hold is on record, for this reason; its stop was sent all the same.
+    Unrecorded(String),
+}
+
+/// **Hold one session, then stop it** — in that order, so the sidecar's teardown finds the hold.
+///
+/// No hold is written once the grace has run out (`past_the_grace`): the bound on `until` would no
+/// longer hold. The stop is sent either way — the bootout would kill the session regardless, and a
+/// stop at least lets it tear down.
+fn secure_one(
+    req: &SecureTheInstance<'_>,
+    root: &std::path::Path,
+    engine: &mut crate::error::Result<crate::engine::Engine>,
+    session: &str,
+    until: &str,
+    past_the_grace: bool,
+) -> Secured {
+    let recorded = match past_the_grace {
+        true => Err(
+            "the grace had run out before the session was seen, so no hold was \
+                     recorded for it"
+                .to_string(),
+        ),
+        false => hold(engine, session, until, req.detail, (req.clock)()),
+    };
+    let stopped = crate::worker::stop_session_in(root, session);
+    match (recorded, stopped) {
+        (Ok(()), Ok(_)) => Secured::Held,
+        (Ok(()), Err(stop)) => {
+            eprintln!(
+                "warning: session {session} is on the restart's hold, but its stop could not be \
+                 sent ({stop}); the restart's bootout ends it"
+            );
+            Secured::Held
+        }
+        (Err(why), Ok(_)) => Secured::Unrecorded(why),
+        (Err(why), Err(stop)) => Secured::Unrecorded(format!("{why}; and its stop failed: {stop}")),
+    }
+}
+
+/// What the first look found that is not the instance's to hold: sessions in another process group,
+/// claims that cannot prove their process, and processes whose group could not be read.
+fn note_what_is_not_ours(
+    report: &mut RestartPreparation,
+    workspace: &str,
+    grouped: &crate::worker::GroupedSessions,
+) {
+    let prepared = |sessions: &[String]| {
+        sessions
+            .iter()
+            .map(|session| PreparedSession {
+                workspace: workspace.to_string(),
+                session: session.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    report.left_alone.extend(prepared(&grouped.others));
+    report.unverifiable.extend(prepared(&grouped.unverifiable));
+    report.unreadable.extend(
+        grouped
+            .unreadable
+            .iter()
+            .map(|(session, errno)| SessionTrouble {
+                workspace: workspace.to_string(),
+                session: session.clone(),
+                error: format!(
+                    "its process group could not be read: {}",
+                    std::io::Error::from_raw_os_error(*errno)
+                ),
+            }),
+    );
 }
 
 /// Record one session's hold through the Engine seam the runtime callback refuses for this limit.

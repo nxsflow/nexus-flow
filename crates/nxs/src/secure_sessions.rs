@@ -101,23 +101,15 @@ fn instance_group(home: &ServiceHome) -> Result<i32, String> {
     process_group_of(pid)
 }
 
-#[cfg(unix)]
+/// The group of `pid`, through the chat engine's one wrapper of `getpgid`.
 fn process_group_of(pid: u32) -> Result<i32, String> {
-    // SAFETY: `getpgid` reads another process's group and touches no memory of this process; a bad
-    // pid is an errno, not UB.
-    let group = unsafe { libc::getpgid(pid as libc::pid_t) };
-    if group > 0 {
-        return Ok(group);
-    }
-    Err(format!(
-        "the running service's process group could not be read ({})",
-        std::io::Error::last_os_error()
-    ))
-}
-
-#[cfg(not(unix))]
-fn process_group_of(_pid: u32) -> Result<i32, String> {
-    Err("this platform has no process groups to find the service's sessions by".to_string())
+    nexus_chat::worker::process_group_of(pid).map_err(|errno| match errno {
+        Some(errno) => format!(
+            "the running service's process group could not be read ({})",
+            std::io::Error::from_raw_os_error(errno)
+        ),
+        None => "the running service's process is gone".to_string(),
+    })
 }
 
 /// `SIGINT` ignored for as long as this lives, and restored after.
