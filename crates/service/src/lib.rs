@@ -43,6 +43,7 @@ pub mod launchd;
 pub mod lock;
 pub mod machine;
 pub mod orders;
+pub mod process;
 pub mod program;
 pub mod registry;
 pub mod restart;
