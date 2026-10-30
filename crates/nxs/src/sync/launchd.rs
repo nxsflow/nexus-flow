@@ -47,7 +47,7 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
         InstallPreparation::InsideTheService(service_pid) => (
             serde_json::json!({ "skipped": "inside-service", "service_pid": service_pid }),
             format!(
-                ". No session was put on hold: this install runs inside a process the service \
+                "No session was put on hold: this install runs inside a process the service \
                  started (pid {service_pid}), and holding and stopping the service's sessions \
                  would stop it too"
             ),
@@ -79,8 +79,8 @@ pub fn install(json: bool, allow_redirected_home: bool) -> Result<()> {
             home.root().display()
         );
         println!("{}", receipt.line);
-        if let Some(words) = prepared_line.strip_prefix(". ") {
-            println!("{words}");
+        if !prepared_line.is_empty() {
+            println!("{prepared_line}");
         }
     }
     if let Some(note) = &ignored {

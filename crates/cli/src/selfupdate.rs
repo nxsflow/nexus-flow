@@ -346,28 +346,34 @@ pub type PrepareForRestart = Box<
     dyn Fn(&nxs_service::ServiceHome, &RestartCause) -> nxs_service::restart::RestartPreparation,
 >;
 
+/// A registered preparation: a plain function, so it can sit in a process-wide slot.
+type PrepareFn =
+    fn(&nxs_service::ServiceHome, &RestartCause) -> nxs_service::restart::RestartPreparation;
+
 /// The preparation `nxf self-update` — the deprecated alias this crate dispatches itself — runs
 /// with: the one the multicall binary registered ([`register_restart_preparation`]), or none.
-static REGISTERED: std::sync::OnceLock<
-    fn(&nxs_service::ServiceHome, &RestartCause) -> nxs_service::restart::RestartPreparation,
-> = std::sync::OnceLock::new();
+///
+/// **This registry exists only for that alias.** The canonical `nxs self-update` takes the hook as
+/// an argument ([`crate::self_update`]). When `nxf self-update` is removed, remove this slot,
+/// [`register_restart_preparation`] and [`registered_preparation`] in the same change.
+static REGISTERED: std::sync::OnceLock<PrepareFn> = std::sync::OnceLock::new();
 
 /// **Hand this crate the preparation for the one path that cannot be given it as an argument** —
 /// `nxf self-update`, the deprecated alias this crate dispatches on its own. The canonical `nxs
 /// self-update` passes it to [`crate::self_update`] directly. A second registration is ignored.
-pub fn register_restart_preparation(
-    prepare: fn(
-        &nxs_service::ServiceHome,
-        &RestartCause,
-    ) -> nxs_service::restart::RestartPreparation,
-) {
+pub fn register_restart_preparation(prepare: PrepareFn) {
     let _ = REGISTERED.set(prepare);
 }
 
 /// The registered preparation, or one that prepares nothing and says why.
 pub(crate) fn registered_preparation() -> PrepareForRestart {
-    match REGISTERED.get() {
-        Some(prepare) => Box::new(*prepare),
+    preparation_from(REGISTERED.get().copied())
+}
+
+/// [`registered_preparation`] for a given slot — `None` prepares nothing and says why.
+fn preparation_from(registered: Option<PrepareFn>) -> PrepareForRestart {
+    match registered {
+        Some(prepare) => Box::new(prepare),
         None => Box::new(|_, _| {
             nxs_service::restart::RestartPreparation::nothing(
                 "this binary does not link the chat engine, so no session was put on hold",
@@ -840,7 +846,7 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
                 .as_deref()
                 .map(|s| format!(" (state: {s})"))
                 .unwrap_or_default(),
-            prepared_words(prepared)
+            another_sentence(prepared_words(prepared))
         )),
         ServiceRestart::Restarted {
             instance,
@@ -850,7 +856,7 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
         } => Line::Result(format!(
             "restarted the {instance} background service on the updated binary (launchd could not \
              be read back to confirm it — `nxs sync daemon status` says what it holds){}",
-            prepared_words(prepared)
+            another_sentence(prepared_words(prepared))
         )),
         ServiceRestart::Skipped {
             instance,
@@ -906,9 +912,18 @@ fn service_restart_line(restart: &ServiceRestart) -> Line {
     }
 }
 
-/// **What the restart did to the instance's sessions, in words** (nxf 6j6v.wxz0) — appended to the
-/// restart's line: what it put on hold, what it left to the bootout, what it left alone, and what
-/// it could not do. Empty when it touched nothing.
+/// `words` as a further sentence of a line — nothing when there are no words.
+fn another_sentence(words: String) -> String {
+    match words.is_empty() {
+        true => words,
+        false => format!(". {words}"),
+    }
+}
+
+/// **What the restart did to the instance's sessions, in words** (nxf 6j6v.wxz0): what it put on
+/// hold, what it left to the bootout, what it left alone, and what it could not do — one clause,
+/// with no separator in front of it, for the caller to place. Empty when it touched nothing and has
+/// no reason to give.
 pub fn prepared_words(prepared: &nxs_service::restart::RestartPreparation) -> String {
     use nxs_service::restart::PreparedSession;
     let names = |sessions: &[PreparedSession]| -> String {
@@ -968,11 +983,11 @@ pub fn prepared_words(prepared: &nxs_service::restart::RestartPreparation) -> St
     }
     if parts.is_empty() {
         return match &prepared.note {
-            Some(note) => format!(". No session was put on hold: {note}"),
+            Some(note) => format!("No session was put on hold: {note}"),
             None => String::new(),
         };
     }
-    format!(". Sessions — {}", parts.join("; "))
+    format!("Sessions — {}", parts.join("; "))
 }
 
 /// The note naming sibling instances that run this binary and were not restarted.
@@ -2484,6 +2499,146 @@ mod tests {
                 "{outcome:?}"
             );
             assert!(calls.borrow().is_empty(), "nothing was prepared");
+        }
+
+        /// A preparation the deprecated `nxf self-update` path can be handed by registration —
+        /// the multicall binary's real hook in production. It records the cause it ran for.
+        static REGISTERED_RAN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn a_registered_hook(
+            _: &nxs_service::ServiceHome,
+            cause: &RestartCause,
+        ) -> RestartPreparation {
+            REGISTERED_RAN.lock().unwrap().push(cause.to_string());
+            RestartPreparation {
+                held: vec![session("m-registered")],
+                ..RestartPreparation::default()
+            }
+        }
+
+        /// **The `nxf self-update` path runs the hook the binary registered** (review pass 2,
+        /// TQ #2): the alias is dispatched inside this crate, which cannot link the hook, so it
+        /// takes the registered one — and it runs before the bootout, exactly as the canonical
+        /// path's argument does. The only test in this process that registers.
+        #[test]
+        fn the_alias_path_runs_the_registered_hook_before_the_bootout() {
+            register_restart_preparation(a_registered_hook);
+            let m = Machine::new().installed();
+            let binary = m.binary.clone();
+            let m = m.alias_to(&binary);
+            let spy = Arc::new(SpyCtl::default());
+            m.running(&spy);
+            let (mut svc, _) = m.svc(&spy);
+            svc.prepare_for_restart = registered_preparation();
+            let verbs_before = spy.verbs().len();
+
+            let outcome = svc.restart(&m.dir, &cause()).unwrap();
+
+            assert_eq!(
+                *REGISTERED_RAN.lock().unwrap(),
+                ["nxs self-update 0.206.1 -> 0.207.0 restarted the background service"],
+                "the registered hook ran, once, with the cause"
+            );
+            assert_eq!(verbs_before, 0, "nothing had touched launchd before it");
+            let ServiceRestart::Restarted { prepared, .. } = outcome else {
+                panic!("the restart proceeds: {outcome:?}");
+            };
+            assert_eq!(
+                prepared.held,
+                [session("m-registered")],
+                "and its report rides along"
+            );
+            assert!(spy.verbs().iter().any(|v| v.starts_with("bootout ")));
+        }
+
+        /// **With nothing registered** — a build without the chat engine — the alias prepares
+        /// nothing, says why, and the restart still proceeds.
+        #[test]
+        fn with_nothing_registered_the_alias_prepares_nothing_says_why_and_restarts() {
+            let m = Machine::new().installed();
+            let binary = m.binary.clone();
+            let m = m.alias_to(&binary);
+            let spy = Arc::new(SpyCtl::default());
+            m.running(&spy);
+            let (mut svc, _) = m.svc(&spy);
+            svc.prepare_for_restart = preparation_from(None);
+
+            let outcome = svc.restart(&m.dir, &cause()).unwrap();
+
+            let ServiceRestart::Restarted { prepared, .. } = &outcome else {
+                panic!("the restart proceeds: {outcome:?}");
+            };
+            assert!(prepared.is_empty(), "{prepared:?}");
+            assert!(
+                prepared
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("does not link the chat engine")),
+                "{prepared:?}"
+            );
+            let Line::Result(line) = service_restart_line(&outcome) else {
+                panic!("a restart is part of the result");
+            };
+            assert!(line.contains("No session was put on hold"), "{line}");
+        }
+
+        /// **What the restart could NOT do is said in both renderings** (review pass 2, TQ #3): a
+        /// session stopped without a hold names its reason, and one whose claim proves nothing is
+        /// named as untouched — on the human line and in `--json`.
+        #[test]
+        fn the_sessions_the_restart_could_not_hold_are_named_in_both_renderings() {
+            use nxs_service::restart::SessionTrouble;
+            let prepared = RestartPreparation {
+                unrecorded: vec![SessionTrouble {
+                    workspace: "/work/a".into(),
+                    session: "m-ghost".into(),
+                    error: "no such internal session: m-ghost".into(),
+                }],
+                unverifiable: vec![session("m-old-claim")],
+                unreadable: vec![SessionTrouble {
+                    workspace: "/work/a".into(),
+                    session: "m-elsewhere".into(),
+                    error: "its process group could not be read: Operation not permitted".into(),
+                }],
+                ..RestartPreparation::default()
+            };
+            let restarted = ServiceRestart::Restarted {
+                instance: "nexus-flow".into(),
+                confirmed: true,
+                state: None,
+                prepared,
+            };
+
+            let Line::Result(line) = service_restart_line(&restarted) else {
+                panic!("a restart is part of the result");
+            };
+            assert!(
+                line.contains(
+                    "stopped without a hold — m-ghost (no such internal session: m-ghost)"
+                ),
+                "{line}"
+            );
+            assert!(
+                line.contains("could not be proven theirs: m-old-claim"),
+                "{line}"
+            );
+            assert!(
+                line.contains("m-elsewhere (its process group could not be read"),
+                "{line}"
+            );
+            assert!(
+                line.contains("passing. Sessions — "),
+                "one sentence break: {line}"
+            );
+
+            let body = with_service_restart(serde_json::json!({}), Some(&restarted));
+            let prepared = &body["service_restart"]["prepared"];
+            assert_eq!(prepared["unrecorded"][0]["session"], "m-ghost", "{body}");
+            assert_eq!(
+                prepared["unrecorded"][0]["error"],
+                "no such internal session: m-ghost"
+            );
+            assert_eq!(prepared["unverifiable"][0]["session"], "m-old-claim");
+            assert_eq!(prepared["unreadable"][0]["session"], "m-elsewhere");
         }
 
         /// The cause, in the words a hold's detail carries.
