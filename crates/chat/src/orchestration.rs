@@ -3610,6 +3610,23 @@ pub(crate) enum CopyInUse {
     },
 }
 
+impl CopyInUse {
+    /// What is keeping the copy, as the clause a warning names — `None` when nothing is.
+    pub(crate) fn describe(&self) -> Option<String> {
+        match self {
+            CopyInUse::Free => None,
+            CopyInUse::Running(running) => Some(format!(
+                "it still has a live process ({})",
+                running.join(", ")
+            )),
+            CopyInUse::OnRestartHold { until } => Some(format!(
+                "a session in it was stopped by a planned service restart and comes back to this \
+                 tree — on a service-restart hold until {until}"
+            )),
+        }
+    }
+}
+
 /// [`CopyInUse`] for `threads` at `ctx.now`: a live process first, then a standing in-place hold.
 ///
 /// vh0z's "a recovering slot keeps the lease" is the general rule of which the second half is the
@@ -3909,17 +3926,7 @@ fn sweep_expired_working_tree(
         return Ok(SweepStep::default());
     };
     let in_use = the_copy_is_still_in_use(ctx, store, &store.work_scope_threads(&scope)?)?;
-    if in_use != CopyInUse::Free {
-        let why = match &in_use {
-            CopyInUse::OnRestartHold { until } => format!(
-                "a session in it was stopped by a planned service restart and comes back to this \
-                 tree — on a service-restart hold until {until}"
-            ),
-            CopyInUse::Running(running) => {
-                format!("it still has a live process ({})", running.join(", "))
-            }
-            CopyInUse::Free => unreachable!("matched above"),
-        };
+    if let Some(why) = in_use.describe() {
         eprintln!(
             "warning: the chain holding this workspace's working copy (`{holder}`) is past its \
              bound ({expires}) but {why}, so the working copy is NOT being reclaimed — a \

@@ -2662,19 +2662,20 @@ test("a tool call still running is put on the record before it returns", async (
 // is coming back. Now the teardown asks the board first. Every case: a real sidecar, a real SIGTERM,
 // a fake `nxc` on PATH recording argv.
 
-/** `nxc session state <session> --json`, with or without a standing hold over `s-1`. */
-function sessionState({ hold }) {
+/** `nxc session state <session> --json`, with or without a standing hold over `session`
+ *  (this sidecar's own `s-1` unless said otherwise). */
+function sessionState({ hold, session = "s-1" }) {
   return JSON.stringify({
     sessions: [
       {
-        session: "s-1",
+        session,
         role: "local/tester",
         state: "running",
         ...(hold
           ? {
               interrupted: {
                 id: 7,
-                session: "s-1",
+                session,
                 at: "2026-10-27T10:00:00Z",
                 limit: hold,
                 until: "2026-10-27T10:02:30Z",
@@ -2749,4 +2750,25 @@ test("(c) unparseable output reads as no hold — the substitute goes out", asyn
     stdout: { "session state": "not json at all" },
   });
   assert.equal(replyCalls(calls).length, 1, `stderr:\n${stderr}`);
+});
+
+test("a hold over ANOTHER session does not silence this one — the substitute goes out", async (t) => {
+  // The board is asked about `s-1` and answers about `s-2` only: the hold is not this session's,
+  // so nothing says it is coming back.
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: "service_restart", session: "s-2" }) },
+  });
+  assert.equal(replyCalls(calls).length, 1, `the substitute goes out; stderr:\n${stderr}`);
+  assert.doesNotMatch(stderr, /told to stop while a hold stands/);
+});
+
+test("a WINDOW hold silences the substitute too — any standing hold means the session is coming back", async (t) => {
+  // Deliberate: the hold record says the same thing whatever its limit, and a substitute would
+  // discharge a round its session is coming back to. Pinned so that narrowing it to
+  // `service_restart` is a decision somebody takes, not a drift.
+  const { calls, stderr } = await stopAnUncoordinatedSession(t, {
+    stdout: { "session state": sessionState({ hold: "seven_day" }) },
+  });
+  assert.deepEqual(replyCalls(calls), [], `stderr:\n${stderr}`);
+  assert.match(stderr, /told to stop while a hold stands \(seven_day\)/);
 });

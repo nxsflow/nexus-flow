@@ -782,6 +782,9 @@ function readReplyDebt() {
   }
 }
 
+const HOLD_READ_ATTEMPTS = 4;
+const HOLD_READ_SPACING_MS = 250;
+const HOLD_READ_BUDGET_MS = 15_000;
 /** **Does a hold stand over THIS session right now?** (nxf 6j6v.wxz0) — `nxc session state
  *  <session> --json`, whose entry for `spec.session` carries the standing hold at `interrupted`.
  *
@@ -791,12 +794,13 @@ function readReplyDebt() {
  *  falls through to today's behaviour, where the engine's `--if-unanswered` gate decides.
  *
  *  A failed call is asked again, a few times, because the restart that sent this stop is writing
- *  holds into the same store at that moment (round-2 IR #8). Bounded well inside the restart's
- *  grace, so a store that stays locked costs at most `HOLD_READ_BUDGET_MS`, never the teardown. An
- *  `nxc` that does not know the verb is not asked again: that answer does not change. */
-const HOLD_READ_ATTEMPTS = 4;
-const HOLD_READ_SPACING_MS = 250;
-const HOLD_READ_BUDGET_MS = 15_000;
+ *  holds into the same store at that moment. Bounded well inside the restart's grace: no further
+ *  attempt is STARTED once `HOLD_READ_BUDGET_MS` has passed, and each attempt is itself bounded by
+ *  `NXC_CALL_TIMEOUT_MS` — so the whole read takes at most the budget plus one call's timeout. An
+ *  `nxc` that does not know the verb is not asked again: that answer does not change.
+ *
+ *  The wait between attempts blocks the thread (`Atomics.wait`), which is acceptable here: this
+ *  runs in the teardown, after the turn was aborted, and nothing else is waiting on the loop. */
 function readStandingHold() {
   const deadline = Date.now() + HOLD_READ_BUDGET_MS;
   for (let attempt = 1; ; attempt += 1) {
