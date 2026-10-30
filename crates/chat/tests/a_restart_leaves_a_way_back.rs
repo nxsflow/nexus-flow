@@ -179,7 +179,7 @@ fn a_repository(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
     std::fs::write(
         root.join(".gitignore"),
-        ".nxs/\n*.log\n*.mjs\ntorn-down-*\nsignalled-*\nflush-*\n",
+        ".nxs/\n*.log\n*.mjs\ntorn-down-*\nsignalled-*\nflush-*\nready-*\n",
     )
     .unwrap();
     git(root, &["add", "."]);
@@ -299,8 +299,15 @@ struct Session {
 impl Session {
     fn start(root: &Path, session: &str, on_term: Option<&str>, own_group: bool) -> Session {
         use std::os::unix::process::CommandExt;
+        // A trap is installed BEFORE anything may signal the process: the shell says so with a file,
+        // and `start` waits for it — a stop that arrived first would end the session by the
+        // default action, as it did once on CI under the injected clock that polls at once.
+        let ready = root.join(format!("ready-{session}"));
         let script = match on_term {
-            Some(trap) => format!("trap '{trap}' TERM; while :; do sleep 0.1; done"),
+            Some(trap) => format!(
+                "trap '{trap}' TERM; touch {}; while :; do sleep 0.1; done",
+                ready.display()
+            ),
             None => "exec sleep 600".to_string(),
         };
         let mut cmd = StdCommand::new("sh");
@@ -319,6 +326,9 @@ impl Session {
         }
         let mut child = cmd.spawn().expect("start the stand-in session");
         let pid = child.id();
+        if on_term.is_some() {
+            assert!(appears(&ready), "the stand-in never installed its trap");
+        }
         let logs = nexus_chat::worker::agent_logs_dir(root);
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(
