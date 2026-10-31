@@ -2787,6 +2787,11 @@ fn summary(
 /// the last movement of an open call's subprocesses, every nudge with its outcome, every rest
 /// confirmed, every stop with its outcome; "this host reports no …" for a signal the worker cannot
 /// read; and a stop still in flight named as UNCONFIRMED, since rung E ends its supervision.
+///
+/// **A known gap against design 8nx4 section 6**: the design words the subprocess line "the CPU
+/// counter moved from a to b"; the row keeps only the LATEST sample (its nine liveness columns), so
+/// the line names the counter where it stood at its last movement, with that instant. Saying "from
+/// a" would need the sample before it stored too.
 fn signs_of_life(
     ctx: &Ctx,
     store: &ChatStore,

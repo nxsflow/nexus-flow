@@ -227,6 +227,11 @@ fn stand_in_over(root: &Path, session: &str, script: &str) -> Child {
     child
 }
 
+/// What runs under the stand-in, all of it (`since` the epoch) — the same read the worker makes.
+fn nexus_chat_test_sample(pid: u32) -> Option<nxs_service::process::SubprocessSample> {
+    nxs_service::process::descendants_started_since(pid, std::time::UNIX_EPOCH)
+}
+
 /// SIGKILL the stand-in's whole process group and reap it. Through `kill(2)`, never the `kill`
 /// command: procps reads `kill -9 -<pgid>` as two options unless a `--` comes first, and BSD's
 /// does not, so the command form killed nothing on Linux and the reap below waited for ever.
@@ -699,9 +704,20 @@ fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
             serde_json::json!({ "name": "Bash", "input": { "command": "gh run watch" } }),
         )],
     );
+    // Each look comes once the child's CPU counter has really moved since the one before — polled,
+    // not slept, so a loaded runner waits as long as it needs and an idle one no longer.
+    let sample = || nexus_chat_test_sample(child.id());
+    let mut last = sample();
     let mut secs = 600;
     while secs <= 60 + 4 * nexus_chat::ladder::SILENCE_SECS {
-        std::thread::sleep(std::time::Duration::from_millis(1_500));
+        assert!(
+            within(30, || {
+                let now = sample();
+                now != last
+            }),
+            "the working child's counter never moved"
+        );
+        last = sample();
         tick(root, &at(secs), &thread);
         secs += 600;
     }

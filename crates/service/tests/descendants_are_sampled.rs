@@ -115,8 +115,13 @@ fn an_unreadable_pid_is_none() {
 fn a_grandchild_is_sampled_and_listed_with_its_start() {
     let since = SystemTime::now() - Duration::from_secs(1);
     let tree = Tree::spawn("sh -c 'sleep 60 & wait' & wait");
-    std::thread::sleep(Duration::from_millis(300));
-    let listed = descendants_with_start(tree.id()).expect("readable");
+    // Polled until both levels exist, not slept: a loaded runner forks late.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut listed = descendants_with_start(tree.id()).expect("readable");
+    while listed.len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        listed = descendants_with_start(tree.id()).expect("readable");
+    }
     assert!(listed.len() >= 2, "a child and a grandchild: {listed:?}");
     let s = descendants_started_since(tree.id(), since).unwrap();
     assert!(s.count >= 2, "both are in the sample: {s:?}");

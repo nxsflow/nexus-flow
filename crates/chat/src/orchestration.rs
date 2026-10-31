@@ -12944,10 +12944,11 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
 /// **What a posted answer does to its writer's slot** (nxf 6j6v.1r61, design 8nx4 sections 3 and 4)
 /// — once the reply is admitted, and never deciding whether it is:
 ///
-/// - **the session's nudges are withdrawn** (`Worker::withdraw_asks`) when the slot it answers has
-///   one on record, so a session that has replied is not handed "no sign of life from you" at its
-///   turn's end — the shape that invites a duplicate reply or a new round. Not at the owed row's deletion, which the sweep makes a look
-///   later: the sidecar yields a pending nudge at the very next `result`.
+/// - **the session's nudges are withdrawn** (`ladder::withdraw_the_nudges`) when the slot it answers
+///   has one on record, so a session that has replied is not handed "no sign of life from you" at
+///   its turn's end — the shape that invites a duplicate reply or a new round. Here, not at the
+///   owed row's deletion: the sweep makes that a look later, and the sidecar yields a pending
+///   nudge at the very next `result`.
 /// - **the owed turn is over when the reply discharged the slot**: ONE update zeroes the turn's
 ///   budget and every field of its episode, so a turn owed again on the same slot — before the
 ///   sweep forgets the row — starts from nothing (round 3 CQ #2 / TQ #3 / IR #2).
