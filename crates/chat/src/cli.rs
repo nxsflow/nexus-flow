@@ -1587,6 +1587,19 @@ impl crate::worker::Worker for LazyWorker {
         }
     }
 
+    /// The subprocess sample, forwarded in the same change that added it to the trait (nxf
+    /// 6j6v.pszd cut 2). A selection failure is `None` — a worker that could not be built read no
+    /// process, and the ladder then judges the open call without a sample.
+    fn subprocess_sample(
+        &self,
+        internal_session: &str,
+        since: &str,
+    ) -> Option<nxs_service::process::SubprocessSample> {
+        crate::worker::select_worker(self.cwd.clone())
+            .ok()?
+            .subprocess_sample(internal_session, since)
+    }
+
     /// The act behind the question one method up, forwarded with it (nxf 6j6v.b9nf). A selection
     /// failure is reported AS the refusal it is, in `run_precondition`'s shape below: there is no
     /// safe `Ok` to fall back to — an `Ok` here means "delivered", and a caller would wait on a

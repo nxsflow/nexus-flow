@@ -825,6 +825,25 @@ pub trait Worker: Send + Sync {
         let _ = internal_session;
         Ok(())
     }
+
+    /// **What the processes under this session's open tool call have used so far** (nxf 6j6v.pszd
+    /// cut 2, design 8nx4 section 1 (b)) — `(count, Σ CPU counter)` of the descendants of the
+    /// session's process started at or after `since`, the RFC3339 instant
+    /// `ChatStore::slot_open_tool_call` returns. The counter is in the platform's raw unit and is
+    /// compared for change only.
+    ///
+    /// **The default is `None`**: a host that cannot read its sessions' processes has no sample,
+    /// and the ladder then keeps judging the open call without one.
+    ///
+    /// Must return promptly and must not call back into the engine — [`Worker`]'s two rules.
+    fn subprocess_sample(
+        &self,
+        internal_session: &str,
+        since: &str,
+    ) -> Option<nxs_service::process::SubprocessSample> {
+        let _ = (internal_session, since);
+        None
+    }
 }
 
 /// **What a session's pulse says** (nxf 6j6v.pszd cut 1) — see [`Worker::session_pulse`]. The
@@ -1063,6 +1082,15 @@ impl Worker for BoundedWorker {
     /// Forwarded, not bounded (nxf 6j6v.pszd): a conforming withdrawal unlinks files.
     fn withdraw_asks(&self, internal_session: &str) -> std::result::Result<(), String> {
         self.inner.withdraw_asks(internal_session)
+    }
+
+    /// Forwarded, not bounded (nxf 6j6v.pszd cut 2): a conforming sample is a process-table read.
+    fn subprocess_sample(
+        &self,
+        internal_session: &str,
+        since: &str,
+    ) -> Option<nxs_service::process::SubprocessSample> {
+        self.inner.subprocess_sample(internal_session, since)
     }
 
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
@@ -2239,6 +2267,28 @@ impl Worker for SidecarWorker {
             Ok(())
         } else {
             Err(failed.join("; "))
+        }
+    }
+
+    /// **The sample under this session's claim** (nxf 6j6v.pszd cut 2): the descendants of the pid
+    /// its own `<session>.pid` names — and only once [`who_holds`] has PROVED that pid is this
+    /// session's process, as [`stop_session_by`](SidecarWorker::stop_session_by) does before a
+    /// signal. A claim that is missing, gone, handed on or unverifiable is `None`: the children of
+    /// a stranger holding the number would keep a dead session alive on somebody else's CPU.
+    fn subprocess_sample(
+        &self,
+        internal_session: &str,
+        since: &str,
+    ) -> Option<nxs_service::process::SubprocessSample> {
+        let since =
+            time::OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339)
+                .ok()?;
+        let claim = claim_in(&agent_logs_dir(&self.cwd).join(format!("{internal_session}.pid")))?;
+        match who_holds(&claim) {
+            ClaimHolder::TheSession => {
+                nxs_service::process::descendants_started_since(claim.pid, since.into())
+            }
+            ClaimHolder::Gone | ClaimHolder::SomebodyElse | ClaimHolder::Unverifiable => None,
         }
     }
 
@@ -3699,6 +3749,50 @@ mod tests {
             ]
         );
         assert_eq!(w.withdraw_asks("s-1"), Ok(()), "idempotent");
+    }
+
+    /// **The subprocess sample is read only under a claim that is provably this session's** (nxf
+    /// 6j6v.pszd cut 2): a missing claim, a pid handed on to somebody else and a claim that cannot
+    /// be verified all answer `None` — reading a stranger's children would keep a dead session
+    /// alive on somebody else's CPU.
+    #[test]
+    fn subprocess_sample_reads_only_under_this_sessions_own_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = sidecar_worker_at(tmp.path());
+        let logs = agent_logs_dir(tmp.path());
+        let since = "2026-01-01T00:00:00Z";
+        assert_eq!(w.subprocess_sample("s-1", since), None, "no claim");
+        std::fs::create_dir_all(&logs).unwrap();
+        let me = std::process::id();
+        // A live pid whose recorded start is decades off: the pid was handed on.
+        std::fs::write(
+            logs.join("s-1.pid"),
+            format!("{me}\n2000-01-01T00:00:00Z\n"),
+        )
+        .unwrap();
+        assert_eq!(w.subprocess_sample("s-1", since), None, "somebody else");
+        // A pid that has exited: the session is gone.
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let dead = exited.id();
+        exited.wait().unwrap();
+        std::fs::write(logs.join("s-1.pid"), session_claim_for(dead)).unwrap();
+        assert_eq!(w.subprocess_sample("s-1", since), None, "gone");
+        // The old format: a bare pid, nothing to verify it against.
+        std::fs::write(logs.join("s-1.pid"), format!("{me}\n")).unwrap();
+        assert_eq!(w.subprocess_sample("s-1", since), None, "unverifiable");
+        // The session's own claim, but `since` that is not an instant.
+        std::fs::write(logs.join("s-1.pid"), session_claim_for(me)).unwrap();
+        assert_eq!(
+            w.subprocess_sample("s-1", "soon"),
+            None,
+            "unparseable since"
+        );
+        if SESSIONS_ARE_STOPPABLE && nxs_service::heartbeat::process_started_at(me).is_some() {
+            assert!(
+                w.subprocess_sample("s-1", since).is_some(),
+                "this session's own claim is sampled"
+            );
+        }
     }
 
     // ---- the declared-hurdle seam (nxf 6j6v.n92p) ---------------------------------------------

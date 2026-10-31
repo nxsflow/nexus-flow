@@ -315,7 +315,7 @@ pub fn write_to(path: &Path, hb: &Heartbeat) -> Result<()> {
 /// the service's OWN start still passes. That is not the failure this exists to fix — the reported
 /// case is a service that died long ago and whose pid the system handed to something else, which
 /// this catches however wide the gap.
-const START_TIME_SLACK: Duration = Duration::from_secs(60);
+pub(crate) const START_TIME_SLACK: Duration = Duration::from_secs(60);
 
 /// How far AFTER its own process a service may claim to have started and still be that process
 /// (nxf 6j6v.d43g, bounded after the review of PR #421).
