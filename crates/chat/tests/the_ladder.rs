@@ -23,7 +23,9 @@ use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::error::Result as NxfResult;
 use nexus_chat::facade::{self, StatusOperation, StatusScope, StatusThread};
-use nexus_chat::orchestration::{self, ConsequenceClass, SessionEnd, TickReceipt, TickRequest};
+use nexus_chat::orchestration::{
+    self, ConsequenceClass, ReplyReceipt, SessionEnd, TickReceipt, TickRequest,
+};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::store::ChatStore;
 use nexus_chat::surface::{self, ReplyThreadRequest, SendToRefs, SendToRequest};
@@ -84,6 +86,12 @@ struct Hand {
     samples: Mutex<HashMap<String, Option<SubprocessSample>>>,
     /// Every session whose asks were withdrawn, in order.
     withdrawn: Mutex<Vec<String>>,
+    /// When set, every withdrawal is recorded and then answers this error — an ask file the
+    /// worker could not unlink.
+    withdraw_fails: Mutex<Option<&'static str>>,
+    /// When set, every stop is recorded and then answers this instead of `Requested`:
+    /// `"nothing"` is `NothingToStop`, anything else an `Err` with that text.
+    stop_answers: Mutex<Option<&'static str>>,
     /// Every pulse read for a session whose process was NOT running — a reading the ladder must
     /// never take, since the file outlives its process (review of d1ey, CQ #2 / IR #3).
     pulse_read_while_not_running: Mutex<Vec<String>>,
@@ -194,7 +202,13 @@ impl Worker for Hand {
             .lock()
             .unwrap()
             .push(internal_session.to_string());
-        Ok(SessionStop::Requested)
+        match *self.stop_answers.lock().unwrap() {
+            None => Ok(SessionStop::Requested),
+            Some("nothing") => Ok(SessionStop::NothingToStop(
+                "its pid is gone (injected)".to_string(),
+            )),
+            Some(e) => Err(e.to_string()),
+        }
     }
     fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
         if !self.session_is_running(&ask.session) {
@@ -225,7 +239,10 @@ impl Worker for Hand {
             .lock()
             .unwrap()
             .push(internal_session.to_string());
-        Ok(())
+        match *self.withdraw_fails.lock().unwrap() {
+            None => Ok(()),
+            Some(e) => Err(e.to_string()),
+        }
     }
     fn subprocess_sample(&self, internal_session: &str, _since: &str) -> Option<SubprocessSample> {
         self.samples
@@ -472,6 +489,18 @@ impl Team {
     }
 
     fn reply(&self, now: &str, role: &str, session: &str, thread: &str, body: &str) {
+        self.reply_receipt(now, role, session, thread, body);
+    }
+
+    /// [`Team::reply`], with the receipt the reply's writer gets.
+    fn reply_receipt(
+        &self,
+        now: &str,
+        role: &str,
+        session: &str,
+        thread: &str,
+        body: &str,
+    ) -> ReplyReceipt {
         self.with(now, role, Some(session), |ctx, store| {
             surface::reply_in_thread(
                 ctx,
@@ -486,7 +515,7 @@ impl Team {
                 },
             )
         })
-        .expect("the reply is posted");
+        .expect("the reply is posted")
     }
 
     /// The commissioner, `owner`, answers in `thread`.
@@ -3756,4 +3785,173 @@ fn a_reply_on_one_slot_leaves_no_other_slot_waiting_on_a_withdrawn_nudge() {
     );
     let to_y = team.worker.asks().iter().filter(|a| a.thread == y).count();
     assert_eq!(to_y, 2, "Y is nudged again");
+}
+
+// ---- review of pass 2: the failure paths the ticket names (TQ #1, TQ #2) ---------------------------
+
+/// **A reply whose withdrawal fails is still a reply** (review of pass 2, TQ #1): one session
+/// serves X and Y, both nudged; the worker cannot unlink the ask files. The answer on X is posted,
+/// X's owed turn is over, the receipt carries the failed withdrawal as a `RecoveryFailed` warning
+/// naming X and the session, and Y's nudge row is cleared all the same, since the sidecar's own
+/// drain may still deliver the file.
+#[test]
+fn a_reply_whose_withdrawal_fails_is_posted_discharges_its_slot_warns_and_clears_the_other_nudges()
+{
+    let team = team();
+    let x = team.commission(T0, "pm", "plan the X feature").thread_id;
+    let session = team.worker.last("pm").internal_session;
+    let y = team.commission(&at(60), "coder", "build Y").thread_id;
+    team.sql(&format!(
+        "UPDATE owed_starts SET session = '{session}' WHERE thread = '{y}'"
+    ));
+    team.worker.run(&session);
+    team.tick(&at(600), &x);
+    team.tick(&at(660), &y);
+    assert_eq!(team.worker.asks().len(), 2, "both slots nudged");
+    assert_eq!(team.owed(&x, "pm", "asked_at"), Some(at(600)));
+    assert_eq!(team.owed(&y, "coder", "asked_at"), Some(at(660)));
+    *team.worker.withdraw_fails.lock().unwrap() =
+        Some("the ask file could not be unlinked (injected)");
+
+    let receipt = team.reply_receipt(&at(700), "pm", &session, &x, "the plan");
+
+    assert!(receipt.posted, "the reply is posted");
+    assert!(
+        team.messages(&x)
+            .iter()
+            .any(|(_, _, body)| body == "the plan"),
+        "the answer is in X"
+    );
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()],
+        "the withdrawal was tried"
+    );
+    let warning = receipt
+        .warnings
+        .iter()
+        .find(|w| w.class == ConsequenceClass::RecoveryFailed)
+        .unwrap_or_else(|| panic!("a RecoveryFailed warning: {:?}", receipt.warnings));
+    assert_eq!(warning.thread.as_deref(), Some(x.as_str()));
+    assert_eq!(warning.session.as_deref(), Some(session.as_str()));
+    assert!(
+        warning.detail.contains("could not be withdrawn")
+            && warning.detail.contains("could not be unlinked (injected)"),
+        "{}",
+        warning.detail
+    );
+    assert_eq!(
+        (
+            team.owed(&x, "pm", "asked_at"),
+            team.owed(&x, "pm", "recovery_started_at")
+        ),
+        (None, None),
+        "X's owed turn is over"
+    );
+    assert_eq!(
+        team.owed(&y, "coder", "asked_at"),
+        None,
+        "Y's nudge row is cleared although the unlink failed"
+    );
+}
+
+/// **A dead verdict whose stop finds nothing to stop** (review of pass 2, TQ #2): the `stopped` row
+/// says `nothing_to_stop`, and the stop is still on record (`stop_requested_at` at the verdict —
+/// the choice pinned here: the outcome does not decide whether a stop was requested). Its end
+/// announced, the slot is continued like any stopped session — no further SIGTERM is sent.
+#[test]
+fn a_dead_verdict_with_nothing_to_stop_logs_it_and_the_slot_is_continued() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    *team.worker.stop_answers.lock().unwrap() = Some("nothing");
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(
+        team.log_at(&thread, "coder"),
+        vec![
+            ("asked".into(), Some("asked".into()), 600),
+            ("stopped".into(), Some("nothing_to_stop".into()), 900),
+        ]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(900))
+    );
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, None);
+    team.tick(&at(960), &thread);
+    team.tick(&at(1_020), &thread);
+    let actions: Vec<String> = team
+        .log(&thread, "coder")
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    assert_eq!(actions, ["asked", "stopped", "continued"]);
+    assert_eq!(team.worker.stops().len(), 1, "no further SIGTERM");
+}
+
+/// **A dead verdict whose stop FAILS** (review of pass 2, TQ #2): the `stopped` row carries
+/// `failed: <the worker's error>`, and the stop stands as requested — the choice pinned here: a
+/// failed SIGTERM is treated like one the process ignored, so the one further SIGTERM comes at the
+/// grace and the look at twice the grace escalates the process as one that would not stop.
+#[test]
+fn a_dead_verdict_whose_stop_fails_logs_the_error_signals_once_more_and_escalates() {
+    use nexus_chat::ladder::STOP_GRACE_SECS;
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    *team.worker.stop_answers.lock().unwrap() = Some("kill(2) refused (injected)");
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(
+        team.log_at(&thread, "coder")[1],
+        (
+            "stopped".into(),
+            Some("failed: kill(2) refused (injected)".into()),
+            900
+        )
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(900)),
+        "a failed stop is still a stop in flight"
+    );
+    team.tick(&at(900 + STOP_GRACE_SECS), &thread);
+    assert_eq!(team.worker.stops().len(), 2, "the one further SIGTERM");
+    team.tick(&at(900 + 2 * STOP_GRACE_SECS), &thread);
+    assert_eq!(team.escalated_at(&thread), vec![900 + 2 * STOP_GRACE_SECS]);
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(body.contains("would not stop"), "{body}");
+}
+
+/// **The cap under B does not depend on the stop's answer** (review of pass 2, TQ #2): continued
+/// once, the session is dead again at +1 620; whether its stop finds nothing to stop or fails, the
+/// `stopped` row carries that outcome and the slot escalates at that same look.
+#[test]
+fn at_the_cap_a_stop_with_nothing_to_stop_or_a_failed_stop_still_escalates_at_that_look() {
+    for (answer, outcome) in [
+        ("nothing", "nothing_to_stop"),
+        (
+            "kill(2) refused (injected)",
+            "failed: kill(2) refused (injected)",
+        ),
+    ] {
+        let team = team();
+        let (thread, _session) = continued_once(&team);
+        *team.worker.stop_answers.lock().unwrap() = Some(answer);
+        for s in (1_080..=1_620).step_by(60) {
+            team.tick(&at(s), &thread);
+        }
+        let log = team.log_at(&thread, "coder");
+        assert_eq!(
+            log[log.len() - 2..],
+            [
+                ("stopped".into(), Some(outcome.into()), 1_620),
+                ("escalated".into(), log[log.len() - 1].1.clone(), 1_620),
+            ],
+            "{answer}: {log:?}"
+        );
+        assert_eq!(team.escalated_at(&thread), vec![1_620], "{answer}");
+    }
 }
