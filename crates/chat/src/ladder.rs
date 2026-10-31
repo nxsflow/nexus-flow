@@ -683,6 +683,40 @@ impl ChatStore {
         Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
     }
 
+    /// **The session's OWN life on the slot** (nxf 6j6v.1r61, design 8nx4 section 1, `L(a)`): the
+    /// newest instant in the slot's current span among the entries the MODEL produced — `assistant`,
+    /// `thinking`, `tool_use`, and a `tool_result` only when its `tool_use` lies in the same span.
+    /// The sidecar's `turn_start` (written for every opener, a continuation and an ask included),
+    /// the runtime's `session_init`, `result` and `error` are bookkeeping, never life — which is
+    /// what keeps a resumed session from reading "alive" before its model has said a word. The
+    /// unfiltered reading stays [`slot_last_activity`](ChatStore::slot_last_activity), which `nxc
+    /// status` and rung E's summary show.
+    pub(crate) fn slot_last_own_output(
+        &self,
+        session: &str,
+        thread: &str,
+    ) -> Result<Option<String>> {
+        let Some((start, end)) = self.slot_turn(session, thread)? else {
+            return Ok(None);
+        };
+        let conn = self.connection();
+        let mut st = conn.prepare(
+            "SELECT e.at FROM agent_transcript e
+              WHERE e.internal_session = ?1 AND e.seq >= ?2 AND (?3 IS NULL OR e.seq < ?3)
+                AND e.at IS NOT NULL
+                AND ( e.kind IN ('assistant', 'thinking', 'tool_use')
+                   OR ( e.kind = 'tool_result' AND e.tool_use_id IS NOT NULL AND EXISTS (
+                          SELECT 1 FROM agent_transcript u
+                           WHERE u.internal_session = ?1 AND u.kind = 'tool_use'
+                             AND u.tool_use_id = e.tool_use_id
+                             AND u.seq >= ?2 AND (?3 IS NULL OR u.seq < ?3))))",
+        )?;
+        let ats = st
+            .query_map(params![session, start, end], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
+    }
+
     /// **The span of the slot's own turn** in `session`'s transcript: from the newest `turn_start {
     /// thread }` of THAT slot (inclusive) up to the next `turn_start` of any other slot (exclusive,
     /// `None` while there is none). `None` when the slot has no turn of its own on record.
@@ -1896,6 +1930,82 @@ mod tests {
         wait_for("a failed renewal", || renewal.failures() > 0);
         drop(renewal);
         assert!(!missing.exists(), "nothing was created");
+    }
+
+    fn entry(store: &ChatStore, kind: &str, at: &str, tool_use_id: Option<&str>, data: &str) {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO agent_transcript(internal_session, seq, kind, tool_use_id, at, data)
+                 VALUES ('s-1', (SELECT COALESCE(MAX(seq), -1) + 1 FROM agent_transcript
+                                  WHERE internal_session = 's-1'), ?1, ?2, ?3, ?4)",
+                params![kind, tool_use_id, at, data],
+            )
+            .unwrap();
+    }
+
+    /// **The session's own life is model output only** (nxf 6j6v.1r61, design 8nx4 section 1, round
+    /// 3 TQ #4 / TQ #6): the newest `assistant`, `thinking` or `tool_use` of the slot's span, and a
+    /// `tool_result` only when its `tool_use` lies in the same span. The sidecar's `turn_start`,
+    /// the runtime's `session_init`, `result` and `error` are not life — and neither is a result
+    /// whose call was made before the span began (a resumed session's first entry, often).
+    #[test]
+    fn slot_last_own_output_reads_model_output_and_nothing_the_runtime_writes() {
+        let store = ChatStore::open_in_memory(1);
+        // An earlier turn of the slot: a call made there.
+        entry(&store, "turn_start", &at(0), None, r#"{"thread":"t-1"}"#);
+        entry(
+            &store,
+            "tool_use",
+            &at(10),
+            Some("old"),
+            r#"{"name":"Bash"}"#,
+        );
+        // The current span.
+        entry(&store, "turn_start", &at(100), None, r#"{"thread":"t-1"}"#);
+        entry(&store, "session_init", &at(101), None, "{}");
+        assert_eq!(
+            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            None,
+            "the marker and the runtime's init are not life"
+        );
+        entry(&store, "tool_result", &at(102), Some("old"), "{}");
+        assert_eq!(
+            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            None,
+            "a result whose call lies before the span is not life"
+        );
+        entry(&store, "thinking", &at(110), None, "{}");
+        assert_eq!(
+            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            Some(at(110))
+        );
+        entry(
+            &store,
+            "tool_use",
+            &at(120),
+            Some("new"),
+            r#"{"name":"Bash"}"#,
+        );
+        entry(&store, "tool_result", &at(130), Some("new"), "{}");
+        assert_eq!(
+            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            Some(at(130)),
+            "a result whose call lies in the span is"
+        );
+        entry(&store, "assistant", &at(140), None, "{}");
+        entry(&store, "result", &at(150), None, "{}");
+        entry(&store, "error", &at(160), None, "{}");
+        assert_eq!(
+            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            Some(at(140)),
+            "result and error are the runtime's"
+        );
+        assert_eq!(
+            store.slot_last_activity("s-1", "t-1").unwrap(),
+            Some(at(160)),
+            "the unfiltered reader is unchanged"
+        );
     }
 
     /// Every typed outcome reads back as itself — the log's words and the hold's.

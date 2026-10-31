@@ -56,7 +56,10 @@ pub(crate) const STRANDED_DDL: &str = "
     -- `recovery_started_at`, `asked_at` and `last_progress_at` are the ladder's (6j6v.558h) and
     -- stay at their defaults until it is built. `backfilled` marks a row the one-time backfill
     -- wrote for a slot opened before this cut; `abandoned` is the reason such a slot is recorded as
-    -- given up (never nudged), with `abandoned_at`.
+    -- given up (never nudged), with `abandoned_at`. The liveness ladder (6j6v.pszd cut 3) keeps
+    -- its episode on the row: `confirmations` and `rest_total_secs` (the rests granted by `nxc
+    -- confirm`), `confirmed_until`, `stop_requested_at` and `stop_signals` (a stop in flight), and
+    -- the last sample of the open call's subprocesses with the instant it last moved.
     CREATE TABLE IF NOT EXISTS owed_starts(
         thread              TEXT    NOT NULL,
         role                TEXT    NOT NULL,
@@ -73,6 +76,14 @@ pub(crate) const STRANDED_DDL: &str = "
         abandoned           TEXT,
         abandoned_at        TEXT,
         next_look           TEXT,
+        confirmations       INTEGER NOT NULL DEFAULT 0,
+        rest_total_secs     INTEGER NOT NULL DEFAULT 0,
+        confirmed_until     TEXT,
+        stop_requested_at   TEXT,
+        stop_signals        INTEGER NOT NULL DEFAULT 0,
+        subprocess_count    INTEGER,
+        subprocess_cpu_units INTEGER,
+        subprocess_moved_at TEXT,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
@@ -161,6 +172,46 @@ pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Resul
             "owed_starts",
             "next_look",
             "ALTER TABLE owed_starts ADD COLUMN next_look TEXT;",
+        ),
+        (
+            "owed_starts",
+            "confirmations",
+            "ALTER TABLE owed_starts ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "rest_total_secs",
+            "ALTER TABLE owed_starts ADD COLUMN rest_total_secs INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "confirmed_until",
+            "ALTER TABLE owed_starts ADD COLUMN confirmed_until TEXT;",
+        ),
+        (
+            "owed_starts",
+            "stop_requested_at",
+            "ALTER TABLE owed_starts ADD COLUMN stop_requested_at TEXT;",
+        ),
+        (
+            "owed_starts",
+            "stop_signals",
+            "ALTER TABLE owed_starts ADD COLUMN stop_signals INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_count",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_count INTEGER;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_cpu_units",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_cpu_units INTEGER;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_moved_at",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_moved_at TEXT;",
         ),
         (
             "session_map",
@@ -346,6 +397,22 @@ pub(crate) struct OwedStart {
     /// (its commissioning message is gone). Never nudged; `withdraw` is its exit.
     pub abandoned: Option<String>,
     pub abandoned_at: Option<String>,
+    /// The rests granted in the episode under way (`nxc confirm --rest`, 6j6v.pszd cut 3).
+    pub confirmations: u32,
+    /// Their sum, in seconds — capped at `ladder::CONFIRM_TOTAL_CAP_SECS`.
+    pub rest_total_secs: i64,
+    /// The rest standing: no look acts before this instant plus `ladder::CONFIRM_GRACE_SECS`.
+    pub confirmed_until: Option<String>,
+    /// The ladder's SIGTERM of the slot's process, while that stop is in flight.
+    pub stop_requested_at: Option<String>,
+    /// How many SIGTERMs the stop in flight has sent: one, then the one further one.
+    pub stop_signals: u32,
+    /// The last sample of the open call's subprocesses: how many…
+    pub subprocess_count: Option<u32>,
+    /// …and their CPU counter, in the platform's raw unit.
+    pub subprocess_cpu_units: Option<u64>,
+    /// The look that last saw the sample move (`M`, design 8nx4 section 2).
+    pub subprocess_moved_at: Option<String>,
 }
 
 /// **One row the one-time backfill writes** (nxf 6j6v.kgfn) — an open coordinated slot opened before
@@ -515,7 +582,8 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
 
 const OWED_COLS: &str = "thread, role, session, trigger_clock, triggered, coordinator, \
      backfilled, attempts, recovering_until, recovery_started_at, asked_at, last_progress_at, \
-     abandoned, abandoned_at";
+     abandoned, abandoned_at, confirmations, rest_total_secs, confirmed_until, stop_requested_at, \
+     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at";
 
 fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
     let triggered: i64 = r.get(4)?;
@@ -536,6 +604,18 @@ fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
         last_progress_at: r.get(11)?,
         abandoned: r.get(12)?,
         abandoned_at: r.get(13)?,
+        confirmations: u32::try_from(r.get::<_, i64>(14)?).unwrap_or(0),
+        rest_total_secs: r.get(15)?,
+        confirmed_until: r.get(16)?,
+        stop_requested_at: r.get(17)?,
+        stop_signals: u32::try_from(r.get::<_, i64>(18)?).unwrap_or(0),
+        subprocess_count: r
+            .get::<_, Option<i64>>(19)?
+            .and_then(|n| u32::try_from(n).ok()),
+        subprocess_cpu_units: r
+            .get::<_, Option<i64>>(20)?
+            .and_then(|n| u64::try_from(n).ok()),
+        subprocess_moved_at: r.get(21)?,
     })
 }
 
@@ -2944,6 +3024,52 @@ mod tests {
             .query_row("SELECT escalation FROM stranded_sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(escalation, "posted");
+    }
+
+    /// **The liveness columns reach a store from before cut 3 of 6j6v.pszd** (nxf 6j6v.1r61): an
+    /// `owed_starts` of the shape the ladder had until then gains the eight columns in place, with
+    /// their defaults on the row it already held — and a second pass adds nothing.
+    #[test]
+    fn a_store_from_before_the_liveness_ladder_gains_its_eight_columns_in_place() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owed_starts(
+                 thread TEXT NOT NULL, role TEXT NOT NULL, session TEXT,
+                 trigger_clock TEXT NOT NULL, triggered INTEGER NOT NULL, coordinator TEXT,
+                 recovering_until TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                 recovery_started_at TEXT, backfilled INTEGER NOT NULL DEFAULT 0, asked_at TEXT,
+                 last_progress_at TEXT, abandoned TEXT, abandoned_at TEXT, next_look TEXT,
+                 PRIMARY KEY(thread, role));
+             INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered)
+                 VALUES ('m-t', 'ws/verifier', 'm-s', '2026-10-18T10:00:00Z', 1);",
+        )
+        .unwrap();
+        add_ladder_columns(&conn).unwrap();
+        add_ladder_columns(&conn).unwrap();
+        for column in [
+            "confirmations",
+            "rest_total_secs",
+            "confirmed_until",
+            "stop_requested_at",
+            "stop_signals",
+            "subprocess_count",
+            "subprocess_cpu_units",
+            "subprocess_moved_at",
+        ] {
+            assert!(
+                column_exists(&conn, "owed_starts", column).unwrap(),
+                "{column} was added"
+            );
+        }
+        let (confirmations, rest, signals, until): (i64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT confirmations, rest_total_secs, stop_signals, confirmed_until
+                   FROM owed_starts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((confirmations, rest, signals, until), (0, 0, 0, None));
     }
 
     fn backfill_row(thread: &str, abandoned: Option<&str>) -> Backfill {
