@@ -2309,7 +2309,7 @@ async function runSidecarWithTheDoor(t, opts, drive) {
   return { ...collect({ status, signal, stdout, stderr }), claimAfter: read(claim), claimPath: claim };
 }
 
-const ASK_TEXT = "Coordinator of thread thread-77: I have seen no activity from you for 20 minutes.";
+const ASK_TEXT = "Coordinator of thread thread-77: no sign of life from you for 10 minutes.";
 
 /** The door's whole round trip: the sidecar declares `ask: 1` in its claim once its handler is in
  *  place; SIGUSR2 with an ask file leaves the file where it is while the running turn runs (drained

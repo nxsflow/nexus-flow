@@ -50,11 +50,13 @@ pub(crate) const STRANDED_DDL: &str = "
     -- The obligation record (nxf 6j6v.ccvy; the SLOT since 6j6v.kgfn): thread T owes an answer
     -- from role H (the qualified handle, as the thread register names it). Written when the slot is
     -- OPENED, before any session exists — `session` is NULL until the mint fills it. ONE clock
-    -- column: the open instant, then the mint's, then every trigger's, moved by every re-trigger
-    -- and by a resume; `triggered` says whether any trigger ran. `coordinator` is the thread whose
-    -- tick coordinates the slot (`coordinator_of`). `recovering_until`, `attempts`,
-    -- `recovery_started_at`, `asked_at` and `last_progress_at` are the ladder's (6j6v.558h) and
-    -- stay at their defaults until it is built. `backfilled` marks a row the one-time backfill
+    -- column, the process-start instant P: the INSERT writes the first one, and since 6j6v.1r61
+    -- only a process start moves it (`reset_for_a_new_process`); `triggered` says whether any
+    -- trigger ran. `coordinator` is the thread whose tick coordinates the slot (`coordinator_of`).
+    -- `recovering_until`, `attempts`, `recovery_started_at` and `asked_at` are the ladder's
+    -- (6j6v.558h). `last_progress_at` is read-only: written by versions before 6j6v.1r61 (the
+    -- retired `nxc reply --progress`), never written now, and only cleared at an episode's end.
+    -- `backfilled` marks a row the one-time backfill
     -- wrote for a slot opened before this cut; `abandoned` is the reason such a slot is recorded as
     -- given up (never nudged), with `abandoned_at`. The liveness ladder (6j6v.pszd cut 3) keeps
     -- its episode on the row: `confirmations` and `rest_total_secs` (the rests granted by `nxc
@@ -412,7 +414,8 @@ pub(crate) struct OwedStart {
     pub recovery_started_at: Option<String>,
     /// The ladder's last ask (6j6v.558h).
     pub asked_at: Option<String>,
-    /// The ladder's last sign of life (6j6v.558h).
+    /// **Read-only**: the last `nxc reply --progress` — written by versions before 6j6v.1r61,
+    /// never written now; only the end of a recovery episode clears it.
     pub last_progress_at: Option<String>,
     /// Why the slot was given up, when it was: `delivered` / `withdrawn` (the root no longer
     /// waits), `aged` (its newest evidence is older than [`ABANDONED_AFTER_SECS`]), `consolidated`
@@ -3148,7 +3151,7 @@ mod tests {
     /// `owed_starts` of the shape the ladder had until then gains the nine columns in place, with
     /// their defaults on the row it already held — and a second pass adds nothing.
     #[test]
-    fn a_store_from_before_the_liveness_ladder_gains_its_eight_columns_in_place() {
+    fn a_store_from_before_the_liveness_ladder_gains_its_nine_columns_in_place() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE owed_starts(
