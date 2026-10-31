@@ -980,6 +980,16 @@ VOCABULARY=(
   # review of PR #48 (Code Quality #2) found two spec lines still naming it. BARE: no identifier
   # survives under the old name.
   'NextRank'
+  #
+  # nxf 6j6v.1r61 (2026-10-31) — `nxc reply --progress` is retired: a coordinator's nudge has two
+  # answers, `nxc reply` and the bounded `nxc confirm --rest`. The flag, `surface::reply_progress`,
+  # `ProgressReceipt` and `Engine::reply_progress` went. What STAYS, read-only, is the on-disk word
+  # (`MessageKind::Progress`, `RecoveryAction::Progress`, `RungOutcome::Reset`), so `progress` alone
+  # is no term here. `--progress` is BARE and will meet other tools' own flags (`git clone
+  # --progress`); every such hit is a collision to judge, not a leftover.
+  '--progress'
+  'reply_progress'
+  'ProgressReceipt'
 )
 
 # ---- THE EXCLUSIONS, each with the reason it is not a defect ----------------------------------
