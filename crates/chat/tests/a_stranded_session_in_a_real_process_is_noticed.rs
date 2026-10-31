@@ -775,3 +775,258 @@ fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
     kill_tree(child);
     assert_eq!(taken, vec!["escalated".to_string()], "no nudge was spent");
 }
+
+// ---- the liveness ladder against the REAL sidecar (nxf 6j6v.1r61, design 8nx4 test 1) -------------
+
+/// The real `agent-sidecar/src/main.mjs`, its SDK mapped by a loader hook to a stub `query()` that
+/// says one thing, starts a shell whose `sleep` is a GRANDCHILD of the sidecar, and then hangs until
+/// it is aborted — a model that went quiet mid-turn. Every pid it starts is appended to
+/// `pids.log`, so the test can reap them whatever happens.
+fn a_real_sidecar_over_a_hanging_model(dir: &Path) -> std::path::PathBuf {
+    let main = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../agent-sidecar/src/main.mjs")
+        .canonicalize()
+        .expect("the sidecar's source");
+    let pids = dir.join("pids.log");
+    std::fs::write(
+        dir.join("sdk-stub.mjs"),
+        format!(
+            "import {{ spawn }} from \"node:child_process\";\n\
+             import {{ appendFileSync, writeFileSync }} from \"node:fs\";\n\
+             const PIDS = {pids:?};\n\
+             const textOf = (m) => typeof m?.message?.content === \"string\" ? m.message.content : JSON.stringify(m?.message?.content ?? m);\n\
+             export async function* query(arg) {{\n\
+               let prompt = arg?.prompt;\n\
+               if (prompt && typeof prompt === \"object\" && typeof prompt[Symbol.asyncIterator] === \"function\") {{\n\
+                 const r = await prompt[Symbol.asyncIterator]().next(); prompt = r.done ? null : textOf(r.value);\n\
+               }}\n\
+               appendFileSync({prompts:?}, JSON.stringify({{ pid: process.pid, prompt }}) + \"\\n\");\n\
+               yield {{ type: \"system\", subtype: \"init\", session_id: \"real-hung\", model: \"stub\", tools: [], apiKeySource: \"none\" }};\n\
+               yield {{ type: \"assistant\", message: {{ content: [{{ type: \"text\", text: \"on it\" }}] }} }};\n\
+               const sh = spawn(\"sh\", [\"-c\", \"sleep 600 & echo $! >> \" + PIDS + \"; wait\"], {{ stdio: \"ignore\" }});\n\
+               sh.unref();\n\
+               appendFileSync(PIDS, sh.pid + \"\\n\");\n\
+               writeFileSync({hanging:?}, String(process.pid));\n\
+               const hold = setInterval(() => {{}}, 1 << 30);\n\
+               await new Promise((resolve) => {{\n\
+                 const s = arg?.options?.abortController?.signal;\n\
+                 if (!s) return;\n\
+                 if (s.aborted) return resolve();\n\
+                 s.addEventListener(\"abort\", resolve, {{ once: true }});\n\
+               }});\n\
+               clearInterval(hold);\n\
+               appendFileSync({aborted:?}, String(process.pid) + \"\\n\");\n\
+             }}\n",
+            prompts = dir.join("prompts.log"),
+            hanging = dir.join("hanging"),
+            aborted = dir.join("aborted.log"),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("loader.mjs"),
+        format!(
+            "const STUB = {stub:?};\n\
+             export async function resolve(specifier, context, next) {{\n\
+               if (specifier === \"@anthropic-ai/claude-agent-sdk\") return {{ url: STUB, shortCircuit: true }};\n\
+               return next(specifier, context);\n\
+             }}\n",
+            stub = format!("file://{}", dir.join("sdk-stub.mjs").display()),
+        ),
+    )
+    .unwrap();
+    let sidecar = dir.join("sidecar.mjs");
+    std::fs::write(
+        &sidecar,
+        format!(
+            "import {{ register }} from \"node:module\";\n\
+             register(new URL(\"./loader.mjs\", import.meta.url));\n\
+             await import({main:?});\n",
+            main = format!("file://{}", main.display()),
+        ),
+    )
+    .unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("nxc"), bin.join("nxc")).unwrap();
+    sidecar
+}
+
+/// `nxc` at `now`, under the REAL sidecar worker, with this test's sidecar and its `nxc` on PATH.
+fn under_the_real_sidecar(root: &Path, dir: &Path, now: &str) -> Command {
+    let mut c = nxc(root, now, "sidecar");
+    let path = format!(
+        "{}:{}",
+        dir.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    c.env("NXC_SIDECAR", dir.join("sidecar.mjs"))
+        .env("PATH", path);
+    c
+}
+
+/// Polls `what` until it holds or `secs` pass.
+fn within(secs: u64, what: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if what() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    what()
+}
+
+/// SIGKILLs every process the stub started and every sidecar that is still running.
+fn reap_the_real_run(dir: &Path) {
+    let mut pids: Vec<String> = std::fs::read_to_string(dir.join("pids.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for line in std::fs::read_to_string(dir.join("prompts.log"))
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Some(pid) = v["pid"].as_u64() {
+                pids.push(pid.to_string());
+            }
+        }
+    }
+    for pid in pids.iter().filter(|p| !p.trim().is_empty()) {
+        let _ = StdCommand::new("kill").args(["-9", pid.trim()]).status();
+    }
+}
+
+/// **Design 8nx4 test 1, in real processes**: a session whose model went quiet mid-turn under the
+/// REAL sidecar is nudged — the ask file is written beside its claim — then, with no life after the
+/// nudge, stopped by SIGTERM; the sidecar's teardown announces the end, and the coordinator
+/// continues the session with a text that names the cause and the grandchild that outlived the
+/// stop (a `sleep` the stopped turn started, never signalled). The looks are injected instants
+/// anchored at the wall clock, because the sidecar dates its own output by it.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_hung_session_in_the_real_sidecar_is_nudged_stopped_and_continued_naming_its_survivor() {
+    if StdCommand::new("node").arg("--version").output().is_err() {
+        eprintln!("skipped: no `node` on this host to run the sidecar");
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dir = root.join("real-sidecar");
+    std::fs::create_dir_all(&dir).unwrap();
+    a_real_sidecar_over_a_hanging_model(&dir);
+    let base = {
+        use time::format_description::well_known::Rfc3339;
+        let now = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .unwrap();
+        now.format(&Rfc3339).unwrap()
+    };
+    let when = |secs: i64| {
+        use time::format_description::well_known::Rfc3339;
+        (time::OffsetDateTime::parse(&base, &Rfc3339).unwrap() + time::Duration::seconds(secs))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    let out = under_the_real_sidecar(root, &dir, &when(0))
+        .args([
+            "send",
+            "--to",
+            "review",
+            "--no-ref",
+            "--json",
+            "verify the build",
+        ])
+        .output()
+        .unwrap();
+    let thread = json_of(&out.stdout)["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (slot, session): (String, String) = store(root)
+        .connection()
+        .query_row(
+            "SELECT thread, session FROM owed_starts WHERE role = 'local/verifier'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the obligation is recorded");
+    let logs = nexus_chat::worker::agent_logs_dir(root);
+    let hung = within(30, || dir.join("hanging").exists());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(hung, "the sidecar never reached the model's hang");
+        // The claim declares the ask door once the handler is in, and the pulse names the output.
+        assert!(within(10, || std::fs::read_to_string(
+            logs.join(format!("{session}.pid"))
+        )
+        .is_ok_and(|c| c.contains("ask: 1"))));
+        let tick = |secs: i64| {
+            under_the_real_sidecar(root, &dir, &when(secs))
+                .args(["tick", "--thread", &thread, "--json"])
+                .output()
+                .unwrap()
+        };
+        tick(660);
+        let asks: Vec<_> = std::fs::read_dir(&logs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(&format!("{session}.ask.")))
+            .collect();
+        assert_eq!(asks.len(), 1, "the nudge's ask file: {asks:?}");
+        tick(960);
+        let taken: Vec<(String, Option<String>)> = rungs(root);
+        assert_eq!(
+            taken,
+            vec![
+                ("asked".to_string(), Some("asked".to_string())),
+                ("stopped".to_string(), Some("stop_requested".to_string()))
+            ]
+        );
+        assert!(
+            within(30, || std::fs::read_to_string(dir.join("aborted.log"))
+                .is_ok_and(|a| !a.is_empty())),
+            "the SIGTERM reached the sidecar and it aborted the model's turn"
+        );
+        assert!(
+            within(30, || store(root)
+                .session_ended_at(&session)
+                .unwrap()
+                .is_some()),
+            "the sidecar's teardown announced the end"
+        );
+        let survivor: String = std::fs::read_to_string(dir.join("pids.log"))
+            .unwrap()
+            .lines()
+            .nth(1)
+            .expect("the grandchild's pid")
+            .trim()
+            .to_string();
+        tick(1_020);
+        assert!(
+            within(30, || std::fs::read_to_string(dir.join("prompts.log"))
+                .is_ok_and(|p| p.lines().count() >= 2)),
+            "the session was continued"
+        );
+        let prompts = std::fs::read_to_string(dir.join("prompts.log")).unwrap();
+        let continued = prompts.lines().nth(1).unwrap();
+        assert!(
+            continued.contains(&format!(
+                "no sign of life for 5 minutes after it was asked and was stopped at {}",
+                when(960)
+            )),
+            "{continued}"
+        );
+        assert!(
+            continued.contains(&format!("pid {survivor}")),
+            "the grandchild {survivor} that outlived the stop is named: {continued}"
+        );
+        assert_eq!(escalations_in(root, &slot), 0);
+    }));
+    reap_the_real_run(&dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

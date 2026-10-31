@@ -1902,6 +1902,11 @@ fn a_session_with_no_tool_call_open_is_nudged_stopped_and_escalated_when_it_will
     let posted = escalations(&team.messages(&thread));
     assert_eq!(posted.len(), 1, "{posted:?}");
     assert!(posted[0].contains("would not stop"), "{}", posted[0]);
+    assert!(
+        posted[0].contains("- last pulse: this host reports no pulse"),
+        "{}",
+        posted[0]
+    );
 }
 
 /// **A tool call that outlives its own bound is hung** — and an ask cannot reach a session inside
@@ -2792,6 +2797,20 @@ fn a_silent_session_is_nudged_at_ten_stopped_at_fifteen_and_escalated_at_twenty_
         body.contains("dead after 1 recovery attempts on this turn; this workspace allows 1"),
         "{body}"
     );
+    // Rung E's "Signs of life" block (design 8nx4 section 6): built from the slot's whole log.
+    for needle in [
+        "Signs of life:".to_string(),
+        "- last pulse: none yet".to_string(),
+        format!("- nudge at {}: asked", at(600)),
+        format!("- stop at {} (its pid unknown): stop_requested", at(900)),
+        format!("- stop at {} (its pid unknown): stop_requested", at(1_620)),
+        format!(
+            "the SIGTERM of {} to its pid unknown is UNCONFIRMED",
+            at(1_620)
+        ),
+    ] {
+        assert!(body.contains(&needle), "{needle:?} missing from:\n{body}");
+    }
     assert_eq!(team.owed(&thread, "coder", "recovery_started_at"), None);
     assert!(
         team.worker
@@ -3584,4 +3603,20 @@ fn a_cannot_ask_row_opens_no_episode_and_a_door_closed_past_the_wait_is_dead() {
         team.owed(&thread, "coder", "recovery_started_at"),
         Some(at(900))
     );
+}
+
+/// **A session whose model streams is alive** (design 8nx4 section 1, the pulse): a thinking block
+/// that runs twenty minutes has no transcript entry until it closes, but the sidecar's pulse moves
+/// with the model's output — so the session is not nudged. (Mutation 1 of design test 8: drop the
+/// pulse read and this session is nudged at +600.)
+#[test]
+fn a_session_streaming_for_twenty_minutes_is_not_nudged() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    for s in (60..=1_200).step_by(60) {
+        team.pulse(&session, Pulse::At(at(s - 30)));
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+    assert!(team.log(&thread, "coder").is_empty());
 }

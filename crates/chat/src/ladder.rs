@@ -1356,13 +1356,12 @@ impl Signal {
 /// no nudge comes earlier than ten minutes after the process's start (round 3 CQ #5). `P`
 /// ([`Life::process_start`]) is the row's `trigger_clock`, which only a process start moves.
 struct Life {
-    /// `L` and where it came from.
+    /// `L` and where it came from — `M`, the last movement of the open call's subprocesses, among
+    /// its candidates (present only while an open call stands, the host samples it and a sample
+    /// with a process under the call has been stored).
     own: Option<(String, Signal)>,
     /// `P`.
     process_start: String,
-    /// `M` — present only while an open call stands, the host samples it and a sample with a
-    /// process under the call has been stored.
-    moved_at: Option<String>,
     /// `max(S + SILENCE_SECS, M + SUBPROCESS_IDLE_SECS)`; on a host that cannot sample an open
     /// call, the call's own bound (today's rule: no nudge while the call stands).
     due: String,
@@ -1443,7 +1442,6 @@ impl Life {
         Ok(Life {
             own,
             process_start,
-            moved_at,
             due,
             pulse,
             blind_call,
@@ -2626,11 +2624,13 @@ fn summary(
         .as_deref()
         .map_or("none was ever started".to_string(), str::to_string);
     let lease = lease_words(ctx, store, t, row.session.as_deref());
+    let signs = signs_of_life(ctx, store, row, &last_activity)?;
     Ok(format!(
         "ESCALATED BY ITS COORDINATOR — step {step} on thread {t} (coordinated by thread {coord}) \
          could not be recovered.\n\n\
          Cause: {cause}.\n\n\
          What was tried:\n{attempts}\n\n\
+         Signs of life:\n{signs}\n\n\
          Last activity on this slot: {last_activity}.\n\
          Session: {session}.\n\
          Working copy: {lease}.\n\n\
@@ -2638,6 +2638,101 @@ fn summary(
          {root} --accept` accepts it as it stands; `nxc withdraw --thread {root}` takes it back.",
         coord = coordinator.thread,
     ))
+}
+
+/// **Rung E's "Signs of life" block** (nxf 6j6v.1r61, design 8nx4 section 6): built from the row and
+/// the slot's WHOLE log, not only the episode's rows — the last transcript entry, the last pulse,
+/// the last movement of an open call's subprocesses, every nudge with its outcome, every rest
+/// confirmed, every stop with its outcome; "this host reports no …" for a signal the worker cannot
+/// read; and a stop still in flight named as UNCONFIRMED, since rung E ends its supervision.
+fn signs_of_life(
+    ctx: &Ctx,
+    store: &ChatStore,
+    row: &OwedStart,
+    last_activity: &str,
+) -> Result<String> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let mut lines = vec![format!("- last transcript entry: {last_activity}")];
+    let running = row
+        .session
+        .as_deref()
+        .is_some_and(|s| ctx.worker.session_is_running(s));
+    lines.push(match row.session.as_deref() {
+        Some(s) if running => match ctx.worker.session_pulse(s) {
+            crate::worker::Pulse::At(at) => format!("- last pulse: the model's output at {at}"),
+            crate::worker::Pulse::NoneYet => {
+                "- last pulse: none yet — its process has produced no output".to_string()
+            }
+            _ => "- last pulse: this host reports no pulse".to_string(),
+        },
+        _ => "- last pulse: not read — no process runs".to_string(),
+    });
+    let call = match row.session.as_deref() {
+        Some(s) => store.slot_open_tool_call(s, t)?,
+        None => None,
+    };
+    let blind = match (row.session.as_deref(), &call) {
+        (Some(s), Some(call)) if running => ctx.worker.subprocess_sample(s, &call.since).is_none(),
+        _ => false,
+    };
+    lines.push(
+        match (
+            &row.subprocess_moved_at,
+            row.subprocess_count,
+            row.subprocess_cpu_units,
+        ) {
+            _ if blind => "- subprocesses: this host reports no subprocess signals".to_string(),
+            (Some(m), Some(n), Some(cpu)) => format!(
+            "- last subprocess movement: at {m} — {n} process(es) under the open call, the CPU \
+             counter standing at {cpu}"
+        ),
+            (None, Some(n), Some(cpu)) => {
+                format!("- subprocesses: {n} under the open call, never moving (CPU counter {cpu})")
+            }
+            _ => "- subprocesses: none sampled".to_string(),
+        },
+    );
+    for r in store.slot_recovery_log(t, h)? {
+        let outcome = r.outcome.as_deref().unwrap_or("in flight");
+        match action_of(&r) {
+            Some(RecoveryAction::Asked) => {
+                lines.push(format!("- nudge at {}: {outcome}", r.at));
+            }
+            Some(RecoveryAction::Confirmed) => {
+                lines.push(format!("- confirmation at {}: {}", r.at, r.detail));
+            }
+            Some(RecoveryAction::Stopped) => {
+                let pid = process_of(&r.detail)
+                    .map_or_else(|| "its pid unknown".to_string(), |p| format!("pid {p}"));
+                let survivors: Vec<String> = descendants_of(&r.detail)
+                    .into_iter()
+                    .filter(|m| ctx.worker.process_survives(m))
+                    .map(|m| format!("pid {}", m.pid))
+                    .collect();
+                let survivors = if survivors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; still running from it: {}", survivors.join(", "))
+                };
+                lines.push(format!("- stop at {} ({pid}): {outcome}{survivors}", r.at));
+            }
+            Some(RecoveryAction::Recovered) => {
+                lines.push(format!("- recovered at {}: {}", r.at, r.detail));
+            }
+            _ => {}
+        }
+    }
+    if let Some(stop) = row.stop_requested_at.as_deref() {
+        let pid = store
+            .newest_rung_of(t, h, RecoveryAction::Stopped)?
+            .and_then(|r| process_of(&r.detail))
+            .map_or_else(|| "its pid unknown".to_string(), |p| format!("pid {p}"));
+        lines.push(format!(
+            "- the SIGTERM of {stop} to {pid} is UNCONFIRMED: this escalation ends its \
+             supervision, and nothing checks whether that process went"
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 /// The lease as the escalation names it.
