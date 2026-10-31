@@ -2436,6 +2436,13 @@ fn judge(
             store.drop_stranded_suspect(t, h)?;
             return Ok(Judgement::Held);
         }
+        // **A live process is judged by its own life** (nxf 6j6v.1r61, design 8nx4 section 4): an
+        // answer held behind its turn, or a sub-round it opened, waits on THAT process — a live
+        // process is always mid-turn, and one that hangs mid-turn would otherwise never be looked
+        // at, its pending nudge never followed and its stop in flight never supervised. Rule 5
+        // below takes it as `Live`.
+        Some(StillComing::HeldDelivery | StillComing::SubRoundInFlight)
+            if coordinated && s.is_some_and(|s| ctx.worker.session_is_running(s)) => {}
         Some(_) => {
             store.drop_stranded_suspect(t, h)?;
             return Ok(Judgement::Coming);
