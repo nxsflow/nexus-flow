@@ -1198,7 +1198,16 @@ fn a_recommission_whose_start_fails_on_a_prime_timeout_is_retried_at_the_next_lo
     let fresh = &starts[1];
     assert_eq!(fresh.resume_real, None, "a fresh session");
     assert!(fresh.message.contains("Add a --since flag."));
-    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 2);
+    assert_eq!(
+        team.ladder(&thread, "coder").unwrap().attempts,
+        1,
+        "the retry is the same re-commission: one attempt (round 2 TQ #6)"
+    );
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("recommissioned".to_string(), Some("triggered".to_string()))],
+        "and one row, settled again"
+    );
     team.reply(
         &at(200),
         "coder",
@@ -1217,7 +1226,7 @@ fn a_recommission_whose_start_fails_on_a_prime_timeout_is_retried_at_the_next_lo
 
 /// **A failed continue is continued again at the next look** (nxf 6j6v.yts5): the session bound and
 /// wrote, so the rung after an end is a continue, and the retry asks for that rung again — the SAME
-/// session resumed, never a fresh one.
+/// session resumed, never a fresh one, and on the same row and attempt (round 2 TQ #6).
 #[test]
 fn a_continue_whose_start_fails_is_continued_again_at_the_next_look_and_answered() {
     let team = team();
@@ -1239,30 +1248,12 @@ fn a_continue_whose_start_fails_is_continued_again_at_the_next_look_and_answered
     team.tick(&at(190), &thread);
 
     let log = team.log(&thread, "coder");
-    assert_eq!(log.len(), 2, "{log:?}");
-    assert_eq!(log[0].0, "continued");
-    assert!(log[0]
-        .1
-        .as_deref()
-        .is_some_and(|o| o.starts_with("failed:")));
     assert_eq!(
-        log[1],
-        ("continued".to_string(), Some("triggered".to_string())),
-        "continued again, not re-commissioned"
+        log,
+        vec![("continued".to_string(), Some("triggered".to_string()))],
+        "continued again on the same row — one continue with its retry (round 2 TQ #6)"
     );
-    let detail: String = team
-        .store()
-        .connection()
-        .query_row(
-            "SELECT detail FROM recovery_log ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        detail.contains("its continued at") && detail.contains("could not be started"),
-        "the retry's occasion is the failed continue: {detail}"
-    );
+    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
     let again = team.worker.last("coder");
     assert_eq!(again.internal_session, session, "the same session");
     assert_eq!(
@@ -1333,8 +1324,10 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
         assert!(looks < 50, "escalated within 50 looks");
     }
 
+    // Nine starts a cadence apart from +130 (three attempts of three starts each, round 2 TQ #6),
+    // then rung E at the next look: +670.
     assert!(
-        now <= 600,
+        now <= 700,
         "escalated at +{now}s, within the budget's few minutes"
     );
     assert_eq!(team.worker.of("coder").len(), 1, "nothing ever started");
@@ -1346,6 +1339,20 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
         })
         .count();
     assert_eq!(failed, 3, "{log:?}");
+    // Three re-commissions, each with its start retried twice on its own row (round 2 TQ #6):
+    // nine starts, three attempts, then rung E — still minutes, not the deadline.
+    let retries: Vec<i64> = {
+        let store = team.store();
+        let mut st = store
+            .connection()
+            .prepare("SELECT retries FROM recovery_log WHERE action = 'recommissioned' ORDER BY id")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert_eq!(retries, vec![2, 2, 2]);
     assert_eq!(log.last().map(|(a, _)| a.as_str()), Some("escalated"));
     let posted = escalations(&team.messages(&thread));
     assert_eq!(posted.len(), 1, "{posted:?}");
@@ -3680,4 +3687,28 @@ fn a_call_after_a_call_with_children_inherits_no_subprocess_movement() {
         at(960),
         "the look after call 2's own instant plus 600 (920)"
     );
+}
+
+/// **One re-commission with its retries is ONE attempt and ONE `recommissioned` row** (round 2 TQ
+/// #6, a contract on yts5; review of pass 1, CQ #1 / TQ #1): a start that failed is retried at the
+/// next look on the SAME rung — its row is settled again and its attempt is not counted twice.
+#[test]
+fn one_recommission_with_its_retries_is_one_attempt_and_one_row() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    *team.worker.refuse.lock().unwrap() = Some("prime_timeout");
+    team.tick(&at(130), &thread);
+    team.tick(&at(190), &thread);
+    assert_eq!(team.worker.of("coder").len(), 2, "started at the retry");
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("recommissioned".to_string(), Some("triggered".to_string()))]
+    );
+    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
+    let retries: i64 = team
+        .store()
+        .connection()
+        .query_row("SELECT retries FROM recovery_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(retries, 1);
 }

@@ -86,6 +86,12 @@ pub const TRIGGER_TIMEOUT_SECS: i64 = 600;
 /// already used a recovery attempt — an ordinary continue or re-commission included — escalates
 /// under policy B at its FIRST dead verdict.
 pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
+/// **How often one rung's failed start is tried again on the same rung** (round 2 TQ #6): one
+/// re-commission or continue with its retries is ONE attempt and ONE log row — three starts in all,
+/// as a direct send gets (`orchestration::MAX_START_ATTEMPTS`). Past that, the next try is a new
+/// rung and a new attempt, so a start that never succeeds still reaches [`MAX_RECOVERY_ATTEMPTS`]
+/// within minutes rather than at the thread's deadline.
+pub const RUNG_START_RETRIES: u32 = 2;
 /// The wall-clock ceiling's floor: two hours.
 pub const RECOVERY_CEILING_FLOOR_SECS: i64 = 7_200;
 /// The wall-clock ceiling's cap: six hours.
@@ -346,6 +352,9 @@ pub struct RecoveryLogRow {
     /// `None` while the rung is in flight.
     pub outcome: Option<String>,
     pub detail: String,
+    /// How often this rung's start was tried again after it failed — on the same row and the same
+    /// attempt (round 2 TQ #6).
+    pub retries: u32,
 }
 
 /// What taking a slot's claim found.
@@ -359,7 +368,7 @@ pub(crate) enum SlotClaim {
     NoRow,
 }
 
-const LOG_COLS: &str = "id, thread, role, at, action, attempt, session, outcome, detail";
+const LOG_COLS: &str = "id, thread, role, at, action, attempt, session, outcome, detail, retries";
 
 fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLogRow> {
     let attempt: i64 = r.get(5)?;
@@ -373,6 +382,7 @@ fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLogRow> {
         session: r.get(6)?,
         outcome: r.get(7)?,
         detail: r.get(8)?,
+        retries: u32::try_from(r.get::<_, i64>(9)?).unwrap_or(0),
     })
 }
 
@@ -502,6 +512,16 @@ impl ChatStore {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// **Take a failed rung up again** for one more start: its outcome goes back to in flight and its
+    /// retry count goes up — the same row, the same attempt.
+    pub(crate) fn retry_rung(&mut self, id: i64) -> Result<()> {
+        self.connection().execute(
+            "UPDATE recovery_log SET outcome = NULL, retries = retries + 1 WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 
     /// Write what became of a rung — one of the typed words.
@@ -2319,7 +2339,8 @@ fn run(
     if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
         return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
-    if row.attempts >= MAX_RECOVERY_ATTEMPTS {
+    // A retry of this rung's failed start spends no new attempt, so the budget does not stop it.
+    if row.attempts >= MAX_RECOVERY_ATTEMPTS && rung_to_retry(store, row, rung)?.is_none() {
         return escalate(ctx, store, row, coordinator, occasion, findings);
     }
     match store.claim_slot(t, h, ctx.now)? {
@@ -2351,6 +2372,17 @@ fn run(
     }
 }
 
+/// **The rung whose failed start this one retries** — the slot's newest row, when it is this
+/// rung's, failed, on the current clock, and has retries left ([`RUNG_START_RETRIES`]).
+fn rung_to_retry(store: &ChatStore, row: &OwedStart, rung: Rung) -> Result<Option<RecoveryLogRow>> {
+    Ok(store.newest_rung(&row.thread, &row.role)?.filter(|last| {
+        last.action == rung.action().as_str()
+            && last.outcome.as_deref().and_then(failure_of).is_some()
+            && !earlier(&last.at, &row.trigger_clock)
+            && last.retries < RUNG_START_RETRIES
+    }))
+}
+
 /// The part of [`run`] that holds the claim: the recheck, the attempt, the log row, the lease hook,
 /// the trigger, what follows — in that order, fail-closed. `None` when the recheck stopped it.
 fn under_the_claim(
@@ -2368,17 +2400,29 @@ fn under_the_claim(
     // The lease hook (cut 1g): the slot's lease still names this operation. Until 1g there is
     // nothing to check and nothing to renew.
     lease_hook(ctx, store, row);
-    let opened_the_episode = row.recovery_started_at.is_none();
-    let attempt = store.begin_attempt(t, h, ctx.now)?;
-    let log = store.log_rung(
-        t,
-        h,
-        ctx.now,
-        rung.action(),
-        attempt,
-        row.session.as_deref(),
-        &occasion.detail,
-    )?;
+    // **A failed start of this same rung is retried on its own row and attempt** (round 2 TQ #6),
+    // up to [`RUNG_START_RETRIES`]; past that, a new rung counts a new attempt.
+    let retried = rung_to_retry(store, row, rung)?;
+    let counted = retried.is_none();
+    let opened_the_episode = counted && row.recovery_started_at.is_none();
+    let log = match retried {
+        Some(last) => {
+            store.retry_rung(last.id)?;
+            last.id
+        }
+        None => {
+            let attempt = store.begin_attempt(t, h, ctx.now)?;
+            store.log_rung(
+                t,
+                h,
+                ctx.now,
+                rung.action(),
+                attempt,
+                row.session.as_deref(),
+                &occasion.detail,
+            )?
+        }
+    };
     let done = {
         let _renewal = ClaimRenewal::start(ctx, t, h);
         fire_the_rung(ctx, store, row, rung)
@@ -2388,7 +2432,16 @@ fn under_the_claim(
         Done::Refused(why) => store.settle_rung(log, &format!("refused: {why}"))?,
         Done::Failed(why) => store.settle_rung(log, &failed_outcome(why))?,
     }
-    after_the_rung(ctx, store, row, rung, &done, opened_the_episode, findings)?;
+    after_the_rung(
+        ctx,
+        store,
+        row,
+        rung,
+        &done,
+        counted,
+        opened_the_episode,
+        findings,
+    )?;
     Ok(Some(done))
 }
 
@@ -2424,14 +2477,16 @@ fn recheck(
     Ok(true)
 }
 
-/// **What follows a rung**: an attempt that did nothing is taken back, an ask starts the silence
-/// clock, a failure is a finding — and the next look is armed once, for when this outcome wants it.
+/// **What follows a rung**: an attempt that did nothing is taken back (a retry counted none), a
+/// failure is a finding — and the next look is armed once, for when this outcome wants it.
+#[allow(clippy::too_many_arguments)]
 fn after_the_rung(
     ctx: &Ctx,
     store: &mut ChatStore,
     row: &OwedStart,
     rung: Rung,
     done: &Done,
+    counted: bool,
     opened_the_episode: bool,
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<()> {
@@ -2439,7 +2494,9 @@ fn after_the_rung(
     let recheck = crate::orchestration::SESSION_LIVENESS_RECHECK_SECS;
     let next = match done {
         Done::Nothing(_) => {
-            store.revert_attempt(t, h, opened_the_episode)?;
+            if counted {
+                store.revert_attempt(t, h, opened_the_episode)?;
+            }
             Some(after(ctx.now, recheck, "the next look")?)
         }
         Done::Acted(_) => {

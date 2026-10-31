@@ -140,7 +140,8 @@ pub(crate) const STRANDED_DDL: &str = "
         attempt INTEGER NOT NULL,
         session TEXT,
         outcome TEXT,
-        detail  TEXT    NOT NULL
+        detail  TEXT    NOT NULL,
+        retries INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS recovery_log_by_slot ON recovery_log(thread, role, id);
     -- The obligation a queued trigger carried when it met the working-copy queue (nxf 6j6v.558h,
@@ -164,6 +165,11 @@ pub(crate) const STRANDED_DDL: &str = "
 /// resume recorded on its hold.
 pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     for (table, column, ddl) in [
+        (
+            "recovery_log",
+            "retries",
+            "ALTER TABLE recovery_log ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
+        ),
         (
             "stranded_sessions",
             "summary",
