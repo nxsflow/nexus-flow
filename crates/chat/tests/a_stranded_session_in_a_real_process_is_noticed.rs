@@ -203,6 +203,38 @@ fn stand_in(root: &Path, session: &str) -> Child {
     child
 }
 
+/// **A stand-in with processes under it** (nxf 6j6v.1r61): `sh -c <script>` in a process group of
+/// its own, claimed as the session's process — so the sidecar worker samples what runs beneath it
+/// as it samples a real sidecar's tool call. Killed WHOLE by [`kill_tree`]: killing only the shell
+/// would orphan its children, which then hold the harness's pipes.
+fn stand_in_over(root: &Path, session: &str, script: &str) -> Child {
+    use std::os::unix::process::CommandExt;
+    let child = StdCommand::new("sh")
+        .args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("start the stand-in process");
+    let logs = nexus_chat::worker::agent_logs_dir(root);
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join(format!("{session}.pid")),
+        nexus_chat::worker::session_claim_for(child.id()),
+    )
+    .unwrap();
+    child
+}
+
+/// SIGKILL the stand-in's whole process group and reap it.
+fn kill_tree(mut child: Child) {
+    let _ = StdCommand::new("kill")
+        .args(["-9", &format!("-{}", child.id())])
+        .status();
+    let _ = child.wait();
+}
+
 /// `kill -9` and reap it, leaving the claim file behind as a SIGKILLed sidecar does.
 fn kill_hard(mut child: Child) {
     child.kill().expect("SIGKILL the stand-in");
@@ -613,8 +645,16 @@ fn line(kind: &str, secs: i64, id: Option<&str>, data: Value) -> String {
 
 /// A live session on the review slot, bound, its turn on the slot begun.
 fn a_live_turn(root: &Path) -> (String, String, String, Child) {
+    a_live_turn_over(root, None)
+}
+
+/// …with `script` running as the session's process, when one is given.
+fn a_live_turn_over(root: &Path, script: Option<&str>) -> (String, String, String, Child) {
     let (thread, slot, s) = commission(root, "review");
-    let child = stand_in(root, &s);
+    let child = match script {
+        Some(script) => stand_in_over(root, &s, script),
+        None => stand_in(root, &s),
+    };
     bind(root, &at(5), &s);
     append(
         root,
@@ -630,15 +670,22 @@ fn a_live_turn(root: &Path) -> (String, String, String, Child) {
     (thread, slot, s, child)
 }
 
-/// **A session in one tool call longer than three ask intervals, in real processes** — a live
-/// process, its open `tool_use` flushed through a real `nxc transcript append`, looked at by real
-/// `nxc tick`s under the sidecar worker for four ask intervals: no rung is taken and nothing is
-/// escalated.
+/// A child that works a little every second — the shape of `gh run watch` under a Bash call.
+const WORKING_CHILD: &str =
+    "sh -c 'while :; do i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done; sleep 1; done' & wait";
+
+/// **A session in one tool call longer than three silences, in real processes** — a live process
+/// whose open `tool_use` was flushed through a real `nxc transcript append`, with a real child
+/// under it that keeps working, looked at by real `nxc tick`s under the sidecar worker for four
+/// silences: the host samples the child's CPU moving, so no rung is taken and nothing is
+/// escalated (nxf 6j6v.1r61; the j6yk field case, a merger watching CI). The looks are a second and
+/// a half apart in real time, so the child's counter has time to move between them.
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
     let tmp = workspace();
     let root = tmp.path();
-    let (thread, slot, s, child) = a_live_turn(root);
+    let (thread, slot, s, child) = a_live_turn_over(root, Some(WORKING_CHILD));
     append(
         root,
         &at(60),
@@ -652,17 +699,19 @@ fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
     );
     let mut secs = 600;
     while secs <= 60 + 4 * nexus_chat::ladder::SILENCE_SECS {
+        std::thread::sleep(std::time::Duration::from_millis(1_500));
         tick(root, &at(secs), &thread);
         secs += 600;
     }
-    assert!(rungs(root).is_empty(), "{:?}", rungs(root));
+    let rows = rungs(root);
+    kill_tree(child);
+    assert!(rows.is_empty(), "{rows:?}");
     assert_eq!(escalations_in(root, &slot), 0);
-    kill_hard(child);
 }
 
-/// **…and one that is really silent is still asked** — its one call returned, nothing since.
+/// **…and one that is really silent is still nudged** — its one call returned, nothing since.
 #[test]
-fn a_live_session_with_no_call_open_is_still_asked_after_twenty_minutes() {
+fn a_live_session_with_no_call_open_is_still_nudged_after_ten_minutes() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, _slot, s, child) = a_live_turn(root);
@@ -697,12 +746,15 @@ fn a_live_session_with_no_call_open_is_still_asked_after_twenty_minutes() {
     kill_hard(child);
 }
 
-/// **A tool call that outlives its own bound, in real processes** — escalated once, no ask taken.
+/// **A tool call that outlives its own bound, in real processes** — escalated once, no nudge
+/// taken. A child is still running under the call (it sleeps), so the call is the subprocess
+/// rule's until the bound (nxf 6j6v.1r61).
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
     let tmp = workspace();
     let root = tmp.path();
-    let (thread, slot, s, child) = a_live_turn(root);
+    let (thread, slot, s, child) = a_live_turn_over(root, Some("sleep 600 & wait"));
     append(
         root,
         &at(60),
@@ -720,6 +772,6 @@ fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
     tick(root, &at(60 + bound), &thread);
     assert_eq!(escalations_in(root, &slot), 1);
     let taken: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
-    assert_eq!(taken, vec!["escalated".to_string()], "no ask was spent");
-    kill_hard(child);
+    kill_tree(child);
+    assert_eq!(taken, vec!["escalated".to_string()], "no nudge was spent");
 }
