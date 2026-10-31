@@ -18,9 +18,9 @@ use nexus_chat::definitions::Definitions;
 use nexus_chat::engine::{Engine, EngineConfig};
 use nexus_chat::facade::{Reader, StatusScope};
 use nexus_chat::ladder::{SILENCE_SECS, TOOL_CALL_BOUND_SECS};
-use nexus_chat::orchestration::{self, Caller, SessionEnd, TickRequest};
+use nexus_chat::orchestration::{self, Caller, ConsequenceClass, SessionEnd, TickRequest};
 use nexus_chat::role::RoleDecl;
-use nexus_chat::surface::{SendToRefs, SendToRequest};
+use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::DisabledTimer;
 use nexus_chat::timer::TimerConfig;
 use nexus_chat::transcript::TranscriptEntry;
@@ -39,6 +39,8 @@ struct Hand {
     running: Mutex<HashSet<String>>,
     asked: Mutex<Vec<SessionAsk>>,
     stopped: Mutex<Vec<String>>,
+    /// When set, every withdrawal of a session's asks answers this error.
+    withdraw_fails: Mutex<Option<&'static str>>,
 }
 
 impl Worker for Hand {
@@ -71,6 +73,12 @@ impl Worker for Hand {
         }
         self.asked.lock().unwrap().push(ask.clone());
         AskOutcome::Asked
+    }
+    fn withdraw_asks(&self, _internal_session: &str) -> Result<(), String> {
+        match *self.withdraw_fails.lock().unwrap() {
+            None => Ok(()),
+            Some(e) => Err(e.to_string()),
+        }
     }
 }
 
@@ -419,4 +427,84 @@ fn engine_a_tool_call_past_its_bound_is_escalated_as_hung() {
     look(&tmp, &engine, &worker, &thread, 60 + TOOL_CALL_BOUND_SECS);
     assert_eq!(seen(&tmp, &engine, &thread, 60 + TOOL_CALL_BOUND_SECS).1, 1);
     assert!(worker.asked.lock().unwrap().is_empty());
+}
+
+/// **`Engine::reply_thread` when the nudges cannot be withdrawn** (review of pass 2, TQ #1): one
+/// session serves two slots, both nudged, and the worker cannot unlink its ask files. The reply on
+/// the first is posted all the same and its owed turn is over; the receipt carries the failed
+/// withdrawal as a `RecoveryFailed` warning, and the other slot's nudge row is cleared.
+#[test]
+fn engine_a_reply_whose_withdrawal_fails_is_posted_warns_and_clears_the_other_nudge() {
+    let (tmp, engine, worker) = engine();
+    let (x, session) = working(&tmp, &engine, &worker);
+    let y = engine
+        .send_to(
+            at(Some("carsten"), None, NOW),
+            SendToRequest {
+                machine: None,
+                to: "coder",
+                body: "And a --until flag.",
+                refs: SendToRefs::ExplicitlyNone,
+            },
+        )
+        .expect("the second commission")
+        .thread_id;
+    let store = || {
+        Workspace::resolve(None, tmp.path())
+            .unwrap()
+            .open_chat_store()
+            .unwrap()
+    };
+    store()
+        .connection()
+        .execute(
+            "UPDATE owed_starts SET session = ?1 WHERE thread = ?2",
+            [&session, &y],
+        )
+        .unwrap();
+    let asked_at = |thread: &str| -> Option<String> {
+        store()
+            .connection()
+            .query_row(
+                "SELECT asked_at FROM owed_starts WHERE thread = ?1",
+                [thread],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let nudge = 1 + SILENCE_SECS;
+    look(&tmp, &engine, &worker, &x, nudge);
+    look(&tmp, &engine, &worker, &y, nudge);
+    assert_eq!(worker.asked.lock().unwrap().len(), 2, "both slots nudged");
+    assert!(asked_at(&x).is_some() && asked_at(&y).is_some());
+    *worker.withdraw_fails.lock().unwrap() = Some("the ask file could not be unlinked (injected)");
+
+    let receipt = engine
+        .reply_thread(
+            at(None, Some(&session), &later(nudge + 30)),
+            ReplyThreadRequest {
+                machine: None,
+                thread: &x,
+                body: "done: --since is in",
+                escalate: false,
+                needs_rework: false,
+                accept: false,
+            },
+        )
+        .expect("the reply is admitted");
+
+    assert!(receipt.posted, "the reply is posted");
+    let warning = receipt
+        .warnings
+        .iter()
+        .find(|w| w.class == ConsequenceClass::RecoveryFailed)
+        .unwrap_or_else(|| panic!("a RecoveryFailed warning: {:?}", receipt.warnings));
+    assert_eq!(warning.thread.as_deref(), Some(x.as_str()));
+    assert!(
+        warning.detail.contains("could not be unlinked (injected)"),
+        "{}",
+        warning.detail
+    );
+    assert_eq!(asked_at(&x), None, "the first slot's owed turn is over");
+    assert_eq!(asked_at(&y), None, "the other slot's nudge row is cleared");
 }
