@@ -84,6 +84,7 @@ pub(crate) const STRANDED_DDL: &str = "
         subprocess_count    INTEGER,
         subprocess_cpu_units INTEGER,
         subprocess_moved_at TEXT,
+        subprocess_since    TEXT,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
@@ -212,6 +213,11 @@ pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Resul
             "owed_starts",
             "subprocess_moved_at",
             "ALTER TABLE owed_starts ADD COLUMN subprocess_moved_at TEXT;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_since",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_since TEXT;",
         ),
         (
             "session_map",
@@ -413,6 +419,9 @@ pub(crate) struct OwedStart {
     pub subprocess_cpu_units: Option<u64>,
     /// The look that last saw the sample move (`M`, design 8nx4 section 2).
     pub subprocess_moved_at: Option<String>,
+    /// The open call the sample was taken under (its `since`): a sample of another call is no
+    /// prior sample (review of pass 1, Integrity #1).
+    pub subprocess_since: Option<String>,
 }
 
 /// **One row the one-time backfill writes** (nxf 6j6v.kgfn) — an open coordinated slot opened before
@@ -583,7 +592,7 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
 const OWED_COLS: &str = "thread, role, session, trigger_clock, triggered, coordinator, \
      backfilled, attempts, recovering_until, recovery_started_at, asked_at, last_progress_at, \
      abandoned, abandoned_at, confirmations, rest_total_secs, confirmed_until, stop_requested_at, \
-     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at";
+     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at, subprocess_since";
 
 fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
     let triggered: i64 = r.get(4)?;
@@ -616,6 +625,7 @@ fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
             .get::<_, Option<i64>>(20)?
             .and_then(|n| u64::try_from(n).ok()),
         subprocess_moved_at: r.get(21)?,
+        subprocess_since: r.get(22)?,
     })
 }
 
@@ -746,7 +756,8 @@ impl ChatStore {
         let n = conn.execute(
             "UPDATE owed_starts SET asked_at = NULL, stop_requested_at = NULL, stop_signals = 0,
                     confirmed_until = NULL, subprocess_count = NULL, subprocess_cpu_units = NULL,
-                    subprocess_moved_at = NULL, trigger_clock = ?3, triggered = 1
+                    subprocess_moved_at = NULL, subprocess_since = NULL, trigger_clock = ?3,
+                    triggered = 1
               WHERE role = ?1 AND session = ?2",
             params![role, session, now],
         )?;
@@ -3110,7 +3121,7 @@ mod tests {
     }
 
     /// **The liveness columns reach a store from before cut 3 of 6j6v.pszd** (nxf 6j6v.1r61): an
-    /// `owed_starts` of the shape the ladder had until then gains the eight columns in place, with
+    /// `owed_starts` of the shape the ladder had until then gains the nine columns in place, with
     /// their defaults on the row it already held — and a second pass adds nothing.
     #[test]
     fn a_store_from_before_the_liveness_ladder_gains_its_eight_columns_in_place() {
@@ -3138,6 +3149,7 @@ mod tests {
             "subprocess_count",
             "subprocess_cpu_units",
             "subprocess_moved_at",
+            "subprocess_since",
         ] {
             assert!(
                 column_exists(&conn, "owed_starts", column).unwrap(),

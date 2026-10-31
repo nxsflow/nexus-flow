@@ -704,33 +704,46 @@ impl ChatStore {
     /// **Store one sample of the open call's subprocesses** and answer `M`: the instant the sample
     /// last moved. Any change of `(count, cpu)` is a movement, and so is the first sample with a
     /// process in it; a call that never had one under it has no `M` (design 8nx4 section 1 (b)).
+    /// The sample is the CALL's (`call_since`, the call's open instant): a sample stored under an
+    /// earlier call is no prior sample, so a call with nothing under it never inherits the `M` of
+    /// the call before it (review of pass 1, Integrity #1).
     pub(crate) fn store_subprocess_sample(
         &mut self,
         thread: &str,
         role: &str,
         row: &OwedStart,
+        call_since: &str,
         sample: nxs_service::process::SubprocessSample,
         now: &str,
     ) -> Result<Option<String>> {
-        let before = (row.subprocess_count, row.subprocess_cpu_units);
+        let same_call = row.subprocess_since.as_deref() == Some(call_since);
+        let (before, prior_moved_at) = if same_call {
+            (
+                (row.subprocess_count, row.subprocess_cpu_units),
+                row.subprocess_moved_at.clone(),
+            )
+        } else {
+            ((None, None), None)
+        };
         let after = (Some(sample.count), Some(sample.cpu_units));
-        let had_a_process = row.subprocess_count.is_some_and(|c| c > 0);
+        let had_a_process = before.0.is_some_and(|c| c > 0);
         let moved = before != after && (sample.count > 0 || had_a_process);
         let moved_at = if moved {
             Some(now.to_string())
         } else {
-            row.subprocess_moved_at.clone()
+            prior_moved_at
         };
         self.connection().execute(
             "UPDATE owed_starts SET subprocess_count = ?3, subprocess_cpu_units = ?4,
-                    subprocess_moved_at = ?5
+                    subprocess_moved_at = ?5, subprocess_since = ?6
               WHERE thread = ?1 AND role = ?2",
             params![
                 thread,
                 role,
                 i64::from(sample.count),
                 i64::try_from(sample.cpu_units).unwrap_or(i64::MAX),
-                moved_at
+                moved_at,
+                call_since
             ],
         )?;
         Ok(moved_at)
@@ -1395,7 +1408,8 @@ impl Life {
         if let Some(call) = call {
             match ctx.worker.subprocess_sample(session, &call.since) {
                 Some(sample) => {
-                    let moved = store.store_subprocess_sample(t, h, row, sample, ctx.now)?;
+                    let moved =
+                        store.store_subprocess_sample(t, h, row, &call.since, sample, ctx.now)?;
                     moved_at = moved.filter(|m| !earlier(m, &call.since));
                 }
                 None => blind_call = true,

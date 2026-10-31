@@ -3651,3 +3651,33 @@ fn a_reply_withdraws_the_nudge_it_answers_and_only_a_nudged_slots() {
         "nothing was nudged on that slot, so nothing is withdrawn"
     );
 }
+
+/// **A sample belongs to its call** (review of pass 1, Integrity #1): call 1 ran a child that kept
+/// moving and returned; call 2 runs nothing under it. Call 2 inherits no `M` from call 1 — it is
+/// the silence rule's and is nudged at its own instant plus ten minutes.
+#[test]
+fn a_call_after_a_call_with_children_inherits_no_subprocess_movement() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.tool_call(&session, "toolu_one", "Bash", &at(60));
+    for (i, s) in (120..=300).step_by(60).enumerate() {
+        team.sample(&session, 2, 100 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    team.tool_returned(&session, "toolu_one", &at(310));
+    team.tool_call(&session, "toolu_two", "mcp__thing", &at(320));
+    team.sample(&session, 0, 0);
+    for s in (360..=960).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(
+        asks[0].at,
+        at(960),
+        "the look after call 2's own instant plus 600 (920)"
+    );
+}
