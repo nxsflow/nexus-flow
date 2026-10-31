@@ -303,12 +303,6 @@ enum Command {
         /// something other than "the review passed" — because it is not that.
         #[arg(long, conflicts_with_all = ["escalate", "needs_rework"])]
         accept: bool,
-        /// Only when a coordinator asked you, in the words it used.
-        #[arg(
-            long,
-            conflicts_with_all = ["escalate", "needs_rework", "accept", "if_unanswered", "stream"]
-        )]
-        progress: bool,
         /// Answer in this thread. A thread id identifies a conversation on its own — no channel
         /// context — and hands the turn back to whoever is on the other side of it.
         ///
@@ -503,6 +497,17 @@ enum Command {
         /// Start it even though the runtime says its window has not lifted yet.
         #[arg(long)]
         force: bool,
+    },
+    /// Answer a coordinator's nudge: still working, look again in `--rest` minutes. Named only in
+    /// the nudge itself, so not in the help.
+    #[command(hide = true)]
+    Confirm {
+        /// The thread the nudge named.
+        #[arg(long)]
+        thread: String,
+        /// The minutes of rest asked for, 1 to 60.
+        #[arg(long, allow_negative_numbers = true)]
+        rest: i64,
     },
     // `Release { thread }` was here — "give this workspace's working copy back when the chain
     // holding it is over and nothing is going to give it back on its own". REMOVED by nxf 6j6v.b9nf
@@ -977,7 +982,6 @@ fn dispatch(cli: &Cli) -> Result<()> {
             escalate,
             needs_rework,
             accept,
-            progress,
             thread,
             if_unanswered,
             stream,
@@ -985,9 +989,6 @@ fn dispatch(cli: &Cli) -> Result<()> {
         } => {
             refuse_another_db_for_a_session(db)?;
             let body = resolve_body(body.as_deref(), body_file.as_deref())?;
-            if *progress {
-                return reply_progress(cli.json, db, thread.as_deref(), &body);
-            }
             reply_thread(
                 cli.json,
                 db,
@@ -1030,6 +1031,10 @@ fn dispatch(cli: &Cli) -> Result<()> {
             session,
             force,
         } => resume(cli.json, db, thread.as_deref(), session.as_deref(), *force),
+        Command::Confirm { thread, rest } => {
+            refuse_another_db_for_a_session(db)?;
+            confirm(cli.json, db, thread, *rest)
+        }
         Command::Tick { thread } => tick(cli.json, db, thread),
         Command::Handover => handover_verb(cli.json, db),
         Command::Guide { topic } => crate::guide::guide(cli.json, topic.as_deref()),
@@ -1598,6 +1603,22 @@ impl crate::worker::Worker for LazyWorker {
         crate::worker::select_worker(self.cwd.clone())
             .ok()?
             .subprocess_sample(internal_session, since)
+    }
+
+    /// The process tree, forwarded in the same change that added it to the trait (nxf 6j6v.1r61).
+    /// A selection failure is `None` — a worker that could not be built read no process.
+    fn session_process_tree(
+        &self,
+        internal_session: &str,
+    ) -> Option<crate::worker::SessionProcessTree> {
+        crate::worker::select_worker(self.cwd.clone())
+            .ok()?
+            .session_process_tree(internal_session)
+    }
+
+    /// Forwarded with the tree (nxf 6j6v.1r61); a selection failure names no survivor.
+    fn process_survives(&self, mark: &crate::worker::ProcessMark) -> bool {
+        crate::worker::select_worker(self.cwd.clone()).is_ok_and(|w| w.process_survives(mark))
     }
 
     /// The act behind the question one method up, forwarded with it (nxf 6j6v.b9nf). A selection
@@ -3058,37 +3079,20 @@ struct ReplyArgs<'a> {
     machine: Option<&'a str>,
 }
 
-/// **`nxc reply --progress`** (nxf 6j6v.558h) — see [`crate::surface::reply_progress`]. The thread
-/// resolves as a plain reply's does: named, or the one conversation open for the caller.
-fn reply_progress(json: bool, db: Option<&str>, thread: Option<&str>, body: &str) -> Result<()> {
+/// **`nxc confirm --thread <t> --rest <minutes>`** (nxf 6j6v.1r61) — see
+/// [`crate::surface::confirm_rest`]. Named only in a coordinator's nudge, so hidden from the help.
+fn confirm(json: bool, db: Option<&str>, thread: &str, rest: i64) -> Result<()> {
     let cli_ctx = CliCtx::resolve(db, hop())?;
     let ctx = cli_ctx.ctx();
     let mut store = open(db)?;
-    let resolved;
-    let thread = match thread {
-        Some(named) => named,
-        None => {
-            resolved = crate::addressees::sole_open_thread_for_session(
-                &store,
-                &ctx.caller_handle(),
-                ctx.session,
-                crate::facade::parent_thread_of(&store, ctx.session).as_deref(),
-                ctx.now,
-            )?;
-            resolved.as_str()
-        }
-    };
-    let r = crate::surface::reply_progress(&ctx, &mut store, thread, body)?;
+    let r = crate::surface::confirm_rest(&ctx, &mut store, thread, rest)?;
     if json {
         println!(
             "{}",
-            serde_json::to_string(&r).expect("progress receipt serializes")
+            serde_json::to_string(&r).expect("confirm receipt serializes")
         );
     } else {
-        println!(
-            "progress {} in thread {}: {}",
-            r.message_id, r.thread_id, r.receipt
-        );
+        println!("{}", r.receipt);
     }
     Ok(())
 }
@@ -4854,6 +4858,9 @@ mod tests {
             at: "2026-10-24T10:20:00Z".into(),
             last_activity: Some("2026-10-24T10:00:00Z".into()),
             next_look: Some("2026-10-24T10:40:00Z".into()),
+            confirmed_until: None,
+            confirmations: 0,
+            rest_total_secs: 0,
         }
     }
 

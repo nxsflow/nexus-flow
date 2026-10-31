@@ -50,13 +50,18 @@ pub(crate) const STRANDED_DDL: &str = "
     -- The obligation record (nxf 6j6v.ccvy; the SLOT since 6j6v.kgfn): thread T owes an answer
     -- from role H (the qualified handle, as the thread register names it). Written when the slot is
     -- OPENED, before any session exists — `session` is NULL until the mint fills it. ONE clock
-    -- column: the open instant, then the mint's, then every trigger's, moved by every re-trigger
-    -- and by a resume; `triggered` says whether any trigger ran. `coordinator` is the thread whose
-    -- tick coordinates the slot (`coordinator_of`). `recovering_until`, `attempts`,
-    -- `recovery_started_at`, `asked_at` and `last_progress_at` are the ladder's (6j6v.558h) and
-    -- stay at their defaults until it is built. `backfilled` marks a row the one-time backfill
+    -- column, the process-start instant P: the INSERT writes the first one, and since 6j6v.1r61
+    -- only a process start moves it (`reset_for_a_new_process`); `triggered` says whether any
+    -- trigger ran. `coordinator` is the thread whose tick coordinates the slot (`coordinator_of`).
+    -- `recovering_until`, `attempts`, `recovery_started_at` and `asked_at` are the ladder's
+    -- (6j6v.558h). `last_progress_at` is read-only: written by versions before 6j6v.1r61 (the
+    -- retired `nxc reply --progress`), never written now, and only cleared at an episode's end.
+    -- `backfilled` marks a row the one-time backfill
     -- wrote for a slot opened before this cut; `abandoned` is the reason such a slot is recorded as
-    -- given up (never nudged), with `abandoned_at`.
+    -- given up (never nudged), with `abandoned_at`. The liveness ladder (6j6v.pszd cut 3) keeps
+    -- its episode on the row: `confirmations` and `rest_total_secs` (the rests granted by `nxc
+    -- confirm`), `confirmed_until`, `stop_requested_at` and `stop_signals` (a stop in flight), and
+    -- the last sample of the open call's subprocesses with the instant it last moved.
     CREATE TABLE IF NOT EXISTS owed_starts(
         thread              TEXT    NOT NULL,
         role                TEXT    NOT NULL,
@@ -73,6 +78,15 @@ pub(crate) const STRANDED_DDL: &str = "
         abandoned           TEXT,
         abandoned_at        TEXT,
         next_look           TEXT,
+        confirmations       INTEGER NOT NULL DEFAULT 0,
+        rest_total_secs     INTEGER NOT NULL DEFAULT 0,
+        confirmed_until     TEXT,
+        stop_requested_at   TEXT,
+        stop_signals        INTEGER NOT NULL DEFAULT 0,
+        subprocess_count    INTEGER,
+        subprocess_cpu_units INTEGER,
+        subprocess_moved_at TEXT,
+        subprocess_since    TEXT,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
@@ -128,7 +142,8 @@ pub(crate) const STRANDED_DDL: &str = "
         attempt INTEGER NOT NULL,
         session TEXT,
         outcome TEXT,
-        detail  TEXT    NOT NULL
+        detail  TEXT    NOT NULL,
+        retries INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS recovery_log_by_slot ON recovery_log(thread, role, id);
     -- The obligation a queued trigger carried when it met the working-copy queue (nxf 6j6v.558h,
@@ -153,6 +168,11 @@ pub(crate) const STRANDED_DDL: &str = "
 pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     for (table, column, ddl) in [
         (
+            "recovery_log",
+            "retries",
+            "ALTER TABLE recovery_log ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
             "stranded_sessions",
             "summary",
             "ALTER TABLE stranded_sessions ADD COLUMN summary TEXT;",
@@ -161,6 +181,51 @@ pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Resul
             "owed_starts",
             "next_look",
             "ALTER TABLE owed_starts ADD COLUMN next_look TEXT;",
+        ),
+        (
+            "owed_starts",
+            "confirmations",
+            "ALTER TABLE owed_starts ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "rest_total_secs",
+            "ALTER TABLE owed_starts ADD COLUMN rest_total_secs INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "confirmed_until",
+            "ALTER TABLE owed_starts ADD COLUMN confirmed_until TEXT;",
+        ),
+        (
+            "owed_starts",
+            "stop_requested_at",
+            "ALTER TABLE owed_starts ADD COLUMN stop_requested_at TEXT;",
+        ),
+        (
+            "owed_starts",
+            "stop_signals",
+            "ALTER TABLE owed_starts ADD COLUMN stop_signals INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_count",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_count INTEGER;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_cpu_units",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_cpu_units INTEGER;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_moved_at",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_moved_at TEXT;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_since",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_since TEXT;",
         ),
         (
             "session_map",
@@ -310,6 +375,16 @@ pub const ABANDONED_AFTER_SECS: i64 = 86_400;
 /// How long a stranded record is kept once written — the retention bound of `stranded_sessions`.
 pub const STRANDED_RETENTION_DAYS: i64 = 30;
 
+/// **Whether a write owes a NEW turn on the slot, or re-triggers the turn already owed** (nxf
+/// 6j6v.1r61) — what [`ChatStore::record_owed_start`] decides the owed turn's budget by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Obligation {
+    /// A commission, a flow step, a border commission: a turn of its own, with a fresh budget.
+    New,
+    /// A rung of the ladder, a queued trigger released, an answer travelling back: the same turn.
+    Same,
+}
+
 /// **The obligation record** — thread `thread` owes an answer from `role`; the SLOT (nxf
 /// 6j6v.kgfn), owed from the instant it is opened, and `session` is the one that owes it once a
 /// session exists.
@@ -339,13 +414,33 @@ pub(crate) struct OwedStart {
     pub recovery_started_at: Option<String>,
     /// The ladder's last ask (6j6v.558h).
     pub asked_at: Option<String>,
-    /// The ladder's last sign of life (6j6v.558h).
+    /// **Read-only**: the last `nxc reply --progress` — written by versions before 6j6v.1r61,
+    /// never written now; only the end of a recovery episode clears it.
     pub last_progress_at: Option<String>,
     /// Why the slot was given up, when it was: `delivered` / `withdrawn` (the root no longer
     /// waits), `aged` (its newest evidence is older than [`ABANDONED_AFTER_SECS`]), `consolidated`
     /// (its commissioning message is gone). Never nudged; `withdraw` is its exit.
     pub abandoned: Option<String>,
     pub abandoned_at: Option<String>,
+    /// The rests granted in the episode under way (`nxc confirm --rest`, 6j6v.pszd cut 3).
+    pub confirmations: u32,
+    /// Their sum, in seconds — capped at `ladder::CONFIRM_TOTAL_CAP_SECS`.
+    pub rest_total_secs: i64,
+    /// The rest standing: no look acts before this instant plus `ladder::CONFIRM_GRACE_SECS`.
+    pub confirmed_until: Option<String>,
+    /// The ladder's SIGTERM of the slot's process, while that stop is in flight.
+    pub stop_requested_at: Option<String>,
+    /// How many SIGTERMs the stop in flight has sent: one, then the one further one.
+    pub stop_signals: u32,
+    /// The last sample of the open call's subprocesses: how many…
+    pub subprocess_count: Option<u32>,
+    /// …and their CPU counter, in the platform's raw unit.
+    pub subprocess_cpu_units: Option<u64>,
+    /// The look that last saw the sample move (`M`, design 8nx4 section 2).
+    pub subprocess_moved_at: Option<String>,
+    /// The open call the sample was taken under (its `since`): a sample of another call is no
+    /// prior sample (review of pass 1, Integrity #1).
+    pub subprocess_since: Option<String>,
 }
 
 /// **One row the one-time backfill writes** (nxf 6j6v.kgfn) — an open coordinated slot opened before
@@ -515,7 +610,8 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
 
 const OWED_COLS: &str = "thread, role, session, trigger_clock, triggered, coordinator, \
      backfilled, attempts, recovering_until, recovery_started_at, asked_at, last_progress_at, \
-     abandoned, abandoned_at";
+     abandoned, abandoned_at, confirmations, rest_total_secs, confirmed_until, stop_requested_at, \
+     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at, subprocess_since";
 
 fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
     let triggered: i64 = r.get(4)?;
@@ -536,6 +632,19 @@ fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
         last_progress_at: r.get(11)?,
         abandoned: r.get(12)?,
         abandoned_at: r.get(13)?,
+        confirmations: u32::try_from(r.get::<_, i64>(14)?).unwrap_or(0),
+        rest_total_secs: r.get(15)?,
+        confirmed_until: r.get(16)?,
+        stop_requested_at: r.get(17)?,
+        stop_signals: u32::try_from(r.get::<_, i64>(18)?).unwrap_or(0),
+        subprocess_count: r
+            .get::<_, Option<i64>>(19)?
+            .and_then(|n| u32::try_from(n).ok()),
+        subprocess_cpu_units: r
+            .get::<_, Option<i64>>(20)?
+            .and_then(|n| u64::try_from(n).ok()),
+        subprocess_moved_at: r.get(21)?,
+        subprocess_since: r.get(22)?,
     })
 }
 
@@ -591,11 +700,16 @@ impl ChatStore {
     /// nobody coordinates, which keeps cut 1a's row exactly as it was (a `coordinator` an earlier
     /// write named is left as it is — the next look decides whether it still holds).
     ///
-    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the session,
-    /// and the same session re-triggered moves only the clock. What the open wrote about the slot —
-    /// and what the ladder will write about its recovery — stays. Every stranded record of the same
-    /// obligation judged against an OLDER clock is stamped superseded in the same call — a later
-    /// trigger is what ends a record's currency, and it is the one event that does.
+    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the session.
+    /// **The clock is the INSERT's only** (nxf 6j6v.1r61, design 8nx4 section 4): the open instant
+    /// is the slot's first `P`, and from then on only a process START moves it
+    /// ([`reset_for_a_new_process`](ChatStore::reset_for_a_new_process)) — a trigger that met a
+    /// live process or the working-copy queue started nothing. `Obligation::New` is a write that
+    /// owes a NEW turn on the slot (a commission, a flow step, a border commission), not a rung of
+    /// the ladder or a queued trigger released: it starts the owed turn's budget (`attempts`)
+    /// again. Nothing else the ladder wrote moves here — a nudge pending, a stop in flight and the
+    /// episode stand until the process they are about is replaced or the slot is answered.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_owed_start(
         &mut self,
         thread: &str,
@@ -604,27 +718,73 @@ impl ChatStore {
         clock: &str,
         triggered: bool,
         coordinator: Option<&str>,
+        obligation: Obligation,
     ) -> Result<()> {
+        let new_obligation = obligation == Obligation::New;
         let conn = self.connection();
         conn.execute(
             "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered, coordinator)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(thread, role) DO UPDATE SET
                  session = excluded.session,
-                 trigger_clock = excluded.trigger_clock,
                  triggered = excluded.triggered,
-                 coordinator = COALESCE(excluded.coordinator, owed_starts.coordinator)",
+                 coordinator = COALESCE(excluded.coordinator, owed_starts.coordinator),
+                 attempts = CASE WHEN ?7 THEN 0 ELSE owed_starts.attempts END",
             params![
                 thread,
                 role,
                 session,
                 clock,
                 i64::from(triggered),
-                coordinator
+                coordinator,
+                new_obligation
             ],
         )?;
-        supersede_older(conn, thread, role, clock)?;
+        let current: String = conn.query_row(
+            "SELECT trigger_clock FROM owed_starts WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+            |r| r.get(0),
+        )?;
+        supersede_older(conn, thread, role, &current)?;
         Ok(())
+    }
+
+    /// **A process was started for `session`** (nxf 6j6v.1r61, design 8nx4 section 4, round 3 TQ #1
+    /// / IR #1) — written AFTER the worker took the trigger, and only then: every slot the session
+    /// owes is about the new process from now on. The per-process fields go (the nudge, the stop,
+    /// the rest, the subprocess sample) and `trigger_clock` — `P` — moves to `now`. A fresh process
+    /// is never sent a second SIGTERM for its predecessor's stop, never reads "moved" from its
+    /// predecessor's sample, and is never confirmed for a nudge it did not get. The episode, its
+    /// confirmations, its rests and the owed turn's `attempts` run on: a resume ends nothing.
+    ///
+    /// Keyed by `(role, session)` across the threads it owes, because a process is the SESSION's,
+    /// not one slot's — and so a push into a session whose process had ended (no reply thread of
+    /// its own) resets the slot it owes too. Answers how many rows moved.
+    pub(crate) fn reset_for_a_new_process(
+        &mut self,
+        role: &str,
+        session: &str,
+        now: &str,
+    ) -> Result<usize> {
+        let conn = self.connection();
+        let threads: Vec<String> = {
+            let mut st =
+                conn.prepare("SELECT thread FROM owed_starts WHERE role = ?1 AND session = ?2")?;
+            let rows = st.query_map(params![role, session], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let n = conn.execute(
+            "UPDATE owed_starts SET asked_at = NULL, stop_requested_at = NULL, stop_signals = 0,
+                    confirmed_until = NULL, subprocess_count = NULL, subprocess_cpu_units = NULL,
+                    subprocess_moved_at = NULL, subprocess_since = NULL, trigger_clock = ?3,
+                    triggered = 1
+              WHERE role = ?1 AND session = ?2",
+            params![role, session, now],
+        )?;
+        for thread in &threads {
+            supersede_older(conn, thread, role, now)?;
+        }
+        Ok(n)
     }
 
     /// Name the thread that coordinates a slot whose row did not say (a row cut 1a wrote), or no
@@ -688,25 +848,24 @@ impl ChatStore {
         Ok(true)
     }
 
-    /// **Move the clock of one obligation, only while `session` is the one that owes it** — the
+    /// **Mark one obligation triggered, only while `session` is the one that owes it** — the
     /// resume and the way-back wake. Keyed by `(thread, role, session)` so a resume for one thread
-    /// never turns another thread's current record into history. Returns whether a row moved.
+    /// never touches another thread's row. **It moves no clock** (nxf 6j6v.1r61): a wake into a
+    /// live process is queued behind its turn and the process is judged by its own life; a wake
+    /// that started a process moved the clock through
+    /// [`reset_for_a_new_process`](ChatStore::reset_for_a_new_process). Returns whether the row is
+    /// this session's.
     pub(crate) fn touch_owed_start(
         &mut self,
         thread: &str,
         role: &str,
         session: &str,
-        now: &str,
     ) -> Result<bool> {
-        let conn = self.connection();
-        let n = conn.execute(
-            "UPDATE owed_starts SET trigger_clock = ?4, triggered = 1
+        let n = self.connection().execute(
+            "UPDATE owed_starts SET triggered = 1
               WHERE thread = ?1 AND role = ?2 AND session = ?3",
-            params![thread, role, session, now],
+            params![thread, role, session],
         )?;
-        if n > 0 {
-            supersede_older(conn, thread, role, now)?;
-        }
         Ok(n > 0)
     }
 
@@ -1730,7 +1889,7 @@ pub(crate) fn owe_durably(
         return Ok(Vec::new());
     }
     crate::orchestration::through_the_lock(|| {
-        store.record_owed_start(thread, role, session, ctx.now, false, None)
+        store.record_owed_start(thread, role, session, ctx.now, false, None, Obligation::New)
     })?;
     Ok(arm_first_look(ctx, store, thread, role, ctx.now)
         .into_iter()
@@ -1740,7 +1899,9 @@ pub(crate) fn owe_durably(
 /// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write the
 /// trigger funnel makes, and the mint of a slot nobody coordinates (cut 1a's row, kept exactly as it
 /// was: a slot with no coordinator keeps today's behaviour). `coordinator` is the slot's
-/// coordinating thread when it has one.
+/// coordinating thread when it has one; `obligation` whether the trigger owes a new turn rather than
+/// a rung of the ladder or a queued trigger released ([`ChatStore::record_owed_start`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn owe(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -1749,14 +1910,22 @@ pub(crate) fn owe(
     session: &str,
     triggered: bool,
     coordinator: Option<&str>,
+    obligation: Obligation,
 ) -> Vec<FailedConsequence> {
     // An engine identity (the synthesizer) answers for the engine; rule 1 excludes it anyway, and
     // keeping it out of the table keeps the work list to what can strand.
     if crate::orchestration::is_engine_identity(role) {
         return Vec::new();
     }
-    if let Err(e) = store.record_owed_start(thread, role, session, ctx.now, triggered, coordinator)
-    {
+    if let Err(e) = store.record_owed_start(
+        thread,
+        role,
+        session,
+        ctx.now,
+        triggered,
+        coordinator,
+        obligation,
+    ) {
         return not_owed(thread, role, Some(session), &e);
     }
     arm_first_look(ctx, store, thread, role, ctx.now)
@@ -1764,9 +1933,10 @@ pub(crate) fn owe(
         .collect()
 }
 
-/// **Move the clock of the obligation `session` owes on `thread`** — a resume, or a wake on the
-/// way back. Only when `session` is the one that owes it (keyed by `(thread, role, session)`, so a
-/// woken session never re-owns another session's slot), and the look moves with the clock.
+/// **Mark the obligation `session` owes on `thread` triggered** — a resume, or a wake on the way
+/// back — and arm its look. Only when `session` is the one that owes it (keyed by `(thread, role,
+/// session)`, so a woken session never re-owns another session's slot). It moves no clock (nxf
+/// 6j6v.1r61): only a process start does, after the worker took it.
 pub(crate) fn touch(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -1774,7 +1944,7 @@ pub(crate) fn touch(
     role: &str,
     session: &str,
 ) -> Vec<FailedConsequence> {
-    match store.touch_owed_start(thread, role, session, ctx.now) {
+    match store.touch_owed_start(thread, role, session) {
         Ok(true) => arm_first_look(ctx, store, thread, role, ctx.now)
             .into_iter()
             .collect(),
@@ -2296,6 +2466,13 @@ fn judge(
             store.drop_stranded_suspect(t, h)?;
             return Ok(Judgement::Held);
         }
+        // **A live process is judged by its own life** (nxf 6j6v.1r61, design 8nx4 section 4): an
+        // answer held behind its turn, or a sub-round it opened, waits on THAT process — a live
+        // process is always mid-turn, and one that hangs mid-turn would otherwise never be looked
+        // at, its pending nudge never followed and its stop in flight never supervised. Rule 5
+        // below takes it as `Live`.
+        Some(StillComing::HeldDelivery | StillComing::SubRoundInFlight)
+            if coordinated && s.is_some_and(|s| ctx.worker.session_is_running(s)) => {}
         Some(_) => {
             store.drop_stranded_suspect(t, h)?;
             return Ok(Judgement::Coming);
@@ -2869,12 +3046,36 @@ mod tests {
         assert_eq!(row.trigger_clock, T1);
         assert!(!row.triggered, "a mint is not a trigger");
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T2, true, Some("m-chan"))
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s1",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert!(row.triggered);
-        assert_eq!(row.trigger_clock, T2);
+        assert_eq!(
+            row.trigger_clock, T1,
+            "a trigger moves no clock; only a process start does (6j6v.1r61)"
+        );
         assert_eq!(row.coordinator.as_deref(), Some("m-chan"));
+        assert_eq!(
+            s.reset_for_a_new_process("ws/verifier", "m-s1", T2)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.owed_start("m-t", "ws/verifier")
+                .unwrap()
+                .unwrap()
+                .trigger_clock,
+            T2,
+            "the process start moved it"
+        );
     }
 
     /// A store from before this cut carries the old `owed_starts` (session NOT NULL, five columns)
@@ -2944,6 +3145,53 @@ mod tests {
             .query_row("SELECT escalation FROM stranded_sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(escalation, "posted");
+    }
+
+    /// **The liveness columns reach a store from before cut 3 of 6j6v.pszd** (nxf 6j6v.1r61): an
+    /// `owed_starts` of the shape the ladder had until then gains the nine columns in place, with
+    /// their defaults on the row it already held — and a second pass adds nothing.
+    #[test]
+    fn a_store_from_before_the_liveness_ladder_gains_its_nine_columns_in_place() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE owed_starts(
+                 thread TEXT NOT NULL, role TEXT NOT NULL, session TEXT,
+                 trigger_clock TEXT NOT NULL, triggered INTEGER NOT NULL, coordinator TEXT,
+                 recovering_until TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                 recovery_started_at TEXT, backfilled INTEGER NOT NULL DEFAULT 0, asked_at TEXT,
+                 last_progress_at TEXT, abandoned TEXT, abandoned_at TEXT, next_look TEXT,
+                 PRIMARY KEY(thread, role));
+             INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered)
+                 VALUES ('m-t', 'ws/verifier', 'm-s', '2026-10-18T10:00:00Z', 1);",
+        )
+        .unwrap();
+        add_ladder_columns(&conn).unwrap();
+        add_ladder_columns(&conn).unwrap();
+        for column in [
+            "confirmations",
+            "rest_total_secs",
+            "confirmed_until",
+            "stop_requested_at",
+            "stop_signals",
+            "subprocess_count",
+            "subprocess_cpu_units",
+            "subprocess_moved_at",
+            "subprocess_since",
+        ] {
+            assert!(
+                column_exists(&conn, "owed_starts", column).unwrap(),
+                "{column} was added"
+            );
+        }
+        let (confirmations, rest, signals, until): (i64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT confirmations, rest_total_secs, stop_signals, confirmed_until
+                   FROM owed_starts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((confirmations, rest, signals, until), (0, 0, 0, None));
     }
 
     fn backfill_row(thread: &str, abandoned: Option<&str>) -> Backfill {
@@ -3115,26 +3363,199 @@ mod tests {
     #[test]
     fn a_new_session_for_the_same_obligation_replaces_the_row_whole() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T0, false, Some("m-chan"))
-            .unwrap();
-        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true, Some("m-chan"))
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s1",
+            T0,
+            false,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s2",
+            T1,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert_eq!(row.session.as_deref(), Some("m-s2"));
-        assert_eq!(row.trigger_clock, T1);
+        assert_eq!(
+            row.trigger_clock, T0,
+            "the INSERT's clock stands until a process starts (6j6v.1r61)"
+        );
         assert!(row.triggered);
         assert_eq!(s.owed_starts().unwrap().len(), 1);
     }
 
+    /// **A NEW obligation starts the owed turn's budget again; a re-trigger of the same one does
+    /// not** (nxf 6j6v.1r61, round 3 CQ #2 / TQ #3 / IR #2) — and neither touches the episode, a
+    /// pending nudge or a stop in flight: those are about the process, which only its start resets.
     #[test]
-    fn a_touch_moves_only_the_obligation_the_session_owes() {
+    fn a_new_obligation_resets_the_budget_and_a_re_trigger_keeps_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true, Some("m-chan"))
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.connection()
+            .execute_batch(&format!(
+                "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}',
+                        recovery_started_at = '{T1}', stop_requested_at = '{T1}'"
+            ))
             .unwrap();
-        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true, Some("m-chan"))
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::Same,
+        )
+        .unwrap();
+        assert_eq!(
+            s.owed_start("m-t", "ws/coder").unwrap().unwrap().attempts,
+            1
+        );
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        let row = s.owed_start("m-t", "ws/coder").unwrap().unwrap();
+        assert_eq!(row.attempts, 0);
+        assert_eq!(
+            (
+                row.asked_at.as_deref(),
+                row.recovery_started_at.as_deref(),
+                row.stop_requested_at.as_deref(),
+                row.trigger_clock.as_str()
+            ),
+            (Some(T1), Some(T1), Some(T1), T0)
+        );
+    }
+
+    /// **A process start resets the per-process fields of every slot its session owes** (nxf
+    /// 6j6v.1r61) — and only those: the episode, its confirmations and the budget run on.
+    #[test]
+    fn a_process_start_resets_the_per_process_fields_and_keeps_the_episode() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.record_owed_start(
+            "m-a",
+            "ws/pm",
+            "m-p",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-b",
+            "ws/pm",
+            "m-p",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-c",
+            "ws/pm",
+            "m-other",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.connection()
+            .execute_batch(&format!(
+                "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}', recovery_started_at = '{T1}',
+                        stop_requested_at = '{T1}', stop_signals = 2, confirmed_until = '{T1}',
+                        confirmations = 2, rest_total_secs = 600, subprocess_count = 3,
+                        subprocess_cpu_units = 99, subprocess_moved_at = '{T1}'"
+            ))
             .unwrap();
-        assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2", T2).unwrap());
-        assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2", T2).unwrap());
+        assert_eq!(s.reset_for_a_new_process("ws/pm", "m-p", T2).unwrap(), 2);
+        for thread in ["m-a", "m-b"] {
+            let row = s.owed_start(thread, "ws/pm").unwrap().unwrap();
+            assert_eq!(row.trigger_clock, T2);
+            assert_eq!(
+                (
+                    &row.asked_at,
+                    &row.stop_requested_at,
+                    row.stop_signals,
+                    &row.confirmed_until,
+                    row.subprocess_count,
+                    row.subprocess_cpu_units,
+                    &row.subprocess_moved_at
+                ),
+                (&None, &None, 0, &None, None, None, &None),
+                "{thread}"
+            );
+            assert_eq!(
+                (
+                    row.attempts,
+                    row.recovery_started_at.as_deref(),
+                    row.confirmations,
+                    row.rest_total_secs
+                ),
+                (1, Some(T1), 2, 600),
+                "a resume ends nothing: {thread}"
+            );
+        }
+        let other = s.owed_start("m-c", "ws/pm").unwrap().unwrap();
+        assert_eq!(
+            other.trigger_clock, T0,
+            "another session's slot is untouched"
+        );
+        assert_eq!(other.asked_at.as_deref(), Some(T1));
+    }
+
+    #[test]
+    fn a_touch_marks_only_the_obligation_the_session_owes_and_moves_no_clock() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.record_owed_start(
+            "m-r1",
+            "ws/pm",
+            "m-p1",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-r2",
+            "ws/pm",
+            "m-p2",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2").unwrap());
+        assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2").unwrap());
         assert_eq!(
             s.owed_start("m-r1", "ws/pm")
                 .unwrap()
@@ -3147,7 +3568,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .trigger_clock,
-            T2
+            T0,
+            "a wake moves no clock (6j6v.1r61)"
         );
     }
 
@@ -3156,8 +3578,16 @@ mod tests {
     #[test]
     fn a_record_stays_current_after_its_owed_row_goes_and_a_later_trigger_supersedes_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         assert!(s.record_stranded(&record(T0)).unwrap());
         assert!(
             !s.record_stranded(&record(T0)).unwrap(),
@@ -3170,8 +3600,16 @@ mod tests {
             Some(T0)
         );
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true, Some("m-chan"))
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         assert!(s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty());
         assert_eq!(
             s.stranded_records().unwrap()[0].superseded_at.as_deref(),
@@ -3228,8 +3666,16 @@ mod tests {
             s.stranded_suspect("m-t", "ws/verifier").unwrap(),
             Some(reset)
         );
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         s.forget_owed_start("m-t", "ws/verifier").unwrap();
         assert_eq!(s.stranded_suspect("m-t", "ws/verifier").unwrap(), None);
     }
@@ -3502,6 +3948,7 @@ mod tests {
                 "m-synth-session",
                 true,
                 None,
+                Obligation::New,
             )
         };
         assert!(findings.is_empty(), "{findings:?}");
@@ -3523,6 +3970,7 @@ mod tests {
             later_fractional,
             true,
             Some("m-chan"),
+            Obligation::New,
         )
         .unwrap();
         assert!(
@@ -3539,6 +3987,7 @@ mod tests {
             "2026-10-18T12:00:00+02:00",
             true,
             Some("m-chan"),
+            Obligation::New,
         )
         .unwrap();
         assert_eq!(s.current_stranded_by_threads(&["m-t"]).unwrap().len(), 1);

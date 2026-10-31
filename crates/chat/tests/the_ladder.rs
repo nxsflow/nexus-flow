@@ -16,23 +16,26 @@
 
 mod common;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use nexus_chat::channel::ChannelDecl;
 use nexus_chat::definitions::Definitions;
 use nexus_chat::error::Result as NxfResult;
 use nexus_chat::facade::{self, StatusOperation, StatusScope, StatusThread};
-use nexus_chat::orchestration::{self, ConsequenceClass, SessionEnd, TickReceipt, TickRequest};
+use nexus_chat::orchestration::{
+    self, ConsequenceClass, ReplyReceipt, SessionEnd, TickReceipt, TickRequest,
+};
 use nexus_chat::role::RoleDecl;
 use nexus_chat::store::ChatStore;
 use nexus_chat::surface::{self, ReplyThreadRequest, SendToRefs, SendToRequest};
 use nexus_chat::timer::{Timer, TimerHandle};
 use nexus_chat::worker::{
-    AskOutcome, SessionAsk, SessionStop, TriggerError, TriggerOutcome, TriggerRequest,
+    AskOutcome, Pulse, SessionAsk, SessionStop, TriggerError, TriggerOutcome, TriggerRequest,
     TriggerResult, Worker,
 };
 use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
+use nxs_service::process::SubprocessSample;
 use tempfile::TempDir;
 
 // ---- the clock ------------------------------------------------------------------------------------
@@ -76,6 +79,25 @@ struct Hand {
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// Set while a start is blocked at the gate.
     at_the_gate: std::sync::atomic::AtomicBool,
+    /// What each session's pulse file says; `Unreported` for a session not named (an older
+    /// sidecar), so a test that sets none keeps the transcript-only rule.
+    pulse: Mutex<HashMap<String, Pulse>>,
+    /// What each session's open call samples; `None` for a session not named (a blind host).
+    samples: Mutex<HashMap<String, Option<SubprocessSample>>>,
+    /// Every session whose asks were withdrawn, in order.
+    withdrawn: Mutex<Vec<String>>,
+    /// When set, every withdrawal is recorded and then answers this error — an ask file the
+    /// worker could not unlink.
+    withdraw_fails: Mutex<Option<&'static str>>,
+    /// When set, every stop is recorded and then answers this instead of `Requested`:
+    /// `"nothing"` is `NothingToStop`, anything else an `Err` with that text.
+    stop_answers: Mutex<Option<&'static str>>,
+    /// Every pulse read for a session whose process was NOT running — a reading the ladder must
+    /// never take, since the file outlives its process (review of d1ey, CQ #2 / IR #3).
+    pulse_read_while_not_running: Mutex<Vec<String>>,
+    /// Sessions whose process dies right after the next question whether it runs — the judge's
+    /// `Live` and a later read of the same look disagree.
+    dies_after_one_question: Mutex<HashSet<String>>,
 }
 
 impl Hand {
@@ -101,6 +123,9 @@ impl Hand {
     }
     fn stop(&self, session: &str) {
         self.running.lock().unwrap().remove(session);
+    }
+    fn stops(&self) -> Vec<String> {
+        self.stopped.lock().unwrap().clone()
     }
 }
 
@@ -148,7 +173,17 @@ impl Worker for Hand {
         Ok(TriggerOutcome::Accepted)
     }
     fn session_is_running(&self, internal_session: &str) -> bool {
-        self.running.lock().unwrap().contains(internal_session)
+        let running = self.running.lock().unwrap().contains(internal_session);
+        if running
+            && self
+                .dies_after_one_question
+                .lock()
+                .unwrap()
+                .remove(internal_session)
+        {
+            self.running.lock().unwrap().remove(internal_session);
+        }
+        running
     }
     fn answers_liveness(&self) -> bool {
         true
@@ -167,7 +202,13 @@ impl Worker for Hand {
             .lock()
             .unwrap()
             .push(internal_session.to_string());
-        Ok(SessionStop::Requested)
+        match *self.stop_answers.lock().unwrap() {
+            None => Ok(SessionStop::Requested),
+            Some("nothing") => Ok(SessionStop::NothingToStop(
+                "its pid is gone (injected)".to_string(),
+            )),
+            Some(e) => Err(e.to_string()),
+        }
     }
     fn ask_session(&self, ask: &SessionAsk) -> AskOutcome {
         if !self.session_is_running(&ask.session) {
@@ -178,6 +219,38 @@ impl Worker for Hand {
         }
         self.asked.lock().unwrap().push(ask.clone());
         AskOutcome::Asked
+    }
+    fn session_pulse(&self, internal_session: &str) -> Pulse {
+        if !self.session_is_running(internal_session) {
+            self.pulse_read_while_not_running
+                .lock()
+                .unwrap()
+                .push(internal_session.to_string());
+        }
+        self.pulse
+            .lock()
+            .unwrap()
+            .get(internal_session)
+            .cloned()
+            .unwrap_or(Pulse::Unreported)
+    }
+    fn withdraw_asks(&self, internal_session: &str) -> Result<(), String> {
+        self.withdrawn
+            .lock()
+            .unwrap()
+            .push(internal_session.to_string());
+        match *self.withdraw_fails.lock().unwrap() {
+            None => Ok(()),
+            Some(e) => Err(e.to_string()),
+        }
+    }
+    fn subprocess_sample(&self, internal_session: &str, _since: &str) -> Option<SubprocessSample> {
+        self.samples
+            .lock()
+            .unwrap()
+            .get(internal_session)
+            .copied()
+            .flatten()
     }
 }
 
@@ -256,8 +329,14 @@ struct Team {
 }
 
 fn role(handle: &str) -> RoleDecl {
+    // `builder` needs the working copy to itself — the one role here whose start can queue.
+    let exclusive = if handle == "builder" {
+        "working_tree: exclusive\n"
+    } else {
+        ""
+    };
     serde_yaml::from_str(&format!(
-        "handle: {handle}\nsystem_prompt: You are {handle}.\n"
+        "handle: {handle}\nsystem_prompt: You are {handle}.\n{exclusive}"
     ))
     .expect("test role parses")
 }
@@ -270,7 +349,7 @@ fn team() -> Team {
         .map(|c| serde_yaml::from_str(c).expect("channel parses"))
         .collect();
     let defs = Definitions::new(
-        ["pm", "coder", "verifier", "reviewer", "finisher"]
+        ["pm", "coder", "verifier", "reviewer", "finisher", "builder"]
             .into_iter()
             .map(role)
             .collect(),
@@ -295,7 +374,6 @@ struct Ladder {
     attempts: i64,
     recovery_started_at: Option<String>,
     asked_at: Option<String>,
-    last_progress_at: Option<String>,
     recovering_until: Option<String>,
 }
 
@@ -411,6 +489,18 @@ impl Team {
     }
 
     fn reply(&self, now: &str, role: &str, session: &str, thread: &str, body: &str) {
+        self.reply_receipt(now, role, session, thread, body);
+    }
+
+    /// [`Team::reply`], with the receipt the reply's writer gets.
+    fn reply_receipt(
+        &self,
+        now: &str,
+        role: &str,
+        session: &str,
+        thread: &str,
+        body: &str,
+    ) -> ReplyReceipt {
         self.with(now, role, Some(session), |ctx, store| {
             surface::reply_in_thread(
                 ctx,
@@ -425,7 +515,7 @@ impl Team {
                 },
             )
         })
-        .expect("the reply is posted");
+        .expect("the reply is posted")
     }
 
     /// The commissioner, `owner`, answers in `thread`.
@@ -488,6 +578,70 @@ impl Team {
         self.entry(session, "assistant", when, "{\"text\":\"working\"}");
     }
 
+    /// What `session`'s pulse file says from now on.
+    fn pulse(&self, session: &str, p: Pulse) {
+        self.worker
+            .pulse
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), p);
+    }
+
+    /// What `session`'s open call samples from now on.
+    fn sample(&self, session: &str, count: u32, cpu_units: u64) {
+        self.worker.samples.lock().unwrap().insert(
+            session.to_string(),
+            Some(SubprocessSample { count, cpu_units }),
+        );
+    }
+
+    /// The slot's log with the instant of every row: (action, outcome, seconds since T0).
+    fn log_at(&self, thread: &str, handle: &str) -> Vec<(String, Option<String>, i64)> {
+        let store = self.store();
+        let mut st = store
+            .connection()
+            .prepare(
+                "SELECT action, outcome, at FROM recovery_log WHERE thread = ?1 AND role = ?2
+                  ORDER BY id",
+            )
+            .unwrap();
+        st.query_map([thread, &self.q(handle)], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .into_iter()
+        .map(|(a, o, t)| (a, o, secs_of(&t)))
+        .collect()
+    }
+
+    /// One column of the slot's owed row, as text (NULL as `None`).
+    fn owed(&self, thread: &str, handle: &str, column: &str) -> Option<String> {
+        self.store()
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT CAST({column} AS TEXT) FROM owed_starts WHERE thread = ?1 AND role = ?2"
+                ),
+                [thread, &self.q(handle)],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// The escalations in `thread` with the instant each was posted, seconds since T0.
+    fn escalated_at(&self, thread: &str) -> Vec<i64> {
+        self.store()
+            .messages_in_thread(thread)
+            .expect("messages")
+            .into_iter()
+            .filter(|m| m.kind == "escalation")
+            .filter_map(|m| m.created.as_deref().map(secs_of))
+            .collect()
+    }
+
     /// `session`'s main conversation called the tool `name` at `when` — a `tool_use` with its id.
     fn tool_call(&self, session: &str, id: &str, name: &str, when: &str) {
         self.entry_with_id(
@@ -534,19 +688,17 @@ impl Team {
             .expect("transcript entry");
     }
 
-    /// `role`'s session says "still working" on `thread` — `nxc reply --progress`.
-    fn progress(
+    /// `coder`'s session `session` answers a nudge on `thread` with a rest — `nxc confirm --rest`.
+    fn confirm(
         &self,
         now: &str,
-        role: &str,
         session: &str,
         thread: &str,
-        body: &str,
-    ) -> surface::ProgressReceipt {
-        self.with(now, role, Some(session), |ctx, store| {
-            surface::reply_progress(ctx, store, thread, body)
+        minutes: i64,
+    ) -> NxfResult<surface::ConfirmReceipt> {
+        self.with(now, "coder", Some(session), |ctx, store| {
+            surface::confirm_rest(ctx, store, thread, minutes)
         })
-        .expect("the progress is posted")
     }
 
     /// The session's process ends, announcing `cause`, as the sidecar's teardown does.
@@ -573,8 +725,7 @@ impl Team {
         self.store()
             .connection()
             .query_row(
-                "SELECT session, attempts, recovery_started_at, asked_at, last_progress_at,
-                        recovering_until
+                "SELECT session, attempts, recovery_started_at, asked_at, recovering_until
                    FROM owed_starts WHERE thread = ?1 AND role = ?2",
                 [thread, &self.q(handle)],
                 |r| {
@@ -583,8 +734,7 @@ impl Team {
                         attempts: r.get(1)?,
                         recovery_started_at: r.get(2)?,
                         asked_at: r.get(3)?,
-                        last_progress_at: r.get(4)?,
-                        recovering_until: r.get(5)?,
+                        recovering_until: r.get(4)?,
                     })
                 },
             )
@@ -657,7 +807,7 @@ fn escalations(messages: &[(String, String, String)]) -> Vec<String> {
 /// without answering — told to stop. Nothing is recorded stranded and nothing is escalated: at the
 /// end + grace its coordinator continues the SAME session, resuming the runtime session it bound,
 /// with the continue text naming the thread and quoting the commissioning message's first line —
-/// and the text offers no `--progress`. One attempt is counted and logged.
+/// and the text offers no `nxc confirm`. One attempt is counted and logged.
 #[test]
 fn an_ended_session_is_continued_in_the_same_session_with_the_thread_and_task_named() {
     let team = team();
@@ -699,7 +849,7 @@ fn an_ended_session_is_continued_in_the_same_session_with_the_thread_and_task_na
         "{}",
         cont.message
     );
-    assert!(!cont.message.contains("--progress"), "{}", cont.message);
+    assert!(!cont.message.contains("nxc confirm"), "{}", cont.message);
     let ladder = team.ladder(&thread, "coder").expect("the row stands");
     assert_eq!(ladder.attempts, 1);
     assert_eq!(
@@ -978,40 +1128,44 @@ fn a_recommissioned_session_answers_its_slot_and_another_commissions_session_may
     assert!(team.store().session_serves(&old, &thread).unwrap());
 }
 
-/// **`--progress` is bound like a reply** (nxf 6j6v.f5rf, review TQ #2): a progress from another
-/// commission's session is refused, and the slot it named keeps its silence clock and its messages —
-/// a stranger's "still working" must not keep somebody else's slot looking alive. The session's own
-/// progress is taken as before.
+/// **`nxc confirm` is bound like a reply** (nxf 6j6v.f5rf, review TQ #2; nxf 6j6v.1r61): a
+/// confirmation from another commission's session is refused, and the slot it named keeps its nudge,
+/// its rests and its messages — a stranger's "still working" must not keep somebody else's slot
+/// looking alive. The session's own confirmation is granted as before.
 #[test]
-fn a_progress_from_another_commissions_session_is_refused_and_moves_nothing() {
+fn a_confirm_from_another_commissions_session_is_refused_and_moves_nothing() {
     let team = team();
     let thread = team
         .commission(T0, "coder", "Add a --since flag.")
         .thread_id;
     let session = team.worker.last("coder").internal_session;
     team.worker.run(&session);
-    team.tick(&at(1_200), &thread);
+    team.tick(&at(600), &thread);
     let asked = team.ladder(&thread, "coder").unwrap();
-    assert!(asked.asked_at.is_some(), "an ask is pending: {asked:?}");
+    assert!(asked.asked_at.is_some(), "a nudge is pending: {asked:?}");
     team.commission(T0, "coder", "Something else.");
     let stranger = team.worker.last("coder").internal_session;
     let before = team.messages(&thread);
 
     let refused = team
-        .with(&at(1_300), "coder", Some(&stranger), |ctx, store| {
-            surface::reply_progress(ctx, store, &thread, "running the suite")
-        })
+        .confirm(&at(630), &stranger, &thread, 20)
         .expect_err("another commission's session does not serve this slot");
     assert_eq!(refused.kind, nxs_foundation::error::ErrorKind::Forbidden);
     assert_eq!(team.messages(&thread), before, "nothing written");
     assert_eq!(
         team.ladder(&thread, "coder").unwrap(),
         asked,
-        "the silence clock, the ask and the budget are untouched"
+        "the nudge, the episode and the budget are untouched"
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "confirmations"),
+        Some("0".into())
     );
 
-    let r = team.progress(&at(1_310), "coder", &session, &thread, "running the suite");
-    assert!(r.counted, "the slot's own session is taken: {r:?}");
+    let r = team
+        .confirm(&at(640), &session, &thread, 20)
+        .expect("the slot's own session is granted its rest");
+    assert_eq!(r.granted_minutes, 20);
 }
 
 // ---- a re-commission whose start fails (nxf 6j6v.yts5) ------------------------------------------
@@ -1073,7 +1227,16 @@ fn a_recommission_whose_start_fails_on_a_prime_timeout_is_retried_at_the_next_lo
     let fresh = &starts[1];
     assert_eq!(fresh.resume_real, None, "a fresh session");
     assert!(fresh.message.contains("Add a --since flag."));
-    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 2);
+    assert_eq!(
+        team.ladder(&thread, "coder").unwrap().attempts,
+        1,
+        "the retry is the same re-commission: one attempt (round 2 TQ #6)"
+    );
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("recommissioned".to_string(), Some("triggered".to_string()))],
+        "and one row, settled again"
+    );
     team.reply(
         &at(200),
         "coder",
@@ -1092,7 +1255,7 @@ fn a_recommission_whose_start_fails_on_a_prime_timeout_is_retried_at_the_next_lo
 
 /// **A failed continue is continued again at the next look** (nxf 6j6v.yts5): the session bound and
 /// wrote, so the rung after an end is a continue, and the retry asks for that rung again — the SAME
-/// session resumed, never a fresh one.
+/// session resumed, never a fresh one, and on the same row and attempt (round 2 TQ #6).
 #[test]
 fn a_continue_whose_start_fails_is_continued_again_at_the_next_look_and_answered() {
     let team = team();
@@ -1114,30 +1277,12 @@ fn a_continue_whose_start_fails_is_continued_again_at_the_next_look_and_answered
     team.tick(&at(190), &thread);
 
     let log = team.log(&thread, "coder");
-    assert_eq!(log.len(), 2, "{log:?}");
-    assert_eq!(log[0].0, "continued");
-    assert!(log[0]
-        .1
-        .as_deref()
-        .is_some_and(|o| o.starts_with("failed:")));
     assert_eq!(
-        log[1],
-        ("continued".to_string(), Some("triggered".to_string())),
-        "continued again, not re-commissioned"
+        log,
+        vec![("continued".to_string(), Some("triggered".to_string()))],
+        "continued again on the same row — one continue with its retry (round 2 TQ #6)"
     );
-    let detail: String = team
-        .store()
-        .connection()
-        .query_row(
-            "SELECT detail FROM recovery_log ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        detail.contains("its continued at") && detail.contains("could not be started"),
-        "the retry's occasion is the failed continue: {detail}"
-    );
+    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
     let again = team.worker.last("coder");
     assert_eq!(again.internal_session, session, "the same session");
     assert_eq!(
@@ -1208,8 +1353,10 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
         assert!(looks < 50, "escalated within 50 looks");
     }
 
+    // Nine starts a cadence apart from +130 (three attempts of three starts each, round 2 TQ #6),
+    // then rung E at the next look: +670.
     assert!(
-        now <= 600,
+        now <= 700,
         "escalated at +{now}s, within the budget's few minutes"
     );
     assert_eq!(team.worker.of("coder").len(), 1, "nothing ever started");
@@ -1221,6 +1368,20 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
         })
         .count();
     assert_eq!(failed, 3, "{log:?}");
+    // Three re-commissions, each with its start retried twice on its own row (round 2 TQ #6):
+    // nine starts, three attempts, then rung E — still minutes, not the deadline.
+    let retries: Vec<i64> = {
+        let store = team.store();
+        let mut st = store
+            .connection()
+            .prepare("SELECT retries FROM recovery_log WHERE action = 'recommissioned' ORDER BY id")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert_eq!(retries, vec![2, 2, 2]);
     assert_eq!(log.last().map(|(a, _)| a.as_str()), Some("escalated"));
     let posted = escalations(&team.messages(&thread));
     assert_eq!(posted.len(), 1, "{posted:?}");
@@ -1411,7 +1572,10 @@ fn a_coordinated_slot_whose_retry_is_due_past_the_ceiling_escalates_at_the_ceili
 
 /// **No look reaches past the ceiling.** A live session's next look is one cadence out; thirty
 /// seconds before the ceiling that would land thirty seconds past it, and the ceiling would fire
-/// late. The look is armed AT the ceiling instead, and fires there.
+/// late. The look is armed AT the ceiling instead, and fires there. The session here is a resumed
+/// one in its first minutes (its process started just before; nothing of its own yet), so its
+/// episode stands — a session with life of its own since its start would end the episode instead
+/// (`a_recovered_episode_is_closed_and_a_later_silence_opens_a_second`).
 #[test]
 fn a_look_that_would_land_past_the_ceiling_is_armed_at_it() {
     let team = team();
@@ -1423,8 +1587,12 @@ fn a_look_that_would_land_past_the_ceiling_is_armed_at_it() {
     assert_eq!(team.log(&thread, "coder")[0].0, "continued");
     team.worker.run(&session);
     let ceiling = 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS;
-    team.turn(&session, &thread, &at(ceiling - 45));
-    team.work(&session, &at(ceiling - 40));
+    // A later resume started its process 45 s before the look: P moves, the episode stands.
+    team.sql(&format!(
+        "UPDATE owed_starts SET trigger_clock = '{}' WHERE thread = '{thread}'",
+        at(ceiling - 75)
+    ));
+    team.turn(&session, &thread, &at(ceiling - 75));
 
     team.tick(&at(ceiling - 30), &thread);
 
@@ -1542,54 +1710,59 @@ fn a_permanent_refusal_escalates_at_once() {
 
 // ---- rung A: ask (field case 2b) -----------------------------------------------------------------
 
-/// A live session with no activity on its slot for 20 minutes is ASKED, through the door, with the
-/// one text that offers `--progress` — once. Nothing is stopped and nothing is started. Before the
-/// 20 minutes, nothing at all.
+/// A live session with no life of its own on its slot for 10 minutes is NUDGED, through the door,
+/// with the one text that offers `nxc confirm --rest` — once, and counting no attempt. Nothing is
+/// stopped and nothing is started. Before the 10 minutes, nothing at all (nxf 6j6v.1r61).
 #[test]
-fn a_live_session_silent_on_its_slot_for_twenty_minutes_is_asked_once_with_the_progress_text() {
+fn a_live_session_silent_on_its_slot_for_ten_minutes_is_nudged_once_with_the_confirm_text() {
     let team = team();
     let thread = team
         .commission(T0, "coder", "Add a --since flag.")
         .thread_id;
     let session = team.worker.last("coder").internal_session;
     team.worker.run(&session);
-    team.tick(&at(1_199), &thread);
+    team.tick(&at(599), &thread);
     assert!(team.worker.asks().is_empty(), "not yet");
-    team.tick(&at(1_200), &thread);
+    team.tick(&at(600), &thread);
     let asks = team.worker.asks();
     assert_eq!(asks.len(), 1, "{asks:?}");
     let ask = &asks[0];
     assert_eq!(ask.session, session);
     assert_eq!(ask.thread, thread);
     assert_eq!(ask.role, team.q("coder"));
-    assert_eq!(ask.text, nexus_chat::ladder::ask_text(&thread));
-    assert!(
-        ask.text
-            .contains(&format!("nxc reply --thread {thread} --progress"))
-            && ask.text.contains("20 minutes"),
-        "{}",
-        ask.text
-    );
+    assert_eq!(ask.text, nexus_chat::ladder::ask_text(&thread, 10, 90));
+    for needle in [
+        "no sign of life from you for 10 minutes".to_string(),
+        format!("If you have already replied on thread {thread}, do nothing and end your turn."),
+        format!("`nxc reply --thread {thread} -`"),
+        format!("`nxc confirm --thread {thread} --rest <minutes>` (at most 60; 90 minutes of rest remain)"),
+        format!("`nxc reply --thread {thread} --escalate -`"),
+    ] {
+        assert!(ask.text.contains(&needle), "{needle:?} missing from {}", ask.text);
+    }
+    assert!(!ask.text.contains("--progress"), "{}", ask.text);
     let ladder = team.ladder(&thread, "coder").unwrap();
-    assert_eq!(ladder.attempts, 1);
-    assert_eq!(ladder.asked_at.as_deref(), Some(at(1_200).as_str()));
+    assert_eq!(ladder.attempts, 0, "a nudge counts no attempt");
+    assert_eq!(ladder.asked_at.as_deref(), Some(at(600).as_str()));
+    assert_eq!(
+        ladder.recovery_started_at.as_deref(),
+        Some(at(600).as_str()),
+        "the nudge opened the episode"
+    );
     assert_eq!(
         team.log(&thread, "coder"),
         vec![("asked".to_string(), Some("asked".to_string()))]
     );
     assert_eq!(team.worker.of("coder").len(), 1, "nothing started");
-    assert!(
-        team.worker.stopped.lock().unwrap().is_empty(),
-        "nothing stopped"
-    );
-    // The next look before another 20 minutes asks nothing more.
-    team.tick(&at(1_200 + 600), &thread);
+    assert!(team.worker.stops().is_empty(), "nothing stopped");
+    // The next look inside the nudge's wait asks nothing more.
+    team.tick(&at(660), &thread);
     assert_eq!(team.worker.asks().len(), 1);
     // The status row says so, never "stale".
-    let row = team.status_of(&at(1_201), &thread);
+    let row = team.status_of(&at(601), &thread);
     let recovery = row.recovery.expect("under recovery");
     assert_eq!(recovery.action, nexus_chat::ladder::RecoveryAction::Asked);
-    assert_eq!((recovery.attempt, recovery.of), (1, 3));
+    assert_eq!((recovery.attempt, recovery.of), (0, 3));
     assert!(!row.stale);
 }
 
@@ -1720,11 +1893,14 @@ fn a_session_inside_one_tool_call_longer_than_three_ask_intervals_is_neither_ask
     assert_eq!(team.worker.asks().len(), 1, "asked once the call is over");
 }
 
-/// **A session that is really silent is still asked and escalated as before** — none of its calls
-/// is open: one returned, and one has no result on record but the model spoke after it, so it is
-/// over too. Asked three times, then escalated once.
+/// **A session that is really silent is nudged and stopped** — none of its calls is open: one
+/// returned, and one has no result on record but the model spoke after it, so it is over too. Its
+/// last life is at +60; the looks every five minutes nudge it at the first look past +660 and stop
+/// it five minutes later. Its process ignores the SIGTERM: the one further SIGTERM comes at the
+/// stop's grace and the slot escalates at twice it, naming the process that would not stop
+/// (nxf 6j6v.1r61, design 8nx4 section 4 step 1).
 #[test]
-fn a_session_with_no_tool_call_open_is_still_asked_three_times_and_escalated() {
+fn a_session_with_no_tool_call_open_is_nudged_stopped_and_escalated_when_it_will_not_stop() {
     let team = team();
     let thread = team
         .commission(T0, "coder", "Add a --since flag.")
@@ -1737,12 +1913,36 @@ fn a_session_with_no_tool_call_open_is_still_asked_three_times_and_escalated() {
     team.tool_call(&session, "toolu_lost", "Bash", &at(50));
     team.work(&session, &at(60));
     let mut now = 300;
-    while now <= 7_200 {
+    while now <= 2_400 {
         team.tick(&at(now), &thread);
         now += 300;
     }
-    assert_eq!(team.worker.asks().len(), 3, "{:?}", team.worker.asks());
-    assert_eq!(escalations(&team.messages(&thread)).len(), 1);
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].at, at(900));
+    assert_eq!(team.worker.stops(), vec![session.clone(), session.clone()]);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("asked".into(), 900),
+            ("stopped".into(), 1_200),
+            ("stopped".into(), 1_500),
+            ("escalated".into(), 1_800)
+        ]
+    );
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(posted[0].contains("would not stop"), "{}", posted[0]);
+    assert!(
+        posted[0].contains("- last pulse: this host reports no pulse"),
+        "{}",
+        posted[0]
+    );
 }
 
 /// **A tool call that outlives its own bound is hung** — and an ask cannot reach a session inside
@@ -1775,172 +1975,7 @@ fn a_tool_call_that_outlives_its_bound_is_escalated_as_hung_without_an_ask() {
     assert_eq!(escalations(&team.messages(&thread)).len(), 1, "once");
 }
 
-// ---- `--progress` ---------------------------------------------------------------------------------
-
-/// **A requested `--progress`** resets the budget and the silence clock and answers the ask — and
-/// discharges nothing, starts nothing, wakes nobody. The later real answer is accepted.
-#[test]
-fn a_requested_progress_resets_attempts_and_discharges_nothing() {
-    let team = team();
-    let thread = team
-        .commission(T0, "coder", "Add a --since flag.")
-        .thread_id;
-    let session = team.worker.last("coder").internal_session;
-    team.worker.run(&session);
-    team.tick(&at(1_200), &thread);
-    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
-    let starts = team.worker.all().len();
-
-    let r = team.progress(&at(1_300), "coder", &session, &thread, "running the suite");
-    assert!(r.counted, "{r:?}");
-    assert_eq!(r.receipt, surface::PROGRESS_TAKEN);
-    let ladder = team.ladder(&thread, "coder").unwrap();
-    assert_eq!(ladder.attempts, 0, "the budget is back");
-    assert_eq!(ladder.asked_at, None, "the ask is answered");
-    assert_eq!(ladder.last_progress_at.as_deref(), Some(at(1_300).as_str()));
-    assert_eq!(
-        ladder.recovery_started_at.as_deref(),
-        Some(at(1_200).as_str()),
-        "the ceiling clock stands"
-    );
-    let row = team.status_of(&at(1_301), &thread);
-    assert_eq!(row.outstanding, vec![team.q("coder")], "nothing discharged");
-    assert!(!row.awaiting_human, "nobody woken: the root has no answer");
-    assert_eq!(team.worker.all().len(), starts, "nothing started");
-    let kinds: Vec<String> = team
-        .messages(&thread)
-        .into_iter()
-        .map(|(_, k, _)| k)
-        .collect();
-    assert_eq!(
-        kinds,
-        vec!["info", "progress"],
-        "the progress is on the record"
-    );
-
-    // Silent again from the progress on: asked again at +20 min from it, not before.
-    team.tick(&at(1_300 + 1_199), &thread);
-    assert_eq!(team.worker.asks().len(), 1);
-    team.tick(&at(1_300 + 1_200), &thread);
-    assert_eq!(team.worker.asks().len(), 2);
-
-    team.reply(
-        &at(3_000),
-        "coder",
-        &session,
-        &thread,
-        "done: --since is in",
-    );
-    assert!(
-        team.status_of(&at(3_001), &thread).awaiting_human,
-        "the real answer is accepted"
-    );
-}
-
-/// **An unrequested `--progress`** is stored and counts for nothing.
-#[test]
-fn an_unrequested_progress_is_stored_and_counts_nothing() {
-    let team = team();
-    let thread = team.commission(T0, "coder", "build").thread_id;
-    let session = team.worker.last("coder").internal_session;
-    team.bound_with_transcript(&session, 1, &at(5));
-    team.ended(&at(10), &session, None);
-    team.tick(&at(130), &thread);
-    assert_eq!(
-        team.ladder(&thread, "coder").unwrap().attempts,
-        1,
-        "continued once"
-    );
-    let r = team.progress(&at(200), "coder", &session, &thread, "still on it");
-    assert!(!r.counted);
-    assert_eq!(r.receipt, surface::PROGRESS_UNREQUESTED);
-    let ladder = team.ladder(&thread, "coder").unwrap();
-    assert_eq!(ladder.attempts, 1, "unchanged");
-    assert_eq!(ladder.last_progress_at, None);
-    assert_eq!(
-        team.status_of(&at(201), &thread).outstanding,
-        vec![team.q("coder")]
-    );
-}
-
-/// A real answer mistakenly sent as `--progress` discharges nothing; the silence clock asks again
-/// later, and the proper reply is accepted.
-#[test]
-fn a_real_answer_sent_as_progress_is_asked_for_again_and_the_proper_reply_accepted() {
-    let team = team();
-    let thread = team.commission(T0, "coder", "build").thread_id;
-    let session = team.worker.last("coder").internal_session;
-    team.worker.run(&session);
-    team.tick(&at(1_200), &thread);
-    team.progress(&at(1_210), "coder", &session, &thread, "done: it is built");
-    assert!(!team.status_of(&at(1_211), &thread).awaiting_human);
-    team.tick(&at(1_210 + 1_200), &thread);
-    assert_eq!(team.worker.asks().len(), 2, "asked again");
-    team.reply(&at(2_500), "coder", &session, &thread, "done: it is built");
-    assert!(team.status_of(&at(2_501), &thread).awaiting_human);
-}
-
 // ---- the budget and the ceiling -------------------------------------------------------------------
-
-/// **The ceiling** (must-fix, design review round 3 TQ #3 / IR #4, round 4 TQ #4): a session that
-/// answers EVERY ask with `--progress` is never escalated for being slow — until the wall clock
-/// from the episode's first attempt reaches `clamp(3 × window, 2 h, 6 h)`. A direct commission
-/// declares no member window, so the floor holds: two hours.
-#[test]
-fn a_worker_answering_every_ask_with_progress_reaches_rung_e_at_the_ceiling() {
-    let team = team();
-    let thread = team.commission(T0, "coder", "build").thread_id;
-    let session = team.worker.last("coder").internal_session;
-    team.worker.run(&session);
-    let first_ask = 1_200;
-    let mut now = first_ask;
-    let mut asks = 0;
-    while now < first_ask + 7_200 {
-        team.tick(&at(now), &thread);
-        if team.worker.asks().len() > asks {
-            asks = team.worker.asks().len();
-            team.progress(&at(now + 5), "coder", &session, &thread, "still at it");
-        }
-        assert!(
-            escalations(&team.messages(&thread)).is_empty(),
-            "at +{now}s"
-        );
-        now += 300;
-    }
-    assert!(asks >= 5, "asked {asks} times, each answered");
-    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 0);
-    team.tick(&at(first_ask + 7_200), &thread);
-    let posted = escalations(&team.messages(&thread));
-    assert_eq!(posted.len(), 1, "rung E at the ceiling");
-    assert!(posted[0].contains("ceiling"), "{}", posted[0]);
-}
-
-/// The continue text offers no `--progress`, so a session that answers every CONTINUATION with one
-/// is not reset — the progress is unrequested — and it is escalated after three.
-#[test]
-fn a_worker_answering_every_continuation_with_progress_is_escalated_after_three() {
-    let team = team();
-    let thread = team.commission(T0, "coder", "build").thread_id;
-    let session = team.worker.last("coder").internal_session;
-    team.bound_with_transcript(&session, 1, &at(5));
-    let mut now = 10;
-    for _ in 0..3 {
-        team.ended(&at(now), &session, None);
-        now += 120;
-        team.tick(&at(now), &thread);
-        let r = team.progress(&at(now + 5), "coder", &session, &thread, "working");
-        assert!(!r.counted);
-        now += 60;
-    }
-    team.ended(&at(now), &session, None);
-    team.tick(&at(now + 120), &thread);
-    assert_eq!(escalations(&team.messages(&thread)).len(), 1);
-    assert_eq!(
-        team.worker.of("coder").len(),
-        4,
-        "the first start and three continuations"
-    );
-}
 
 /// **After rung E and a commissioner reply**, a later silence gets a FRESH ask — not an immediate
 /// escalation (must-fix, design review round 4 TQ #4): rung E's record ends the episode ON THE ROW,
@@ -1988,15 +2023,21 @@ fn after_an_escalation_and_a_commissioner_reply_a_later_silence_gets_a_fresh_ask
         at(now)
     ));
     team.worker.run(&session);
-    team.tick(&at(now + 1_199), &thread);
+    team.tick(&at(now + 599), &thread);
     assert!(team.worker.asks().is_empty(), "not at once");
-    team.tick(&at(now + 1_200), &thread);
+    team.tick(&at(now + 600), &thread);
     assert_eq!(
         team.worker.asks().len(),
         1,
         "a fresh ask after a fresh silence"
     );
-    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
+    let ladder = team.ladder(&thread, "coder").unwrap();
+    assert_eq!(ladder.attempts, 0, "a nudge counts no attempt");
+    assert_eq!(
+        ladder.recovery_started_at.as_deref(),
+        Some(at(now + 600).as_str()),
+        "a fresh episode"
+    );
     assert_eq!(
         escalations(&team.messages(&thread)).len(),
         1,
@@ -2699,4 +2740,1218 @@ fn a_trigger_slower_than_the_claim_keeps_it_and_a_look_past_the_in_flight_guard_
         None,
         "released"
     );
+}
+
+// ---- the liveness ladder: nudge at 10, dead at 15, stop, resume cap (nxf 6j6v.1r61) ----------------
+
+/// A coder commissioned at T0 whose session runs, opened its turn at T0, bound, and produced one
+/// model entry at T0 — the slot of the liveness tests.
+fn a_running_coder_with_own_life_at_t0(team: &Team) -> (String, String) {
+    let thread = team
+        .commission(T0, "coder", "Add a --since flag.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.bound_with_transcript(&session, 1, &at(0));
+    (thread, session)
+}
+
+/// **Test 1 and the B path of test 9** (design 8nx4 sections 2, 4 and 10): a session silent from
+/// T0 is nudged at the look at T0+600 exactly, stopped at T0+900, continued once its end is
+/// announced (T0+1 020); the continuation writes only its `turn_start` and `session_init` — not
+/// life — so it is dead at T0+1 620 without a nudge, stopped, and under policy B the slot escalates
+/// at that same look, the `stopped` row before the `escalated` one. No `recovered` row anywhere,
+/// and the episode's clock stands at T0+600 until the escalation clears it.
+#[test]
+fn a_silent_session_is_nudged_at_ten_stopped_at_fifteen_and_escalated_at_twenty_seven_under_b() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=900).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].at, at(600), "nudged at the look at T0+600 exactly");
+    assert_eq!(team.worker.stops(), vec![session.clone()]);
+    assert_eq!(
+        team.log_at(&thread, "coder"),
+        vec![
+            ("asked".into(), Some("asked".into()), 600),
+            ("stopped".into(), Some("stop_requested".into()), 900),
+        ]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "recovery_started_at"),
+        Some(at(600))
+    );
+    // The process ends at the SIGTERM; its teardown announces the end.
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, Some("told to stop (SIGTERM)"));
+    team.tick(&at(960), &thread);
+    team.tick(&at(1_020), &thread);
+    let resumed = team.worker.last("coder");
+    assert_eq!(
+        resumed.internal_session, session,
+        "continued, the same session"
+    );
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::NoneYet);
+    team.turn(&session, &thread, &at(1_020));
+    team.entry(&session, "session_init", &at(1_021), "{}");
+    assert_eq!(
+        team.owed(&thread, "coder", "recovery_started_at"),
+        Some(at(600)),
+        "a resume ends nothing"
+    );
+    for s in (1_080..=1_620).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("continued", 1_020),
+            ("stopped", 1_620),
+            ("escalated", 1_620)
+        ],
+        "{log:?}"
+    );
+    assert_eq!(
+        team.worker.asks().len(),
+        1,
+        "the continuation is not nudged"
+    );
+    assert_eq!(team.worker.stops(), vec![session.clone(), session.clone()]);
+    assert_eq!(team.escalated_at(&thread), vec![1_620]);
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(
+        body.contains("dead after 1 recovery attempts on this turn; this workspace allows 1"),
+        "{body}"
+    );
+    // Rung E's "Signs of life" block (design 8nx4 section 6): built from the slot's whole log.
+    for needle in [
+        "Signs of life:".to_string(),
+        "- last pulse: none yet".to_string(),
+        format!("- nudge at {}: asked", at(600)),
+        format!("- stop at {} (its pid unknown): stop_requested", at(900)),
+        format!("- stop at {} (its pid unknown): stop_requested", at(1_620)),
+        format!(
+            "the SIGTERM of {} to its pid unknown is UNCONFIRMED",
+            at(1_620)
+        ),
+    ] {
+        assert!(body.contains(&needle), "{needle:?} missing from:\n{body}");
+    }
+    assert_eq!(team.owed(&thread, "coder", "recovery_started_at"), None);
+    assert!(
+        team.worker
+            .pulse_read_while_not_running
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "the pulse is read only for a session whose process runs"
+    );
+}
+
+/// Ticks the slot's coordinator at every look the service holds for it, from `from` up to `to`
+/// (inclusive) — the service's book keeps one look per slot and fires it at its instant.
+fn follow_looks(team: &Team, thread: &str, handle: &str, from: i64, to: i64) {
+    let mut now = from;
+    while now <= to {
+        team.tick(&at(now), thread);
+        let next = team
+            .book
+            .held_look(thread, handle)
+            .map(|l| secs_of(&l))
+            .unwrap_or(now + 60);
+        now = if next > now { next } else { now + 60 };
+    }
+}
+
+/// **The pulse is read only for a session whose process runs** (review of d1ey, CQ #2 / IR #3):
+/// the file outlives its process, so a look whose process died between the judge's question and
+/// the read must not take the dead process's last output for life. Here the process dies right
+/// after the judge said `Live`; the look reads no pulse.
+#[test]
+fn the_pulse_is_never_read_for_a_process_that_no_longer_runs() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(590)));
+    team.worker
+        .dies_after_one_question
+        .lock()
+        .unwrap()
+        .insert(session.clone());
+    team.tick(&at(600), &thread);
+    assert!(
+        team.worker
+            .pulse_read_while_not_running
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "no pulse read for a process that is gone"
+    );
+}
+
+// ---- test 2: `nxc confirm --rest` (design 8nx4 section 5) ------------------------------------------
+
+/// (a) A confirmation of 20 minutes 30 s after the nudge is granted until then plus 20 minutes, and
+/// no nudge comes before the rest's end plus its grace — the look there nudges again, since the
+/// session showed no life since.
+#[test]
+fn a_confirm_of_twenty_minutes_holds_every_nudge_until_its_end_plus_the_grace() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    assert_eq!(team.worker.asks().len(), 1);
+    let r = team
+        .confirm(&at(630), &session, &thread, 20)
+        .expect("granted");
+    assert_eq!(r.granted_minutes, 20);
+    assert_eq!(r.until, at(630 + 1_200));
+    assert_eq!(r.next_look, at(630 + 1_200 + 300));
+    assert!(!r.clamped);
+    assert!(r.receipt.contains(&at(630 + 1_200)), "{}", r.receipt);
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(
+        team.log(&thread, "coder").last().cloned(),
+        Some(("confirmed".to_string(), Some("granted".to_string())))
+    );
+    for s in (660..630 + 1_200 + 300).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    assert_eq!(
+        team.worker.asks().len(),
+        1,
+        "no nudge inside the rest and its grace"
+    );
+    assert!(team.worker.stops().is_empty());
+    team.tick(&at(630 + 1_200 + 300), &thread);
+    let asks = team.worker.asks();
+    assert_eq!(
+        asks.len(),
+        2,
+        "nudged again at the rest's end plus the grace"
+    );
+    assert_eq!(asks[1].at, at(2_130));
+    assert!(
+        asks[1].text.contains("70 minutes of rest remain"),
+        "{}",
+        asks[1].text
+    );
+}
+
+/// (b) Three confirmations, then the look at the fourth nudge-time escalates as STUCK, naming the
+/// three confirmations and their rests — a fourth nudge never comes.
+#[test]
+fn after_three_confirmations_the_look_at_the_fourth_nudge_escalates_as_stuck() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    let mut now = 600;
+    let mut confirmed = 0;
+    while escalations(&team.messages(&thread)).is_empty() {
+        team.tick(&at(now), &thread);
+        if team.worker.asks().len() > confirmed {
+            confirmed += 1;
+            team.confirm(&at(now + 5), &session, &thread, 20)
+                .expect("each nudge is answered with a rest");
+        }
+        now = team
+            .book
+            .held_look(&thread, "coder")
+            .map(|l| secs_of(&l))
+            .filter(|n| *n > now)
+            .unwrap_or(now + 60);
+        assert!(now < 7_000, "escalated before the ceiling");
+    }
+    assert_eq!(team.worker.asks().len(), 3, "a fourth nudge never comes");
+    assert_eq!(
+        team.owed(&thread, "coder", "confirmations"),
+        Some("0".into()),
+        "rung E ended the episode"
+    );
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(body.contains("stuck: it confirmed 3 times"), "{body}");
+    assert!(body.contains("rest 20 min until"), "{body}");
+    assert!(
+        team.worker.stops().is_empty(),
+        "stuck is escalated, not stopped"
+    );
+}
+
+/// (c) A confirmation of 60 after a first of 60 is granted the 30 minutes the episode has left, and
+/// its receipt says the cap cut it short.
+#[test]
+fn a_second_confirm_of_sixty_is_clamped_to_the_thirty_left() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    let first = team.confirm(&at(605), &session, &thread, 60).unwrap();
+    assert_eq!((first.granted_minutes, first.clamped), (60, false));
+    team.tick(&at(605 + 3_600 + 300), &thread);
+    assert_eq!(team.worker.asks().len(), 2);
+    assert!(team.worker.asks()[1]
+        .text
+        .contains("30 minutes of rest remain"));
+    let second = team
+        .confirm(&at(605 + 3_600 + 310), &session, &thread, 60)
+        .unwrap();
+    assert_eq!((second.granted_minutes, second.clamped), (30, true));
+    assert!(
+        second.receipt.contains("30 of the 60 minutes"),
+        "{}",
+        second.receipt
+    );
+    assert!(
+        second.receipt.contains("capped at 90 min"),
+        "{}",
+        second.receipt
+    );
+}
+
+/// (d) No confirmation cancels a stop: one sent while the stop is in flight is refused with the
+/// stop's text, and the one further SIGTERM still comes at the stop's grace.
+#[test]
+fn a_confirm_while_the_stop_is_in_flight_is_refused_and_the_second_sigterm_still_comes() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(team.worker.stops().len(), 1, "stopped at +900");
+    let refused = team
+        .confirm(&at(930), &session, &thread, 20)
+        .expect_err("a stop is in flight");
+    assert_eq!(refused.kind, nxs_foundation::error::ErrorKind::Validation);
+    assert!(
+        refused.msg.contains("your session is being stopped"),
+        "{}",
+        refused.msg
+    );
+    team.tick(&at(1_199), &thread);
+    assert_eq!(team.worker.stops().len(), 1);
+    team.tick(&at(1_200), &thread);
+    assert_eq!(
+        team.worker.stops().len(),
+        2,
+        "the second SIGTERM at the stop's grace"
+    );
+}
+
+/// (e) A resumed session is a fresh process: the nudge its predecessor got is not its own, so its
+/// confirmation is refused — until it is nudged itself.
+#[test]
+fn a_confirm_on_a_resumed_session_is_refused_until_it_is_nudged_itself() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, None);
+    team.tick(&at(1_020), &thread);
+    assert_eq!(team.log(&thread, "coder")[2].0, "continued");
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::Unreported);
+    team.turn(&session, &thread, &at(1_020));
+    team.work(&session, &at(1_030));
+    let refused = team
+        .confirm(&at(1_040), &session, &thread, 20)
+        .expect_err("the predecessor's nudge is not this process's");
+    assert!(
+        refused.msg.contains("nothing is asked of you"),
+        "{}",
+        refused.msg
+    );
+    team.tick(&at(1_630), &thread);
+    assert_eq!(team.worker.asks().len(), 2, "nudged itself at +1 630");
+    let granted = team
+        .confirm(&at(1_640), &session, &thread, 20)
+        .expect("now it was asked");
+    assert_eq!(granted.granted_minutes, 20);
+}
+
+/// (f) The verb at the command line: absent from `nxc --help` and `nxc guide`; with no nudge
+/// pending it exits 1 and writes nothing; `--rest 0` and `--rest 61` are refused naming the bounds.
+#[test]
+fn nxc_confirm_is_hidden_and_refuses_with_exit_one_and_no_row() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    let nxc = || {
+        let mut c = nxs_test_support::cargo_bin("nxc");
+        c.current_dir(team.tmp.path())
+            .env_remove("NXC_DB")
+            .env("NXC_ACTOR", "coder")
+            .env("NXC_SESSION", &session)
+            .env("NXC_NOW", at(60))
+            .env("NXC_WORKER", "dry")
+            .env("NXC_TIMER", "dry")
+            .env("NXC_DRY_LOG", team.tmp.path().join("dry.log"));
+        c
+    };
+    let help = nxc().arg("--help").output().unwrap();
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("confirm"));
+    let guide = nxc().arg("guide").output().unwrap();
+    assert!(!String::from_utf8_lossy(&guide.stdout).contains("confirm"));
+    for (rest, needle) in [
+        ("5", "nothing is asked of you"),
+        ("0", "--rest takes 1 to 60 minutes"),
+        ("61", "--rest takes 1 to 60 minutes"),
+    ] {
+        let out = nxc()
+            .args(["confirm", "--thread", &thread, "--rest", rest])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "--rest {rest}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(needle), "--rest {rest}: {err}");
+    }
+    assert!(team.log(&thread, "coder").is_empty(), "no row written");
+    assert_eq!(
+        team.owed(&thread, "coder", "confirmations"),
+        Some("0".into())
+    );
+}
+
+/// (g) Round 3 IR #4: after a rest of one minute, only a `tool_result` arrives — a tool ending is
+/// not the model being alive, so the look at the rest's end plus its grace nudges again and writes
+/// no `recovered`.
+#[test]
+fn a_tool_result_after_a_rest_is_not_life_since_the_confirmation() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.tool_call(&session, "toolu_run", "Bash", &at(100));
+    // The host samples the call: nothing runs under it, so silence counts from the call.
+    team.sample(&session, 0, 0);
+    follow_looks(&team, &thread, "coder", 120, 700);
+    assert_eq!(team.worker.asks().len(), 1);
+    assert_eq!(team.worker.asks()[0].at, at(700));
+    team.confirm(&at(705), &session, &thread, 1).unwrap();
+    team.tool_returned(&session, "toolu_run", &at(800));
+    team.tick(&at(705 + 60 + 300), &thread);
+    let actions: Vec<String> = team
+        .log(&thread, "coder")
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    assert_eq!(
+        actions,
+        ["asked", "confirmed", "asked"],
+        "nudged again, not recovered"
+    );
+}
+
+// ---- test 3, the ladder's half: the subprocess under an open call ----------------------------------
+
+/// A session inside one call: a turn at T0, a `tool_use` at +60 that stays open.
+fn a_coder_inside_one_call(team: &Team) -> (String, String) {
+    let thread = team.commission(T0, "coder", "Watch the CI run.").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.tool_call(&session, "toolu_watch", "Bash", &at(60));
+    (thread, session)
+}
+
+/// Moving samples under an open call keep every look arming for 40 minutes, with no nudge.
+#[test]
+fn a_moving_subprocess_keeps_the_open_call_alive_for_forty_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_inside_one_call(&team);
+    for (i, s) in (120..=60 + 2_400).step_by(60).enumerate() {
+        team.sample(&session, 2, 1_000 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+    assert!(team.log(&thread, "coder").is_empty());
+}
+
+/// **The named test that kills a CPU floor** (design 8nx4 test 8, mutation 6b): a subprocess whose
+/// counter moves by ONE unit per look — `gh run watch` spends tens of milliseconds a minute — is
+/// still progress, and the call is not nudged for 40 minutes.
+#[test]
+fn a_subprocess_that_works_tens_of_milliseconds_a_minute_keeps_the_call_alive() {
+    let team = team();
+    let (thread, session) = a_coder_inside_one_call(&team);
+    for (i, s) in (120..=60 + 2_400).step_by(60).enumerate() {
+        team.sample(&session, 1, 500 + i as u64);
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+}
+
+/// A sample that freezes is nudged at the look at its last movement plus 30 minutes exactly.
+#[test]
+fn a_frozen_subprocess_is_nudged_at_its_last_movement_plus_thirty_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_inside_one_call(&team);
+    for (i, s) in (120..=2_460).step_by(60).enumerate() {
+        if s <= 600 {
+            team.sample(&session, 1, 100 * (i as u64 + 1));
+        }
+        team.tick(&at(s), &thread);
+    }
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].at, at(600 + 1_800), "M + 1 800 exactly");
+    assert_eq!(
+        team.owed(&thread, "coder", "subprocess_moved_at"),
+        Some(at(600))
+    );
+}
+
+/// A call with nothing running under it has no `M`: it is the silence rule's, nudged at its last
+/// own life plus ten minutes.
+#[test]
+fn an_open_call_with_no_subprocess_is_nudged_at_its_last_life_plus_ten_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_inside_one_call(&team);
+    team.sample(&session, 0, 0);
+    for s in (120..=720).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].at, at(660), "the call's own instant plus 600");
+}
+
+// ---- test 4: the chain -----------------------------------------------------------------------------
+
+/// **A dead verdict whose re-commission keeps failing reaches the escalation after the budget, not
+/// at the deadline** (design 8nx4 test 4, on yts5's retried start): a fresh process that never
+/// produced anything is dead at its start plus ten minutes, stopped, and — having written nothing —
+/// re-commissioned; every start fails, each failure is an attempt, and the third escalates.
+#[test]
+fn a_dead_verdict_whose_recommission_keeps_failing_escalates_after_the_budget() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::NoneYet);
+    team.tick(&at(600), &thread);
+    assert_eq!(
+        team.worker.stops(),
+        vec![session.clone()],
+        "dead without a nudge"
+    );
+    assert!(team.worker.asks().is_empty());
+    team.worker.stop(&session);
+    team.ended(&at(600), &session, None);
+    *team.worker.refuse_every.lock().unwrap() = Some("prime_timeout");
+    follow_looks(&team, &thread, "coder", 660, 1_500);
+    let log = team.log(&thread, "coder");
+    let failed = log
+        .iter()
+        .filter(|(a, o)| {
+            a == "recommissioned" && o.as_deref().is_some_and(|o| o.starts_with("failed:"))
+        })
+        .count();
+    assert_eq!(failed, 3, "{log:?}");
+    assert_eq!(
+        log.last().map(|(a, _)| a.as_str()),
+        Some("escalated"),
+        "{log:?}"
+    );
+    let at_ = team.escalated_at(&thread);
+    assert_eq!(at_.len(), 1);
+    assert!(
+        at_[0] < 1_500,
+        "escalated at +{}s, long before the deadline",
+        at_[0]
+    );
+}
+
+// ---- test 5: the episode --------------------------------------------------------------------------
+
+/// **Two episodes, not one** (design 8nx4 test 5): nudged at +10 min, life at +12, the nudge
+/// overtaken and the first episode closed by `recovered` at +20; silence from +40 gives a NUDGE at
+/// +50 (a second episode), not a stop. A rest of 20 minutes confirmed then is granted until +70;
+/// life after it ends the second episode at +75 and resets its confirmations.
+#[test]
+fn a_recovered_episode_is_closed_and_a_later_silence_opens_a_second() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=3_000).step_by(60) {
+        if (720..=2_400).contains(&s) {
+            team.pulse(&session, Pulse::At(at(s)));
+        }
+        team.tick(&at(s), &thread);
+    }
+    let rows: Vec<(String, Option<String>, i64)> = team.log_at(&thread, "coder");
+    assert_eq!(
+        rows,
+        vec![
+            ("asked".into(), Some("overtaken".into()), 600),
+            ("recovered".into(), Some("life".into()), 1_200),
+            ("asked".into(), Some("asked".into()), 3_000),
+        ]
+    );
+    assert!(team.worker.stops().is_empty(), "a nudge, not a stop");
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "recovery_started_at"),
+        Some(at(3_000))
+    );
+    let r = team.confirm(&at(3_000), &session, &thread, 20).unwrap();
+    assert_eq!(r.until, at(4_200), "until T0+70, in the future");
+    assert_eq!(
+        team.owed(&thread, "coder", "confirmations"),
+        Some("1".into())
+    );
+    team.pulse(&session, Pulse::At(at(4_300)));
+    team.tick(&at(4_500), &thread);
+    let last = team.log_at(&thread, "coder").pop().unwrap();
+    assert_eq!(last, ("recovered".into(), Some("life".into()), 4_500));
+    assert_eq!(
+        team.owed(&thread, "coder", "confirmations"),
+        Some("0".into())
+    );
+    assert_eq!(team.owed(&thread, "coder", "recovery_started_at"), None);
+}
+
+/// A session nudged and overtaken again and again over more than two hours is never escalated by
+/// the ceiling: each overtaken nudge ends its episode by life, and the ceiling is the episode's.
+#[test]
+fn a_session_nudged_and_overtaken_for_two_hours_is_never_escalated_by_the_ceiling() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=9_000).step_by(60) {
+        if (11..=19).contains(&((s / 60) % 20)) {
+            team.pulse(&session, Pulse::At(at(s)));
+        }
+        team.tick(&at(s), &thread);
+    }
+    assert!(
+        team.worker.asks().len() >= 3,
+        "{}",
+        team.worker.asks().len()
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+    assert!(team.worker.stops().is_empty());
+    let recovered = team
+        .log(&thread, "coder")
+        .iter()
+        .filter(|(a, _)| a == "recovered")
+        .count();
+    assert!(
+        recovered + 1 >= team.worker.asks().len(),
+        "every nudge's episode but the last ended by life: {recovered} of {}",
+        team.worker.asks().len()
+    );
+}
+
+// ---- test 9: the B path's other cases ---------------------------------------------------------------
+
+/// The B path up to the continue at +1 020: nudged +600, stopped +900, the end announced at the
+/// stop, continued at +1 020; the continuation is marked running with a `NoneYet` pulse and its
+/// two bookkeeping entries.
+fn continued_once(team: &Team) -> (String, String) {
+    let (thread, session) = a_running_coder_with_own_life_at_t0(team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, None);
+    team.tick(&at(960), &thread);
+    team.tick(&at(1_020), &thread);
+    assert_eq!(team.log(&thread, "coder")[2].0, "continued");
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::NoneYet);
+    team.turn(&session, &thread, &at(1_020));
+    team.entry(&session, "session_init", &at(1_021), "{}");
+    (thread, session)
+}
+
+/// **Recover-then-hang under B** (round 3 TQ #7): the continuation writes one model entry at +1 085,
+/// so the first look after the continue (+1 140, the trigger's grace) writes `recovered` with
+/// attempt 1; silent from there, it is nudged at +1 685 and found dead at +1 985 — stopped and
+/// escalated at that look, with no second `continued`: `attempts` survives the episode's end.
+#[test]
+fn recover_then_hang_under_b_is_escalated_at_its_next_dead_verdict_without_a_second_resume() {
+    let team = team();
+    let (thread, session) = continued_once(&team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    follow_looks(&team, &thread, "coder", 1_140, 2_100);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("asked".into(), 600),
+            ("stopped".into(), 900),
+            ("continued".into(), 1_020),
+            ("recovered".into(), 1_140),
+            ("asked".into(), 1_685),
+            ("stopped".into(), 1_985),
+            ("escalated".into(), 1_985),
+        ]
+    );
+    let attempt: i64 = team
+        .store()
+        .connection()
+        .query_row(
+            "SELECT attempt FROM recovery_log WHERE action = 'recovered'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(attempt, 1);
+}
+
+/// **A second owed turn on the same slot is allowed its own resume** (round 3 CQ #2, the arbiter):
+/// the continued session answers, and within the same minute the slot is owed again — before any
+/// sweep forgets the row. The reply discharged the first turn, so its budget went with it: silent
+/// again, the session is nudged, stopped and RESUMED, not escalated at its first dead verdict.
+#[test]
+fn a_second_owed_turn_after_a_reply_is_allowed_its_own_resume() {
+    let team = team();
+    let (thread, session) = continued_once(&team);
+    team.work(&session, &at(1_050));
+    team.reply(
+        &at(1_100),
+        "coder",
+        &session,
+        &thread,
+        "done: --since is in",
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "attempts"),
+        Some("0".into()),
+        "the turn's budget went"
+    );
+    // Owed again within the same minute — the expectation re-declared on the slot, the process
+    // still running; the new turn's process start moves the clock.
+    let mut store = team.store();
+    store.set_expects_reply_from(
+        &thread,
+        &serde_json::to_string(&[team.q("coder")]).unwrap(),
+        &team.q("owner"),
+    );
+    drop(store);
+    team.sql(&format!(
+        "UPDATE owed_starts SET trigger_clock = '{}' WHERE thread = '{thread}'",
+        at(1_110)
+    ));
+    team.pulse(&session, Pulse::Unreported);
+    team.turn(&session, &thread, &at(1_110));
+    follow_looks(&team, &thread, "coder", 1_170, 2_010);
+    team.worker.stop(&session);
+    team.ended(&at(2_010), &session, None);
+    follow_looks(&team, &thread, "coder", 2_070, 2_200);
+    let actions: Vec<String> = team
+        .log(&thread, "coder")
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "asked",
+            "stopped",
+            "continued",
+            "asked",
+            "stopped",
+            "continued"
+        ],
+        "the second turn got its own resume"
+    );
+    assert!(escalations(&team.messages(&thread)).is_empty());
+}
+
+/// The coder, at work on `thread`, commissions a reviewer at `sent`, which answers at `answered` —
+/// the answer wakes the coder on the way back while its process still runs.
+fn a_way_back_wake(team: &Team, thread: &str, session: &str, sent: i64, answered: i64) {
+    let child = team
+        .session_sends(&at(sent), "coder", session, "reviewer", "check this")
+        .thread_id;
+    let reviewer = team.worker.last("reviewer").internal_session;
+    team.worker.run(&reviewer);
+    team.reply(&at(answered), "reviewer", &reviewer, &child, "looks fine");
+    let _ = thread;
+}
+
+/// **A wake into a live process moves nothing** (round 2 TQ #3): the answer of a child arrives at
+/// +960 while the stop of +900 is in flight — the process still runs, so the wake is held behind
+/// its turn, the row's stop stands, and the one further SIGTERM comes at +1 200.
+#[test]
+fn a_wake_with_the_stop_in_flight_leaves_the_stop_and_the_second_sigterm_comes() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    a_way_back_wake(&team, &thread, &session, 930, 960);
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(900))
+    );
+    assert_eq!(team.owed(&thread, "coder", "trigger_clock"), Some(at(0)));
+    team.tick(&at(1_200), &thread);
+    assert_eq!(team.worker.stops(), vec![session.clone(), session.clone()]);
+}
+
+/// …and a wake at +700 with the nudge of +600 pending leaves the nudge, and the session is stopped
+/// at +900.
+#[test]
+fn a_wake_with_a_nudge_pending_leaves_the_nudge_and_the_session_is_stopped_at_fifteen() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    a_way_back_wake(&team, &thread, &session, 650, 700);
+    assert_eq!(team.owed(&thread, "coder", "asked_at"), Some(at(600)));
+    team.tick(&at(900), &thread);
+    assert_eq!(team.worker.stops(), vec![session.clone()]);
+}
+
+/// **A funnel trigger into a live session moves nothing** (round 3 TQ #1): a continue the worker
+/// refuses `already_running` started nothing, so the slot's clock, its nudge and its stop stand —
+/// and the reverted opener settles its own row with that outcome.
+#[test]
+fn a_trigger_refused_already_running_leaves_the_clock_the_nudge_and_the_stop() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.ended(&at(10), &session, None);
+    team.sql(&format!(
+        "UPDATE owed_starts SET asked_at = '{a}', stop_requested_at = '{a}', stop_signals = 1
+          WHERE thread = '{thread}'",
+        a = at(8)
+    ));
+    *team.worker.refuse.lock().unwrap() = Some("already_running");
+    team.tick(&at(130), &thread);
+    assert_eq!(team.owed(&thread, "coder", "trigger_clock"), Some(at(0)));
+    assert_eq!(team.owed(&thread, "coder", "asked_at"), Some(at(8)));
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(8))
+    );
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("continued".to_string(), Some("already_running".to_string()))]
+    );
+}
+
+/// **A re-commission queued behind the working copy resets nothing** until its released start
+/// spawns (round 3 TQ #1): the session of an exclusive role produced nothing of its own, was nudged
+/// and stopped; having written nothing it is re-commissioned — and the lease is another
+/// operation's, so the start waits in the queue. Nothing started, and the slot's clock, nudge and
+/// stop stand. (A CONTINUE never queues: it travels back up its own chain, `ChainMove::Unwind`,
+/// which never waits for the working copy unless that operation's work is parked.)
+#[test]
+fn a_recommission_queued_behind_the_working_copy_resets_nothing() {
+    let team = team();
+    let thread = team.commission(T0, "builder", "build").thread_id;
+    let session = team.worker.last("builder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(team.worker.stops(), vec![session.clone()]);
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, None);
+    team.sql(&format!(
+        "UPDATE working_tree_lease SET scope_key = 'thread:another-operation', expires = '{}'",
+        at(86_400)
+    ));
+    team.tick(&at(1_020), &thread);
+    assert_eq!(
+        team.log(&thread, "builder").last().cloned(),
+        Some(("recommissioned".to_string(), Some("queued".to_string())))
+    );
+    assert_eq!(team.worker.of("builder").len(), 1, "nothing started");
+    assert_eq!(team.owed(&thread, "builder", "trigger_clock"), Some(at(0)));
+    assert_eq!(team.owed(&thread, "builder", "asked_at"), Some(at(600)));
+    assert_eq!(
+        team.owed(&thread, "builder", "stop_requested_at"),
+        Some(at(900))
+    );
+}
+
+/// **The round-3 contradiction case** (TQ #2 / IR #1): a pulse from before the process started is
+/// the generous side — the session is nudged at its start plus ten minutes, not stopped, and
+/// stopped five minutes later.
+#[test]
+fn a_pulse_older_than_the_process_start_is_nudged_not_stopped() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::At(at(-60)));
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .collect();
+    assert_eq!(rows, vec![("asked".into(), 600), ("stopped".into(), 900)]);
+}
+
+/// **A `cannot_ask` row opens no episode** (round 3 CQ #4 / IR #5): the door is closed, the row
+/// says so once, and the episode's clock stays unset — until the door is still closed at the due
+/// plus the nudge's wait, when the session is dead and the stop opens it.
+#[test]
+fn a_cannot_ask_row_opens_no_episode_and_a_door_closed_past_the_wait_is_dead() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.worker.no_door.lock().unwrap().insert(session.clone());
+    for s in (600..=840).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("asked".to_string(), Some("cannot_ask".to_string()))],
+        "one row per closed door"
+    );
+    assert_eq!(team.owed(&thread, "coder", "recovery_started_at"), None);
+    team.tick(&at(900), &thread);
+    assert_eq!(team.worker.stops(), vec![session.clone()]);
+    assert_eq!(
+        team.owed(&thread, "coder", "recovery_started_at"),
+        Some(at(900))
+    );
+}
+
+/// **A session whose model streams is alive** (design 8nx4 section 1, the pulse): a thinking block
+/// that runs twenty minutes has no transcript entry until it closes, but the sidecar's pulse moves
+/// with the model's output — so the session is not nudged. (Mutation 1 of design test 8: drop the
+/// pulse read and this session is nudged at +600.)
+#[test]
+fn a_session_streaming_for_twenty_minutes_is_not_nudged() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    for s in (60..=1_200).step_by(60) {
+        team.pulse(&session, Pulse::At(at(s - 30)));
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+    assert!(team.log(&thread, "coder").is_empty());
+}
+
+/// **A reply withdraws the nudge it answers** (design 8nx4 section 3; round 2 IR #3): a session
+/// nudged at +600 that replies at +630 has its ask file withdrawn at the reply, so it is not handed
+/// "no sign of life from you" at its turn's end — and the reply is admitted either way. A reply on
+/// a slot nobody nudged withdraws nothing: another slot's nudge of the same session stands.
+#[test]
+fn a_reply_withdraws_the_nudge_it_answers_and_only_a_nudged_slots() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    assert_eq!(team.worker.asks().len(), 1);
+    team.reply(&at(630), "coder", &session, &thread, "done: --since is in");
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "asked_at"),
+        None,
+        "the turn is over"
+    );
+
+    let other = team.commission(&at(700), "reviewer", "check it").thread_id;
+    let reviewer = team.worker.last("reviewer").internal_session;
+    team.reply(&at(710), "reviewer", &reviewer, &other, "fine");
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()],
+        "nothing was nudged on that slot, so nothing is withdrawn"
+    );
+}
+
+/// **A sample belongs to its call** (review of pass 1, Integrity #1): call 1 ran a child that kept
+/// moving and returned; call 2 runs nothing under it. Call 2 inherits no `M` from call 1 — it is
+/// the silence rule's and is nudged at its own instant plus ten minutes.
+#[test]
+fn a_call_after_a_call_with_children_inherits_no_subprocess_movement() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(0));
+    team.tool_call(&session, "toolu_one", "Bash", &at(60));
+    for (i, s) in (120..=300).step_by(60).enumerate() {
+        team.sample(&session, 2, 100 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    team.tool_returned(&session, "toolu_one", &at(310));
+    team.tool_call(&session, "toolu_two", "mcp__thing", &at(320));
+    team.sample(&session, 0, 0);
+    for s in (360..=960).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let asks = team.worker.asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(
+        asks[0].at,
+        at(960),
+        "the look after call 2's own instant plus 600 (920)"
+    );
+}
+
+/// **One re-commission with its retries is ONE attempt and ONE `recommissioned` row** (round 2 TQ
+/// #6, a contract on yts5; review of pass 1, CQ #1 / TQ #1): a start that failed is retried at the
+/// next look on the SAME rung — its row is settled again and its attempt is not counted twice.
+#[test]
+fn one_recommission_with_its_retries_is_one_attempt_and_one_row() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    *team.worker.refuse.lock().unwrap() = Some("prime_timeout");
+    team.tick(&at(130), &thread);
+    team.tick(&at(190), &thread);
+    assert_eq!(team.worker.of("coder").len(), 2, "started at the retry");
+    assert_eq!(
+        team.log(&thread, "coder"),
+        vec![("recommissioned".to_string(), Some("triggered".to_string()))]
+    );
+    assert_eq!(team.ladder(&thread, "coder").unwrap().attempts, 1);
+    let retries: i64 = team
+        .store()
+        .connection()
+        .query_row("SELECT retries FROM recovery_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(retries, 1);
+}
+
+/// **An instant from the future is no sign of life** (review of pass 1, Integrity #4): a pulse
+/// file naming an instant an hour ahead of the look — a skewed clock or a forged file — does not
+/// push the silence out; the session is nudged at ten minutes as if the file were not there.
+#[test]
+fn a_pulse_dated_in_the_future_is_no_sign_of_life() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(4_200)));
+    team.tick(&at(600), &thread);
+    assert_eq!(team.worker.asks().len(), 1, "nudged at +600");
+}
+
+/// **A withdrawal takes every nudge of the session, so every slot it took one from knows** (review
+/// of pass 1, Integrity #2): one session serves X and Y, both nudged; it answers X, and the ask
+/// files go — Y's with them. Y is no longer waiting on a nudge that will never arrive: it is nudged
+/// again at its next look, and the session is not stopped for failing to read Y's lost nudge.
+#[test]
+fn a_reply_on_one_slot_leaves_no_other_slot_waiting_on_a_withdrawn_nudge() {
+    let team = team();
+    let x = team.commission(T0, "pm", "plan the X feature").thread_id;
+    let session = team.worker.last("pm").internal_session;
+    let y = team.commission(&at(60), "coder", "build Y").thread_id;
+    team.sql(&format!(
+        "UPDATE owed_starts SET session = '{session}' WHERE thread = '{y}'"
+    ));
+    team.worker.run(&session);
+    team.tick(&at(600), &x);
+    team.tick(&at(660), &y);
+    let nudged: Vec<String> = team.worker.asks().into_iter().map(|a| a.thread).collect();
+    assert_eq!(nudged, vec![x.clone(), y.clone()]);
+    team.reply(&at(700), "pm", &session, &x, "the plan");
+    assert_eq!(
+        team.owed(&y, "coder", "asked_at"),
+        None,
+        "Y's nudge went with the files"
+    );
+    team.tick(&at(960), &y);
+    assert!(
+        team.worker.stops().is_empty(),
+        "not stopped for a nudge it never got"
+    );
+    let to_y = team.worker.asks().iter().filter(|a| a.thread == y).count();
+    assert_eq!(to_y, 2, "Y is nudged again");
+}
+
+// ---- review of pass 2: the failure paths the ticket names (TQ #1, TQ #2) ---------------------------
+
+/// **A reply whose withdrawal fails is still a reply** (review of pass 2, TQ #1): one session
+/// serves X and Y, both nudged; the worker cannot unlink the ask files. The answer on X is posted,
+/// X's owed turn is over, the receipt carries the failed withdrawal as a `RecoveryFailed` warning
+/// naming X and the session, and Y's nudge row is cleared all the same, since the sidecar's own
+/// drain may still deliver the file.
+#[test]
+fn a_reply_whose_withdrawal_fails_is_posted_discharges_its_slot_warns_and_clears_the_other_nudges()
+{
+    let team = team();
+    let x = team.commission(T0, "pm", "plan the X feature").thread_id;
+    let session = team.worker.last("pm").internal_session;
+    let y = team.commission(&at(60), "coder", "build Y").thread_id;
+    team.sql(&format!(
+        "UPDATE owed_starts SET session = '{session}' WHERE thread = '{y}'"
+    ));
+    team.worker.run(&session);
+    team.tick(&at(600), &x);
+    team.tick(&at(660), &y);
+    assert_eq!(team.worker.asks().len(), 2, "both slots nudged");
+    assert_eq!(team.owed(&x, "pm", "asked_at"), Some(at(600)));
+    assert_eq!(team.owed(&y, "coder", "asked_at"), Some(at(660)));
+    *team.worker.withdraw_fails.lock().unwrap() =
+        Some("the ask file could not be unlinked (injected)");
+
+    let receipt = team.reply_receipt(&at(700), "pm", &session, &x, "the plan");
+
+    assert!(receipt.posted, "the reply is posted");
+    assert!(
+        team.messages(&x)
+            .iter()
+            .any(|(_, _, body)| body == "the plan"),
+        "the answer is in X"
+    );
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()],
+        "the withdrawal was tried"
+    );
+    let warning = receipt
+        .warnings
+        .iter()
+        .find(|w| w.class == ConsequenceClass::RecoveryFailed)
+        .unwrap_or_else(|| panic!("a RecoveryFailed warning: {:?}", receipt.warnings));
+    assert_eq!(warning.thread.as_deref(), Some(x.as_str()));
+    assert_eq!(warning.session.as_deref(), Some(session.as_str()));
+    assert!(
+        warning.detail.contains("could not be withdrawn")
+            && warning.detail.contains("could not be unlinked (injected)"),
+        "{}",
+        warning.detail
+    );
+    assert_eq!(
+        (
+            team.owed(&x, "pm", "asked_at"),
+            team.owed(&x, "pm", "recovery_started_at")
+        ),
+        (None, None),
+        "X's owed turn is over"
+    );
+    assert_eq!(
+        team.owed(&y, "coder", "asked_at"),
+        None,
+        "Y's nudge row is cleared although the unlink failed"
+    );
+}
+
+/// **A dead verdict whose stop finds nothing to stop** (review of pass 2, TQ #2): the `stopped` row
+/// says `nothing_to_stop`, and the stop is still on record (`stop_requested_at` at the verdict —
+/// the choice pinned here: the outcome does not decide whether a stop was requested). Its end
+/// announced, the slot is continued like any stopped session — no further SIGTERM is sent.
+#[test]
+fn a_dead_verdict_with_nothing_to_stop_logs_it_and_the_slot_is_continued() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    *team.worker.stop_answers.lock().unwrap() = Some("nothing");
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(
+        team.log_at(&thread, "coder"),
+        vec![
+            ("asked".into(), Some("asked".into()), 600),
+            ("stopped".into(), Some("nothing_to_stop".into()), 900),
+        ]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(900))
+    );
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, None);
+    team.tick(&at(960), &thread);
+    team.tick(&at(1_020), &thread);
+    let actions: Vec<String> = team
+        .log(&thread, "coder")
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    assert_eq!(actions, ["asked", "stopped", "continued"]);
+    assert_eq!(team.worker.stops().len(), 1, "no further SIGTERM");
+}
+
+/// **A dead verdict whose stop FAILS** (review of pass 2, TQ #2): the `stopped` row carries
+/// `failed: <the worker's error>`, and the stop stands as requested — the choice pinned here: a
+/// failed SIGTERM is treated like one the process ignored, so the one further SIGTERM comes at the
+/// grace and the look at twice the grace escalates the process as one that would not stop.
+#[test]
+fn a_dead_verdict_whose_stop_fails_logs_the_error_signals_once_more_and_escalates() {
+    use nexus_chat::ladder::STOP_GRACE_SECS;
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    *team.worker.stop_answers.lock().unwrap() = Some("kill(2) refused (injected)");
+    team.tick(&at(600), &thread);
+    team.tick(&at(900), &thread);
+    assert_eq!(
+        team.log_at(&thread, "coder")[1],
+        (
+            "stopped".into(),
+            Some("failed: kill(2) refused (injected)".into()),
+            900
+        )
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "stop_requested_at"),
+        Some(at(900)),
+        "a failed stop is still a stop in flight"
+    );
+    team.tick(&at(900 + STOP_GRACE_SECS), &thread);
+    assert_eq!(team.worker.stops().len(), 2, "the one further SIGTERM");
+    team.tick(&at(900 + 2 * STOP_GRACE_SECS), &thread);
+    assert_eq!(team.escalated_at(&thread), vec![900 + 2 * STOP_GRACE_SECS]);
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(body.contains("would not stop"), "{body}");
+}
+
+/// **The cap under B does not depend on the stop's answer** (review of pass 2, TQ #2): continued
+/// once, the session is dead again at +1 620; whether its stop finds nothing to stop or fails, the
+/// `stopped` row carries that outcome and the slot escalates at that same look.
+#[test]
+fn at_the_cap_a_stop_with_nothing_to_stop_or_a_failed_stop_still_escalates_at_that_look() {
+    for (answer, outcome) in [
+        ("nothing", "nothing_to_stop"),
+        (
+            "kill(2) refused (injected)",
+            "failed: kill(2) refused (injected)",
+        ),
+    ] {
+        let team = team();
+        let (thread, _session) = continued_once(&team);
+        *team.worker.stop_answers.lock().unwrap() = Some(answer);
+        for s in (1_080..=1_620).step_by(60) {
+            team.tick(&at(s), &thread);
+        }
+        let log = team.log_at(&thread, "coder");
+        assert_eq!(
+            log[log.len() - 2..],
+            [
+                ("stopped".into(), Some(outcome.into()), 1_620),
+                ("escalated".into(), log[log.len() - 1].1.clone(), 1_620),
+            ],
+            "{answer}: {log:?}"
+        );
+        assert_eq!(team.escalated_at(&thread), vec![1_620], "{answer}");
+    }
 }

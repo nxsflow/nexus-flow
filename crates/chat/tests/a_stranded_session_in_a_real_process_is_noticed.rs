@@ -203,6 +203,45 @@ fn stand_in(root: &Path, session: &str) -> Child {
     child
 }
 
+/// **A stand-in with processes under it** (nxf 6j6v.1r61): `sh -c <script>` in a process group of
+/// its own, claimed as the session's process — so the sidecar worker samples what runs beneath it
+/// as it samples a real sidecar's tool call. Killed WHOLE by [`kill_tree`]: killing only the shell
+/// would orphan its children, which then hold the harness's pipes.
+fn stand_in_over(root: &Path, session: &str, script: &str) -> Child {
+    use std::os::unix::process::CommandExt;
+    let child = StdCommand::new("sh")
+        .args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("start the stand-in process");
+    let logs = nexus_chat::worker::agent_logs_dir(root);
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join(format!("{session}.pid")),
+        nexus_chat::worker::session_claim_for(child.id()),
+    )
+    .unwrap();
+    child
+}
+
+/// What runs under the stand-in, all of it (`since` the epoch) — the same read the worker makes.
+fn nexus_chat_test_sample(pid: u32) -> Option<nxs_service::process::SubprocessSample> {
+    nxs_service::process::descendants_started_since(pid, std::time::UNIX_EPOCH)
+}
+
+/// SIGKILL the stand-in's whole process group and reap it. Through `kill(2)`, never the `kill`
+/// command: procps reads `kill -9 -<pgid>` as two options unless a `--` comes first, and BSD's
+/// does not, so the command form killed nothing on Linux and the reap below waited for ever.
+fn kill_tree(mut child: Child) {
+    // SAFETY: `kill` touches no caller memory; the negative pid names this child's own group,
+    // which `process_group(0)` made, never the harness's.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    let _ = child.wait();
+}
+
 /// `kill -9` and reap it, leaving the claim file behind as a SIGKILLed sidecar does.
 fn kill_hard(mut child: Child) {
     child.kill().expect("SIGKILL the stand-in");
@@ -613,8 +652,16 @@ fn line(kind: &str, secs: i64, id: Option<&str>, data: Value) -> String {
 
 /// A live session on the review slot, bound, its turn on the slot begun.
 fn a_live_turn(root: &Path) -> (String, String, String, Child) {
+    a_live_turn_over(root, None)
+}
+
+/// …with `script` running as the session's process, when one is given.
+fn a_live_turn_over(root: &Path, script: Option<&str>) -> (String, String, String, Child) {
     let (thread, slot, s) = commission(root, "review");
-    let child = stand_in(root, &s);
+    let child = match script {
+        Some(script) => stand_in_over(root, &s, script),
+        None => stand_in(root, &s),
+    };
     bind(root, &at(5), &s);
     append(
         root,
@@ -630,15 +677,22 @@ fn a_live_turn(root: &Path) -> (String, String, String, Child) {
     (thread, slot, s, child)
 }
 
-/// **A session in one tool call longer than three ask intervals, in real processes** — a live
-/// process, its open `tool_use` flushed through a real `nxc transcript append`, looked at by real
-/// `nxc tick`s under the sidecar worker for four ask intervals: no rung is taken and nothing is
-/// escalated.
+/// A child that works a little every second — the shape of `gh run watch` under a Bash call.
+const WORKING_CHILD: &str =
+    "sh -c 'while :; do i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done; sleep 1; done' & wait";
+
+/// **A session in one tool call longer than three silences, in real processes** — a live process
+/// whose open `tool_use` was flushed through a real `nxc transcript append`, with a real child
+/// under it that keeps working, looked at by real `nxc tick`s under the sidecar worker for four
+/// silences: the host samples the child's CPU moving, so no rung is taken and nothing is
+/// escalated (nxf 6j6v.1r61; the j6yk field case, a merger watching CI). The looks are a second and
+/// a half apart in real time, so the child's counter has time to move between them.
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
     let tmp = workspace();
     let root = tmp.path();
-    let (thread, slot, s, child) = a_live_turn(root);
+    let (thread, slot, s, child) = a_live_turn_over(root, Some(WORKING_CHILD));
     append(
         root,
         &at(60),
@@ -650,19 +704,32 @@ fn a_live_session_inside_one_long_tool_call_is_neither_asked_nor_escalated() {
             serde_json::json!({ "name": "Bash", "input": { "command": "gh run watch" } }),
         )],
     );
+    // Each look comes once the child's CPU counter has really moved since the one before — polled,
+    // not slept, so a loaded runner waits as long as it needs and an idle one no longer.
+    let sample = || nexus_chat_test_sample(child.id());
+    let mut last = sample();
     let mut secs = 600;
     while secs <= 60 + 4 * nexus_chat::ladder::SILENCE_SECS {
+        assert!(
+            within(30, || {
+                let now = sample();
+                now != last
+            }),
+            "the working child's counter never moved"
+        );
+        last = sample();
         tick(root, &at(secs), &thread);
         secs += 600;
     }
-    assert!(rungs(root).is_empty(), "{:?}", rungs(root));
+    let rows = rungs(root);
+    kill_tree(child);
+    assert!(rows.is_empty(), "{rows:?}");
     assert_eq!(escalations_in(root, &slot), 0);
-    kill_hard(child);
 }
 
-/// **…and one that is really silent is still asked** — its one call returned, nothing since.
+/// **…and one that is really silent is still nudged** — its one call returned, nothing since.
 #[test]
-fn a_live_session_with_no_call_open_is_still_asked_after_twenty_minutes() {
+fn a_live_session_with_no_call_open_is_still_nudged_after_ten_minutes() {
     let tmp = workspace();
     let root = tmp.path();
     let (thread, _slot, s, child) = a_live_turn(root);
@@ -697,12 +764,15 @@ fn a_live_session_with_no_call_open_is_still_asked_after_twenty_minutes() {
     kill_hard(child);
 }
 
-/// **A tool call that outlives its own bound, in real processes** — escalated once, no ask taken.
+/// **A tool call that outlives its own bound, in real processes** — escalated once, no nudge
+/// taken. A child is still running under the call (it sleeps), so the call is the subprocess
+/// rule's until the bound (nxf 6j6v.1r61).
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
     let tmp = workspace();
     let root = tmp.path();
-    let (thread, slot, s, child) = a_live_turn(root);
+    let (thread, slot, s, child) = a_live_turn_over(root, Some("sleep 600 & wait"));
     append(
         root,
         &at(60),
@@ -720,6 +790,276 @@ fn a_live_session_whose_tool_call_outlives_its_bound_is_escalated_as_hung() {
     tick(root, &at(60 + bound), &thread);
     assert_eq!(escalations_in(root, &slot), 1);
     let taken: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
-    assert_eq!(taken, vec!["escalated".to_string()], "no ask was spent");
-    kill_hard(child);
+    kill_tree(child);
+    assert_eq!(taken, vec!["escalated".to_string()], "no nudge was spent");
+}
+
+// ---- the liveness ladder against the REAL sidecar (nxf 6j6v.1r61, design 8nx4 test 1) -------------
+
+/// The real `agent-sidecar/src/main.mjs`, its SDK mapped by a loader hook to a stub `query()` that
+/// says one thing, starts a shell whose `sleep` is a GRANDCHILD of the sidecar, and then hangs until
+/// it is aborted — a model that went quiet mid-turn. Every pid it starts is appended to
+/// `pids.log`, so the test can reap them whatever happens.
+fn a_real_sidecar_over_a_hanging_model(dir: &Path) -> std::path::PathBuf {
+    let main = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../agent-sidecar/src/main.mjs")
+        .canonicalize()
+        .expect("the sidecar's source");
+    let pids = dir.join("pids.log");
+    std::fs::write(
+        dir.join("sdk-stub.mjs"),
+        format!(
+            "import {{ spawn }} from \"node:child_process\";\n\
+             import {{ appendFileSync, writeFileSync }} from \"node:fs\";\n\
+             const PIDS = {pids:?};\n\
+             const textOf = (m) => typeof m?.message?.content === \"string\" ? m.message.content : JSON.stringify(m?.message?.content ?? m);\n\
+             export async function* query(arg) {{\n\
+               let prompt = arg?.prompt;\n\
+               if (prompt && typeof prompt === \"object\" && typeof prompt[Symbol.asyncIterator] === \"function\") {{\n\
+                 const r = await prompt[Symbol.asyncIterator]().next(); prompt = r.done ? null : textOf(r.value);\n\
+               }}\n\
+               appendFileSync({prompts:?}, JSON.stringify({{ pid: process.pid, prompt }}) + \"\\n\");\n\
+               yield {{ type: \"system\", subtype: \"init\", session_id: \"real-hung\", model: \"stub\", tools: [], apiKeySource: \"none\" }};\n\
+               yield {{ type: \"assistant\", message: {{ content: [{{ type: \"text\", text: \"on it\" }}] }} }};\n\
+               const sh = spawn(\"sh\", [\"-c\", \"sleep 600 & echo $! >> \" + PIDS + \"; wait\"], {{ stdio: \"ignore\" }});\n\
+               sh.unref();\n\
+               appendFileSync(PIDS, sh.pid + \"\\n\");\n\
+               writeFileSync({hanging:?}, String(process.pid));\n\
+               const hold = setInterval(() => {{}}, 1 << 30);\n\
+               await new Promise((resolve) => {{\n\
+                 const s = arg?.options?.abortController?.signal;\n\
+                 if (!s) return;\n\
+                 if (s.aborted) return resolve();\n\
+                 s.addEventListener(\"abort\", resolve, {{ once: true }});\n\
+               }});\n\
+               clearInterval(hold);\n\
+               appendFileSync({aborted:?}, String(process.pid) + \"\\n\");\n\
+             }}\n",
+            prompts = dir.join("prompts.log"),
+            hanging = dir.join("hanging"),
+            aborted = dir.join("aborted.log"),
+        ),
+    )
+    .unwrap();
+    let stub_url = format!("file://{}", dir.join("sdk-stub.mjs").display());
+    std::fs::write(
+        dir.join("loader.mjs"),
+        format!(
+            "const STUB = {stub:?};\n\
+             export async function resolve(specifier, context, next) {{\n\
+               if (specifier === \"@anthropic-ai/claude-agent-sdk\") return {{ url: STUB, shortCircuit: true }};\n\
+               return next(specifier, context);\n\
+             }}\n",
+            stub = stub_url,
+        ),
+    )
+    .unwrap();
+    let sidecar = dir.join("sidecar.mjs");
+    let main_url = format!("file://{}", main.display());
+    std::fs::write(
+        &sidecar,
+        format!(
+            "import {{ register }} from \"node:module\";\n\
+             register(new URL(\"./loader.mjs\", import.meta.url));\n\
+             await import({main:?});\n",
+            main = main_url,
+        ),
+    )
+    .unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // The `nxc` this test's binary was built beside (`target/<profile>/nxc`, two levels above the
+    // test executable in `deps/`) — the one `nxs_test_support::cargo_bin` just checked for
+    // freshness when the commission ran it.
+    let nxc_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(Path::parent)
+        .expect("the target directory")
+        .join("nxc");
+    std::os::unix::fs::symlink(nxc_bin, bin.join("nxc")).unwrap();
+    sidecar
+}
+
+/// `nxc` at `now`, under the REAL sidecar worker, with this test's sidecar and its `nxc` on PATH.
+fn under_the_real_sidecar(root: &Path, dir: &Path, now: &str) -> Command {
+    let mut c = nxc(root, now, "sidecar");
+    let path = format!(
+        "{}:{}",
+        dir.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    c.env("NXC_SIDECAR", dir.join("sidecar.mjs"))
+        .env("PATH", path);
+    c
+}
+
+/// Polls `what` until it holds or `secs` pass.
+fn within(secs: u64, what: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if what() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    what()
+}
+
+/// SIGKILLs every process the stub started and every sidecar that is still running.
+fn reap_the_real_run(dir: &Path) {
+    let mut pids: Vec<String> = std::fs::read_to_string(dir.join("pids.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for line in std::fs::read_to_string(dir.join("prompts.log"))
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Some(pid) = v["pid"].as_u64() {
+                pids.push(pid.to_string());
+            }
+        }
+    }
+    for pid in pids
+        .iter()
+        .filter_map(|p| p.trim().parse::<libc::pid_t>().ok())
+    {
+        // SAFETY: as in `kill_tree` — a plain pid this run started, signalled once.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+/// **Design 8nx4 test 1, in real processes**: a session whose model went quiet mid-turn under the
+/// REAL sidecar is nudged — the ask file is written beside its claim — then, with no life after the
+/// nudge, stopped by SIGTERM; the sidecar's teardown announces the end, and the coordinator
+/// continues the session with a text that names the cause and the grandchild that outlived the
+/// stop (a `sleep` the stopped turn started, never signalled). The looks are injected instants
+/// anchored at the wall clock, because the sidecar dates its own output by it.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_hung_session_in_the_real_sidecar_is_nudged_stopped_and_continued_naming_its_survivor() {
+    if StdCommand::new("node").arg("--version").output().is_err() {
+        eprintln!("skipped: no `node` on this host to run the sidecar");
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dir = root.join("real-sidecar");
+    std::fs::create_dir_all(&dir).unwrap();
+    a_real_sidecar_over_a_hanging_model(&dir);
+    let base = {
+        use time::format_description::well_known::Rfc3339;
+        let now = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .unwrap();
+        now.format(&Rfc3339).unwrap()
+    };
+    let when = |secs: i64| {
+        use time::format_description::well_known::Rfc3339;
+        (time::OffsetDateTime::parse(&base, &Rfc3339).unwrap() + time::Duration::seconds(secs))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    let out = under_the_real_sidecar(root, &dir, &when(0))
+        .args([
+            "send",
+            "--to",
+            "review",
+            "--no-ref",
+            "--json",
+            "verify the build",
+        ])
+        .output()
+        .unwrap();
+    let thread = json_of(&out.stdout)["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (slot, session): (String, String) = store(root)
+        .connection()
+        .query_row(
+            "SELECT thread, session FROM owed_starts WHERE role = 'local/verifier'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the obligation is recorded");
+    let logs = nexus_chat::worker::agent_logs_dir(root);
+    let hung = within(30, || dir.join("hanging").exists());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(hung, "the sidecar never reached the model's hang");
+        // The claim declares the ask door once the handler is in, and the pulse names the output.
+        assert!(within(10, || std::fs::read_to_string(
+            logs.join(format!("{session}.pid"))
+        )
+        .is_ok_and(|c| c.contains("ask: 1"))));
+        let tick = |secs: i64| {
+            under_the_real_sidecar(root, &dir, &when(secs))
+                .args(["tick", "--thread", &thread, "--json"])
+                .output()
+                .unwrap()
+        };
+        tick(660);
+        let asks: Vec<_> = std::fs::read_dir(&logs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(&format!("{session}.ask.")))
+            .collect();
+        assert_eq!(asks.len(), 1, "the nudge's ask file: {asks:?}");
+        tick(960);
+        let taken: Vec<(String, Option<String>)> = rungs(root);
+        assert_eq!(
+            taken,
+            vec![
+                ("asked".to_string(), Some("asked".to_string())),
+                ("stopped".to_string(), Some("stop_requested".to_string()))
+            ]
+        );
+        assert!(
+            within(30, || std::fs::read_to_string(dir.join("aborted.log"))
+                .is_ok_and(|a| !a.is_empty())),
+            "the SIGTERM reached the sidecar and it aborted the model's turn"
+        );
+        assert!(
+            within(30, || store(root)
+                .session_ended_at(&session)
+                .unwrap()
+                .is_some()),
+            "the sidecar's teardown announced the end"
+        );
+        let survivor: String = std::fs::read_to_string(dir.join("pids.log"))
+            .unwrap()
+            .lines()
+            .nth(1)
+            .expect("the grandchild's pid")
+            .trim()
+            .to_string();
+        tick(1_020);
+        assert!(
+            within(30, || std::fs::read_to_string(dir.join("prompts.log"))
+                .is_ok_and(|p| p.lines().count() >= 2)),
+            "the session was continued"
+        );
+        let prompts = std::fs::read_to_string(dir.join("prompts.log")).unwrap();
+        let continued = prompts.lines().nth(1).unwrap();
+        assert!(
+            continued.contains(&format!(
+                "no sign of life for 5 minutes after it was asked and was stopped at {}",
+                when(960)
+            )),
+            "{continued}"
+        );
+        assert!(
+            continued.contains(&format!("pid {survivor}")),
+            "the grandchild {survivor} that outlived the stop is named: {continued}"
+        );
+        assert_eq!(escalations_in(root, &slot), 0);
+    }));
+    reap_the_real_run(&dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }

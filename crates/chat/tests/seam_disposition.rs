@@ -591,6 +591,20 @@ const RECORD: &[Disposition] = &[
                  session_ends_unanswered`.",
     },
     Disposition {
+        verb: "reply --progress",
+        cli: Gone,
+        seam: left("reply_progress"),
+        reason: "REMOVED with its seam (nxf 6j6v.1r61, design 8nx4 section 5). The owner's model of \
+                 a silent session has exactly two answers to a coordinator's nudge — `nxc reply`, \
+                 or the bounded `nxc confirm --rest` — and a third, unbounded \"still working\" \
+                 would defeat the cap on rests. `Engine::reply_progress`, `surface::reply_progress` \
+                 and `ProgressReceipt` went with the flag; `Engine::confirm_rest` is the seam of \
+                 the bounded answer. What stays is READ-ONLY: `MessageKind::Progress`, \
+                 `RecoveryAction::Progress` and `RungOutcome::Reset` still parse the rows and \
+                 messages older versions wrote, so `nxc status` lists an old progress note as \
+                 not-an-answer.",
+    },
+    Disposition {
         verb: "send --thread",
         cli: Gone,
         seam: stays("send"),

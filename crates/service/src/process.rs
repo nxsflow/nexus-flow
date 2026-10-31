@@ -85,6 +85,30 @@ pub fn descendants_started_since(pid: u32, since: SystemTime) -> Option<Subproce
     Some(sample)
 }
 
+/// **Every descendant of `pid` with its start instant** (nxf 6j6v.1r61) — what the ladder records
+/// when it stops a session, so that the look after the end can name a descendant that outlived
+/// the stop. The start is the operating system's (`None` when it cannot be read); a process is
+/// told apart from a later one holding the same number by [`still_the_process`].
+///
+/// `None` on a platform this cannot read, or when `pid` itself cannot be read.
+pub fn descendants_with_start(pid: u32) -> Option<Vec<(u32, Option<SystemTime>)>> {
+    Some(
+        descendants(pid)?
+            .into_iter()
+            .map(|child| (child, crate::heartbeat::process_started_at(child)))
+            .collect(),
+    )
+}
+
+/// **Whether `pid` is still the process that started at `started`** (RFC3339) — the start read
+/// again and compared with the slack [`born_together`](crate::heartbeat::born_together) concedes.
+/// A pid that is gone, or that the system handed to a later process, is not; nor is one whose start
+/// cannot be read, since naming a stranger as a survivor would be worse than naming none.
+pub fn still_the_process(pid: u32, started: &str) -> bool {
+    crate::heartbeat::born_together(started, crate::heartbeat::process_started_at(pid))
+        == Some(true)
+}
+
 #[cfg(target_os = "macos")]
 fn descendants(pid: u32) -> Option<Vec<u32>> {
     // `pid` itself must be readable, or the answer is None (not "no children").

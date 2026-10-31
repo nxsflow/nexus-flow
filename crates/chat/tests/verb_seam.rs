@@ -90,6 +90,14 @@ const WAIVERS: &[Waiver] = &[
     // with the verb rather than standing as dead prose. `seam_disposition.rs` carries the removal's
     // own row, with the owner's safety reason and both dates.
     Waiver::Alias {
+        verb: "confirm",
+        seam: "confirm_rest",
+        reason: "`surface::confirm_rest` / `Engine::confirm_rest` (nxf 6j6v.1r61): the seam names \
+                 WHAT is confirmed — a rest — because a bare `confirm` on the handle would read as \
+                 confirming anything; the verb is the short word the coordinator's nudge prints, \
+                 and it is hidden from the help because only that nudge names it.",
+    },
+    Waiver::Alias {
         verb: "session bind",
         seam: "bind_runtime_session",
         reason: "`Engine::bind_runtime_session` makes the identical `store.bind_session` call. It \

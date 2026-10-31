@@ -866,6 +866,18 @@ pub fn trigger_role(
             &internal_session,
             true,
             slot_coordinator.as_ref().map(|c| c.thread.as_str()),
+            // **A NEW owed turn, or the same one again** (nxf 6j6v.1r61): a rung of the ladder,
+            // a queued trigger released and an answer on its way back re-trigger the turn that is
+            // already owed, and must not hand it a fresh budget; every other coordinator
+            // commissions a turn of its own.
+            if matches!(
+                coordinator,
+                Coordinator::Recovery | Coordinator::Released | Coordinator::Return
+            ) {
+                crate::stranded::Obligation::Same
+            } else {
+                crate::stranded::Obligation::New
+            },
         ),
         (None, Some(owed_on)) => {
             crate::stranded::touch(ctx, store, owed_on, &owed_role, &internal_session)
@@ -1142,6 +1154,20 @@ pub fn trigger_role(
             "warning: session {internal_session} was put back in motion, but forgetting that a \
              withdrawal had stopped it failed ({e}); a tick may still name it as pinning its \
              claim, and send it the one further SIGTERM a withdrawn session gets"
+        );
+    }
+
+    // **…and every slot it owes is about the NEW process** (nxf 6j6v.1r61, design 8nx4 section 4,
+    // round 3 TQ #1 / IR #1). After the spawn and only after it, for the line above's reason: a
+    // trigger the worker refused (`AlreadyRunning`) started nothing, so the live process keeps its
+    // clock, its pending nudge and its stop in flight; a trigger that only queued reaches this
+    // line when its released entry spawns. Best-effort, a breadcrumb: the slot's look still runs
+    // on the old clock, the generous direction.
+    if let Err(e) = store.reset_for_a_new_process(&owed_role, &internal_session, ctx.now) {
+        eprintln!(
+            "warning: session {internal_session} was started, but its slots could not be told so \
+             ({e}); the coordinator judges the new process by its predecessor's clock until the \
+             next start"
         );
     }
 
@@ -12904,6 +12930,84 @@ fn debug_assert_one_place(_warnings: &[FailedConsequence], _wake_skipped: Option
 /// release rather than after, because one contract across all four sites is worth more than a
 /// compatibility switch that would leave two.
 pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<ReplyReceipt> {
+    let mut receipt = reply_routed(ctx, store, req)?;
+    if receipt.posted {
+        if let Some(thread) = receipt.thread_id.clone() {
+            receipt
+                .warnings
+                .extend(after_an_answer(ctx, store, &thread));
+        }
+    }
+    Ok(receipt)
+}
+
+/// **What a posted answer does to its writer's slot** (nxf 6j6v.1r61, design 8nx4 sections 3 and 4)
+/// — once the reply is admitted, and never deciding whether it is:
+///
+/// - **the session's nudges are withdrawn** (`ladder::withdraw_the_nudges`) when the slot it answers
+///   has one on record, so a session that has replied is not handed "no sign of life from you" at
+///   its turn's end — the shape that invites a duplicate reply or a new round. Here, not at the
+///   owed row's deletion: the sweep makes that a look later, and the sidecar yields a pending
+///   nudge at the very next `result`.
+/// - **the owed turn is over when the reply discharged the slot**: ONE update zeroes the turn's
+///   budget and every field of its episode, so a turn owed again on the same slot — before the
+///   sweep forgets the row — starts from nothing (round 3 CQ #2 / TQ #3 / IR #2).
+///
+/// Both are consequences: an `Err` is a receipt warning, and the sidecar's own drain also removes
+/// an ask file (round 2 IR #3).
+fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<FailedConsequence> {
+    let mut findings = Vec::new();
+    let role = ctx.caller_handle();
+    // Only a slot with a nudge on record has one to take back: a reply on a slot nobody nudged
+    // must not withdraw the nudge another slot of the same session is waiting on, nor report a
+    // worker it cannot reach as a failed consequence of a reply that had nothing to withdraw.
+    let nudged = store
+        .owed_start(thread, &role)
+        .ok()
+        .flatten()
+        .is_some_and(|row| row.asked_at.is_some());
+    if let Some(session) = ctx.session.filter(|_| nudged) {
+        if let Err(e) = crate::ladder::withdraw_the_nudges(ctx, store, session, thread) {
+            findings.push(FailedConsequence::stranded(
+                ConsequenceClass::RecoveryFailed,
+                Some(thread),
+                Some(session),
+                format!(
+                    "the reply is posted, but the nudges waiting for session {session} could not \
+                     be withdrawn: {e}; one may still reach it at its turn's end"
+                ),
+            ));
+        }
+    }
+    let discharged = store
+        .thread_quorum(thread, ctx.now)
+        .map(|q| q.is_none_or(|q| !crate::stranded::outstanding_has(&q.outstanding, &role)));
+    match discharged {
+        Ok(true) => {
+            if let Err(e) = store.end_the_owed_turn(thread, &role) {
+                findings.push(FailedConsequence::stranded(
+                    ConsequenceClass::RecoveryFailed,
+                    Some(thread),
+                    ctx.session,
+                    format!(
+                        "the reply is posted and answers the slot, but its recovery could not be \
+                         closed: {e}; the row goes with the next sweep"
+                    ),
+                ));
+            }
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "warning: whether the reply in thread {thread} answered its slot could not be read: \
+             {e}; the row goes with the sweep once it does"
+        ),
+    }
+    findings
+}
+
+/// [`reply`] up to and including its routing — everything but what the answer does to its
+/// writer's slot ([`after_an_answer`]).
+fn reply_routed(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<ReplyReceipt> {
     let hop = resolve_hop(ctx, store)?;
     let refs = with_working_copy(ctx, with_return_address(ctx, req.refs));
     let Some(receipt) = facade::reply(

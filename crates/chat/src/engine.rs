@@ -1150,18 +1150,17 @@ impl Engine {
         })
     }
 
-    /// **Say "still working" because a coordinator asked** (`nxc reply --progress`, nxf
-    /// 6j6v.558h) — see [`surface::reply_progress`]. Never an answer: it settles no turn, starts
-    /// no step and wakes nobody; it resets the caller's slot's silence clock and budget when an ask
-    /// was pending, and is stored for the record otherwise.
-    pub fn reply_progress(
+    /// **Answer a coordinator's nudge with a rest** (`nxc confirm --rest`, nxf 6j6v.1r61) — see
+    /// [`surface::confirm_rest`]. Never an answer: it settles no turn and posts nothing; it is
+    /// accepted only while a nudge is pending on the caller's slot and no stop is in flight.
+    pub fn confirm_rest(
         &self,
         caller: Caller<'_>,
         thread: &str,
-        body: &str,
-    ) -> Result<surface::ProgressReceipt> {
+        minutes: i64,
+    ) -> Result<surface::ConfirmReceipt> {
         self.with_orchestration(caller, |ctx, store| {
-            surface::reply_progress(ctx, store, thread, body)
+            surface::confirm_rest(ctx, store, thread, minutes)
         })
     }
 
