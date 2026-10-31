@@ -3724,3 +3724,36 @@ fn a_pulse_dated_in_the_future_is_no_sign_of_life() {
     team.tick(&at(600), &thread);
     assert_eq!(team.worker.asks().len(), 1, "nudged at +600");
 }
+
+/// **A withdrawal takes every nudge of the session, so every slot it took one from knows** (review
+/// of pass 1, Integrity #2): one session serves X and Y, both nudged; it answers X, and the ask
+/// files go — Y's with them. Y is no longer waiting on a nudge that will never arrive: it is nudged
+/// again at its next look, and the session is not stopped for failing to read Y's lost nudge.
+#[test]
+fn a_reply_on_one_slot_leaves_no_other_slot_waiting_on_a_withdrawn_nudge() {
+    let team = team();
+    let x = team.commission(T0, "pm", "plan the X feature").thread_id;
+    let session = team.worker.last("pm").internal_session;
+    let y = team.commission(&at(60), "coder", "build Y").thread_id;
+    team.sql(&format!(
+        "UPDATE owed_starts SET session = '{session}' WHERE thread = '{y}'"
+    ));
+    team.worker.run(&session);
+    team.tick(&at(600), &x);
+    team.tick(&at(660), &y);
+    let nudged: Vec<String> = team.worker.asks().into_iter().map(|a| a.thread).collect();
+    assert_eq!(nudged, vec![x.clone(), y.clone()]);
+    team.reply(&at(700), "pm", &session, &x, "the plan");
+    assert_eq!(
+        team.owed(&y, "coder", "asked_at"),
+        None,
+        "Y's nudge went with the files"
+    );
+    team.tick(&at(960), &y);
+    assert!(
+        team.worker.stops().is_empty(),
+        "not stopped for a nudge it never got"
+    );
+    let to_y = team.worker.asks().iter().filter(|a| a.thread == y).count();
+    assert_eq!(to_y, 2, "Y is nudged again");
+}

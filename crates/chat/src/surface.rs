@@ -1149,7 +1149,7 @@ pub fn confirm_rest(
             .ok_or_else(|| nothing_asked(thread))?;
         return Err(refusal(&row));
     }
-    if let Err(e) = ctx.worker.withdraw_asks(session) {
+    if let Err(e) = crate::ladder::withdraw_the_nudges(ctx, store, session, thread) {
         eprintln!(
             "warning: the nudge of session {session} on thread {thread} was answered, but its ask \
              file could not be withdrawn: {e}; the sidecar drains it at its turn's end"

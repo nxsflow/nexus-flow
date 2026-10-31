@@ -12966,7 +12966,7 @@ fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<Failed
         .flatten()
         .is_some_and(|row| row.asked_at.is_some());
     if let Some(session) = ctx.session.filter(|_| nudged) {
-        if let Err(e) = ctx.worker.withdraw_asks(session) {
+        if let Err(e) = crate::ladder::withdraw_the_nudges(ctx, store, session, thread) {
             findings.push(FailedConsequence::stranded(
                 ConsequenceClass::RecoveryFailed,
                 Some(thread),

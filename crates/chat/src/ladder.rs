@@ -665,6 +665,17 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Every OTHER slot `session` owes forgets the nudge it was waiting on — its file was withdrawn
+    /// with the session's (see [`withdraw_the_nudges`]).
+    pub(crate) fn forget_the_other_nudges(&mut self, session: &str, thread: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET asked_at = NULL
+              WHERE session = ?1 AND thread <> ?2 AND asked_at IS NOT NULL",
+            params![session, thread],
+        )?;
+        Ok(())
+    }
+
     /// The nudge is no longer pending — overtaken by life.
     pub(crate) fn set_asked_cleared(&mut self, thread: &str, role: &str) -> Result<()> {
         self.connection().execute(
@@ -1526,6 +1537,28 @@ impl Life {
     }
 }
 
+/// **Take back every nudge waiting for `session`** — the worker unlinks ALL of its ask files, so
+/// every other slot of the session that was waiting on one is told so: its `asked_at` goes, and
+/// its next look nudges it again instead of finding it dead for not reading a nudge that is gone
+/// (review of pass 1, Integrity #2). `thread` is the slot the withdrawal is for, which the caller
+/// clears itself. The rows are cleared even when the unlink failed: the sidecar's own drain may
+/// still deliver a file, and a fresh nudge after a stale one is the harmless direction.
+pub(crate) fn withdraw_the_nudges(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    session: &str,
+    thread: &str,
+) -> std::result::Result<(), String> {
+    let withdrawn = ctx.worker.withdraw_asks(session);
+    if let Err(e) = store.forget_the_other_nudges(session, thread) {
+        eprintln!(
+            "warning: the nudges of session {session} were withdrawn, but its other slots could \
+             not be told: {e}; one may wait on a nudge that will not come"
+        );
+    }
+    withdrawn
+}
+
 /// The earlier of `at` and `recheck` — no look is armed later than one cadence out — and never an
 /// instant already past.
 fn soonest(ctx: &Ctx, at: &str, recheck: &str) -> String {
@@ -1750,7 +1783,7 @@ fn step_nudge_pending(
         );
         return Ok(());
     }
-    if let Err(e) = ctx.worker.withdraw_asks(session) {
+    if let Err(e) = withdraw_the_nudges(ctx, store, session, t) {
         eprintln!(
             "warning: the overtaken nudge of session {session} on thread {t} could not be \
              withdrawn: {e}; the sidecar drops it at its next yield only if it is gone"
