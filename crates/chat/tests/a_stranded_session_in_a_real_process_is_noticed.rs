@@ -227,11 +227,13 @@ fn stand_in_over(root: &Path, session: &str, script: &str) -> Child {
     child
 }
 
-/// SIGKILL the stand-in's whole process group and reap it.
+/// SIGKILL the stand-in's whole process group and reap it. Through `kill(2)`, never the `kill`
+/// command: procps reads `kill -9 -<pgid>` as two options unless a `--` comes first, and BSD's
+/// does not, so the command form killed nothing on Linux and the reap below waited for ever.
 fn kill_tree(mut child: Child) {
-    let _ = StdCommand::new("kill")
-        .args(["-9", &format!("-{}", child.id())])
-        .status();
+    // SAFETY: `kill` touches no caller memory; the negative pid names this child's own group,
+    // which `process_group(0)` made, never the harness's.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
     let _ = child.wait();
 }
 
@@ -905,8 +907,12 @@ fn reap_the_real_run(dir: &Path) {
             }
         }
     }
-    for pid in pids.iter().filter(|p| !p.trim().is_empty()) {
-        let _ = StdCommand::new("kill").args(["-9", pid.trim()]).status();
+    for pid in pids
+        .iter()
+        .filter_map(|p| p.trim().parse::<libc::pid_t>().ok())
+    {
+        // SAFETY: as in `kill_tree` — a plain pid this run started, signalled once.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 }
 
