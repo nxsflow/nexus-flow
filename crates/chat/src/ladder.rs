@@ -957,18 +957,10 @@ impl ChatStore {
     /// what keeps a resumed session from reading "alive" before its model has said a word. The
     /// unfiltered reading stays [`slot_last_activity`](ChatStore::slot_last_activity), which `nxc
     /// status` and rung E's summary show.
+    ///
+    /// As a look at `now` reads it: the newest model output at or before `now` — an entry dated
+    /// later is no evidence of life yet (review of pass 1, Integrity #4).
     pub(crate) fn slot_last_own_output(
-        &self,
-        session: &str,
-        thread: &str,
-    ) -> Result<Option<String>> {
-        self.own_output(session, thread, true, None)
-    }
-
-    /// [`slot_last_own_output`](ChatStore::slot_last_own_output) as a look at `now` reads it: the
-    /// newest model output at or before `now` — an entry dated later is no evidence of life yet
-    /// (review of pass 1, Integrity #4).
-    pub(crate) fn slot_last_own_output_by(
         &self,
         session: &str,
         thread: &str,
@@ -1451,7 +1443,7 @@ impl Life {
         call: Option<&OpenToolCall>,
     ) -> Result<Life> {
         let (t, h) = (row.thread.as_str(), row.role.as_str());
-        let entry = store.slot_last_own_output_by(session, t, ctx.now)?;
+        let entry = store.slot_last_own_output(session, t, ctx.now)?;
         // **The pulse only for a session whose process runs** (review of d1ey, CQ #2 / IR #3): the
         // file outlives its process, and its `At` would read as life of a process that is gone.
         // The judge said `Live` a moment ago; asked again here so the order holds whoever calls.
@@ -3060,19 +3052,25 @@ mod tests {
         entry(&store, "turn_start", &at(100), None, r#"{"thread":"t-1"}"#);
         entry(&store, "session_init", &at(101), None, "{}");
         assert_eq!(
-            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            store
+                .slot_last_own_output("s-1", "t-1", &at(10_000))
+                .unwrap(),
             None,
             "the marker and the runtime's init are not life"
         );
         entry(&store, "tool_result", &at(102), Some("old"), "{}");
         assert_eq!(
-            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            store
+                .slot_last_own_output("s-1", "t-1", &at(10_000))
+                .unwrap(),
             None,
             "a result whose call lies before the span is not life"
         );
         entry(&store, "thinking", &at(110), None, "{}");
         assert_eq!(
-            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            store
+                .slot_last_own_output("s-1", "t-1", &at(10_000))
+                .unwrap(),
             Some(at(110))
         );
         entry(
@@ -3084,7 +3082,9 @@ mod tests {
         );
         entry(&store, "tool_result", &at(130), Some("new"), "{}");
         assert_eq!(
-            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            store
+                .slot_last_own_output("s-1", "t-1", &at(10_000))
+                .unwrap(),
             Some(at(130)),
             "a result whose call lies in the span is"
         );
@@ -3092,7 +3092,9 @@ mod tests {
         entry(&store, "result", &at(150), None, "{}");
         entry(&store, "error", &at(160), None, "{}");
         assert_eq!(
-            store.slot_last_own_output("s-1", "t-1").unwrap(),
+            store
+                .slot_last_own_output("s-1", "t-1", &at(10_000))
+                .unwrap(),
             Some(at(140)),
             "result and error are the runtime's"
         );
