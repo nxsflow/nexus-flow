@@ -951,7 +951,19 @@ impl ChatStore {
         session: &str,
         thread: &str,
     ) -> Result<Option<String>> {
-        self.own_output(session, thread, true)
+        self.own_output(session, thread, true, None)
+    }
+
+    /// [`slot_last_own_output`](ChatStore::slot_last_own_output) as a look at `now` reads it: the
+    /// newest model output at or before `now` — an entry dated later is no evidence of life yet
+    /// (review of pass 1, Integrity #4).
+    pub(crate) fn slot_last_own_output_by(
+        &self,
+        session: &str,
+        thread: &str,
+        now: &str,
+    ) -> Result<Option<String>> {
+        self.own_output(session, thread, true, Some(now))
     }
 
     /// [`slot_last_own_output`](ChatStore::slot_last_own_output) without the `tool_result`s — the
@@ -961,11 +973,18 @@ impl ChatStore {
         &self,
         session: &str,
         thread: &str,
+        now: &str,
     ) -> Result<Option<String>> {
-        self.own_output(session, thread, false)
+        self.own_output(session, thread, false, Some(now))
     }
 
-    fn own_output(&self, session: &str, thread: &str, results: bool) -> Result<Option<String>> {
+    fn own_output(
+        &self,
+        session: &str,
+        thread: &str,
+        results: bool,
+        by: Option<&str>,
+    ) -> Result<Option<String>> {
         let Some((start, end)) = self.slot_turn(session, thread)? else {
             return Ok(None);
         };
@@ -986,7 +1005,12 @@ impl ChatStore {
                 r.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
+        Ok(latest(
+            ats.iter()
+                .map(String::as_str)
+                .filter(|at| by.is_none_or(|now| !earlier(now, at))),
+        )
+        .map(str::to_string))
     }
 
     /// **The span of the slot's own turn** in `session`'s transcript: from the newest `turn_start {
@@ -1406,7 +1430,9 @@ struct Life {
 }
 
 impl Life {
-    fn read(
+    /// **Observe the session at this look** — and STORE the open call's subprocess sample on the
+    /// way, since `M` is the instant the stored sample last moved: an observation, not a query.
+    fn observe(
         ctx: &Ctx,
         store: &mut ChatStore,
         row: &OwedStart,
@@ -1414,7 +1440,7 @@ impl Life {
         call: Option<&OpenToolCall>,
     ) -> Result<Life> {
         let (t, h) = (row.thread.as_str(), row.role.as_str());
-        let entry = store.slot_last_own_output(session, t)?;
+        let entry = store.slot_last_own_output_by(session, t, ctx.now)?;
         // **The pulse only for a session whose process runs** (review of d1ey, CQ #2 / IR #3): the
         // file outlives its process, and its `At` would read as life of a process that is gone.
         // The judge said `Live` a moment ago; asked again here so the order holds whoever calls.
@@ -1444,7 +1470,13 @@ impl Life {
             },
             moved_at.clone().map(|m| (m, Signal::Subprocess)),
         ];
-        for (at, signal) in candidates.into_iter().flatten() {
+        // An instant later than this look is no evidence of life yet — a skewed clock or a forged
+        // file would otherwise push the silence out to the ceiling (review of pass 1, IR #4).
+        for (at, signal) in candidates
+            .into_iter()
+            .flatten()
+            .filter(|(at, _)| !earlier(ctx.now, at))
+        {
             if own.as_ref().is_none_or(|(best, _)| earlier(best, &at)) {
                 own = Some((at, signal));
             }
@@ -1533,7 +1565,7 @@ fn live(
     if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
         return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
-    let life = Life::read(ctx, store, row, session, call.as_ref())?;
+    let life = Life::observe(ctx, store, row, session, call.as_ref())?;
     if row.stop_requested_at.is_some() {
         return step_stop_in_flight(ctx, store, row, coordinator, &recheck, findings);
     }
@@ -1647,7 +1679,7 @@ fn step_rest(
         .newest_rung_of(t, h, RecoveryAction::Confirmed)?
         .map_or_else(|| until.to_string(), |r| r.at);
     let model_since = store
-        .slot_last_model_output(session, t)?
+        .slot_last_model_output(session, t, ctx.now)?
         .is_some_and(|m| earlier(&confirmed_at, &m));
     let pulse_since =
         matches!(&life.pulse, crate::worker::Pulse::At(p) if earlier(&confirmed_at, p));
@@ -1726,7 +1758,7 @@ fn step_nudge_pending(
     }
     store.set_asked_cleared(t, h)?;
     if let Some(asked_row) = store.newest_rung_of(t, h, RecoveryAction::Asked)? {
-        let (l, signal) = life.own.clone().unwrap_or_default_signal();
+        let (l, signal) = own_or_unknown(life);
         store.settle_rung_with_detail(
             asked_row.id,
             RungOutcome::Overtaken.as_str(),
@@ -1741,14 +1773,12 @@ fn step_nudge_pending(
     step_alive(ctx, store, &row, life, recheck, findings)
 }
 
-trait OwnLife {
-    fn unwrap_or_default_signal(self) -> (String, Signal);
-}
-
-impl OwnLife for Option<(String, Signal)> {
-    fn unwrap_or_default_signal(self) -> (String, Signal) {
-        self.unwrap_or_else(|| ("an unknown instant".to_string(), Signal::Entry))
-    }
+/// `L` and its signal, as a log row names them — never absent where it is asked for, but said
+/// plainly if it were.
+fn own_or_unknown(life: &Life) -> (String, Signal) {
+    life.own
+        .clone()
+        .unwrap_or_else(|| ("an unknown instant".to_string(), Signal::Entry))
 }
 
 /// **Step 4 — no nudge pending and the silence is due.** A session with life of its own since its
@@ -1866,7 +1896,7 @@ fn step_alive(
     let nothing_stands =
         row.asked_at.is_none() && row.confirmed_until.is_none() && row.stop_requested_at.is_none();
     if row.recovery_started_at.is_some() && nothing_stands && life.since_its_start() {
-        let (l, signal) = life.own.clone().unwrap_or_default_signal();
+        let (l, signal) = own_or_unknown(life);
         let id = store.log_rung(
             t,
             h,
@@ -1958,26 +1988,40 @@ fn stop_outcome(stop: std::result::Result<crate::worker::SessionStop, String>) -
     }
 }
 
-/// The marker before the descendants a `stopped` row names.
-const DESCENDANTS: &str = "descendants at the stop: ";
-/// The marker before the stopped process's own pid.
-const PROCESS: &str = "its process ";
+/// The marker before the descendants a `stopped` row names — with its leading separator, so no
+/// reason text can contain it (review of pass 1, Integrity #3).
+const DESCENDANTS: &str = "; descendants at the stop: ";
+/// The marker before the stopped process's own pid, likewise: a reason may say "its process
+/// started at …", never "; stopped pid ".
+const PROCESS: &str = "; stopped pid ";
 
 /// **A `stopped` row's detail** — why, the process and the descendants sampled at the stop, each
 /// as `pid@start`, which the continue text re-reads to name a survivor ([`process_of`],
 /// [`descendants_of`]); and "this host reports no …" for each signal the host could not read.
 fn stop_detail(why: &str, tree: Option<&crate::worker::SessionProcessTree>, life: &Life) -> String {
+    let mut out = describe_the_stop(why, tree);
+    if life.pulse == crate::worker::Pulse::Unreported {
+        out.push_str("; this host reports no pulse");
+    }
+    if life.blind_call {
+        out.push_str("; this host reports no subprocess signals");
+    }
+    out
+}
+
+/// The reason, the stopped process and its descendants, as a `stopped` row's detail carries them.
+fn describe_the_stop(why: &str, tree: Option<&crate::worker::SessionProcessTree>) -> String {
     let mut out = why.to_string();
     match tree {
         Some(tree) => {
-            out.push_str(&format!("; {PROCESS}{}", tree.pid));
+            out.push_str(&format!("{PROCESS}{}", tree.pid));
             let marks: Vec<String> = tree
                 .descendants
                 .iter()
                 .map(|d| format!("{}@{}", d.pid, d.started.as_deref().unwrap_or("?")))
                 .collect();
             out.push_str(&format!(
-                "; {DESCENDANTS}{}",
+                "{DESCENDANTS}{}",
                 if marks.is_empty() {
                     "none".to_string()
                 } else {
@@ -1986,12 +2030,6 @@ fn stop_detail(why: &str, tree: Option<&crate::worker::SessionProcessTree>, life
             ));
         }
         None => out.push_str("; this host reports no process tree"),
-    }
-    if life.pulse == crate::worker::Pulse::Unreported {
-        out.push_str("; this host reports no pulse");
-    }
-    if life.blind_call {
-        out.push_str("; this host reports no subprocess signals");
     }
     out
 }
@@ -3025,6 +3063,26 @@ mod tests {
             Some(at(160)),
             "the unfiltered reader is unchanged"
         );
+    }
+
+    /// **A stop's detail names its pid however its reason is worded** (review of pass 1, Integrity
+    /// #3): the reason of a stop without a nudge begins "its process started at …", and the pid
+    /// marker must not be found inside it.
+    #[test]
+    fn a_stop_detail_names_its_pid_and_descendants_whatever_its_reason_says() {
+        let tree = crate::worker::SessionProcessTree {
+            pid: 4242,
+            descendants: vec![crate::worker::ProcessMark {
+                pid: 77,
+                started: Some(BASE.to_string()),
+            }],
+        };
+        let detail = describe_the_stop(
+            "its process started at 2026-10-25T10:00:00Z and produced nothing of its own since",
+            Some(&tree),
+        );
+        assert_eq!(process_of(&detail), Some(4242), "{detail}");
+        assert_eq!(descendants_of(&detail), tree.descendants, "{detail}");
     }
 
     /// Every typed outcome reads back as itself — the log's words and the hold's.

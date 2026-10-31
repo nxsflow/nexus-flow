@@ -870,10 +870,14 @@ pub fn trigger_role(
             // a queued trigger released and an answer on its way back re-trigger the turn that is
             // already owed, and must not hand it a fresh budget; every other coordinator
             // commissions a turn of its own.
-            !matches!(
+            if matches!(
                 coordinator,
                 Coordinator::Recovery | Coordinator::Released | Coordinator::Return
-            ),
+            ) {
+                crate::stranded::Obligation::Same
+            } else {
+                crate::stranded::Obligation::New
+            },
         ),
         (None, Some(owed_on)) => {
             crate::stranded::touch(ctx, store, owed_on, &owed_role, &internal_session)

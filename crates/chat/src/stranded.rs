@@ -373,6 +373,16 @@ pub const ABANDONED_AFTER_SECS: i64 = 86_400;
 /// How long a stranded record is kept once written — the retention bound of `stranded_sessions`.
 pub const STRANDED_RETENTION_DAYS: i64 = 30;
 
+/// **Whether a write owes a NEW turn on the slot, or re-triggers the turn already owed** (nxf
+/// 6j6v.1r61) — what [`ChatStore::record_owed_start`] decides the owed turn's budget by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Obligation {
+    /// A commission, a flow step, a border commission: a turn of its own, with a fresh budget.
+    New,
+    /// A rung of the ladder, a queued trigger released, an answer travelling back: the same turn.
+    Same,
+}
+
 /// **The obligation record** — thread `thread` owes an answer from `role`; the SLOT (nxf
 /// 6j6v.kgfn), owed from the instant it is opened, and `session` is the one that owes it once a
 /// session exists.
@@ -691,7 +701,7 @@ impl ChatStore {
     /// **The clock is the INSERT's only** (nxf 6j6v.1r61, design 8nx4 section 4): the open instant
     /// is the slot's first `P`, and from then on only a process START moves it
     /// ([`reset_for_a_new_process`](ChatStore::reset_for_a_new_process)) — a trigger that met a
-    /// live process or the working-copy queue started nothing. `new_obligation` is a write that
+    /// live process or the working-copy queue started nothing. `Obligation::New` is a write that
     /// owes a NEW turn on the slot (a commission, a flow step, a border commission), not a rung of
     /// the ladder or a queued trigger released: it starts the owed turn's budget (`attempts`)
     /// again. Nothing else the ladder wrote moves here — a nudge pending, a stop in flight and the
@@ -705,8 +715,9 @@ impl ChatStore {
         clock: &str,
         triggered: bool,
         coordinator: Option<&str>,
-        new_obligation: bool,
+        obligation: Obligation,
     ) -> Result<()> {
+        let new_obligation = obligation == Obligation::New;
         let conn = self.connection();
         conn.execute(
             "INSERT INTO owed_starts(thread, role, session, trigger_clock, triggered, coordinator)
@@ -846,7 +857,6 @@ impl ChatStore {
         thread: &str,
         role: &str,
         session: &str,
-        _now: &str,
     ) -> Result<bool> {
         let n = self.connection().execute(
             "UPDATE owed_starts SET triggered = 1
@@ -1876,7 +1886,7 @@ pub(crate) fn owe_durably(
         return Ok(Vec::new());
     }
     crate::orchestration::through_the_lock(|| {
-        store.record_owed_start(thread, role, session, ctx.now, false, None, true)
+        store.record_owed_start(thread, role, session, ctx.now, false, None, Obligation::New)
     })?;
     Ok(arm_first_look(ctx, store, thread, role, ctx.now)
         .into_iter()
@@ -1886,7 +1896,7 @@ pub(crate) fn owe_durably(
 /// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write the
 /// trigger funnel makes, and the mint of a slot nobody coordinates (cut 1a's row, kept exactly as it
 /// was: a slot with no coordinator keeps today's behaviour). `coordinator` is the slot's
-/// coordinating thread when it has one; `new_obligation` a trigger that owes a new turn rather than
+/// coordinating thread when it has one; `obligation` whether the trigger owes a new turn rather than
 /// a rung of the ladder or a queued trigger released ([`ChatStore::record_owed_start`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn owe(
@@ -1897,7 +1907,7 @@ pub(crate) fn owe(
     session: &str,
     triggered: bool,
     coordinator: Option<&str>,
-    new_obligation: bool,
+    obligation: Obligation,
 ) -> Vec<FailedConsequence> {
     // An engine identity (the synthesizer) answers for the engine; rule 1 excludes it anyway, and
     // keeping it out of the table keeps the work list to what can strand.
@@ -1911,7 +1921,7 @@ pub(crate) fn owe(
         ctx.now,
         triggered,
         coordinator,
-        new_obligation,
+        obligation,
     ) {
         return not_owed(thread, role, Some(session), &e);
     }
@@ -1931,7 +1941,7 @@ pub(crate) fn touch(
     role: &str,
     session: &str,
 ) -> Vec<FailedConsequence> {
-    match store.touch_owed_start(thread, role, session, ctx.now) {
+    match store.touch_owed_start(thread, role, session) {
         Ok(true) => arm_first_look(ctx, store, thread, role, ctx.now)
             .into_iter()
             .collect(),
@@ -3033,8 +3043,16 @@ mod tests {
         assert_eq!(row.trigger_clock, T1);
         assert!(!row.triggered, "a mint is not a trigger");
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T2, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s1",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert!(row.triggered);
         assert_eq!(
@@ -3349,11 +3367,19 @@ mod tests {
             T0,
             false,
             Some("m-chan"),
-            true,
+            Obligation::New,
         )
         .unwrap();
-        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s2",
+            T1,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert_eq!(row.session.as_deref(), Some("m-s2"));
         assert_eq!(
@@ -3370,22 +3396,46 @@ mod tests {
     #[test]
     fn a_new_obligation_resets_the_budget_and_a_re_trigger_keeps_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/coder", "m-s", T0, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         s.connection()
             .execute_batch(&format!(
                 "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}',
                         recovery_started_at = '{T1}', stop_requested_at = '{T1}'"
             ))
             .unwrap();
-        s.record_owed_start("m-t", "ws/coder", "m-s", T2, true, Some("m-chan"), false)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::Same,
+        )
+        .unwrap();
         assert_eq!(
             s.owed_start("m-t", "ws/coder").unwrap().unwrap().attempts,
             1
         );
-        s.record_owed_start("m-t", "ws/coder", "m-s", T2, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/coder",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         let row = s.owed_start("m-t", "ws/coder").unwrap().unwrap();
         assert_eq!(row.attempts, 0);
         assert_eq!(
@@ -3404,12 +3454,36 @@ mod tests {
     #[test]
     fn a_process_start_resets_the_per_process_fields_and_keeps_the_episode() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-a", "ws/pm", "m-p", T0, true, Some("m-chan"), true)
-            .unwrap();
-        s.record_owed_start("m-b", "ws/pm", "m-p", T0, true, Some("m-chan"), true)
-            .unwrap();
-        s.record_owed_start("m-c", "ws/pm", "m-other", T0, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-a",
+            "ws/pm",
+            "m-p",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-b",
+            "ws/pm",
+            "m-p",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-c",
+            "ws/pm",
+            "m-other",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         s.connection()
             .execute_batch(&format!(
                 "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}', recovery_started_at = '{T1}',
@@ -3457,12 +3531,28 @@ mod tests {
     #[test]
     fn a_touch_marks_only_the_obligation_the_session_owes_and_moves_no_clock() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true, Some("m-chan"), true)
-            .unwrap();
-        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true, Some("m-chan"), true)
-            .unwrap();
-        assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2", T2).unwrap());
-        assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2", T2).unwrap());
+        s.record_owed_start(
+            "m-r1",
+            "ws/pm",
+            "m-p1",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        s.record_owed_start(
+            "m-r2",
+            "ws/pm",
+            "m-p2",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
+        assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2").unwrap());
+        assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2").unwrap());
         assert_eq!(
             s.owed_start("m-r1", "ws/pm")
                 .unwrap()
@@ -3485,8 +3575,16 @@ mod tests {
     #[test]
     fn a_record_stays_current_after_its_owed_row_goes_and_a_later_trigger_supersedes_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         assert!(s.record_stranded(&record(T0)).unwrap());
         assert!(
             !s.record_stranded(&record(T0)).unwrap(),
@@ -3499,8 +3597,16 @@ mod tests {
             Some(T0)
         );
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T2,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         assert!(s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty());
         assert_eq!(
             s.stranded_records().unwrap()[0].superseded_at.as_deref(),
@@ -3557,8 +3663,16 @@ mod tests {
             s.stranded_suspect("m-t", "ws/verifier").unwrap(),
             Some(reset)
         );
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"), true)
-            .unwrap();
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s",
+            T0,
+            true,
+            Some("m-chan"),
+            Obligation::New,
+        )
+        .unwrap();
         s.forget_owed_start("m-t", "ws/verifier").unwrap();
         assert_eq!(s.stranded_suspect("m-t", "ws/verifier").unwrap(), None);
     }
@@ -3831,7 +3945,7 @@ mod tests {
                 "m-synth-session",
                 true,
                 None,
-                true,
+                Obligation::New,
             )
         };
         assert!(findings.is_empty(), "{findings:?}");
@@ -3853,7 +3967,7 @@ mod tests {
             later_fractional,
             true,
             Some("m-chan"),
-            true,
+            Obligation::New,
         )
         .unwrap();
         assert!(
@@ -3870,7 +3984,7 @@ mod tests {
             "2026-10-18T12:00:00+02:00",
             true,
             Some("m-chan"),
-            true,
+            Obligation::New,
         )
         .unwrap();
         assert_eq!(s.current_stranded_by_threads(&["m-t"]).unwrap().len(), 1);

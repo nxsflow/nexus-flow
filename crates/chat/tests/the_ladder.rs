@@ -3712,3 +3712,15 @@ fn one_recommission_with_its_retries_is_one_attempt_and_one_row() {
         .unwrap();
     assert_eq!(retries, 1);
 }
+
+/// **An instant from the future is no sign of life** (review of pass 1, Integrity #4): a pulse
+/// file naming an instant an hour ahead of the look — a skewed clock or a forged file — does not
+/// push the silence out; the session is nudged at ten minutes as if the file were not there.
+#[test]
+fn a_pulse_dated_in_the_future_is_no_sign_of_life() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(4_200)));
+    team.tick(&at(600), &thread);
+    assert_eq!(team.worker.asks().len(), 1, "nudged at +600");
+}
