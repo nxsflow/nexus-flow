@@ -844,6 +844,43 @@ pub trait Worker: Send + Sync {
         let _ = (internal_session, since);
         None
     }
+
+    /// **The session's process and every process under it, each with its start** (nxf 6j6v.1r61) —
+    /// what the ladder records when it stops a session it found dead, so the look after the end can
+    /// name a descendant that outlived the stop ([`Worker::process_survives`]). Never signalled:
+    /// a survivor is named, not killed (htdw).
+    ///
+    /// **The default is `None`**: a host that cannot read its sessions' processes names none.
+    /// Must return promptly and must not call back into the engine — [`Worker`]'s two rules.
+    fn session_process_tree(&self, internal_session: &str) -> Option<SessionProcessTree> {
+        let _ = internal_session;
+        None
+    }
+
+    /// **Whether a process the ladder recorded is still that process** (nxf 6j6v.1r61) — its pid
+    /// is there and its start is the one recorded, so a number handed on is not a survivor.
+    ///
+    /// **The default is `false`**: a host that cannot read processes names no survivor.
+    fn process_survives(&self, mark: &ProcessMark) -> bool {
+        let _ = mark;
+        false
+    }
+}
+
+/// **One process the ladder recorded** (nxf 6j6v.1r61): its pid and its start, RFC3339 — `None`
+/// when the start could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMark {
+    pub pid: u32,
+    pub started: Option<String>,
+}
+
+/// **A session's process and its descendants**, as [`Worker::session_process_tree`] reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProcessTree {
+    /// The pid the session's claim names.
+    pub pid: u32,
+    pub descendants: Vec<ProcessMark>,
 }
 
 /// **What a session's pulse says** (nxf 6j6v.pszd cut 1) — see [`Worker::session_pulse`]. The
@@ -861,8 +898,8 @@ pub trait Worker: Send + Sync {
 pub enum Pulse {
     /// No pulse file: an older sidecar, or a host with no sidecar. The ladder keeps today's rule.
     Unreported,
-    /// The file exists and names no instant: the process started and its model has produced
-    /// nothing yet.
+    /// The file exists and is empty: the process started and its model has produced nothing yet.
+    /// Content that is neither empty nor an instant reads as [`Pulse::Unreported`].
     NoneYet,
     /// The model's last output, RFC3339, as the sidecar wrote it.
     At(String),
@@ -1091,6 +1128,16 @@ impl Worker for BoundedWorker {
         since: &str,
     ) -> Option<nxs_service::process::SubprocessSample> {
         self.inner.subprocess_sample(internal_session, since)
+    }
+
+    /// Forwarded, not bounded (nxf 6j6v.1r61): a conforming read is a process-table read.
+    fn session_process_tree(&self, internal_session: &str) -> Option<SessionProcessTree> {
+        self.inner.session_process_tree(internal_session)
+    }
+
+    /// Forwarded, not bounded (nxf 6j6v.1r61): one process's start, read again.
+    fn process_survives(&self, mark: &ProcessMark) -> bool {
+        self.inner.process_survives(mark)
     }
 
     fn trigger(&self, req: TriggerRequest) -> TriggerResult {
@@ -2215,8 +2262,8 @@ impl Worker for SidecarWorker {
     }
 
     /// **The pulse** (nxf 6j6v.pszd cut 1): `<session>.alive` beside the claim, as the sidecar
-    /// writes it — no file is `Unreported`, a line that is not an RFC3339 instant (the empty file
-    /// it creates at start, or anything unreadable as one) is `NoneYet`.
+    /// writes it — no file is `Unreported`, the empty file it creates at start is `NoneYet`, an
+    /// RFC3339 line is `At`, and anything else is `Unreported` (nxf 6j6v.1r61).
     ///
     /// A file that exists but cannot be READ (permissions, an I/O error) is `Unreported` too, and
     /// deliberately unlogged (review of d1ey, IR #3): it is the blind side, on which the ladder
@@ -2228,12 +2275,20 @@ impl Worker for SidecarWorker {
             Err(_) => Pulse::Unreported,
             Ok(content) => {
                 let line = content.trim();
-                if time::OffsetDateTime::parse(line, &time::format_description::well_known::Rfc3339)
-                    .is_ok()
+                if line.is_empty() {
+                    Pulse::NoneYet
+                } else if time::OffsetDateTime::parse(
+                    line,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .is_ok()
                 {
                     Pulse::At(line.to_string())
                 } else {
-                    Pulse::NoneYet
+                    // Not the empty file a start writes and not an instant: unreadable, so the
+                    // blind side — never `NoneYet`, which lets the ladder stop a process with no
+                    // nudge (review of d1ey, CQ #1; nxf 6j6v.1r61).
+                    Pulse::Unreported
                 }
             }
         }
@@ -2290,6 +2345,41 @@ impl Worker for SidecarWorker {
             }
             ClaimHolder::Gone | ClaimHolder::SomebodyElse | ClaimHolder::Unverifiable => None,
         }
+    }
+
+    /// **The tree under the session's own process** (nxf 6j6v.1r61) — only once the claim has
+    /// PROVED its pid is this session's, as the sample and the stop do: a stranger's children are
+    /// not this session's survivors.
+    fn session_process_tree(&self, internal_session: &str) -> Option<SessionProcessTree> {
+        let claim = claim_in(&agent_logs_dir(&self.cwd).join(format!("{internal_session}.pid")))?;
+        match who_holds(&claim) {
+            ClaimHolder::TheSession => {}
+            ClaimHolder::Gone | ClaimHolder::SomebodyElse | ClaimHolder::Unverifiable => {
+                return None
+            }
+        }
+        let descendants = nxs_service::process::descendants_with_start(claim.pid)?
+            .into_iter()
+            .map(|(pid, started)| ProcessMark {
+                pid,
+                started: started.and_then(|s| {
+                    time::OffsetDateTime::from(s)
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                }),
+            })
+            .collect();
+        Some(SessionProcessTree {
+            pid: claim.pid,
+            descendants,
+        })
+    }
+
+    /// The recorded process, read again by pid and start (nxf 6j6v.1r61).
+    fn process_survives(&self, mark: &ProcessMark) -> bool {
+        mark.started
+            .as_deref()
+            .is_some_and(|started| nxs_service::process::still_the_process(mark.pid, started))
     }
 
     /// **The declared hurdle, run where the sessions run** (nxf 6j6v.n92p): `sh -c <command>` in
@@ -3674,9 +3764,9 @@ mod tests {
     }
 
     /// **The pulse file's three readings** (design 8nx4 section 1): no file is an older sidecar
-    /// (`Unreported`); a file that names no instant is a process whose model has produced nothing
-    /// yet (`NoneYet`) — and so is one whose content does not parse; an RFC3339 line is the model's
-    /// last output, verbatim (`At`).
+    /// (`Unreported`); an empty file is a process whose model has produced nothing yet (`NoneYet`);
+    /// an RFC3339 line is the model's last output, verbatim (`At`); content that is neither is
+    /// unreadable, the blind side again (`Unreported`, nxf 6j6v.1r61).
     #[test]
     fn the_pulse_file_reads_unreported_none_yet_and_at() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3701,11 +3791,20 @@ mod tests {
             Pulse::Unreported,
             "another session's pulse is not this one's"
         );
-        std::fs::write(logs.join("s-1.alive"), "garbage\n").unwrap();
+        std::fs::write(logs.join("s-1.alive"), "  \n").unwrap();
         assert_eq!(
             w.session_pulse("s-1"),
             Pulse::NoneYet,
-            "an unparsable instant is no output"
+            "whitespace names no instant"
+        );
+        // **Content that names no instant and is not empty is the blind side** (review of d1ey,
+        // CQ #1; nxf 6j6v.1r61): `NoneYet` is what lets the ladder stop a fresh process WITHOUT a
+        // nudge, so a file it cannot read must never say it.
+        std::fs::write(logs.join("s-1.alive"), "garbage\n").unwrap();
+        assert_eq!(
+            w.session_pulse("s-1"),
+            Pulse::Unreported,
+            "an unparsable instant is not a silent model"
         );
     }
 

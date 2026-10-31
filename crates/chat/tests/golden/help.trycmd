@@ -190,9 +190,6 @@ Options:
           
           It is recorded as its own kind (`accepted`), so an override stays findable afterwards as something other than "the review passed" — because it is not that.
 
-      --progress
-          Only when a coordinator asked you, in the words it used
-
       --thread <THREAD>
           Answer in this thread. A thread id identifies a conversation on its own — no channel context — and hands the turn back to whoever is on the other side of it.
           

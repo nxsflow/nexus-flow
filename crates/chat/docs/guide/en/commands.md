@@ -212,8 +212,7 @@ reply goes to the thread that session was put to work on, to one it was resumed,
 re-commissioned into, or to one it opened itself — and nowhere else, with or without `--thread`. A
 second round of the same persona is another session's work: its thread is never listed in your wake,
 a bare reply never resolves to it, and `--thread` naming it is refused with the thread you do serve.
-The same holds for `--progress`. Outside any session — a person at a terminal — every thread may be
-named, as before.
+Outside any session — a person at a terminal — every thread may be named, as before.
 
 ```console
 $ NXC_ACTOR=coder nxc reply --thread m-00000000000000000000000001 "Added the flag and a test; branch feat/export-since." --json
@@ -643,14 +642,16 @@ process anywhere to ask about — and `true` under the shipped sidecar.
 
 **A slot its coordinator is taking up says RECOVERING.** When a coordinated slot's session goes
 quiet, ends without answering or never starts, the coordinator acts before anybody is asked: it
-asks the running session (once it has been silent on that slot for 20 minutes), continues the
-ended one in the same session, or starts the slot afresh with its original task — three attempts in
-all, and at most two to six hours for a session that keeps answering with `--progress`. `recovery`
-says how far it got (`attempt`, `of`, `action`, `at`, `last_activity`, `next_look`), `stale` reads
-`false` beside it, and the line says it in place of "nothing is coming":
+nudges the running session once it has shown no life of its own on that slot for 10 minutes,
+stops it when five more pass without any, continues the ended one in the same session, or starts
+the slot afresh with its original task. A nudge counts no attempt; a continuation or a fresh start
+does — three in all, and by default a session found dead again after one is escalated — and one
+recovery runs two to six hours at most. `recovery` says how far it got (`attempt`, `of`, `action`,
+`at`, `last_activity`, `next_look`), `stale` reads `false` beside it, and the line says it in place
+of "nothing is coming":
 
 ```text
-m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 1/3 at 2026-10-18T10:20:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:40:00Z
+m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 0/3 at 2026-10-18T10:10:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:15:00Z
 ```
 
 When the attempts are spent the coordinator escalates in the member's name, with the step, the

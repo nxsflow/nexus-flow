@@ -4222,8 +4222,8 @@ pub(crate) mod tests {
             seed_thread(&mut s, "t-1", "c-1", "o/a", &["o/b"]);
             post_in_thread_of_kind(&mut s, "c-1", "t-1", "o/b", "I cannot do this", kind);
             let q = s.thread_quorum("t-1", NOW).unwrap().unwrap();
-            // **The one kind that is not an answer** (nxf 6j6v.558h): `--progress` says "still
-            // working" because a coordinator asked, and settles nothing.
+            // **The one kind that is not an answer** (nxf 6j6v.558h): a progress note says "still
+            // working" and settles nothing — no longer written (6j6v.1r61), still read.
             if kind == MessageKind::Progress {
                 assert!(q.replied.is_empty(), "progress discharges nothing: {q:?}");
                 assert_eq!(q.outstanding, vec!["o/b"], "{q:?}");

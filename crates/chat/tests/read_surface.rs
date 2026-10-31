@@ -868,21 +868,20 @@ const SURFACE: &[Member] = &[
               but its host — and it starts exactly what that call starts.",
     },
     Member {
-        name: "reply_progress",
+        name: "confirm_rest",
         kind: Handle,
         records: Recorded::ReadBy {
-            fact: "a progress note in the thread, and — when the slot's coordinator had asked — \
-                   the slot's silence clock and budget reset (nxf 6j6v.558h)",
-            by: &["thread", "status"],
+            fact: "a rest on the caller's slot — its end, the confirmations and the rests of the \
+                   episode — and a `confirmed` row in the slot's recovery log (nxf 6j6v.1r61)",
+            by: &["status"],
         },
         causes: Causes::Nothing,
-        why: "A session tells its slot's coordinator it is STILL WORKING, because the coordinator \
-              asked (`nxc reply --progress`, nxf 6j6v.558h). It is a callback of the coordinated \
-              session, not a way to speak: the discharge predicate excludes the message's kind, \
-              so it answers no turn, starts no step and wakes nobody — which is why it is a \
-              `Handle` row that starts nothing rather than a third way to speak. On the handle \
-              for `session_ended`'s reason: a session running under a host that owns it elsewhere \
-              reaches nothing but its host.",
+        why: "A session answers its coordinator's nudge with a rest (`nxc confirm --rest`, nxf \
+              6j6v.1r61): still working, look again later. It is supervisor bookkeeping, not a way \
+              to speak — it posts nothing, answers no turn, starts no step and wakes nobody, and \
+              it is accepted only while a nudge is pending. On the handle for `session_ended`'s \
+              reason: a session running under a host that owns it elsewhere reaches nothing but \
+              its host.",
     },
     Member {
         name: "resume_interrupted",

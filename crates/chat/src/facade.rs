@@ -805,6 +805,13 @@ pub struct RecoveryStatus {
     /// When its coordinator looks next, when that was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_look: Option<String>,
+    /// The rest the session confirmed, while it stands (`nxc confirm --rest`, nxf 6j6v.1r61).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_until: Option<String>,
+    /// The rests the episode has confirmed so far…
+    pub confirmations: u32,
+    /// …and their sum, in seconds.
+    pub rest_total_secs: i64,
 }
 
 /// **An abandoned slot as a status row shows it** (nxf 6j6v.kgfn).
@@ -4472,6 +4479,9 @@ fn recovery_for(
                 at: last.at.clone(),
                 last_activity,
                 next_look: store.next_look(&row.thread, &row.role)?,
+                confirmed_until: row.confirmed_until.clone(),
+                confirmations: row.confirmations,
+                rest_total_secs: row.rest_total_secs,
             },
         );
     }

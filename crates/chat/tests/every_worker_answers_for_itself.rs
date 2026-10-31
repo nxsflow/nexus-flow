@@ -110,6 +110,12 @@ const DEFAULTED: &[&str] = &[
     // cut 2). A delegator resting on the default `None` would hide every running subprocess from
     // the ladder, and a session whose only sign of life is a `gh run watch` would be judged silent.
     "subprocess_sample",
+    // **The thirteenth and fourteenth, added here in the same change that added them to the
+    // trait** (nxf 6j6v.1r61). The tree is what a stopped session's survivors are named from, and
+    // the second reads one of them again: a delegator resting on `None` / `false` would leave the
+    // continue text silent about a descendant still holding a lock or a port.
+    "session_process_tree",
+    "process_survives",
 ];
 
 struct Implementor {
@@ -127,7 +133,7 @@ const IMPLEMENTORS: &[Implementor] = &[
         name: "BoundedWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself, ForItself, ForItself, ForItself,
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
         ],
         why: "A DELEGATOR: it wraps a host-supplied worker to bound `trigger`. Anything it does not \
               forward is answered for a third party that may well know better, so it forwards. \
@@ -154,11 +160,15 @@ const IMPLEMENTORS: &[Implementor] = &[
               Both are a file read or an unlink — local state again. The twelfth (nxf 6j6v.pszd \
               cut 2) is the same argument about the host's processes: a host that can read what \
               runs under an open tool call would be reported as unable to, and a working \
-              subprocess would read as a silent session. It is a process-table read.",
+              subprocess would read as a silent session. It is a process-table read. The thirteenth \
+              and fourteenth (nxf 6j6v.1r61) are the same read once more — the tree and one \
+              process's start again.",
     },
     Implementor {
         name: "DryWorker",
         answers: &[
+            OnTheDefault,
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -191,13 +201,13 @@ const IMPLEMENTORS: &[Implementor] = &[
               reads no pulse because no session of its own writes one — `Unreported` is the truth \
               — and it has no ask of its own to withdraw, so the no-op `Ok` is the truth too. \
               It started no process, so there is nothing running under one: `None` is the truth \
-              of the sample.",
+              of the sample — and of the tree, and no process of its own can survive a stop.",
     },
     Implementor {
         name: "SidecarWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself, ForItself, ForItself, ForItself,
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
         ],
         why: "The only worker in this crate that owns real processes. Liveness comes off the pid \
               file its own `SessionLock` already writes at every trigger — same file, same parse, \
@@ -230,13 +240,16 @@ const IMPLEMENTORS: &[Implementor] = &[
               sidecar drains them only at the running turn's result, so one taken back before \
               then is never delivered. The twelfth samples the processes under that same pid \
               claim (nxf 6j6v.pszd cut 2) — again only once it has PROVED the pid is this \
-              session's, as the stop does, because a stranger's children are no sign of life.",
+              session's, as the stop does, because a stranger's children are no sign of life. The \
+              thirteenth lists that same proven tree with each start, and the fourteenth reads one \
+              recorded process again by pid AND start (nxf 6j6v.1r61), so a number handed on is \
+              never named as a survivor.",
     },
     Implementor {
         name: "LazyWorker",
         answers: &[
             ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
-            ForItself, ForItself, ForItself, ForItself,
+            ForItself, ForItself, ForItself, ForItself, ForItself, ForItself,
         ],
         why: "A DELEGATOR, and the one this gate exists for: `cli.rs` resolves the worker per call \
               from the environment, so EVERY command-line call passes through it. It forwarded only \
@@ -257,11 +270,15 @@ const IMPLEMENTORS: &[Implementor] = &[
               and the tenth and eleventh (nxf 6j6v.pszd) — a pulse resting on `Unreported` here \
               would leave the shipped path on today's silence clock while every test of the \
               sidecar worker passed. The twelfth likewise (nxf 6j6v.pszd cut 2): a sample \
-              resting on `None` here would hide every running subprocess on the shipped path.",
+              resting on `None` here would hide every running subprocess on the shipped path. The \
+              thirteenth and fourteenth likewise (nxf 6j6v.1r61): resting on the defaults here \
+              would name no survivor of a stopped session on the shipped path.",
     },
     Implementor {
         name: "DisabledWorker",
         answers: &[
+            OnTheDefault,
+            OnTheDefault,
             OnTheDefault,
             OnTheDefault,
             OnTheDefault,
@@ -287,7 +304,8 @@ const IMPLEMENTORS: &[Implementor] = &[
               session it never started is not one it can reach, so `CannotAsk` is the truth. \
               And a session it never started writes it no pulse and left it no ask, so \
               `Unreported` and the no-op are the truth as well. Nor is anything it never \
-              started running under it, so `None` is the truth of the sample.",
+              started running under it, so `None` is the truth of the sample — and of the tree, and \
+              no process of its own can survive a stop.",
     },
 ];
 

@@ -1050,97 +1050,147 @@ pub fn reply_in_thread(
     Ok(receipt)
 }
 
-/// What [`machine`] is asked about (nxf 6j6v.1c6k): a chat about to start, or one that runs.
-/// **What `nxc reply --progress` did** (nxf 6j6v.558h).
+/// **What `nxc confirm --rest` granted** (nxf 6j6v.1r61, design 8nx4 section 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
-pub struct ProgressReceipt {
+pub struct ConfirmReceipt {
     pub thread_id: String,
-    pub message_id: String,
-    /// Whether an ask was pending on the caller's slot and this progress answered it: the silence
-    /// clock restarted and the budget went back to zero. `false` is a progress nobody asked for —
-    /// stored, and counted for nothing.
-    pub counted: bool,
+    /// The minutes of rest granted — the request, or less when the episode's rests ran out.
+    pub granted_minutes: i64,
+    /// The instant the rest ends.
+    pub until: String,
+    /// Whether the cap on the episode's rests cut the request short.
+    pub clamped: bool,
+    /// When the coordinator looks next: the rest's end plus its grace.
+    pub next_look: String,
     /// What the caller is told, verbatim.
     pub receipt: String,
 }
 
-/// The receipt of a progress an ask was waiting for.
-pub const PROGRESS_TAKEN: &str = "taken as progress — your answer is still owed";
-/// The receipt of a progress nobody asked for.
-pub const PROGRESS_UNREQUESTED: &str = "stored; no ask was pending — this did not count";
+/// The refusal of a confirmation nobody asked for.
+fn nothing_asked(thread: &str) -> NxfError {
+    NxfError::validation(format!(
+        "nothing is asked of you on thread {thread} — if your session was nudged earlier, it showed \
+         life since and the nudge was withdrawn; carry on and answer with `nxc reply` when the work \
+         is done"
+    ))
+}
 
-/// **`nxc reply --progress <text>`** (nxf 6j6v.558h) — "still working", said ONLY because a
-/// coordinator asked. The message is posted into the thread as kind `progress`, which the discharge
-/// predicate excludes: it never settles the slot, never starts a step, never wakes an opener, and
-/// no consolidation carries it.
-///
-/// When an ask is pending on the caller's slot of `thread` (its coordinator asked and nothing has
-/// answered the ask since), the slot's silence clock restarts from now, its budget goes back to
-/// zero and the ask is answered — the ceiling clock is left standing, so a session that answers
-/// every ask with progress still reaches its coordinator's escalation at the ceiling. Otherwise the
-/// message is stored for the record and nothing else happens.
-pub fn reply_progress(
+/// The refusal of a confirmation while the ladder is stopping the session.
+fn being_stopped() -> NxfError {
+    NxfError::validation("your session is being stopped; a confirmation cannot cancel that")
+}
+
+/// The refusal of a confirmation once the episode's rests are spent.
+fn rests_used_up() -> NxfError {
+    NxfError::validation(format!(
+        "your rests are used up ({} min); reply, or escalate",
+        crate::ladder::CONFIRM_TOTAL_CAP_SECS / 60
+    ))
+}
+
+/// **`nxc confirm --thread <t> --rest <minutes>`** (nxf 6j6v.1r61, design 8nx4 section 5) — the
+/// one answer to a coordinator's nudge besides a reply: "still working, look again in N minutes".
+/// Accepted only while a nudge is pending on the caller's slot and no stop is in flight; refused,
+/// with nothing recorded, otherwise. The rest is granted up to the episode's cap — ninety minutes
+/// in all, three confirmations at most — and taken in ONE update with the nudge it answers, so a
+/// confirmation is never half taken. Supervisor bookkeeping: no message is posted into the thread.
+pub fn confirm_rest(
     ctx: &Ctx,
     store: &mut ChatStore,
     thread: &str,
-    body: &str,
-) -> Result<ProgressReceipt> {
-    if body.trim().is_empty() {
+    minutes: i64,
+) -> Result<ConfirmReceipt> {
+    use crate::ladder::{CONFIRM_GRACE_SECS, CONFIRM_TOTAL_CAP_SECS, REST_MAX_MINUTES};
+    let Some(session) = ctx.session else {
         return Err(NxfError::validation(
-            "a progress note needs one line saying what is still being done",
+            "`nxc confirm` answers a coordinator's nudge, and only the session it nudged can — run \
+             it from that session",
         ));
+    };
+    if !(1..=REST_MAX_MINUTES).contains(&minutes) {
+        return Err(NxfError::validation(format!(
+            "--rest takes 1 to {REST_MAX_MINUTES} minutes; {minutes} is outside that"
+        )));
     }
-    // A progress restarts the silence clock of the slot it lands on, so a stranger's would keep
-    // another session's slot looking alive (nxf 6j6v.f5rf).
     refuse_a_thread_this_session_does_not_serve(ctx, store, thread)?;
-    let channel = store
-        .thread_channel(thread)
-        .or_else(|| store.thread_channel_via_message(thread))
-        .ok_or_else(|| NxfError::not_found(format!("no such thread: {thread}")))?;
-    // Posted straight into the thread, as `facade::send` posts: the note starts nothing, and the
-    // store's own post is the whole of what it does.
-    let actor = nxs_foundation::model::validate_author(ctx.actor)?;
-    store.set_wall_clock(ctx.now);
-    let message_id = store.post_message(&crate::model::MessageEnvelope {
-        origin: ctx.origin.to_string(),
-        channel_id: channel,
-        sender: format!("{}/{actor}", ctx.origin),
-        kind: MessageKind::Progress,
-        priority: Priority::Normal,
-        disposition: Disposition::InTurn,
-        thread_id: Some(thread.to_string()),
-        refs: Refs::default(),
-        body: body.to_string(),
-    });
     let role = ctx.caller_handle();
-    let counted = store.take_progress(thread, &role, ctx.now)?;
-    if counted {
-        store
-            .log_rung(
-                thread,
-                &role,
-                ctx.now,
-                crate::ladder::RecoveryAction::Progress,
-                0,
-                ctx.session,
-                body.lines().next().unwrap_or(""),
-            )
-            .and_then(|id| store.settle_rung_as(id, crate::ladder::RungOutcome::Reset))?;
-    }
-    Ok(ProgressReceipt {
-        thread_id: thread.to_string(),
-        message_id,
-        counted,
-        receipt: if counted {
-            PROGRESS_TAKEN
+    let owed = store
+        .thread_quorum(thread, ctx.now)?
+        .is_some_and(|q| crate::stranded::outstanding_has(&q.outstanding, &role));
+    let Some(row) = store.owed_start(thread, &role)?.filter(|_| owed) else {
+        return Err(nothing_asked(thread));
+    };
+    let refusal = |row: &crate::stranded::OwedStart| {
+        if row.stop_requested_at.is_some() {
+            being_stopped()
+        } else if row.asked_at.is_none() {
+            nothing_asked(thread)
         } else {
-            PROGRESS_UNREQUESTED
+            rests_used_up()
         }
-        .to_string(),
+    };
+    if row.stop_requested_at.is_some()
+        || row.asked_at.is_none()
+        || row.rest_total_secs >= CONFIRM_TOTAL_CAP_SECS
+    {
+        return Err(refusal(&row));
+    }
+    let asked = minutes.saturating_mul(60);
+    let granted = asked.min(CONFIRM_TOTAL_CAP_SECS - row.rest_total_secs);
+    let until = crate::stranded::after(ctx.now, granted, "the rest's end")?;
+    let next_look = crate::stranded::after(&until, CONFIRM_GRACE_SECS, "the look after a rest")?;
+    let taken = orchestration::through_the_lock(|| {
+        store.confirm_rest_on_row(thread, &role, &until, granted)
+    })?;
+    if !taken {
+        let row = store
+            .owed_start(thread, &role)?
+            .ok_or_else(|| nothing_asked(thread))?;
+        return Err(refusal(&row));
+    }
+    if let Err(e) = ctx.worker.withdraw_asks(session) {
+        eprintln!(
+            "warning: the nudge of session {session} on thread {thread} was answered, but its ask \
+             file could not be withdrawn: {e}; the sidecar drains it at its turn's end"
+        );
+    }
+    let granted_minutes = granted / 60;
+    store
+        .log_rung(
+            thread,
+            &role,
+            ctx.now,
+            crate::ladder::RecoveryAction::Confirmed,
+            row.attempts,
+            Some(session),
+            &format!("rest {granted_minutes} min until {until}"),
+        )
+        .and_then(|id| store.settle_rung_as(id, crate::ladder::RungOutcome::Granted))?;
+    let clamped = granted < asked;
+    let receipt = if clamped {
+        format!(
+            "rest granted until {until}: {granted_minutes} of the {minutes} minutes asked — the \
+             rests of one recovery are capped at {} min; the coordinator looks again at {next_look}",
+            CONFIRM_TOTAL_CAP_SECS / 60
+        )
+    } else {
+        format!(
+            "rest granted until {until} ({granted_minutes} min); the coordinator looks again at \
+             {next_look}"
+        )
+    };
+    Ok(ConfirmReceipt {
+        thread_id: thread.to_string(),
+        granted_minutes,
+        until,
+        clamped,
+        next_look,
+        receipt,
     })
 }
 
+/// What [`machine`] is asked about (nxf 6j6v.1c6k): a chat about to start, or one that runs.
 #[derive(Debug, Clone, Copy)]
 pub enum MachineQuery<'a> {
     /// A new chat with this persona — where it would run, and whether starting it would ask.

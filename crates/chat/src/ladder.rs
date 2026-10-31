@@ -1,31 +1,34 @@
-//! **The ladder: ask, continue, re-commission, escalate** (nxf 6j6v.558h, cut 1d of epic 6j6v.nmc9,
-//! section B).
+//! **The ladder: nudge, stop, continue, re-commission, escalate** (nxf 6j6v.558h, cut 1d of epic
+//! 6j6v.nmc9, section B; the liveness of 6j6v.1r61, cut 3 of epic 6j6v.pszd).
 //!
 //! Every coordinated slot (`stranded::coordinator_of`) is taken up by its coordinator — the engine's
 //! tick on the thread that opened it — before anybody is asked. The stranded sweep's look decides
 //! WHAT it sees ([`crate::stranded`]'s `judge`); this module decides what to DO about it, one rung
 //! per look, under a claim:
 //!
-//! - **A — ask.** A live session with no activity on its slot for [`SILENCE_SECS`] is asked through
-//!   the ask door ([`crate::worker::Worker::ask_session`]) with the one text that offers
-//!   `nxc reply --progress`.
+//! - **A — nudge, and stop.** A live session that showed no life of its own on its slot for
+//!   [`SILENCE_SECS`] is nudged through the ask door ([`crate::worker::Worker::ask_session`]) with
+//!   the one text that offers `nxc confirm --rest`; nudged and still lifeless after
+//!   [`NUDGE_WAIT_SECS`], it is dead and stopped (SIGTERM). The state machine of one look is
+//!   `live` below, step by step as design 8nx4 section 4 numbers them.
 //! - **B — hold.** A slot whose session is on hold is the resume's; the ladder takes up only the
 //!   holds nothing will: a resume the provider refused (→ D), a hold that names no instant and
 //!   waits on nobody (→ C one grace after it was taken).
-//! - **C — continue.** A session that ended without answering, bound and with work of its own on
-//!   the record, is continued in the SAME session with a reminder that names the thread and the
-//!   task.
+//! - **C — continue.** A session that ended without answering — stopped by A included — bound and
+//!   with work of its own on the record, is continued in the SAME session with a reminder that
+//!   names the thread, the task and, after a stop, why and what still runs.
 //! - **D — re-commission.** A slot that never got a session, whose start was given up, whose
 //!   session ended with nothing written, or whose resume the provider refused, gets a fresh session
 //!   with its ORIGINAL body, minted into the same slot.
-//! - **E — escalate.** At [`MAX_RECOVERY_ATTEMPTS`], at the wall-clock ceiling, or on a permanent
-//!   refusal, the coordinator escalates in the member's name with what it knows — the step, the
-//!   cause, every attempt, the last activity, the session and the lease — and the escalation climbs
-//!   one level per round through the existing path.
+//! - **E — escalate.** At [`MAX_RECOVERY_ATTEMPTS`], at a dead verdict past the resume cap, at the
+//!   wall-clock ceiling, or on a permanent refusal, the coordinator escalates in the member's name
+//!   with what it knows — the step, the cause, every attempt, the signs of life, the session and
+//!   the lease — and the escalation climbs one level per round through the existing path.
 //!
-//! **The budget is one counter** — asks, continuations and re-commissions together — reset by a
-//! genuine answer (the row goes) and by a `--progress` that was asked for; the resets themselves are
-//! bounded by the ceiling, counted from the episode's first attempt.
+//! **The budget is the owed turn's** — continuations and re-commissions; nudges and stops are
+//! logged, not counted — reset by an answer that discharges the slot and by rung E. **The episode**
+//! is the ceiling's unit: opened by the first nudge, stop or attempt, ended by the session's own
+//! life (`recovered`), by an answer, or by rung E.
 //!
 //! **The claim** makes one action at a time per slot: taken before any side effect, renewed while
 //! the trigger runs, released whatever the trigger returned. Inside it, fail-closed: the recheck,
@@ -42,9 +45,32 @@ use crate::stranded::{
 };
 use crate::worker::{AskOutcome, SessionAsk, TriggerError};
 
-/// **Silence on a slot that earns an ask** — 20 minutes with no transcript activity attributed to
-/// the slot, no progress and no ask (owner guideline B of 2026-10-23).
-pub const SILENCE_SECS: i64 = 1_200;
+/// **Silence on a slot that earns a nudge** (nxf 6j6v.1r61, design 8nx4 section 2) — ten minutes
+/// with no life of the session's own since `max(L, P)`; also the life of a nudge nobody read.
+pub const SILENCE_SECS: i64 = 600;
+/// **Nudged, and no life since** — five minutes on, the session is dead.
+pub const NUDGE_WAIT_SECS: i64 = 300;
+/// **An open call's subprocess stops counting as life** this long after its last movement.
+pub const SUBPROCESS_IDLE_SECS: i64 = 1_800;
+/// **The look after a rest** comes at the rest's end plus this.
+pub const CONFIRM_GRACE_SECS: i64 = 300;
+/// **How many rests one episode may confirm** (`nxc confirm --rest`).
+pub const CONFIRMATIONS_MAX: u32 = 3;
+/// **The sum of the rests one episode may be granted**, in seconds — ninety minutes.
+pub const CONFIRM_TOTAL_CAP_SECS: i64 = 5_400;
+/// **The bound of one `--rest`**, in minutes.
+pub const REST_MAX_MINUTES: i64 = 60;
+/// **A stop's grace** — the one further SIGTERM at this, "would not stop" at twice this.
+pub const STOP_GRACE_SECS: i64 = 300;
+/// **The resumes an owed turn is allowed before its next dead verdict escalates** — policy B, the
+/// default. Read through [`dead_resumes`] only; cut 4 of 6j6v.pszd replaces that one read with the
+/// workspace's configured policy.
+pub const DEFAULT_DEAD_RESUMES: u32 = 1;
+
+/// **The resume cap in force** — the ONE read site of the policy (cut 4 reads the workspace's).
+pub(crate) fn dead_resumes(_ctx: &Ctx) -> u32 {
+    DEFAULT_DEAD_RESUMES
+}
 /// **The bound of one tool call** (nxf 6j6v.j6yk) — how long a live session may sit inside a single
 /// tool call before the call counts as hung. Generous on purpose: a step that watches CI waits on a
 /// run of 60–80 minutes, and the quality gates alone may take 150.
@@ -55,7 +81,10 @@ pub const CLAIM_SECS: i64 = 60;
 /// **How long a rung in flight blocks a second one** — the recheck refuses while the slot's newest
 /// log row has no outcome and is younger than this.
 pub const TRIGGER_TIMEOUT_SECS: i64 = 600;
-/// **The budget** — asks, continuations and re-commissions together.
+/// **The budget** — resumes and re-commissions; nudges and stops are logged, not counted. It is the
+/// OWED TURN's budget: reset only by an answer that discharges the slot, or by rung E. A turn that
+/// already used a recovery attempt — an ordinary continue or re-commission included — escalates
+/// under policy B at its FIRST dead verdict.
 pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// The wall-clock ceiling's floor: two hours.
 pub const RECOVERY_CEILING_FLOOR_SECS: i64 = 7_200;
@@ -92,8 +121,15 @@ pub enum RecoveryAction {
     Recommissioned,
     /// Rung E: the coordinator escalated.
     Escalated,
-    /// An asked-for `--progress` reset the budget.
+    /// An asked-for `--progress` reset the budget. Written by versions before 6j6v.1r61 retired
+    /// `nxc reply --progress`, never written now; kept so an old row still reads.
     Progress,
+    /// The coordinator stopped a session it found dead (SIGTERM).
+    Stopped,
+    /// The session confirmed a rest (`nxc confirm --rest`).
+    Confirmed,
+    /// The episode ended by the session's own life.
+    Recovered,
 }
 
 impl RecoveryAction {
@@ -104,6 +140,9 @@ impl RecoveryAction {
             RecoveryAction::Recommissioned => "recommissioned",
             RecoveryAction::Escalated => "escalated",
             RecoveryAction::Progress => "progress",
+            RecoveryAction::Stopped => "stopped",
+            RecoveryAction::Confirmed => "confirmed",
+            RecoveryAction::Recovered => "recovered",
         }
     }
 
@@ -114,6 +153,9 @@ impl RecoveryAction {
             "recommissioned" => RecoveryAction::Recommissioned,
             "escalated" => RecoveryAction::Escalated,
             "progress" => RecoveryAction::Progress,
+            "stopped" => RecoveryAction::Stopped,
+            "confirmed" => RecoveryAction::Confirmed,
+            "recovered" => RecoveryAction::Recovered,
             _ => return None,
         })
     }
@@ -145,8 +187,19 @@ pub enum RungOutcome {
     TimedOut,
     /// The coordinator escalated.
     Escalated,
-    /// An asked-for `--progress` reset the budget.
+    /// An asked-for `--progress` reset the budget. Written by versions before 6j6v.1r61, never
+    /// written now; kept so an old row still reads.
     Reset,
+    /// A nudge the session's own life overtook, withdrawn unread.
+    Overtaken,
+    /// The SIGTERM was delivered.
+    StopRequested,
+    /// There was no process left to signal.
+    NothingToStop,
+    /// A rest was granted.
+    Granted,
+    /// The episode ended by the session's own life.
+    Life,
 }
 
 impl RungOutcome {
@@ -163,6 +216,11 @@ impl RungOutcome {
             RungOutcome::TimedOut => "timed_out",
             RungOutcome::Escalated => "escalated",
             RungOutcome::Reset => "reset",
+            RungOutcome::Overtaken => "overtaken",
+            RungOutcome::StopRequested => "stop_requested",
+            RungOutcome::NothingToStop => "nothing_to_stop",
+            RungOutcome::Granted => "granted",
+            RungOutcome::Life => "life",
         }
     }
 
@@ -179,6 +237,11 @@ impl RungOutcome {
             "timed_out" => RungOutcome::TimedOut,
             "escalated" => RungOutcome::Escalated,
             "reset" => RungOutcome::Reset,
+            "overtaken" => RungOutcome::Overtaken,
+            "stop_requested" => RungOutcome::StopRequested,
+            "nothing_to_stop" => RungOutcome::NothingToStop,
+            "granted" => RungOutcome::Granted,
+            "life" => RungOutcome::Life,
             _ => return None,
         })
     }
@@ -199,6 +262,11 @@ impl RungOutcome {
             RungOutcome::TimedOut => "it did not finish within the trigger timeout",
             RungOutcome::Escalated => "escalated",
             RungOutcome::Reset => "the budget was reset",
+            RungOutcome::Overtaken => "its own life overtook the nudge, which was withdrawn",
+            RungOutcome::StopRequested => "the stop was requested",
+            RungOutcome::NothingToStop => "there was no process left to stop",
+            RungOutcome::Granted => "the rest was granted",
+            RungOutcome::Life => "it showed life of its own",
         }
     }
 }
@@ -469,6 +537,40 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// The slot's newest row of `action`, `None` before its first.
+    pub(crate) fn newest_rung_of(
+        &self,
+        thread: &str,
+        role: &str,
+        action: RecoveryAction,
+    ) -> Result<Option<RecoveryLogRow>> {
+        Ok(self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {LOG_COLS} FROM recovery_log WHERE thread = ?1 AND role = ?2
+                       AND action = ?3 ORDER BY id DESC LIMIT 1"
+                ),
+                params![thread, role, action.as_str()],
+                log_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Write what became of a rung and say it again in its detail.
+    pub(crate) fn settle_rung_with_detail(
+        &mut self,
+        id: i64,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<()> {
+        self.connection().execute(
+            "UPDATE recovery_log SET outcome = ?2, detail = ?3 WHERE id = ?1",
+            params![id, outcome, detail],
+        )?;
+        Ok(())
+    }
+
     /// The slot's newest rung, `None` before its first.
     pub(crate) fn newest_rung(&self, thread: &str, role: &str) -> Result<Option<RecoveryLogRow>> {
         Ok(self
@@ -531,13 +633,107 @@ impl ChatStore {
         Ok(gone)
     }
 
-    /// Mark the slot asked at `now`.
+    /// Mark the slot nudged at `now` — and open the episode, when none is open. No attempt is
+    /// counted: a nudge is logged, not counted.
     pub(crate) fn set_asked(&mut self, thread: &str, role: &str, now: &str) -> Result<()> {
         self.connection().execute(
-            "UPDATE owed_starts SET asked_at = ?3 WHERE thread = ?1 AND role = ?2",
+            "UPDATE owed_starts SET asked_at = ?3,
+                    recovery_started_at = COALESCE(recovery_started_at, ?3)
+              WHERE thread = ?1 AND role = ?2",
             params![thread, role, now],
         )?;
         Ok(())
+    }
+
+    /// The nudge is no longer pending — overtaken by life.
+    pub(crate) fn set_asked_cleared(&mut self, thread: &str, role: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET asked_at = NULL WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+        )?;
+        Ok(())
+    }
+
+    /// **The ladder stopped the slot's process at `now`** — the stop in flight, its first signal,
+    /// and the episode opened when none is open.
+    pub(crate) fn note_stop_requested(
+        &mut self,
+        thread: &str,
+        role: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET stop_requested_at = ?3, stop_signals = 1,
+                    recovery_started_at = COALESCE(recovery_started_at, ?3)
+              WHERE thread = ?1 AND role = ?2",
+            params![thread, role, now],
+        )?;
+        Ok(())
+    }
+
+    /// The one further SIGTERM was sent.
+    pub(crate) fn note_second_signal(&mut self, thread: &str, role: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET stop_signals = 2 WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+        )?;
+        Ok(())
+    }
+
+    /// The rest no longer stands.
+    pub(crate) fn clear_rest(&mut self, thread: &str, role: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET confirmed_until = NULL WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+        )?;
+        Ok(())
+    }
+
+    /// **The episode ended by life** (step 5): its clock, its confirmations and its rests go;
+    /// `attempts` — the owed turn's budget — stays.
+    pub(crate) fn end_episode_by_life(&mut self, thread: &str, role: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts SET recovery_started_at = NULL, confirmations = 0,
+                    rest_total_secs = 0, confirmed_until = NULL
+              WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+        )?;
+        Ok(())
+    }
+
+    /// **Store one sample of the open call's subprocesses** and answer `M`: the instant the sample
+    /// last moved. Any change of `(count, cpu)` is a movement, and so is the first sample with a
+    /// process in it; a call that never had one under it has no `M` (design 8nx4 section 1 (b)).
+    pub(crate) fn store_subprocess_sample(
+        &mut self,
+        thread: &str,
+        role: &str,
+        row: &OwedStart,
+        sample: nxs_service::process::SubprocessSample,
+        now: &str,
+    ) -> Result<Option<String>> {
+        let before = (row.subprocess_count, row.subprocess_cpu_units);
+        let after = (Some(sample.count), Some(sample.cpu_units));
+        let had_a_process = row.subprocess_count.is_some_and(|c| c > 0);
+        let moved = before != after && (sample.count > 0 || had_a_process);
+        let moved_at = if moved {
+            Some(now.to_string())
+        } else {
+            row.subprocess_moved_at.clone()
+        };
+        self.connection().execute(
+            "UPDATE owed_starts SET subprocess_count = ?3, subprocess_cpu_units = ?4,
+                    subprocess_moved_at = ?5
+              WHERE thread = ?1 AND role = ?2",
+            params![
+                thread,
+                role,
+                i64::from(sample.count),
+                i64::try_from(sample.cpu_units).unwrap_or(i64::MAX),
+                moved_at
+            ],
+        )?;
+        Ok(moved_at)
     }
 
     /// The instant the next look is due, for `status`.
@@ -562,25 +758,51 @@ impl ChatStore {
             .flatten())
     }
 
-    /// **Take a `--progress` as the sign of life an ask asked for** — when an ask is pending on the
-    /// slot (`asked_at` set): the silence clock restarts from `now`, the budget goes back to zero and
-    /// the ask is answered. The ceiling clock is left standing. `false` when no ask was pending.
-    pub(crate) fn take_progress(&mut self, thread: &str, role: &str, now: &str) -> Result<bool> {
+    /// **A rest confirmed** (nxf 6j6v.1r61, design 8nx4 section 5) — ONE update, accepted only while
+    /// a nudge is pending and no stop is in flight: the rest's end, one more confirmation, the rest
+    /// added to the episode's total, and the nudge answered. `false` when the row did not qualify
+    /// at the moment of the write; nothing was recorded then.
+    pub(crate) fn confirm_rest_on_row(
+        &mut self,
+        thread: &str,
+        role: &str,
+        until: &str,
+        granted_secs: i64,
+    ) -> Result<bool> {
         let n = self.connection().execute(
-            "UPDATE owed_starts SET last_progress_at = ?3, attempts = 0, asked_at = NULL
-              WHERE thread = ?1 AND role = ?2 AND asked_at IS NOT NULL",
-            params![thread, role, now],
+            "UPDATE owed_starts SET confirmed_until = ?3, confirmations = confirmations + 1,
+                    rest_total_secs = rest_total_secs + ?4, asked_at = NULL
+              WHERE thread = ?1 AND role = ?2 AND asked_at IS NOT NULL
+                AND stop_requested_at IS NULL",
+            params![thread, role, until, granted_secs],
         )?;
         Ok(n > 0)
     }
 
     /// **The episode is over** — rung E's record, or a commissioner's reply after it: the budget and
-    /// the ceiling clock start again from nothing.
+    /// the ceiling clock start again from nothing, and every pending nudge, rest and stop goes with
+    /// them (round 2 CQ #1) — the final stop is not supervised further.
     pub(crate) fn end_recovery_episode(&mut self, thread: &str, role: &str) -> Result<()> {
         self.connection().execute(
             "UPDATE owed_starts
                 SET attempts = 0, recovery_started_at = NULL, asked_at = NULL,
-                    last_progress_at = NULL, next_look = NULL
+                    last_progress_at = NULL, next_look = NULL, stop_requested_at = NULL,
+                    stop_signals = 0, confirmed_until = NULL, confirmations = 0,
+                    rest_total_secs = 0
+              WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+        )?;
+        Ok(())
+    }
+
+    /// **The owed turn was answered** (nxf 6j6v.1r61): its budget and every field of its episode go
+    /// in ONE update — the reply discharged the slot, so whatever is owed on it next is a new turn.
+    pub(crate) fn end_the_owed_turn(&mut self, thread: &str, role: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE owed_starts
+                SET attempts = 0, recovery_started_at = NULL, asked_at = NULL,
+                    confirmed_until = NULL, confirmations = 0, rest_total_secs = 0,
+                    stop_requested_at = NULL, stop_signals = 0
               WHERE thread = ?1 AND role = ?2",
             params![thread, role],
         )?;
@@ -696,6 +918,21 @@ impl ChatStore {
         session: &str,
         thread: &str,
     ) -> Result<Option<String>> {
+        self.own_output(session, thread, true)
+    }
+
+    /// [`slot_last_own_output`](ChatStore::slot_last_own_output) without the `tool_result`s — the
+    /// MODEL's output only, what "life since a confirmation" counts (round 3 IR #4): a tool's
+    /// result arriving says the tool ended, not that the model is alive.
+    pub(crate) fn slot_last_model_output(
+        &self,
+        session: &str,
+        thread: &str,
+    ) -> Result<Option<String>> {
+        self.own_output(session, thread, false)
+    }
+
+    fn own_output(&self, session: &str, thread: &str, results: bool) -> Result<Option<String>> {
         let Some((start, end)) = self.slot_turn(session, thread)? else {
             return Ok(None);
         };
@@ -705,14 +942,16 @@ impl ChatStore {
               WHERE e.internal_session = ?1 AND e.seq >= ?2 AND (?3 IS NULL OR e.seq < ?3)
                 AND e.at IS NOT NULL
                 AND ( e.kind IN ('assistant', 'thinking', 'tool_use')
-                   OR ( e.kind = 'tool_result' AND e.tool_use_id IS NOT NULL AND EXISTS (
+                   OR ( ?4 AND e.kind = 'tool_result' AND e.tool_use_id IS NOT NULL AND EXISTS (
                           SELECT 1 FROM agent_transcript u
                            WHERE u.internal_session = ?1 AND u.kind = 'tool_use'
                              AND u.tool_use_id = e.tool_use_id
                              AND u.seq >= ?2 AND (?3 IS NULL OR u.seq < ?3))))",
         )?;
         let ats = st
-            .query_map(params![session, start, end], |r| r.get::<_, String>(0))?
+            .query_map(params![session, start, end, results], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(latest(ats.iter().map(String::as_str)).map(str::to_string))
     }
@@ -905,19 +1144,20 @@ fn first_line(body: &str) -> &str {
         .unwrap_or("")
 }
 
-/// **The ask** (rung A) — the one place `nxc reply --progress` is ever offered.
-pub fn ask_text(thread: &str) -> String {
+/// **The nudge** (design 8nx4 section 3) — the one place `nxc confirm` is ever named. `silent` is
+/// the minutes since the session's last life, `rest_left` the minutes of rest its episode has left.
+pub fn ask_text(thread: &str, silent_minutes: i64, rest_left_minutes: i64) -> String {
     format!(
-        "Coordinator of thread {thread}: I have seen no activity from you for {} minutes. If the \
-         work is done, send it with `nxc reply --thread {thread} -`. If you are still working, say so \
-         this one time with `nxc reply --thread {thread} --progress <one line>` — use it because I \
-         asked you, and again only when I ask you again. If you cannot finish, `nxc reply --thread \
-         {thread} --escalate -` and say why.",
-        SILENCE_SECS / 60
+        "Coordinator of thread {thread}: no sign of life from you for {silent_minutes} minutes. If \
+         you have already replied on thread {thread}, do nothing and end your turn. If the work is \
+         done: `nxc reply --thread {thread} -`. If you are still working and need more time: `nxc \
+         confirm --thread {thread} --rest <minutes>` (at most {REST_MAX_MINUTES}; \
+         {rest_left_minutes} minutes of rest remain). If you cannot finish: `nxc reply --thread \
+         {thread} --escalate -`."
     )
 }
 
-/// **The continue** (rung C) — names the thread and quotes the task; offers no `--progress`.
+/// **The continue** (rung C) — names the thread and quotes the task; offers no `nxc confirm`.
 pub fn continue_text(thread: &str, commission: &str) -> String {
     format!(
         "Your turn for thread {thread} ended without a reply; the task was: {}. If the work is done, \
@@ -925,6 +1165,48 @@ pub fn continue_text(thread: &str, commission: &str) -> String {
          cannot, `nxc reply --thread {thread} --escalate -` and say why.",
         first_line(commission)
     )
+}
+
+/// **Why the session is being continued, when the ladder stopped it** (design 8nx4 section 4, step
+/// 6): the cause — no sign of life for N minutes after it was nudged, or since its start — and
+/// every descendant of the stopped process that is still running, read again by pid and start.
+/// A survivor is named, never signalled (htdw): one holding a lock or a port is the first thing a
+/// resumed session needs to know. `None` when no stop of the ladder ended the process.
+fn stop_cause(ctx: &Ctx, store: &ChatStore, row: &OwedStart) -> Option<String> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let stop = store
+        .newest_rung_of(t, h, RecoveryAction::Stopped)
+        .ok()
+        .flatten()
+        .filter(|s| !earlier(&s.at, &row.trigger_clock))?;
+    let (since, what) = match row.asked_at.as_deref() {
+        Some(asked) => (asked, "after it was asked"),
+        None => (row.trigger_clock.as_str(), "after its process started"),
+    };
+    let minutes = seconds_between(since, &stop.at).unwrap_or(0).max(0) / 60;
+    let mut cause = format!(
+        "Your session showed no sign of life for {minutes} minutes {what} and was stopped at {}.",
+        stop.at
+    );
+    let survivors: Vec<String> = descendants_of(&stop.detail)
+        .into_iter()
+        .filter(|m| ctx.worker.process_survives(m))
+        .map(|m| {
+            format!(
+                "pid {} (started {})",
+                m.pid,
+                m.started.as_deref().unwrap_or("at an unknown instant")
+            )
+        })
+        .collect();
+    if !survivors.is_empty() {
+        cause.push_str(&format!(
+            " Still running from the stopped process, and not signalled: {} — it may hold a lock, \
+             a port or a file you need.",
+            survivors.join(", ")
+        ));
+    }
+    Some(cause)
 }
 
 /// The slot's commissioning message: the first message on its thread an action may follow.
@@ -940,7 +1222,6 @@ pub(crate) fn commissioning_body(store: &ChatStore, thread: &str) -> Result<Opti
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Rung {
-    Ask,
     Continue,
     Recommission,
 }
@@ -948,7 +1229,6 @@ enum Rung {
 impl Rung {
     fn action(self) -> RecoveryAction {
         match self {
-            Rung::Ask => RecoveryAction::Asked,
             Rung::Continue => RecoveryAction::Continued,
             Rung::Recommission => RecoveryAction::Recommissioned,
         }
@@ -1045,9 +1325,155 @@ fn provider_refused_the_resume(store: &ChatStore, row: &OwedStart, session: &str
     }))
 }
 
-/// **Rung A's look**: a live session. Asked when it has been silent on its slot for
-/// [`SILENCE_SECS`]; otherwise the next look is armed for the instant it would be — or one liveness
-/// cadence out, whichever is first, so a session killed in between is found at its grace.
+// ---- the look at a live session: the state machine of design 8nx4 section 4 (nxf 6j6v.1r61) ------
+
+/// **Where a sign of the session's own life came from** — what a `recovered` row names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    /// A model entry of the slot's span ([`ChatStore::slot_last_own_output`]).
+    Entry,
+    /// The sidecar's pulse ([`crate::worker::Worker::session_pulse`]).
+    Pulse,
+    /// The open call's subprocesses moved ([`crate::worker::Worker::subprocess_sample`]).
+    Subprocess,
+}
+
+impl Signal {
+    fn word(self) -> &'static str {
+        match self {
+            Signal::Entry => "entry",
+            Signal::Pulse => "pulse",
+            Signal::Subprocess => "subprocess",
+        }
+    }
+}
+
+/// **What one look knows about a live session's life** (design 8nx4 sections 1 and 2).
+///
+/// `L` ([`Life::own`]) is the session's OWN life: a model entry of the slot's current span, the
+/// pulse, a movement of the open call's subprocesses — never `trigger_clock`, never a `turn_start`.
+/// `L(a)` is per current process span by design, and `S = max(L, P)` floors `due` at `P + 600`, so
+/// no nudge comes earlier than ten minutes after the process's start (round 3 CQ #5). `P`
+/// ([`Life::process_start`]) is the row's `trigger_clock`, which only a process start moves.
+struct Life {
+    /// `L` and where it came from.
+    own: Option<(String, Signal)>,
+    /// `P`.
+    process_start: String,
+    /// `M` — present only while an open call stands, the host samples it and a sample with a
+    /// process under the call has been stored.
+    moved_at: Option<String>,
+    /// `max(S + SILENCE_SECS, M + SUBPROCESS_IDLE_SECS)`; on a host that cannot sample an open
+    /// call, the call's own bound (today's rule: no nudge while the call stands).
+    due: String,
+    pulse: crate::worker::Pulse,
+    /// The host answered `None` for the open call — the signal the escalation names.
+    blind_call: bool,
+    /// `S = max(L, P)`.
+    silent_since: String,
+}
+
+impl Life {
+    fn read(
+        ctx: &Ctx,
+        store: &mut ChatStore,
+        row: &OwedStart,
+        session: &str,
+        call: Option<&OpenToolCall>,
+    ) -> Result<Life> {
+        let (t, h) = (row.thread.as_str(), row.role.as_str());
+        let entry = store.slot_last_own_output(session, t)?;
+        // **The pulse only for a session whose process runs** (review of d1ey, CQ #2 / IR #3): the
+        // file outlives its process, and its `At` would read as life of a process that is gone.
+        // The judge said `Live` a moment ago; asked again here so the order holds whoever calls.
+        let pulse = if ctx.worker.session_is_running(session) {
+            ctx.worker.session_pulse(session)
+        } else {
+            crate::worker::Pulse::Unreported
+        };
+        let mut moved_at = None;
+        let mut blind_call = false;
+        if let Some(call) = call {
+            match ctx.worker.subprocess_sample(session, &call.since) {
+                Some(sample) => {
+                    let moved = store.store_subprocess_sample(t, h, row, sample, ctx.now)?;
+                    moved_at = moved.filter(|m| !earlier(m, &call.since));
+                }
+                None => blind_call = true,
+            }
+        }
+        let mut own: Option<(String, Signal)> = None;
+        let candidates = [
+            entry.map(|e| (e, Signal::Entry)),
+            match &pulse {
+                crate::worker::Pulse::At(at) => Some((at.clone(), Signal::Pulse)),
+                _ => None,
+            },
+            moved_at.clone().map(|m| (m, Signal::Subprocess)),
+        ];
+        for (at, signal) in candidates.into_iter().flatten() {
+            if own.as_ref().is_none_or(|(best, _)| earlier(best, &at)) {
+                own = Some((at, signal));
+            }
+        }
+        let process_start = row.trigger_clock.clone();
+        let silent_since = match &own {
+            Some((l, _)) if earlier(&process_start, l) => l.clone(),
+            _ => process_start.clone(),
+        };
+        let due = match call {
+            Some(call) if blind_call => {
+                after(&call.since, TOOL_CALL_BOUND_SECS, "the tool call's bound")?
+            }
+            _ => {
+                let silence = after(&silent_since, SILENCE_SECS, "the silence clock")?;
+                match &moved_at {
+                    Some(m) => {
+                        let idle = after(m, SUBPROCESS_IDLE_SECS, "the subprocess clock")?;
+                        if earlier(&silence, &idle) {
+                            idle
+                        } else {
+                            silence
+                        }
+                    }
+                    None => silence,
+                }
+            }
+        };
+        Ok(Life {
+            own,
+            process_start,
+            moved_at,
+            due,
+            pulse,
+            blind_call,
+            silent_since,
+        })
+    }
+
+    /// `L ≥ instant` — life of its own at or after `instant`.
+    fn since(&self, instant: &str) -> bool {
+        self.own.as_ref().is_some_and(|(l, _)| !earlier(l, instant))
+    }
+
+    /// `L ≥ P` — the session has shown life of its own since its process started.
+    fn since_its_start(&self) -> bool {
+        self.since(&self.process_start)
+    }
+}
+
+/// The earlier of `at` and `recheck` — no look is armed later than one cadence out — and never an
+/// instant already past.
+fn soonest(ctx: &Ctx, at: &str, recheck: &str) -> String {
+    if earlier(at, recheck) && earlier(ctx.now, at) {
+        at.to_string()
+    } else {
+        recheck.to_string()
+    }
+}
+
+/// **The look at a live session** (design 8nx4 section 4, steps 0–6) — for a coordinated slot whose
+/// session holds a live process. Each step is its own function below; this one decides which.
 fn live(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -1055,84 +1481,522 @@ fn live(
     coordinator: &CoordinatorRef,
     findings: &mut Vec<FailedConsequence>,
 ) -> Result<()> {
-    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let t = row.thread.as_str();
     let session = row.session.as_deref().unwrap_or_default();
     let recheck = after(
         ctx.now,
         crate::orchestration::SESSION_LIVENESS_RECHECK_SECS,
         "the next look",
     )?;
-    // **Inside one tool call the session is working, not silent** (nxf 6j6v.j6yk): an ask reaches it
-    // only at its turn's end, so none is spent and nothing is escalated while the call runs — until
-    // the call outlives its own bound, when it is hung and no ask could be heard either.
-    if let Some(call) = store.slot_open_tool_call(session, t)? {
-        let bound = after(&call.since, TOOL_CALL_BOUND_SECS, "the tool call's bound")?;
-        if !reached(ctx.now, &bound) {
-            let next = if earlier(&bound, &recheck) {
-                bound
-            } else {
-                recheck
-            };
-            arm(ctx, store, t, h, &next, findings);
-            return Ok(());
+    let call = store.slot_open_tool_call(session, t)?;
+    // Step 0 — the caps, unchanged: a call past its own bound is hung; the ceiling.
+    if let Some(call) = &call {
+        if reached(
+            ctx.now,
+            &after(&call.since, TOOL_CALL_BOUND_SECS, "the tool call's bound")?,
+        ) {
+            return escalate(ctx, store, row, coordinator, hung_call(call), findings);
         }
-        let occasion = Occasion {
-            observed: Observation::Silent,
-            judged_from: call.since.clone(),
-            detail: format!(
-                "its process is alive but has been inside one tool call ({}) since {} — past the \
-                 bound of {} h for a single tool call, so the call is taken as hung; an ask would \
-                 only reach the session once the call returns",
-                call.tool,
-                call.since,
-                TOOL_CALL_BOUND_SECS / 3600
-            ),
-        };
-        return escalate(ctx, store, row, coordinator, occasion, findings);
     }
     if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
         return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
-    let activity = store.slot_last_activity(session, t)?;
-    let quiet_since = latest(
-        [
-            activity.as_deref(),
-            row.last_progress_at.as_deref(),
-            row.asked_at.as_deref(),
-            Some(row.trigger_clock.as_str()),
-        ]
-        .into_iter()
-        .flatten(),
-    )
-    .unwrap_or(row.trigger_clock.as_str())
-    .to_string();
-    let due = after(&quiet_since, SILENCE_SECS, "the silence clock")?;
-    // An ask this host cannot deliver is not retried every cadence: the slot waits for its end.
-    let door_closed = store.slot_recovery_log(t, h)?.last().is_some_and(|r| {
-        r.action == RecoveryAction::Asked.as_str()
-            && r.outcome.as_deref() == Some(RungOutcome::CannotAsk.as_str())
-            && !reached(
-                ctx.now,
-                &after(&r.at, SILENCE_SECS, "the closed door").unwrap_or_default(),
-            )
-    });
-    if reached(ctx.now, &due) && !door_closed {
+    let life = Life::read(ctx, store, row, session, call.as_ref())?;
+    if row.stop_requested_at.is_some() {
+        return step_stop_in_flight(ctx, store, row, coordinator, &recheck, findings);
+    }
+    if row.confirmed_until.is_some() {
+        return step_rest(ctx, store, row, coordinator, &life, &recheck, findings);
+    }
+    if row.asked_at.is_some() {
+        return step_nudge_pending(ctx, store, row, coordinator, &life, &recheck, findings);
+    }
+    if reached(ctx.now, &life.due) {
+        return step_due(ctx, store, row, coordinator, &life, &recheck, findings);
+    }
+    step_alive(ctx, store, row, &life, &recheck, findings)
+}
+
+/// The occasion of a tool call past its own bound.
+fn hung_call(call: &OpenToolCall) -> Occasion {
+    Occasion {
+        observed: Observation::Silent,
+        judged_from: call.since.clone(),
+        detail: format!(
+            "its process is alive but has been inside one tool call ({}) since {} — past the bound \
+             of {} h for a single tool call, so the call is taken as hung; a nudge would only reach \
+             the session once the call returns",
+            call.tool,
+            call.since,
+            TOOL_CALL_BOUND_SECS / 3600
+        ),
+    }
+}
+
+/// **Step 1 — a stop is in flight** and the process still runs: the one further SIGTERM at the
+/// grace, the escalation at twice the grace ("would not stop"). Before everything else, so no
+/// confirmation and no rest can cancel a stop. No SIGKILL (htdw).
+fn step_stop_in_flight(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let session = row.session.as_deref().unwrap_or_default();
+    let stop = row.stop_requested_at.as_deref().unwrap_or(ctx.now);
+    let again = after(stop, STOP_GRACE_SECS, "the stop's grace")?;
+    let give_up = after(stop, 2 * STOP_GRACE_SECS, "the stop's second grace")?;
+    if reached(ctx.now, &give_up) {
+        let pid = store
+            .newest_rung_of(t, h, RecoveryAction::Stopped)?
+            .and_then(|r| process_of(&r.detail))
+            .map_or_else(|| "its pid unknown".to_string(), |p| format!("pid {p}"));
         let occasion = Occasion {
             observed: Observation::Silent,
-            judged_from: quiet_since.clone(),
+            judged_from: stop.to_string(),
             detail: format!(
-                "its process is alive and nothing was heard from it on this slot since {quiet_since}"
+                "it was stopped at {stop} and its process would not stop ({pid}); it was signalled \
+                 twice and is left running — no further signal is sent"
             ),
         };
-        return run(ctx, store, row, coordinator, Rung::Ask, occasion, findings);
+        return escalate(ctx, store, row, coordinator, occasion, findings);
     }
-    let next = if earlier(&due, &recheck) && !door_closed {
-        due
+    if reached(ctx.now, &again) && row.stop_signals < 2 {
+        let outcome = stop_outcome(ctx.worker.stop_session(session));
+        let id = store.log_rung(
+            t,
+            h,
+            ctx.now,
+            RecoveryAction::Stopped,
+            row.attempts,
+            Some(session),
+            &format!("the one further SIGTERM: the process still ran {STOP_GRACE_SECS} s after the stop of {stop}"),
+        )?;
+        store.settle_rung(id, &outcome)?;
+        store.note_second_signal(t, h)?;
+        arm(ctx, store, t, h, &soonest(ctx, &give_up, recheck), findings);
+        return Ok(());
+    }
+    let next = if reached(ctx.now, &again) {
+        give_up
     } else {
-        recheck
+        again
     };
-    arm(ctx, store, t, h, &next, findings);
+    arm(ctx, store, t, h, &soonest(ctx, &next, recheck), findings);
     Ok(())
+}
+
+/// **Step 2 — a rest stands** (`nxc confirm --rest`): nothing before its end plus the grace. Then
+/// the rest is cleared; life since the confirmation — model output or a pulse, never a
+/// `tool_result` (round 3 IR #4) — is step 5; otherwise the confirmations or the rests are spent
+/// (stuck), or the session is nudged again.
+fn step_rest(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let session = row.session.as_deref().unwrap_or_default();
+    let until = row.confirmed_until.as_deref().unwrap_or(ctx.now);
+    let look = after(until, CONFIRM_GRACE_SECS, "the rest's grace")?;
+    if !reached(ctx.now, &look) {
+        arm(ctx, store, t, h, &soonest(ctx, &look, recheck), findings);
+        return Ok(());
+    }
+    store.clear_rest(t, h)?;
+    let confirmed_at = store
+        .newest_rung_of(t, h, RecoveryAction::Confirmed)?
+        .map_or_else(|| until.to_string(), |r| r.at);
+    let model_since = store
+        .slot_last_model_output(session, t)?
+        .is_some_and(|m| earlier(&confirmed_at, &m));
+    let pulse_since =
+        matches!(&life.pulse, crate::worker::Pulse::At(p) if earlier(&confirmed_at, p));
+    let row = store.owed_start(t, h)?.unwrap_or_else(|| row.clone());
+    if model_since || pulse_since {
+        return step_alive(ctx, store, &row, life, recheck, findings);
+    }
+    if row.confirmations >= CONFIRMATIONS_MAX || row.rest_total_secs >= CONFIRM_TOTAL_CAP_SECS {
+        let rests: Vec<String> = store
+            .slot_recovery_log(t, h)?
+            .into_iter()
+            .filter(|r| r.action == RecoveryAction::Confirmed.as_str())
+            .filter(|r| {
+                row.recovery_started_at
+                    .as_deref()
+                    .is_some_and(|s| !earlier(&r.at, s))
+            })
+            .map(|r| format!("{} at {}", r.detail, r.at))
+            .collect();
+        let occasion = Occasion {
+            observed: Observation::Silent,
+            judged_from: life.silent_since.clone(),
+            detail: format!(
+                "stuck: it confirmed {} times ({}) for {} min of rest in all, and showed no life \
+                 of its own after its last rest ended at {until}",
+                row.confirmations,
+                rests.join("; "),
+                row.rest_total_secs / 60
+            ),
+        };
+        return escalate(ctx, store, &row, coordinator, occasion, findings);
+    }
+    nudge(ctx, store, &row, coordinator, life, recheck, findings)
+}
+
+/// **Step 3 — a nudge is pending.** No life since it: dead at the nudge's wait. Life since it: the
+/// session is working and has not read it — withdrawn once it is as old as a silence (overtaken),
+/// and the look goes on to step 5.
+fn step_nudge_pending(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let session = row.session.as_deref().unwrap_or_default();
+    let asked = row.asked_at.as_deref().unwrap_or(ctx.now);
+    if !life.since(asked) {
+        let wait = after(asked, NUDGE_WAIT_SECS, "the nudge's wait")?;
+        if reached(ctx.now, &wait) {
+            return step_dead(ctx, store, row, coordinator, life, recheck, findings);
+        }
+        arm(ctx, store, t, h, &soonest(ctx, &wait, recheck), findings);
+        return Ok(());
+    }
+    let overtaken = after(asked, SILENCE_SECS, "the nudge's life")?;
+    if !reached(ctx.now, &overtaken) {
+        arm(
+            ctx,
+            store,
+            t,
+            h,
+            &soonest(ctx, &overtaken, recheck),
+            findings,
+        );
+        return Ok(());
+    }
+    if let Err(e) = ctx.worker.withdraw_asks(session) {
+        eprintln!(
+            "warning: the overtaken nudge of session {session} on thread {t} could not be \
+             withdrawn: {e}; the sidecar drops it at its next yield only if it is gone"
+        );
+    }
+    store.set_asked_cleared(t, h)?;
+    if let Some(asked_row) = store.newest_rung_of(t, h, RecoveryAction::Asked)? {
+        let (l, signal) = life.own.clone().unwrap_or_default_signal();
+        store.settle_rung_with_detail(
+            asked_row.id,
+            RungOutcome::Overtaken.as_str(),
+            &format!(
+                "{}; overtaken by its own life at {l} ({})",
+                asked_row.detail,
+                signal.word()
+            ),
+        )?;
+    }
+    let row = store.owed_start(t, h)?.unwrap_or_else(|| row.clone());
+    step_alive(ctx, store, &row, life, recheck, findings)
+}
+
+trait OwnLife {
+    fn unwrap_or_default_signal(self) -> (String, Signal);
+}
+
+impl OwnLife for Option<(String, Signal)> {
+    fn unwrap_or_default_signal(self) -> (String, Signal) {
+        self.unwrap_or_else(|| ("an unknown instant".to_string(), Signal::Entry))
+    }
+}
+
+/// **Step 4 — no nudge pending and the silence is due.** A session with life of its own since its
+/// start — or on a host whose sidecar reports no pulse, or whose pulse predates the start (round 3
+/// TQ #2 / IR #1, the generous side) — is nudged; one whose fresh process has produced nothing at
+/// all (pulse `NoneYet`) is dead without a nudge, since a nudge is read only at a turn's `result`.
+fn step_due(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    if life.pulse == crate::worker::Pulse::NoneYet && !life.since_its_start() {
+        return step_dead(ctx, store, row, coordinator, life, recheck, findings);
+    }
+    nudge(ctx, store, row, coordinator, life, recheck, findings)
+}
+
+/// **The nudge** (step 4a): through the ask door, with the one text that offers `nxc confirm`.
+/// `Asked` opens the episode if none is open and counts no attempt; a door that stays closed past
+/// the nudge's wait is dead. A `cannot_ask` row opens no episode (round 3 CQ #4 / IR #5).
+fn nudge(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let Some(session) = row.session.as_deref() else {
+        arm(ctx, store, t, h, recheck, findings);
+        return Ok(());
+    };
+    let silent_minutes = seconds_between(&life.silent_since, ctx.now).unwrap_or(SILENCE_SECS) / 60;
+    let rest_left = (CONFIRM_TOTAL_CAP_SECS - row.rest_total_secs).max(0) / 60;
+    let ask = SessionAsk {
+        session: session.to_string(),
+        thread: t.to_string(),
+        role: h.to_string(),
+        text: ask_text(t, silent_minutes, rest_left),
+        at: ctx.now.to_string(),
+    };
+    let detail = format!(
+        "its process is alive and showed no life of its own on this slot since {}",
+        life.silent_since
+    );
+    match ctx.worker.ask_session(&ask) {
+        AskOutcome::Asked => {
+            let id = store.log_rung(
+                t,
+                h,
+                ctx.now,
+                RecoveryAction::Asked,
+                row.attempts,
+                Some(session),
+                &detail,
+            )?;
+            store.settle_rung_as(id, RungOutcome::Asked)?;
+            store.set_asked(t, h, ctx.now)?;
+            let wait = after(ctx.now, NUDGE_WAIT_SECS, "the nudge's wait")?;
+            arm(ctx, store, t, h, &soonest(ctx, &wait, recheck), findings);
+            Ok(())
+        }
+        AskOutcome::NoProcess => {
+            // The judge finds no process at the next look.
+            arm(ctx, store, t, h, recheck, findings);
+            Ok(())
+        }
+        _ => {
+            let closed_past = after(&life.due, NUDGE_WAIT_SECS, "the closed door's wait")?;
+            if reached(ctx.now, &closed_past) {
+                return step_dead(ctx, store, row, coordinator, life, recheck, findings);
+            }
+            // One row per closed door, not one per cadence.
+            let logged = store.newest_rung(t, h)?.is_some_and(|r| {
+                r.action == RecoveryAction::Asked.as_str()
+                    && r.outcome.as_deref() == Some(RungOutcome::CannotAsk.as_str())
+                    && !earlier(&r.at, &life.due)
+            });
+            if !logged {
+                let id = store.log_rung(
+                    t,
+                    h,
+                    ctx.now,
+                    RecoveryAction::Asked,
+                    row.attempts,
+                    Some(session),
+                    &detail,
+                )?;
+                store.settle_rung_as(id, RungOutcome::CannotAsk)?;
+            }
+            arm(ctx, store, t, h, recheck, findings);
+            Ok(())
+        }
+    }
+}
+
+/// **Step 5 — alive.** With an episode open, nothing pending and life of its own since its start,
+/// the episode ends by life: the `recovered` row, alone in its look, and the episode's clears —
+/// never `attempts`, the owed turn's budget.
+fn step_alive(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let nothing_stands =
+        row.asked_at.is_none() && row.confirmed_until.is_none() && row.stop_requested_at.is_none();
+    if row.recovery_started_at.is_some() && nothing_stands && life.since_its_start() {
+        let (l, signal) = life.own.clone().unwrap_or_default_signal();
+        let id = store.log_rung(
+            t,
+            h,
+            ctx.now,
+            RecoveryAction::Recovered,
+            row.attempts,
+            row.session.as_deref(),
+            &format!("its own life at {l} ({})", signal.word()),
+        )?;
+        store.settle_rung_as(id, RungOutcome::Life)?;
+        store.end_episode_by_life(t, h)?;
+    }
+    let due = if reached(ctx.now, &life.due) {
+        recheck.to_string()
+    } else {
+        life.due.clone()
+    };
+    arm(ctx, store, t, h, &soonest(ctx, &due, recheck), findings);
+    Ok(())
+}
+
+/// **Step 6 — dead.** The process is stopped (SIGTERM), the stop is logged with the descendants
+/// sampled for the continue text, and THEN the cap: an owed turn that already used its resumes
+/// escalates at this look — never through [`run`]'s pre-check, which would escalate without
+/// stopping (round 2 TQ #5). Otherwise the judge finds no process next, and the rung after an end
+/// continues or re-commissions it.
+fn step_dead(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    row: &OwedStart,
+    coordinator: &CoordinatorRef,
+    life: &Life,
+    recheck: &str,
+    findings: &mut Vec<FailedConsequence>,
+) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let session = row.session.as_deref().unwrap_or_default();
+    let tree = ctx.worker.session_process_tree(session);
+    let outcome = stop_outcome(ctx.worker.stop_session(session));
+    let why = match &row.asked_at {
+        Some(asked) => format!(
+            "no life of its own since it was nudged at {asked} (silent since {})",
+            life.silent_since
+        ),
+        None => format!(
+            "its process started at {} and produced nothing of its own since",
+            life.process_start
+        ),
+    };
+    let id = store.log_rung(
+        t,
+        h,
+        ctx.now,
+        RecoveryAction::Stopped,
+        row.attempts,
+        Some(session),
+        &stop_detail(&why, tree.as_ref(), life),
+    )?;
+    store.settle_rung(id, &outcome)?;
+    store.note_stop_requested(t, h, ctx.now)?;
+    let allowed = dead_resumes(ctx);
+    if row.attempts >= allowed {
+        let row = store.owed_start(t, h)?.unwrap_or_else(|| row.clone());
+        let occasion = Occasion {
+            observed: Observation::Silent,
+            judged_from: life.silent_since.clone(),
+            detail: format!(
+                "{why}; it was stopped at {} — dead after {} recovery attempts on this turn; this \
+                 workspace allows {allowed}",
+                ctx.now, row.attempts
+            ),
+        };
+        return escalate(ctx, store, &row, coordinator, occasion, findings);
+    }
+    arm(ctx, store, t, h, recheck, findings);
+    Ok(())
+}
+
+/// A stop's answer as its log row's outcome.
+fn stop_outcome(stop: std::result::Result<crate::worker::SessionStop, String>) -> String {
+    match stop {
+        Ok(crate::worker::SessionStop::Requested) => {
+            RungOutcome::StopRequested.as_str().to_string()
+        }
+        Ok(crate::worker::SessionStop::NothingToStop(_)) => {
+            RungOutcome::NothingToStop.as_str().to_string()
+        }
+        Err(e) => failed_outcome(&e),
+    }
+}
+
+/// The marker before the descendants a `stopped` row names.
+const DESCENDANTS: &str = "descendants at the stop: ";
+/// The marker before the stopped process's own pid.
+const PROCESS: &str = "its process ";
+
+/// **A `stopped` row's detail** — why, the process and the descendants sampled at the stop, each
+/// as `pid@start`, which the continue text re-reads to name a survivor ([`process_of`],
+/// [`descendants_of`]); and "this host reports no …" for each signal the host could not read.
+fn stop_detail(why: &str, tree: Option<&crate::worker::SessionProcessTree>, life: &Life) -> String {
+    let mut out = why.to_string();
+    match tree {
+        Some(tree) => {
+            out.push_str(&format!("; {PROCESS}{}", tree.pid));
+            let marks: Vec<String> = tree
+                .descendants
+                .iter()
+                .map(|d| format!("{}@{}", d.pid, d.started.as_deref().unwrap_or("?")))
+                .collect();
+            out.push_str(&format!(
+                "; {DESCENDANTS}{}",
+                if marks.is_empty() {
+                    "none".to_string()
+                } else {
+                    marks.join(" ")
+                }
+            ));
+        }
+        None => out.push_str("; this host reports no process tree"),
+    }
+    if life.pulse == crate::worker::Pulse::Unreported {
+        out.push_str("; this host reports no pulse");
+    }
+    if life.blind_call {
+        out.push_str("; this host reports no subprocess signals");
+    }
+    out
+}
+
+/// The stopped process's pid a `stopped` row named.
+fn process_of(detail: &str) -> Option<u32> {
+    let rest = &detail[detail.find(PROCESS)? + PROCESS.len()..];
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The descendants a `stopped` row named.
+fn descendants_of(detail: &str) -> Vec<crate::worker::ProcessMark> {
+    let Some(at) = detail.find(DESCENDANTS) else {
+        return Vec::new();
+    };
+    let rest = &detail[at + DESCENDANTS.len()..];
+    let rest = rest.split(';').next().unwrap_or("");
+    rest.split_whitespace()
+        .filter_map(|mark| {
+            let (pid, started) = mark.split_once('@')?;
+            Some(crate::worker::ProcessMark {
+                pid: pid.parse().ok()?,
+                started: (started != "?").then(|| started.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// Whole seconds from `a` to `b`, when both parse.
+fn seconds_between(a: &str, b: &str) -> Option<i64> {
+    use time::format_description::well_known::Rfc3339;
+    let a = time::OffsetDateTime::parse(a, &Rfc3339).ok()?;
+    let b = time::OffsetDateTime::parse(b, &Rfc3339).ok()?;
+    Some((b - a).whole_seconds())
 }
 
 /// **Rung B's look**: a hold stands. The resume takes it up; the ladder acts only on a hold that
@@ -1268,7 +2132,14 @@ pub(crate) fn retry_of_a_failed_rung(
         // Never settled failed: an ask settles asked, no process or cannot ask (`fire_the_rung`),
         // and an escalation or a progress row starts nothing. Read as a slot that never started, so
         // a row this build did not write still ends in a re-commission rather than in nothing.
-        Some(RecoveryAction::Asked | RecoveryAction::Escalated | RecoveryAction::Progress)
+        Some(
+            RecoveryAction::Asked
+            | RecoveryAction::Escalated
+            | RecoveryAction::Progress
+            | RecoveryAction::Stopped
+            | RecoveryAction::Confirmed
+            | RecoveryAction::Recovered,
+        )
         | None => Observation::NeverStarted,
     };
     Ok(Some(Judgement::Record {
@@ -1559,10 +2430,6 @@ fn after_the_rung(
             store.revert_attempt(t, h, opened_the_episode)?;
             Some(after(ctx.now, recheck, "the next look")?)
         }
-        Done::Acted(RungOutcome::Asked) => {
-            store.set_asked(t, h, ctx.now)?;
-            Some(after(ctx.now, SILENCE_SECS, "the next ask")?)
-        }
         Done::Acted(_) => {
             // The trigger armed the slot's first look one grace out (`stranded::owe`); noted only.
             let next = after(ctx.now, STRANDED_GRACE_SECS, "the next look")?;
@@ -1599,23 +2466,6 @@ fn lease_hook(_ctx: &Ctx, _store: &mut ChatStore, _row: &OwedStart) {}
 fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) -> Done {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
     match rung {
-        Rung::Ask => {
-            let Some(session) = row.session.as_deref() else {
-                return Done::Nothing(RungOutcome::NoSession);
-            };
-            let ask = SessionAsk {
-                session: session.to_string(),
-                thread: t.to_string(),
-                role: h.to_string(),
-                text: ask_text(t),
-                at: ctx.now.to_string(),
-            };
-            match ctx.worker.ask_session(&ask) {
-                AskOutcome::Asked => Done::Acted(RungOutcome::Asked),
-                AskOutcome::NoProcess => Done::Nothing(RungOutcome::NoProcess),
-                _ => Done::Nothing(RungOutcome::CannotAsk),
-            }
-        }
         Rung::Continue => {
             let Some(session) = row.session.as_deref() else {
                 return recommission(ctx, store, row);
@@ -1624,7 +2474,10 @@ fn fire_the_rung(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart, rung: Rung) 
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            let text = continue_text(t, &commission);
+            let mut text = continue_text(t, &commission);
+            if let Some(cause) = stop_cause(ctx, store, row) {
+                text = format!("{text}\n\n{cause}");
+            }
             match crate::orchestration::ladder_continue(ctx, store, t, h, session, &text) {
                 Ok(admission) => Done::Acted(admitted(&admission)),
                 // The runtime no longer has the conversation: there is nothing to continue, so the
@@ -1810,7 +2663,7 @@ fn lease_words(ctx: &Ctx, store: &ChatStore, thread: &str, session: Option<&str>
 /// Whether the slot is UNDER RECOVERY (epic 6j6v.nmc9 section B, defined once): a row is present,
 /// at least one attempt counted, not abandoned, and no rung-E record ends the episode.
 pub(crate) fn under_recovery(row: &OwedStart) -> bool {
-    row.attempts >= 1 && row.abandoned.is_none()
+    (row.attempts >= 1 || row.recovery_started_at.is_some()) && row.abandoned.is_none()
 }
 
 pub(crate) fn action_of(row: &RecoveryLogRow) -> Option<RecoveryAction> {
@@ -2023,6 +2876,11 @@ mod tests {
             RungOutcome::TimedOut,
             RungOutcome::Escalated,
             RungOutcome::Reset,
+            RungOutcome::Overtaken,
+            RungOutcome::StopRequested,
+            RungOutcome::NothingToStop,
+            RungOutcome::Granted,
+            RungOutcome::Life,
         ] {
             assert_eq!(RungOutcome::parse(o.as_str()), Some(o));
             assert!(!o.words().contains('_'), "{:?} reads as a sentence", o);

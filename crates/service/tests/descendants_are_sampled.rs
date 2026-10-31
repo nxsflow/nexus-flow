@@ -6,7 +6,7 @@
 //! as stalled.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
-use nxs_service::process::descendants_started_since;
+use nxs_service::process::{descendants_started_since, descendants_with_start, still_the_process};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -105,4 +105,31 @@ fn an_unreadable_pid_is_none() {
         descendants_started_since(u32::MAX - 7, SystemTime::now()),
         None
     );
+}
+
+/// **The walk reaches below the direct children** (review of 00yd, carried to 6j6v.1r61): a
+/// `sleep` started by a shell that the root's own child started is a GRANDCHILD of the root, and
+/// it is sampled and listed like a child. The ladder names such a descendant when it outlives a
+/// stopped session, so a walk that stopped at one level would leave it unnamed.
+#[test]
+fn a_grandchild_is_sampled_and_listed_with_its_start() {
+    let since = SystemTime::now() - Duration::from_secs(1);
+    let tree = Tree::spawn("sh -c 'sleep 60 & wait' & wait");
+    std::thread::sleep(Duration::from_millis(300));
+    let listed = descendants_with_start(tree.id()).expect("readable");
+    assert!(listed.len() >= 2, "a child and a grandchild: {listed:?}");
+    let s = descendants_started_since(tree.id(), since).unwrap();
+    assert!(s.count >= 2, "both are in the sample: {s:?}");
+    for (pid, started) in &listed {
+        let started = started.expect("a live descendant's start is readable");
+        let stamp = time::OffsetDateTime::from(started)
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        assert!(still_the_process(*pid, &stamp), "{pid} is still itself");
+        let long_ago = "2000-01-01T00:00:00Z";
+        assert!(
+            !still_the_process(*pid, long_ago),
+            "a different start is another process"
+        );
+    }
 }

@@ -671,11 +671,16 @@ impl ChatStore {
     /// nobody coordinates, which keeps cut 1a's row exactly as it was (a `coordinator` an earlier
     /// write named is left as it is — the next look decides whether it still holds).
     ///
-    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the session,
-    /// and the same session re-triggered moves only the clock. What the open wrote about the slot —
-    /// and what the ladder will write about its recovery — stays. Every stranded record of the same
-    /// obligation judged against an OLDER clock is stamped superseded in the same call — a later
-    /// trigger is what ends a record's currency, and it is the one event that does.
+    /// An upsert by `(thread, role)`: a new session for the same obligation replaces the session.
+    /// **The clock is the INSERT's only** (nxf 6j6v.1r61, design 8nx4 section 4): the open instant
+    /// is the slot's first `P`, and from then on only a process START moves it
+    /// ([`reset_for_a_new_process`](ChatStore::reset_for_a_new_process)) — a trigger that met a
+    /// live process or the working-copy queue started nothing. `new_obligation` is a write that
+    /// owes a NEW turn on the slot (a commission, a flow step, a border commission), not a rung of
+    /// the ladder or a queued trigger released: it starts the owed turn's budget (`attempts`)
+    /// again. Nothing else the ladder wrote moves here — a nudge pending, a stop in flight and the
+    /// episode stand until the process they are about is replaced or the slot is answered.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_owed_start(
         &mut self,
         thread: &str,
@@ -684,6 +689,7 @@ impl ChatStore {
         clock: &str,
         triggered: bool,
         coordinator: Option<&str>,
+        new_obligation: bool,
     ) -> Result<()> {
         let conn = self.connection();
         conn.execute(
@@ -691,20 +697,63 @@ impl ChatStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(thread, role) DO UPDATE SET
                  session = excluded.session,
-                 trigger_clock = excluded.trigger_clock,
                  triggered = excluded.triggered,
-                 coordinator = COALESCE(excluded.coordinator, owed_starts.coordinator)",
+                 coordinator = COALESCE(excluded.coordinator, owed_starts.coordinator),
+                 attempts = CASE WHEN ?7 THEN 0 ELSE owed_starts.attempts END",
             params![
                 thread,
                 role,
                 session,
                 clock,
                 i64::from(triggered),
-                coordinator
+                coordinator,
+                new_obligation
             ],
         )?;
-        supersede_older(conn, thread, role, clock)?;
+        let current: String = conn.query_row(
+            "SELECT trigger_clock FROM owed_starts WHERE thread = ?1 AND role = ?2",
+            params![thread, role],
+            |r| r.get(0),
+        )?;
+        supersede_older(conn, thread, role, &current)?;
         Ok(())
+    }
+
+    /// **A process was started for `session`** (nxf 6j6v.1r61, design 8nx4 section 4, round 3 TQ #1
+    /// / IR #1) — written AFTER the worker took the trigger, and only then: every slot the session
+    /// owes is about the new process from now on. The per-process fields go (the nudge, the stop,
+    /// the rest, the subprocess sample) and `trigger_clock` — `P` — moves to `now`. A fresh process
+    /// is never sent a second SIGTERM for its predecessor's stop, never reads "moved" from its
+    /// predecessor's sample, and is never confirmed for a nudge it did not get. The episode, its
+    /// confirmations, its rests and the owed turn's `attempts` run on: a resume ends nothing.
+    ///
+    /// Keyed by `(role, session)` across the threads it owes, because a process is the SESSION's,
+    /// not one slot's — and so a push into a session whose process had ended (no reply thread of
+    /// its own) resets the slot it owes too. Answers how many rows moved.
+    pub(crate) fn reset_for_a_new_process(
+        &mut self,
+        role: &str,
+        session: &str,
+        now: &str,
+    ) -> Result<usize> {
+        let conn = self.connection();
+        let threads: Vec<String> = {
+            let mut st =
+                conn.prepare("SELECT thread FROM owed_starts WHERE role = ?1 AND session = ?2")?;
+            let rows = st.query_map(params![role, session], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let n = conn.execute(
+            "UPDATE owed_starts SET asked_at = NULL, stop_requested_at = NULL, stop_signals = 0,
+                    confirmed_until = NULL, subprocess_count = NULL, subprocess_cpu_units = NULL,
+                    subprocess_moved_at = NULL, trigger_clock = ?3, triggered = 1
+              WHERE role = ?1 AND session = ?2",
+            params![role, session, now],
+        )?;
+        for thread in &threads {
+            supersede_older(conn, thread, role, now)?;
+        }
+        Ok(n)
     }
 
     /// Name the thread that coordinates a slot whose row did not say (a row cut 1a wrote), or no
@@ -768,25 +817,25 @@ impl ChatStore {
         Ok(true)
     }
 
-    /// **Move the clock of one obligation, only while `session` is the one that owes it** — the
+    /// **Mark one obligation triggered, only while `session` is the one that owes it** — the
     /// resume and the way-back wake. Keyed by `(thread, role, session)` so a resume for one thread
-    /// never turns another thread's current record into history. Returns whether a row moved.
+    /// never touches another thread's row. **It moves no clock** (nxf 6j6v.1r61): a wake into a
+    /// live process is queued behind its turn and the process is judged by its own life; a wake
+    /// that started a process moved the clock through
+    /// [`reset_for_a_new_process`](ChatStore::reset_for_a_new_process). Returns whether the row is
+    /// this session's.
     pub(crate) fn touch_owed_start(
         &mut self,
         thread: &str,
         role: &str,
         session: &str,
-        now: &str,
+        _now: &str,
     ) -> Result<bool> {
-        let conn = self.connection();
-        let n = conn.execute(
-            "UPDATE owed_starts SET trigger_clock = ?4, triggered = 1
+        let n = self.connection().execute(
+            "UPDATE owed_starts SET triggered = 1
               WHERE thread = ?1 AND role = ?2 AND session = ?3",
-            params![thread, role, session, now],
+            params![thread, role, session],
         )?;
-        if n > 0 {
-            supersede_older(conn, thread, role, now)?;
-        }
         Ok(n > 0)
     }
 
@@ -1810,7 +1859,7 @@ pub(crate) fn owe_durably(
         return Ok(Vec::new());
     }
     crate::orchestration::through_the_lock(|| {
-        store.record_owed_start(thread, role, session, ctx.now, false, None)
+        store.record_owed_start(thread, role, session, ctx.now, false, None, true)
     })?;
     Ok(arm_first_look(ctx, store, thread, role, ctx.now)
         .into_iter()
@@ -1820,7 +1869,9 @@ pub(crate) fn owe_durably(
 /// **Write the obligation `thread` owes `role` on `session` and arm its first look** — the write the
 /// trigger funnel makes, and the mint of a slot nobody coordinates (cut 1a's row, kept exactly as it
 /// was: a slot with no coordinator keeps today's behaviour). `coordinator` is the slot's
-/// coordinating thread when it has one.
+/// coordinating thread when it has one; `new_obligation` a trigger that owes a new turn rather than
+/// a rung of the ladder or a queued trigger released ([`ChatStore::record_owed_start`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn owe(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -1829,14 +1880,22 @@ pub(crate) fn owe(
     session: &str,
     triggered: bool,
     coordinator: Option<&str>,
+    new_obligation: bool,
 ) -> Vec<FailedConsequence> {
     // An engine identity (the synthesizer) answers for the engine; rule 1 excludes it anyway, and
     // keeping it out of the table keeps the work list to what can strand.
     if crate::orchestration::is_engine_identity(role) {
         return Vec::new();
     }
-    if let Err(e) = store.record_owed_start(thread, role, session, ctx.now, triggered, coordinator)
-    {
+    if let Err(e) = store.record_owed_start(
+        thread,
+        role,
+        session,
+        ctx.now,
+        triggered,
+        coordinator,
+        new_obligation,
+    ) {
         return not_owed(thread, role, Some(session), &e);
     }
     arm_first_look(ctx, store, thread, role, ctx.now)
@@ -1844,9 +1903,10 @@ pub(crate) fn owe(
         .collect()
 }
 
-/// **Move the clock of the obligation `session` owes on `thread`** — a resume, or a wake on the
-/// way back. Only when `session` is the one that owes it (keyed by `(thread, role, session)`, so a
-/// woken session never re-owns another session's slot), and the look moves with the clock.
+/// **Mark the obligation `session` owes on `thread` triggered** — a resume, or a wake on the way
+/// back — and arm its look. Only when `session` is the one that owes it (keyed by `(thread, role,
+/// session)`, so a woken session never re-owns another session's slot). It moves no clock (nxf
+/// 6j6v.1r61): only a process start does, after the worker took it.
 pub(crate) fn touch(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -2949,12 +3009,28 @@ mod tests {
         assert_eq!(row.trigger_clock, T1);
         assert!(!row.triggered, "a mint is not a trigger");
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T2, true, Some("m-chan"))
+        s.record_owed_start("m-t", "ws/verifier", "m-s1", T2, true, Some("m-chan"), true)
             .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert!(row.triggered);
-        assert_eq!(row.trigger_clock, T2);
+        assert_eq!(
+            row.trigger_clock, T1,
+            "a trigger moves no clock; only a process start does (6j6v.1r61)"
+        );
         assert_eq!(row.coordinator.as_deref(), Some("m-chan"));
+        assert_eq!(
+            s.reset_for_a_new_process("ws/verifier", "m-s1", T2)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.owed_start("m-t", "ws/verifier")
+                .unwrap()
+                .unwrap()
+                .trigger_clock,
+            T2,
+            "the process start moved it"
+        );
     }
 
     /// A store from before this cut carries the old `owed_starts` (session NOT NULL, five columns)
@@ -3241,23 +3317,124 @@ mod tests {
     #[test]
     fn a_new_session_for_the_same_obligation_replaces_the_row_whole() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s1", T0, false, Some("m-chan"))
-            .unwrap();
-        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true, Some("m-chan"))
+        s.record_owed_start(
+            "m-t",
+            "ws/verifier",
+            "m-s1",
+            T0,
+            false,
+            Some("m-chan"),
+            true,
+        )
+        .unwrap();
+        s.record_owed_start("m-t", "ws/verifier", "m-s2", T1, true, Some("m-chan"), true)
             .unwrap();
         let row = s.owed_start("m-t", "ws/verifier").unwrap().unwrap();
         assert_eq!(row.session.as_deref(), Some("m-s2"));
-        assert_eq!(row.trigger_clock, T1);
+        assert_eq!(
+            row.trigger_clock, T0,
+            "the INSERT's clock stands until a process starts (6j6v.1r61)"
+        );
         assert!(row.triggered);
         assert_eq!(s.owed_starts().unwrap().len(), 1);
     }
 
+    /// **A NEW obligation starts the owed turn's budget again; a re-trigger of the same one does
+    /// not** (nxf 6j6v.1r61, round 3 CQ #2 / TQ #3 / IR #2) — and neither touches the episode, a
+    /// pending nudge or a stop in flight: those are about the process, which only its start resets.
     #[test]
-    fn a_touch_moves_only_the_obligation_the_session_owes() {
+    fn a_new_obligation_resets_the_budget_and_a_re_trigger_keeps_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true, Some("m-chan"))
+        s.record_owed_start("m-t", "ws/coder", "m-s", T0, true, Some("m-chan"), true)
             .unwrap();
-        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true, Some("m-chan"))
+        s.connection()
+            .execute_batch(&format!(
+                "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}',
+                        recovery_started_at = '{T1}', stop_requested_at = '{T1}'"
+            ))
+            .unwrap();
+        s.record_owed_start("m-t", "ws/coder", "m-s", T2, true, Some("m-chan"), false)
+            .unwrap();
+        assert_eq!(
+            s.owed_start("m-t", "ws/coder").unwrap().unwrap().attempts,
+            1
+        );
+        s.record_owed_start("m-t", "ws/coder", "m-s", T2, true, Some("m-chan"), true)
+            .unwrap();
+        let row = s.owed_start("m-t", "ws/coder").unwrap().unwrap();
+        assert_eq!(row.attempts, 0);
+        assert_eq!(
+            (
+                row.asked_at.as_deref(),
+                row.recovery_started_at.as_deref(),
+                row.stop_requested_at.as_deref(),
+                row.trigger_clock.as_str()
+            ),
+            (Some(T1), Some(T1), Some(T1), T0)
+        );
+    }
+
+    /// **A process start resets the per-process fields of every slot its session owes** (nxf
+    /// 6j6v.1r61) — and only those: the episode, its confirmations and the budget run on.
+    #[test]
+    fn a_process_start_resets_the_per_process_fields_and_keeps_the_episode() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.record_owed_start("m-a", "ws/pm", "m-p", T0, true, Some("m-chan"), true)
+            .unwrap();
+        s.record_owed_start("m-b", "ws/pm", "m-p", T0, true, Some("m-chan"), true)
+            .unwrap();
+        s.record_owed_start("m-c", "ws/pm", "m-other", T0, true, Some("m-chan"), true)
+            .unwrap();
+        s.connection()
+            .execute_batch(&format!(
+                "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}', recovery_started_at = '{T1}',
+                        stop_requested_at = '{T1}', stop_signals = 2, confirmed_until = '{T1}',
+                        confirmations = 2, rest_total_secs = 600, subprocess_count = 3,
+                        subprocess_cpu_units = 99, subprocess_moved_at = '{T1}'"
+            ))
+            .unwrap();
+        assert_eq!(s.reset_for_a_new_process("ws/pm", "m-p", T2).unwrap(), 2);
+        for thread in ["m-a", "m-b"] {
+            let row = s.owed_start(thread, "ws/pm").unwrap().unwrap();
+            assert_eq!(row.trigger_clock, T2);
+            assert_eq!(
+                (
+                    &row.asked_at,
+                    &row.stop_requested_at,
+                    row.stop_signals,
+                    &row.confirmed_until,
+                    row.subprocess_count,
+                    row.subprocess_cpu_units,
+                    &row.subprocess_moved_at
+                ),
+                (&None, &None, 0, &None, None, None, &None),
+                "{thread}"
+            );
+            assert_eq!(
+                (
+                    row.attempts,
+                    row.recovery_started_at.as_deref(),
+                    row.confirmations,
+                    row.rest_total_secs
+                ),
+                (1, Some(T1), 2, 600),
+                "a resume ends nothing: {thread}"
+            );
+        }
+        let other = s.owed_start("m-c", "ws/pm").unwrap().unwrap();
+        assert_eq!(
+            other.trigger_clock, T0,
+            "another session's slot is untouched"
+        );
+        assert_eq!(other.asked_at.as_deref(), Some(T1));
+    }
+
+    #[test]
+    fn a_touch_marks_only_the_obligation_the_session_owes_and_moves_no_clock() {
+        let mut s = ChatStore::open_in_memory(1);
+        s.record_owed_start("m-r1", "ws/pm", "m-p1", T0, true, Some("m-chan"), true)
+            .unwrap();
+        s.record_owed_start("m-r2", "ws/pm", "m-p2", T0, true, Some("m-chan"), true)
             .unwrap();
         assert!(!s.touch_owed_start("m-r1", "ws/pm", "m-p2", T2).unwrap());
         assert!(s.touch_owed_start("m-r2", "ws/pm", "m-p2", T2).unwrap());
@@ -3273,7 +3450,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .trigger_clock,
-            T2
+            T0,
+            "a wake moves no clock (6j6v.1r61)"
         );
     }
 
@@ -3282,7 +3460,7 @@ mod tests {
     #[test]
     fn a_record_stays_current_after_its_owed_row_goes_and_a_later_trigger_supersedes_it() {
         let mut s = ChatStore::open_in_memory(1);
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"), true)
             .unwrap();
         assert!(s.record_stranded(&record(T0)).unwrap());
         assert!(
@@ -3296,7 +3474,7 @@ mod tests {
             Some(T0)
         );
 
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true, Some("m-chan"))
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T2, true, Some("m-chan"), true)
             .unwrap();
         assert!(s.current_stranded_by_threads(&["m-t"]).unwrap().is_empty());
         assert_eq!(
@@ -3354,7 +3532,7 @@ mod tests {
             s.stranded_suspect("m-t", "ws/verifier").unwrap(),
             Some(reset)
         );
-        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"))
+        s.record_owed_start("m-t", "ws/verifier", "m-s", T0, true, Some("m-chan"), true)
             .unwrap();
         s.forget_owed_start("m-t", "ws/verifier").unwrap();
         assert_eq!(s.stranded_suspect("m-t", "ws/verifier").unwrap(), None);
@@ -3628,6 +3806,7 @@ mod tests {
                 "m-synth-session",
                 true,
                 None,
+                true,
             )
         };
         assert!(findings.is_empty(), "{findings:?}");
@@ -3649,6 +3828,7 @@ mod tests {
             later_fractional,
             true,
             Some("m-chan"),
+            true,
         )
         .unwrap();
         assert!(
@@ -3665,6 +3845,7 @@ mod tests {
             "2026-10-18T12:00:00+02:00",
             true,
             Some("m-chan"),
+            true,
         )
         .unwrap();
         assert_eq!(s.current_stranded_by_threads(&["m-t"]).unwrap().len(), 1);

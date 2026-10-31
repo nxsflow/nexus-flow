@@ -221,9 +221,8 @@ gestartet hat, geht eine Antwort an den Faden, für den diese Sitzung gestartet 
 sie wieder aufgenommen, fortgesetzt oder neu beauftragt wurde, oder an einen, den sie selbst eröffnet
 hat — und nirgendwohin sonst, mit oder ohne `--thread`. Eine zweite Runde derselben Persona ist die
 Arbeit einer anderen Sitzung: ihr Faden steht nie in Ihrem Wecken, eine Antwort ohne Faden löst nie
-auf ihn auf, und `--thread` mit seiner Id wird abgelehnt, mit dem Faden, den Sie bedienen. Dasselbe
-gilt für `--progress`. Außerhalb jeder Sitzung — ein Mensch am Terminal — darf jeder Faden genannt
-werden, wie bisher.
+auf ihn auf, und `--thread` mit seiner Id wird abgelehnt, mit dem Faden, den Sie bedienen.
+Außerhalb jeder Sitzung — ein Mensch am Terminal — darf jeder Faden genannt werden, wie bisher.
 
 ```console
 $ NXC_ACTOR=coder nxc reply --thread m-00000000000000000000000001 "Added the flag and a test; branch feat/export-since." --json
@@ -693,15 +692,17 @@ Sidecar steht `true`.
 
 **Ein Slot, den sein Koordinator wieder aufnimmt, sagt RECOVERING.** Wenn die Sitzung eines
 koordinierten Slots verstummt, ohne Antwort endet oder nie startet, handelt der Koordinator, bevor
-jemand gefragt wird: Er fragt die laufende Sitzung (sobald sie an diesem Slot 20 Minuten still war),
-setzt die beendete in derselben Sitzung fort oder startet den Slot mit seiner ursprünglichen Aufgabe
-neu — drei Versuche insgesamt und höchstens zwei bis sechs Stunden für eine Sitzung, die immer
-wieder mit `--progress` antwortet. `recovery` sagt, wie weit er kam (`attempt`, `of`, `action`, `at`,
+jemand gefragt wird: Er stupst die laufende Sitzung an, sobald sie an diesem Slot 10 Minuten kein
+eigenes Lebenszeichen gegeben hat, stoppt sie, wenn fünf weitere ohne vergehen, setzt die beendete
+in derselben Sitzung fort oder startet den Slot mit seiner ursprünglichen Aufgabe neu. Ein Anstupsen
+zählt keinen Versuch; eine Fortsetzung oder ein Neustart schon — drei insgesamt, und standardmäßig
+wird eine Sitzung, die nach einem davon wieder tot ist, eskaliert —, und eine Wiederaufnahme dauert
+höchstens zwei bis sechs Stunden. `recovery` sagt, wie weit er kam (`attempt`, `of`, `action`, `at`,
 `last_activity`, `next_look`), `stale` steht daneben auf `false`, und die Zeile sagt es anstelle von
 „nothing is coming“:
 
 ```text
-m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 1/3 at 2026-10-18T10:20:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:40:00Z
+m-01M0…  #review  waiting on ab12/verifier — RECOVERING: asked 0/3 at 2026-10-18T10:10:00Z, last activity 2026-10-18T10:00:00Z, next look 2026-10-18T10:15:00Z
 ```
 
 Sind die Versuche aufgebraucht, eskaliert der Koordinator im Namen des Mitglieds, mit dem Schritt,
