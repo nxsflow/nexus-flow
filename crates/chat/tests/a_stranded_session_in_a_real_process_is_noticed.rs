@@ -823,6 +823,7 @@ fn a_real_sidecar_over_a_hanging_model(dir: &Path) -> std::path::PathBuf {
         ),
     )
     .unwrap();
+    let stub_url = format!("file://{}", dir.join("sdk-stub.mjs").display());
     std::fs::write(
         dir.join("loader.mjs"),
         format!(
@@ -831,24 +832,34 @@ fn a_real_sidecar_over_a_hanging_model(dir: &Path) -> std::path::PathBuf {
                if (specifier === \"@anthropic-ai/claude-agent-sdk\") return {{ url: STUB, shortCircuit: true }};\n\
                return next(specifier, context);\n\
              }}\n",
-            stub = format!("file://{}", dir.join("sdk-stub.mjs").display()),
+            stub = stub_url,
         ),
     )
     .unwrap();
     let sidecar = dir.join("sidecar.mjs");
+    let main_url = format!("file://{}", main.display());
     std::fs::write(
         &sidecar,
         format!(
             "import {{ register }} from \"node:module\";\n\
              register(new URL(\"./loader.mjs\", import.meta.url));\n\
              await import({main:?});\n",
-            main = format!("file://{}", main.display()),
+            main = main_url,
         ),
     )
     .unwrap();
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("nxc"), bin.join("nxc")).unwrap();
+    // The `nxc` this test's binary was built beside (`target/<profile>/nxc`, two levels above the
+    // test executable in `deps/`) — the one `nxs_test_support::cargo_bin` just checked for
+    // freshness when the commission ran it.
+    let nxc_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(Path::parent)
+        .expect("the target directory")
+        .join("nxc");
+    std::os::unix::fs::symlink(nxc_bin, bin.join("nxc")).unwrap();
     sidecar
 }
 

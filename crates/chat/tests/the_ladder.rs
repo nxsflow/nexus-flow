@@ -2883,8 +2883,8 @@ fn a_confirm_of_twenty_minutes_holds_every_nudge_until_its_end_plus_the_grace() 
     assert!(!r.clamped);
     assert!(r.receipt.contains(&at(630 + 1_200)), "{}", r.receipt);
     assert_eq!(
-        team.worker.withdrawn.lock().unwrap().as_slice(),
-        [session.clone()]
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
     );
     assert_eq!(
         team.log(&thread, "coder").last().cloned(),
@@ -3269,8 +3269,8 @@ fn a_recovered_episode_is_closed_and_a_later_silence_opens_a_second() {
     );
     assert!(team.worker.stops().is_empty(), "a nudge, not a stop");
     assert_eq!(
-        team.worker.withdrawn.lock().unwrap().as_slice(),
-        [session.clone()]
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
     );
     assert_eq!(
         team.owed(&thread, "coder", "recovery_started_at"),
@@ -3407,7 +3407,6 @@ fn a_second_owed_turn_after_a_reply_is_allowed_its_own_resume() {
         Some("0".into()),
         "the turn's budget went"
     );
-    assert!(team.worker.withdrawn.lock().unwrap().contains(&session));
     // Owed again within the same minute — the expectation re-declared on the slot, the process
     // still running; the new turn's process start moves the clock.
     let mut store = team.store();
@@ -3619,4 +3618,36 @@ fn a_session_streaming_for_twenty_minutes_is_not_nudged() {
     }
     assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
     assert!(team.log(&thread, "coder").is_empty());
+}
+
+/// **A reply withdraws the nudge it answers** (design 8nx4 section 3; round 2 IR #3): a session
+/// nudged at +600 that replies at +630 has its ask file withdrawn at the reply, so it is not handed
+/// "no sign of life from you" at its turn's end — and the reply is admitted either way. A reply on
+/// a slot nobody nudged withdraws nothing: another slot's nudge of the same session stands.
+#[test]
+fn a_reply_withdraws_the_nudge_it_answers_and_only_a_nudged_slots() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    assert_eq!(team.worker.asks().len(), 1);
+    team.reply(&at(630), "coder", &session, &thread, "done: --since is in");
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(
+        team.owed(&thread, "coder", "asked_at"),
+        None,
+        "the turn is over"
+    );
+
+    let other = team.commission(&at(700), "reviewer", "check it").thread_id;
+    let reviewer = team.worker.last("reviewer").internal_session;
+    team.reply(&at(710), "reviewer", &reviewer, &other, "fine");
+    assert_eq!(
+        *team.worker.withdrawn.lock().unwrap(),
+        vec![session.clone()],
+        "nothing was nudged on that slot, so nothing is withdrawn"
+    );
 }

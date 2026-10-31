@@ -12940,9 +12940,9 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
 /// **What a posted answer does to its writer's slot** (nxf 6j6v.1r61, design 8nx4 sections 3 and 4)
 /// — once the reply is admitted, and never deciding whether it is:
 ///
-/// - **the session's nudges are withdrawn** (`Worker::withdraw_asks`), so a session that has
-///   replied is not handed "no sign of life from you" at its turn's end — the shape that invites a
-///   duplicate reply or a new round. Not at the owed row's deletion, which the sweep makes a look
+/// - **the session's nudges are withdrawn** (`Worker::withdraw_asks`) when the slot it answers has
+///   one on record, so a session that has replied is not handed "no sign of life from you" at its
+///   turn's end — the shape that invites a duplicate reply or a new round. Not at the owed row's deletion, which the sweep makes a look
 ///   later: the sidecar yields a pending nudge at the very next `result`.
 /// - **the owed turn is over when the reply discharged the slot**: ONE update zeroes the turn's
 ///   budget and every field of its episode, so a turn owed again on the same slot — before the
@@ -12952,7 +12952,16 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
 /// an ask file (round 2 IR #3).
 fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<FailedConsequence> {
     let mut findings = Vec::new();
-    if let Some(session) = ctx.session {
+    let role = ctx.caller_handle();
+    // Only a slot with a nudge on record has one to take back: a reply on a slot nobody nudged
+    // must not withdraw the nudge another slot of the same session is waiting on, nor report a
+    // worker it cannot reach as a failed consequence of a reply that had nothing to withdraw.
+    let nudged = store
+        .owed_start(thread, &role)
+        .ok()
+        .flatten()
+        .is_some_and(|row| row.asked_at.is_some());
+    if let Some(session) = ctx.session.filter(|_| nudged) {
         if let Err(e) = ctx.worker.withdraw_asks(session) {
             findings.push(FailedConsequence::stranded(
                 ConsequenceClass::RecoveryFailed,
@@ -12965,10 +12974,9 @@ fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<Failed
             ));
         }
     }
-    let role = ctx.caller_handle();
     let discharged = store
         .thread_quorum(thread, ctx.now)
-        .map(|q| !q.is_some_and(|q| crate::stranded::outstanding_has(&q.outstanding, &role)));
+        .map(|q| q.is_none_or(|q| !crate::stranded::outstanding_has(&q.outstanding, &role)));
     match discharged {
         Ok(true) => {
             if let Err(e) = store.end_the_owed_turn(thread, &role) {
