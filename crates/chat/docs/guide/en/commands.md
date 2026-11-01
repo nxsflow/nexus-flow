@@ -658,6 +658,25 @@ When the attempts are spent the coordinator escalates in the member's name, with
 cause, every attempt, the last activity, the session and the working copy — and the slot then says
 STRANDED, below.
 
+**How many resumes a turn gets is the workspace's setting**, in `.nxs/config.toml`:
+
+```toml
+[chat.liveness]
+dead_resumes = 1              # 1 to 3: recovery attempts on one owed turn before a dead verdict escalates
+notice_at_first_stop = false  # true: a non-escalating notice to the commissioner at the first stop
+```
+
+Without the section, or without a key, the default is `1` and `false`. `dead_resumes = 3` resumes a
+session that is found dead up to three times before the escalation; `notice_at_first_stop` is read
+and checked, and this version does not post the notice yet. The file is read at every look — each
+look is a process of its own — so an edit takes effect at the next one, with no restart; an app
+that embeds the engine runs the setting of the workspace it opened, until it opens it again. `.nxs/`
+is local to the machine and not synced, so the setting is per machine: three workspaces on one
+machine can each run their own. A value out of range or of the wrong type never skips a look: the
+look runs the default for that key, its receipt carries an `invalid_setting` warning naming the
+file, the key and the value, and an escalation says the default was used. An unknown key under
+`[chat.liveness]` is warned about the same way and changes nothing.
+
 **A slot whose session will not answer says STRANDED instead** — and why, and what was done about
 it. `stranded` names the observation (`observed`, 1–5: never started, never bound, ended without
 answering, no live process, start given up), when it was recorded, and what became of the
@@ -868,7 +887,7 @@ Three subcommands exist and are hidden from `--help`, because nobody should type
 - **`nxc tick --thread <id>`** — a clock's hand. The one-shot job a channel's declared `timeout:`
   schedules runs it to re-check a thread and, if due, route it through the channel's `on_complete`
   policy. It is idempotent: a thread whose completion was already handled is a clean no-op, never a
-  second wake.
+  second wake. It is also the coordinator's look, and it reads `[chat.liveness]` each time it runs.
 - **`nxc pick-up`** — the executing machine's hand. The background service runs it after a pass
   that left a chat for THIS machine: it starts or resumes the persona of every chat designated here
   that is owed a turn, once per message, and only for messages whose origin this machine trusts. It

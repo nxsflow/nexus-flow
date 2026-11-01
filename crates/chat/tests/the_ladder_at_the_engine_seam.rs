@@ -509,3 +509,69 @@ fn engine_a_reply_whose_withdrawal_fails_is_posted_warns_and_clears_the_other_nu
     assert_eq!(asked_at(&x), None, "the first slot's owed turn is over");
     assert_eq!(asked_at(&y), None, "the other slot's nudge row is cleared");
 }
+
+// ---- the liveness policy at the seam (nxf 6j6v.t0jn) ----------------------------------------------
+
+/// A workspace whose `.nxs/config.toml` ends with `[chat.liveness]` `section`, and an engine opened
+/// over it.
+fn engine_with_liveness(section: &str) -> (TempDir, Engine) {
+    let tmp = TempDir::new().unwrap();
+    setup(tmp.path(), &chat_config()).expect("seed chat workspace");
+    write_liveness(tmp.path(), section);
+    let engine = Engine::open(None, tmp.path()).expect("open engine");
+    (tmp, engine)
+}
+
+fn write_liveness(root: &std::path::Path, section: &str) {
+    let path = root.join(".nxs").join("config.toml");
+    let text = std::fs::read_to_string(&path).expect("config.toml");
+    let kept = match text.find("[chat.liveness]") {
+        Some(i) => text[..i].to_string(),
+        None => text,
+    };
+    std::fs::write(&path, format!("{kept}\n[chat.liveness]\n{section}\n")).expect("write");
+}
+
+/// **`Engine::liveness_policy` is the policy of the workspace the handle loaded, for its lifetime**
+/// (design 6j6v.pszd 6.1; round 2 CQ #8): read once at open — an edit to the file afterwards does
+/// not reach the open handle, a handle opened again reads it.
+#[test]
+fn engine_liveness_policy_is_the_loaded_workspaces_for_the_handles_lifetime() {
+    let (tmp, engine) = engine_with_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let r = engine.liveness_policy();
+    assert_eq!(
+        (
+            r.policy.dead_resumes,
+            r.policy.notice_at_first_stop,
+            r.policy.letter()
+        ),
+        (3, true, Some('C'))
+    );
+    assert!(r.warnings.is_empty(), "{r:?}");
+    write_liveness(tmp.path(), "dead_resumes = 1");
+    assert_eq!(
+        engine.liveness_policy().policy.letter(),
+        Some('C'),
+        "the open handle keeps the policy it loaded"
+    );
+    let reopened = Engine::open(None, tmp.path()).expect("open again");
+    assert_eq!(reopened.liveness_policy().policy.letter(), Some('B'));
+}
+
+/// **An invalid value at the seam runs the default and says so** — the policy and its warnings
+/// come back together, so an app that drives looks can report them.
+#[test]
+fn engine_liveness_policy_with_an_invalid_value_runs_the_default_and_carries_the_warning() {
+    let (_tmp, engine) = engine_with_liveness("dead_resumes = 0\nlivenes = true");
+    let r = engine.liveness_policy();
+    assert_eq!(r.policy.dead_resumes, 1);
+    assert!(r.policy.fell_back);
+    assert_eq!(r.unknown_keys, vec!["livenes".to_string()]);
+    assert_eq!(r.warnings.len(), 2, "{r:?}");
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains(".nxs/config.toml") && w.contains("dead_resumes = 0")),
+        "{r:?}"
+    );
+}
