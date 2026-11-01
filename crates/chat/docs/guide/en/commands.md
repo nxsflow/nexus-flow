@@ -674,7 +674,8 @@ that embeds the engine runs the setting of the workspace it opened, until it ope
 is local to the machine and not synced, so the setting is per machine: three workspaces on one
 machine can each run their own. A value out of range or of the wrong type never skips a look: the
 look runs the default for that key, its receipt carries an `invalid_setting` warning naming the
-file, the key and the value, and an escalation says the default was used. An unknown key under
+file, the key and the value, and an escalation says the default was used. Every tick's receipt
+names the policy the look ran under, as `liveness`. An unknown key under
 `[chat.liveness]` is warned about the same way and changes nothing.
 
 **A slot whose session will not answer says STRANDED instead** — and why, and what was done about

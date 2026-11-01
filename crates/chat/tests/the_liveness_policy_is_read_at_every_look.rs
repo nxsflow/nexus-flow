@@ -139,3 +139,40 @@ fn the_next_look_reads_the_file_again_with_no_restart() {
         "fixed in the file: {fixed}"
     );
 }
+
+/// The `(dead_resumes, notice_at_first_stop, fell_back)` the look's receipt says it ran under.
+fn ran_under(receipt: &Value) -> (u64, bool, bool) {
+    let p = &receipt["liveness"];
+    (
+        p["dead_resumes"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the policy in force: {receipt}")),
+        p["notice_at_first_stop"].as_bool().expect("bool"),
+        p["fell_back"].as_bool().expect("bool"),
+    )
+}
+
+/// **The real process hands the file's policy to the ladder** (review of t0jn, TQ #1): the
+/// `Ctx::liveness` a look runs with is the one its receipt names, so this pins `CliCtx`'s hand-off —
+/// a `CliCtx` that supplied the default instead would read `(1, false, false)` under A and C. Read
+/// again at every look: B, then C, then an invalid value falling back per key, with no restart.
+#[test]
+fn every_look_runs_under_the_policy_the_file_says_at_that_look() {
+    let tmp = workspace();
+    let thread = a_thread(tmp.path());
+    assert_eq!(
+        ran_under(&look(tmp.path(), &thread)),
+        (1, false, false),
+        "B"
+    );
+    set_liveness(tmp.path(), "dead_resumes = 3\nnotice_at_first_stop = true");
+    assert_eq!(ran_under(&look(tmp.path(), &thread)), (3, true, false), "C");
+    set_liveness(tmp.path(), "dead_resumes = 2");
+    assert_eq!(ran_under(&look(tmp.path(), &thread)), (2, false, false));
+    set_liveness(tmp.path(), "dead_resumes = 9\nnotice_at_first_stop = true");
+    assert_eq!(
+        ran_under(&look(tmp.path(), &thread)),
+        (1, true, true),
+        "the invalid key runs its default, the valid one stays"
+    );
+}

@@ -242,6 +242,12 @@ pub struct Engine {
     /// builds, for its lifetime. The CLI reads it at every look because a look is a process of its
     /// own; an app holds one handle across many, so an edit to the file reaches it when the app
     /// opens the workspace again. See [`Engine::liveness_policy`].
+    ///
+    /// **No verb of this handle reaches the ladder's dead verdict today**: that is a look, and a
+    /// look is `orchestration::tick`, which has no seam twin by decision (6j6v.dvyq, recorded in
+    /// `tests/verb_seam.rs`). The policy is supplied anyway so that every `Ctx` this handle builds
+    /// says what the workspace set; an app that runs looks itself builds its own `Ctx` and takes the
+    /// policy from [`Engine::liveness_policy`].
     liveness: crate::workspace::ResolvedLiveness,
 }
 

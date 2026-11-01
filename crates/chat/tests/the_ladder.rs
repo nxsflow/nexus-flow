@@ -541,8 +541,12 @@ impl Team {
         .expect("the commissioner's reply is posted");
     }
 
-    /// One look, as the CLI's `nxs chat tick` runs it: the tick under the policy read for this
-    /// look, and what that read found wrong appended to the receipt's warnings (6j6v.t0jn).
+    /// One look, MIRRORING the CLI's `nxs chat tick`: the tick under the policy read for this look,
+    /// and what that read found wrong appended to the receipt's warnings (6j6v.t0jn). It re-does
+    /// what `cli.rs` does, so a receipt assertion here proves this helper and the ladder, not the
+    /// CLI: that the real process reads the file at every look, hands the policy to `Ctx::liveness`
+    /// and puts the warnings on its receipt is pinned at the binary path, in
+    /// `the_liveness_policy_is_read_at_every_look.rs`.
     fn tick(&self, now: &str, thread: &str) -> TickReceipt {
         let mut receipt = self
             .with(now, "service", None, |ctx, store| {
@@ -2968,9 +2972,12 @@ fn under_a_a_silent_session_is_resumed_three_times_and_escalated_at_the_fourth_d
     );
 }
 
-/// **The policy is read at every look** (design 6.1; round 2 CQ #7 / TQ #4): B until the look at
-/// T0+900, then the file says A before the look at T0+1 620 — so that look stops the resumed
-/// session and does NOT escalate (A allows three), and the slot is continued again at +1 740.
+/// **A policy changed between two looks judges the next one** (design 6.1; round 2 CQ #7 / TQ #4):
+/// B until the look at T0+900, then the file says A before the look at T0+1 620 — so that look
+/// stops the resumed session and does NOT escalate (A allows three), and the slot is continued again
+/// at +1 740. The harness re-resolves the file per call, so this proves the LADDER honours the
+/// `Ctx::liveness` of each look; that the CLI re-reads the file per process is pinned at the binary
+/// path (`the_liveness_policy_is_read_at_every_look.rs`).
 #[test]
 fn the_policy_is_read_at_every_look() {
     let team = team();

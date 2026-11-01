@@ -727,7 +727,7 @@ wird nicht synchronisiert, die Einstellung gilt also je Rechner: drei Workspaces
 können jeder ihre eigene haben. Ein Wert außerhalb des Bereichs oder vom falschen Typ lässt nie
 einen Blick aus: Der Blick läuft mit dem Standard für diesen Schlüssel, seine Quittung trägt eine
 Warnung `invalid_setting`, die Datei, Schlüssel und Wert nennt, und eine Eskalation sagt, dass der
-Standard galt. Ein unbekannter Schlüssel unter `[chat.liveness]` wird genauso gewarnt und ändert
+Standard galt. Die Quittung jedes Ticks nennt als `liveness` die Politik, unter der der Blick lief. Ein unbekannter Schlüssel unter `[chat.liveness]` wird genauso gewarnt und ändert
 nichts.
 
 **Ein Slot, dessen Sitzung nicht antworten wird, sagt stattdessen STRANDED** — und warum, und was
