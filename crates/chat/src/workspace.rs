@@ -139,9 +139,255 @@ pub fn chat_config() -> WorkspaceConfig {
     }
 }
 
+/// chat's key, under its `[chat]` section, for the liveness policy (6j6v.pszd, design 6.1).
+pub const LIVENESS_KEY: &str = "liveness";
+/// Where the policy is read from, as the warnings name it.
+const LIVENESS_FILE: &str = ".nxs/config.toml";
+
+/// **The workspace's liveness policy** — the `[chat.liveness]` section of `.nxs/config.toml`
+/// (6j6v.pszd, design 6.1): two knobs, not one named policy.
+///
+/// ```toml
+/// [chat.liveness]
+/// dead_resumes = 1              # 1 to 3: recovery attempts on one owed turn before a dead verdict escalates
+/// notice_at_first_stop = false  # true: a non-escalating notice to the commissioner at the first stop
+/// ```
+///
+/// The trial compares A = `3`/`false`, **B = `1`/`false` (the default when the section or a key is
+/// absent)** and C = `3`/`true`; `2` is valid and has no letter, and `1`/`true` is a valid fourth
+/// setting. It is **read at every look**: the CLI resolves it in every `nxs chat tick` process, so an
+/// edit needs no service restart; an embedding app's [`crate::engine::Engine`] supplies the policy
+/// of the workspace it loaded, for its lifetime. Nothing inside the ladder reads the file — the
+/// ladder reads [`crate::orchestration::Ctx::liveness`]. `.nxs/` is device-local and not synced, so
+/// the setting is per machine: the trial runs over three workspaces on this one machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct LivenessPolicy {
+    /// Recovery attempts on one owed turn before a dead verdict escalates: 1 to
+    /// [`crate::ladder::MAX_RECOVERY_ATTEMPTS`].
+    pub dead_resumes: u32,
+    /// Post a non-escalating notice to the commissioner at the episode's first stop.
+    pub notice_at_first_stop: bool,
+    /// At least one key was invalid and its default was used — what rung E's summary repeats.
+    pub fell_back: bool,
+}
+
+impl Default for LivenessPolicy {
+    /// Policy B.
+    fn default() -> Self {
+        Self {
+            dead_resumes: crate::ladder::DEFAULT_DEAD_RESUMES,
+            notice_at_first_stop: false,
+            fell_back: false,
+        }
+    }
+}
+
+impl LivenessPolicy {
+    /// `A`, `B` or `C` for the three combinations the trial compares; `None` for any other pair.
+    pub fn letter(self) -> Option<char> {
+        match (self.dead_resumes, self.notice_at_first_stop) {
+            (3, false) => Some('A'),
+            (1, false) => Some('B'),
+            (3, true) => Some('C'),
+            _ => None,
+        }
+    }
+}
+
+/// [`liveness_policy`]'s answer: the policy in force together with what the read had to say about
+/// the file — so a host that runs the look also reports it (the tick's receipt carries the
+/// warnings).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLiveness {
+    pub policy: LivenessPolicy,
+    /// One line per invalid value or unknown key: `<file>: [chat.liveness] <key> = <value> — <why>;
+    /// the default <d> is used`.
+    pub warnings: Vec<String>,
+    /// Unknown keys under `[chat.liveness]`, verbatim (the liveness report lists them).
+    pub unknown_keys: Vec<String>,
+}
+
+/// Read the liveness policy from a workspace's config (6j6v.pszd, design 6.1), in the shape of
+/// flow's `flow_plugin`. **An invalid value never skips a look**: a value out of `1 to 3` or of the
+/// wrong type, for either key, runs the DEFAULT for that key, sets
+/// [`LivenessPolicy::fell_back`] and adds a warning naming the file, the key and the value; an
+/// unknown key is listed and warned about, and changes nothing.
+pub fn liveness_policy(config: &WorkspaceConfig) -> ResolvedLiveness {
+    let mut out = ResolvedLiveness {
+        policy: LivenessPolicy::default(),
+        warnings: Vec::new(),
+        unknown_keys: Vec::new(),
+    };
+    let Some(raw) = config
+        .products
+        .get(CHAT_MODULE)
+        .and_then(|c| c.as_table())
+        .and_then(|c| c.get(LIVENESS_KEY))
+    else {
+        return out;
+    };
+    let default = LivenessPolicy::default();
+    let Some(section) = raw.as_table() else {
+        out.policy.fell_back = true;
+        out.warnings.push(format!(
+            "{LIVENESS_FILE}: [chat.liveness] = {raw} — must be a table; the defaults \
+             dead_resumes = {} and notice_at_first_stop = {} are used",
+            default.dead_resumes, default.notice_at_first_stop
+        ));
+        return out;
+    };
+    let max = crate::ladder::MAX_RECOVERY_ATTEMPTS;
+    for (key, value) in section {
+        match key.as_str() {
+            "dead_resumes" => match value
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| (1..=max).contains(n))
+            {
+                Some(n) => out.policy.dead_resumes = n,
+                None => {
+                    out.policy.fell_back = true;
+                    out.warnings.push(format!(
+                        "{LIVENESS_FILE}: [chat.liveness] dead_resumes = {value} — must be 1 to \
+                         {max}; the default {} is used",
+                        default.dead_resumes
+                    ));
+                }
+            },
+            "notice_at_first_stop" => match value.as_bool() {
+                Some(b) => out.policy.notice_at_first_stop = b,
+                None => {
+                    out.policy.fell_back = true;
+                    out.warnings.push(format!(
+                        "{LIVENESS_FILE}: [chat.liveness] notice_at_first_stop = {value} — must be \
+                         true or false; the default {} is used",
+                        default.notice_at_first_stop
+                    ));
+                }
+            },
+            other => {
+                out.unknown_keys.push(other.to_string());
+                out.warnings.push(format!(
+                    "{LIVENESS_FILE}: [chat.liveness] {other} is not a known key and is ignored"
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with(section: &str) -> WorkspaceConfig {
+        let text = format!("{section}\n");
+        let mut cfg = chat_config();
+        let table: toml::value::Table = toml::from_str(&text).unwrap();
+        cfg.products.extend(table);
+        cfg
+    }
+
+    #[test]
+    fn no_section_is_policy_b() {
+        let r = liveness_policy(&chat_config());
+        assert_eq!(r.policy, LivenessPolicy::default());
+        assert_eq!(r.policy.letter(), Some('B'));
+        assert!(r.warnings.is_empty());
+        assert!(r.unknown_keys.is_empty());
+        assert!(!r.policy.fell_back);
+    }
+
+    #[test]
+    fn a_and_c_and_the_unlettered_pairs() {
+        let a = liveness_policy(&with(
+            "[chat.liveness]\ndead_resumes = 3\nnotice_at_first_stop = false",
+        ))
+        .policy;
+        assert_eq!(
+            (a.dead_resumes, a.notice_at_first_stop, a.letter()),
+            (3, false, Some('A'))
+        );
+        let c = liveness_policy(&with(
+            "[chat.liveness]\ndead_resumes = 3\nnotice_at_first_stop = true",
+        ))
+        .policy;
+        assert_eq!(c.letter(), Some('C'));
+        let two = liveness_policy(&with("[chat.liveness]\ndead_resumes = 2"));
+        assert_eq!(
+            (
+                two.policy.dead_resumes,
+                two.policy.letter(),
+                two.warnings.len()
+            ),
+            (2, None, 0)
+        );
+        let one_true =
+            liveness_policy(&with("[chat.liveness]\nnotice_at_first_stop = true")).policy;
+        assert_eq!(
+            (
+                one_true.dead_resumes,
+                one_true.notice_at_first_stop,
+                one_true.letter()
+            ),
+            (1, true, None)
+        );
+    }
+
+    #[test]
+    fn an_invalid_value_runs_the_default_and_warns() {
+        for bad in ["0", "4", "5", "\"three\"", "-1", "2.5"] {
+            let r = liveness_policy(&with(&format!("[chat.liveness]\ndead_resumes = {bad}")));
+            assert_eq!(r.policy.dead_resumes, 1, "{bad}");
+            assert!(r.policy.fell_back, "{bad}");
+            assert_eq!(r.warnings.len(), 1, "{bad}");
+            assert!(
+                r.warnings[0].contains(".nxs/config.toml")
+                    && r.warnings[0].contains("dead_resumes")
+                    && r.warnings[0].contains(bad.trim_matches('"'))
+                    && r.warnings[0].contains("1 to 3"),
+                "{}",
+                r.warnings[0]
+            );
+        }
+        let r = liveness_policy(&with("[chat.liveness]\nnotice_at_first_stop = 1"));
+        assert!(
+            !r.policy.notice_at_first_stop
+                && r.policy.fell_back
+                && r.warnings[0].contains("notice_at_first_stop"),
+            "{r:?}"
+        );
+        // One bad key falls back for THAT key only: the other valid key still applies.
+        let r = liveness_policy(&with(
+            "[chat.liveness]\ndead_resumes = 3\nnotice_at_first_stop = \"yes\"",
+        ));
+        assert_eq!(
+            (
+                r.policy.dead_resumes,
+                r.policy.notice_at_first_stop,
+                r.policy.fell_back
+            ),
+            (3, false, true)
+        );
+        let r = liveness_policy(&with("[chat.liveness]\ndead_resume = 3"));
+        assert_eq!(r.unknown_keys, vec!["dead_resume".to_string()]);
+        assert_eq!(r.policy.dead_resumes, 1);
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("dead_resume"), "{}", r.warnings[0]);
+    }
+
+    #[test]
+    fn a_liveness_that_is_not_a_table_runs_b_and_warns() {
+        let r = liveness_policy(&with("[chat]\nliveness = 3"));
+        assert_eq!(r.policy.dead_resumes, 1);
+        assert!(r.policy.fell_back);
+        assert_eq!(r.warnings.len(), 1);
+        assert!(
+            r.warnings[0].contains("[chat.liveness]"),
+            "{}",
+            r.warnings[0]
+        );
+    }
 
     #[test]
     fn chat_config_registers_only_chat() {
