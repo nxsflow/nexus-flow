@@ -34,7 +34,7 @@ use nexus_chat::worker::{
     AskOutcome, Pulse, SessionAsk, SessionStop, TriggerError, TriggerOutcome, TriggerRequest,
     TriggerResult, Worker,
 };
-use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
+use nexus_chat::workspace::{chat_config, liveness_policy, setup, ChatWorkspaceExt, Workspace};
 use nxs_service::process::SubprocessSample;
 use tempfile::TempDir;
 
@@ -399,6 +399,9 @@ impl Team {
         let db_path = ws.db_path_str().expect("db path");
         let mut store = ws.open_chat_store().expect("open chat store");
         let defs = Definitions::resolve(self.tmp.path()).expect("declarations");
+        // The workspace's `[chat.liveness]`, read at every call exactly as the CLI reads it in
+        // every `nxs chat tick` process (6j6v.t0jn).
+        let liveness = liveness_policy(&ws.config).policy;
         let ctx = orchestration::Ctx {
             now,
             origin: &self.origin,
@@ -414,7 +417,7 @@ impl Team {
             module_primes: None,
             machines: None,
             peers: None,
-            liveness: Default::default(),
+            liveness,
         };
         f(&ctx, &mut store)
     }
@@ -538,11 +541,33 @@ impl Team {
         .expect("the commissioner's reply is posted");
     }
 
+    /// One look, as the CLI's `nxs chat tick` runs it: the tick under the policy read for this
+    /// look, and what that read found wrong appended to the receipt's warnings (6j6v.t0jn).
     fn tick(&self, now: &str, thread: &str) -> TickReceipt {
-        self.with(now, "service", None, |ctx, store| {
-            orchestration::tick(ctx, store, TickRequest { thread_id: thread })
-        })
-        .expect("tick")
+        let mut receipt = self
+            .with(now, "service", None, |ctx, store| {
+                orchestration::tick(ctx, store, TickRequest { thread_id: thread })
+            })
+            .expect("tick");
+        let ws = Workspace::resolve(None, self.tmp.path()).expect("resolve workspace");
+        receipt.warnings.extend(orchestration::liveness_findings(
+            thread,
+            &liveness_policy(&ws.config),
+        ));
+        receipt
+    }
+
+    /// Writes `section` as the workspace's `[chat.liveness]` — replacing one written before, so a
+    /// test can change the policy between two looks (6j6v.t0jn). The section always sits at the
+    /// end of `.nxs/config.toml`, after what `setup` wrote.
+    fn set_liveness(&self, section: &str) {
+        let path = self.tmp.path().join(".nxs").join("config.toml");
+        let text = std::fs::read_to_string(&path).expect("config.toml");
+        let kept = match text.find("[chat.liveness]") {
+            Some(i) => text[..i].to_string(),
+            None => text,
+        };
+        std::fs::write(&path, format!("{kept}\n[chat.liveness]\n{section}\n")).expect("write");
     }
 
     /// The session bound to a runtime id and wrote `entries` transcript entries, the last at `last`.
@@ -2856,6 +2881,180 @@ fn a_silent_session_is_nudged_at_ten_stopped_at_fifteen_and_escalated_at_twenty_
             .unwrap()
             .is_empty(),
         "the pulse is read only for a session whose process runs"
+    );
+}
+
+// ---- the per-workspace policy: [chat.liveness] read at every look (nxf 6j6v.t0jn) -----------------
+
+/// The coder's continued session at `at(continued)`: its process runs and writes exactly what a
+/// real continuation writes before the model speaks — its `turn_start` for the slot and a
+/// `session_init` — and the pulse reads `NoneYet`. Neither is life.
+fn a_continuation_that_never_speaks(team: &Team, session: &str, thread: &str, continued: i64) {
+    let resumed = team.worker.last("coder");
+    assert_eq!(
+        resumed.internal_session, session,
+        "continued, the same session"
+    );
+    team.worker.run(session);
+    team.pulse(session, Pulse::NoneYet);
+    team.turn(session, thread, &at(continued));
+    team.entry(session, "session_init", &at(continued + 1), "{}");
+}
+
+/// The stopped session's process ends at the SIGTERM of `at(stopped)`; its teardown announces the
+/// end, and the looks at +60 and +120 follow — the judge continues at stop + 120 s.
+fn its_end_is_announced_and_followed(team: &Team, session: &str, thread: &str, stopped: i64) {
+    team.worker.stop(session);
+    team.ended(&at(stopped), session, Some("told to stop (SIGTERM)"));
+    team.tick(&at(stopped + 60), thread);
+    team.tick(&at(stopped + 120), thread);
+}
+
+/// The slot of a coder silent from T0, ticked every minute up to and including the stop at T0+900.
+fn a_coder_silent_from_t0_stopped_at_fifteen(team: &Team) -> (String, String) {
+    let (thread, session) = a_running_coder_with_own_life_at_t0(team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=900).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    (thread, session)
+}
+
+/// **Test 9's A path** (design 8nx4 section 2, 6.1): under `dead_resumes = 3` a session that never
+/// speaks again is resumed three times and escalated at its fourth dead verdict — `continued` at
+/// +1 020, +1 740, +2 460; `stopped` at +900, +1 620, +2 340, +3 060; `escalated` at +3 060; no
+/// `recovered` and no `noticed` row.
+#[test]
+fn under_a_a_silent_session_is_resumed_three_times_and_escalated_at_the_fourth_dead_verdict() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    let mut stopped = 900;
+    for _ in 0..3 {
+        its_end_is_announced_and_followed(&team, &session, &thread, stopped);
+        let continued = stopped + 120;
+        a_continuation_that_never_speaks(&team, &session, &thread, continued);
+        for s in ((continued + 60)..=(continued + 600)).step_by(60) {
+            team.tick(&at(s), &thread);
+        }
+        stopped = continued + 600;
+    }
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("continued", 1_020),
+            ("stopped", 1_620),
+            ("continued", 1_740),
+            ("stopped", 2_340),
+            ("continued", 2_460),
+            ("stopped", 3_060),
+            ("escalated", 3_060),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(team.escalated_at(&thread), vec![3_060]);
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(
+        body.contains("dead after 3 recovery attempts on this turn; this workspace allows 3"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("[chat.liveness] setting was invalid"),
+        "a valid policy is not reported as fallen back:\n{body}"
+    );
+}
+
+/// **The policy is read at every look** (design 6.1; round 2 CQ #7 / TQ #4): B until the look at
+/// T0+900, then the file says A before the look at T0+1 620 — so that look stops the resumed
+/// session and does NOT escalate (A allows three), and the slot is continued again at +1 740.
+#[test]
+fn the_policy_is_read_at_every_look() {
+    let team = team();
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    its_end_is_announced_and_followed(&team, &session, &thread, 900);
+    a_continuation_that_never_speaks(&team, &session, &thread, 1_020);
+    for s in (1_080..=1_560).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    team.set_liveness("dead_resumes = 3");
+    team.tick(&at(1_620), &thread);
+    its_end_is_announced_and_followed(&team, &session, &thread, 1_620);
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("continued", 1_020),
+            ("stopped", 1_620),
+            ("continued", 1_740),
+        ],
+        "{log:?}"
+    );
+    assert!(team.escalated_at(&thread).is_empty());
+}
+
+/// **An invalid policy runs B and warns** (design 6.1, "Decided here" 11): `dead_resumes = 5` is
+/// never a reason to skip a look — the slot runs B's instants (escalated at T0+1 620), every look's
+/// receipt names `.nxs/config.toml`, `dead_resumes` and `5`, and the escalation says the setting
+/// was invalid and the default was used.
+#[test]
+fn an_invalid_policy_runs_b_and_warns_on_the_tick_receipt() {
+    let team = team();
+    team.set_liveness("dead_resumes = 5");
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    let mut receipts = Vec::new();
+    for s in (60..=900).step_by(60) {
+        receipts.push(team.tick(&at(s), &thread));
+    }
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, Some("told to stop (SIGTERM)"));
+    receipts.push(team.tick(&at(960), &thread));
+    receipts.push(team.tick(&at(1_020), &thread));
+    a_continuation_that_never_speaks(&team, &session, &thread, 1_020);
+    for s in (1_080..=1_620).step_by(60) {
+        receipts.push(team.tick(&at(s), &thread));
+    }
+    for (i, r) in receipts.iter().enumerate() {
+        let invalid: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.class == ConsequenceClass::InvalidSetting)
+            .collect();
+        assert_eq!(invalid.len(), 1, "look {i}: {:?}", r.warnings);
+        let w = &invalid[0].detail;
+        assert!(
+            w.contains(".nxs/config.toml") && w.contains("dead_resumes") && w.contains('5'),
+            "look {i}: {w}"
+        );
+        assert_eq!(invalid[0].thread.as_deref(), Some(thread.as_str()));
+    }
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("continued", 1_020),
+            ("stopped", 1_620),
+            ("escalated", 1_620)
+        ],
+        "{log:?}"
+    );
+    let body = &escalations(&team.messages(&thread))[0];
+    assert!(
+        body.contains(
+            "Policy: the workspace's [chat.liveness] setting was invalid; the default was used \
+             (see the tick's warnings)."
+        ),
+        "{body}"
     );
 }
 
