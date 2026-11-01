@@ -3304,6 +3304,36 @@ mod tests {
         assert_eq!((row.action.as_str(), row.attempt), ("asked", 0));
     }
 
+    /// **A policy value no writer could have written reads as unknown** (round 2 IR #3): a
+    /// negative or oversized `policy_dead_resumes` is `None`, never a plausible-looking `Some(0)`.
+    #[test]
+    fn a_policy_dead_resumes_out_of_range_reads_back_as_none() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(STRANDED_DDL).unwrap();
+        conn.execute_batch(
+            "INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail,
+                                      policy_dead_resumes, policy_notice)
+                 VALUES ('m-t', 'ws/verifier', '2026-10-18T10:10:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', -1, 0),
+                        ('m-t', 'ws/verifier', '2026-10-18T10:11:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', 4294967296, 0),
+                        ('m-t', 'ws/verifier', '2026-10-18T10:12:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', 3, 0);",
+        )
+        .unwrap();
+        let read: Vec<Option<u32>> = conn
+            .prepare(&format!(
+                "SELECT {} FROM recovery_log ORDER BY id",
+                crate::ladder::LOG_COLS
+            ))
+            .unwrap()
+            .query_map([], crate::ladder::log_from_row)
+            .unwrap()
+            .map(|r| r.unwrap().policy_dead_resumes)
+            .collect();
+        assert_eq!(read, [None, None, Some(3)]);
+    }
+
     fn backfill_row(thread: &str, abandoned: Option<&str>) -> Backfill {
         Backfill {
             thread: thread.into(),

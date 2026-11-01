@@ -429,9 +429,10 @@ pub(crate) fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLo
         outcome: r.get(7)?,
         detail: r.get(8)?,
         retries: u32::try_from(r.get::<_, i64>(9)?).unwrap_or(0),
+        // A value no writer could have written is unknown, not a plausible 0 (round 2 IR #3).
         policy_dead_resumes: r
             .get::<_, Option<i64>>(10)?
-            .map(|n| u32::try_from(n).unwrap_or(0)),
+            .and_then(|n| u32::try_from(n).ok()),
         policy_notice: r.get::<_, Option<i64>>(11)?.map(|n| n != 0),
         silent_since: r.get(12)?,
         rest_secs: r.get(13)?,

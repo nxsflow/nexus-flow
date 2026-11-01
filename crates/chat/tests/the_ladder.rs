@@ -3238,6 +3238,17 @@ fn a_second_confirm_of_sixty_is_clamped_to_the_thirty_left() {
         "{}",
         second.receipt
     );
+    let rests: Vec<Option<i64>> = team
+        .rows(&thread, "coder")
+        .into_iter()
+        .filter(|r| r.action == "confirmed")
+        .map(|r| r.rest_secs)
+        .collect();
+    assert_eq!(
+        rests,
+        [Some(3_600), Some(1_800)],
+        "the row records the rest granted, not the rest asked (round 2 TQ #4)"
+    );
 }
 
 /// (d) No confirmation cancels a stop: one sent while the stop is in flight is refused with the
@@ -3853,6 +3864,16 @@ fn a_cannot_ask_row_opens_no_episode_and_a_door_closed_past_the_wait_is_dead() {
         team.log(&thread, "coder"),
         vec![("asked".to_string(), Some("cannot_ask".to_string()))],
         "one row per closed door"
+    );
+    let rows = team.rows(&thread, "coder");
+    assert_eq!(
+        (
+            rows[0].silent_since.as_deref(),
+            rows[0].policy_dead_resumes,
+            rows[0].policy_notice
+        ),
+        (Some(at(0).as_str()), Some(1), Some(false)),
+        "the closed door's row carries the S it judged and the policy (round 2 TQ #2)"
     );
     assert_eq!(team.owed(&thread, "coder", "recovery_started_at"), None);
     team.tick(&at(900), &thread);
@@ -4623,4 +4644,86 @@ fn a_withdraw_after_the_slot_escalated_writes_no_withdrawn_row() {
     assert!(!rows.iter().any(|r| r.action == "withdrawn"), "{rows:#?}");
     assert_eq!(rows, before, "the withdraw adds no row to an ended episode");
     every_episode_ends_once_and_last(&rows);
+}
+
+/// The slot's `stopped` rows as `(at, silent_since)`, oldest first.
+fn stopped_rows(team: &Team, thread: &str) -> Vec<(i64, Option<String>)> {
+    team.rows(thread, "coder")
+        .into_iter()
+        .filter(|r| r.action == "stopped")
+        .map(|r| (r.at, r.silent_since))
+        .collect()
+}
+
+/// **Round 2 TQ #1 — the one further SIGTERM judges the silence its stop judged**: the coder silent
+/// from T0 is stopped at T0+900 and its process ignores the SIGTERM; the further SIGTERM at the
+/// stop's grace (T0+1 200) is a second `stopped` row carrying the first one's S, T0.
+#[test]
+fn the_further_sigterm_row_carries_the_silence_of_the_stop_it_follows() {
+    let team = team();
+    let (thread, _session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    for s in (960..=1_200).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    assert_eq!(
+        team.worker.stops().len(),
+        2,
+        "the further SIGTERM at +1 200"
+    );
+    assert_eq!(
+        stopped_rows(&team, &thread),
+        [(900, Some(at(0))), (1_200, Some(at(0)))]
+    );
+}
+
+/// **Round 2 TQ #1 — after a resume, the NEWEST stop's silence**: under `dead_resumes = 3` the
+/// first stop at T0+900 ends its process (S = T0); the continuation of T0+1 020 never speaks and is
+/// stopped at T0+1 620 with S = T0+1 020, and ignores that SIGTERM. The further SIGTERM at
+/// T0+1 920 carries T0+1 020 — the stop it follows — not the first stop's T0.
+#[test]
+fn the_further_sigterm_after_a_resume_carries_the_newest_stops_silence() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    its_end_is_announced_and_followed(&team, &session, &thread, 900);
+    a_continuation_that_never_speaks(&team, &session, &thread, 1_020);
+    for s in (1_080..=1_920).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    assert_eq!(
+        stopped_rows(&team, &thread),
+        [
+            (900, Some(at(0))),
+            (1_620, Some(at(1_020))),
+            (1_920, Some(at(1_020)))
+        ]
+    );
+}
+
+/// **Round 2 TQ #3 — the sweep's `withdrawn` is best-effort**: the episode nudged at T0+600 is open
+/// when the owner withdraws the round; with a `recovery_log` that refuses every insert, the next
+/// look still forgets the owed row and does not fail — the log keeps only its `asked` row.
+#[test]
+fn a_withdrawn_row_the_log_refuses_still_lets_the_sweep_forget_the_owed_row() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.with(&at(650), "owner", None, |ctx, store| {
+        orchestration::withdraw(ctx, store, &thread)
+    })
+    .expect("withdraw");
+    team.sql(
+        "CREATE TRIGGER refuse_the_log BEFORE INSERT ON recovery_log
+         BEGIN SELECT RAISE(ABORT, 'the log refuses the row (injected)'); END;",
+    );
+    team.tick(&at(660), &thread);
+    team.sql("DROP TRIGGER refuse_the_log;");
+    assert_eq!(team.ladder(&thread, "coder"), None, "the owed row is gone");
+    let actions: Vec<String> = team
+        .rows(&thread, "coder")
+        .into_iter()
+        .map(|r| r.action)
+        .collect();
+    assert_eq!(actions, ["asked"]);
 }
