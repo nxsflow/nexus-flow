@@ -2092,7 +2092,7 @@ fn step_dead(
     // The notice (policy C): the stop just written is the episode's first — told before the cap,
     // so a look that also escalates writes `stopped`, `noticed`, `escalated` in that order.
     if ctx.liveness.notice_at_first_stop && open_episode_stops(store, t, h)? == 1 {
-        post_notice(ctx, store, row)?;
+        notice_without_gating(ctx, store, row);
     }
     let allowed = dead_resumes(ctx);
     if row.attempts >= allowed {
@@ -2844,11 +2844,12 @@ pub(crate) fn episode_noticed_at(store: &ChatStore, t: &str, h: &str) -> Result<
 /// **The notice's text** (design 8nx4 section 6.2, with round 2 CQ #9's wording): who stopped which
 /// step on which thread, after how long a silence, how often it is being recovered, and that nothing
 /// is asked of the reader. `nudged` says whether the stop followed a nudge (step 4a) or came without
-/// one (step 4b — the process never produced a token since it started).
+/// one (step 4b — the process never produced a token since it started). `silent_minutes` is `None`
+/// when the stop's silence cannot be measured; the figure is then left out rather than invented.
 pub fn notice_text(
     thread: &str,
     step: &str,
-    silent_minutes: i64,
+    silent_minutes: Option<i64>,
     stopped_at: &str,
     dead_resumes: u32,
     nudged: bool,
@@ -2859,9 +2860,13 @@ pub fn notice_text(
         "since it started"
     };
     let times = if dead_resumes == 1 { "time" } else { "times" };
+    let how_long = match silent_minutes {
+        Some(m) => format!("for {m} minutes {when}"),
+        None => when.to_string(),
+    };
     format!(
-        "NOTICE from the coordinator of thread {thread}: step {step} showed no sign of life for \
-         {silent_minutes} minutes {when} and was stopped at {stopped_at}. It is being recovered — \
+        "NOTICE from the coordinator of thread {thread}: step {step} showed no sign of life \
+         {how_long} and was stopped at {stopped_at}. It is being recovered — \
          resumed with its own transcript or re-commissioned — up to {dead_resumes} {times}; you are \
          escalated to if it does not recover. Nothing is asked of you now."
     )
@@ -2894,7 +2899,16 @@ fn post_notice(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> Result<()> 
         .silent_since
         .as_deref()
         .and_then(|since| seconds_between(since, &stop.at))
-        .map_or(0, |secs| secs / 60);
+        .map(|secs| secs / 60);
+    if silent_minutes.is_none() {
+        eprintln!(
+            "warning: the stop of step {} on thread {t} at {} carries no measurable silence \
+             ({:?}); its notice leaves the minutes out",
+            bare(h),
+            stop.at,
+            stop.silent_since
+        );
+    }
     let step = match store.flow_mark(t).ok().flatten() {
         Some(mark) => mark.step,
         None => bare(h).to_string(),
@@ -2968,6 +2982,13 @@ fn retry_a_failed_notice(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> R
     if !ctx.liveness.notice_at_first_stop {
         return Ok(());
     }
+    // The common case answered by one indexed read (review pass 1, Code Quality #3): no notice was
+    // ever tried on this slot, or its newest one did not fail — nothing to retry, and the slot's
+    // log is not read.
+    let newest = store.newest_rung_of(&row.thread, &row.role, RecoveryAction::Noticed)?;
+    if !newest.is_some_and(|r| r.outcome.as_deref().and_then(failure_of).is_some()) {
+        return Ok(());
+    }
     let episode = open_episode_rows(store, &row.thread, &row.role)?;
     let stops = episode
         .iter()
@@ -2984,9 +3005,21 @@ fn retry_a_failed_notice(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> R
         .iter()
         .any(|r| r.outcome.as_deref().and_then(failure_of).is_some());
     if stops == 1 && failed && !posted {
-        post_notice(ctx, store, row)?;
+        notice_without_gating(ctx, store, row);
     }
     Ok(())
+}
+
+/// [`post_notice`], whose own failures — its log row or its settle — cost the notice and nothing
+/// else (review pass 1, Integrity #2): the look that called it goes on to its cap, its escalation and
+/// its next look exactly as without a notice.
+fn notice_without_gating(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) {
+    if let Err(e) = post_notice(ctx, store, row) {
+        eprintln!(
+            "warning: the notice for thread {} ({}) could not be recorded: {e}; the look goes on",
+            row.thread, row.role
+        );
+    }
 }
 
 /// **Rung E**: the coordinator escalates — in the member's name, into the slot's thread, through
@@ -3467,6 +3500,52 @@ mod tests {
     }
 
     /// Every typed outcome reads back as itself — the log's words and the hold's.
+    /// The notice's text in every shape it can take (nxf 6j6v.71gy): after a nudge (step 4a) or
+    /// since the process started (step 4b), one or several resumes, and a silence whose length is
+    /// unknown — which is left out rather than written as "0 minutes".
+    #[test]
+    fn the_notice_text_says_what_the_stop_judged_and_never_a_made_up_figure() {
+        let tail =
+            "and was stopped at T1. It is being recovered — resumed with its own transcript \
+                    or re-commissioned — up to";
+        for (minutes, resumes, nudged, middle, end) in [
+            (
+                Some(15),
+                3,
+                true,
+                "for 15 minutes after it was asked",
+                "3 times;",
+            ),
+            (
+                Some(10),
+                3,
+                false,
+                "for 10 minutes since it started",
+                "3 times;",
+            ),
+            (
+                Some(15),
+                1,
+                true,
+                "for 15 minutes after it was asked",
+                "1 time;",
+            ),
+            (None, 3, true, "after it was asked", "3 times;"),
+            (None, 2, false, "since it started", "2 times;"),
+        ] {
+            let text = notice_text("t-1", "coder", minutes, "T1", resumes, nudged);
+            assert_eq!(
+                text,
+                format!(
+                    "NOTICE from the coordinator of thread t-1: step coder showed no sign of life \
+                     {middle} {tail} {end} you are escalated to if it does not recover. Nothing is \
+                     asked of you now."
+                ),
+                "{minutes:?} {resumes} {nudged}"
+            );
+        }
+    }
+
     #[test]
     fn every_outcome_word_parses_back_to_its_variant() {
         for o in [

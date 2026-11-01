@@ -314,8 +314,9 @@ pub enum MessageKind {
     /// claim and wakes nobody; the collected answers never carry it. The commissioner reads it in
     /// the root thread and in `nxc status`.
     ///
-    /// An older binary that does not know the label fails to parse the envelope — the
-    /// store-don't-fold path (§3.1) this enum's doc names — rather than misreading it as an answer.
+    /// An older binary that does not know the label fails to parse the envelope: it keeps the op
+    /// but folds no message from it (the store-don't-fold path, §3.1, this enum's doc names), so
+    /// the notice is not shown there and is never read as an answer.
     Notice,
 }
 

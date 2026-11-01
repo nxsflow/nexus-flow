@@ -2205,6 +2205,51 @@ fn resume_over_a_claimed_slot_answers_being_recovered_with_the_renewal_horizon()
     assert_eq!(team.worker.of("coder").len(), 1, "nothing started");
 }
 
+/// **Under C the refusal names the rung that acted, not the notice** (review pass 1, Integrity #1):
+/// the slot's log ends `stopped`, then `noticed`; `nxc resume` over its claim answers
+/// `BeingRecovered` with `stopped` as its action.
+#[test]
+fn resume_over_a_claimed_slot_names_the_stop_not_the_notice_beside_it() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.with(&at(10), "service", None, |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &session, "five_hour", None, "quota")
+    })
+    .unwrap();
+    let role = team.q("coder");
+    team.sql(&format!(
+        "UPDATE owed_starts SET recovering_until = '{until}', attempts = 1 WHERE thread = '{thread}';
+         INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail)
+           VALUES ('{thread}', '{role}', '{a}', 'stopped', 1, '{session}', 'stop_requested', ''),
+                  ('{thread}', '{role}', '{a}', 'noticed', 1, '{session}', 'posted', 'm-1');",
+        until = at(70),
+        a = at(15),
+    ));
+    let r = team
+        .with(&at(20), "owner", None, |ctx, store| {
+            orchestration::resume_interrupted(
+                ctx,
+                store,
+                orchestration::ResumeRequest {
+                    scope: orchestration::ResumeScope::Thread(&thread),
+                    force: true,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        r.outcome,
+        orchestration::ResumeOutcome::BeingRecovered {
+            attempt: 1,
+            of: 3,
+            action: Some(nexus_chat::ladder::RecoveryAction::Stopped),
+            retry_at: at(70),
+        }
+    );
+}
+
 /// A recovering slot is where its operation hangs — `hangs_at` names it, with the rung.
 #[test]
 fn a_recovering_slot_is_where_its_operation_hangs() {
@@ -3096,6 +3141,49 @@ fn under_c_the_first_stop_posts_one_notice_into_the_root_thread_and_moves_nothin
     assert_eq!(notices_in(&team, &root).len(), 1, "one notice in total");
 }
 
+/// **Step 4b's notice**: a session whose process started and never produced a token (its pulse
+/// `NoneYet`, nothing of its own in its transcript) is stopped without a nudge — so its notice says
+/// it showed no sign of life "since it started", never "after it was asked".
+#[test]
+fn under_c_a_stop_without_a_nudge_says_since_it_started() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let thread = team
+        .commission(T0, "coder", "Add a --since flag.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::NoneYet);
+    team.turn(&session, &thread, &at(0));
+    for s in (60..=900).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    assert!(
+        !log.iter().any(|(a, _, _)| a == "asked"),
+        "no nudge: {log:?}"
+    );
+    let stopped = log
+        .iter()
+        .find(|(a, _, _)| a == "stopped")
+        .map(|(_, _, t)| *t)
+        .expect("a stop");
+    let root = team.store().thread_root(&thread).expect("root");
+    let notices = notices_in(&team, &root);
+    assert_eq!(notices.len(), 1, "{log:?}");
+    assert_eq!(
+        notices[0].2,
+        format!(
+            "NOTICE from the coordinator of thread {thread}: step coder showed no sign of life for \
+             {} minutes since it started and was stopped at {}. It is being recovered — resumed \
+             with its own transcript or re-commissioned — up to 3 times; you are escalated to if \
+             it does not recover. Nothing is asked of you now.",
+            stopped / 60,
+            at(stopped)
+        )
+    );
+}
+
 /// **Under A no notice is posted** — the switch is the policy's: the A path's first stop writes no
 /// `noticed` row and the root thread holds no `notice`.
 #[test]
@@ -3928,7 +4016,12 @@ fn continued_once(team: &Team) -> (String, String) {
     team.ended(&at(900), &session, None);
     team.tick(&at(960), &thread);
     team.tick(&at(1_020), &thread);
-    assert_eq!(team.log(&thread, "coder")[2].0, "continued");
+    let log = team.log(&thread, "coder");
+    assert_eq!(
+        log.last().map(|r| r.0.as_str()),
+        Some("continued"),
+        "{log:?}"
+    );
     team.worker.run(&session);
     team.pulse(&session, Pulse::NoneYet);
     team.turn(&session, &thread, &at(1_020));
@@ -3973,6 +4066,71 @@ fn recover_then_hang_under_b_is_escalated_at_its_next_dead_verdict_without_a_sec
         )
         .unwrap();
     assert_eq!(attempt, 1);
+}
+
+/// **A look that stops AND escalates writes `stopped`, `noticed`, `escalated`, in that order**
+/// (design 8nx4 section 4 step 5; review pass 1, Test Quality #3): recover-then-hang under
+/// `dead_resumes = 1` with the notice on. The second episode's first stop at +1 985 finds the owed
+/// turn's one resume spent, so that look is also the escalation — and the notice comes between.
+#[test]
+fn a_first_stop_that_also_escalates_writes_stopped_noticed_escalated() {
+    let team = team();
+    team.set_liveness("dead_resumes = 1\nnotice_at_first_stop = true");
+    let (thread, session) = continued_once(&team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    follow_looks(&team, &thread, "coder", 1_140, 2_100);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("asked".into(), 600),
+            ("stopped".into(), 900),
+            ("noticed".into(), 900),
+            ("continued".into(), 1_020),
+            ("recovered".into(), 1_140),
+            ("asked".into(), 1_685),
+            ("stopped".into(), 1_985),
+            ("noticed".into(), 1_985),
+            ("escalated".into(), 1_985),
+        ]
+    );
+}
+
+/// **The notice never gates the cap** (review pass 1, Integrity #2): the same look, with the
+/// second episode's `noticed` row refused by the store. The stop is still followed by the
+/// escalation at +1 985 — the notice's own bookkeeping failing costs the notice, nothing else.
+#[test]
+fn a_notice_whose_log_row_fails_still_lets_the_look_escalate() {
+    let team = team();
+    team.set_liveness("dead_resumes = 1\nnotice_at_first_stop = true");
+    let (thread, session) = continued_once(&team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    team.sql(
+        "CREATE TRIGGER refuse_the_noticed_row BEFORE INSERT ON recovery_log
+         WHEN NEW.action = 'noticed'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error (injected)'); END;",
+    );
+    follow_looks(&team, &thread, "coder", 1_140, 2_100);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .skip(4)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("recovered".into(), 1_140),
+            ("asked".into(), 1_685),
+            ("stopped".into(), 1_985),
+            ("escalated".into(), 1_985),
+        ]
+    );
+    assert_eq!(team.escalated_at(&thread), vec![1_985]);
 }
 
 /// **A second owed turn on the same slot is allowed its own resume** (round 3 CQ #2, the arbiter):

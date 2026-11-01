@@ -723,15 +723,16 @@ Sitzung, die tot vorgefunden wird, bis zu dreimal wieder auf, bevor eskaliert wi
 ein `notice` im Wurzel-Thread des Vorgangs, vom Koordinator geschrieben, der sagt, welcher Schritt
 nach wie langer Stille gestoppt wurde und dass er wiederhergestellt wird. Vom Leser wird nichts
 verlangt — der Hinweis erledigt keinen Zug, startet nichts und weckt niemanden —, und `nxc status`
-zeigt, wann er gepostet wurde. Die Datei wird bei jedem Blick gelesen — jeder Blick ist ein eigener Prozess —, eine Änderung wirkt
-also beim nächsten, ohne Neustart; eine App, die die Engine einbettet, läuft mit der Einstellung des
-Workspaces, den sie geöffnet hat, bis sie ihn erneut öffnet. `.nxs/` liegt lokal auf dem Rechner und
-wird nicht synchronisiert, die Einstellung gilt also je Rechner: drei Workspaces auf einem Rechner
-können jeder ihre eigene haben. Ein Wert außerhalb des Bereichs oder vom falschen Typ lässt nie
-einen Blick aus: Der Blick läuft mit dem Standard für diesen Schlüssel, seine Quittung trägt eine
-Warnung `invalid_setting`, die Datei, Schlüssel und Wert nennt, und eine Eskalation sagt, dass der
-Standard galt. Die Quittung jedes Ticks nennt als `liveness` die Politik, unter der der Blick lief. Ein unbekannter Schlüssel unter `[chat.liveness]` wird genauso gewarnt und ändert
-nichts.
+zeigt, wann er gepostet wurde. Die Datei wird bei jedem Blick gelesen — jeder Blick ist ein eigener
+Prozess —, eine Änderung wirkt also beim nächsten, ohne Neustart; eine App, die die Engine
+einbettet, läuft mit der Einstellung des Workspaces, den sie geöffnet hat, bis sie ihn erneut
+öffnet. `.nxs/` liegt lokal auf dem Rechner und wird nicht synchronisiert, die Einstellung gilt also
+je Rechner: drei Workspaces auf einem Rechner können jeder ihre eigene haben. Ein Wert außerhalb des
+Bereichs oder vom falschen Typ lässt nie einen Blick aus: Der Blick läuft mit dem Standard für
+diesen Schlüssel, seine Quittung trägt eine Warnung `invalid_setting`, die Datei, Schlüssel und Wert
+nennt, und eine Eskalation sagt, dass der Standard galt. Die Quittung jedes Ticks nennt als
+`liveness` die Politik, unter der der Blick lief. Ein unbekannter Schlüssel unter `[chat.liveness]`
+wird genauso gewarnt und ändert nichts.
 
 **Ein Slot, dessen Sitzung nicht antworten wird, sagt stattdessen STRANDED** — und warum, und was
 daraufhin geschah. `stranded` nennt den Befund (`observed`, 1–5: nie gestartet, nie angebunden, ohne
