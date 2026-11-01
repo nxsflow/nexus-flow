@@ -1650,6 +1650,7 @@ mod tests {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         };
         let mut store = ChatStore::open_in_memory(1);
         let thread = commissioned_thread(&mut store);

@@ -63,13 +63,14 @@ pub const REST_MAX_MINUTES: i64 = 60;
 /// **A stop's grace** — the one further SIGTERM at this, "would not stop" at twice this.
 pub const STOP_GRACE_SECS: i64 = 300;
 /// **The resumes an owed turn is allowed before its next dead verdict escalates** — policy B, the
-/// default. Read through [`dead_resumes`] only; cut 4 of 6j6v.pszd replaces that one read with the
-/// workspace's configured policy.
+/// default of `[chat.liveness] dead_resumes` ([`crate::workspace::LivenessPolicy`]). The ladder
+/// reads the policy in force through [`dead_resumes`] only.
 pub const DEFAULT_DEAD_RESUMES: u32 = 1;
 
-/// **The resume cap in force** — the ONE read site of the policy (cut 4 reads the workspace's).
-pub(crate) fn dead_resumes(_ctx: &Ctx) -> u32 {
-    DEFAULT_DEAD_RESUMES
+/// **The resume cap in force** — the ONE read site of the policy: the workspace's `[chat.liveness]
+/// dead_resumes`, as the host resolved it for this look into [`Ctx::liveness`] (6j6v.t0jn).
+pub(crate) fn dead_resumes(ctx: &Ctx) -> u32 {
+    ctx.liveness.dead_resumes
 }
 /// **The bound of one tool call** (nxf 6j6v.j6yk) — how long a live session may sit inside a single
 /// tool call before the call counts as hung. Generous on purpose: a step that watches CI waits on a
@@ -2759,6 +2760,14 @@ fn summary(
         .map_or("none was ever started".to_string(), str::to_string);
     let lease = lease_words(ctx, store, t, row.session.as_deref());
     let signs = signs_of_life(ctx, store, row, &last_activity)?;
+    // An invalid `[chat.liveness]` ran the default (6j6v.t0jn): the reader of the escalation is
+    // told, since the cap the slot was judged by is not the one the workspace meant to set.
+    let policy = if ctx.liveness.fell_back {
+        "Policy: the workspace's [chat.liveness] setting was invalid; the default was used (see the \
+         tick's warnings).\n"
+    } else {
+        ""
+    };
     Ok(format!(
         "ESCALATED BY ITS COORDINATOR — step {step} on thread {t} (coordinated by thread {coord}) \
          could not be recovered.\n\n\
@@ -2767,7 +2776,8 @@ fn summary(
          Signs of life:\n{signs}\n\n\
          Last activity on this slot: {last_activity}.\n\
          Session: {session}.\n\
-         Working copy: {lease}.\n\n\
+         Working copy: {lease}.\n\
+         {policy}\n\
          The ways on: a reply into thread {root} commissions the round again; `nxc reply --thread \
          {root} --accept` accepts it as it stands; `nxc withdraw --thread {root}` takes it back.",
         coord = coordinator.thread,

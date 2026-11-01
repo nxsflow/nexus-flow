@@ -149,6 +149,7 @@ fn ctx<'a>(defs: &'a Definitions, worker: &'a dyn Worker, hop: u32) -> Ctx<'a> {
         module_primes: None,
         machines: None,
         peers: None,
+        liveness: Default::default(),
     }
 }
 

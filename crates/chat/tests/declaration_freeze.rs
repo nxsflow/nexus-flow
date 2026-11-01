@@ -468,6 +468,7 @@ impl DirectCtx {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         }
     }
 }

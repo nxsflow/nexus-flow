@@ -272,6 +272,7 @@ fn look(tmp: &TempDir, engine: &Engine, worker: &Arc<Hand>, thread: &str, secs: 
         module_primes: None,
         machines: None,
         peers: None,
+        liveness: Default::default(),
     };
     orchestration::tick(&ctx, &mut store, TickRequest { thread_id: thread }).expect("tick");
 }

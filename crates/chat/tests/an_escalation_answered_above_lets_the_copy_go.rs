@@ -314,6 +314,7 @@ fn the_step_asks_a_question(
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         };
         orchestration::reply(
             &ctx,

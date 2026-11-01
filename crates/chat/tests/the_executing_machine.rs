@@ -116,6 +116,7 @@ fn ctx<'a>(
         module_primes: None,
         machines,
         peers: None,
+        liveness: Default::default(),
     }
 }
 

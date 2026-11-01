@@ -208,6 +208,7 @@ fn ctx_in_session<'a>(
         module_primes: None,
         machines: None,
         peers: None,
+        liveness: Default::default(),
     }
 }
 

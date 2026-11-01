@@ -330,6 +330,7 @@ fn tick_with(
         module_primes: None,
         machines: None,
         peers: None,
+        liveness: Default::default(),
     };
     orchestration::tick(&ctx, &mut store, TickRequest { thread_id }).expect("tick")
 }
