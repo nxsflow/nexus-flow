@@ -3773,6 +3773,9 @@ fn recovery_words(r: &crate::facade::RecoveryStatus) -> String {
     if let Some(next) = &r.next_look {
         words.push_str(&format!(", next look {next}"));
     }
+    if let Some(noticed) = &r.noticed_at {
+        words.push_str(&format!(", commissioner noticed at {noticed}"));
+    }
     words
 }
 
@@ -4878,6 +4881,7 @@ mod tests {
             confirmed_until: None,
             confirmations: 0,
             rest_total_secs: 0,
+            noticed_at: None,
         }
     }
 
@@ -4897,6 +4901,21 @@ mod tests {
     }
 
     // ---- ABANDONED and `hangs at` (nxf 6j6v.kgfn) ----------------------------------------------
+
+    /// A slot whose commissioner was told of the first stop says when (nxf 6j6v.71gy).
+    #[test]
+    fn a_recovering_slot_whose_commissioner_was_noticed_says_when() {
+        let mut row = open_row(crate::orchestration::SessionState::Ended, None);
+        let mut recovery = recovering(crate::ladder::RecoveryAction::Stopped, 0);
+        recovery.noticed_at = Some("2026-10-24T10:15:00Z".into());
+        row.recovery = Some(recovery);
+        assert_eq!(
+            session_suffix(&row),
+            " — RECOVERING: stopped 0/3 at 2026-10-24T10:20:00Z, last activity \
+             2026-10-24T10:00:00Z, next look 2026-10-24T10:40:00Z, commissioner noticed at \
+             2026-10-24T10:15:00Z"
+        );
+    }
 
     #[test]
     fn an_abandoned_slot_says_why_and_names_its_exit_instead_of_nothing_is_coming() {

@@ -143,6 +143,10 @@ pub enum RecoveryAction {
     /// The episode ended because the slot is owed no more — the sweep forgot its owed row while the
     /// episode was open (a rework, a closed thread, a withdraw; nxf 6j6v.0z5x).
     Withdrawn,
+    /// The commissioner was told of the episode's first stop — the notice of policy C (nxf
+    /// 6j6v.71gy, design 8nx4 section 6.2). Not a rung: it acts on nobody, so the reads of "the
+    /// slot's newest rung" pass over it.
+    Noticed,
 }
 
 impl RecoveryAction {
@@ -158,6 +162,7 @@ impl RecoveryAction {
             RecoveryAction::Recovered => "recovered",
             RecoveryAction::Answered => "answered",
             RecoveryAction::Withdrawn => "withdrawn",
+            RecoveryAction::Noticed => "noticed",
         }
     }
 
@@ -173,6 +178,7 @@ impl RecoveryAction {
             "recovered" => RecoveryAction::Recovered,
             "answered" => RecoveryAction::Answered,
             "withdrawn" => RecoveryAction::Withdrawn,
+            "noticed" => RecoveryAction::Noticed,
             _ => return None,
         })
     }
@@ -223,6 +229,8 @@ pub enum RungOutcome {
     EscalatedByMember,
     /// The slot was owed no more while its episode was open.
     Withdrawn,
+    /// The notice was posted into the root thread.
+    Posted,
 }
 
 impl RungOutcome {
@@ -247,6 +255,7 @@ impl RungOutcome {
             RungOutcome::Replied => "replied",
             RungOutcome::EscalatedByMember => "escalated_by_member",
             RungOutcome::Withdrawn => "withdrawn",
+            RungOutcome::Posted => "posted",
         }
     }
 
@@ -271,6 +280,7 @@ impl RungOutcome {
             "replied" => RungOutcome::Replied,
             "escalated_by_member" => RungOutcome::EscalatedByMember,
             "withdrawn" => RungOutcome::Withdrawn,
+            "posted" => RungOutcome::Posted,
             _ => return None,
         })
     }
@@ -299,6 +309,7 @@ impl RungOutcome {
             RungOutcome::Replied => "the member replied",
             RungOutcome::EscalatedByMember => "the member escalated",
             RungOutcome::Withdrawn => "the slot was owed no more",
+            RungOutcome::Posted => "the commissioner was told",
         }
     }
 }
@@ -653,21 +664,27 @@ impl ChatStore {
     }
 
     /// The slot's newest rung, `None` before its first.
+    ///
+    /// A `noticed` row is not a rung — it tells the commissioner and acts on nobody (nxf 6j6v.71gy)
+    /// — so it is passed over: a failed notice must never read as a failed rung start to retry, and
+    /// the rung a look compares against stays the one that acted on the slot.
     pub(crate) fn newest_rung(&self, thread: &str, role: &str) -> Result<Option<RecoveryLogRow>> {
         Ok(self
             .connection()
             .query_row(
                 &format!(
                     "SELECT {LOG_COLS} FROM recovery_log WHERE thread = ?1 AND role = ?2
-                      ORDER BY id DESC LIMIT 1"
+                       AND action <> ?3 ORDER BY id DESC LIMIT 1"
                 ),
-                params![thread, role],
+                params![thread, role, RecoveryAction::Noticed.as_str()],
                 log_from_row,
             )
             .optional()?)
     }
 
-    /// The newest row of every slot among `threads` — `status`'s one read.
+    /// The newest rung of every slot among `threads` — `status`'s one read. A `noticed` row is
+    /// passed over as in [`newest_rung`](Self::newest_rung): the status names the rung that acted,
+    /// and the notice beside it ([`crate::facade::RecoveryStatus::noticed_at`]).
     pub(crate) fn newest_recovery_by_threads(
         &self,
         threads: &[&str],
@@ -678,7 +695,9 @@ impl ChatStore {
         for chunk in threads.chunks(500) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let mut st = conn.prepare(&format!(
-                "SELECT {LOG_COLS} FROM recovery_log WHERE thread IN ({placeholders}) ORDER BY id"
+                "SELECT {LOG_COLS} FROM recovery_log WHERE thread IN ({placeholders})
+                    AND action <> '{noticed}' ORDER BY id",
+                noticed = RecoveryAction::Noticed.as_str()
             ))?;
             let rows = st
                 .query_map(rusqlite::params_from_iter(chunk.iter()), log_from_row)?
@@ -1372,6 +1391,7 @@ pub(crate) fn climb(
     judgement: Judgement,
 ) -> Result<Vec<FailedConsequence>> {
     let mut findings = Vec::new();
+    retry_a_failed_notice(ctx, store, row)?;
     match judgement {
         Judgement::Nothing => {}
         // **The ceiling, whatever the look judged** (nxf 6j6v.yts5): a slot waiting out a grace is
@@ -2069,6 +2089,11 @@ fn step_dead(
     )?;
     store.settle_rung(id, &outcome)?;
     store.note_stop_requested(t, h, ctx.now)?;
+    // The notice (policy C): the stop just written is the episode's first — told before the cap,
+    // so a look that also escalates writes `stopped`, `noticed`, `escalated` in that order.
+    if ctx.liveness.notice_at_first_stop && open_episode_stops(store, t, h)? == 1 {
+        post_notice(ctx, store, row)?;
+    }
     let allowed = dead_resumes(ctx);
     if row.attempts >= allowed {
         let row = store.owed_start(t, h)?.unwrap_or_else(|| row.clone());
@@ -2322,7 +2347,8 @@ pub(crate) fn retry_of_a_failed_rung(
             | RecoveryAction::Confirmed
             | RecoveryAction::Recovered
             | RecoveryAction::Answered
-            | RecoveryAction::Withdrawn,
+            | RecoveryAction::Withdrawn
+            | RecoveryAction::Noticed,
         )
         | None => Observation::NeverStarted,
     };
@@ -2778,6 +2804,189 @@ fn episode_silent_since(store: &ChatStore, t: &str, h: &str) -> Result<Option<St
         .rposition(|r| ends_an_episode(&r.action))
         .map_or(0, |i| i + 1);
     Ok(rows[open..].iter().find_map(|r| r.silent_since.clone()))
+}
+
+// ---- the notice (policy C, nxf 6j6v.71gy) ------------------------------------------------------
+
+/// The rows of the slot's OPEN episode — those written since its last end row (all of them when it
+/// has none), oldest first.
+fn open_episode_rows(store: &ChatStore, t: &str, h: &str) -> Result<Vec<RecoveryLogRow>> {
+    let mut rows = store.slot_recovery_log(t, h)?;
+    let open = rows
+        .iter()
+        .rposition(|r| ends_an_episode(&r.action))
+        .map_or(0, |i| i + 1);
+    Ok(rows.split_off(open))
+}
+
+/// How many `stopped` rows the slot's open episode holds.
+fn open_episode_stops(store: &ChatStore, t: &str, h: &str) -> Result<usize> {
+    Ok(open_episode_rows(store, t, h)?
+        .iter()
+        .filter(|r| r.action == RecoveryAction::Stopped.as_str())
+        .count())
+}
+
+/// **When the commissioner was told of the open episode's first stop** — the instant of its posted
+/// `noticed` row; `None` when none was posted. What `nxc status` shows as
+/// [`crate::facade::RecoveryStatus::noticed_at`].
+pub(crate) fn episode_noticed_at(store: &ChatStore, t: &str, h: &str) -> Result<Option<String>> {
+    Ok(open_episode_rows(store, t, h)?
+        .into_iter()
+        .rev()
+        .find(|r| {
+            r.action == RecoveryAction::Noticed.as_str()
+                && r.outcome.as_deref() == Some(RungOutcome::Posted.as_str())
+        })
+        .map(|r| r.at))
+}
+
+/// **The notice's text** (design 8nx4 section 6.2, with round 2 CQ #9's wording): who stopped which
+/// step on which thread, after how long a silence, how often it is being recovered, and that nothing
+/// is asked of the reader. `nudged` says whether the stop followed a nudge (step 4a) or came without
+/// one (step 4b — the process never produced a token since it started).
+pub fn notice_text(
+    thread: &str,
+    step: &str,
+    silent_minutes: i64,
+    stopped_at: &str,
+    dead_resumes: u32,
+    nudged: bool,
+) -> String {
+    let when = if nudged {
+        "after it was asked"
+    } else {
+        "since it started"
+    };
+    let times = if dead_resumes == 1 { "time" } else { "times" };
+    format!(
+        "NOTICE from the coordinator of thread {thread}: step {step} showed no sign of life for \
+         {silent_minutes} minutes {when} and was stopped at {stopped_at}. It is being recovered — \
+         resumed with its own transcript or re-commissioned — up to {dead_resumes} {times}; you are \
+         escalated to if it does not recover. Nothing is asked of you now."
+    )
+}
+
+/// **Post the notice for the open episode's first stop and log it** — `noticed`, outcome `posted`
+/// with the message id as its detail, or `failed: <error>`. Everything the text says is read from
+/// the episode's own rows (its first `stopped` row and whether a nudge preceded it), so the first
+/// post and a retry at a later look say the same thing.
+///
+/// Into the operation's ROOT thread, from the coordinator's identity
+/// ([`crate::channel::SUPERVISOR_HANDLE`], the supervisor that writes NEEDS REWORK and ACCEPTED),
+/// kind [`MessageKind::Notice`](crate::model::MessageKind::Notice): a plain store write that
+/// triggers no session — and, being excluded from the discharge predicate, settles nothing.
+fn post_notice(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> Result<()> {
+    let (t, h) = (row.thread.as_str(), row.role.as_str());
+    let episode = open_episode_rows(store, t, h)?;
+    let Some(stop) = episode
+        .iter()
+        .find(|r| r.action == RecoveryAction::Stopped.as_str())
+    else {
+        return Ok(());
+    };
+    let nudged = episode.iter().any(|r| {
+        r.id < stop.id
+            && r.action == RecoveryAction::Asked.as_str()
+            && r.outcome.as_deref() == Some(RungOutcome::Asked.as_str())
+    });
+    let silent_minutes = stop
+        .silent_since
+        .as_deref()
+        .and_then(|since| seconds_between(since, &stop.at))
+        .map_or(0, |secs| secs / 60);
+    let step = match store.flow_mark(t).ok().flatten() {
+        Some(mark) => mark.step,
+        None => bare(h).to_string(),
+    };
+    let body = notice_text(
+        t,
+        &step,
+        silent_minutes,
+        &stop.at,
+        dead_resumes(ctx),
+        nudged,
+    );
+    let (outcome, detail) = match post_into_the_root(ctx, store, t, &body) {
+        Ok(message_id) => (RungOutcome::Posted.as_str().to_string(), message_id),
+        Err(e) => {
+            eprintln!("warning: the notice for step {step} on thread {t} could not be posted: {e}");
+            (failed_outcome(&e.to_string()), String::new())
+        }
+    };
+    let id = store.log_rung(
+        ctx.liveness,
+        t,
+        h,
+        ctx.now,
+        RecoveryAction::Noticed,
+        row.attempts,
+        row.session.as_deref(),
+        &detail,
+        LogExtras::default(),
+    )?;
+    store.settle_rung(id, &outcome)
+}
+
+/// The notice's one way out: a [`crate::model::MessageKind::Notice`] into the root of `thread`'s
+/// operation, as the coordinator. `Ok(message id)`.
+fn post_into_the_root(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    body: &str,
+) -> Result<String> {
+    let root = store.thread_root(thread)?;
+    let channel = store
+        .thread_channel(&root)
+        .or_else(|| store.thread_channel_via_message(&root))
+        .ok_or_else(|| {
+            crate::error::NxfError::not_found(format!("the channel of thread {root}"))
+        })?;
+    let receipt = crate::facade::send(
+        store,
+        crate::facade::SendRequest {
+            now: ctx.now,
+            origin: ctx.origin,
+            actor: crate::channel::SUPERVISOR_HANDLE,
+            channel: &channel,
+            body,
+            kind: crate::model::MessageKind::Notice,
+            priority: crate::model::Priority::Normal,
+            disposition: crate::model::Disposition::NextSession,
+            thread: Some(&root),
+            refs: crate::model::Refs::default(),
+        },
+    )?;
+    Ok(receipt.message_id)
+}
+
+/// **A failed notice is tried again at the next look** — only while the policy still asks for it,
+/// the open episode holds exactly one `stopped` row, a `noticed` row of it failed and none was
+/// posted. Once the episode has a second stop, or has ended, the notice is not owed any more.
+fn retry_a_failed_notice(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) -> Result<()> {
+    if !ctx.liveness.notice_at_first_stop {
+        return Ok(());
+    }
+    let episode = open_episode_rows(store, &row.thread, &row.role)?;
+    let stops = episode
+        .iter()
+        .filter(|r| r.action == RecoveryAction::Stopped.as_str())
+        .count();
+    let noticed: Vec<&RecoveryLogRow> = episode
+        .iter()
+        .filter(|r| r.action == RecoveryAction::Noticed.as_str())
+        .collect();
+    let posted = noticed
+        .iter()
+        .any(|r| r.outcome.as_deref() == Some(RungOutcome::Posted.as_str()));
+    let failed = noticed
+        .iter()
+        .any(|r| r.outcome.as_deref().and_then(failure_of).is_some());
+    if stops == 1 && failed && !posted {
+        post_notice(ctx, store, row)?;
+    }
+    Ok(())
 }
 
 /// **Rung E**: the coordinator escalates — in the member's name, into the slot's thread, through

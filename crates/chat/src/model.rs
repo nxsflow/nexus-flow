@@ -303,11 +303,29 @@ pub enum MessageKind {
     /// (`store::answers`), so it settles no turn, starts no step, wakes no opener, and the
     /// collected answers never carry it.
     Progress,
+    /// **"Your step was stopped and is being recovered; nothing is asked of you"** — the coordinator's
+    /// word to the commissioner at the first stop of a recovery episode, written into the
+    /// operation's ROOT thread when the workspace's `[chat.liveness]` sets
+    /// `notice_at_first_stop = true` (nxf 6j6v.71gy, design 8nx4 section 6.2). Written only by the
+    /// ladder, from the coordinator's identity ([`crate::channel::SUPERVISOR_HANDLE`]).
+    ///
+    /// **It is not an answer, exactly as [`Progress`](MessageKind::Progress) is not**: the discharge
+    /// predicate excludes it (`store::answers`), so it settles no turn, starts no step, holds no
+    /// claim and wakes nobody; the collected answers never carry it. The commissioner reads it in
+    /// the root thread and in `nxc status`.
+    ///
+    /// An older binary that does not know the label fails to parse the envelope — the
+    /// store-don't-fold path (§3.1) this enum's doc names — rather than misreading it as an answer.
+    Notice,
 }
 
 /// The label [`MessageKind::Progress`] is stored as in `messages.kind` — [`KIND_ESCALATION`]'s
 /// family once more, pinned by the same test, because the discharge predicate compares against it.
 pub const KIND_PROGRESS: &str = "progress";
+
+/// The label [`MessageKind::Notice`] is stored as in `messages.kind` — beside [`KIND_PROGRESS`], and
+/// for the same reason: the discharge predicate excludes it by this spelling.
+pub const KIND_NOTICE: &str = "notice";
 
 /// **The discriminants are written out because they are an ON-DISK FORMAT, not because a reader
 /// needs the numbers** (PR review of nxf epic 6j6v.bqe0). `working_tree_queue.priority` stores
@@ -537,6 +555,21 @@ mod tests {
                 .unwrap()
                 .as_str(),
             Some(KIND_PROGRESS)
+        );
+    }
+
+    #[test]
+    fn the_notice_marker_is_the_label_the_column_stores() {
+        // nxf 6j6v.71gy. The discharge predicate EXCLUDES this label in SQL, as it does
+        // `KIND_PROGRESS`; a rename that drifted from `KIND_NOTICE` would make the coordinator's
+        // notice discharge the commissioner's own round.
+        assert_eq!(
+            serde_json::to_value(MessageKind::Notice).unwrap().as_str(),
+            Some(KIND_NOTICE)
+        );
+        assert_eq!(
+            serde_json::from_str::<MessageKind>("\"notice\"").unwrap(),
+            MessageKind::Notice
         );
     }
 

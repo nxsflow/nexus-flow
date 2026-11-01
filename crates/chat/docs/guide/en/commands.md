@@ -667,8 +667,11 @@ notice_at_first_stop = false  # true: a non-escalating notice to the commissione
 ```
 
 Without the section, or without a key, the default is `1` and `false`. `dead_resumes = 3` resumes a
-session that is found dead up to three times before the escalation; `notice_at_first_stop` is read
-and checked, and this version does not post the notice yet. The file is read at every look — each
+session that is found dead up to three times before the escalation. `notice_at_first_stop = true`
+tells the commissioner at a recovery's first stop: one `notice` in the operation's root thread,
+written by the coordinator, saying which step was stopped after how long a silence and that it is
+being recovered. Nothing is asked of the reader — the notice settles no turn, starts nothing and
+wakes nobody — and `nxc status` shows when it was posted. The file is read at every look — each
 look is a process of its own — so an edit takes effect at the next one, with no restart; an app
 that embeds the engine runs the setting of the workspace it opened, until it opens it again. `.nxs/`
 is local to the machine and not synced, so the setting is per machine: three workspaces on one

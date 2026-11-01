@@ -718,9 +718,12 @@ notice_at_first_stop = false  # true: ein nicht eskalierender Hinweis an den Auf
 ```
 
 Ohne den Abschnitt oder ohne einen Schlüssel gilt `1` und `false`. `dead_resumes = 3` nimmt eine
-Sitzung, die tot vorgefunden wird, bis zu dreimal wieder auf, bevor eskaliert wird;
-`notice_at_first_stop` wird gelesen und geprüft, und diese Version postet den Hinweis noch nicht.
-Die Datei wird bei jedem Blick gelesen — jeder Blick ist ein eigener Prozess —, eine Änderung wirkt
+Sitzung, die tot vorgefunden wird, bis zu dreimal wieder auf, bevor eskaliert wird.
+`notice_at_first_stop = true` informiert den Auftraggeber beim ersten Stopp einer Wiederherstellung:
+ein `notice` im Wurzel-Thread des Vorgangs, vom Koordinator geschrieben, der sagt, welcher Schritt
+nach wie langer Stille gestoppt wurde und dass er wiederhergestellt wird. Vom Leser wird nichts
+verlangt — der Hinweis erledigt keinen Zug, startet nichts und weckt niemanden —, und `nxc status`
+zeigt, wann er gepostet wurde. Die Datei wird bei jedem Blick gelesen — jeder Blick ist ein eigener Prozess —, eine Änderung wirkt
 also beim nächsten, ohne Neustart; eine App, die die Engine einbettet, läuft mit der Einstellung des
 Workspaces, den sie geöffnet hat, bis sie ihn erneut öffnet. `.nxs/` liegt lokal auf dem Rechner und
 wird nicht synchronisiert, die Einstellung gilt also je Rechner: drei Workspaces auf einem Rechner
