@@ -3632,7 +3632,9 @@ fn recover_then_hang_under_b_is_escalated_at_its_next_dead_verdict_without_a_sec
 /// **A second owed turn on the same slot is allowed its own resume** (round 3 CQ #2, the arbiter):
 /// the continued session answers, and within the same minute the slot is owed again — before any
 /// sweep forgets the row. The reply discharged the first turn, so its budget went with it: silent
-/// again, the session is nudged, stopped and RESUMED, not escalated at its first dead verdict.
+/// again, the session is nudged, stopped and RESUMED, not escalated at its first dead verdict. The
+/// reply came inside the first turn's episode, so that episode ends `answered` (6j6v.0z5x) and the
+/// second turn's nudge opens a new one.
 #[test]
 fn a_second_owed_turn_after_a_reply_is_allowed_its_own_resume() {
     let team = team();
@@ -3680,6 +3682,7 @@ fn a_second_owed_turn_after_a_reply_is_allowed_its_own_resume() {
             "asked",
             "stopped",
             "continued",
+            "answered",
             "asked",
             "stopped",
             "continued"
@@ -4161,4 +4164,359 @@ fn at_the_cap_a_stop_with_nothing_to_stop_or_a_failed_stop_still_escalates_at_th
         );
         assert_eq!(team.escalated_at(&thread), vec![1_620], "{answer}");
     }
+}
+
+// ---- test 10: the evidence — every row carries the policy, every episode one end (6j6v.0z5x) -----
+
+/// One `recovery_log` row with the evidence columns of design 8nx4 section 6.3, read back as the
+/// writer left them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Evidence {
+    action: String,
+    outcome: Option<String>,
+    at: i64,
+    attempt: u32,
+    detail: String,
+    policy_dead_resumes: Option<u32>,
+    policy_notice: Option<bool>,
+    silent_since: Option<String>,
+    rest_secs: Option<i64>,
+}
+
+impl Team {
+    /// The slot's whole log, oldest first, with the evidence columns.
+    fn rows(&self, thread: &str, handle: &str) -> Vec<Evidence> {
+        let store = self.store();
+        let mut st = store
+            .connection()
+            .prepare(
+                "SELECT action, outcome, at, attempt, detail, policy_dead_resumes, policy_notice,
+                        silent_since, rest_secs
+                   FROM recovery_log WHERE thread = ?1 AND role = ?2 ORDER BY id",
+            )
+            .unwrap();
+        st.query_map([thread, &self.q(handle)], |r| {
+            Ok(Evidence {
+                action: r.get(0)?,
+                outcome: r.get(1)?,
+                at: secs_of(&r.get::<_, String>(2)?),
+                attempt: r.get(3)?,
+                detail: r.get(4)?,
+                policy_dead_resumes: r.get(5)?,
+                policy_notice: r.get::<_, Option<i64>>(6)?.map(|n| n != 0),
+                silent_since: r.get(7)?,
+                rest_secs: r.get(8)?,
+            })
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    }
+}
+
+/// The rows that open an episode when none is open (round 3 CQ #1 / IR #3).
+const OPENERS: [&str; 4] = ["asked", "stopped", "continued", "recommissioned"];
+/// The four rows that end one (design 6.3; round 3 TQ #5 adds `withdrawn`).
+const ENDS: [&str; 4] = ["recovered", "answered", "escalated", "withdrawn"];
+
+/// **The episodes of one slot's log, by the ladder's own definition** (design 8nx4 section 6.3,
+/// round 3): from an opener that follows an end row or the slot's first row, up to and including
+/// the next end row; the last one may be open. A row outside every episode belongs to none.
+fn episodes_of(rows: &[Evidence]) -> Vec<Vec<Evidence>> {
+    let mut episodes = Vec::new();
+    let mut open: Option<Vec<Evidence>> = None;
+    for r in rows {
+        match open.as_mut() {
+            Some(ep) => ep.push(r.clone()),
+            None if OPENERS.contains(&r.action.as_str()) => open = Some(vec![r.clone()]),
+            None => {}
+        }
+        if ENDS.contains(&r.action.as_str()) {
+            if let Some(ep) = open.take() {
+                episodes.push(ep);
+            }
+        }
+    }
+    episodes.extend(open);
+    episodes
+}
+
+/// Every closed episode has exactly one end row, and it is its last.
+fn every_episode_ends_once_and_last(rows: &[Evidence]) {
+    for ep in episodes_of(rows) {
+        let ends = ep
+            .iter()
+            .filter(|r| ENDS.contains(&r.action.as_str()))
+            .count();
+        let last_ends = ep.last().is_some_and(|r| ENDS.contains(&r.action.as_str()));
+        assert_eq!(ends, usize::from(last_ends), "{ep:#?}");
+    }
+}
+
+/// **Test 9's plain B slot**, run to its escalation at T0+1 620 and two looks beyond.
+fn b_fixture(team: &Team) -> String {
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(team);
+    its_end_is_announced_and_followed(team, &session, &thread, 900);
+    a_continuation_that_never_speaks(team, &session, &thread, 1_020);
+    for s in (1_080..=1_740).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    thread
+}
+
+/// **Test 9's A slot, answered after resume `n`**: under `dead_resumes = 3` the silent coder is
+/// stopped and continued `n` times; 150 s into the last continuation it replies — inside the
+/// episode, which stands open since T0+600 — and the looks run on for ten minutes after it.
+fn a_fixture_answered_after_resume(team: &Team, n: usize) -> String {
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(team);
+    let mut stopped = 900;
+    for k in 1..=n {
+        its_end_is_announced_and_followed(team, &session, &thread, stopped);
+        let continued = stopped + 120;
+        a_continuation_that_never_speaks(team, &session, &thread, continued);
+        if k < n {
+            for s in ((continued + 60)..=(continued + 600)).step_by(60) {
+                team.tick(&at(s), &thread);
+            }
+            stopped = continued + 600;
+        } else {
+            team.tick(&at(continued + 60), &thread);
+            team.tick(&at(continued + 120), &thread);
+            team.reply(
+                &at(continued + 150),
+                "coder",
+                &session,
+                &thread,
+                "done: --since is in",
+            );
+            for s in ((continued + 180)..=(continued + 780)).step_by(60) {
+                team.tick(&at(s), &thread);
+            }
+        }
+    }
+    thread
+}
+
+/// **Recover-then-reply under B**: continued at T0+1 020, the continuation speaks at +1 085, the
+/// look at +1 140 ends the episode by life — and only then, at +1 300, outside any episode, the
+/// coder replies.
+fn recovered_then_replied_fixture(team: &Team) -> String {
+    let (thread, session) = continued_once(team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    follow_looks(team, &thread, "coder", 1_140, 1_200);
+    team.reply(&at(1_300), "coder", &session, &thread, "done");
+    follow_looks(team, &thread, "coder", 1_360, 1_500);
+    thread
+}
+
+/// **A rest of `minutes` confirmed** 30 s after the nudge of T0+600.
+fn confirmed_fixture(team: &Team, minutes: i64) -> String {
+    let (thread, session) = a_running_coder_with_own_life_at_t0(team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.confirm(&at(630), &session, &thread, minutes)
+        .expect("granted");
+    thread
+}
+
+/// **Test 10** (design 8nx4 section 10, minus its `facade::liveness` paragraph — cut 6's): every
+/// row carries the policy it was written under; the B slot's nudge and first stop carry S = T0,
+/// the resumed session's stop its own S (its process start, T0+1 020 — `S = max(L, P)`), the
+/// escalation the episode's S; a reply after resume 2 under A writes `answered` with `attempt` 2 as
+/// the slot's last row; a reply outside any episode writes none; a confirmation carries its rest;
+/// every episode ends exactly once, at its last row.
+#[test]
+fn every_row_carries_the_policy_and_every_episode_ends_in_exactly_one_end_row() {
+    let team_b = team();
+    let b = b_fixture(&team_b);
+    let rows = team_b.rows(&b, "coder");
+    for r in &rows {
+        assert_eq!(
+            (r.policy_dead_resumes, r.policy_notice),
+            (Some(1), Some(false)),
+            "{r:?}"
+        );
+    }
+    let judged: Vec<(&str, i64, Option<&str>)> = rows
+        .iter()
+        .map(|r| (r.action.as_str(), r.at, r.silent_since.as_deref()))
+        .collect();
+    let (t0, p) = (at(0), at(1_020));
+    assert_eq!(
+        judged,
+        [
+            ("asked", 600, Some(t0.as_str())),
+            ("stopped", 900, Some(t0.as_str())),
+            ("continued", 1_020, None),
+            ("stopped", 1_620, Some(p.as_str())),
+            ("escalated", 1_620, Some(t0.as_str())),
+        ],
+        "the escalation is the slot's last row: {rows:#?}"
+    );
+    every_episode_ends_once_and_last(&rows);
+    assert_eq!(episodes_of(&rows).len(), 1);
+
+    let team_a = team();
+    let a = a_fixture_answered_after_resume(&team_a, 2);
+    let rows = team_a.rows(&a, "coder");
+    for r in &rows {
+        assert_eq!(
+            (r.policy_dead_resumes, r.policy_notice),
+            (Some(3), Some(false)),
+            "{r:?}"
+        );
+    }
+    let last = rows.last().cloned().unwrap();
+    assert_eq!(
+        (
+            last.action.as_str(),
+            last.attempt,
+            last.outcome.as_deref(),
+            last.at
+        ),
+        ("answered", 2, Some("replied"), 1_890),
+        "{rows:#?}"
+    );
+    let reply = team_a
+        .store()
+        .messages_in_thread(&a)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "done: --since is in")
+        .expect("the reply");
+    assert_eq!(
+        last.detail, reply.message_id,
+        "the detail is the reply's message id"
+    );
+    every_episode_ends_once_and_last(&rows);
+    assert_eq!(team_a.ladder(&a, "coder"), None, "the sweep forgot the row");
+
+    let team_r = team();
+    let r = recovered_then_replied_fixture(&team_r);
+    let rows = team_r.rows(&r, "coder");
+    assert!(
+        !rows.iter().any(|x| x.action == "answered"),
+        "no `answered` outside an episode: {rows:#?}"
+    );
+    let episodes = episodes_of(&rows);
+    let shape: Vec<Vec<&str>> = episodes
+        .iter()
+        .map(|ep| ep.iter().map(|x| x.action.as_str()).collect())
+        .collect();
+    assert_eq!(shape, [["asked", "stopped", "continued", "recovered"]]);
+    for ep in &episodes {
+        let recovered = ep.iter().filter(|x| x.action == "recovered").count();
+        if ep.last().is_some_and(|x| x.action == "recovered") {
+            assert_eq!(recovered, 1, "{ep:?}");
+        } else {
+            assert_eq!(recovered, 0, "{ep:?}");
+        }
+    }
+    every_episode_ends_once_and_last(&rows);
+
+    let team_c = team();
+    let c = confirmed_fixture(&team_c, 20);
+    let rows = team_c.rows(&c, "coder");
+    let confirmed = rows.iter().find(|x| x.action == "confirmed").unwrap();
+    assert_eq!(confirmed.rest_secs, Some(1_200));
+    assert_eq!(
+        (confirmed.policy_dead_resumes, confirmed.policy_notice),
+        (Some(1), Some(false))
+    );
+}
+
+/// **Round 2 IR #3, the `answered` half**: admitting a reply never depends on the log. Inside an
+/// episode (nudged at T0+600), with a store whose `recovery_log` refuses every insert, the reply is
+/// posted and discharges its slot — the episode's fields zeroed — and its receipt carries one
+/// warning naming the `answered` row; no later row stands in for the one that failed.
+#[test]
+fn a_reply_whose_answered_row_cannot_be_written_is_still_admitted_with_a_warning() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    assert_eq!(
+        team.owed(&thread, "coder", "recovery_started_at"),
+        Some(at(600))
+    );
+    team.sql(
+        "CREATE TRIGGER refuse_the_log BEFORE INSERT ON recovery_log
+         BEGIN SELECT RAISE(ABORT, 'the log refuses the row (injected)'); END;",
+    );
+
+    let receipt = team.reply_receipt(&at(700), "coder", &session, &thread, "done");
+
+    assert!(receipt.posted, "the reply is admitted");
+    assert!(
+        team.messages(&thread).iter().any(|(_, _, b)| b == "done"),
+        "the answer is in the thread"
+    );
+    let warnings: Vec<_> = receipt
+        .warnings
+        .iter()
+        .filter(|w| w.detail.contains("`answered`"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{:?}", receipt.warnings);
+    assert_eq!(warnings[0].class, ConsequenceClass::RecoveryFailed);
+    assert_eq!(warnings[0].thread.as_deref(), Some(thread.as_str()));
+    assert!(
+        warnings[0].detail.contains("(injected)"),
+        "{}",
+        warnings[0].detail
+    );
+    assert_eq!(
+        (
+            team.owed(&thread, "coder", "recovery_started_at"),
+            team.owed(&thread, "coder", "asked_at")
+        ),
+        (None, None),
+        "the slot is discharged and its episode zeroed"
+    );
+    team.sql("DROP TRIGGER refuse_the_log;");
+    team.tick(&at(760), &thread);
+    let actions: Vec<String> = team
+        .rows(&thread, "coder")
+        .into_iter()
+        .map(|r| r.action)
+        .collect();
+    assert_eq!(actions, ["asked"], "no row records the failed one");
+}
+
+/// **Round 3 TQ #5 — the fourth end**: nudged at T0+600, the episode is open when the owner
+/// withdraws the round at T0+650; the slot is owed no more, and the next look's sweep writes
+/// `withdrawn` (outcome `withdrawn`, with the policy) as the slot's last row before it forgets the
+/// owed row.
+#[test]
+fn an_open_episode_whose_obligation_is_withdrawn_ends_with_a_withdrawn_row() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    team.tick(&at(600), &thread);
+    team.with(&at(650), "owner", None, |ctx, store| {
+        orchestration::withdraw(ctx, store, &thread)
+    })
+    .expect("withdraw");
+    team.tick(&at(660), &thread);
+    team.tick(&at(720), &thread);
+    let rows = team.rows(&thread, "coder");
+    let shape: Vec<(&str, Option<&str>, i64)> = rows
+        .iter()
+        .map(|r| (r.action.as_str(), r.outcome.as_deref(), r.at))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("asked", Some("asked"), 600),
+            ("withdrawn", Some("withdrawn"), 660)
+        ],
+        "{rows:#?}"
+    );
+    let last = rows.last().unwrap();
+    assert_eq!(
+        (last.policy_dead_resumes, last.policy_notice, last.attempt),
+        (Some(1), Some(false), 0)
+    );
+    assert_eq!(team.ladder(&thread, "coder"), None, "the owed row is gone");
+    every_episode_ends_once_and_last(&rows);
 }

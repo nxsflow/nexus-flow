@@ -12965,12 +12965,14 @@ fn debug_assert_one_place(_warnings: &[FailedConsequence], _wake_skipped: Option
 /// release rather than after, because one contract across all four sites is worth more than a
 /// compatibility switch that would leave two.
 pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<ReplyReceipt> {
+    let escalated = req.kind == MessageKind::Escalation;
     let mut receipt = reply_routed(ctx, store, req)?;
     if receipt.posted {
         if let Some(thread) = receipt.thread_id.clone() {
+            let message = receipt.message_id.clone().unwrap_or_default();
             receipt
                 .warnings
-                .extend(after_an_answer(ctx, store, &thread));
+                .extend(after_an_answer(ctx, store, &thread, &message, escalated));
         }
     }
     Ok(receipt)
@@ -12987,10 +12989,22 @@ pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<Repl
 /// - **the owed turn is over when the reply discharged the slot**: ONE update zeroes the turn's
 ///   budget and every field of its episode, so a turn owed again on the same slot — before the
 ///   sweep forgets the row — starts from nothing (round 3 CQ #2 / TQ #3 / IR #2).
+/// - **an open episode ends by the answer** (nxf 6j6v.0z5x, design 8nx4 section 6.3): at that same
+///   site and in that same step, FIRST the `answered` row — written from the owed row as it stood
+///   before the zeroing, with its `attempts` (the resumes spent), outcome `replied` or
+///   `escalated_by_member`, the reply's message id as its detail — THEN the zeroing. Only while
+///   `recovery_started_at` is set: a reply outside an episode writes no row.
 ///
-/// Both are consequences: an `Err` is a receipt warning, and the sidecar's own drain also removes
-/// an ask file (round 2 IR #3).
-fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<FailedConsequence> {
+/// All three are consequences: an `Err` is a receipt warning, and the sidecar's own drain also
+/// removes an ask file (round 2 IR #3). A failed `answered` row is said once and stands for
+/// itself — no later row records it, and the zeroing runs regardless.
+fn after_an_answer(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    message: &str,
+    escalated: bool,
+) -> Vec<FailedConsequence> {
     let mut findings = Vec::new();
     let role = ctx.caller_handle();
     // Only a slot with a nudge on record has one to take back: a reply on a slot nobody nudged
@@ -13019,6 +13033,11 @@ fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<Failed
         .map(|q| q.is_none_or(|q| !crate::stranded::outstanding_has(&q.outstanding, &role)));
     match discharged {
         Ok(true) => {
+            if let Some(finding) =
+                the_episode_ends_by_the_answer(ctx, store, thread, message, escalated)
+            {
+                findings.push(finding);
+            }
             if let Err(e) = store.end_the_owed_turn(thread, &role) {
                 findings.push(FailedConsequence::stranded(
                     ConsequenceClass::RecoveryFailed,
@@ -13038,6 +13057,63 @@ fn after_an_answer(ctx: &Ctx, store: &mut ChatStore, thread: &str) -> Vec<Failed
         ),
     }
     findings
+}
+
+/// **The `answered` row of a reply that discharged its slot inside an episode** (nxf 6j6v.0z5x) —
+/// `None` when it was written or there was no open episode to end; the finding when the owed row
+/// could not be read or the row could not be written. Never decides whether the reply stands.
+fn the_episode_ends_by_the_answer(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+    message: &str,
+    escalated: bool,
+) -> Option<FailedConsequence> {
+    use crate::ladder::{LogExtras, RecoveryAction, RungOutcome};
+    let role = ctx.caller_handle();
+    let written = store.owed_start(thread, &role).and_then(|row| {
+        let Some(row) = row.filter(|r| r.recovery_started_at.is_some()) else {
+            return Ok(());
+        };
+        // **Rung E speaking is not an answer**: its escalation is posted in the member's name
+        // through this same path while its own `escalated` row — the episode's end — is still in
+        // flight (`ladder::escalate` settles it once the record stands). A second end row would
+        // split one episode in two.
+        let rung_e = store
+            .newest_rung(thread, &role)?
+            .is_some_and(|r| r.action == RecoveryAction::Escalated.as_str() && r.outcome.is_none());
+        if rung_e {
+            return Ok(());
+        }
+        let outcome = if escalated {
+            RungOutcome::EscalatedByMember
+        } else {
+            RungOutcome::Replied
+        };
+        let id = store.log_rung(
+            ctx.liveness,
+            thread,
+            &role,
+            ctx.now,
+            RecoveryAction::Answered,
+            row.attempts,
+            ctx.session.or(row.session.as_deref()),
+            message,
+            LogExtras::default(),
+        )?;
+        store.settle_rung_as(id, outcome)
+    });
+    written.err().map(|e| {
+        FailedConsequence::stranded(
+            ConsequenceClass::RecoveryFailed,
+            Some(thread),
+            ctx.session,
+            format!(
+                "the reply is posted and answers the slot, but the `answered` row that ends its \
+                 recovery episode could not be written to the ladder's log: {e}"
+            ),
+        )
+    })
 }
 
 /// [`reply`] up to and including its routing — everything but what the answer does to its
