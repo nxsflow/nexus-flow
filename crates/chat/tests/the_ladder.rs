@@ -2205,6 +2205,51 @@ fn resume_over_a_claimed_slot_answers_being_recovered_with_the_renewal_horizon()
     assert_eq!(team.worker.of("coder").len(), 1, "nothing started");
 }
 
+/// **Under C the refusal names the rung that acted, not the notice** (review pass 1, Integrity #1):
+/// the slot's log ends `stopped`, then `noticed`; `nxc resume` over its claim answers
+/// `BeingRecovered` with `stopped` as its action.
+#[test]
+fn resume_over_a_claimed_slot_names_the_stop_not_the_notice_beside_it() {
+    let team = team();
+    let thread = team.commission(T0, "coder", "build").thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.bound_with_transcript(&session, 1, &at(5));
+    team.with(&at(10), "service", None, |ctx, store| {
+        orchestration::session_interrupted(ctx, store, &session, "five_hour", None, "quota")
+    })
+    .unwrap();
+    let role = team.q("coder");
+    team.sql(&format!(
+        "UPDATE owed_starts SET recovering_until = '{until}', attempts = 1 WHERE thread = '{thread}';
+         INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail)
+           VALUES ('{thread}', '{role}', '{a}', 'stopped', 1, '{session}', 'stop_requested', ''),
+                  ('{thread}', '{role}', '{a}', 'noticed', 1, '{session}', 'posted', 'm-1');",
+        until = at(70),
+        a = at(15),
+    ));
+    let r = team
+        .with(&at(20), "owner", None, |ctx, store| {
+            orchestration::resume_interrupted(
+                ctx,
+                store,
+                orchestration::ResumeRequest {
+                    scope: orchestration::ResumeScope::Thread(&thread),
+                    force: true,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        r.outcome,
+        orchestration::ResumeOutcome::BeingRecovered {
+            attempt: 1,
+            of: 3,
+            action: Some(nexus_chat::ladder::RecoveryAction::Stopped),
+            retry_at: at(70),
+        }
+    );
+}
+
 /// A recovering slot is where its operation hangs — `hangs_at` names it, with the rung.
 #[test]
 fn a_recovering_slot_is_where_its_operation_hangs() {
@@ -2937,6 +2982,22 @@ fn a_coder_silent_from_t0_stopped_at_fifteen(team: &Team) -> (String, String) {
     (thread, session)
 }
 
+/// **Test 9's A path from the first stop at T0+900 on**: three continuations that never speak, each
+/// stopped 600 s after it starts — at +1 620, +2 340 and +3 060, where the fourth dead verdict
+/// escalates under `dead_resumes = 3`.
+fn the_a_path_after_the_first_stop(team: &Team, session: &str, thread: &str) {
+    let mut stopped = 900;
+    for _ in 0..3 {
+        its_end_is_announced_and_followed(team, session, thread, stopped);
+        let continued = stopped + 120;
+        a_continuation_that_never_speaks(team, session, thread, continued);
+        for s in ((continued + 60)..=(continued + 600)).step_by(60) {
+            team.tick(&at(s), thread);
+        }
+        stopped = continued + 600;
+    }
+}
+
 /// **Test 9's A path** (design 8nx4 section 2, 6.1): under `dead_resumes = 3` a session that never
 /// speaks again is resumed three times and escalated at its fourth dead verdict — `continued` at
 /// +1 020, +1 740, +2 460; `stopped` at +900, +1 620, +2 340, +3 060; `escalated` at +3 060; no
@@ -2946,16 +3007,7 @@ fn under_a_a_silent_session_is_resumed_three_times_and_escalated_at_the_fourth_d
     let team = team();
     team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
     let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
-    let mut stopped = 900;
-    for _ in 0..3 {
-        its_end_is_announced_and_followed(&team, &session, &thread, stopped);
-        let continued = stopped + 120;
-        a_continuation_that_never_speaks(&team, &session, &thread, continued);
-        for s in ((continued + 60)..=(continued + 600)).step_by(60) {
-            team.tick(&at(s), &thread);
-        }
-        stopped = continued + 600;
-    }
+    the_a_path_after_the_first_stop(&team, &session, &thread);
     let log = team.log_at(&thread, "coder");
     let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
     assert_eq!(
@@ -2983,6 +3035,364 @@ fn under_a_a_silent_session_is_resumed_three_times_and_escalated_at_the_fourth_d
         !body.contains("[chat.liveness] setting was invalid"),
         "a valid policy is not reported as fallen back:\n{body}"
     );
+}
+
+// ---- the notice (policy C, nxf 6j6v.71gy) ---------------------------------------------------------
+
+/// The `notice` messages of `thread`, oldest first: (message id, sender, body).
+fn notices_in(team: &Team, thread: &str) -> Vec<(String, String, String)> {
+    team.store()
+        .messages_in_thread(thread)
+        .expect("messages")
+        .into_iter()
+        .filter(|m| m.kind == "notice")
+        .map(|m| (m.message_id, m.sender, m.body))
+        .collect()
+}
+
+/// The text the C path's first stop posts for the coder of `thread`, silent from T0 and nudged, under
+/// `dead_resumes = 3` (round 2 CQ #9's wording).
+fn the_coders_notice(thread: &str) -> String {
+    format!(
+        "NOTICE from the coordinator of thread {thread}: step coder showed no sign of life for 15 \
+         minutes after it was asked and was stopped at {}. It is being recovered — resumed with its \
+         own transcript or re-commissioned — up to 3 times; you are escalated to if it does not \
+         recover. Nothing is asked of you now.",
+        at(900)
+    )
+}
+
+/// **Test 9's C path** (design 8nx4 sections 2 and 6.2): under `dead_resumes = 3` with
+/// `notice_at_first_stop = true` the look at T0+900 writes `asked`, `stopped` and `noticed`
+/// (`posted`, its detail the notice's message id), and posts exactly one `notice` into the root
+/// thread, written by the coordinator's identity. It starts nothing and changes no quorum: the coder
+/// still owes the round. `nxc status` names the notice's instant. The rest is the A path unchanged —
+/// escalated at T0+3 060 with one `noticed` row in total.
+#[test]
+fn under_c_the_first_stop_posts_one_notice_into_the_root_thread_and_moves_nothing() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    assert_eq!(
+        team.log_at(&thread, "coder"),
+        vec![
+            ("asked".into(), Some("asked".into()), 600),
+            ("stopped".into(), Some("stop_requested".into()), 900),
+            ("noticed".into(), Some("posted".into()), 900),
+        ]
+    );
+    let root = team.store().thread_root(&thread).expect("root");
+    let notices = notices_in(&team, &root);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    let (id, sender, body) = &notices[0];
+    assert_eq!(*body, the_coders_notice(&thread));
+    assert_eq!(
+        *sender,
+        team.q(nexus_chat::channel::SUPERVISOR_HANDLE),
+        "written by the coordinator's identity"
+    );
+    let noticed = team.rows(&thread, "coder").pop().expect("the noticed row");
+    assert_eq!(noticed.detail, *id, "the detail is the notice's message id");
+    assert_eq!(
+        (noticed.policy_dead_resumes, noticed.policy_notice),
+        (Some(3), Some(true))
+    );
+    // It starts nothing and settles nothing: one start of the coder, and the coder still owes.
+    assert_eq!(team.worker.of("coder").len(), 1, "nothing started by it");
+    let quorum = team
+        .store()
+        .thread_quorum(&root, &at(900))
+        .expect("quorum")
+        .expect("the root has a quorum");
+    assert!(!quorum.complete, "{quorum:?}");
+    assert_eq!(quorum.outstanding, vec![team.q("coder")], "{quorum:?}");
+    // `nxc status` names it.
+    let recovery = team
+        .status_of(&at(900), &thread)
+        .recovery
+        .expect("the slot is recovering");
+    assert_eq!(recovery.noticed_at, Some(at(900)));
+    assert_eq!(
+        recovery.action,
+        nexus_chat::ladder::RecoveryAction::Stopped,
+        "the status names the rung that acted, the notice beside it"
+    );
+
+    the_a_path_after_the_first_stop(&team, &session, &thread);
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("noticed", 900),
+            ("continued", 1_020),
+            ("stopped", 1_620),
+            ("continued", 1_740),
+            ("stopped", 2_340),
+            ("continued", 2_460),
+            ("stopped", 3_060),
+            ("escalated", 3_060),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(team.escalated_at(&thread), vec![3_060]);
+    assert_eq!(notices_in(&team, &root).len(), 1, "one notice in total");
+}
+
+/// **Step 4b's notice**: a session whose process started and never produced a token (its pulse
+/// `NoneYet`, nothing of its own in its transcript) is stopped without a nudge — so its notice says
+/// it showed no sign of life "since it started", never "after it was asked".
+#[test]
+fn under_c_a_stop_without_a_nudge_says_since_it_started() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let thread = team
+        .commission(T0, "coder", "Add a --since flag.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.pulse(&session, Pulse::NoneYet);
+    team.turn(&session, &thread, &at(0));
+    for s in (60..=900).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    assert!(
+        !log.iter().any(|(a, _, _)| a == "asked"),
+        "no nudge: {log:?}"
+    );
+    let stopped = log
+        .iter()
+        .find(|(a, _, _)| a == "stopped")
+        .map(|(_, _, t)| *t)
+        .expect("a stop");
+    let root = team.store().thread_root(&thread).expect("root");
+    let notices = notices_in(&team, &root);
+    assert_eq!(notices.len(), 1, "{log:?}");
+    assert_eq!(
+        notices[0].2,
+        format!(
+            "NOTICE from the coordinator of thread {thread}: step coder showed no sign of life for \
+             {} minutes since it started and was stopped at {}. It is being recovered — resumed \
+             with its own transcript or re-commissioned — up to 3 times; you are escalated to if \
+             it does not recover. Nothing is asked of you now.",
+            stopped / 60,
+            at(stopped)
+        )
+    );
+}
+
+/// **Under A no notice is posted** — the switch is the policy's: the A path's first stop writes no
+/// `noticed` row and the root thread holds no `notice`.
+#[test]
+fn without_the_switch_the_first_stop_posts_no_notice() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
+    let (thread, _session) = a_coder_silent_from_t0_stopped_at_fifteen(&team);
+    assert!(
+        !team
+            .log_at(&thread, "coder")
+            .iter()
+            .any(|(a, _, _)| a == "noticed"),
+        "{:?}",
+        team.log_at(&thread, "coder")
+    );
+    let root = team.store().thread_root(&thread).expect("root");
+    assert!(notices_in(&team, &root).is_empty());
+    assert_eq!(
+        team.status_of(&at(900), &thread)
+            .recovery
+            .expect("recovering")
+            .noticed_at,
+        None
+    );
+}
+
+impl Team {
+    /// [`Team::tick`] with every message post of the look refused as a store another process holds
+    /// refuses it (`ChatStore::refuse_next_posts`, the injection of nxf 6j6v.3eqa) — the ladder's own
+    /// log rows are written as ever.
+    fn tick_refusing_posts(&self, now: &str, thread: &str) {
+        self.with(now, "service", None, |ctx, store| {
+            store.refuse_next_posts(ChatStore::EVERY_POST);
+            orchestration::tick(ctx, store, TickRequest { thread_id: thread })
+        })
+        .expect("tick");
+    }
+}
+
+/// **A failed notice is retried at the next look, and never after it is posted** (design 6.2): the
+/// post at T0+900 is refused — `noticed` with `failed: …`; the look at T0+960, the episode still
+/// holding exactly one `stopped` row, posts it — `noticed` `posted`; the looks after that write no
+/// third.
+#[test]
+fn a_failed_notice_is_retried_while_the_episode_has_one_stopped_row() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=840).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    team.tick_refusing_posts(&at(900), &thread);
+    let log = team.log_at(&thread, "coder");
+    let (action, outcome, when) = log.last().cloned().expect("a row");
+    assert_eq!((action.as_str(), when), ("noticed", 900), "{log:?}");
+    assert!(
+        outcome
+            .as_deref()
+            .is_some_and(|o| o.starts_with("failed: ")),
+        "{log:?}"
+    );
+    let root = team.store().thread_root(&thread).expect("root");
+    assert!(notices_in(&team, &root).is_empty(), "nothing was posted");
+    for s in (960..=1_140).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let noticed: Vec<(Option<String>, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .filter(|(a, _, _)| a == "noticed")
+        .map(|(_, o, t)| (o, t))
+        .collect();
+    assert_eq!(noticed.len(), 2, "{noticed:?}");
+    assert_eq!(noticed[1], (Some("posted".into()), 960), "{noticed:?}");
+    assert_eq!(notices_in(&team, &root).len(), 1);
+}
+
+/// **A failed notice is not retried once the episode has a second `stopped` row**: every post is
+/// refused from T0+900 until the further SIGTERM of T0+1 200 has written the episode's second
+/// `stopped` row; from then on — the posts no longer refused — no look tries it again.
+#[test]
+fn a_failed_notice_is_not_retried_after_a_second_stopped_row() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=840).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    for s in (900..=1_200).step_by(60) {
+        team.tick_refusing_posts(&at(s), &thread);
+    }
+    for s in (1_260..=1_380).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    let stopped: Vec<i64> = log
+        .iter()
+        .filter(|(a, _, _)| a == "stopped")
+        .map(|(_, _, t)| *t)
+        .collect();
+    assert_eq!(stopped, [900, 1_200], "{log:?}");
+    // Tried at every look while the episode held one stop — the look at T0+1 200 included, whose
+    // retry runs before its own further SIGTERM — and never after the second `stopped` row.
+    let second_stop = log
+        .iter()
+        .rposition(|(a, _, _)| a == "stopped")
+        .expect("the second stop");
+    assert!(
+        !log[second_stop..].iter().any(|(a, _, _)| a == "noticed"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter()
+            .filter(|(a, _, _)| a == "noticed")
+            .all(|(_, o, _)| o.as_deref().is_some_and(|o| o.starts_with("failed: "))),
+        "{log:?}"
+    );
+    let root = team.store().thread_root(&thread).expect("root");
+    assert!(notices_in(&team, &root).is_empty(), "{log:?}");
+}
+
+/// **A failed notice is not a failed rung**: the slot's newest row is the `noticed` row the refused
+/// post of T0+900 wrote, and the process has ended at the SIGTERM. The judge's "retry a failed rung"
+/// passes over it — the slot is continued at T0+1 020 as ever, never re-commissioned at T0+960 —
+/// and the notice is posted at the look of T0+960.
+#[test]
+fn a_failed_notice_is_never_taken_for_a_failed_rung() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=840).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    team.tick_refusing_posts(&at(900), &thread);
+    team.worker.stop(&session);
+    team.ended(&at(900), &session, Some("told to stop (SIGTERM)"));
+    team.tick(&at(960), &thread);
+    team.tick(&at(1_020), &thread);
+    let log = team.log_at(&thread, "coder");
+    let actions: Vec<(&str, i64)> = log.iter().map(|(a, _, t)| (a.as_str(), *t)).collect();
+    assert_eq!(
+        actions,
+        [
+            ("asked", 600),
+            ("stopped", 900),
+            ("noticed", 900),
+            ("noticed", 960),
+            ("continued", 1_020)
+        ],
+        "{log:?}"
+    );
+    assert_eq!(log[3].1.as_deref(), Some("posted"), "{log:?}");
+}
+
+/// **The notice goes into the ROOT thread, not the slot's**: a verifier commissioned through a
+/// channel serves a member thread below the root. At its first stop under C the notice lands in the
+/// root — the thread the commissioner opened — and the member thread carries none; the flow does not
+/// move on and the round stays open.
+#[test]
+fn under_c_a_channel_members_notice_lands_in_the_root_thread_and_moves_no_flow() {
+    let team = team();
+    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = true");
+    let root = team.commission(T0, "quick", "verify it").thread_id;
+    let verifier = team.worker.last("verifier");
+    let slot = verifier.reply_thread.clone().expect("the member thread");
+    let session = verifier.internal_session.clone();
+    assert_ne!(slot, root);
+    team.worker.run(&session);
+    team.turn(&session, &slot, &at(0));
+    team.bound_with_transcript(&session, 1, &at(0));
+    team.pulse(&session, Pulse::At(at(0)));
+    for s in (60..=900).step_by(60) {
+        team.tick(&at(s), &root);
+    }
+    let log = team.log_at(&slot, "verifier");
+    assert_eq!(
+        log.iter()
+            .map(|(a, _, t)| (a.as_str(), *t))
+            .collect::<Vec<_>>(),
+        [("asked", 600), ("stopped", 900), ("noticed", 900)],
+        "{log:?}"
+    );
+    assert_eq!(team.store().thread_root(&slot).expect("root"), root);
+    let notices = notices_in(&team, &root);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].2.starts_with(&format!(
+            "NOTICE from the coordinator of thread {slot}: step verifier "
+        )),
+        "{}",
+        notices[0].2
+    );
+    assert!(
+        notices_in(&team, &slot).is_empty(),
+        "not in the member thread"
+    );
+    assert!(
+        team.worker.of("finisher").is_empty(),
+        "the flow did not move on"
+    );
+    let quorum = team
+        .store()
+        .thread_quorum(&root, &at(900))
+        .expect("quorum")
+        .expect("the root has a quorum");
+    assert!(!quorum.complete, "{quorum:?}");
 }
 
 /// **A policy changed between two looks judges the next one** (design 6.1; round 2 CQ #7 / TQ #4):
@@ -3606,7 +4016,12 @@ fn continued_once(team: &Team) -> (String, String) {
     team.ended(&at(900), &session, None);
     team.tick(&at(960), &thread);
     team.tick(&at(1_020), &thread);
-    assert_eq!(team.log(&thread, "coder")[2].0, "continued");
+    let log = team.log(&thread, "coder");
+    assert_eq!(
+        log.last().map(|r| r.0.as_str()),
+        Some("continued"),
+        "{log:?}"
+    );
     team.worker.run(&session);
     team.pulse(&session, Pulse::NoneYet);
     team.turn(&session, &thread, &at(1_020));
@@ -3651,6 +4066,71 @@ fn recover_then_hang_under_b_is_escalated_at_its_next_dead_verdict_without_a_sec
         )
         .unwrap();
     assert_eq!(attempt, 1);
+}
+
+/// **A look that stops AND escalates writes `stopped`, `noticed`, `escalated`, in that order**
+/// (design 8nx4 section 4 step 5; review pass 1, Test Quality #3): recover-then-hang under
+/// `dead_resumes = 1` with the notice on. The second episode's first stop at +1 985 finds the owed
+/// turn's one resume spent, so that look is also the escalation — and the notice comes between.
+#[test]
+fn a_first_stop_that_also_escalates_writes_stopped_noticed_escalated() {
+    let team = team();
+    team.set_liveness("dead_resumes = 1\nnotice_at_first_stop = true");
+    let (thread, session) = continued_once(&team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    follow_looks(&team, &thread, "coder", 1_140, 2_100);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("asked".into(), 600),
+            ("stopped".into(), 900),
+            ("noticed".into(), 900),
+            ("continued".into(), 1_020),
+            ("recovered".into(), 1_140),
+            ("asked".into(), 1_685),
+            ("stopped".into(), 1_985),
+            ("noticed".into(), 1_985),
+            ("escalated".into(), 1_985),
+        ]
+    );
+}
+
+/// **The notice never gates the cap** (review pass 1, Integrity #2): the same look, with the
+/// second episode's `noticed` row refused by the store. The stop is still followed by the
+/// escalation at +1 985 — the notice's own bookkeeping failing costs the notice, nothing else.
+#[test]
+fn a_notice_whose_log_row_fails_still_lets_the_look_escalate() {
+    let team = team();
+    team.set_liveness("dead_resumes = 1\nnotice_at_first_stop = true");
+    let (thread, session) = continued_once(&team);
+    team.entry(&session, "assistant", &at(1_085), "{}");
+    team.sql(
+        "CREATE TRIGGER refuse_the_noticed_row BEFORE INSERT ON recovery_log
+         WHEN NEW.action = 'noticed'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error (injected)'); END;",
+    );
+    follow_looks(&team, &thread, "coder", 1_140, 2_100);
+    let rows: Vec<(String, i64)> = team
+        .log_at(&thread, "coder")
+        .into_iter()
+        .map(|(a, _, t)| (a, t))
+        .skip(4)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("recovered".into(), 1_140),
+            ("asked".into(), 1_685),
+            ("stopped".into(), 1_985),
+            ("escalated".into(), 1_985),
+        ]
+    );
+    assert_eq!(team.escalated_at(&thread), vec![1_985]);
 }
 
 /// **A second owed turn on the same slot is allowed its own resume** (round 3 CQ #2, the arbiter):
