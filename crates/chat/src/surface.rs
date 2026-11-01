@@ -1158,6 +1158,7 @@ pub fn confirm_rest(
     let granted_minutes = granted / 60;
     store
         .log_rung(
+            ctx.liveness,
             thread,
             &role,
             ctx.now,
@@ -1165,6 +1166,10 @@ pub fn confirm_rest(
             row.attempts,
             Some(session),
             &format!("rest {granted_minutes} min until {until}"),
+            crate::ladder::LogExtras {
+                silent_since: None,
+                rest_secs: Some(granted),
+            },
         )
         .and_then(|id| store.settle_rung_as(id, crate::ladder::RungOutcome::Granted))?;
     let clamped = granted < asked;

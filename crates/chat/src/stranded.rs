@@ -143,7 +143,13 @@ pub(crate) const STRANDED_DDL: &str = "
         session TEXT,
         outcome TEXT,
         detail  TEXT    NOT NULL,
-        retries INTEGER NOT NULL DEFAULT 0
+        retries INTEGER NOT NULL DEFAULT 0,
+        -- The evidence (nxf 6j6v.0z5x, design 8nx4 section 6.3): the policy in force when the row
+        -- was written, the silence it judged, the rest it granted. NULL on rows older than that.
+        policy_dead_resumes INTEGER,
+        policy_notice       INTEGER,
+        silent_since        TEXT,
+        rest_secs           INTEGER
     );
     CREATE INDEX IF NOT EXISTS recovery_log_by_slot ON recovery_log(thread, role, id);
     -- The obligation a queued trigger carried when it met the working-copy queue (nxf 6j6v.558h,
@@ -171,6 +177,26 @@ pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Resul
             "recovery_log",
             "retries",
             "ALTER TABLE recovery_log ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "recovery_log",
+            "policy_dead_resumes",
+            "ALTER TABLE recovery_log ADD COLUMN policy_dead_resumes INTEGER;",
+        ),
+        (
+            "recovery_log",
+            "policy_notice",
+            "ALTER TABLE recovery_log ADD COLUMN policy_notice INTEGER;",
+        ),
+        (
+            "recovery_log",
+            "silent_since",
+            "ALTER TABLE recovery_log ADD COLUMN silent_since TEXT;",
+        ),
+        (
+            "recovery_log",
+            "rest_secs",
+            "ALTER TABLE recovery_log ADD COLUMN rest_secs INTEGER;",
         ),
         (
             "stranded_sessions",
@@ -2080,6 +2106,40 @@ pub(crate) fn reconcile_stranded_sessions(
     findings
 }
 
+/// **The fourth end of an episode** (nxf 6j6v.0z5x, round 3 TQ #5): the slot is owed no more —
+/// a rework, a closed thread, a withdraw — while its episode is OPEN (`recovery_started_at` set),
+/// so the `withdrawn` row is written before the owed row goes. An answered slot (zeroed by
+/// `reply`) and an escalated one (cleared by rung E) have no open episode here and get none.
+///
+/// Best-effort: the sweep has no receipt to carry a finding on, so a failed insert is a warning on
+/// stderr and the owed row is forgotten all the same — the log then shows that episode as open.
+fn the_episode_ends_withdrawn(ctx: &Ctx, store: &mut ChatStore, row: &OwedStart) {
+    use crate::ladder::{LogExtras, RecoveryAction, RungOutcome};
+    if row.recovery_started_at.is_none() {
+        return;
+    }
+    let written = store
+        .log_rung(
+            ctx.liveness,
+            &row.thread,
+            &row.role,
+            ctx.now,
+            RecoveryAction::Withdrawn,
+            row.attempts,
+            row.session.as_deref(),
+            "the thread no longer owes this slot an answer",
+            LogExtras::default(),
+        )
+        .and_then(|id| store.settle_rung_as(id, RungOutcome::Withdrawn));
+    if let Err(e) = written {
+        eprintln!(
+            "warning: the open recovery episode of {} on thread {} ended because the slot is owed \
+             no more, but its `withdrawn` row could not be written: {e}",
+            row.role, row.thread
+        );
+    }
+}
+
 fn judge_candidates(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -2105,6 +2165,7 @@ fn judge_candidates(
         if owes {
             live.push(row);
         } else {
+            the_episode_ends_withdrawn(ctx, store, &row);
             store.forget_owed_start(&row.thread, &row.role)?;
         }
     }
@@ -3192,6 +3253,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!((confirmations, rest, signals, until), (0, 0, 0, None));
+    }
+
+    /// **The evidence columns reach a store from before cut 5 of 6j6v.pszd** (nxf 6j6v.0z5x): a
+    /// `recovery_log` of the shape the ladder wrote until then gains `policy_dead_resumes`,
+    /// `policy_notice`, `silent_since` and `rest_secs` in place — a second pass adds nothing — and
+    /// the row it already held reads back with `None` in all four.
+    #[test]
+    fn a_recovery_log_from_before_the_evidence_columns_gains_them_and_old_rows_read_none() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE recovery_log(
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, role TEXT NOT NULL,
+                 at TEXT NOT NULL, action TEXT NOT NULL, attempt INTEGER NOT NULL, session TEXT,
+                 outcome TEXT, detail TEXT NOT NULL, retries INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail)
+                 VALUES ('m-t', 'ws/verifier', '2026-10-18T10:10:00Z', 'asked', 0, 'm-s',
+                         'asked', 'silent');",
+        )
+        .unwrap();
+        add_ladder_columns(&conn).unwrap();
+        add_ladder_columns(&conn).unwrap();
+        for column in [
+            "policy_dead_resumes",
+            "policy_notice",
+            "silent_since",
+            "rest_secs",
+        ] {
+            assert!(
+                column_exists(&conn, "recovery_log", column).unwrap(),
+                "{column} was added"
+            );
+        }
+        let row = conn
+            .query_row(
+                &format!("SELECT {} FROM recovery_log", crate::ladder::LOG_COLS),
+                [],
+                crate::ladder::log_from_row,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                row.policy_dead_resumes,
+                row.policy_notice,
+                row.silent_since,
+                row.rest_secs
+            ),
+            (None, None, None, None)
+        );
+        assert_eq!((row.action.as_str(), row.attempt), ("asked", 0));
+    }
+
+    /// **A policy value no writer could have written reads as unknown** (round 2 IR #3): a
+    /// negative or oversized `policy_dead_resumes` is `None`, never a plausible-looking `Some(0)`.
+    #[test]
+    fn a_policy_dead_resumes_out_of_range_reads_back_as_none() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(STRANDED_DDL).unwrap();
+        conn.execute_batch(
+            "INSERT INTO recovery_log(thread, role, at, action, attempt, session, outcome, detail,
+                                      policy_dead_resumes, policy_notice)
+                 VALUES ('m-t', 'ws/verifier', '2026-10-18T10:10:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', -1, 0),
+                        ('m-t', 'ws/verifier', '2026-10-18T10:11:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', 4294967296, 0),
+                        ('m-t', 'ws/verifier', '2026-10-18T10:12:00Z', 'asked', 0, 'm-s', 'asked',
+                         'silent', 3, 0);",
+        )
+        .unwrap();
+        let read: Vec<Option<u32>> = conn
+            .prepare(&format!(
+                "SELECT {} FROM recovery_log ORDER BY id",
+                crate::ladder::LOG_COLS
+            ))
+            .unwrap()
+            .query_map([], crate::ladder::log_from_row)
+            .unwrap()
+            .map(|r| r.unwrap().policy_dead_resumes)
+            .collect();
+        assert_eq!(read, [None, None, Some(3)]);
     }
 
     fn backfill_row(thread: &str, abandoned: Option<&str>) -> Backfill {

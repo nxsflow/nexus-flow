@@ -137,6 +137,12 @@ pub enum RecoveryAction {
     Confirmed,
     /// The episode ended by the session's own life.
     Recovered,
+    /// The episode ended by an answer: a reply that discharged the slot while it was open (nxf
+    /// 6j6v.0z5x).
+    Answered,
+    /// The episode ended because the slot is owed no more — the sweep forgot its owed row while the
+    /// episode was open (a rework, a closed thread, a withdraw; nxf 6j6v.0z5x).
+    Withdrawn,
 }
 
 impl RecoveryAction {
@@ -150,6 +156,8 @@ impl RecoveryAction {
             RecoveryAction::Stopped => "stopped",
             RecoveryAction::Confirmed => "confirmed",
             RecoveryAction::Recovered => "recovered",
+            RecoveryAction::Answered => "answered",
+            RecoveryAction::Withdrawn => "withdrawn",
         }
     }
 
@@ -163,6 +171,8 @@ impl RecoveryAction {
             "stopped" => RecoveryAction::Stopped,
             "confirmed" => RecoveryAction::Confirmed,
             "recovered" => RecoveryAction::Recovered,
+            "answered" => RecoveryAction::Answered,
+            "withdrawn" => RecoveryAction::Withdrawn,
             _ => return None,
         })
     }
@@ -207,6 +217,12 @@ pub enum RungOutcome {
     Granted,
     /// The episode ended by the session's own life.
     Life,
+    /// The member answered the slot with a reply.
+    Replied,
+    /// The member answered the slot with an escalation of its own (`nxc reply --escalate`).
+    EscalatedByMember,
+    /// The slot was owed no more while its episode was open.
+    Withdrawn,
 }
 
 impl RungOutcome {
@@ -228,6 +244,9 @@ impl RungOutcome {
             RungOutcome::NothingToStop => "nothing_to_stop",
             RungOutcome::Granted => "granted",
             RungOutcome::Life => "life",
+            RungOutcome::Replied => "replied",
+            RungOutcome::EscalatedByMember => "escalated_by_member",
+            RungOutcome::Withdrawn => "withdrawn",
         }
     }
 
@@ -249,6 +268,9 @@ impl RungOutcome {
             "nothing_to_stop" => RungOutcome::NothingToStop,
             "granted" => RungOutcome::Granted,
             "life" => RungOutcome::Life,
+            "replied" => RungOutcome::Replied,
+            "escalated_by_member" => RungOutcome::EscalatedByMember,
+            "withdrawn" => RungOutcome::Withdrawn,
             _ => return None,
         })
     }
@@ -274,6 +296,9 @@ impl RungOutcome {
             RungOutcome::NothingToStop => "there was no process left to stop",
             RungOutcome::Granted => "the rest was granted",
             RungOutcome::Life => "it showed life of its own",
+            RungOutcome::Replied => "the member replied",
+            RungOutcome::EscalatedByMember => "the member escalated",
+            RungOutcome::Withdrawn => "the slot was owed no more",
         }
     }
 }
@@ -342,6 +367,7 @@ impl HoldOutcome {
 
 /// **One row of the ladder's record.**
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub struct RecoveryLogRow {
     pub id: i64,
     pub thread: String,
@@ -356,6 +382,23 @@ pub struct RecoveryLogRow {
     /// How often this rung's start was tried again after it failed — on the same row and the same
     /// attempt (round 2 TQ #6).
     pub retries: u32,
+    /// The policy's `dead_resumes` in force when the row was written (nxf 6j6v.0z5x); `None` on a
+    /// row older than that.
+    pub policy_dead_resumes: Option<u32>,
+    /// The policy's `notice_at_first_stop` in force when the row was written; `None` on an older row.
+    pub policy_notice: Option<bool>,
+    /// The silence the row judged — S on `asked` and `stopped`, the episode's on `escalated`.
+    pub silent_since: Option<String>,
+    /// The seconds of rest a `confirmed` row granted.
+    pub rest_secs: Option<i64>,
+}
+
+/// **What a log row carries beyond the policy** (nxf 6j6v.0z5x, design 8nx4 section 6.3) — the
+/// silence an `asked`, `stopped` or `escalated` row judged and the rest a `confirmed` row granted.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LogExtras<'a> {
+    pub silent_since: Option<&'a str>,
+    pub rest_secs: Option<i64>,
 }
 
 /// What taking a slot's claim found.
@@ -369,9 +412,11 @@ pub(crate) enum SlotClaim {
     NoRow,
 }
 
-const LOG_COLS: &str = "id, thread, role, at, action, attempt, session, outcome, detail, retries";
+pub(crate) const LOG_COLS: &str =
+    "id, thread, role, at, action, attempt, session, outcome, detail, \
+     retries, policy_dead_resumes, policy_notice, silent_since, rest_secs";
 
-fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLogRow> {
+pub(crate) fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLogRow> {
     let attempt: i64 = r.get(5)?;
     Ok(RecoveryLogRow {
         id: r.get(0)?,
@@ -384,6 +429,13 @@ fn log_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryLogRow> {
         outcome: r.get(7)?,
         detail: r.get(8)?,
         retries: u32::try_from(r.get::<_, i64>(9)?).unwrap_or(0),
+        // A value no writer could have written is unknown, not a plausible 0 (round 2 IR #3).
+        policy_dead_resumes: r
+            .get::<_, Option<i64>>(10)?
+            .and_then(|n| u32::try_from(n).ok()),
+        policy_notice: r.get::<_, Option<i64>>(11)?.map(|n| n != 0),
+        silent_since: r.get(12)?,
+        rest_secs: r.get(13)?,
     })
 }
 
@@ -484,12 +536,14 @@ impl ChatStore {
         Ok(())
     }
 
-    /// Append one row to the ladder's record; `outcome` is NULL until [`settle_rung`].
+    /// Append one row to the ladder's record; `outcome` is NULL until [`settle_rung`]. Every row
+    /// carries the policy it was written under (nxf 6j6v.0z5x) — the caller's `ctx.liveness`.
     ///
     /// [`settle_rung`]: ChatStore::settle_rung
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_rung(
         &mut self,
+        policy: crate::workspace::LivenessPolicy,
         thread: &str,
         role: &str,
         now: &str,
@@ -497,11 +551,13 @@ impl ChatStore {
         attempt: u32,
         session: Option<&str>,
         detail: &str,
+        extras: LogExtras<'_>,
     ) -> Result<i64> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO recovery_log(thread, role, at, action, attempt, session, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO recovery_log(thread, role, at, action, attempt, session, detail,
+                                      policy_dead_resumes, policy_notice, silent_since, rest_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 thread,
                 role,
@@ -509,7 +565,11 @@ impl ChatStore {
                 action.as_str(),
                 i64::from(attempt),
                 session,
-                detail
+                detail,
+                i64::from(policy.dead_resumes),
+                i64::from(policy.notice_at_first_stop),
+                extras.silent_since,
+                extras.rest_secs
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -1656,7 +1716,12 @@ fn step_stop_in_flight(
     }
     if reached(ctx.now, &again) && row.stop_signals < 2 {
         let outcome = stop_outcome(ctx.worker.stop_session(session));
+        // The further SIGTERM judges the silence the stop judged: its S is that row's.
+        let silent_since = store
+            .newest_rung_of(t, h, RecoveryAction::Stopped)?
+            .and_then(|r| r.silent_since);
         let id = store.log_rung(
+            ctx.liveness,
             t,
             h,
             ctx.now,
@@ -1664,6 +1729,10 @@ fn step_stop_in_flight(
             row.attempts,
             Some(session),
             &format!("the one further SIGTERM: the process still ran {STOP_GRACE_SECS} s after the stop of {stop}"),
+            LogExtras {
+                silent_since: silent_since.as_deref(),
+                rest_secs: None,
+            },
         )?;
         store.settle_rung(id, &outcome)?;
         store.note_second_signal(t, h)?;
@@ -1859,6 +1928,7 @@ fn nudge(
     match ctx.worker.ask_session(&ask) {
         AskOutcome::Asked => {
             let id = store.log_rung(
+                ctx.liveness,
                 t,
                 h,
                 ctx.now,
@@ -1866,6 +1936,10 @@ fn nudge(
                 row.attempts,
                 Some(session),
                 &detail,
+                LogExtras {
+                    silent_since: Some(&life.silent_since),
+                    rest_secs: None,
+                },
             )?;
             store.settle_rung_as(id, RungOutcome::Asked)?;
             store.set_asked(t, h, ctx.now)?;
@@ -1891,6 +1965,7 @@ fn nudge(
             });
             if !logged {
                 let id = store.log_rung(
+                    ctx.liveness,
                     t,
                     h,
                     ctx.now,
@@ -1898,6 +1973,10 @@ fn nudge(
                     row.attempts,
                     Some(session),
                     &detail,
+                    LogExtras {
+                        silent_since: Some(&life.silent_since),
+                        rest_secs: None,
+                    },
                 )?;
                 store.settle_rung_as(id, RungOutcome::CannotAsk)?;
             }
@@ -1924,6 +2003,7 @@ fn step_alive(
     if row.recovery_started_at.is_some() && nothing_stands && life.since_its_start() {
         let (l, signal) = own_or_unknown(life);
         let id = store.log_rung(
+            ctx.liveness,
             t,
             h,
             ctx.now,
@@ -1931,6 +2011,7 @@ fn step_alive(
             row.attempts,
             row.session.as_deref(),
             &format!("its own life at {l} ({})", signal.word()),
+            LogExtras::default(),
         )?;
         store.settle_rung_as(id, RungOutcome::Life)?;
         store.end_episode_by_life(t, h)?;
@@ -1973,6 +2054,7 @@ fn step_dead(
         ),
     };
     let id = store.log_rung(
+        ctx.liveness,
         t,
         h,
         ctx.now,
@@ -1980,6 +2062,10 @@ fn step_dead(
         row.attempts,
         Some(session),
         &stop_detail(&why, tree.as_ref(), life),
+        LogExtras {
+            silent_since: Some(&life.silent_since),
+            rest_secs: None,
+        },
     )?;
     store.settle_rung(id, &outcome)?;
     store.note_stop_requested(t, h, ctx.now)?;
@@ -2234,7 +2320,9 @@ pub(crate) fn retry_of_a_failed_rung(
             | RecoveryAction::Progress
             | RecoveryAction::Stopped
             | RecoveryAction::Confirmed
-            | RecoveryAction::Recovered,
+            | RecoveryAction::Recovered
+            | RecoveryAction::Answered
+            | RecoveryAction::Withdrawn,
         )
         | None => Observation::NeverStarted,
     };
@@ -2477,6 +2565,7 @@ fn under_the_claim(
         None => {
             let attempt = store.begin_attempt(t, h, ctx.now)?;
             store.log_rung(
+                ctx.liveness,
                 t,
                 h,
                 ctx.now,
@@ -2484,6 +2573,7 @@ fn under_the_claim(
                 attempt,
                 row.session.as_deref(),
                 &occasion.detail,
+                LogExtras::default(),
             )?
         }
     };
@@ -2664,6 +2754,32 @@ fn classify(e: TriggerError) -> Done {
 
 // ---- rung E --------------------------------------------------------------------------------------
 
+/// Whether a log row ENDS an episode (design 8nx4 section 6.3, round 3 TQ #5): `recovered`,
+/// `answered`, `escalated`, `withdrawn` — the four rows that clear `recovery_started_at`.
+pub(crate) fn ends_an_episode(action: &str) -> bool {
+    matches!(
+        RecoveryAction::parse(action),
+        Some(
+            RecoveryAction::Recovered
+                | RecoveryAction::Answered
+                | RecoveryAction::Escalated
+                | RecoveryAction::Withdrawn
+        )
+    )
+}
+
+/// **The silence of the slot's open episode** — S of its first row that judged one (a nudge or a
+/// stop), read from the rows written since the slot's last end row; `None` when none did (an
+/// episode that only continued or re-commissioned, or a log older than nxf 6j6v.0z5x).
+fn episode_silent_since(store: &ChatStore, t: &str, h: &str) -> Result<Option<String>> {
+    let rows = store.slot_recovery_log(t, h)?;
+    let open = rows
+        .iter()
+        .rposition(|r| ends_an_episode(&r.action))
+        .map_or(0, |i| i + 1);
+    Ok(rows[open..].iter().find_map(|r| r.silent_since.clone()))
+}
+
 /// **Rung E**: the coordinator escalates — in the member's name, into the slot's thread, through
 /// cut 1a's record and its stamping — with the summary the commissioner needs. The episode ends
 /// with it: the budget and the ceiling clock are cleared.
@@ -2677,7 +2793,9 @@ fn escalate(
 ) -> Result<()> {
     let (t, h) = (row.thread.as_str(), row.role.as_str());
     let summary = summary(ctx, store, row, coordinator, &occasion)?;
+    let silent_since = episode_silent_since(store, t, h)?;
     let log = store.log_rung(
+        ctx.liveness,
         t,
         h,
         ctx.now,
@@ -2685,6 +2803,10 @@ fn escalate(
         row.attempts,
         row.session.as_deref(),
         &occasion.detail,
+        LogExtras {
+            silent_since: silent_since.as_deref(),
+            rest_secs: None,
+        },
     )?;
     findings.extend(crate::stranded::record(
         ctx,
@@ -3155,6 +3277,9 @@ mod tests {
             RungOutcome::NothingToStop,
             RungOutcome::Granted,
             RungOutcome::Life,
+            RungOutcome::Replied,
+            RungOutcome::EscalatedByMember,
+            RungOutcome::Withdrawn,
         ] {
             assert_eq!(RungOutcome::parse(o.as_str()), Some(o));
             assert!(!o.words().contains('_'), "{:?} reads as a sentence", o);
