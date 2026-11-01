@@ -768,6 +768,16 @@ const SURFACE: &[Member] = &[
               what it wrote; it reads no messages.",
     },
     Member {
+        name: "liveness_policy",
+        kind: Handle,
+        records: Recorded::Nothing,
+        causes: Causes::Nothing,
+        why: "The `[chat.liveness]` policy of the workspace this handle loaded, read once at open, \
+              with what that read found wrong (nxf 6j6v.t0jn). About the HANDLE: it is what every \
+              `Ctx` this handle builds runs its ladder under, and how an app that drives looks \
+              itself learns an invalid setting; it reads no messages.",
+    },
+    Member {
         name: "definitions",
         kind: Handle,
         records: Recorded::Nothing,

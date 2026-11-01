@@ -1256,6 +1256,11 @@ struct CliCtx {
     /// linking this CLI on its own, which composes chat's own half alone.
     module_primes: Option<&'static dyn crate::facade::ModulePrimes>,
     hop: u32,
+    /// The workspace's `[chat.liveness]` policy and what its read had to say (6j6v.pszd, design
+    /// 6.1). Read HERE, once per process — and a look is one `nxs chat tick` process, so the policy
+    /// is read at every look and an edit needs no service restart. The tick verb puts the warnings
+    /// on its receipt.
+    liveness: crate::workspace::ResolvedLiveness,
 }
 
 impl CliCtx {
@@ -1295,6 +1300,7 @@ impl CliCtx {
             project_claude_md: std::fs::read_to_string(root.join("CLAUDE.md")).ok(),
             module_primes: MODULE_PRIMES.get().copied(),
             hop,
+            liveness: crate::workspace::liveness_policy(&ws.config),
         })
     }
 
@@ -1314,6 +1320,7 @@ impl CliCtx {
             module_primes: self.module_primes,
             machines: MACHINES.get().copied(),
             peers: PEERS.get().copied(),
+            liveness: self.liveness.policy,
         }
     }
 }
@@ -2116,6 +2123,9 @@ fn list(json: bool, db: Option<&str>, persona: Option<&str>) -> Result<()> {
 /// "status that is always red is a status nobody reads" case in its purest form, and it would drown
 /// the classes this rule exists for.
 ///
+/// [`ConsequenceClass::InvalidSetting`] (nxf 6j6v.t0jn) is the sixth: the look ran, with the
+/// default for the key the workspace set wrongly — an invalid setting never skips a look.
+///
 /// Both stay on the receipt and in `--json`, and both keep their `warning:` line on stderr. What
 /// changes is only the claim the exit code makes about the call.
 fn changes_the_exit_code(warnings: &[crate::orchestration::FailedConsequence]) -> bool {
@@ -2128,6 +2138,7 @@ fn changes_the_exit_code(warnings: &[crate::orchestration::FailedConsequence]) -
                 | ConsequenceClass::DeclarationChanged
                 | ConsequenceClass::WorkNotParked
                 | ConsequenceClass::WorkHandedOnUnparked
+                | ConsequenceClass::InvalidSetting
         )
     })
 }
@@ -2786,11 +2797,17 @@ fn handover_verb(json: bool, db: Option<&str>) -> Result<()> {
 fn tick(json: bool, db: Option<&str>, thread_id: &str) -> Result<()> {
     let cli_ctx = CliCtx::resolve(db, hop())?;
     let mut store = open(db)?;
-    let r = crate::orchestration::tick(
+    let mut r = crate::orchestration::tick(
         &cli_ctx.ctx(),
         &mut store,
         crate::orchestration::TickRequest { thread_id },
     )?;
+    // The look ran with the policy this process read (6j6v.t0jn); what the read found wrong with
+    // the file rides this look's receipt — on every look, until the file is fixed.
+    r.warnings.extend(crate::orchestration::liveness_findings(
+        thread_id,
+        &cli_ctx.liveness,
+    ));
     print_tick_result(json, &r);
     Ok(())
 }

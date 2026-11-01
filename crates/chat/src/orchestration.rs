@@ -127,6 +127,14 @@ pub struct Ctx<'a> {
     /// test that does not care — reaches none: an address from another workspace is refused, and
     /// everything else runs exactly as before the border existed.
     pub peers: Option<&'a dyn crate::border::Peers>,
+    /// **The workspace's liveness policy** (`[chat.liveness]` in `.nxs/config.toml`, 6j6v.pszd
+    /// design 6.1) — how many recovery attempts one owed turn gets before a dead verdict escalates,
+    /// and whether the commissioner hears of the first stop. Host-supplied exactly as
+    /// `project_claude_md` is: the CLI reads it in every `nxs chat tick` process, so an edit takes
+    /// effect at the next look; an embedding app's [`crate::engine::Engine`] supplies the policy of
+    /// the workspace it loaded, for its lifetime. Nothing inside the ladder reads the file. Its
+    /// `Default` is policy B — what a test that does not care runs.
+    pub liveness: crate::workspace::LivenessPolicy,
 }
 
 /// **Who is calling, and nothing that can be derived from that** (nxf 6j6v.07me): [`Ctx`]'s caller
@@ -292,6 +300,8 @@ pub struct Adapter<'a> {
     pub machines: Option<&'a dyn crate::machine::Machines>,
     /// See [`Ctx::peers`].
     pub peers: Option<&'a dyn crate::border::Peers>,
+    /// See [`Ctx::liveness`].
+    pub liveness: crate::workspace::LivenessPolicy,
 }
 
 impl<'a> Caller<'a> {
@@ -359,6 +369,7 @@ impl<'a> Caller<'a> {
             module_primes: adapter.module_primes,
             machines: adapter.machines,
             peers: adapter.peers,
+            liveness: adapter.liveness,
         }
     }
 }
@@ -8417,6 +8428,7 @@ fn as_supervisor<'a>(ctx: &Ctx<'a>, hop: CheckedHop) -> Ctx<'a> {
         module_primes: ctx.module_primes,
         machines: ctx.machines,
         peers: ctx.peers,
+        liveness: ctx.liveness,
     }
 }
 
@@ -12470,6 +12482,13 @@ pub enum ConsequenceClass {
     /// an error that a retry may not meet. The attempt stays counted and its error is in the slot's
     /// recovery log; the next look tries again, and the budget ends in an escalation either way.
     RecoveryFailed,
+    /// **A workspace setting was invalid, so its default ran** (nxf 6j6v.t0jn) — a value under
+    /// `[chat.liveness]` in `.nxs/config.toml` out of range or of the wrong type, or a key that is
+    /// not known there. The look ran all the same, with the default for that key: an invalid value
+    /// never skips a look (design 6j6v.pszd, 6.1). [`detail`](FailedConsequence::detail) names the
+    /// file, the key and the value; `thread` is the thread the tick was about. It does NOT make the
+    /// verb exit non-zero — the call did everything it was asked.
+    InvalidSetting,
     // `AdvanceFailed` and `NoVerdict` stood here — hq71's third class and its second
     // manifestation, both about a run that did not move on. REMOVED with the run record
     // (6j6v.dvyq §3). Nothing else ever produced them: they were the two classes only the
@@ -12712,6 +12731,22 @@ impl FailedConsequence {
             session: None,
             reason: None,
             detail: detail.into(),
+            precondition: None,
+            declaration: None,
+        }
+    }
+
+    /// A workspace setting was invalid and its default ran (nxf 6j6v.t0jn) — see
+    /// [`ConsequenceClass::InvalidSetting`]. `warning` is one line of
+    /// [`crate::workspace::ResolvedLiveness::warnings`], which already names the file, the key and
+    /// the value; it is carried verbatim so the receipt and the escalation say the same thing.
+    pub(crate) fn invalid_setting(thread: &str, warning: &str) -> Self {
+        FailedConsequence {
+            class: ConsequenceClass::InvalidSetting,
+            thread: Some(thread.to_string()),
+            session: None,
+            reason: None,
+            detail: warning.to_string(),
             precondition: None,
             declaration: None,
         }
@@ -16904,6 +16939,12 @@ pub struct TickReceipt {
     /// on at most one occasion. Absent from the JSON on every tick that moved nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handed_on: Option<HandedOn>,
+    /// **The liveness policy this look ran its ladder under** (nxf 6j6v.t0jn) — the
+    /// [`Ctx::liveness`] the host supplied: for the CLI, the workspace's `[chat.liveness]` as this
+    /// `nxs chat tick` process read it. `fell_back` is `true` when an invalid value ran its default;
+    /// the [`warnings`](TickReceipt::warnings) then say which. Always present, so a reader of an
+    /// unattended look can tell which resume cap judged the slot without reading the file.
+    pub liveness: crate::workspace::LivenessPolicy,
 }
 
 /// One commission that was taken back before it ever started (nxf 6j6v.0h3p). Declared field order =
@@ -18126,6 +18167,23 @@ fn interrupt_the_chain_above(
     Ok(())
 }
 
+/// **What a host's read of `[chat.liveness]` had to say, as tick findings** (nxf 6j6v.t0jn): one
+/// [`ConsequenceClass::InvalidSetting`] per line of `resolved.warnings`, about `thread`. The host
+/// that resolved the policy for this look — the CLI in every `nxs chat tick` process — appends them
+/// to the [`TickReceipt::warnings`] of the tick it ran, so an invalid setting is reported where an
+/// unattended look is read, and never silently. [`tick`] itself cannot: [`Ctx::liveness`] carries
+/// the policy (it stays `Copy`), not the read's findings.
+pub fn liveness_findings(
+    thread: &str,
+    resolved: &crate::workspace::ResolvedLiveness,
+) -> Vec<FailedConsequence> {
+    resolved
+        .warnings
+        .iter()
+        .map(|w| FailedConsequence::invalid_setting(thread, w))
+        .collect()
+}
+
 /// Re-check one channel board and, if it is genuinely due, route its completion
 /// (`nxc tick --thread <id>`, nxf 6j6v.z06n).
 ///
@@ -18204,6 +18262,7 @@ fn interrupt_the_chain_above(
 /// [`TICK_ADVANCED`].
 pub fn tick(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result<TickReceipt> {
     let mut receipt = tick_reporting_its_own_failures(ctx, store, req)?;
+    receipt.liveness = ctx.liveness;
     // **A tick is the verb with the most to lose from silence** (nxf 6j6v.0j12): it is what the
     // service itself runs unattended, and what an app calls when nothing else will. Appended after
     // the work, so the finding rides a receipt that is otherwise exactly what it was.
@@ -18609,6 +18668,8 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
             working_tree: None,
             parked: None,
             handed_on: None,
+            // Set by [`tick`] from the context the look ran with.
+            liveness: Default::default(),
         });
     }
 
@@ -18711,6 +18772,8 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
         working_tree: None,
         parked: None,
         handed_on: None,
+        // Set by [`tick`] from the context the look ran with.
+        liveness: Default::default(),
     })
 }
 
@@ -18918,6 +18981,8 @@ fn tick_no_op(thread_id: &str, reason: &str, outstanding: Vec<String>) -> TickRe
         working_tree: None,
         parked: None,
         handed_on: None,
+        // Set by [`tick`] from the context the look ran with.
+        liveness: Default::default(),
     }
 }
 
@@ -19322,6 +19387,7 @@ mod tests {
                 module_primes: None,
                 machines: None,
                 peers: None,
+                liveness: Default::default(),
             };
             the_copy_is_still_in_use(&ctx, store, &["t-claim".to_string()]).unwrap()
         };
@@ -19583,6 +19649,7 @@ mod tests {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         };
 
         // One pass outside the timing loop: it is the one that pays for SQLite's page cache and for
@@ -19678,6 +19745,7 @@ mod tests {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         };
 
         // The warm-up, outside the loop for the reason the measurement beside it gives — and it is
@@ -20190,6 +20258,7 @@ mod tests {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         }
     }
 

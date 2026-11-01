@@ -254,6 +254,7 @@ impl Team {
             module_primes: None,
             machines: None,
             peers: None,
+            liveness: Default::default(),
         };
         f(&ctx, &mut store)
     }
@@ -814,6 +815,7 @@ impl Replica {
             module_primes: None,
             machines: self.machines.as_ref().map(|m| m as &dyn Machines),
             peers: None,
+            liveness: Default::default(),
         };
         f(&ctx, &mut self.store)
     }

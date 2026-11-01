@@ -237,6 +237,18 @@ pub struct Engine {
     machines: Option<Arc<dyn crate::machine::Machines>>,
     /// ([`EngineConfig::peers`]) — held for the handle's lifetime, like the machines.
     peers: Option<Arc<dyn crate::border::Peers>>,
+    /// **The `[chat.liveness]` policy of the workspace this handle loaded** (nxf 6j6v.t0jn), read
+    /// ONCE at open from [`Engine::workspace`]'s config and supplied to every `Ctx` this handle
+    /// builds, for its lifetime. The CLI reads it at every look because a look is a process of its
+    /// own; an app holds one handle across many, so an edit to the file reaches it when the app
+    /// opens the workspace again. See [`Engine::liveness_policy`].
+    ///
+    /// **No verb of this handle reaches the ladder's dead verdict today**: that is a look, and a
+    /// look is `orchestration::tick`, which has no seam twin by decision (6j6v.dvyq, recorded in
+    /// `tests/verb_seam.rs`). The policy is supplied anyway so that every `Ctx` this handle builds
+    /// says what the workspace set; an app that runs looks itself builds its own `Ctx` and takes the
+    /// policy from [`Engine::liveness_policy`].
+    liveness: crate::workspace::ResolvedLiveness,
 }
 
 /// chat's store factory for the foundation handle: open the chat store (message reducer + the six
@@ -363,7 +375,9 @@ impl Engine {
         // `build_in` for the timer's reason one line up, and one the naming run makes sharper: the
         // detached run it starts asks a MODEL, which reads the project context it is standing in.
         let namer = cfg.namer.build_in(&handle.workspace());
+        let liveness = crate::workspace::liveness_policy(&handle.workspace().config);
         Ok(Engine {
+            liveness,
             handle,
             worker,
             timer,
@@ -826,6 +840,17 @@ impl Engine {
         self.handle.workspace()
     }
 
+    /// **The liveness policy this handle runs its ladder under** (nxf 6j6v.t0jn; design 6j6v.pszd,
+    /// 6.1): the `[chat.liveness]` section of the workspace it loaded, read once at open, with what
+    /// that read found wrong — an invalid value or an unknown key, each of which ran the default
+    /// for its key. It is the policy every verb of this handle supplies as
+    /// [`crate::orchestration::Ctx::liveness`], for the handle's lifetime: an app that wants a
+    /// changed file to take effect opens the workspace again. An app that drives looks itself can
+    /// put the warnings on the receipts it shows with [`crate::orchestration::liveness_findings`].
+    pub fn liveness_policy(&self) -> &crate::workspace::ResolvedLiveness {
+        &self.liveness
+    }
+
     /// Bind a runtime's OWN opaque session id to the internal session a trigger minted — the
     /// out-of-band half of the worker seam (nxf 6j6v.5x9j), and the library twin of `nxc session
     /// bind`, which until now was the only way to do this at all.
@@ -1026,6 +1051,7 @@ impl Engine {
                         .peers
                         .as_deref()
                         .map(|p| p as &dyn crate::border::Peers),
+                    liveness: self.liveness.policy,
                 },
             );
             f(&ctx, &mut s.store)
@@ -1111,6 +1137,7 @@ impl Engine {
                         .peers
                         .as_deref()
                         .map(|p| p as &dyn crate::border::Peers),
+                    liveness: self.liveness.policy,
                 },
             );
             surface::machine(&ctx, &s.store, query)

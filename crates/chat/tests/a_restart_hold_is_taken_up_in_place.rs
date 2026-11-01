@@ -474,6 +474,7 @@ fn tick(
         module_primes: None,
         machines: None,
         peers: None,
+        liveness: Default::default(),
     };
     nexus_chat::orchestration::tick(
         &ctx,

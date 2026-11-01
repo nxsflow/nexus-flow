@@ -709,6 +709,27 @@ Sind die Versuche aufgebraucht, eskaliert der Koordinator im Namen des Mitglieds
 der Ursache, jedem Versuch, der letzten Aktivität, der Sitzung und der Arbeitskopie — und der Slot
 sagt dann STRANDED, wie unten.
 
+**Wie viele Wiederaufnahmen ein Zug bekommt, stellt der Workspace ein**, in `.nxs/config.toml`:
+
+```toml
+[chat.liveness]
+dead_resumes = 1              # 1 bis 3: Wiederaufnahmen eines geschuldeten Zugs, bevor ein Tot-Befund eskaliert
+notice_at_first_stop = false  # true: ein nicht eskalierender Hinweis an den Auftraggeber beim ersten Stopp
+```
+
+Ohne den Abschnitt oder ohne einen Schlüssel gilt `1` und `false`. `dead_resumes = 3` nimmt eine
+Sitzung, die tot vorgefunden wird, bis zu dreimal wieder auf, bevor eskaliert wird;
+`notice_at_first_stop` wird gelesen und geprüft, und diese Version postet den Hinweis noch nicht.
+Die Datei wird bei jedem Blick gelesen — jeder Blick ist ein eigener Prozess —, eine Änderung wirkt
+also beim nächsten, ohne Neustart; eine App, die die Engine einbettet, läuft mit der Einstellung des
+Workspaces, den sie geöffnet hat, bis sie ihn erneut öffnet. `.nxs/` liegt lokal auf dem Rechner und
+wird nicht synchronisiert, die Einstellung gilt also je Rechner: drei Workspaces auf einem Rechner
+können jeder ihre eigene haben. Ein Wert außerhalb des Bereichs oder vom falschen Typ lässt nie
+einen Blick aus: Der Blick läuft mit dem Standard für diesen Schlüssel, seine Quittung trägt eine
+Warnung `invalid_setting`, die Datei, Schlüssel und Wert nennt, und eine Eskalation sagt, dass der
+Standard galt. Die Quittung jedes Ticks nennt als `liveness` die Politik, unter der der Blick lief. Ein unbekannter Schlüssel unter `[chat.liveness]` wird genauso gewarnt und ändert
+nichts.
+
 **Ein Slot, dessen Sitzung nicht antworten wird, sagt stattdessen STRANDED** — und warum, und was
 daraufhin geschah. `stranded` nennt den Befund (`observed`, 1–5: nie gestartet, nie angebunden, ohne
 Antwort geendet, kein lebender Prozess, Start aufgegeben), wann er festgehalten wurde und was aus der
@@ -936,7 +957,8 @@ Drei Unterbefehle existieren und sind aus `--help` ausgeblendet, weil niemand si
 - **`nxc tick --thread <id>`** — ein Uhrzeiger. Der Einmal-Job, den das deklarierte `timeout:` eines
   Kanals plant, führt ihn aus, um einen Faden erneut zu prüfen und ihn, wenn fällig, durch die
   `on_complete`-Politik des Kanals zu leiten. Er ist idempotent: ein bereits behandelter Faden ist
-  ein sauberer No-Op, nie ein zweites Wecken.
+  ein sauberer No-Op, nie ein zweites Wecken. Er ist auch der Blick des Koordinators und liest
+  `[chat.liveness]` bei jedem Lauf.
 - **`nxc pick-up`** — die Hand der ausführenden Maschine. Der Hintergrunddienst führt es nach einem
   Durchgang aus, der einen Chat für DIESE Maschine hinterlassen hat: Es startet oder weckt die
   Persona jedes hier bestimmten Chats, der einen Zug schuldet, einmal je Nachricht, und nur für

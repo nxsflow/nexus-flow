@@ -126,3 +126,6 @@ nexus-memory = { path = "../memory" }
 # The stale-multicall-binary gate (0yyw): `nxc` is an argv[0] symlink to `nxs`, which `-p
 # nexus-chat` never rebuilds — without this the suite silently asserts against an old binary.
 nxs-test-support = { path = "../test-support" }
+# The liveness-policy unit tests (6j6v.t0jn) build a `[chat.liveness]` section from TOML text; the
+# library reads `WorkspaceConfig::products` through method calls only and needs no `toml` of its own.
+toml = "0.8"
