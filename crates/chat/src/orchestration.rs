@@ -12967,13 +12967,16 @@ fn debug_assert_one_place(_warnings: &[FailedConsequence], _wake_skipped: Option
 pub fn reply(ctx: &Ctx, store: &mut ChatStore, req: ReplyRequest) -> Result<ReplyReceipt> {
     let escalated = req.kind == MessageKind::Escalation;
     let mut receipt = reply_routed(ctx, store, req)?;
-    if receipt.posted {
-        if let Some(thread) = receipt.thread_id.clone() {
-            let message = receipt.message_id.clone().unwrap_or_default();
-            receipt
-                .warnings
-                .extend(after_an_answer(ctx, store, &thread, &message, escalated));
-        }
+    // A posted receipt always names its message (`message_id` is `None` only when `posted` is
+    // false), so the `answered` row's detail is never an empty id (round 1 CQ #2).
+    if let (true, Some(thread), Some(message)) = (
+        receipt.posted,
+        receipt.thread_id.clone(),
+        receipt.message_id.clone(),
+    ) {
+        receipt
+            .warnings
+            .extend(after_an_answer(ctx, store, &thread, &message, escalated));
     }
     Ok(receipt)
 }

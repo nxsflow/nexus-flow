@@ -505,6 +505,19 @@ impl Team {
         thread: &str,
         body: &str,
     ) -> ReplyReceipt {
+        self.answer(now, role, session, thread, body, false)
+    }
+
+    /// [`Team::reply_receipt`], as `nxc reply --escalate` when `escalate` is set.
+    fn answer(
+        &self,
+        now: &str,
+        role: &str,
+        session: &str,
+        thread: &str,
+        body: &str,
+        escalate: bool,
+    ) -> ReplyReceipt {
         self.with(now, role, Some(session), |ctx, store| {
             surface::reply_in_thread(
                 ctx,
@@ -513,7 +526,7 @@ impl Team {
                     machine: None,
                     thread,
                     body,
-                    escalate: false,
+                    escalate,
                     needs_rework: false,
                     accept: false,
                 },
@@ -4268,7 +4281,18 @@ fn b_fixture(team: &Team) -> String {
 /// stopped and continued `n` times; 150 s into the last continuation it replies — inside the
 /// episode, which stands open since T0+600 — and the looks run on for ten minutes after it.
 fn a_fixture_answered_after_resume(team: &Team, n: usize) -> String {
-    team.set_liveness("dead_resumes = 3\nnotice_at_first_stop = false");
+    a_fixture_answering(
+        team,
+        n,
+        "dead_resumes = 3\nnotice_at_first_stop = false",
+        false,
+    )
+}
+
+/// [`a_fixture_answered_after_resume`] under the `[chat.liveness]` section `policy`, the answer an
+/// `nxc reply --escalate` when `escalate` is set.
+fn a_fixture_answering(team: &Team, n: usize, policy: &str, escalate: bool) -> String {
+    team.set_liveness(policy);
     let (thread, session) = a_coder_silent_from_t0_stopped_at_fifteen(team);
     let mut stopped = 900;
     for k in 1..=n {
@@ -4283,12 +4307,13 @@ fn a_fixture_answered_after_resume(team: &Team, n: usize) -> String {
         } else {
             team.tick(&at(continued + 60), &thread);
             team.tick(&at(continued + 120), &thread);
-            team.reply(
+            team.answer(
                 &at(continued + 150),
                 "coder",
                 &session,
                 &thread,
                 "done: --since is in",
+                escalate,
             );
             for s in ((continued + 180)..=(continued + 780)).step_by(60) {
                 team.tick(&at(s), &thread);
@@ -4518,5 +4543,84 @@ fn an_open_episode_whose_obligation_is_withdrawn_ends_with_a_withdrawn_row() {
         (Some(1), Some(false), 0)
     );
     assert_eq!(team.ladder(&thread, "coder"), None, "the owed row is gone");
+    every_episode_ends_once_and_last(&rows);
+}
+
+/// **Round 1 TQ #1 and #2 — the member's own escalation ends the episode as `answered`**: under
+/// `dead_resumes = 3` with `notice_at_first_stop = true`, the coder nudged at T0+600 and continued
+/// twice answers with `nxc reply --escalate` inside the open episode. The slot's last row is
+/// `answered` with outcome `escalated_by_member` — not `replied` — its detail the reply's message
+/// id, its attempt the two resumes spent, and every row carries the policy it was written under,
+/// `notice_at_first_stop = true` included; the episode ends exactly once.
+#[test]
+fn an_escalating_reply_inside_an_episode_ends_it_answered_as_escalated_by_the_member() {
+    let team = team();
+    let thread = a_fixture_answering(
+        &team,
+        2,
+        "dead_resumes = 3\nnotice_at_first_stop = true",
+        true,
+    );
+    let rows = team.rows(&thread, "coder");
+    for r in &rows {
+        assert_eq!(
+            (r.policy_dead_resumes, r.policy_notice),
+            (Some(3), Some(true)),
+            "{r:?}"
+        );
+    }
+    let last = rows.last().cloned().unwrap();
+    assert_eq!(
+        (
+            last.action.as_str(),
+            last.attempt,
+            last.outcome.as_deref(),
+            last.at
+        ),
+        ("answered", 2, Some("escalated_by_member"), 1_890),
+        "{rows:#?}"
+    );
+    let reply = team
+        .store()
+        .messages_in_thread(&thread)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "done: --since is in")
+        .expect("the escalation");
+    assert_eq!(
+        last.detail, reply.message_id,
+        "the detail is the escalation's message id"
+    );
+    assert_eq!(
+        rows.iter().filter(|r| r.action == "answered").count(),
+        1,
+        "{rows:#?}"
+    );
+    every_episode_ends_once_and_last(&rows);
+    assert_eq!(episodes_of(&rows).len(), 1, "{rows:#?}");
+}
+
+/// **Round 1 TQ #3 — `withdrawn` ends only an OPEN episode**: the B slot escalated by rung E at
+/// T0+1 620 has its episode ended; when the owner then withdraws the round, the sweep writes no
+/// `withdrawn` row after the `escalated` one — the escalation stays the slot's last row.
+#[test]
+fn a_withdraw_after_the_slot_escalated_writes_no_withdrawn_row() {
+    let team = team();
+    let thread = b_fixture(&team);
+    let before = team.rows(&thread, "coder");
+    assert_eq!(
+        before.last().map(|r| r.action.as_str()),
+        Some("escalated"),
+        "{before:#?}"
+    );
+    team.with(&at(1_800), "owner", None, |ctx, store| {
+        orchestration::withdraw(ctx, store, &thread)
+    })
+    .expect("withdraw");
+    team.tick(&at(1_860), &thread);
+    team.tick(&at(1_920), &thread);
+    let rows = team.rows(&thread, "coder");
+    assert!(!rows.iter().any(|r| r.action == "withdrawn"), "{rows:#?}");
+    assert_eq!(rows, before, "the withdraw adds no row to an ended episode");
     every_episode_ends_once_and_last(&rows);
 }
