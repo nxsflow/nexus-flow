@@ -5013,7 +5013,10 @@ fn facade_liveness_over_the_ladders_own_rows_reads_its_episodes() {
     );
     assert_eq!(
         report.episodes[0].resumes,
-        vec![(1, facade::ResumeOutcome::Recovered)]
+        vec![facade::Resume {
+            attempt: 1,
+            outcome: facade::ResumeOutcome::Recovered
+        }]
     );
     assert_eq!(
         (
@@ -5036,7 +5039,10 @@ fn facade_liveness_over_the_ladders_own_rows_reads_its_episodes() {
     assert_eq!(report.episodes.len(), 1, "{:#?}", report.episodes);
     assert_eq!(
         report.episodes[0].resumes,
-        vec![(1, facade::ResumeOutcome::DeadAgain)]
+        vec![facade::Resume {
+            attempt: 1,
+            outcome: facade::ResumeOutcome::DeadAgain
+        }]
     );
     assert_eq!(report.episodes[0].ended, facade::EpisodeEnd::Escalated);
     assert_eq!(

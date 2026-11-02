@@ -863,12 +863,15 @@ und 3 gerettet haben, und wie viele eskaliert endeten.
 
 `--everywhere` liest jeden Arbeitsbereich, den der Dienst betreut (`~/.nexusflow/workspaces.toml`),
 jeden unter seiner eigenen Politik; ein Speicher, der sich nicht öffnen lässt, ist ein Block
-`unreadable` mit dem Fehler, und die anderen sind vollständig. `--json` ist das ganze Dokument; ohne
+`unreadable` mit dem Fehler, und die anderen sind vollständig. Ein `--from` oder `--to`, das kein
+RFC3339-Zeitpunkt ist, oder ein Fenster, dessen `--from` nicht vor seinem `--to` liegt, wird als
+`validation`-Fehler abgelehnt, bevor ein Arbeitsbereich gelesen wird. `--json` ist das ganze Dokument; ohne
 es eine Tabelle je Arbeitsbereich.
 
 **Nur der Eigentümer am Terminal liest ihn.** In einer Agenten-Sitzung (`NXC_SESSION` gesetzt) wird
 er mit `forbidden` abgelehnt: Der Bericht zeigt die Wiederherstellungsgeschichte jeder Operation, und
-die braucht kein Agent. Eine App liest dasselbe Dokument über `Engine::liveness` als Eigentümer des
+die braucht kein Agent. Diese Regel hält Agenten-Sitzungen fern; eine Sicherheitsgrenze ist sie
+nicht — sie liest die Umgebung, und wer die Shell hat, kann `NXC_SESSION` entfernen. Eine App liest dasselbe Dokument über `Engine::liveness` als Eigentümer des
 Boards.
 
 ## Sitzungen und Verläufe

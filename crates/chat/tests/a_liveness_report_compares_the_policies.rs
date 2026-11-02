@@ -83,6 +83,7 @@ fn seeds() -> Vec<Seed> {
     let x = ("m-x", "ws/coder");
     let w = ("m-w", "ws/coder");
     let v = ("m-v", "ws/coder");
+    let u = ("m-u", "ws/coder");
     let sa = Some("2026-10-24T09:00:00Z");
     let sb = Some("2026-10-24T11:00:00Z");
     let sc = Some("2026-10-24T13:00:00Z");
@@ -366,6 +367,16 @@ fn seeds() -> Vec<Seed> {
             Some("2026-10-24T23:45:00Z"),
         ),
         s(x, "2026-10-25T00:10:00Z", "recovered", 0, "life", X, None),
+        // Exactly at `--from`: the window's start is inclusive, so it is counted and listed.
+        s(
+            u,
+            FROM,
+            "asked",
+            0,
+            "asked",
+            X,
+            Some("2026-10-23T23:50:00Z"),
+        ),
         // Compared as INSTANTS, not as text: 00:30+02:00 is 22:30Z, inside, though the text sorts
         // after `--to`; 01:00+05:00 is 20:00Z the day before, outside, though the text sorts after
         // `--from`.
@@ -480,7 +491,10 @@ fn summary_of(block: &Value, policy: (u32, bool)) -> &Value {
         .as_array()
         .unwrap()
         .iter()
-        .find(|s| s["policy"] == serde_json::json!([policy.0, policy.1]))
+        .find(|s| {
+            s["policy"]
+                == serde_json::json!({"dead_resumes": policy.0, "notice_at_first_stop": policy.1})
+        })
         .unwrap_or_else(|| panic!("no summary for {policy:?} in {block}"))
 }
 
@@ -543,16 +557,19 @@ fn the_three_trial_slots_compare_as_designed() {
     };
     assert_eq!(
         of("m-a")[0]["resumes"],
-        serde_json::json!([[1, "dead_again"], [2, "answered"]])
+        serde_json::json!([
+            {"attempt": 1, "outcome": "dead_again"},
+            {"attempt": 2, "outcome": "answered"}
+        ])
     );
     assert_eq!(of("m-a")[0]["end_attempt"], 2);
     assert_eq!(
         of("m-b")[0]["resumes"],
-        serde_json::json!([[1, "dead_again"]])
+        serde_json::json!([{"attempt": 1, "outcome": "dead_again"}])
     );
     assert_eq!(
         of("m-c")[0]["resumes"],
-        serde_json::json!([[1, "answered"]])
+        serde_json::json!([{"attempt": 1, "outcome": "answered"}])
     );
     assert_eq!(of("m-c")[0]["ended"], "answered");
 
@@ -567,7 +584,7 @@ fn the_three_trial_slots_compare_as_designed() {
     assert_eq!(ended("m-e"), vec!["recovered", "escalated"]);
     assert_eq!(
         of("m-e")[0]["resumes"],
-        serde_json::json!([[1, "recovered"]])
+        serde_json::json!([{"attempt": 1, "outcome": "recovered"}])
     );
     assert_eq!(of("m-e")[1]["resumes"], serde_json::json!([]));
     assert_eq!(of("m-e")[1]["end_attempt"], 1);
@@ -582,7 +599,12 @@ fn the_three_trial_slots_compare_as_designed() {
     assert_eq!(ended("m-x"), vec!["recovered"]);
     assert_eq!(of("m-x")[0]["silence_to_recovery_secs"], 1500);
     assert_eq!(ended("m-w"), vec!["open"]);
-    assert_eq!(block["counts"]["asked"], 12);
+    assert_eq!(
+        ended("m-u"),
+        vec!["open"],
+        "a first row at exactly --from is in the window"
+    );
+    assert_eq!(block["counts"]["asked"], 13);
     assert_eq!(
         block["counts"]["recovered"], 4,
         "m-y's end row lies in the window"
@@ -620,7 +642,8 @@ fn an_episode_is_counted_by_its_first_row_and_read_from_its_whole_slot() {
         (nexus_chat::facade::EpisodeEnd::Recovered, Some(1500))
     );
     assert!(threads.contains(&"m-w"), "{threads:?}");
-    assert_eq!(block.counts["asked"], 12);
+    assert!(threads.contains(&"m-u"), "{threads:?}");
+    assert_eq!(block.counts["asked"], 13);
 }
 
 #[test]
@@ -708,6 +731,110 @@ fn everywhere(home: &TempDir, cwd: &TempDir) -> Value {
     ]))
 }
 
+/// Every row of a workspace's `recovery_log`, every column, in id order.
+fn log_of(tmp: &TempDir) -> Vec<Vec<String>> {
+    let conn = rusqlite::Connection::open(root(tmp).join(".nxs/db.sqlite")).unwrap();
+    let mut st = conn
+        .prepare(
+            "SELECT id, thread, role, at, action, attempt, session, outcome, detail, retries,
+                    policy_dead_resumes, policy_notice, silent_since, rest_secs
+               FROM recovery_log ORDER BY id",
+        )
+        .unwrap();
+    let n = st.column_count();
+    st.query_map([], |r| {
+        (0..n)
+            .map(|i| {
+                r.get::<_, rusqlite::types::Value>(i)
+                    .map(|v| format!("{v:?}"))
+            })
+            .collect()
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// A refusal of the window: a non-zero exit, a `validation` envelope naming `needle`, and no
+/// report — no `workspaces` at all, so a caller's mistake never reads as a store fault.
+fn refused_window(cmd: &mut Command, needle: &str) {
+    let out = cmd.assert().failure();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let doc: Value = serde_json::from_str(stdout.trim()).expect("an error envelope");
+    assert_eq!(doc["error"]["kind"], "validation", "{stdout}");
+    assert!(
+        doc["error"]["msg"].as_str().unwrap().contains(needle),
+        "{stdout}"
+    );
+    assert!(doc.get("workspaces").is_none(), "{stdout}");
+}
+
+#[test]
+fn a_window_that_is_not_one_is_refused_before_any_workspace_is_read() {
+    let tmp = trial();
+    refused_window(
+        owner(&tmp).args(["liveness", "--from", "not-a-date", "--to", TO, "--json"]),
+        "--from `not-a-date`",
+    );
+    refused_window(
+        owner(&tmp).args(["liveness", "--from", FROM, "--to", "soon", "--json"]),
+        "--to `soon`",
+    );
+    refused_window(
+        owner(&tmp).args(["liveness", "--from", TO, "--to", FROM, "--json"]),
+        "must lie before",
+    );
+    refused_window(
+        owner(&tmp).args(["liveness", "--from", FROM, "--to", FROM, "--json"]),
+        "must lie before",
+    );
+
+    // Under `--everywhere` it is the SAME one error — not an `unreadable` block per workspace.
+    let home = TempDir::new().unwrap();
+    register(home.path(), &[("one", &root(&tmp))]);
+    for (from, to, needle) in [
+        ("garbage", TO, "--from `garbage`"),
+        (FROM, "garbage", "--to `garbage`"),
+        (TO, FROM, "must lie before"),
+    ] {
+        let mut cmd = owner(&tmp);
+        cmd.pin_home(home.path());
+        refused_window(
+            cmd.args([
+                "liveness",
+                "--everywhere",
+                "--from",
+                from,
+                "--to",
+                to,
+                "--json",
+            ]),
+            needle,
+        );
+    }
+
+    // And at the seam, before the store is read.
+    let engine = Engine::open(None, &root(&tmp)).expect("open the engine");
+    for (from, to) in [("garbage", TO), (FROM, "garbage"), (TO, FROM)] {
+        let err = engine
+            .liveness(Reader::Owner, NOW, Some(LivenessWindow { from, to }))
+            .unwrap_err();
+        assert_eq!(err.kind.as_str(), "validation", "{from} {to}: {}", err.msg);
+    }
+}
+
+#[test]
+fn everywhere_with_no_registry_reports_no_workspace_and_succeeds() {
+    let tmp = trial();
+    let home = TempDir::new().unwrap();
+    let doc = everywhere(&home, &tmp);
+    assert_eq!(doc["workspaces"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        (doc["from"].as_str(), doc["to"].as_str()),
+        (Some(FROM), Some(TO))
+    );
+}
+
 #[test]
 fn everywhere_reports_every_attended_workspace_with_its_own_policy() {
     let one = trial();
@@ -716,7 +843,13 @@ fn everywhere_reports_every_attended_workspace_with_its_own_policy() {
     let home = TempDir::new().unwrap();
     register(home.path(), &[("one", &root(&one)), ("two", &root(&two))]);
 
+    let before = log_of(&two);
     let doc = everywhere(&home, &one);
+    assert_eq!(
+        log_of(&two),
+        before,
+        "reading another workspace writes nothing to its log"
+    );
     let blocks = doc["workspaces"].as_array().unwrap();
     assert_eq!(blocks.len(), 2, "{doc}");
     assert_eq!(blocks[0]["workspace"]["name"], "one");
@@ -756,7 +889,7 @@ fn everywhere_marks_a_store_it_cannot_open_unreadable_and_completes_the_others()
     let blocks = doc["workspaces"].as_array().unwrap();
     assert_eq!(blocks.len(), 2, "{doc}");
     assert_eq!(blocks[0]["state"], "read");
-    assert_eq!(blocks[0]["episodes"].as_array().unwrap().len(), 13, "{doc}");
+    assert_eq!(blocks[0]["episodes"].as_array().unwrap().len(), 14, "{doc}");
     assert_eq!(blocks[1]["state"], "unreadable", "{doc}");
     assert_eq!(blocks[1]["workspace"]["name"], "two");
     assert!(!blocks[1]["error"].as_str().unwrap().is_empty());

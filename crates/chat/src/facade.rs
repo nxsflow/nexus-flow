@@ -873,9 +873,9 @@ pub use crate::stranded::Observation;
 /// **The liveness report** (nxf 6j6v.t7xp): `nxc liveness` and [`crate::engine::Engine::liveness`]
 /// read through [`liveness`]; [`episodes_of`] is the pure episode cut both rest on.
 pub use crate::liveness_report::{
-    admit_liveness_reader, default_liveness_from, episodes_of, liveness, Episode, EpisodeEnd,
-    LivenessReport, LivenessWindow, LivenessWorkspace, PolicySummary, ResumeOutcome,
-    WorkspaceBlock, WorkspaceLiveness,
+    admit_liveness_reader, episodes_of, liveness, resolve_liveness_window, Episode, EpisodeEnd,
+    LivenessReport, LivenessWindow, LivenessWorkspace, PolicyPair, PolicySeen, PolicySummary,
+    Resume, ResumeOutcome, WorkspaceBlock, WorkspaceLiveness,
 };
 
 /// **A stranded session as a status row shows it** (nxf 6j6v.ccvy).

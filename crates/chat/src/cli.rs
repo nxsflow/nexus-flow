@@ -3887,7 +3887,9 @@ fn parked_line(p: &crate::park::ParkedWork) -> String {
 /// **Who reads it** is decided here, at the adapter: the person at the terminal of this
 /// single-device board when no agent session is set; inside an agent session it is refused
 /// `forbidden` (round 3 CQ #3 / IR #6), so an agent never reads other operations' recovery
-/// history. Like `nxc status`, the verb reads through the reader-free facade read and builds no
+/// history. That is a rule that keeps agent sessions out of the report, **not a security
+/// boundary**: it reads the environment, and whoever holds the shell can unset `NXC_SESSION` —
+/// which on this single-device board is the owner. Like `nxc status`, the verb reads through the reader-free facade read and builds no
 /// [`crate::facade::Reader`] at all: selecting the owner reader is an embedder's act, never one an
 /// `nxc` variable can produce (`owner_reads.rs`), and [`crate::engine::Engine::liveness`] is where
 /// an app's owner is admitted.
@@ -3905,12 +3907,10 @@ fn liveness_verb(
              owner",
         ));
     }
-    let now = resolve_now()?;
-    let to = to.map(str::to_string).unwrap_or_else(|| now.clone());
-    let from = match from {
-        Some(f) => f.to_string(),
-        None => crate::facade::default_liveness_from(&to)?,
-    };
+    // The window is resolved and checked ONCE, before any workspace is read: a malformed or
+    // inverted window is the caller's mistake and this verb's error, never one `unreadable`
+    // block per workspace under `--everywhere`.
+    let (from, to) = crate::facade::resolve_liveness_window(&resolve_now()?, from, to)?;
     let window = LivenessWindow {
         from: &from,
         to: &to,
@@ -3966,8 +3966,9 @@ fn liveness_verb(
 fn liveness_table(report: &crate::facade::LivenessReport) -> String {
     use crate::facade::WorkspaceBlock;
     use std::fmt::Write as _;
-    let numbers = |p: (u32, bool)| format!("({}/{})", p.0, p.1);
-    let pair = |p: (u32, bool), letter: Option<char>| match letter {
+    let numbers =
+        |p: crate::facade::PolicyPair| format!("({}/{})", p.dead_resumes, p.notice_at_first_stop);
+    let pair = |p: crate::facade::PolicyPair, letter: Option<char>| match letter {
         Some(l) => format!("{l} {}", numbers(p)),
         None => format!("- {}", numbers(p)),
     };
@@ -3992,12 +3993,15 @@ fn liveness_table(report: &crate::facade::LivenessReport) -> String {
             "\n{} ({})\n  policy now: {}{}",
             ws.workspace.name,
             ws.workspace.path,
-            match ws.letter_now {
-                Some(l) => format!(
-                    "{l} {}",
-                    numbers((now.dead_resumes, now.notice_at_first_stop))
-                ),
-                None => numbers((now.dead_resumes, now.notice_at_first_stop)),
+            {
+                let p = crate::facade::PolicyPair {
+                    dead_resumes: now.dead_resumes,
+                    notice_at_first_stop: now.notice_at_first_stop,
+                };
+                match ws.letter_now {
+                    Some(l) => format!("{l} {}", numbers(p)),
+                    None => numbers(p),
+                }
             },
             if now.fell_back { " (fell back)" } else { "" }
         );
@@ -4055,7 +4059,7 @@ fn liveness_table(report: &crate::facade::LivenessReport) -> String {
             let resumes: Vec<String> = e
                 .resumes
                 .iter()
-                .map(|(n, o)| format!("{n}:{}", o.as_str()))
+                .map(|r| format!("{}:{}", r.attempt, r.outcome.as_str()))
                 .collect();
             let _ = writeln!(
                 out,

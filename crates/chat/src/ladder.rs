@@ -166,7 +166,7 @@ impl RecoveryAction {
         }
     }
 
-    fn parse(raw: &str) -> Option<RecoveryAction> {
+    pub(crate) fn parse(raw: &str) -> Option<RecoveryAction> {
         Some(match raw {
             "asked" => RecoveryAction::Asked,
             "continued" => RecoveryAction::Continued,

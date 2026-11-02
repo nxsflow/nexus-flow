@@ -857,16 +857,11 @@ impl Engine {
         window: Option<facade::LivenessWindow<'_>>,
     ) -> Result<facade::LivenessReport> {
         facade::admit_liveness_reader(reader)?;
-        let default_from;
-        let window = match window {
-            Some(w) => w,
-            None => {
-                default_from = facade::default_liveness_from(now)?;
-                facade::LivenessWindow {
-                    from: &default_from,
-                    to: now,
-                }
-            }
+        let (from, to) =
+            facade::resolve_liveness_window(now, window.map(|w| w.from), window.map(|w| w.to))?;
+        let window = facade::LivenessWindow {
+            from: &from,
+            to: &to,
         };
         let workspace = facade::LivenessWorkspace::of(&self.workspace())?;
         let block = self

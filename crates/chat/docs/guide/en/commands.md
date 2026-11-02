@@ -796,10 +796,14 @@ escalation, how many episodes resume 1, 2 and 3 rescued, and how many ended esca
 
 `--everywhere` reads every workspace the service attends (`~/.nexusflow/workspaces.toml`), each
 under its own policy; a store that cannot be opened is one block `unreadable` with the error, and
-the others are complete. `--json` is the whole document; without it, a table per workspace.
+the others are complete. A `--from` or `--to` that is not an RFC3339 instant, or a window whose
+`--from` does not lie before its `--to`, is refused as a `validation` error before any workspace is
+read. `--json` is the whole document; without it, a table per workspace.
 
 **Only the owner at the terminal reads it.** Inside an agent session (`NXC_SESSION` set) it is
 refused `forbidden`: the report shows the recovery history of every operation, which no agent needs.
+That rule keeps agent sessions out; it is not a security boundary — it reads the environment, and
+whoever holds the shell can unset `NXC_SESSION`.
 An app reads the same document through `Engine::liveness` as the board's owner.
 
 ## Sessions and transcripts

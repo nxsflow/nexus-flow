@@ -8,7 +8,7 @@
       ],
       "counts": {
         "answered": 2,
-        "asked": 12,
+        "asked": 13,
         "confirmed": 1,
         "continued": 6,
         "escalated": 2,
@@ -24,19 +24,19 @@
           "ended": "answered",
           "first_nudge": "2026-10-24T09:10:00Z",
           "letter": "A",
-          "policy": [
-            3,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          },
           "resumes": [
-            [
-              1,
-              "dead_again"
-            ],
-            [
-              2,
-              "answered"
-            ]
+            {
+              "attempt": 1,
+              "outcome": "dead_again"
+            },
+            {
+              "attempt": 2,
+              "outcome": "answered"
+            }
           ],
           "role": "ws/coder",
           "rows": [
@@ -57,15 +57,15 @@
           "ended": "escalated",
           "first_nudge": "2026-10-24T11:10:00Z",
           "letter": "B",
-          "policy": [
-            1,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          },
           "resumes": [
-            [
-              1,
-              "dead_again"
-            ]
+            {
+              "attempt": 1,
+              "outcome": "dead_again"
+            }
           ],
           "role": "ws/verifier",
           "rows": [
@@ -85,15 +85,15 @@
           "ended": "answered",
           "first_nudge": "2026-10-24T13:10:00Z",
           "letter": "C",
-          "policy": [
-            3,
-            true
-          ],
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          },
           "resumes": [
-            [
-              1,
-              "answered"
-            ]
+            {
+              "attempt": 1,
+              "outcome": "answered"
+            }
           ],
           "role": "ws/coder",
           "rows": [
@@ -113,10 +113,10 @@
           "ended": "recovered",
           "first_nudge": "2026-10-24T14:10:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -133,10 +133,10 @@
           "ended": "open",
           "first_nudge": "2026-10-24T14:50:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -152,15 +152,15 @@
           "ended": "recovered",
           "first_nudge": "2026-10-24T15:10:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [
-            [
-              1,
-              "recovered"
-            ]
+            {
+              "attempt": 1,
+              "outcome": "recovered"
+            }
           ],
           "role": "ws/coder",
           "rows": [
@@ -179,10 +179,10 @@
           "ended": "escalated",
           "first_nudge": "2026-10-24T15:28:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -200,10 +200,10 @@
           "ended": "recovered",
           "first_nudge": "2026-10-24T16:10:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -221,10 +221,10 @@
           "ended": "withdrawn",
           "first_nudge": null,
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -240,10 +240,10 @@
           "ended": "open",
           "first_nudge": "2026-10-24T17:20:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -259,10 +259,10 @@
           "ended": "withdrawn",
           "first_nudge": "2026-10-24T18:10:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -277,16 +277,35 @@
         {
           "end_attempt": null,
           "ended": "open",
-          "first_nudge": "2026-10-25T00:30:00+02:00",
+          "first_nudge": "2026-10-24T00:00:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
             40
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-23T23:50:00Z",
+          "thread": "m-u"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-25T00:30:00+02:00",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            41
           ],
           "silence_to_escalation_secs": null,
           "silence_to_recovery_secs": null,
@@ -298,10 +317,10 @@
           "ended": "recovered",
           "first_nudge": "2026-10-24T23:55:00Z",
           "letter": null,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "resumes": [],
           "role": "ws/coder",
           "rows": [
@@ -316,34 +335,34 @@
       ],
       "letter_now": "B",
       "policies_in_rows": [
-        [
-          [
-            1,
-            false
-          ],
-          "B"
-        ],
-        [
-          [
-            2,
-            false
-          ],
-          null
-        ],
-        [
-          [
-            3,
-            false
-          ],
-          "A"
-        ],
-        [
-          [
-            3,
-            true
-          ],
-          "C"
-        ]
+        {
+          "letter": "B",
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": "A",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": "C",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          }
+        }
       ],
       "policy_now": {
         "dead_resumes": 1,
@@ -360,10 +379,10 @@
           "max_silence_to_recovery_secs": null,
           "median_silence_to_escalation_secs": 1920,
           "median_silence_to_recovery_secs": null,
-          "policy": [
-            1,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          },
           "rescued_by_resume": [
             0,
             0,
@@ -371,17 +390,17 @@
           ]
         },
         {
-          "episodes": 10,
+          "episodes": 11,
           "escalated": 1,
           "letter": null,
           "max_silence_to_escalation_secs": 900,
           "max_silence_to_recovery_secs": 2220,
           "median_silence_to_escalation_secs": 900,
           "median_silence_to_recovery_secs": 1350,
-          "policy": [
-            2,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
           "rescued_by_resume": [
             1,
             0,
@@ -396,10 +415,10 @@
           "max_silence_to_recovery_secs": 2400,
           "median_silence_to_escalation_secs": null,
           "median_silence_to_recovery_secs": 2400,
-          "policy": [
-            3,
-            false
-          ],
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          },
           "rescued_by_resume": [
             0,
             1,
@@ -414,10 +433,10 @@
           "max_silence_to_recovery_secs": 1500,
           "median_silence_to_escalation_secs": null,
           "median_silence_to_recovery_secs": 1500,
-          "policy": [
-            3,
-            true
-          ],
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          },
           "rescued_by_resume": [
             1,
             0,
