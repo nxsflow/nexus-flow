@@ -4,12 +4,22 @@ This file provides instructions and context for AI coding agents working on this
 
 ## Quality gates: CI is the gate
 
-The full suite and clippy take hours on the development machine and minutes in CI, so **the
-project's gate is the CI workflow, not a local run.** Never run `cargo clippy`, `cargo test --all`
-or `cargo test --workspace` locally.
+The full suite and a workspace-wide clippy take hours on the development machine and minutes in
+CI, so **the project's gate is the CI workflow, not a local run.** Never run `cargo test --all`,
+`cargo test --workspace`, or `cargo clippy` without `-p` (that includes `--all` and
+`--workspace`) locally.
 
-Locally, run only `cargo fmt --all -- --check` and the test files your change touched
-(`cargo test -p <crate> --test <file>`). Then the gate is:
+Locally, run only:
+
+- `cargo fmt --all -- --check`;
+- the test files your change touched (`cargo test -p <crate> --test <file>`);
+- clippy **scoped to the crates your change touched, and nothing else**:
+  `cargo clippy -p <crate> --all-targets -- -D warnings`, one `-p` per crate that contains a
+  file you created or edited. Clippy cannot lint a single file; the crate is the smallest scope it
+  has, so the crate is the scope. Run it before you push: a lint error found locally costs a
+  minute, the same error found by CI costs a full CI cycle.
+
+Then the gate is:
 
 ```
 git push origin HEAD
