@@ -3903,9 +3903,13 @@ fn parked_line(p: &crate::park::ParkedWork) -> String {
 /// [`crate::facade::liveness`] call per workspace: this one, or with `--everywhere` every workspace
 /// the service home attends, each with its OWN identity and its OWN `[chat.liveness]` policy.
 ///
-/// **The reader** is decided here, at the adapter: the owner at the terminal of this single-device
-/// board when no agent session is set, otherwise the session's handle — which the report refuses
-/// (round 3 CQ #3 / IR #6), so an agent never reads other operations' recovery history.
+/// **Who reads it** is decided here, at the adapter: the person at the terminal of this
+/// single-device board when no agent session is set; inside an agent session it is refused
+/// `forbidden` (round 3 CQ #3 / IR #6), so an agent never reads other operations' recovery
+/// history. Like `nxc status`, the verb reads through the reader-free facade read and builds no
+/// [`crate::facade::Reader`] at all: selecting the owner reader is an embedder's act, never one an
+/// `nxc` variable can produce (`owner_reads.rs`), and [`crate::engine::Engine::liveness`] is where
+/// an app's owner is admitted.
 fn liveness_verb(
     json: bool,
     db: Option<&str>,
@@ -3913,13 +3917,13 @@ fn liveness_verb(
     to: Option<&str>,
     everywhere: bool,
 ) -> Result<()> {
-    use crate::facade::{LivenessWindow, LivenessWorkspace, Reader, WorkspaceBlock};
-    let me = actor();
-    let reader = match session() {
-        Some(_) => Reader::Handle(&me),
-        None => Reader::Owner,
-    };
-    crate::facade::admit_liveness_reader(reader)?;
+    use crate::facade::{LivenessWindow, LivenessWorkspace, WorkspaceBlock};
+    if session().is_some() {
+        return Err(NxfError::forbidden(
+            "only the board's owner reads the liveness report, and an agent session is not the \
+             owner",
+        ));
+    }
     let now = resolve_now()?;
     let to = to.map(str::to_string).unwrap_or_else(|| now.clone());
     let from = match from {

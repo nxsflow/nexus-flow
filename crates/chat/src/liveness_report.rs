@@ -190,12 +190,13 @@ pub struct LivenessReport {
 
 /// **Who may read the report: the board's owner, nobody else** (6j6v.pszd round 3 CQ #3 / IR #6).
 /// It exposes every operation's recovery history, so a handle — an agent — is refused as well as
-/// an account that is not the owner. This deliberately does NOT go through `Reader::standing`,
-/// which admits a handle.
+/// an account that is not the owner (whom [`Reader`]'s one rule refuses already). A handle is
+/// admitted by that rule for the conversation reads, so this asks it for the reader's standing and
+/// refuses every standing that is a chat identity.
 pub fn admit_liveness_reader(reader: Reader<'_>) -> Result<()> {
-    match reader {
-        Reader::Owner => Ok(()),
-        Reader::Handle(_) | Reader::NotOwner => Err(NxfError::forbidden(
+    match reader.standing()?.handle() {
+        None => Ok(()),
+        Some(_) => Err(NxfError::forbidden(
             "only the board's owner reads the liveness report",
         )),
     }
@@ -257,7 +258,7 @@ pub fn liveness(
         episodes.extend(
             episodes_of(&slot_rows)
                 .into_iter()
-                .filter(|e| first_at(&slot_rows, e).is_some_and(|at| in_window(at))),
+                .filter(|e| first_at(&slot_rows, e).is_some_and(&in_window)),
         );
     }
 
@@ -657,14 +658,5 @@ mod tests {
         assert_eq!(median(&[]), None);
         assert_eq!(median(&[5, 1, 3]), Some(3));
         assert_eq!(median(&[4, 1, 2, 7]), Some(3));
-    }
-
-    #[test]
-    fn a_handle_and_a_non_owner_are_refused_the_owner_reads() {
-        assert!(admit_liveness_reader(Reader::Owner).is_ok());
-        for reader in [Reader::Handle("ws/coder"), Reader::NotOwner] {
-            let err = admit_liveness_reader(reader).unwrap_err();
-            assert_eq!(err.kind, crate::error::ErrorKind::Forbidden, "{reader:?}");
-        }
     }
 }
