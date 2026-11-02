@@ -3934,7 +3934,8 @@ fn liveness_verb(
                     name: entry.name.clone(),
                     path: entry.path.clone(),
                 };
-                Workspace::resolve(None, std::path::Path::new(&entry.path))
+                // In place: a stale entry is `unreadable`, never the workspace above it.
+                Workspace::at(std::path::Path::new(&entry.path))
                     .and_then(|ws| read_one(&ws, &identity))
                     .unwrap_or_else(|e| WorkspaceBlock::Unreadable {
                         workspace: identity,

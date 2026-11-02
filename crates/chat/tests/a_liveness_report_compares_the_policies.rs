@@ -895,6 +895,47 @@ fn everywhere_marks_a_store_it_cannot_open_unreadable_and_completes_the_others()
     assert!(!blocks[1]["error"].as_str().unwrap().is_empty());
 }
 
+/// A registry entry whose directory holds no workspace of its own is `unreadable` — never the
+/// report of the nearest workspace ABOVE it under the entry's name, and never a legacy
+/// `.nexusflow/` above it renamed on disk by a report that writes nothing (round 4 IR #1).
+#[test]
+fn everywhere_reads_a_registered_workspace_in_place_never_an_ancestors() {
+    let parent = trial();
+    let stale = root(&parent).join("gone");
+    std::fs::create_dir_all(&stale).unwrap();
+    let legacy_parent = TempDir::new().unwrap();
+    std::fs::create_dir_all(legacy_parent.path().join(".nexusflow")).unwrap();
+    std::fs::write(legacy_parent.path().join(".nexusflow/replica.toml"), "").unwrap();
+    let under_legacy = root(&legacy_parent).join("gone");
+    std::fs::create_dir_all(&under_legacy).unwrap();
+    let home = TempDir::new().unwrap();
+    register(
+        home.path(),
+        &[("stale", &stale), ("under-legacy", &under_legacy)],
+    );
+
+    let doc = everywhere(&home, &parent);
+    let blocks = doc["workspaces"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "{doc}");
+    for (block, path) in blocks.iter().zip([&stale, &under_legacy]) {
+        assert_eq!(block["state"], "unreadable", "{doc}");
+        assert!(block.get("episodes").is_none(), "{doc}");
+        let error = block["error"].as_str().unwrap();
+        assert!(
+            error.contains(&format!("no workspace at {}", path.display())),
+            "{error}"
+        );
+    }
+    assert!(
+        legacy_parent
+            .path()
+            .join(".nexusflow/replica.toml")
+            .is_file()
+            && !legacy_parent.path().join(".nxs").exists(),
+        "the report renamed a legacy workspace above a registered path"
+    );
+}
+
 #[test]
 fn the_human_form_is_a_table_per_workspace() {
     let tmp = trial();
