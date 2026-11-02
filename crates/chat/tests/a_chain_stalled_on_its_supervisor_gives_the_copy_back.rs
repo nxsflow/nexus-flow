@@ -61,6 +61,8 @@ const ENDED: &str = "2026-11-02T09:22:00Z";
 const JUST_AFTER: &str = "2026-11-02T09:23:00Z";
 /// Five minutes after the empty slot opened at [`ENDED`] — when the tick first counts it out.
 const SLOT_COUNTS_OUT: &str = "2026-11-02T09:27:00Z";
+/// Inside the revival's window: past [`SLOT_COUNTS_OUT`], short of it plus one liveness cadence.
+const REVIVING: &str = "2026-11-02T09:27:30Z";
 /// One second short of five minutes of quiet.
 const ONE_SECOND_SHORT: &str = "2026-11-02T09:26:59Z";
 /// Exactly five minutes of quiet.
@@ -804,7 +806,7 @@ fn a_chain_with_a_slot_never_commissioned_is_revived_rather_than_parked() {
         },
     );
 
-    let receipt = b.tick(QUIET, &rival.unwrap());
+    let receipt = b.tick(REVIVING, &rival.unwrap());
 
     kept(&b, &root, &receipt);
     // Armed under the SLOT's own key, at the instant the slot counts out of the set…
@@ -828,8 +830,80 @@ fn a_chain_with_a_slot_never_commissioned_is_revived_rather_than_parked() {
         b.timer.armed.lock().unwrap()
     );
 
-    b.tick(QUIET, &root);
+    // The revival itself — the channel thread's own tick — arms nothing again: its channel half is
+    // what moves the chain, a second later is not another chance.
+    b.timer.looks.lock().unwrap().clear();
+    b.tick(REVIVING, &root);
+    assert!(
+        !b.timer
+            .looks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(slot, _, _)| slot.ends_with("-revive")),
+        "the revival re-armed itself: {:?}",
+        b.timer.looks.lock().unwrap()
+    );
     assert_eq!(b.started("verifier"), 1, "the chain went on to verify");
+}
+
+/// **A revival that cannot move the chain is parked, not revived for the rest of the bound**
+/// (re-review of PR #111, R1). Here the never-commissioned slot is the ONLY slot of its channel
+/// thread — a nested step whose first member's commission was killed — so the tick keeps it (a
+/// board with no members at all is not consolidated) and the chain cannot move. Inside the
+/// revival's window the sweep arms its tick; past it, the chain is a stall like any other.
+#[test]
+fn a_revival_that_cannot_move_the_chain_is_parked_once_its_window_is_over() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    let rival = rival.unwrap();
+    let nested = "m-01NESTEDREVIEWCHANNEL00000";
+    let only = "m-01NESTEDSLOTNEVERCOMMISSIONED";
+    b.open_under(nested, &root, &b.supervisor(), ENDED);
+    b.store().set_expects_reply_from(
+        nested,
+        &serde_json::to_string(&[b.supervisor()]).unwrap(),
+        &b.supervisor(),
+    );
+    b.open_under(only, nested, &b.supervisor(), ENDED);
+    assert_eq!(b.owes(nested, QUIET), vec![b.supervisor()], "the premise");
+
+    let inside = b.tick(REVIVING, &rival);
+    kept(&b, &root, &inside);
+    assert_eq!(
+        b.timer
+            .looks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(slot, thread, _)| (slot.clone(), thread.clone()))
+            .collect::<Vec<_>>(),
+        vec![(format!("{only}-revive"), nested.to_string())],
+        "inside its window the revival is armed once"
+    );
+
+    // The revival runs and cannot move anything.
+    b.tick(REVIVING, nested);
+    assert_eq!(b.started("verifier"), 0);
+
+    b.timer.looks.lock().unwrap().clear();
+    let past = b.tick(QUIET, &rival);
+    assert_eq!(
+        past.handed_on.map(|h| h.occasion),
+        Some(ParkOccasion::StalledOnItsSupervisor),
+        "past its window the stall is parked"
+    );
+    assert!(
+        !b.timer
+            .looks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(slot, _, _)| slot.ends_with("-revive")),
+        "and its revival is not armed again: {:?}",
+        b.timer.looks.lock().unwrap()
+    );
+    assert_eq!(b.started("solo"), 1);
 }
 
 /// **A revived chain that stalls AGAIN is taken.** The empty slot the revival moved past stays under
@@ -846,7 +920,7 @@ fn a_revived_chain_that_stalls_again_is_taken() {
         },
     );
     let rival = rival.unwrap();
-    b.tick(QUIET, &root);
+    b.tick(REVIVING, &root);
     assert_eq!(b.started("verifier"), 1, "revived: the verifier runs");
     let verifier = b.session_of("verifier");
     let verify = b

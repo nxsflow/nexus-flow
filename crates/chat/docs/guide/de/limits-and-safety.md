@@ -332,7 +332,9 @@ der sie greift:
   als noch arbeitenden Schritt und antwortete für immer `not_due`; sobald er fünf Minuten alt ist,
   zählt er gar nicht mehr als Schritt, und der Tick führt die Kette weiter. Eine solche Kette wird
   wiederbelebt statt geparkt: Solange jemand wartet, stellt der Sweep diesen Tick selbst, statt die
-  Kopie zu übernehmen. Wartet niemand, stellt ihn vor der Frist des leeren Schritts nichts —
+  Kopie zu übernehmen. Das ist eine Chance, kein Dauerfreibrief: Ist der leere Schritt eine Minute
+  später noch immer der neueste — der Tick konnte die Kette nicht bewegen —, parkt der Sweep sie wie
+  jede andere hängen gebliebene Kette. Wartet niemand, stellt ihn vor der Frist des leeren Schritts nichts —
   `nxc tick --thread <id>` auf dem ersten Thread des Vorgangs erledigt das von Hand.
 - **Wer schon wartet, kommt zuerst dran.** Das Zurückholen eines abgelaufenen Anspruchs gibt den Zug
   der Warteschlange im selben Schritt weiter: die Kette, die schon anstand, startet, und der

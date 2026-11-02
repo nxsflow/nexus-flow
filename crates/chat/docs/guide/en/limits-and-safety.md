@@ -303,7 +303,9 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   answer, no message. A `tick` on the operation's first thread used to read it as a step still
   working and answer `not_due` for ever; once it is five minutes old it is not counted as a step at
   all, and the tick moves the chain on. Such a chain is revived rather than parked: while somebody
-  waits, the sweep arms that tick itself instead of taking the copy. With nobody waiting nothing
+  waits, the sweep arms that tick itself instead of taking the copy. That is one chance, not a
+  standing excuse: if a minute later the empty step is still the newest one — the tick could not move
+  the chain — the sweep parks it like any other stalled chain. With nobody waiting nothing
   arms it before the empty step's own deadline — `nxc tick --thread <id>` on the operation's first
   thread does it by hand.
 - **Whoever is already waiting goes first.** Reclaiming an expired lease hands the queue's turn out

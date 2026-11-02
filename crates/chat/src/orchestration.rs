@@ -3889,6 +3889,7 @@ fn sweep_expired_working_tree(
     ctx: &Ctx,
     store: &mut ChatStore,
     park_already_held: bool,
+    ticked: &str,
     warnings: &mut Vec<FailedConsequence>,
 ) -> Result<SweepStep> {
     let Some((holder, expires)) = store.working_tree_lease_row()? else {
@@ -3922,6 +3923,7 @@ fn sweep_expired_working_tree(
             &holder,
             &expires,
             park_already_held,
+            ticked,
             warnings,
         )?;
         if let Some(handed_on) = handed_on {
@@ -4102,6 +4104,7 @@ fn a_dead_holder_inside_its_bound(
     holder: &str,
     expires: &str,
     park_already_held: bool,
+    ticked: &str,
     warnings: &mut Vec<FailedConsequence>,
 ) -> Result<Option<HandedOn>> {
     let Some(scope) = WorkScope::parse(holder) else {
@@ -4115,8 +4118,13 @@ fn a_dead_holder_inside_its_bound(
             // Neither occasion stands, so nothing is retrying a park under either.
             forget_a_refusal_of_this_occasion(store, ParkOccasion::DiedInsideItsBound);
             forget_a_refusal_of_this_occasion(store, ParkOccasion::StalledOnItsSupervisor);
+            // Not when THIS tick is the channel thread's own: it is the revival, and its channel half
+            // runs right after this sweep. Re-arming here would fire the look again a second later,
+            // for as long as the grace lasts, whether or not the chain can move.
             if let HolderVerdict::Revivable(revival) = verdict {
-                warnings.extend(arm_a_revival(ctx, &revival));
+                if revival.channel_thread != ticked {
+                    warnings.extend(arm_a_revival(ctx, &revival));
+                }
             }
             return Ok(None);
         }
@@ -4459,7 +4467,9 @@ impl OnItsWay {
 /// 5. **The newest slot of its channel thread was not left uncommissioned** ([`never_commissioned`]).
 ///    That chain is not stalled, it is REVIVABLE: a tick of its channel thread moves it on. So this
 ///    answers [`Stall::Revivable`], and the sweep arms that tick rather than parking the work of a
-///    chain about to continue.
+///    chain about to continue — for one liveness cadence past the slot's counting out, and no
+///    longer: a slot still the newest after that is one the tick could not move past, and the
+///    chain is a stall like any other.
 /// 6. **It has been quiet for [`STALLED_CHAIN_QUIET_SECS`]** — so this cannot be the moment between
 ///    a step's end and the opening of the next one, which one process makes in one call.
 fn a_chain_stalled_on_its_supervisor(
@@ -4507,6 +4517,16 @@ fn a_chain_stalled_on_its_supervisor(
             continue;
         };
         let at = crate::stranded::after(&created, STALLED_CHAIN_QUIET_SECS, "a revival")?;
+        // **A revival is given ONE chance, not a standing excuse** (re-review of PR #111, R1). Past
+        // its instant plus one liveness cadence the tick it armed has run, and if the slot is still
+        // the newest, that tick could not move the chain — the slot is its channel thread's only
+        // one, or the advance keeps failing before it opens a new one. Then this is a stall like
+        // any other and falls through to the quiet check below, so it is parked rather than revived
+        // for the rest of its bound.
+        let gives_up = crate::stranded::after(&at, SESSION_LIVENESS_RECHECK_SECS, "a revival")?;
+        if crate::stranded::reached(ctx.now, &gives_up) {
+            continue;
+        }
         return Ok(Stall::Revivable(Revival {
             slot: slot.thread_id,
             channel_thread,
@@ -18061,7 +18081,11 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         .collect();
     interrupt_the_chain_above(ctx, store, thread_id, &taken_back, &withdrawn_qualified)?;
     // The operation is taken back, so no advance in it is waiting for its requester any more.
-    store.forget_stopped_advances_in(&area)?;
+    if let Err(e) = store.forget_stopped_advances_in(&area) {
+        // Best effort: a row left standing only keeps the stalled-chain rule declining on a thread
+        // that no longer owes its supervisor — and that rule asks only threads that still do.
+        eprintln!("warning: could not clear the stopped advances under thread {thread_id}: {e}");
+    }
 
     // **A discarded failed start can leave its claim area holding the copy with nothing in it**
     // (review of PR #32, Integrity #1). The area keeps the lease while anything in it still owes —
@@ -18822,7 +18846,13 @@ fn tick_reporting_its_own_failures(
     // twice in one tick, which is what `park.held` carries across.
     let mut workspace_findings = Vec::new();
     let park = park_step(ctx, store, &mut workspace_findings)?;
-    let sweep = sweep_expired_working_tree(ctx, store, park.held, &mut workspace_findings)?;
+    let sweep = sweep_expired_working_tree(
+        ctx,
+        store,
+        park.held,
+        req.thread_id,
+        &mut workspace_findings,
+    )?;
     // **And the third workspace-wide question, on the same terms** (nxf 6j6v.gn8b): is anybody
     // holding answers for a caller that has stopped running? The scheduled job armed by
     // `session ended` is the ordinary way that queue drains; this is the backstop for the caller
