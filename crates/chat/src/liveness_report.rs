@@ -258,7 +258,7 @@ pub fn liveness(
         episodes.extend(
             episodes_of(&slot_rows)
                 .into_iter()
-                .filter(|e| first_at(&slot_rows, e).is_some_and(&in_window)),
+                .filter(|e| first_at(&slot_rows, e).is_some_and(in_window)),
         );
     }
 
