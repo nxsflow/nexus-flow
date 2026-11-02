@@ -1,6 +1,6 @@
 ---
 type: added
-facade: added
+facade: changed
 ---
 [en]
 New verb `nxc liveness [--from <RFC3339>] [--to <RFC3339>] [--everywhere]`: the owner's report comparing the liveness policies of `[chat.liveness]` (A, B, C) from the coordinator's own recovery log. Per workspace it shows the policy in force now with any invalid values and unknown keys, the policy pairs the window's rows carry, how often each recovery event happened, every recovery episode whose first row lies in the window (how it ended, what each resume led to, the time from the silence to recovery or escalation), and per policy pair the median and maximum of those times, how many episodes resume 1, 2 and 3 rescued and how many ended escalated. The window defaults to the last seven days. `--everywhere` reads every workspace the service attends, each under its own policy, and marks a store it cannot open as `unreadable` while the others are complete. Only the owner at the terminal reads it: inside an agent session it is refused `forbidden`.
