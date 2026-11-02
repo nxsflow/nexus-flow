@@ -246,6 +246,15 @@ der sie greift:
   abgelehnt, und ein Agent, der eine Runde anhalten will, eskaliert stattdessen. Eine Kopie, die
   eine bereits tote Kette hält, braucht niemanden, der fragt: der Sweep weiter unten nimmt sie von
   selbst — über ihrer Frist, oder, weil er eine tote Kette nachweisen kann, schon davor.
+
+  **Der Aufruf nimmt auch einen Vorgang zurück, der die Kopie hält, ohne dass darin überhaupt etwas
+  läuft** — eine Kette, deren nächster Schritt nie gestartet wurde, oder eine zugestellte Runde, die
+  noch von einer Rückgabe gehalten wird, die niemand mehr beantworten kann. Bisher lehnte der Aufruf
+  das mit *nothing … is waiting or running* ab — zutreffend, und es blieb nichts, was die Kopie
+  freigeben konnte. Jetzt werden seine offenen Threads entlastet, sodass daraus nichts mehr beauftragt
+  wird, und der Hintergrund-Tick parkt seine Arbeit und gibt die Kopie weiter wie bei einer
+  angehaltenen Runde. Ein Vorgang, der weder die Kopie hält noch etwas laufen hat, wird weiterhin
+  abgelehnt: dort gibt es nichts zurückzunehmen.
 - **Wie lange ein Anspruch läuft: so lange, wie die Operation es selbst zugesagt hat.** Die Frist ist
   das späteste `timeout:`, das im Anspruchsgebiet noch aussteht — eine Runde, die sechs Stunden sagt,
   hält die Kopie sechs Stunden, und eine Operation, deren Schritte *alle* Minuten sagen, ist nach
@@ -255,6 +264,14 @@ der sie greift:
   galt. Die zwei Stunden sind also jetzt die Antwort für Deklarationen, die nichts sagen — kein
   Budget, das denen aufgezwungen wird, die etwas sagen —, und für eine kürzere Frist entscheidet man
   sich, indem man `timeout:` entlang der Kette deklariert.
+
+  **Die Frist wird festgelegt, wenn der Anspruch genommen oder erneuert wird, und Antworten verkürzen
+  sie nicht.** Sie ist das späteste Fenster, das in dem Moment aussteht, in dem der letzte Schritt
+  der Operation beauftragt wurde — nicht die eigene Frist des ersten Threads, und sie wird nicht neu
+  berechnet, wenn Schritte antworten. Ein `coding`-Lauf, dessen letzter Nacharbeitsschritt um 15:09
+  mit `timeout: 6h` begann, hält seine Frist bis 21:09, obwohl die Frist seines ersten Threads um
+  12:43 verstrichen ist. `nxc status` zeigt die Frist jedes Threads; keine davon ist die Frist des
+  Anspruchs, außer sie gehört zu dem Schritt, der zuletzt beauftragt wurde.
 - **Die Rückfallgrenze.** Ein verwaister Anspruch hört auf, *künftige* Erwerbungen abzulehnen, sobald
   seine Frist verstrichen ist, und ein `tick` nach diesem Punkt gibt die Warteschlange frei — eine
   Beauftragung, die parkt, plant einen für genau diesen Zeitpunkt ein, das Leeren passiert also auch,
@@ -290,6 +307,25 @@ der sie greift:
   eigenen Weg zurück hat. Ein Vorgang, dessen Sitzungen alle endeten und die Aufgabe zurückgegeben
   haben, fällt **nicht** darunter — er wartet auf Sie, und für ihn gilt weiterhin die
   Dreißig-Minuten-Regel von oben.
+
+  **Eine weitere Form gilt als tot: eine Kette, die an ihrem eigenen Supervisor hängen geblieben
+  ist.** Wenn der einzige Thread, der noch eine Antwort schuldet, ein Kanal-Thread ist, der auf
+  `__channel__` wartet — die Engine selbst, die den nächsten Schritt öffnet oder konsolidiert —, gibt
+  es dort keine Sitzung, die tot sein könnte. Ein solcher Vorgang wird übernommen, wenn neben einem
+  antwortenden Worker und keinem laufenden Prozess gilt: nichts darin wartet auf die Kopie oder ist
+  als fehlgeschlagener Start vermerkt; keine Rückgabe darin ist unbeantwortet; nichts davon ist über
+  die Grenze hinweg offen; nichts pausiert an einer Verfügbarkeitsgrenze; und seit fünf Minuten ist
+  darin überhaupt nichts geschehen — kein Thread geöffnet, keine Nachricht gepostet, kein
+  Sitzungsende vermerkt. Die fünf Minuten verhindern, dass die Regel den Moment zwischen dem Ende
+  eines Schritts und dem Öffnen des nächsten erwischt. Sie kam nach einem Lauf hinzu, dessen Übergang
+  zum nächsten Schritt mittendrin abgebrochen wurde (der Aufruf des Sidecars lief bei gesperrter
+  Datenbank in sein Zeitlimit): Der beantwortete Schritt war fertig, der nächste wurde nie gestartet,
+  und die Kopie blieb stundenlang gehalten, ohne dass irgendetwas sie je hätte bewegen können.
+
+  Derselbe Vorfall hinterließ einen Schritt-Thread, den die Engine geöffnet und nie beauftragt hatte
+  — keine erwartete Antwort, keine Nachricht. Ein `tick` auf dem ersten Thread des Vorgangs las ihn
+  als noch arbeitenden Schritt und antwortete für immer `not_due`; sobald er fünf Minuten alt ist,
+  zählt er gar nicht mehr als Schritt, und der Tick führt die Kette weiter.
 - **Wer schon wartet, kommt zuerst dran.** Das Zurückholen eines abgelaufenen Anspruchs gibt den Zug
   der Warteschlange im selben Schritt weiter: die Kette, die schon anstand, startet, und der
   Neuankömmling stellt sich hinten an. Diese Seite schwieg dazu, weil es umgekehrt war — die Kopie

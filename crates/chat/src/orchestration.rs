@@ -4221,6 +4221,12 @@ fn a_dead_holder_inside_its_bound(
 ///    has fallen due costs a minute (the resume takes it up, or the next tick asks again), while
 ///    acting on one costs a park of an operation somebody else is about to resume.
 ///
+/// **Clause 4 has one exception, and it is a different kind of evidence rather than a weaker one**
+/// (nxf 6j6v.3rrv): when every owing thread owes only its channel SUPERVISOR, there is no session to
+/// have reported anything, and [`a_chain_stalled_on_its_supervisor`] decides in its place — nothing
+/// queued, failed, handed back or open across the border in the operation, and nothing at all
+/// happened in it for [`STALLED_CHAIN_QUIET_SECS`].
+///
 /// It takes `&ChatStore`, writes nothing and decides nothing about what to DO — which is what lets
 /// the sweep call it as a guard and lets it be reasoned about on its own.
 fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> Result<bool> {
@@ -4237,16 +4243,26 @@ fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> R
     if !sessions_still_running(ctx, store, &threads)?.is_empty() {
         return Ok(false);
     }
-    // ONE read for the whole clause, not one per owing thread (fix round 1): see
-    // [`ChatStore::newest_sessions_in_threads`] for the N+1 that was here and why this table is the
-    // wrong one to walk. An owing thread absent from the answer never ran a session at all.
-    let newest = store.newest_sessions_in_threads(&owing)?;
-    for thread in &owing {
-        let Some(session) = newest.get(thread) else {
-            return Ok(false); // nothing ever ran here: an obligation on a human, not a death
-        };
-        if session.ended.is_some() {
+    // **An operation that owes nothing but its OWN SUPERVISOR's next move** (nxf 6j6v.3rrv) is the
+    // one shape clause 4 cannot judge: the supervisor is the engine, not a session, so the owing
+    // thread has no session of its own and the loop below would read it as a human being waited
+    // for. It is asked by [`a_chain_stalled_on_its_supervisor`] instead, on evidence of its own.
+    if only_the_supervisor_owes(ctx, store, &owing)? {
+        if !a_chain_stalled_on_its_supervisor(ctx, store, &threads)? {
             return Ok(false);
+        }
+    } else {
+        // ONE read for the whole clause, not one per owing thread (fix round 1): see
+        // [`ChatStore::newest_sessions_in_threads`] for the N+1 that was here and why this table is
+        // the wrong one to walk. An owing thread absent from the answer never ran a session at all.
+        let newest = store.newest_sessions_in_threads(&owing)?;
+        for thread in &owing {
+            let Some(session) = newest.get(thread) else {
+                return Ok(false); // nothing ever ran here: an obligation on a human, not a death
+            };
+            if session.ended.is_some() {
+                return Ok(false);
+            }
         }
     }
     // …and one read for this clause too: the threads with a standing hold, intersected with the
@@ -4256,6 +4272,123 @@ fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> R
         return Ok(false);
     }
     Ok(true)
+}
+
+/// **How long an operation must have been QUIET before the engine calls its chain stalled** (nxf
+/// 6j6v.3rrv) — five minutes since anything at all happened in it: a thread opened, a message
+/// posted, a session's end recorded.
+///
+/// It is the guard for the two rules that act on the engine's OWN unfinished business rather than
+/// on a process that died: [`a_chain_stalled_on_its_supervisor`] (the sweep) and
+/// [`never_commissioned`] (the tick). Both look at a state the engine passes through on its way
+/// somewhere — a supervisor that has not opened the next step YET, a slot whose commission is not
+/// written YET — and a second process must not act on it in that window. The window is short when
+/// the machine is idle and was measured long when it is not: the `session ended` behind 6j6v.3rrv
+/// spent its whole thirty-second call budget waiting on a locked database. Five minutes is ten of
+/// those, and costs a stalled chain five minutes of a wait that used to have no end.
+pub const STALLED_CHAIN_QUIET_SECS: i64 = 5 * 60;
+
+/// **Does every thread that still owes an answer owe it to the engine's own SUPERVISOR, and to it
+/// alone?** (nxf 6j6v.3rrv) — a channel thread waiting on `__channel__` to open its next step or to
+/// consolidate. Nothing here is a session or a person: the supervisor is the engine, and it moves
+/// only when something it waits for happens.
+fn only_the_supervisor_owes(ctx: &Ctx, store: &ChatStore, owing: &[String]) -> Result<bool> {
+    if owing.is_empty() {
+        return Ok(false);
+    }
+    let supervisor = crate::channel::SUPERVISOR_HANDLE;
+    let ids: Vec<&str> = owing.iter().map(String::as_str).collect();
+    Ok(store.thread_quorums(&ids, ctx.now)?.iter().all(|q| {
+        !q.outstanding.is_empty()
+            && q.outstanding
+                .iter()
+                .all(|h| bare_handle_of(h) == supervisor)
+    }))
+}
+
+/// **Has a chain that owes nothing but its supervisor's next move STALLED?** (nxf 6j6v.3rrv) — the
+/// evidence [`holder_is_provably_dead`] asks for in place of a dead session, when there is no
+/// session to be dead.
+///
+/// The supervisor moves only when something below it happens: a step answers, a session ends, a
+/// queued step starts, a failed start is retried, an escalation is answered, the border reports
+/// back. So the chain is stalled — not resting, STALLED: nothing will ever move it — when none of
+/// those can still happen. Every clause is one of them:
+///
+/// 1. **Nothing in the operation is queued for the working copy or recorded as a start that
+///    failed.** Either is a step on its way, and the copy is its own operation's to keep for it.
+/// 2. **No hand-back stands unanswered in it.** An escalation or a question waits for a PERSON, and
+///    that is [`ParkOccasion::StrandedEscalation`]'s, with its thirty-minute contention rule.
+/// 3. **Nothing of it is open across the border** — a persona in another workspace is working on it.
+/// 4. **It has been quiet for [`STALLED_CHAIN_QUIET_SECS`]** — so this cannot be the moment between
+///    a step's end and the opening of the next one, which one process makes in one call.
+///
+/// The measured case (6j6v.3rrv, 2026-11-02) satisfied all four for hours: the advance that would
+/// have opened `verify` was killed half-way, and nothing else was ever going to happen there.
+fn a_chain_stalled_on_its_supervisor(
+    ctx: &Ctx,
+    store: &ChatStore,
+    threads: &[String],
+) -> Result<bool> {
+    let in_area = |t: &Option<String>| t.as_deref().is_some_and(|t| threads.iter().any(|a| a == t));
+    if store
+        .list_working_tree_queue()?
+        .iter()
+        .any(|q| in_area(&q.thread))
+    {
+        return Ok(false);
+    }
+    if store.failed_starts()?.iter().any(|f| in_area(&f.thread)) {
+        return Ok(false);
+    }
+    if store.unanswered_hand_back(threads)?.is_some() {
+        return Ok(false);
+    }
+    if crate::border::rows(store)?.iter().any(|r| {
+        r.direction == crate::border::Direction::Outbound
+            && !r.state.is_final()
+            && threads.contains(&r.thread_id)
+    }) {
+        return Ok(false);
+    }
+    Ok(match store.newest_activity_in(threads)? {
+        Some(at) => quiet_since(ctx.now, &at)?,
+        // An operation with no recorded instant at all has nothing to wait out.
+        None => true,
+    })
+}
+
+/// Whether `now` is at least [`STALLED_CHAIN_QUIET_SECS`] past `at`. An instant that does not parse
+/// is never quiet — the direction that keeps the copy where it is.
+fn quiet_since(now: &str, at: &str) -> Result<bool> {
+    let Ok(until) = crate::stranded::after(at, STALLED_CHAIN_QUIET_SECS, "an operation's quiet")
+    else {
+        return Ok(false);
+    };
+    Ok(crate::stranded::reached(now, &until))
+}
+
+/// **Did the engine open this slot and never commission it?** (nxf 6j6v.3rrv) — a member thread
+/// with nobody expected in it, nothing posted in it, opened longer than [`STALLED_CHAIN_QUIET_SECS`]
+/// ago.
+///
+/// [`open_flow_step`] opens the slot and stamps its deadline BEFORE the commission writes its
+/// register and posts its task, and those are separate writes. A process killed between them — the
+/// sidecar's `nxc session ended`, at its thirty-second timeout, in the measured case — leaves a slot
+/// that is neither `complete` (it expects nobody) nor ever `stale` (it owes nobody). Read as a
+/// member, it holds its set unsettled for ever. It is not a member of anything: nothing was ever
+/// asked there, and nothing will ever answer.
+fn never_commissioned(ctx: &Ctx, store: &ChatStore, slot: &ThreadQuorum) -> Result<bool> {
+    if !slot.expects.is_empty() {
+        return Ok(false);
+    }
+    if !store.messages_in_thread(&slot.thread_id)?.is_empty() {
+        return Ok(false);
+    }
+    match store.thread_created(&slot.thread_id)? {
+        Some(created) => quiet_since(ctx.now, &created),
+        None => Ok(false),
+    }
 }
 
 /// **When to come back for a commission parked behind somebody else's claim** — the ONE decision,
@@ -17099,6 +17232,13 @@ pub struct WithdrawReceipt {
     /// of a commission that had not started.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stopped: Vec<StoppedSession>,
+    /// **The operation held this workspace's working copy with nothing running in it and nothing
+    /// queued or failed to start** (nxf 6j6v.3rrv) — a chain whose next move was lost, or a
+    /// delivered round kept by a hand-back nobody can answer any more. Its open threads were
+    /// discharged and its work is the background tick's to park, as for a stopped round; whether a
+    /// branch will come of it is [`will_park`](Self::will_park). Absent from the JSON when `false`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held_idle: bool,
     /// **Whether the withdrawn round's work is going to be PARKED** (nxf 6j6v.b9nf): `true` when a
     /// stopped session's operation holds this workspace's working copy, so the background service
     /// will commit whatever it left uncommitted onto a branch once its processes are gone and hand
@@ -17202,8 +17342,13 @@ pub struct WithdrawReceipt {
 /// the round above, and discharged it only when EVERY commission of its current pass was taken back
 /// — nxf 6j6v.7me0. A round with an answered step and a withdrawn one went on.)
 ///
-/// Rejection: a thread this workspace does not know, or an area with nothing waiting and nothing
-/// running in it, is `not_found` naming what was looked for. Where the worker cannot answer the
+/// **An operation that holds the working copy with nothing running in it is taken back too** (nxf
+/// 6j6v.3rrv): every thread of it that still owes is discharged, and the copy goes the way a stopped
+/// round's goes — the withdrawn-holder marker, and the tick's park. See
+/// [`WithdrawReceipt::held_idle`].
+///
+/// Rejection: a thread this workspace does not know, or an area with nothing waiting, nothing
+/// running and no hold on the working copy, is `not_found` naming what was looked for. Where the worker cannot answer the
 /// liveness question at all ([`Worker::answers_liveness`](crate::worker::Worker::answers_liveness)
 /// is `false`) and the area holds sessions that never reported an end, it is refused BY NAME
 /// instead: "nothing is running" would be a fact this call never established.
@@ -17296,7 +17441,24 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
             && !r.state.is_final()
             && area.contains(&r.thread_id)
     });
-    if parked.is_empty() && failed.is_empty() && running.is_empty() && !border_open {
+    // **An operation that HOLDS the working copy with nothing running in it** (nxf 6j6v.3rrv,
+    // 6j6v.2pnn) is something to take back too, and it is the case this verb used to answer
+    // "nothing is waiting or running" for — true, and the reason nothing released the copy: a chain
+    // whose advance was lost, or a delivered round kept by a superseded escalation, owes nothing a
+    // process will ever answer. Only where "nothing running" was actually ESTABLISHED: a worker that
+    // cannot look counts as running every session that never reported its end.
+    //
+    // Only where nothing ELSE is there to withdraw: a queued or failed commission is taken back by
+    // the loops below as it always was, and a failed start's discharge then asks the release itself.
+    let held_idle = running.is_empty()
+        && parked.is_empty()
+        && failed.is_empty()
+        && !border_open
+        && (ctx.worker.answers_liveness() || unended_sessions_under(store, &area)?.is_empty())
+        && store
+            .working_tree_lease_row()?
+            .is_some_and(|(key, _)| key == WorkScope::Thread(thread_id.to_string()).key());
+    if parked.is_empty() && failed.is_empty() && running.is_empty() && !border_open && !held_idle {
         // **A worker that cannot LOOK does not get to say nothing is running** (fix round 3 of this
         // item's review, Code Quality #7 (a)). `running` is empty for two different reasons: the
         // worker looked and found nothing, or the worker cannot look at all — a custom worker
@@ -17373,7 +17535,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     };
     // **Whether anything of the withdrawn round is in the checkout at all** — the question the
     // marker turns on, and the one that decides which threads may be told anything about a park.
-    let holds_the_copy = running.iter().any(|s| claim.contains(&s.thread));
+    let holds_the_copy = running.iter().any(|s| claim.contains(&s.thread)) || held_idle;
     // **…and whether a park of it would actually PRODUCE a branch** (fix round 2 of this item's
     // review, Code Quality #1). Until this round `will_park` was the line above and nothing else, so
     // it promised a branch for every host that holds the copy — including the three that can never
@@ -17504,6 +17666,48 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
             role: entry.role,
             session: entry.session,
         });
+    }
+
+    // **The idle holder: every thread of it that still owes is discharged** (nxf 6j6v.3rrv). Nothing
+    // is running to stop and nothing is queued to take off the line, so what is taken back is the
+    // operation's open registers themselves — the root waiting on its supervisor first among them.
+    // That is what keeps a later tick from moving the chain on after its work has been parked, and
+    // it is written after the marker above for the reason the marker gives.
+    if held_idle {
+        let work = match &cannot_park {
+            Some(why) => format!(
+                "Whatever it left uncommitted in the working copy CANNOT be parked on a branch \
+                 here ({why}), so the copy is handed on as it stands"
+            ),
+            None => {
+                "Whatever it left uncommitted in the working copy is parked on a branch by the \
+                     background service; `nxc status` lists the branch under this operation"
+                    .to_string()
+            }
+        };
+        for thread in &area {
+            let Some(q) = store.thread_quorum(thread, ctx.now)? else {
+                continue;
+            };
+            if q.outstanding.is_empty() || q.expects.contains(&withdrawn_qualified) {
+                continue;
+            }
+            if store.thread_opener(thread)?.is_none() {
+                continue;
+            }
+            discharge_a_withdrawn_thread(
+                ctx,
+                store,
+                thread,
+                &withdrawn_qualified,
+                &format!(
+                    "[withdrawn by {withdrawn_by}] this operation held the working copy with \
+                     nothing running in it and nothing on its way, and was taken back — nothing \
+                     further is commissioned or consolidated from here. {work}"
+                ),
+                None,
+            )?;
+        }
     }
 
     // **The running round: discharge, then stop** (nxf 6j6v.b9nf), in that order on purpose. The
@@ -17699,6 +17903,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         withdrawn,
         started_meanwhile,
         stopped,
+        held_idle,
         will_park,
         cannot_park,
         warnings,
@@ -18459,6 +18664,21 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // answering differently.
     let (members, unsettled) =
         members_and_the_ones_still_waiting(ctx.now, store, thread_id, Some(ctx.worker))?;
+    // **A slot the engine opened and never commissioned is not a member** (nxf 6j6v.3rrv): it is
+    // neither `complete` nor ever `stale`, so read as one it held this board `not_due` for good.
+    // Dropped only here, on the PULL path that read every slot; the PUSH path anchors on the
+    // current pass, which such a slot never joins (it carries no run mark and no target).
+    //
+    // Unless it is the ONLY slot: a board left with no members at all reads as a thread with no
+    // set, and that branch of [`tick_move`] would consolidate a round nobody ever answered. That
+    // shape stays as it was — held, and the dead-holder sweep's to take when somebody waits.
+    let mut kept = Vec::with_capacity(members.len());
+    for slot in &members {
+        if !never_commissioned(ctx, store, slot)? {
+            kept.push(slot.clone());
+        }
+    }
+    let members = if kept.is_empty() { members } else { kept };
     let outstanding = outstanding_for_report(&q, &members);
     // **A hold names the instant it lifts, when it names one** (nxf 6j6v.ccvy): a decline because
     // of it arms the next look for that instant — only when it is in the future; with no instant

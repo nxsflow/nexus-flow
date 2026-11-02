@@ -1877,6 +1877,63 @@ impl ChatStore {
         }
     }
 
+    /// When a thread was OPENED — the `created` of its root, as the opener stamped it (nxf
+    /// 6j6v.3rrv). `None` for a thread with no `threads` row, as [`thread_opener`](Self::thread_opener)
+    /// beside it. A db error → `io`.
+    pub fn thread_created(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
+        let conn = self.inner.connection();
+        let mut st = conn.prepare("SELECT created FROM threads WHERE thread_id = ?1")?;
+        let mut rows = st.query([thread_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// **The newest thing that happened in `threads`** (nxf 6j6v.3rrv): the latest of every thread's
+    /// opening, every message posted in one, and every recorded end of a session standing in one —
+    /// compared as INSTANTS, not as text, since a fractional second and a whole one do not sort as
+    /// text the way they do as time. An instant that does not parse is returned as it is and wins,
+    /// so a caller asking "has it been quiet?" errs towards "no".
+    ///
+    /// One read, with the ids handed over as ONE JSON array rather than one bind parameter each, so
+    /// an operation of any width stays under the bind ceiling without a second code path.
+    pub fn newest_activity_in(&self, threads: &[String]) -> crate::error::Result<Option<String>> {
+        if threads.is_empty() {
+            return Ok(None);
+        }
+        let ids = serde_json::to_string(threads).expect("thread ids serialize");
+        let conn = self.inner.connection();
+        let mut st = conn.prepare(
+            "SELECT created FROM threads
+              WHERE thread_id IN (SELECT value FROM json_each(?1)) AND created IS NOT NULL
+             UNION ALL
+             SELECT created FROM messages
+              WHERE thread_id IN (SELECT value FROM json_each(?1)) AND created IS NOT NULL
+             UNION ALL
+             SELECT ended FROM session_map
+              WHERE thread IN (SELECT value FROM json_each(?1)) AND ended IS NOT NULL",
+        )?;
+        let instants = st
+            .query_map([ids], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        use time::format_description::well_known::Rfc3339;
+        let mut newest: Option<(Option<time::OffsetDateTime>, String)> = None;
+        for at in instants {
+            let parsed = time::OffsetDateTime::parse(&at, &Rfc3339).ok();
+            let newer = match (&newest, parsed) {
+                (None, _) => true,
+                (Some((Some(_), _)), None) => true,
+                (Some((Some(seen), _)), Some(p)) => p > *seen,
+                (Some((None, _)), _) => false,
+            };
+            if newer {
+                newest = Some((parsed, at));
+            }
+        }
+        Ok(newest.map(|(_, at)| at))
+    }
+
     /// The SUBTREE under `root`, `root` itself included — every thread that hangs beneath it through
     /// any chain of parent edges, however deep and whatever channel it lives in (nxf 6j6v.1xw1).
     ///

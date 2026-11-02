@@ -2674,6 +2674,15 @@ fn withdraw(json: bool, db: Option<&str>, thread: &str) -> Result<()> {
                 "NOT withdrawn: thread {thread} started while this ran — it has a session now"
             );
         }
+        // **The idle holder** (nxf 6j6v.3rrv): nothing was queued and nothing stopped, so without
+        // this line the receipt would say nothing at all about what was taken back.
+        if receipt.held_idle {
+            println!(
+                "operation {} held this workspace's working copy with nothing running in it and \
+                 nothing on its way — it is taken back, and its open threads are discharged",
+                receipt.thread_id
+            );
+        }
         // What becomes of the work, said either way for a stopped round: a caller who took back a
         // running coder needs to know whether to expect a branch.
         //
@@ -2705,7 +2714,7 @@ fn withdraw(json: bool, db: Option<&str>, thread: &str) -> Result<()> {
                 "nothing of it is in this workspace's working copy, so there is nothing to park"
             );
         }
-        if !receipt.withdrawn.is_empty() || !receipt.stopped.is_empty() {
+        if !receipt.withdrawn.is_empty() || !receipt.stopped.is_empty() || receipt.held_idle {
             // **The chain below the named thread is over, and nothing moves it on** (nxf
             // 6j6v.s2cj). This line used to say the opposite — "the round above is now settled —
             // `nxc tick` moves it on" — which was true while a withdrawal left the round above it

@@ -1318,7 +1318,14 @@ impl Worker for LooksAndFindsNothingWorker {
 #[test]
 fn a_host_that_answers_liveness_and_finds_nothing_running_is_a_not_found() {
     let b = Bench::new();
-    let thread = b.commission(T0, "coder");
+    // A SHARED persona: it takes no lease. An operation that holds the working copy with nothing
+    // running in it is withdrawable since nxf 6j6v.3rrv (`held_idle`), so the refusal is pinned on
+    // one that holds nothing — the only shape it still answers.
+    let thread = b.commission(T0, "scribe");
+    assert!(
+        b.holder().is_none(),
+        "the premise: nothing holds the working copy"
+    );
     // The session is never marked running: this worker LOOKS (`answers_liveness` is `true`) and its
     // look finds nothing, which is exactly the fact `not_found` gets to assert.
     let engine = Engine::open_with(
