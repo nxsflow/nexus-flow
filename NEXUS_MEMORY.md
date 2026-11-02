@@ -31,7 +31,7 @@
 - **the-board-is-local-and-not-in-git**: The board is git-ignored, single-device and lives outside the tree (.nxs is a symlink) — and there is no task type, only the plugin set.
 - **handover-notes-are-not-durable-memory**: Where a session stopped belongs in the session-handover skill, never in durable memory.
 - **shell-evaluates-long-descriptions**: Never pass a long description in double quotes — the shell evaluates backticks and angle brackets first; use a quoted heredoc and read it back.
-- **gates-run-in-ci-not-locally**: CI is the gate: push, gh workflow run ci.yml, check headSha; locally only fmt, touched test files, clippy -p <touched crate> once - never test --all or unscoped clippy.
+- **gates-run-in-ci-not-locally**: CI is the gate: push, gh workflow run ci.yml, check headSha; locally only fmt, touched test files, clippy -p <crate> --lib --test <touched file> once - never --all-targets or test --all.
 - **review-session-in-a-shared-checkout-mistakes-the-work-for-its-own**: A review session in a shared checkout can mistake foreign commits for its own work and refuse — say so up front, and forbid cargo there.
 - **the-project-language-is-english**: Write everything down in English — tickets, memories, commits, PRs, code, docs; speak to a human in their language, but never write it down.
 - **a-tickets-own-measurement-is-unverified**: A measurement pasted into a ticket is the TICKET'S evidence, not yours — re-run it before any removal, and hold when it comes out otherwise.
@@ -1003,7 +1003,11 @@ READING BACK IS PART OF THE STEP: after every create/remember with a longer text
 
 ## THE GATE PROCEDURE (migrated from CLAUDE.md, 2026-11-02)
 
-The project's gate is the CI workflow, not a local run. Locally run ONLY: `cargo fmt --all -- --check`; the test files your change touched (`cargo test -p <crate> --test <file>`); and clippy scoped to the crates your change touched, once before the push (`cargo clippy -p <crate> --all-targets -- -D warnings`, one `-p` per crate containing a file you created or edited; never without `-p`). Never `cargo test --all`, `cargo test --workspace`, or an unscoped clippy locally. Then:
+The project's gate is the CI workflow, not a local run. Locally run ONLY: `cargo fmt --all -- --check`; the test files your change touched (`cargo test -p <crate> --test <file>`); and clippy scoped to the TARGETS your change touched, once before the push. Never `--all-targets`: nexus-chat alone has 134 test binaries (104k lines of tests), and `--all-targets` type-checks every one of them. Name the targets instead:
+
+    cargo clippy -p <crate> --lib --test <touched_test_file> [--test <another>] [--bin <touched_bin>] -- -D warnings
+
+`--lib` when you edited a file under `src/`, one `--test <name>` per file under `tests/` you created or edited (the name is the file name without `.rs`), `--bin` only for a touched binary. Clippy cannot lint a single file; the target is the smallest scope it has. Never `cargo test --all`, `cargo test --workspace`, an unscoped clippy (no `-p`), or `--all-targets` locally. Then:
 
     git push origin HEAD
     gh workflow run ci.yml --ref "$(git branch --show-current)"
@@ -1123,8 +1127,8 @@ THE RULE, owner instruction of 2026-09-18:
 1. SUPERSEDED 2026-11-02 by owner decision. The rule used to be "no clippy locally at all". By
    November a CI cycle had grown to 80+ min (quality-gates `Tests (debug)` alone 61 min), and on
    6j6v.t7xp three red CI runs, each for a lint or compile error, cost ~70 min. So now: run
-   `cargo clippy -p <crate> --all-targets -- -D warnings` ONCE before the push, one `-p` per crate
-   that contains a file you created or edited. NEVER without `-p`, never `--all`/`--workspace`.
+   clippy ONCE before the push, scoped to the touched TARGETS (`-p <crate> --lib --test <file>`,
+   see THE GATE PROCEDURE above). NEVER without `-p`, never `--all-targets`/`--all`/`--workspace`.
    Clippy cannot lint a single file; the crate is its smallest scope. Not after every edit, not
    per fix round, not in the background-and-reissue loop described below. The 15-25 min
    measurement below still holds; it is now weighed against an 80+ min CI cycle.
