@@ -16,8 +16,9 @@ Locally, run only:
 - clippy **scoped to the crates your change touched, and nothing else**:
   `cargo clippy -p <crate> --all-targets -- -D warnings`, one `-p` per crate that contains a
   file you created or edited. Clippy cannot lint a single file; the crate is the smallest scope it
-  has, so the crate is the scope. Run it before you push: a lint error found locally costs a
-  minute, the same error found by CI costs a full CI cycle.
+  has, so the crate is the scope. Run it once, before you push, not after every edit: on this
+  machine a crate-scoped clippy of `nexus-chat` measured 15–25 min (2026-09-18), but the same
+  lint error found by CI costs a full CI cycle, which was 80+ min in November 2026.
 
 Then the gate is:
 
