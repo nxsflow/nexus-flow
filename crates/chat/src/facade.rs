@@ -812,6 +812,10 @@ pub struct RecoveryStatus {
     pub confirmations: u32,
     /// …and their sum, in seconds.
     pub rest_total_secs: i64,
+    /// When the commissioner was told of this episode's first stop (`notice_at_first_stop`, nxf
+    /// 6j6v.71gy) — the instant of the episode's posted `noticed` row; `None` when none was posted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noticed_at: Option<String>,
 }
 
 /// **An abandoned slot as a status row shows it** (nxf 6j6v.kgfn).
@@ -4482,6 +4486,7 @@ fn recovery_for(
                 confirmed_until: row.confirmed_until.clone(),
                 confirmations: row.confirmations,
                 rest_total_secs: row.rest_total_secs,
+                noticed_at: crate::ladder::episode_noticed_at(store, &row.thread, &row.role)?,
             },
         );
     }

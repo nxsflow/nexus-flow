@@ -358,12 +358,16 @@ pub(crate) fn acts(msg: &str) -> String {
 /// THIS, so a message nobody here can vouch for is visible in the thread and discharges nothing:
 /// otherwise anybody who can reach the relay could answer for a member by writing a message that
 /// claims the member's name, and the round would move on.
+///
+/// Two kinds are never an answer: a progress note (nxf 6j6v.558h) and the coordinator's notice (nxf
+/// 6j6v.71gy) — both say something about the round without settling any turn of it.
 fn answers(msg: &str) -> String {
     format!(
-        "({} AND {} AND {msg}.kind <> '{}')",
+        "({} AND {} AND {msg}.kind NOT IN ('{}', '{}'))",
         after_the_declaration(msg),
         acts(msg),
-        crate::model::KIND_PROGRESS
+        crate::model::KIND_PROGRESS,
+        crate::model::KIND_NOTICE
     )
 }
 
@@ -3895,7 +3899,9 @@ pub(crate) mod tests {
                 MessageKind::NeedsRework => MessageKind::Accepted,
                 // 6j6v.558h arrived the same way with `Progress`, and moved the terminator on.
                 MessageKind::Accepted => MessageKind::Progress,
-                MessageKind::Progress => break,
+                // 6j6v.71gy arrived the same way with `Notice`, and moved it on again.
+                MessageKind::Progress => MessageKind::Notice,
+                MessageKind::Notice => break,
             };
         }
         all
@@ -4224,8 +4230,9 @@ pub(crate) mod tests {
             let q = s.thread_quorum("t-1", NOW).unwrap().unwrap();
             // **The one kind that is not an answer** (nxf 6j6v.558h): a progress note says "still
             // working" and settles nothing — no longer written (6j6v.1r61), still read.
-            if kind == MessageKind::Progress {
-                assert!(q.replied.is_empty(), "progress discharges nothing: {q:?}");
+            // The coordinator's notice (nxf 6j6v.71gy) is the second.
+            if matches!(kind, MessageKind::Progress | MessageKind::Notice) {
+                assert!(q.replied.is_empty(), "{kind:?} discharges nothing: {q:?}");
                 assert_eq!(q.outstanding, vec!["o/b"], "{q:?}");
                 assert!(!q.complete, "{q:?}");
                 continue;

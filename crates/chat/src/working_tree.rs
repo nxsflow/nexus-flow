@@ -774,6 +774,11 @@ fn hands_the_task_back(kind_label: &str) -> bool {
         // answer, so it is never the reply this reads; should it ever be, holding the copy is the
         // benign direction.
         crate::model::MessageKind::Progress => true,
+        // **A NOTICE CONCLUDES NOTHING** either (nxf 6j6v.71gy, round 2 IR #6): the coordinator's
+        // word to the commissioner that a step was stopped and is being recovered. The discharge
+        // predicate never counts it, so it is never the reply this reads; should it ever be, holding
+        // the copy is the benign direction, as for a progress note.
+        crate::model::MessageKind::Notice => true,
         // **A VERDICT CONCLUDES, it does not hand the task back** (nxf 6j6v.553s (a)) — and this is
         // the arm the construction above exists to force somebody to think about, so here is the
         // thinking.
@@ -5290,6 +5295,8 @@ mod tests {
             ("accepted", false),
             // nxf 6j6v.558h: "still working" — the task is mid-flight, so the copy stays.
             ("progress", true),
+            // nxf 6j6v.71gy: the coordinator's notice — it concludes nothing, like progress.
+            ("notice", true),
         ];
         assert_eq!(
             table.len(),

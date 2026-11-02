@@ -16297,9 +16297,11 @@ fn being_recovered_as(
     let attempt = store
         .owed_start(thread, role)?
         .map_or(0, |row| row.attempts);
+    // The newest RUNG — a `noticed` row is passed over (nxf 6j6v.71gy): the refusal names what
+    // the ladder did to the slot, not that the commissioner was told.
     let action = store
-        .slot_recovery_log(thread, role)?
-        .last()
+        .newest_rung(thread, role)?
+        .as_ref()
         .and_then(crate::ladder::action_of);
     Ok(ResumeOutcome::BeingRecovered {
         attempt,
