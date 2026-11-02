@@ -632,6 +632,12 @@ impl ChatStore {
     /// **The whole workspace's record over a window** (nxf 6j6v.t7xp) — every row with
     /// `from <= at < to`, compared as instants (a row whose `at` does not parse is outside every
     /// window), ordered by `(thread, role, id)`: the liveness report's one read.
+    ///
+    /// **It reads the whole table and filters here**, so its cost follows the log's size, not the
+    /// window's. That is deliberate: `at` is compared as an INSTANT, and a stored `at` with an
+    /// offset (`+02:00`) does not sort as text among `Z` instants, so a SQL `WHERE at >= ?` would
+    /// drop rows that lie inside the window. The log is bounded by
+    /// [`forget_recovery_before`](Self::forget_recovery_before), which compares the same way.
     pub(crate) fn recovery_log_between(&self, from: &str, to: &str) -> Result<Vec<RecoveryLogRow>> {
         let conn = self.connection();
         let mut st = conn.prepare(&format!(

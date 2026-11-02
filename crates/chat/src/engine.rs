@@ -869,9 +869,9 @@ impl Engine {
             }
         };
         let workspace = facade::LivenessWorkspace::of(&self.workspace())?;
-        let block = self.handle.try_with_state(|s| {
-            facade::liveness(&s.store, now, window, &workspace, &self.liveness)
-        })?;
+        let block = self
+            .handle
+            .try_with_state(|s| facade::liveness(&s.store, window, &workspace, &self.liveness))?;
         Ok(facade::LivenessReport {
             from: window.from.to_string(),
             to: window.to.to_string(),

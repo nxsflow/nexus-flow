@@ -79,6 +79,10 @@ fn seeds() -> Vec<Seed> {
     let g = ("m-g", "ws/coder");
     let h = ("m-h", "ws/coder");
     let z = ("m-z", "ws/coder");
+    let y = ("m-y", "ws/coder");
+    let x = ("m-x", "ws/coder");
+    let w = ("m-w", "ws/coder");
+    let v = ("m-v", "ws/coder");
     let sa = Some("2026-10-24T09:00:00Z");
     let sb = Some("2026-10-24T11:00:00Z");
     let sc = Some("2026-10-24T13:00:00Z");
@@ -338,6 +342,51 @@ fn seeds() -> Vec<Seed> {
             A,
             Some("2026-10-23T23:49:59Z"),
         ),
+        // Straddles the window's start: its first row lies before `--from`, its end inside — the
+        // end row is counted, the episode is not.
+        s(
+            y,
+            "2026-10-23T23:50:00Z",
+            "asked",
+            0,
+            "asked",
+            X,
+            Some("2026-10-23T23:40:00Z"),
+        ),
+        s(y, "2026-10-24T00:05:00Z", "recovered", 0, "life", X, None),
+        // Straddles the window's end: its first row lies inside, its end after `--to` — the
+        // episode is counted, and read whole: ended `recovered`, with its full duration.
+        s(
+            x,
+            "2026-10-24T23:55:00Z",
+            "asked",
+            0,
+            "asked",
+            X,
+            Some("2026-10-24T23:45:00Z"),
+        ),
+        s(x, "2026-10-25T00:10:00Z", "recovered", 0, "life", X, None),
+        // Compared as INSTANTS, not as text: 00:30+02:00 is 22:30Z, inside, though the text sorts
+        // after `--to`; 01:00+05:00 is 20:00Z the day before, outside, though the text sorts after
+        // `--from`.
+        s(
+            w,
+            "2026-10-25T00:30:00+02:00",
+            "asked",
+            0,
+            "asked",
+            X,
+            Some("2026-10-24T22:20:00Z"),
+        ),
+        s(
+            v,
+            "2026-10-24T01:00:00+05:00",
+            "asked",
+            0,
+            "asked",
+            X,
+            Some("2026-10-23T19:50:00Z"),
+        ),
     ]
 }
 
@@ -528,11 +577,50 @@ fn the_three_trial_slots_compare_as_designed() {
 
     // Outside the window: neither counted nor an episode.
     assert!(of("m-z").is_empty(), "{block}");
-    assert_eq!(block["counts"]["asked"], 10);
+    assert!(of("m-y").is_empty(), "first row before the window: {block}");
+    assert!(of("m-v").is_empty(), "outside as an instant: {block}");
+    assert_eq!(ended("m-x"), vec!["recovered"]);
+    assert_eq!(of("m-x")[0]["silence_to_recovery_secs"], 1500);
+    assert_eq!(ended("m-w"), vec!["open"]);
+    assert_eq!(block["counts"]["asked"], 12);
+    assert_eq!(
+        block["counts"]["recovered"], 4,
+        "m-y's end row lies in the window"
+    );
     assert_eq!(block["counts"]["stopped"], 7);
     assert_eq!(block["counts"]["noticed"], 1);
     assert_eq!(block["counts"]["withdrawn"], 1);
     assert_eq!(block["counts"]["recommissioned"], 0);
+}
+
+/// The window's edges at the facade itself, over the same seeded store: an episode is counted by
+/// its FIRST row and read from its WHOLE slot, and `at` is an instant.
+#[test]
+fn an_episode_is_counted_by_its_first_row_and_read_from_its_whole_slot() {
+    let tmp = trial();
+    let ws = Workspace::resolve(None, &root(&tmp)).expect("resolve workspace");
+    let block = nexus_chat::facade::liveness(
+        &ws.open_chat_store().expect("open chat store"),
+        LivenessWindow { from: FROM, to: TO },
+        &nexus_chat::facade::LivenessWorkspace::of(&ws).expect("identity"),
+        &nexus_chat::workspace::liveness_policy(&ws.config),
+    )
+    .expect("the block");
+    let threads: Vec<&str> = block.episodes.iter().map(|e| e.thread.as_str()).collect();
+    for absent in ["m-y", "m-v", "m-z"] {
+        assert!(!threads.contains(&absent), "{absent}: {threads:?}");
+    }
+    let x = block
+        .episodes
+        .iter()
+        .find(|e| e.thread == "m-x")
+        .expect("m-x");
+    assert_eq!(
+        (x.ended, x.silence_to_recovery_secs),
+        (nexus_chat::facade::EpisodeEnd::Recovered, Some(1500))
+    );
+    assert!(threads.contains(&"m-w"), "{threads:?}");
+    assert_eq!(block.counts["asked"], 12);
 }
 
 #[test]
@@ -668,7 +756,7 @@ fn everywhere_marks_a_store_it_cannot_open_unreadable_and_completes_the_others()
     let blocks = doc["workspaces"].as_array().unwrap();
     assert_eq!(blocks.len(), 2, "{doc}");
     assert_eq!(blocks[0]["state"], "read");
-    assert_eq!(blocks[0]["episodes"].as_array().unwrap().len(), 11, "{doc}");
+    assert_eq!(blocks[0]["episodes"].as_array().unwrap().len(), 13, "{doc}");
     assert_eq!(blocks[1]["state"], "unreadable", "{doc}");
     assert_eq!(blocks[1]["workspace"]["name"], "two");
     assert!(!blocks[1]["error"].as_str().unwrap().is_empty());

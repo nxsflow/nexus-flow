@@ -8,13 +8,13 @@
       ],
       "counts": {
         "answered": 2,
-        "asked": 10,
+        "asked": 12,
         "confirmed": 1,
         "continued": 6,
         "escalated": 2,
         "noticed": 1,
         "recommissioned": 0,
-        "recovered": 3,
+        "recovered": 4,
         "stopped": 7,
         "withdrawn": 1
       },
@@ -273,6 +273,45 @@
           "silence_to_recovery_secs": null,
           "silent_since": "2026-10-24T18:00:00Z",
           "thread": "m-h"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-25T00:30:00+02:00",
+          "letter": null,
+          "policy": [
+            2,
+            false
+          ],
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            40
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T22:20:00Z",
+          "thread": "m-w"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "recovered",
+          "first_nudge": "2026-10-24T23:55:00Z",
+          "letter": null,
+          "policy": [
+            2,
+            false
+          ],
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            38,
+            39
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 1500,
+          "silent_since": "2026-10-24T23:45:00Z",
+          "thread": "m-x"
         }
       ],
       "letter_now": "B",
@@ -332,13 +371,13 @@
           ]
         },
         {
-          "episodes": 8,
+          "episodes": 10,
           "escalated": 1,
           "letter": null,
           "max_silence_to_escalation_secs": 900,
           "max_silence_to_recovery_secs": 2220,
           "median_silence_to_escalation_secs": 900,
-          "median_silence_to_recovery_secs": 1200,
+          "median_silence_to_recovery_secs": 1350,
           "policy": [
             2,
             false

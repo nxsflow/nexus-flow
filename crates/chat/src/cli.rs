@@ -3880,25 +3880,6 @@ fn parked_line(p: &crate::park::ParkedWork) -> String {
     line
 }
 
-/// One thread's line in `nxc status`, indented by its depth in the tree.
-///
-/// **The root's `awaiting you` is the point of this rendering, not decoration** (a71h §3.4 / its DoD
-/// 5): an answered root and a thread nobody is working on any more are both "nothing is happening",
-/// and only one of them is a problem. The first is the normal end of an operation — the human has
-/// it — and it says so; the second is `waiting on <handle>` and stays visible until somebody acts.
-///
-/// **An ESCALATED thread is checked FIRST, and the word "answered" never appears on it** (nxf
-/// 6j6v.mqad). A round that was handed back is discharged, so every other branch here would call it
-/// `answered` — which is the exact sentence a human read while a persona session had in fact died at
-/// an infrastructure error. The `--json` field is [`StatusThread::escalated`]; this is the same fact
-/// in the terminal, said in the one place a terminal reader looks.
-///
-/// **A SUBSTITUTED thread says who wrote the answer, on every branch** (nxf 6j6v.kffm). It is not a
-/// state of its own — a session that ends quietly without answering leaves a thread that is
-/// genuinely discharged, and one that died leaves an escalation — it is a fact about the ANSWER, so
-/// it rides as a suffix on whichever state applies. Without it "answered" was what a human read
-/// about a round in which the agent never spoke, which is the same sentence, about the same
-/// message, that `escalated` was added to stop being the whole story.
 /// **`nxc liveness`** (nxf 6j6v.t7xp) — the owner's report, composed of one
 /// [`crate::facade::liveness`] call per workspace: this one, or with `--everywhere` every workspace
 /// the service home attends, each with its OWN identity and its OWN `[chat.liveness]` policy.
@@ -3941,7 +3922,7 @@ fn liveness_verb(
         let store = ws.open_chat_store()?;
         let config = crate::workspace::liveness_policy(&ws.config);
         Ok(WorkspaceBlock::Read(crate::facade::liveness(
-            &store, &now, window, identity, &config,
+            &store, window, identity, &config,
         )?))
     };
     let blocks = if everywhere {
@@ -3983,11 +3964,12 @@ fn liveness_verb(
 
 /// The human form of the liveness report: a table per workspace.
 fn liveness_table(report: &crate::facade::LivenessReport) -> String {
-    use crate::facade::{EpisodeEnd, WorkspaceBlock};
+    use crate::facade::WorkspaceBlock;
     use std::fmt::Write as _;
+    let numbers = |p: (u32, bool)| format!("({}/{})", p.0, p.1);
     let pair = |p: (u32, bool), letter: Option<char>| match letter {
-        Some(l) => format!("{l} ({}/{})", p.0, p.1),
-        None => format!("- ({}/{})", p.0, p.1),
+        Some(l) => format!("{l} {}", numbers(p)),
+        None => format!("- {}", numbers(p)),
     };
     let secs = |s: Option<i64>| s.map_or_else(|| "-".to_string(), |s| format!("{s}s"));
     let mut out = String::new();
@@ -4010,8 +3992,13 @@ fn liveness_table(report: &crate::facade::LivenessReport) -> String {
             "\n{} ({})\n  policy now: {}{}",
             ws.workspace.name,
             ws.workspace.path,
-            pair((now.dead_resumes, now.notice_at_first_stop), ws.letter_now)
-                .trim_start_matches("- "),
+            match ws.letter_now {
+                Some(l) => format!(
+                    "{l} {}",
+                    numbers((now.dead_resumes, now.notice_at_first_stop))
+                ),
+                None => numbers((now.dead_resumes, now.notice_at_first_stop)),
+            },
             if now.fell_back { " (fell back)" } else { "" }
         );
         for w in &ws.config_warnings {
@@ -4065,33 +4052,19 @@ fn liveness_table(report: &crate::facade::LivenessReport) -> String {
             }
         }
         for e in &ws.episodes {
-            let ended = match e.ended {
-                EpisodeEnd::Recovered => "recovered",
-                EpisodeEnd::Answered => "answered",
-                EpisodeEnd::Escalated => "escalated",
-                EpisodeEnd::Withdrawn => "withdrawn",
-                EpisodeEnd::Open => "open",
-            };
             let resumes: Vec<String> = e
                 .resumes
                 .iter()
-                .map(|(n, o)| {
-                    format!(
-                        "{n}:{}",
-                        serde_json::to_value(o)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_string))
-                            .unwrap_or_default()
-                    )
-                })
+                .map(|(n, o)| format!("{n}:{}", o.as_str()))
                 .collect();
             let _ = writeln!(
                 out,
-                "  {} {} · {} · {ended}{} · silent since {} · resumes [{}]",
+                "  {} {} · {} · {}{} · silent since {} · resumes [{}]",
                 e.thread,
                 e.role,
                 e.policy
                     .map_or_else(|| "-".to_string(), |p| pair(p, e.letter)),
+                e.ended.as_str(),
                 e.end_attempt
                     .map_or_else(String::new, |a| format!(" (attempt {a})")),
                 e.silent_since.as_deref().unwrap_or("-"),
@@ -4102,6 +4075,25 @@ fn liveness_table(report: &crate::facade::LivenessReport) -> String {
     out
 }
 
+/// One thread's line in `nxc status`, indented by its depth in the tree.
+///
+/// **The root's `awaiting you` is the point of this rendering, not decoration** (a71h §3.4 / its DoD
+/// 5): an answered root and a thread nobody is working on any more are both "nothing is happening",
+/// and only one of them is a problem. The first is the normal end of an operation — the human has
+/// it — and it says so; the second is `waiting on <handle>` and stays visible until somebody acts.
+///
+/// **An ESCALATED thread is checked FIRST, and the word "answered" never appears on it** (nxf
+/// 6j6v.mqad). A round that was handed back is discharged, so every other branch here would call it
+/// `answered` — which is the exact sentence a human read while a persona session had in fact died at
+/// an infrastructure error. The `--json` field is [`StatusThread::escalated`]; this is the same fact
+/// in the terminal, said in the one place a terminal reader looks.
+///
+/// **A SUBSTITUTED thread says who wrote the answer, on every branch** (nxf 6j6v.kffm). It is not a
+/// state of its own — a session that ends quietly without answering leaves a thread that is
+/// genuinely discharged, and one that died leaves an escalation — it is a fact about the ANSWER, so
+/// it rides as a suffix on whichever state applies. Without it "answered" was what a human read
+/// about a round in which the agent never spoke, which is the same sentence, about the same
+/// message, that `escalated` was added to stop being the whole story.
 fn status_line(t: &crate::facade::StatusThread) -> String {
     let indent = "  ".repeat(t.depth + 1);
     let state = if t.escalated {

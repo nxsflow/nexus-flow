@@ -86,6 +86,19 @@ pub enum EpisodeEnd {
     Open,
 }
 
+impl EpisodeEnd {
+    /// The word the report uses for it — the same as its `--json` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EpisodeEnd::Recovered => "recovered",
+            EpisodeEnd::Answered => "answered",
+            EpisodeEnd::Escalated => "escalated",
+            EpisodeEnd::Withdrawn => "withdrawn",
+            EpisodeEnd::Open => "open",
+        }
+    }
+}
+
 /// What became of one resume (`continued` / `recommissioned`), read from the slot's next row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +117,21 @@ pub enum ResumeOutcome {
     Withdrawn,
     /// No next row yet.
     Pending,
+}
+
+impl ResumeOutcome {
+    /// The word the report uses for it — the same as its `--json` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResumeOutcome::Recovered => "recovered",
+            ResumeOutcome::Answered => "answered",
+            ResumeOutcome::DeadAgain => "dead_again",
+            ResumeOutcome::Escalated => "escalated",
+            ResumeOutcome::NudgedAgain => "nudged_again",
+            ResumeOutcome::Withdrawn => "withdrawn",
+            ResumeOutcome::Pending => "pending",
+        }
+    }
 }
 
 /// **One episode** of one slot: from an opener to its end row, inclusive.
@@ -216,7 +244,6 @@ pub fn default_liveness_from(now: &str) -> Result<String> {
 /// policy are ARGUMENTS (round 2 CQ #5): the store does not know which config it belongs to.
 pub fn liveness(
     store: &ChatStore,
-    _now: &str,
     window: LivenessWindow<'_>,
     workspace: &LivenessWorkspace,
     config: &ResolvedLiveness,
@@ -607,6 +634,56 @@ mod tests {
             vec![EpisodeEnd::Open]
         );
         assert_eq!(eps[0].resumes, vec![], "a resume taken back is no resume");
+    }
+
+    #[test]
+    fn a_recommission_is_a_resume_and_its_outcome_is_the_next_row() {
+        let rows = [
+            row(1, "2026-10-24T10:10:00Z", "asked", 0, "asked"),
+            row(2, "2026-10-24T10:15:00Z", "stopped", 0, "stop_requested"),
+            row(
+                3,
+                "2026-10-24T10:17:00Z",
+                "recommissioned",
+                1,
+                "session_gone_recommissioned",
+            ),
+            row(4, "2026-10-24T10:21:00Z", "recovered", 1, "life"),
+        ];
+        let eps = episodes_of(&rows);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].resumes, vec![(1, ResumeOutcome::Recovered)]);
+        assert_eq!(
+            (eps[0].ended, eps[0].silence_to_recovery_secs),
+            (EpisodeEnd::Recovered, Some(1260))
+        );
+    }
+
+    #[test]
+    fn a_reverted_recommission_is_no_resume_and_alone_is_an_episode_withdrawn() {
+        let rows = [
+            row(1, "2026-10-24T10:17:00Z", "recommissioned", 1, "no_process"),
+            row(2, "2026-10-24T10:30:00Z", "asked", 1, "asked"),
+        ];
+        let eps = episodes_of(&rows);
+        assert_eq!(
+            eps.iter()
+                .map(|e| (e.ended, e.resumes.len()))
+                .collect::<Vec<_>>(),
+            vec![(EpisodeEnd::Withdrawn, 0), (EpisodeEnd::Open, 0)]
+        );
+    }
+
+    #[test]
+    fn instants_with_an_offset_are_compared_as_instants() {
+        // 10:30+02:00 is 08:30Z: twenty minutes after a silence that began at 08:10Z.
+        let mut first = row(1, "2026-10-24T10:20:00+02:00", "asked", 0, "asked");
+        first.silent_since = Some("2026-10-24T08:10:00Z".into());
+        let rows = [
+            first,
+            row(2, "2026-10-24T10:30:00+02:00", "recovered", 0, "life"),
+        ];
+        assert_eq!(episodes_of(&rows)[0].silence_to_recovery_secs, Some(1200));
     }
 
     #[test]

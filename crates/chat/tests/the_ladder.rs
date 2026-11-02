@@ -4959,7 +4959,6 @@ impl Team {
         let ws = Workspace::resolve(None, self.tmp.path()).expect("resolve workspace");
         facade::liveness(
             &self.store(),
-            &at(7_200),
             facade::LivenessWindow {
                 from: "2026-10-23T10:00:00Z",
                 to: "2026-10-25T10:00:00Z",
