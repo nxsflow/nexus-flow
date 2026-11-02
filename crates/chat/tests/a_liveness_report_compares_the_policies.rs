@@ -426,7 +426,7 @@ fn trial() -> TempDir {
     tmp
 }
 
-fn summary_of<'v>(block: &'v Value, policy: (u32, bool)) -> &'v Value {
+fn summary_of(block: &Value, policy: (u32, bool)) -> &Value {
     block["summary"]
         .as_array()
         .unwrap()
