@@ -345,6 +345,14 @@ pub fn park_commit_message(
             "The working copy was handed on because this operation's running round was withdrawn \
              and its session was asked to stop."
         }
+        ParkOccasion::StalledOnItsSupervisor => {
+            "The working copy was handed on because this operation's chain stalled: every session \
+             in it had ended and nothing was ever going to start its next step."
+        }
+        ParkOccasion::WithdrawnIdle => {
+            "The working copy was handed on because this operation held it with nothing running \
+             and was withdrawn."
+        }
     };
     format!(
         "nxs: parked {scope_key} at {now}\n\n\
@@ -1864,7 +1872,9 @@ mod tests {
         says(ParkOccasion::AvailabilityBoundary, "availability boundary");
         says(ParkOccasion::PastItsBound, "lease ran out");
         says(ParkOccasion::DiedInsideItsBound, "process died");
-        says(ParkOccasion::Withdrawn, "was withdrawn");
+        says(ParkOccasion::Withdrawn, "running round was withdrawn");
+        says(ParkOccasion::StalledOnItsSupervisor, "chain stalled");
+        says(ParkOccasion::WithdrawnIdle, "nothing running");
 
         // And every occasion still carries the two facts common to all of them.
         for occasion in [
@@ -1873,6 +1883,8 @@ mod tests {
             ParkOccasion::PastItsBound,
             ParkOccasion::DiedInsideItsBound,
             ParkOccasion::Withdrawn,
+            ParkOccasion::StalledOnItsSupervisor,
+            ParkOccasion::WithdrawnIdle,
         ] {
             let m = park_commit_message("thread:01JAAA", "2026-09-05T09:01:51Z", occasion);
             assert!(m.starts_with("nxs: parked thread:01JAAA at 2026-09-05T09:01:51Z\n"));

@@ -231,11 +231,11 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   inside it.
 
   **It also takes back an operation that holds the copy with nothing running in it at all** — a
-  chain whose next step was never started, or a delivered round still held by a hand-back nobody can
-  answer any more. This verb used to refuse that one with *nothing … is waiting or running*, which
+  chain whose next step was never started, or a round held by an escalation nobody is going to
+  answer. This verb used to refuse that one with *nothing … is waiting or running*, which
   was true and left nothing that could release the copy. Now its open threads are discharged, so
   nothing is commissioned from it again, and the background tick parks its work and hands the copy
-  on as for a stopped round. An operation that neither holds the copy nor runs anything is still
+  on as for a stopped round — under its own reason, `withdrawn_idle`, since no round was stopped. An operation that neither holds the copy nor runs anything is still
   refused: there is nothing there to take back.
 - **How long a lease lasts: as long as the operation itself declared.** The bound is the latest
   `timeout:` still outstanding in the claim area — a round that says it has six hours holds the copy
@@ -287,19 +287,26 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   **One more shape counts as dead: a chain stalled on its own supervisor.** When the only thread
   still owing an answer is a channel thread waiting on `__channel__` — the engine itself, which
   opens the next step or consolidates — there is no session there to be dead. That operation is
-  taken when, besides the worker answering and nothing running: nothing in it is queued for the copy
-  or recorded as a start that failed; no hand-back stands unanswered in it; nothing of it is open
-  across the border; nothing is on hold at an availability boundary; and nothing at all has happened
-  in it for five minutes — no thread opened, no message posted, no session's end recorded. The five
-  minutes are what keep this from catching the moment between one step's end and the opening of the
-  next. It was added after a run whose advance to its next step was killed half-way (the sidecar's
-  call timed out under a locked database): the step it had answered was done, the next one was never
-  started, and the copy was held for hours with nothing that could ever move it.
+  taken when, besides the worker answering and nothing running: every session in it has reported
+  its end; nothing in it is queued for the copy or recorded as a start that failed; no hand-back
+  stands unanswered in it; no declared hurdle refused its next step, and no next step failed to
+  start (both wait for you — asking again is your move, and nothing should take the copy from under
+  you while you fix the tree); nothing of it is open across the border; nothing is on hold at an
+  availability boundary; and nothing at all has happened in it for five minutes — no thread opened,
+  no message posted, no session's end recorded. The five minutes are what keep this from catching
+  the moment between one step's end and the opening of the next. The park commit and the tick's line
+  name it as its own occasion, `stalled_on_its_supervisor`, not as a death. It was added after a run
+  whose advance to its next step was killed half-way (the sidecar's call timed out under a locked
+  database): the step it had answered was done, the next one was never started, and the copy was
+  held for hours with nothing that could ever move it.
 
   The same incident left a step thread the engine had opened and never commissioned — no expected
   answer, no message. A `tick` on the operation's first thread used to read it as a step still
   working and answer `not_due` for ever; once it is five minutes old it is not counted as a step at
-  all, and the tick moves the chain on.
+  all, and the tick moves the chain on. Such a chain is revived rather than parked: while somebody
+  waits, the sweep arms that tick itself instead of taking the copy. With nobody waiting nothing
+  arms it before the empty step's own deadline — `nxc tick --thread <id>` on the operation's first
+  thread does it by hand.
 - **Whoever is already waiting goes first.** Reclaiming an expired lease hands the queue's turn out
   in the same step, so the chain that has been standing in line starts and the newcomer that just
   arrived takes its place at the back. This page used to be silent about it because the behaviour was

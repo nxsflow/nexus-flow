@@ -1880,7 +1880,7 @@ impl ChatStore {
     /// When a thread was OPENED — the `created` of its root, as the opener stamped it (nxf
     /// 6j6v.3rrv). `None` for a thread with no `threads` row, as [`thread_opener`](Self::thread_opener)
     /// beside it. A db error → `io`.
-    pub fn thread_created(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
+    pub(crate) fn thread_created(&self, thread_id: &str) -> crate::error::Result<Option<String>> {
         let conn = self.inner.connection();
         let mut st = conn.prepare("SELECT created FROM threads WHERE thread_id = ?1")?;
         let mut rows = st.query([thread_id])?;
@@ -1898,7 +1898,10 @@ impl ChatStore {
     ///
     /// One read, with the ids handed over as ONE JSON array rather than one bind parameter each, so
     /// an operation of any width stays under the bind ceiling without a second code path.
-    pub fn newest_activity_in(&self, threads: &[String]) -> crate::error::Result<Option<String>> {
+    pub(crate) fn newest_activity_in(
+        &self,
+        threads: &[String],
+    ) -> crate::error::Result<Option<String>> {
         if threads.is_empty() {
             return Ok(None);
         }
@@ -3243,6 +3246,8 @@ pub(crate) mod tests {
             "queued_obligations",
             // Every thread a session of this machine was put in motion on (nxf 6j6v.f5rf).
             "session_threads",
+            // An advance this machine's supervisor stopped for its requester (nxf 6j6v.3rrv).
+            "stopped_advances",
         ];
         let store = ChatStore::open_in_memory(1);
         let tables: Vec<String> = store

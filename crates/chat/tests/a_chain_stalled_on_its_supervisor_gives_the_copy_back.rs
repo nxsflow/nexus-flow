@@ -1,5 +1,6 @@
-//! ACCEPTANCE of nxf 6j6v.3rrv and 6j6v.2pnn — **a chain that stalled on its own supervisor gives
-//! the working copy back**.
+//! ACCEPTANCE of nxf 6j6v.3rrv — **a chain that stalled on its own supervisor gives the working copy
+//! back**, and of the one door of 6j6v.2pnn it shares: a copy held with nothing running in it can
+//! be withdrawn.
 //!
 //! # The shape, as it was measured on 2026-11-02
 //!
@@ -25,8 +26,9 @@
 //!    - and the lease's bound was not the root's long-past deadline but the one fixed at the last
 //!      renewal (21:09:31Z, six hours after the last rework slot opened).
 //!
-//! This file pins the way out on each of those doors. Everything is real — a git repository, the
-//! lease, the queue, the park; the engine handle carries every commission and the withdrawal, and
+//! This file pins the way out on each of those doors, and a guard against every way the new rules
+//! could take a copy they must not. Everything is real — a git repository, the lease, the queue,
+//! the park; the engine handle carries every commission and the withdrawal, and
 //! `orchestration::tick` carries the tick, which is what the background service runs. The worker is
 //! the only stand-in, and only for what a worker does.
 
@@ -36,13 +38,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nexus_chat::engine::{Engine, EngineConfig};
-use nexus_chat::model::ThreadRoot;
+use nexus_chat::model::{Disposition, MessageEnvelope, MessageKind, Priority, Refs, ThreadRoot};
 use nexus_chat::orchestration::{self, Caller, Ctx, ParkOccasion, TickReceipt, TickRequest};
+use nexus_chat::precondition::PreconditionOutcome;
 use nexus_chat::store::ChatStore;
 use nexus_chat::surface::{ReplyThreadRequest, SendToRefs, SendToRequest};
-use nexus_chat::timer::DisabledTimer;
+use nexus_chat::timer::{Timer, TimerHandle};
 use nexus_chat::worker::{DryWorker, TriggerRequest, TriggerResult, Worker, WorkerConfig};
-use nexus_chat::working_tree::WorkScope;
+use nexus_chat::working_tree::{QueuedTrigger, WorkScope};
 use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
 use tempfile::TempDir;
 
@@ -52,10 +55,14 @@ const T0: &str = "2026-11-02T09:00:00Z";
 const ANSWERED: &str = "2026-11-02T09:20:00Z";
 /// A rival commission queues behind the copy.
 const QUEUED: &str = "2026-11-02T09:21:00Z";
-/// The coder's end is recorded and the killed `session ended` leaves its empty `verify` slot.
+/// The coder's end is recorded — the last thing that happens in the operation.
 const ENDED: &str = "2026-11-02T09:22:00Z";
-/// One minute after the last thing that happened in the operation: too early to call it stalled.
+/// One minute after it: too early to call the chain stalled.
 const JUST_AFTER: &str = "2026-11-02T09:23:00Z";
+/// One second short of five minutes of quiet.
+const ONE_SECOND_SHORT: &str = "2026-11-02T09:26:59Z";
+/// Exactly five minutes of quiet.
+const FIVE_MINUTES: &str = "2026-11-02T09:27:00Z";
 /// Well past the quiet the engine waits out before it calls a chain stalled.
 const QUIET: &str = "2026-11-02T09:40:00Z";
 /// The lease's bound: six hours (the channel's `timeout:`) after the coder's slot opened.
@@ -68,15 +75,23 @@ const CHANNELS: &str = "- name: coding\n  members: []\n  timeout: 6h\n  \
                         - id: build\n      target: coder\n      next: verify\n    \
                         - id: verify\n      target: verifier\n";
 
+/// [`CHANNELS`] with one DECLARED hurdle — the project's own rule, the kind a person fixes by hand.
+const CHANNELS_WITH_A_HURDLE: &str = "- name: coding\n  members: []\n  timeout: 6h\n  \
+                                      working_tree: exclusive\n  preconditions:\n    \
+                                      - name: tree-clean\n      run: check the tree\n  steps:\n    \
+                                      - id: build\n      target: coder\n      next: verify\n    \
+                                      - id: verify\n      target: verifier\n";
+
 // ---- harness ------------------------------------------------------------------------------------
 
-/// Records its triggers like [`DryWorker`], names where sessions run, and answers which of them
-/// still have a process. `blind` makes it a worker that cannot answer the liveness question at all.
+/// Records its triggers like [`DryWorker`], names where sessions run, answers which of them still
+/// have a process, and answers a declared hurdle — refusing it while `blocked`.
 struct LiveWorker {
     log: PathBuf,
     working_copy: PathBuf,
     running: Mutex<HashSet<String>>,
     looks: AtomicBool,
+    blocked: AtomicBool,
 }
 
 impl Worker for LiveWorker {
@@ -105,6 +120,41 @@ impl Worker for LiveWorker {
     fn resumes_sessions(&self) -> bool {
         true
     }
+    fn run_precondition(&self, _command: &str) -> PreconditionOutcome {
+        PreconditionOutcome::Ran {
+            status: Some(if self.blocked.load(Ordering::SeqCst) {
+                1
+            } else {
+                0
+            }),
+            stdout: String::new(),
+            stderr: "the tree is not clean".into(),
+        }
+    }
+}
+
+/// Records every window it is asked to arm — the one place an armed look is visible.
+#[derive(Default)]
+struct RecordingTimer {
+    armed: Mutex<Vec<(String, String)>>,
+}
+
+impl Timer for RecordingTimer {
+    fn schedule(
+        &self,
+        thread_id: &str,
+        deadline: &str,
+        _command: &str,
+    ) -> nexus_chat::error::Result<TimerHandle> {
+        self.armed
+            .lock()
+            .unwrap()
+            .push((thread_id.to_string(), deadline.to_string()));
+        Ok(TimerHandle(format!("recorded:{thread_id}")))
+    }
+    fn cancel(&self, _handle: &TimerHandle) -> nexus_chat::error::Result<()> {
+        Ok(())
+    }
 }
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -128,7 +178,7 @@ const BASE: &str = "feat/liveness";
 /// What the coder left uncommitted in the tree.
 const HALF_FINISHED: &str = "as it was\nhalf finished\n";
 
-fn workspace() -> TempDir {
+fn workspace(channels: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
     setup(tmp.path(), &chat_config()).expect("seed chat workspace");
     let roles = tmp.path().join(".nxs-personas");
@@ -145,10 +195,10 @@ fn workspace() -> TempDir {
         "handle: solo\nsystem_prompt: You are solo.\nworking_tree: exclusive\n",
     )
     .unwrap();
-    std::fs::write(roles.join("channels.yaml"), CHANNELS).unwrap();
+    std::fs::write(roles.join("channels.yaml"), channels).unwrap();
     git(tmp.path(), &["init", "-q"]);
     git(tmp.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    std::fs::write(tmp.path().join(".gitignore"), ".nxs/\ndry.log\n").unwrap();
+    std::fs::write(tmp.path().join(".gitignore"), ".nxs/\ndry.log\ntimer.log\n").unwrap();
     std::fs::write(tmp.path().join("src.txt"), "as it was\n").unwrap();
     git(tmp.path(), &["add", "-A"]);
     git(
@@ -172,6 +222,7 @@ fn workspace() -> TempDir {
 struct Bench {
     tmp: TempDir,
     worker: Arc<LiveWorker>,
+    timer: RecordingTimer,
     /// The workspace's own replica prefix — the `<origin>` of every qualified handle minted here,
     /// the supervisor's included.
     origin: String,
@@ -179,24 +230,34 @@ struct Bench {
 
 impl Bench {
     fn new() -> Self {
-        let tmp = workspace();
+        Self::with(CHANNELS)
+    }
+
+    fn with(channels: &str) -> Self {
+        let tmp = workspace(channels);
         let worker = Arc::new(LiveWorker {
             log: tmp.path().join("dry.log"),
             working_copy: tmp.path().to_path_buf(),
             running: Mutex::new(HashSet::new()),
             looks: AtomicBool::new(true),
+            blocked: AtomicBool::new(false),
         });
         let mut b = Bench {
             tmp,
             worker,
+            timer: RecordingTimer::default(),
             origin: String::new(),
         };
         b.origin = b.engine().origin();
         b
     }
 
+    fn handle(&self, bare: &str) -> String {
+        format!("{}/{bare}", self.origin)
+    }
+
     fn supervisor(&self) -> String {
-        format!("{}/__channel__", self.origin)
+        self.handle("__channel__")
     }
 
     fn root(&self) -> &Path {
@@ -246,6 +307,26 @@ impl Bench {
             .thread_id
     }
 
+    fn reply(&self, now: &str, session: &str, actor: &str, thread: &str, escalate: bool) {
+        self.engine()
+            .reply_thread(
+                Caller {
+                    session: Some(session),
+                    actor: Some(actor),
+                    now: Some(now),
+                },
+                ReplyThreadRequest {
+                    machine: None,
+                    thread,
+                    body: "built, tests green",
+                    escalate,
+                    needs_rework: false,
+                    accept: false,
+                },
+            )
+            .expect("the reply is posted");
+    }
+
     fn tick(&self, now: &str, thread: &str) -> TickReceipt {
         let ws = Workspace::resolve(None, self.root()).expect("resolve workspace");
         let db_path = ws.db_path_str().expect("db path");
@@ -261,7 +342,7 @@ impl Bench {
             hop: 0,
             defs: &defs,
             worker: worker.as_ref(),
-            timer: &DisabledTimer,
+            timer: &self.timer,
             namer: &nexus_chat::naming::DryNamer,
             db_path: &db_path,
             project_claude_md: None,
@@ -328,21 +409,71 @@ impl Bench {
     fn park_branches(&self) -> String {
         git(self.root(), &["branch", "--list", "nxs/park/*"])
     }
+
+    /// The commit message of the park on `branch` — what a reader of `git log` believes.
+    fn park_message(&self, branch: &str) -> String {
+        git(self.root(), &["log", "-1", "--format=%B", branch])
+    }
+
+    /// Open a thread under `parent`, as `opener`, at `now`.
+    fn open_under(&self, id: &str, parent: &str, opener: &str, now: &str) {
+        self.store().open_thread(
+            id,
+            &ThreadRoot {
+                origin: self.origin.clone(),
+                channel_id: "decl:coding".into(),
+                opener: opener.into(),
+                created: now.into(),
+                parent: Some(parent.into()),
+            },
+            opener,
+        );
+    }
+
+    fn the_copy_stayed(&self, root: &str) {
+        assert_eq!(self.park_branches(), "", "nothing was parked");
+        assert_eq!(
+            self.lease_holder().as_deref(),
+            Some(scope_of(root).as_str())
+        );
+        assert_eq!(self.started("solo"), 0, "the rival waits");
+    }
 }
 
 fn scope_of(thread: &str) -> String {
     WorkScope::Thread(thread.to_string()).key()
 }
 
-/// **The measured shape, built the way it came about.** Returns `(root, rival)` — `rival` is
-/// `None` when `with_rival` is false.
+/// How the measured stall is staged.
+#[derive(Clone, Copy)]
+struct Stage {
+    /// A rival commission waits behind the copy.
+    rival: bool,
+    /// The killed advance left its empty `verify` slot behind.
+    empty_slot: bool,
+    /// The coder's end was recorded — not, when the `session ended` that would record it is still
+    /// on its way.
+    end_recorded: bool,
+}
+
+const LOST_ADVANCE: Stage = Stage {
+    rival: true,
+    empty_slot: false,
+    end_recorded: true,
+};
+
+/// The id the killed advance's empty slot is given.
+const EMPTY_SLOT: &str = "m-01EMPTYVERIFYSLOT0000000000";
+
+/// **The measured shape, built the way it came about.** Returns `(root, build slot, coder session,
+/// rival)`.
 ///
 /// The coder's reply goes through the engine while its process is alive, so the advance is refused
-/// by the real hurdle. The end is then recorded the way the killed `session ended` recorded it —
-/// the end landed, the advance behind it did not — and the slot that advance opened is left exactly
-/// as it was found: a thread under the root, opened by the supervisor, with a deadline and nothing
-/// else.
-fn a_stalled_chain(b: &Bench, with_rival: bool) -> (String, Option<String>) {
+/// by the real brought-along hurdle. Its process then goes and its end is recorded the way the
+/// killed `session ended` recorded it — the end landed, the advance behind it did not. With
+/// `empty_slot`, the slot that advance opened is left exactly as it was found: under the root,
+/// opened by the supervisor, with a deadline and nothing else.
+fn a_stalled_chain(b: &Bench, stage: Stage) -> (String, String, String, Option<String>) {
     let root = b.commission(T0, "coding");
     let coder = b.session_of("coder");
     assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&root).as_str()));
@@ -360,75 +491,61 @@ fn a_stalled_chain(b: &Bench, with_rival: bool) -> (String, Option<String>) {
         .into_iter()
         .next()
         .expect("the build slot");
-    b.engine()
-        .reply_thread(
-            Caller {
-                session: Some(&coder),
-                actor: Some("coder"),
-                now: Some(ANSWERED),
-            },
-            ReplyThreadRequest {
-                machine: None,
-                thread: &build,
-                body: "built, tests green",
-                escalate: false,
-                needs_rework: false,
-                accept: false,
-            },
-        )
-        .expect("the coder's answer is posted");
+    b.reply(ANSWERED, &coder, "coder", &build, false);
     assert_eq!(
         b.started("verifier"),
         0,
         "the hurdle held the verifier back"
     );
 
-    let rival = with_rival.then(|| {
+    let rival = stage.rival.then(|| {
         let solo = b.commission(QUEUED, "solo");
         assert_eq!(b.started("solo"), 0, "the rival is queued, not started");
         solo
     });
 
-    // The killed `session ended`: its end landed, and so did the first two writes of the advance.
     b.worker.running.lock().unwrap().remove(&coder);
-    let mut store = b.store();
-    store
-        .mark_session_ended(&coder, ENDED)
-        .expect("the end is recorded");
-    let empty = "m-01EMPTYVERIFYSLOT0000000000";
-    store.open_thread(
-        empty,
-        &ThreadRoot {
-            origin: b.origin.clone(),
-            channel_id: "decl:coding".into(),
-            opener: b.supervisor(),
-            created: ENDED.into(),
-            parent: Some(root.clone()),
-        },
-        &b.supervisor(),
-    );
-    store.set_deadline(empty, "2026-11-02T15:22:00Z", &b.supervisor());
-    drop(store);
+    if stage.end_recorded {
+        b.store()
+            .mark_session_ended(&coder, ENDED)
+            .expect("the end is recorded");
+    }
+    if stage.empty_slot {
+        b.open_under(EMPTY_SLOT, &root, &b.supervisor(), ENDED);
+        b.store()
+            .set_deadline(EMPTY_SLOT, "2026-11-02T15:22:00Z", &b.supervisor());
+        assert!(
+            b.owes(EMPTY_SLOT, QUIET).is_empty(),
+            "the slot owes nothing"
+        );
+    }
 
     assert_eq!(
         b.owes(&root, QUIET),
         vec![b.supervisor()],
         "the premise: the root waits on its supervisor and on nothing else"
     );
-    assert!(b.owes(empty, QUIET).is_empty(), "the slot owes nothing");
-    (root, rival)
+    (root, build, coder, rival)
+}
+
+/// The stalled chain was NOT taken: no hand-off, nothing parked, the rival still waiting.
+fn kept(b: &Bench, root: &str, receipt: &TickReceipt) {
+    assert!(receipt.handed_on.is_none(), "{:?}", receipt.handed_on);
+    assert!(receipt.working_tree.is_none(), "{:?}", receipt.working_tree);
+    b.the_copy_stayed(root);
 }
 
 // ---- (a) the dead-holder sweep -------------------------------------------------------------------
 
 /// **The heart of (a).** Only the engine's own `__channel__` wait is open, nothing has a process,
-/// nothing is queued in the operation, and it has been quiet for longer than the engine ever takes
-/// to finish what it started — so the sweep takes the copy inside the bound, parks the work first,
-/// and the rival starts.
+/// every session reported its end, nothing is on its way in the operation, and it has been quiet
+/// for longer than the engine ever takes to finish what it started — so the sweep takes the copy
+/// inside the bound, parks the work first under a reason that says what happened, and the rival
+/// starts.
 #[test]
 fn a_chain_stalled_on_its_supervisor_is_taken_inside_its_bound() {
     let b = Bench::new();
-    let (root, rival) = a_stalled_chain(&b, true);
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
     let rival = rival.unwrap();
 
     let receipt = b.tick(QUIET, &rival);
@@ -438,34 +555,50 @@ fn a_chain_stalled_on_its_supervisor_is_taken_inside_its_bound() {
         .clone()
         .unwrap_or_else(|| panic!("the stalled chain kept the copy: {receipt:?}"));
     assert_eq!(handed.scope, scope_of(&root));
-    assert_eq!(handed.occasion, ParkOccasion::DiedInsideItsBound);
+    assert_eq!(handed.occasion, ParkOccasion::StalledOnItsSupervisor);
     let parked = handed.parked.clone().expect("its work was parked first");
     assert!(parked.committed, "there was work to save");
     assert_eq!(
         git(b.root(), &["show", &format!("{}:src.txt", parked.branch)]),
         HALF_FINISHED.trim()
     );
+    let message = b.park_message(&parked.branch);
+    assert!(message.contains("chain stalled"), "{message}");
+    assert!(!message.contains("died"), "no process died: {message}");
     assert_eq!(git(b.root(), &["rev-parse", "--abbrev-ref", "HEAD"]), BASE);
     assert_eq!(b.started("solo"), 1, "the rival started");
     assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&rival).as_str()));
+    let json = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(json["handed_on"]["occasion"], "stalled_on_its_supervisor");
 }
 
-/// **…but not while the operation has only just moved.** One minute after the end was recorded the
-/// advance that end owes may still be on its way — a `session ended` under a busy database can take
-/// that long — and taking the copy then would park work out from under a step that is about to
-/// start.
+/// **The quiet is five minutes, to the second.** The last thing that happened is the recorded end
+/// at 09:22:00; at 09:26:59 the advance that end owes may still be on its way, at 09:27:00 it is not.
+#[test]
+fn the_quiet_is_five_minutes_to_the_second() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    let rival = rival.unwrap();
+
+    let early = b.tick(ONE_SECOND_SHORT, &rival);
+    kept(&b, &root, &early);
+
+    let on_time = b.tick(FIVE_MINUTES, &rival);
+    assert_eq!(
+        on_time.handed_on.map(|h| h.occasion),
+        Some(ParkOccasion::StalledOnItsSupervisor)
+    );
+}
+
+/// **…and a chain that has only just moved keeps the copy** — one minute after the end.
 #[test]
 fn a_chain_that_has_only_just_moved_keeps_the_copy() {
     let b = Bench::new();
-    let (root, rival) = a_stalled_chain(&b, true);
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
 
     let receipt = b.tick(JUST_AFTER, &rival.unwrap());
 
-    assert!(receipt.handed_on.is_none(), "{:?}", receipt.handed_on);
-    assert!(receipt.working_tree.is_none());
-    assert_eq!(b.park_branches(), "");
-    assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&root).as_str()));
-    assert_eq!(b.started("solo"), 0);
+    kept(&b, &root, &receipt);
 }
 
 /// **A worker that cannot answer the liveness question never takes it early** — "nothing is
@@ -473,14 +606,202 @@ fn a_chain_that_has_only_just_moved_keeps_the_copy() {
 #[test]
 fn a_worker_that_cannot_look_never_takes_a_stalled_chain_early() {
     let b = Bench::new();
-    let (root, rival) = a_stalled_chain(&b, true);
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
     b.worker.looks.store(false, Ordering::SeqCst);
 
     let receipt = b.tick(QUIET, &rival.unwrap());
 
-    assert!(receipt.handed_on.is_none(), "{:?}", receipt.handed_on);
-    assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&root).as_str()));
-    assert_eq!(b.started("solo"), 0);
+    kept(&b, &root, &receipt);
+}
+
+/// **A process gone whose `session ended` has not landed is not a stalled chain.** That call can
+/// take thirty seconds and more on a busy database, and when it lands it advances the chain — so
+/// until every session in the operation has a recorded end, the copy stays.
+#[test]
+fn a_session_gone_without_a_recorded_end_keeps_the_copy() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(
+        &b,
+        Stage {
+            end_recorded: false,
+            ..LOST_ADVANCE
+        },
+    );
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+}
+
+/// **A commission of the operation's own, queued for the copy, is on its way** — the chain is not
+/// stalled, it is waiting for its own next step to start.
+#[test]
+fn a_commission_queued_inside_the_operation_keeps_the_copy() {
+    let b = Bench::new();
+    let (root, build, coder, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    b.store()
+        .enqueue_working_tree(
+            &QueuedTrigger {
+                id: 0,
+                scope_key: scope_of(&root),
+                role: "verifier".into(),
+                session: format!("{coder}-v"),
+                thread: Some(build),
+                message: "verify".into(),
+                model: None,
+                depth: 1,
+                priority: Priority::Normal,
+                enqueued_at: None,
+            },
+            ENDED,
+        )
+        .expect("queued");
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+}
+
+/// **A hand-back waits for a PERSON** — an escalation or a question in the operation is the
+/// escalation rule's, with its own thirty minutes, never this one's.
+#[test]
+fn an_unanswered_hand_back_in_the_operation_keeps_the_copy() {
+    let b = Bench::new();
+    let (root, build, coder, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    // Posted at ENDED, so the quiet clock alone would let the sweep act at QUIET: what keeps the copy
+    // here has to be the hand-back.
+    let mut store = b.store();
+    store.set_wall_clock(ENDED);
+    store.post_message(&MessageEnvelope {
+        origin: b.origin.clone(),
+        channel_id: "decl:coding".into(),
+        sender: b.handle("coder"),
+        kind: MessageKind::Escalation,
+        priority: Priority::Normal,
+        disposition: Disposition::InTurn,
+        thread_id: Some(build),
+        refs: Refs {
+            session_id: Some(coder),
+            ..Refs::default()
+        },
+        body: "which of the two APIs did you mean?".into(),
+    });
+    drop(store);
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+}
+
+/// **Work open across the border is running somewhere else.**
+#[test]
+fn an_open_border_thread_in_the_operation_keeps_the_copy() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    let border = "m-01BORDERTHREAD000000000000";
+    b.open_under(border, &root, &b.handle("carsten"), ENDED);
+    b.store()
+        .connection()
+        .execute(
+            "INSERT INTO border_threads(thread_id, direction, peer, persona, state, created, updated)
+             VALUES (?1, 'out', 'other', 'reviewer', 'working', ?2, ?2)",
+            [border, ENDED],
+        )
+        .expect("the border row");
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+}
+
+/// **The supervisor must be the ONLY one owed.** A thread of the operation that waits on a person
+/// — who has no session to die — makes it a wait for that person, whatever the root waits on.
+#[test]
+fn a_thread_owing_a_person_beside_the_supervisor_keeps_the_copy() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    let question = "m-01QUESTIONFORAPERSON0000000";
+    b.open_under(question, &root, &b.handle("coder"), ENDED);
+    b.store().set_expects_reply_from(
+        question,
+        &serde_json::to_string(&[b.handle("carsten")]).unwrap(),
+        &b.handle("coder"),
+    );
+    assert_eq!(b.owes(question, QUIET), vec![b.handle("carsten")]);
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+}
+
+/// **A declared hurdle that refused the next step waits for the requester.** Nothing retries it —
+/// asking again is the requester's move — and the person may be fixing the tree right now; parking
+/// and checking out the base under them is the one thing that must not happen.
+#[test]
+fn a_declared_hurdle_that_stopped_the_chain_keeps_the_copy() {
+    let b = Bench::with(CHANNELS_WITH_A_HURDLE);
+    let root = b.commission(T0, "coding");
+    let coder = b.session_of("coder");
+    std::fs::write(b.root().join("src.txt"), HALF_FINISHED).unwrap();
+    let build = b.store().supervised_children(&root).unwrap()[0].clone();
+    b.reply(ANSWERED, &coder, "coder", &build, false);
+    let solo = b.commission(QUEUED, "solo");
+
+    // The coder's process goes and its end arrives — the advance runs, and the PROJECT's rule says no.
+    b.worker.running.lock().unwrap().remove(&coder);
+    b.worker.blocked.store(true, Ordering::SeqCst);
+    b.engine()
+        .session_ended(
+            Caller {
+                session: Some(&coder),
+                actor: Some("coder"),
+                now: Some(ENDED),
+            },
+            &coder,
+        )
+        .expect("the end is recorded");
+    assert_eq!(
+        b.started("verifier"),
+        0,
+        "the declared hurdle refused verify"
+    );
+    assert_eq!(b.owes(&root, QUIET), vec![b.supervisor()], "the premise");
+
+    let receipt = b.tick(QUIET, &solo);
+
+    kept(&b, &root, &receipt);
+}
+
+/// **A chain the tick can revive is not parked — it is revived.** With the killed advance's empty
+/// slot standing, the sweep declines and arms a tick of the channel thread; that tick moves the
+/// chain on to `verify`, which keeps the copy in its own operation.
+#[test]
+fn a_chain_with_a_slot_never_commissioned_is_revived_rather_than_parked() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(
+        &b,
+        Stage {
+            empty_slot: true,
+            ..LOST_ADVANCE
+        },
+    );
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    kept(&b, &root, &receipt);
+    assert!(
+        b.timer
+            .armed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(thread, at)| thread == &root && at == QUIET),
+        "a tick of the channel thread is armed: {:?}",
+        b.timer.armed.lock().unwrap()
+    );
+
+    b.tick(QUIET, &root);
+    assert_eq!(b.started("verifier"), 1, "the chain went on to verify");
 }
 
 // ---- (b) the bound ------------------------------------------------------------------------------
@@ -491,7 +812,7 @@ fn a_worker_that_cannot_look_never_takes_a_stalled_chain_early() {
 #[test]
 fn past_its_bound_a_stalled_chain_hands_the_copy_to_whoever_waits() {
     let b = Bench::new();
-    let (root, rival) = a_stalled_chain(&b, true);
+    let (root, _, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
     let rival = rival.unwrap();
     b.worker.looks.store(false, Ordering::SeqCst);
 
@@ -511,7 +832,13 @@ fn past_its_bound_a_stalled_chain_hands_the_copy_to_whoever_waits() {
 #[test]
 fn past_its_bound_a_fresh_commission_takes_the_copy_of_a_stalled_chain() {
     let b = Bench::new();
-    let (root, _) = a_stalled_chain(&b, false);
+    let (root, _, _, _) = a_stalled_chain(
+        &b,
+        Stage {
+            rival: false,
+            ..LOST_ADVANCE
+        },
+    );
     b.worker.looks.store(false, Ordering::SeqCst);
     assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&root).as_str()));
 
@@ -531,12 +858,18 @@ fn past_its_bound_a_fresh_commission_takes_the_copy_of_a_stalled_chain() {
 /// **The commissioner can take it back.** `withdraw` used to answer "nothing is waiting or running"
 /// here — true, and the reason nothing ever released the copy. An operation that HOLDS the working
 /// copy with nothing running in it is something to take back: its open threads are discharged, so
-/// no tick commissions anything from it again, and the background tick parks its work and hands the
-/// copy on.
+/// no tick commissions anything from it again, and the background tick parks its work — under a
+/// reason that does not claim a running round was stopped — and hands the copy on.
 #[test]
 fn withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
     let b = Bench::new();
-    let (root, rival) = a_stalled_chain(&b, true);
+    let (root, _, _, rival) = a_stalled_chain(
+        &b,
+        Stage {
+            empty_slot: true,
+            ..LOST_ADVANCE
+        },
+    );
     let rival = rival.unwrap();
 
     let receipt = b
@@ -556,7 +889,7 @@ fn withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
             .withdrawn_holder(&scope_of(&root))
             .expect("the marker reads")
             .map(|m| m.by),
-        Some(format!("{}/carsten", b.origin))
+        Some(b.handle("carsten"))
     );
 
     let ticked = b.tick(JUST_AFTER, &rival);
@@ -566,14 +899,23 @@ fn withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
         .clone()
         .unwrap_or_else(|| panic!("the withdrawn chain kept the copy: {ticked:?}"));
     assert_eq!(handed.scope, scope_of(&root));
-    assert_eq!(handed.occasion, ParkOccasion::Withdrawn);
+    assert_eq!(handed.occasion, ParkOccasion::WithdrawnIdle);
     let parked = handed.parked.expect("its work was parked first");
     assert_eq!(
         git(b.root(), &["show", &format!("{}:src.txt", parked.branch)]),
         HALF_FINISHED.trim()
     );
+    let message = b.park_message(&parked.branch);
+    assert!(message.contains("nothing running"), "{message}");
+    assert!(
+        !message.contains("running round"),
+        "no round was running: {message}"
+    );
     assert_eq!(b.started("solo"), 1, "the rival started");
     assert_eq!(b.lease_holder().as_deref(), Some(scope_of(&rival).as_str()));
+
+    // …and the root's own tick, once the slot is long past its grace, commissions nothing.
+    b.tick(QUIET, &root);
     assert_eq!(
         b.started("verifier"),
         0,
@@ -581,21 +923,63 @@ fn withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
     );
 }
 
-/// **The same door from the command line** — what the commissioner actually types.
+/// **The one door of 6j6v.2pnn this covers: a copy held by an escalation with nothing running.**
+/// A persona hands its task back and its session ends; the escalation holds the copy, and
+/// `withdraw` used to answer "nothing is waiting or running". Now the commissioner takes it back
+/// and the copy moves. (How a SUPERSEDED escalation came to hold a delivered round in 2pnn is not
+/// addressed here.)
 #[test]
-fn nxc_withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
+fn withdraw_takes_back_a_copy_held_by_an_escalation_with_nothing_running() {
     let b = Bench::new();
-    let (root, _) = a_stalled_chain(&b, true);
+    let thread = b.commission(T0, "solo");
+    let session = b.session_of("solo");
+    b.reply(ANSWERED, &session, "solo", &thread, true);
+    b.worker.running.lock().unwrap().remove(&session);
+    b.store().mark_session_ended(&session, ENDED).unwrap();
+    assert_eq!(
+        b.lease_holder().as_deref(),
+        Some(scope_of(&thread).as_str())
+    );
 
-    let out = nxs_test_support::cargo_bin("nxc")
-        .current_dir(b.root())
+    let receipt = b
+        .engine()
+        .withdraw(Bench::human(JUST_AFTER), &thread)
+        .expect("an escalation holding the copy with nothing running is withdrawn");
+    assert!(receipt.held_idle, "{receipt:?}");
+
+    let ticked = b.tick(JUST_AFTER, &thread);
+    assert_eq!(
+        ticked.handed_on.map(|h| h.occasion),
+        Some(ParkOccasion::WithdrawnIdle)
+    );
+    assert_eq!(
+        b.lease_holder(),
+        None,
+        "nobody waits, so the copy is simply free"
+    );
+}
+
+fn nxc(b: &Bench) -> assert_cmd::Command {
+    let mut c = nxs_test_support::cargo_bin("nxc");
+    c.current_dir(b.root())
         .env_remove("NXC_SESSION")
+        .env_remove("NXC_ORIGIN")
         .env("NXC_ACTOR", "carsten")
         .env("NXC_NOW", JUST_AFTER)
         .env("NXC_WORKER", "dry")
         .env("NXC_DRY_LOG", b.root().join("dry.log"))
         .env("NXC_TIMER", "dry")
-        .env("NXC_TIMER_LOG", b.root().join("timer.log"))
+        .env("NXC_TIMER_LOG", b.root().join("timer.log"));
+    c
+}
+
+/// **The same door from the command line** — what the commissioner actually types.
+#[test]
+fn nxc_withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
+    let b = Bench::new();
+    let (root, _, _, _) = a_stalled_chain(&b, LOST_ADVANCE);
+
+    let out = nxc(&b)
         .args(["withdraw", "--thread", &root])
         .assert()
         .success();
@@ -616,12 +1000,38 @@ fn nxc_withdraw_takes_back_a_chain_that_holds_the_copy_with_nothing_running() {
         .is_some());
 }
 
+/// **…and its `--json` carries the fact as `held_idle`.**
+#[test]
+fn nxc_withdraw_json_says_held_idle() {
+    let b = Bench::new();
+    let (root, _, _, _) = a_stalled_chain(&b, LOST_ADVANCE);
+
+    let out = nxc(&b)
+        .args(["withdraw", "--json", "--thread", &root])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("a withdraw receipt");
+
+    assert_eq!(json["held_idle"], true, "{json}");
+    // The dry worker names no working copy, so this host can only hand the copy on unparked — and
+    // the receipt says so rather than promising a branch.
+    assert_eq!(json["will_park"], false, "{json}");
+    assert!(json["cannot_park"].is_string(), "{json}");
+}
+
 /// **An operation that holds nothing and runs nothing is still refused** — the new door is the
 /// held copy, not a licence to "withdraw" any finished conversation.
 #[test]
 fn withdraw_still_refuses_an_operation_that_holds_nothing_and_runs_nothing() {
     let b = Bench::new();
-    let (root, _) = a_stalled_chain(&b, false);
+    let (root, _, _, _) = a_stalled_chain(
+        &b,
+        Stage {
+            rival: false,
+            ..LOST_ADVANCE
+        },
+    );
     // Somebody else takes the copy over first (past the bound, so it may).
     b.worker.looks.store(false, Ordering::SeqCst);
     b.commission(PAST_THE_BOUND, "solo");
@@ -643,7 +1053,14 @@ fn withdraw_still_refuses_an_operation_that_holds_nothing_and_runs_nothing() {
 #[test]
 fn a_tick_moves_the_chain_on_past_a_slot_that_was_never_commissioned() {
     let b = Bench::new();
-    let (root, _) = a_stalled_chain(&b, false);
+    let (root, _, _, _) = a_stalled_chain(
+        &b,
+        Stage {
+            rival: false,
+            empty_slot: true,
+            end_recorded: true,
+        },
+    );
 
     let early = b.tick(JUST_AFTER, &root);
     assert_eq!(

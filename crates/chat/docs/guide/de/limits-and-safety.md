@@ -248,12 +248,12 @@ der sie greift:
   selbst — über ihrer Frist, oder, weil er eine tote Kette nachweisen kann, schon davor.
 
   **Der Aufruf nimmt auch einen Vorgang zurück, der die Kopie hält, ohne dass darin überhaupt etwas
-  läuft** — eine Kette, deren nächster Schritt nie gestartet wurde, oder eine zugestellte Runde, die
-  noch von einer Rückgabe gehalten wird, die niemand mehr beantworten kann. Bisher lehnte der Aufruf
+  läuft** — eine Kette, deren nächster Schritt nie gestartet wurde, oder eine Runde, die von einer
+  Eskalation gehalten wird, die niemand mehr beantworten wird. Bisher lehnte der Aufruf
   das mit *nothing … is waiting or running* ab — zutreffend, und es blieb nichts, was die Kopie
   freigeben konnte. Jetzt werden seine offenen Threads entlastet, sodass daraus nichts mehr beauftragt
   wird, und der Hintergrund-Tick parkt seine Arbeit und gibt die Kopie weiter wie bei einer
-  angehaltenen Runde. Ein Vorgang, der weder die Kopie hält noch etwas laufen hat, wird weiterhin
+  angehaltenen Runde — unter eigenem Grund, `withdrawn_idle`, denn angehalten wurde nichts. Ein Vorgang, der weder die Kopie hält noch etwas laufen hat, wird weiterhin
   abgelehnt: dort gibt es nichts zurückzunehmen.
 - **Wie lange ein Anspruch läuft: so lange, wie die Operation es selbst zugesagt hat.** Die Frist ist
   das späteste `timeout:`, das im Anspruchsgebiet noch aussteht — eine Runde, die sechs Stunden sagt,
@@ -312,12 +312,16 @@ der sie greift:
   ist.** Wenn der einzige Thread, der noch eine Antwort schuldet, ein Kanal-Thread ist, der auf
   `__channel__` wartet — die Engine selbst, die den nächsten Schritt öffnet oder konsolidiert —, gibt
   es dort keine Sitzung, die tot sein könnte. Ein solcher Vorgang wird übernommen, wenn neben einem
-  antwortenden Worker und keinem laufenden Prozess gilt: nichts darin wartet auf die Kopie oder ist
-  als fehlgeschlagener Start vermerkt; keine Rückgabe darin ist unbeantwortet; nichts davon ist über
-  die Grenze hinweg offen; nichts pausiert an einer Verfügbarkeitsgrenze; und seit fünf Minuten ist
-  darin überhaupt nichts geschehen — kein Thread geöffnet, keine Nachricht gepostet, kein
+  antwortenden Worker und keinem laufenden Prozess gilt: jede Sitzung darin hat ihr Ende gemeldet;
+  nichts darin wartet auf die Kopie oder ist als fehlgeschlagener Start vermerkt; keine Rückgabe
+  darin ist unbeantwortet; keine deklarierte Hürde hat den nächsten Schritt abgelehnt, und kein
+  nächster Schritt ist beim Start gescheitert (beides wartet auf Sie — erneut fragen ist Ihr Zug,
+  und niemand soll Ihnen die Kopie wegnehmen, während Sie den Baum in Ordnung bringen); nichts davon
+  ist über die Grenze hinweg offen; nichts pausiert an einer Verfügbarkeitsgrenze; und seit fünf
+  Minuten ist darin überhaupt nichts geschehen — kein Thread geöffnet, keine Nachricht gepostet, kein
   Sitzungsende vermerkt. Die fünf Minuten verhindern, dass die Regel den Moment zwischen dem Ende
-  eines Schritts und dem Öffnen des nächsten erwischt. Sie kam nach einem Lauf hinzu, dessen Übergang
+  eines Schritts und dem Öffnen des nächsten erwischt. Der Park-Commit und die Zeile des Ticks nennen
+  das als eigenen Anlass, `stalled_on_its_supervisor`, nicht als Tod. Sie kam nach einem Lauf hinzu, dessen Übergang
   zum nächsten Schritt mittendrin abgebrochen wurde (der Aufruf des Sidecars lief bei gesperrter
   Datenbank in sein Zeitlimit): Der beantwortete Schritt war fertig, der nächste wurde nie gestartet,
   und die Kopie blieb stundenlang gehalten, ohne dass irgendetwas sie je hätte bewegen können.
@@ -325,7 +329,10 @@ der sie greift:
   Derselbe Vorfall hinterließ einen Schritt-Thread, den die Engine geöffnet und nie beauftragt hatte
   — keine erwartete Antwort, keine Nachricht. Ein `tick` auf dem ersten Thread des Vorgangs las ihn
   als noch arbeitenden Schritt und antwortete für immer `not_due`; sobald er fünf Minuten alt ist,
-  zählt er gar nicht mehr als Schritt, und der Tick führt die Kette weiter.
+  zählt er gar nicht mehr als Schritt, und der Tick führt die Kette weiter. Eine solche Kette wird
+  wiederbelebt statt geparkt: Solange jemand wartet, stellt der Sweep diesen Tick selbst, statt die
+  Kopie zu übernehmen. Wartet niemand, stellt ihn vor der Frist des leeren Schritts nichts —
+  `nxc tick --thread <id>` auf dem ersten Thread des Vorgangs erledigt das von Hand.
 - **Wer schon wartet, kommt zuerst dran.** Das Zurückholen eines abgelaufenen Anspruchs gibt den Zug
   der Warteschlange im selben Schritt weiter: die Kette, die schon anstand, startet, und der
   Neuankömmling stellt sich hinten an. Diese Seite schwieg dazu, weil es umgekehrt war — die Kopie

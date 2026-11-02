@@ -2977,6 +2977,14 @@ fn print_tick_result(json: bool, r: &crate::orchestration::TickReceipt) {
             crate::orchestration::ParkOccasion::Withdrawn => {
                 "its running round was withdrawn and nothing in it is running any more"
             }
+            // nxf 6j6v.3rrv: neither a death nor a stopped round.
+            crate::orchestration::ParkOccasion::StalledOnItsSupervisor => {
+                "every session in it has ended and nothing will ever start its next step, so its \
+                 chain stalled holding the copy while another operation waits"
+            }
+            crate::orchestration::ParkOccasion::WithdrawnIdle => {
+                "it held the copy with nothing running in it and was withdrawn"
+            }
         };
         match (&handed.parked, &handed.unparked) {
             (Some(parked), _) => println!(

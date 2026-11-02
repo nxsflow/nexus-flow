@@ -811,6 +811,30 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              SELECT internal_id, thread FROM session_map WHERE thread IS NOT NULL;",
         )?;
     }
+    // **A withdrawal of an IDLE holder** (nxf 6j6v.3rrv): an operation that held the working copy
+    // with nothing running in it. Its park is a different occasion from a stopped round's, and the
+    // park commit says which, so the marker carries it. Device-local, NOT part of `upgraded` — no
+    // reducer writes the table; an existing row reads 0, a stopped round, which is what every
+    // marker written before this column was.
+    if !column_exists(conn, "withdrawn_holders", "idle")? {
+        conn.execute_batch(
+            "ALTER TABLE withdrawn_holders ADD COLUMN idle INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    // **An advance the supervisor STOPPED for its requester** (nxf 6j6v.3rrv): a declared hurdle
+    // refused the next step, or the step could not be started. Nothing retries either — asking
+    // again is the requester's move — so the operation is waiting for a PERSON, and the
+    // stalled-chain rule must not take its working copy from under somebody fixing the tree. The
+    // row goes when a step of that channel thread opens. Device-local: the supervisor that stopped
+    // the advance runs on this machine.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS stopped_advances(
+             channel_thread TEXT PRIMARY KEY,
+             step           TEXT NOT NULL,
+             reason         TEXT NOT NULL,
+             at             TEXT NOT NULL
+         );",
+    )?;
     Ok(upgraded)
 }
 

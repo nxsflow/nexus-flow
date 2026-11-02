@@ -3841,8 +3841,10 @@ pub struct WorkingTreeSweep {
 ///
 /// The bound is a backstop for a holder nobody can ask about, and a chain that died hard is one this
 /// device CAN ask about. So before it declines on a lease that is still standing, this asks
-/// [`holder_is_provably_dead`] — five conditions, all of which must hold — and hands the copy on
-/// under [`ParkOccasion::DiedInsideItsBound`] when they do. That occasion is
+/// [`holder_is_provably_dead`] — five conditions, all of which must hold, with clause 4 answered by
+/// [`a_chain_stalled_on_its_supervisor`] for a chain that owes only its supervisor — and hands the
+/// copy on under [`ParkOccasion::DiedInsideItsBound`] or [`ParkOccasion::StalledOnItsSupervisor`]
+/// when they do. That occasion is
 /// [`a_dead_holder_inside_its_bound`]'s; it reports through [`TickReceipt::handed_on`] rather than
 /// through [`WorkingTreeSweep`], because it took a lease that had not expired and there is no
 /// `expired` instant to put on one. [`SweepStep`] carries both and says why they cannot collide.
@@ -3902,6 +3904,7 @@ fn sweep_expired_working_tree(
         // row on record is settled by `forget_a_refusal_of_this_occasion`'s own stamp check.
         forget_a_refusal_of_this_occasion(store, ParkOccasion::PastItsBound);
         forget_a_refusal_of_this_occasion(store, ParkOccasion::DiedInsideItsBound);
+        forget_a_refusal_of_this_occasion(store, ParkOccasion::StalledOnItsSupervisor);
         return Ok(SweepStep::default()); // nobody waiting; the next acquire reclaims the row itself
     };
     if store.working_tree_holder(ctx.now)?.is_some() {
@@ -4106,11 +4109,12 @@ fn a_dead_holder_inside_its_bound(
         // and saying it on every tick of every live lease would be a warning nobody can act on.
         return Ok(None);
     };
-    if !holder_is_provably_dead(ctx, store, &scope)? {
-        // The occasion does not stand, so nothing is retrying a park under it.
+    let Some(occasion) = holder_is_provably_dead(ctx, store, &scope)? else {
+        // Neither occasion stands, so nothing is retrying a park under either.
         forget_a_refusal_of_this_occasion(store, ParkOccasion::DiedInsideItsBound);
+        forget_a_refusal_of_this_occasion(store, ParkOccasion::StalledOnItsSupervisor);
         return Ok(None);
-    }
+    };
     if park_already_held {
         // `park_step`'s "at most ONE occasion acts per tick", for this occasion too: the same park
         // of the same holder was attempted a moment ago and refused for a reason that can pass, so
@@ -4131,12 +4135,20 @@ fn a_dead_holder_inside_its_bound(
         WorkScope::Thread(t) => Some(t.as_str()),
         WorkScope::Session(_) => None,
     };
-    let why = format!(
-        "operation {holder} still holds this workspace's working copy inside its bound ({expires}), \
-         but nothing in it is running any more and a thread of it is still owed an answer that \
-         nothing ever ended — so it died without giving the copy back, and something else is \
-         waiting for it"
-    );
+    let why = match occasion {
+        ParkOccasion::StalledOnItsSupervisor => format!(
+            "operation {holder} still holds this workspace's working copy inside its bound \
+             ({expires}), but nothing in it is running, every session in it has ended, and it has \
+             owed nothing but its own channel's next move for {STALLED_CHAIN_QUIET_SECS} s with \
+             nothing on its way — so its chain stalled, and something else is waiting for the copy"
+        ),
+        _ => format!(
+            "operation {holder} still holds this workspace's working copy inside its bound \
+             ({expires}), but nothing in it is running any more and a thread of it is still owed an \
+             answer that nothing ever ended — so it died without giving the copy back, and \
+             something else is waiting for it"
+        ),
+    };
     let outcome = park_and_hand_on(
         ctx,
         store,
@@ -4148,12 +4160,12 @@ fn a_dead_holder_inside_its_bound(
         &why,
         warnings,
         anchor,
-        ParkOccasion::DiedInsideItsBound,
+        occasion,
     )?;
     // The rule's transient half, exactly as the branch past the bound applies it: the claim stays,
     // the refusal is on `nxc status`, the retry is armed by `park_and_hand_on`, and nothing here is
     // reported because nothing moved.
-    Ok(outcome.handed_on(holder, ParkOccasion::DiedInsideItsBound))
+    Ok(outcome.handed_on(holder, occasion))
 }
 
 /// **Is the operation holding this working copy GONE, although its bound has not run out?** (nxf
@@ -4177,7 +4189,8 @@ fn a_dead_holder_inside_its_bound(
 /// ([`ChatStore::newest_sessions_in_threads`], [`ChatStore::interrupted_threads`] — with the same
 /// staging, the N+1 cost a median of 2.68 ms and grew with the claim area).
 ///
-/// **All five, and the answer is `false` the moment one of them is not met.** Taking a working copy
+/// **All five (clause 4 in one of its two forms, see below), and the answer is `false` the moment
+/// one of them is not met.** Taking a working copy
 /// away writes into it (`git checkout`), so the direction that must never be guessed at is this one.
 ///
 /// 1. **The worker ANSWERS the liveness question** ([`Worker::answers_liveness`](crate::worker::
@@ -4229,28 +4242,38 @@ fn a_dead_holder_inside_its_bound(
 ///
 /// It takes `&ChatStore`, writes nothing and decides nothing about what to DO — which is what lets
 /// the sweep call it as a guard and lets it be reasoned about on its own.
-fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> Result<bool> {
+///
+/// **It answers WHICH of two occasions it is** (nxf 6j6v.3rrv), `None` for neither: a session that
+/// died ([`ParkOccasion::DiedInsideItsBound`]), or a chain stalled on its own supervisor
+/// ([`ParkOccasion::StalledOnItsSupervisor`]). Two occasions because the park commit, the tick's
+/// line and the receipt all say WHY the copy moved, and "its process died" is false for the second.
+fn holder_is_provably_dead(
+    ctx: &Ctx,
+    store: &ChatStore,
+    scope: &WorkScope,
+) -> Result<Option<ParkOccasion>> {
     // Cheapest first, and it is also the one that disqualifies a whole class of host: a workspace
     // whose worker cannot look pays one field read per tick for this entire mechanism.
     if !ctx.worker.answers_liveness() {
-        return Ok(false);
+        return Ok(None);
     }
     let threads = store.work_scope_threads(scope)?;
     let owing = store.threads_owing_an_answer(&threads, ctx.now)?;
     if owing.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if !sessions_still_running(ctx, store, &threads)?.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     // **An operation that owes nothing but its OWN SUPERVISOR's next move** (nxf 6j6v.3rrv) is the
     // one shape clause 4 cannot judge: the supervisor is the engine, not a session, so the owing
     // thread has no session of its own and the loop below would read it as a human being waited
     // for. It is asked by [`a_chain_stalled_on_its_supervisor`] instead, on evidence of its own.
-    if only_the_supervisor_owes(ctx, store, &owing)? {
+    let occasion = if only_the_supervisor_owes(ctx, store, &owing)? {
         if !a_chain_stalled_on_its_supervisor(ctx, store, &threads)? {
-            return Ok(false);
+            return Ok(None);
         }
+        ParkOccasion::StalledOnItsSupervisor
     } else {
         // ONE read for the whole clause, not one per owing thread (fix round 1): see
         // [`ChatStore::newest_sessions_in_threads`] for the N+1 that was here and why this table is
@@ -4258,20 +4281,21 @@ fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> R
         let newest = store.newest_sessions_in_threads(&owing)?;
         for thread in &owing {
             let Some(session) = newest.get(thread) else {
-                return Ok(false); // nothing ever ran here: an obligation on a human, not a death
+                return Ok(None); // nothing ever ran here: an obligation on a human, not a death
             };
             if session.ended.is_some() {
-                return Ok(false);
+                return Ok(None);
             }
         }
-    }
+        ParkOccasion::DiedInsideItsBound
+    };
     // …and one read for this clause too: the threads with a standing hold, intersected with the
     // claim area, instead of a row read per hold to place it.
     let interrupted = store.interrupted_threads()?;
     if threads.iter().any(|t| interrupted.contains(t)) {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(true)
+    Ok(Some(occasion))
 }
 
 /// **How long an operation must have been QUIET before the engine calls its chain stalled** (nxf
@@ -4286,7 +4310,7 @@ fn holder_is_provably_dead(ctx: &Ctx, store: &ChatStore, scope: &WorkScope) -> R
 /// the machine is idle and was measured long when it is not: the `session ended` behind 6j6v.3rrv
 /// spent its whole thirty-second call budget waiting on a locked database. Five minutes is ten of
 /// those, and costs a stalled chain five minutes of a wait that used to have no end.
-pub const STALLED_CHAIN_QUIET_SECS: i64 = 5 * 60;
+pub(crate) const STALLED_CHAIN_QUIET_SECS: i64 = 5 * 60;
 
 /// **Does every thread that still owes an answer owe it to the engine's own SUPERVISOR, and to it
 /// alone?** (nxf 6j6v.3rrv) — a channel thread waiting on `__channel__` to open its next step or to
@@ -4306,50 +4330,100 @@ fn only_the_supervisor_owes(ctx: &Ctx, store: &ChatStore, owing: &[String]) -> R
     }))
 }
 
+/// **What is still on its way in an operation** (nxf 6j6v.3rrv) — the commissions queued for the
+/// working copy, the starts that failed and wait for a retry, and whether anything of it is open
+/// across the border. ONE read for the two places that ask: the stalled-chain rule, for which any of
+/// it means the chain is not stalled, and [`withdraw`], which takes the first two back and for which
+/// the third is work running elsewhere.
+struct OnItsWay {
+    queued: Vec<QueuedTrigger>,
+    failed: Vec<crate::working_tree::FailedStart>,
+    border_open: bool,
+}
+
+impl OnItsWay {
+    fn read(store: &ChatStore, area: &[String]) -> Result<OnItsWay> {
+        let in_area =
+            |t: &Option<String>| t.as_deref().is_some_and(|t| area.iter().any(|a| a == t));
+        Ok(OnItsWay {
+            queued: store
+                .list_working_tree_queue()?
+                .into_iter()
+                .filter(|q| in_area(&q.thread))
+                .collect(),
+            failed: store
+                .failed_starts()?
+                .into_iter()
+                .filter(|f| in_area(&f.thread))
+                .collect(),
+            border_open: crate::border::rows(store)?.iter().any(|r| {
+                r.direction == crate::border::Direction::Outbound
+                    && !r.state.is_final()
+                    && area.contains(&r.thread_id)
+            }),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queued.is_empty() && self.failed.is_empty() && !self.border_open
+    }
+}
+
 /// **Has a chain that owes nothing but its supervisor's next move STALLED?** (nxf 6j6v.3rrv) — the
 /// evidence [`holder_is_provably_dead`] asks for in place of a dead session, when there is no
 /// session to be dead.
 ///
 /// The supervisor moves only when something below it happens: a step answers, a session ends, a
 /// queued step starts, a failed start is retried, an escalation is answered, the border reports
-/// back. So the chain is stalled — not resting, STALLED: nothing will ever move it — when none of
-/// those can still happen. Every clause is one of them:
+/// back, or the person who asked asks again. So the chain is stalled — not resting, STALLED: nothing
+/// will ever move it — when none of those can still happen. Every clause is one of them:
 ///
-/// 1. **Nothing in the operation is queued for the working copy or recorded as a start that
-///    failed.** Either is a step on its way, and the copy is its own operation's to keep for it.
-/// 2. **No hand-back stands unanswered in it.** An escalation or a question waits for a PERSON, and
-///    that is [`ParkOccasion::StrandedEscalation`]'s, with its thirty-minute contention rule.
-/// 3. **Nothing of it is open across the border** — a persona in another workspace is working on it.
-/// 4. **It has been quiet for [`STALLED_CHAIN_QUIET_SECS`]** — so this cannot be the moment between
+/// 1. **Nothing is on its way** ([`OnItsWay`]): nothing queued for the copy, no start that failed and
+///    waits for a retry, nothing open across the border.
+/// 2. **No hand-back stands unanswered.** An escalation or a question waits for a PERSON, and that is
+///    [`ParkOccasion::StrandedEscalation`]'s, with its thirty-minute contention rule.
+/// 3. **No advance was STOPPED for the requester** ([`ChatStore::stopped_advance_in`]) — a declared
+///    hurdle refused the next step, or the step could not be started. Nothing retries either, by
+///    design: asking again is the requester's move, and that person may be fixing the tree right now.
+/// 4. **Every session in the operation has a RECORDED end.** A process that is gone but whose
+///    `session ended` has not landed — the call can take thirty seconds and more on a busy database —
+///    may still advance the chain when it does; such an operation is left to the dead-session rule.
+/// 5. **No slot the engine opened was left uncommissioned** ([`never_commissioned`]). That chain is
+///    not stalled, it is REVIVABLE: a tick of its channel thread moves it on. So this declines, and
+///    arms that tick, rather than parking the work of a chain about to continue.
+/// 6. **It has been quiet for [`STALLED_CHAIN_QUIET_SECS`]** — so this cannot be the moment between
 ///    a step's end and the opening of the next one, which one process makes in one call.
-///
-/// The measured case (6j6v.3rrv, 2026-11-02) satisfied all four for hours: the advance that would
-/// have opened `verify` was killed half-way, and nothing else was ever going to happen there.
 fn a_chain_stalled_on_its_supervisor(
     ctx: &Ctx,
     store: &ChatStore,
     threads: &[String],
 ) -> Result<bool> {
-    let in_area = |t: &Option<String>| t.as_deref().is_some_and(|t| threads.iter().any(|a| a == t));
-    if store
-        .list_working_tree_queue()?
-        .iter()
-        .any(|q| in_area(&q.thread))
-    {
-        return Ok(false);
-    }
-    if store.failed_starts()?.iter().any(|f| in_area(&f.thread)) {
+    if !OnItsWay::read(store, threads)?.is_empty() {
         return Ok(false);
     }
     if store.unanswered_hand_back(threads)?.is_some() {
         return Ok(false);
     }
-    if crate::border::rows(store)?.iter().any(|r| {
-        r.direction == crate::border::Direction::Outbound
-            && !r.state.is_final()
-            && threads.contains(&r.thread_id)
-    }) {
+    if store.stopped_advance_in(threads)? {
         return Ok(false);
+    }
+    if !unended_sessions_under(store, threads)?.is_empty() {
+        return Ok(false);
+    }
+    let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
+    for slot in store.thread_quorums(&ids, ctx.now)? {
+        if !never_commissioned(ctx, store, &slot)? {
+            continue;
+        }
+        if let Some(channel_thread) = supervising_parent(store, &slot.thread_id)? {
+            // Best effort: a look that could not be armed is the next tick's to arm again.
+            let _ = ctx.timer.schedule(
+                &channel_thread,
+                ctx.now,
+                &crate::timer::tick_command(&channel_thread),
+            );
+            return Ok(false);
+        }
     }
     Ok(match store.newest_activity_in(threads)? {
         Some(at) => quiet_since(ctx.now, &at)?,
@@ -4772,6 +4846,15 @@ pub enum ParkOccasion {
     /// [`park_a_withdrawn_holder`] — and that marker is also what keeps every other release from
     /// handing the copy on unparked in the meantime; see [`release_working_tree_if_scope_is_done`].
     Withdrawn,
+    /// **The holder's chain STALLED on its own supervisor** (nxf 6j6v.3rrv) — nothing in it runs,
+    /// every session in it reported its end, and all it still owes is its channel's next move, which
+    /// nothing will ever make: the advance was lost. Not a death — no process died — and so not
+    /// [`DiedInsideItsBound`](Self::DiedInsideItsBound). See [`a_chain_stalled_on_its_supervisor`].
+    StalledOnItsSupervisor,
+    /// **An operation that held the copy with NOTHING running in it was withdrawn** (nxf
+    /// 6j6v.3rrv) — [`Withdrawn`](Self::Withdrawn)'s decision, with no round to stop: its open
+    /// threads were discharged and its work is parked. See [`WithdrawReceipt::held_idle`].
+    WithdrawnIdle,
 }
 
 impl ParkOccasion {
@@ -4787,6 +4870,8 @@ impl ParkOccasion {
             ParkOccasion::PastItsBound => "past_its_bound",
             ParkOccasion::DiedInsideItsBound => "died_inside_its_bound",
             ParkOccasion::Withdrawn => "withdrawn",
+            ParkOccasion::StalledOnItsSupervisor => "stalled_on_its_supervisor",
+            ParkOccasion::WithdrawnIdle => "withdrawn_idle",
         }
     }
 }
@@ -5397,7 +5482,14 @@ fn park_a_withdrawn_holder(
         // to another movement and whose retry nobody is running any more, and it goes — the same
         // discipline every other occasion in `park_step` keeps.
         forget_a_refusal_of_this_occasion(store, ParkOccasion::Withdrawn);
+        forget_a_refusal_of_this_occasion(store, ParkOccasion::WithdrawnIdle);
         return Ok(None);
+    };
+    // Which withdrawal it was: a running round that was stopped, or an operation that held the copy
+    // with nothing running in it (nxf 6j6v.3rrv). The park commit says which.
+    let occasion = match store.withdrawn_holder_is_idle(&holder)? {
+        true => ParkOccasion::WithdrawnIdle,
+        false => ParkOccasion::Withdrawn,
     };
     let Some(scope) = WorkScope::parse(&holder) else {
         return Ok(None); // the sweep is the one place that says this out loud
@@ -5437,11 +5529,19 @@ fn park_a_withdrawn_holder(
         }
         return Ok(None);
     }
-    let why = format!(
-        "operation {holder}'s running round was withdrawn by {} at {} and nothing in it is \
-         running any more, so its work is being parked and this workspace's working copy handed on",
-        marker.by, marker.withdrawn_at
-    );
+    let why = match occasion {
+        ParkOccasion::WithdrawnIdle => format!(
+            "operation {holder} held this workspace's working copy with nothing running in it and \
+             was withdrawn by {} at {}, so its work is being parked and the copy handed on",
+            marker.by, marker.withdrawn_at
+        ),
+        _ => format!(
+            "operation {holder}'s running round was withdrawn by {} at {} and nothing in it is \
+             running any more, so its work is being parked and this workspace's working copy \
+             handed on",
+            marker.by, marker.withdrawn_at
+        ),
+    };
     let outcome = park_and_hand_on(
         ctx,
         store,
@@ -5450,7 +5550,7 @@ fn park_a_withdrawn_holder(
         &why,
         warnings,
         anchor,
-        ParkOccasion::Withdrawn,
+        occasion,
     )?;
     let held = outcome.is_held();
     if held {
@@ -5463,7 +5563,7 @@ fn park_a_withdrawn_holder(
     }
     Ok(Some(ParkStep {
         parked: None,
-        handed_on: outcome.handed_on(&holder, ParkOccasion::Withdrawn),
+        handed_on: outcome.handed_on(&holder, occasion),
         held,
     }))
 }
@@ -8873,6 +8973,7 @@ fn open_flow_step(
                 store.set_deadline(&receipt.thread_id, deadline, &opener);
             }
         }
+        forget_a_stopped_advance(store, req.channel_thread);
         return Ok(StepOpened::Opened(receipt.thread_id));
     }
 
@@ -8969,7 +9070,17 @@ fn open_flow_step(
             deadline,
         )?;
     }
+    forget_a_stopped_advance(store, req.channel_thread);
     Ok(StepOpened::Opened(member_thread))
+}
+
+/// A step of `channel_thread` opened, so whatever stopped its advance before is over (nxf
+/// 6j6v.3rrv). Best effort: a row left standing keeps the stalled-chain rule declining — the
+/// direction that keeps the copy where it is.
+fn forget_a_stopped_advance(store: &mut ChatStore, channel_thread: &str) {
+    if let Err(e) = store.forget_stopped_advance(channel_thread) {
+        eprintln!("warning: could not clear the stopped advance of thread {channel_thread}: {e}");
+    }
 }
 
 /// **What [`open_flow_step`] did** — opened the step, or was stopped by a hurdle.
@@ -11337,6 +11448,23 @@ fn supervisor_advance_flow(
         // engine that quietly kept asking would be a busy-wait on a human's working copy. The
         // requester was told, in the receipt of the call it made, and asking again is its move.
         Ok(StepOpened::Refused(refusal)) => {
+            // **A DECLARED refusal is recorded** (nxf 6j6v.3rrv): it waits for the requester, and
+            // the stalled-chain rule must not read that wait as a lost advance and take the copy
+            // from under somebody fixing the tree. The brought-along hurdle is not: the session end
+            // it waits for retries the advance by itself.
+            if refusal.kind != crate::precondition::RefusalKind::BuiltIn {
+                if let Err(e) = store.note_stopped_advance(
+                    &channel_q.thread_id,
+                    target,
+                    &refusal.hurdle,
+                    ctx.now,
+                ) {
+                    eprintln!(
+                        "warning: could not record that the advance of thread {} was stopped: {e}",
+                        channel_q.thread_id
+                    );
+                }
+            }
             let finding = FailedConsequence::precondition_refused(
                 &channel_q.thread_id,
                 target,
@@ -11357,6 +11485,16 @@ fn supervisor_advance_flow(
             ));
         }
         Err(e) => {
+            // Recorded for the refusal's reason above: nothing retries this, so it waits for the
+            // requester.
+            if let Err(note) =
+                store.note_stopped_advance(&channel_q.thread_id, target, "never_started", ctx.now)
+            {
+                eprintln!(
+                    "warning: could not record that the advance of thread {} was stopped: {note}",
+                    channel_q.thread_id
+                );
+            }
             let detail = format!(
                 "step {target:?} of channel {:?} was never started: {e}. The flow stops here — the \
                  previous step's answer is durable, and nothing retries this",
@@ -17406,59 +17544,45 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     // the trigger that is actually parked hangs on a member thread below it. A caller withdrawing
     // "the round I just commissioned" names what it was given.
     let area = store.thread_subtree(thread_id)?;
-    let parked: Vec<_> = store
-        .list_working_tree_queue()?
-        .into_iter()
-        .filter(|q| {
-            q.thread
-                .as_deref()
-                .is_some_and(|t| area.iter().any(|in_area| in_area == t))
-        })
-        .collect();
+    // What is QUEUED behind the copy, what FAILED to start, and whether anything of it is open across
+    // the border — one read ([`OnItsWay`]), shared with the stalled-chain rule.
+    //
     // **A start that failed is a commission that never started** (nxf 6j6v.br25), and it is the
     // case this verb used to answer "nothing is waiting or running" for: the release had taken it
     // off the queue, so it was not parked, and its start had failed, so nothing ran. Measured in
     // the `agents` workspace, where four such rounds could only be re-sent by hand beside the
     // orphans. It is taken back exactly like a parked one — nothing ran, nothing is lost — and its
     // record goes, so the tick does not start it again afterwards.
-    let failed: Vec<_> = store
-        .failed_starts()?
-        .into_iter()
-        .filter(|f| {
-            f.thread
-                .as_deref()
-                .is_some_and(|t| area.iter().any(|in_area| in_area == t))
-        })
-        .collect();
-    // **The running half** (nxf 6j6v.b9nf): every unended session in the area that the worker says
-    // has a live process — the same two reads, in the same order, as `sessions_still_running`.
-    let running = sessions_running_under(ctx, store, &area)?;
+    //
     // **Work running in ANOTHER workspace is running too** (nxf 6j6v.4gp2): a border thread under
     // this operation that is not finished has a persona working on it over there, and taking the
     // operation back is what stops it — see `crate::border::withdraw_under` at the end.
-    let border_open = crate::border::rows(store)?.iter().any(|r| {
-        r.direction == crate::border::Direction::Outbound
-            && !r.state.is_final()
-            && area.contains(&r.thread_id)
-    });
+    let on_its_way = OnItsWay::read(store, &area)?;
+    let nothing_on_its_way = on_its_way.is_empty();
+    let OnItsWay {
+        queued: parked,
+        failed,
+        ..
+    } = on_its_way;
+    // **The running half** (nxf 6j6v.b9nf): every unended session in the area that the worker says
+    // has a live process — the same two reads, in the same order, as `sessions_still_running`.
+    let running = sessions_running_under(ctx, store, &area)?;
     // **An operation that HOLDS the working copy with nothing running in it** (nxf 6j6v.3rrv,
     // 6j6v.2pnn) is something to take back too, and it is the case this verb used to answer
     // "nothing is waiting or running" for — true, and the reason nothing released the copy: a chain
-    // whose advance was lost, or a delivered round kept by a superseded escalation, owes nothing a
-    // process will ever answer. Only where "nothing running" was actually ESTABLISHED: a worker that
+    // whose advance was lost, or a round kept by an escalation nobody is going to answer, owes
+    // nothing a process will ever answer. Only where "nothing running" was actually ESTABLISHED: a worker that
     // cannot look counts as running every session that never reported its end.
     //
     // Only where nothing ELSE is there to withdraw: a queued or failed commission is taken back by
     // the loops below as it always was, and a failed start's discharge then asks the release itself.
     let held_idle = running.is_empty()
-        && parked.is_empty()
-        && failed.is_empty()
-        && !border_open
+        && nothing_on_its_way
         && (ctx.worker.answers_liveness() || unended_sessions_under(store, &area)?.is_empty())
         && store
             .working_tree_lease_row()?
             .is_some_and(|(key, _)| key == WorkScope::Thread(thread_id.to_string()).key());
-    if parked.is_empty() && failed.is_empty() && running.is_empty() && !border_open && !held_idle {
+    if nothing_on_its_way && running.is_empty() && !held_idle {
         // **A worker that cannot LOOK does not get to say nothing is running** (fix round 3 of this
         // item's review, Code Quality #7 (a)). `running` is empty for two different reasons: the
         // worker looked and found nothing, or the worker cannot look at all — a custom worker
@@ -17601,6 +17725,9 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
                 .map(|s| s.session.clone())
                 .collect();
             store.note_withdrawn_sessions(key, &stopping, ctx.now)?;
+            if held_idle {
+                store.mark_withdrawn_holder_idle(key)?;
+            }
             if let Some(finding) = arm_a_look_at_the_withdrawn_holder(ctx, store, scope) {
                 warnings.push(finding);
             }
@@ -19806,6 +19933,8 @@ mod tests {
             ParkOccasion::PastItsBound,
             ParkOccasion::DiedInsideItsBound,
             ParkOccasion::Withdrawn,
+            ParkOccasion::StalledOnItsSupervisor,
+            ParkOccasion::WithdrawnIdle,
         ] {
             let json = serde_json::to_value(occasion).unwrap();
             assert_eq!(json, serde_json::json!(occasion.as_str()), "{json}");
@@ -20053,14 +20182,18 @@ mod tests {
         // also the proof that what is being timed is the WHOLE check: an answer of `true` is only
         // reachable through all five clauses.
         assert!(
-            holder_is_provably_dead(&ctx, &store, &scope).unwrap(),
+            holder_is_provably_dead(&ctx, &store, &scope)
+                .unwrap()
+                .is_some(),
             "the staging has to reach the end of the check, or the number means nothing"
         );
 
         let mut samples: Vec<std::time::Duration> = Vec::with_capacity(MEASURED_REPETITIONS);
         for _ in 0..MEASURED_REPETITIONS {
             let at = std::time::Instant::now();
-            let dead = holder_is_provably_dead(&ctx, &store, &scope).unwrap();
+            let dead = holder_is_provably_dead(&ctx, &store, &scope)
+                .unwrap()
+                .is_some();
             samples.push(at.elapsed());
             assert!(dead);
         }

@@ -1333,10 +1333,76 @@ impl ChatStore {
              SELECT ?1, ?2, ?3 WHERE EXISTS (
                  SELECT 1 FROM working_tree_lease WHERE scope_key = ?1
              )
-             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by",
+             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by, idle = 0",
             params![scope_key, now, by],
         )?;
         Ok(())
+    }
+
+    /// **Mark the withdrawal of `scope_key` as one of an IDLE holder** (nxf 6j6v.3rrv) — nothing was
+    /// running in it to stop. Written right after [`Self::note_withdrawn_holder`], so its park can
+    /// say truthfully why the copy moved ([`crate::orchestration::ParkOccasion::WithdrawnIdle`]).
+    pub(crate) fn mark_withdrawn_holder_idle(&mut self, scope_key: &str) -> Result<()> {
+        self.connection().execute(
+            "UPDATE withdrawn_holders SET idle = 1 WHERE scope_key = ?1",
+            params![scope_key],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the withdrawal standing for `scope_key` was one of an idle holder.
+    pub(crate) fn withdrawn_holder_is_idle(&self, scope_key: &str) -> Result<bool> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT idle FROM withdrawn_holders WHERE scope_key = ?1",
+                params![scope_key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some_and(|idle| idle != 0))
+    }
+
+    /// **Record that the supervisor STOPPED the advance of `channel_thread`** (nxf 6j6v.3rrv) — a
+    /// declared hurdle refused its next step, or the step could not be started. See the
+    /// `stopped_advances` table for why. A later stop of the same thread replaces the row.
+    pub(crate) fn note_stopped_advance(
+        &mut self,
+        channel_thread: &str,
+        step: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.connection().execute(
+            "INSERT INTO stopped_advances(channel_thread, step, reason, at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(channel_thread) DO UPDATE
+                SET step = excluded.step, reason = excluded.reason, at = excluded.at",
+            params![channel_thread, step, reason, now],
+        )?;
+        Ok(())
+    }
+
+    /// A step of `channel_thread` opened: whatever stopped its advance before is over.
+    pub(crate) fn forget_stopped_advance(&mut self, channel_thread: &str) -> Result<()> {
+        self.connection().execute(
+            "DELETE FROM stopped_advances WHERE channel_thread = ?1",
+            params![channel_thread],
+        )?;
+        Ok(())
+    }
+
+    /// Whether any of `threads` has an advance standing STOPPED for its requester.
+    pub(crate) fn stopped_advance_in(&self, threads: &[String]) -> Result<bool> {
+        if threads.is_empty() {
+            return Ok(false);
+        }
+        let ids = serde_json::to_string(threads).expect("thread ids serialize");
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM stopped_advances
+                            WHERE channel_thread IN (SELECT value FROM json_each(?1)))",
+            params![ids],
+            |r| r.get::<_, bool>(0),
+        )?)
     }
 
     /// The marker recorded for `scope_key`, or `None` when its round was not withdrawn (or the copy
