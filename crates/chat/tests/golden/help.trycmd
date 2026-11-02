@@ -40,6 +40,7 @@ Commands:
   reply           Answer in a thread: posts into the thread's own channel and hands the turn back to whoever is on the other side of it
   threads         Thread quorum boards: `list` the caller's boards, or `show` one in full
   status          Where an operation stands: the whole thread TREE from its root down, across channel borders. `--thread` shows the one operation that thread belongs to; `--channel` the live operations that started in a channel; `--all` adds the finished ones; with none of them, everything still going on here
+  liveness        The owner's liveness report: how the ladder's recovery episodes went per policy (A, B, C) over a window — counts, episodes, and per policy the times to recovery and escalation and which resume rescued. Read from the ladder's own record. Only the owner at the terminal reads it; inside an agent session it is refused
   search          Case-insensitive substring over message bodies in the caller's channels (bound LIKE), deterministically ordered
   session         The role-runtime internal↔real SDK session map
   transcript      The role session's Claude Agent SDK transcript: the normalized stream — assistant text, thinking, tool calls and their results, and any subagent activity they spawned
@@ -277,6 +278,22 @@ Options:
       --db <DB>            Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
       --all                Finished operations too, not just what is still going on — with `--channel`, the finished ones of that channel
   -h, --help               Print help
+
+```
+
+```console
+$ nxc liveness --help
+The owner's liveness report: how the ladder's recovery episodes went per policy (A, B, C) over a window — counts, episodes, and per policy the times to recovery and escalation and which resume rescued. Read from the ladder's own record. Only the owner at the terminal reads it; inside an agent session it is refused
+
+Usage: nxc liveness [OPTIONS]
+
+Options:
+      --from <FROM>  The window's start, RFC3339 (default: seven days before its end)
+      --json         Emit machine-readable JSON instead of human output
+      --db <DB>      Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
+      --to <TO>      The window's end, RFC3339, exclusive (default: now)
+      --everywhere   Every workspace the service attends, one block each, instead of this one
+  -h, --help         Print help
 
 ```
 

@@ -839,6 +839,38 @@ eigene Lesung. Ebenso folgt diese Suche einem *Vorgang* nicht über Kanalgrenzen
 bleibt aber in den Kanälen, in denen dieser Eröffner Mitglied ist. Um zu finden, *was eine Sitzung
 getan hat* statt was sie gesagt hat, lesen Sie ihren Verlauf.
 
+### `nxc liveness [--from <RFC3339>] [--to <RFC3339>] [--everywhere]`
+
+Der Bericht für den Eigentümer darüber, wie hängende Sitzungen behandelt wurden, gelesen aus dem
+eigenen Wiederherstellungsprotokoll des Koordinators: der Vergleich der Liveness-Politiken aus
+`[chat.liveness]` — A (`dead_resumes = 3`), B (`1`, die Voreinstellung) und C (`3` mit
+`notice_at_first_stop = true`). Das Fenster ist halboffen (`--from` gehört dazu, `--to` nicht) und
+umfasst ohne Angabe die sieben Tage bis jetzt.
+
+Je Arbeitsbereich zeigt er die jetzt geltende Politik (mit dem, was beim Lesen von `[chat.liveness]`
+nicht stimmte: ungültige Werte und unbekannte Schlüssel), die Politik-Paare, unter denen die Zeilen
+des Fensters geschrieben wurden, wie oft jedes Ereignis vorkam (`asked`, `confirmed`, `recovered`,
+`stopped`, `continued`, `recommissioned`, `noticed`, `answered`, `escalated`, `withdrawn`), und jede
+**Episode**, deren erste Zeile im Fenster liegt. Eine Episode sind die Zeilen eines Platzes von einem
+Anstoß, Stopp oder Wiederaufnehmen bis zu der Zeile, die sie beendet — `recovered`, `answered`,
+`escalated` oder `withdrawn` — oder `open`, solange keine gekommen ist; eine Stufe, die der
+Koordinator sofort zurücknahm (`already_running`, `no_process`, `cannot_ask`), ist eine Episode
+`withdrawn`. Jedes Wiederaufnehmen trägt, was daraus wurde, gelesen aus der nächsten Zeile des
+Platzes: `recovered`, `answered`, `dead_again`, `escalated`, `nudged_again`, `withdrawn` oder
+`pending`. Die Zusammenfassung je Politik-Paar ist das, was du vergleichst: Median und Maximum der
+Zeit von der Stille bis zur Erholung und bis zur Eskalation, wie viele Episoden Wiederaufnahme 1, 2
+und 3 gerettet haben, und wie viele eskaliert endeten.
+
+`--everywhere` liest jeden Arbeitsbereich, den der Dienst betreut (`~/.nexusflow/workspaces.toml`),
+jeden unter seiner eigenen Politik; ein Speicher, der sich nicht öffnen lässt, ist ein Block
+`unreadable` mit dem Fehler, und die anderen sind vollständig. `--json` ist das ganze Dokument; ohne
+es eine Tabelle je Arbeitsbereich.
+
+**Nur der Eigentümer am Terminal liest ihn.** In einer Agenten-Sitzung (`NXC_SESSION` gesetzt) wird
+er mit `forbidden` abgelehnt: Der Bericht zeigt die Wiederherstellungsgeschichte jeder Operation, und
+die braucht kein Agent. Eine App liest dasselbe Dokument über `Engine::liveness` als Eigentümer des
+Boards.
+
 ## Sitzungen und Verläufe
 
 Das sind die Innereien der Rollen-Laufzeit. Geschrieben werden sie vom Agenten-Sidecar; eine davon

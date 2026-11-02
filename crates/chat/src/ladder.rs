@@ -629,6 +629,25 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// **The whole workspace's record over a window** (nxf 6j6v.t7xp) — every row with
+    /// `from <= at < to`, compared as instants (a row whose `at` does not parse is outside every
+    /// window), ordered by `(thread, role, id)`: the liveness report's one read.
+    pub(crate) fn recovery_log_between(&self, from: &str, to: &str) -> Result<Vec<RecoveryLogRow>> {
+        let conn = self.connection();
+        let mut st = conn.prepare(&format!(
+            "SELECT {LOG_COLS} FROM recovery_log ORDER BY thread, role, id"
+        ))?;
+        let rows = st
+            .query_map([], log_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| {
+                !crate::stranded::earlier(&r.at, from) && crate::stranded::earlier(&r.at, to)
+            })
+            .collect())
+    }
+
     /// The slot's newest row of `action`, `None` before its first.
     pub(crate) fn newest_rung_of(
         &self,

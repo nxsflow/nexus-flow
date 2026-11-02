@@ -368,6 +368,21 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// The owner's liveness report: how the ladder's recovery episodes went per policy (A, B, C)
+    /// over a window — counts, episodes, and per policy the times to recovery and escalation and
+    /// which resume rescued. Read from the ladder's own record. Only the owner at the terminal
+    /// reads it; inside an agent session it is refused.
+    Liveness {
+        /// The window's start, RFC3339 (default: seven days before its end).
+        #[arg(long)]
+        from: Option<String>,
+        /// The window's end, RFC3339, exclusive (default: now).
+        #[arg(long)]
+        to: Option<String>,
+        /// Every workspace the service attends, one block each, instead of this one.
+        #[arg(long)]
+        everywhere: bool,
+    },
     // `inbox` and `read` were here. REMOVED by 6j6v.1gm9 — the AGENT-PULL half of the message
     // surface, taken away together with the "## Threads you opened" block `read` was supposed to
     // bound. The boundary that decided it: **humans pull, agents get pushed.** A human at a
@@ -1022,6 +1037,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
             channel,
             all,
         } => status(cli.json, db, thread.as_deref(), channel.as_deref(), *all),
+        Command::Liveness {
+            from,
+            to,
+            everywhere,
+        } => liveness_verb(cli.json, db, from.as_deref(), to.as_deref(), *everywhere),
         Command::Search { query, consumer } => search(cli.json, db, query, consumer.as_deref()),
         Command::Session { action } => session_cmd(cli.json, db, action),
         Command::Transcript { action } => transcript_cmd(cli.json, db, action),
@@ -3879,6 +3899,205 @@ fn parked_line(p: &crate::park::ParkedWork) -> String {
 /// it rides as a suffix on whichever state applies. Without it "answered" was what a human read
 /// about a round in which the agent never spoke, which is the same sentence, about the same
 /// message, that `escalated` was added to stop being the whole story.
+/// **`nxc liveness`** (nxf 6j6v.t7xp) — the owner's report, composed of one
+/// [`crate::facade::liveness`] call per workspace: this one, or with `--everywhere` every workspace
+/// the service home attends, each with its OWN identity and its OWN `[chat.liveness]` policy.
+///
+/// **The reader** is decided here, at the adapter: the owner at the terminal of this single-device
+/// board when no agent session is set, otherwise the session's handle — which the report refuses
+/// (round 3 CQ #3 / IR #6), so an agent never reads other operations' recovery history.
+fn liveness_verb(
+    json: bool,
+    db: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    everywhere: bool,
+) -> Result<()> {
+    use crate::facade::{LivenessWindow, LivenessWorkspace, Reader, WorkspaceBlock};
+    let me = actor();
+    let reader = match session() {
+        Some(_) => Reader::Handle(&me),
+        None => Reader::Owner,
+    };
+    crate::facade::admit_liveness_reader(reader)?;
+    let now = resolve_now()?;
+    let to = to.map(str::to_string).unwrap_or_else(|| now.clone());
+    let from = match from {
+        Some(f) => f.to_string(),
+        None => crate::facade::default_liveness_from(&to)?,
+    };
+    let window = LivenessWindow {
+        from: &from,
+        to: &to,
+    };
+    // One workspace, read as `--db` reads it; an error is the block's, not the report's, only
+    // under `--everywhere` — asked about this workspace alone, a store that cannot be read is the
+    // verb's error.
+    let read_one = |ws: &Workspace, identity: &LivenessWorkspace| -> Result<WorkspaceBlock> {
+        let store = ws.open_chat_store()?;
+        let config = crate::workspace::liveness_policy(&ws.config);
+        Ok(WorkspaceBlock::Read(crate::facade::liveness(
+            &store, &now, window, identity, &config,
+        )?))
+    };
+    let blocks = if everywhere {
+        let home = nxs_service::ServiceHome::resolve()?;
+        home.attended()?
+            .into_iter()
+            .map(|entry| {
+                let identity = LivenessWorkspace {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                };
+                Workspace::resolve(None, std::path::Path::new(&entry.path))
+                    .and_then(|ws| read_one(&ws, &identity))
+                    .unwrap_or_else(|e| WorkspaceBlock::Unreadable {
+                        workspace: identity,
+                        error: e.msg,
+                    })
+            })
+            .collect()
+    } else {
+        let ws = Workspace::resolve(db, &cwd()?)?;
+        vec![read_one(&ws, &LivenessWorkspace::of(&ws)?)?]
+    };
+    let report = crate::facade::LivenessReport {
+        from,
+        to,
+        workspaces: blocks,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).expect("the liveness report serializes")
+        );
+    } else {
+        print!("{}", liveness_table(&report));
+    }
+    Ok(())
+}
+
+/// The human form of the liveness report: a table per workspace.
+fn liveness_table(report: &crate::facade::LivenessReport) -> String {
+    use crate::facade::{EpisodeEnd, WorkspaceBlock};
+    use std::fmt::Write as _;
+    let pair = |p: (u32, bool), letter: Option<char>| match letter {
+        Some(l) => format!("{l} ({}/{})", p.0, p.1),
+        None => format!("- ({}/{})", p.0, p.1),
+    };
+    let secs = |s: Option<i64>| s.map_or_else(|| "-".to_string(), |s| format!("{s}s"));
+    let mut out = String::new();
+    let _ = writeln!(out, "liveness {} .. {}", report.from, report.to);
+    for block in &report.workspaces {
+        let ws = match block {
+            WorkspaceBlock::Unreadable { workspace, error } => {
+                let _ = writeln!(
+                    out,
+                    "\n{} ({})\n  unreadable: {error}",
+                    workspace.name, workspace.path
+                );
+                continue;
+            }
+            WorkspaceBlock::Read(ws) => ws,
+        };
+        let now = &ws.policy_now;
+        let _ = writeln!(
+            out,
+            "\n{} ({})\n  policy now: {}{}",
+            ws.workspace.name,
+            ws.workspace.path,
+            pair((now.dead_resumes, now.notice_at_first_stop), ws.letter_now)
+                .trim_start_matches("- "),
+            if now.fell_back { " (fell back)" } else { "" }
+        );
+        for w in &ws.config_warnings {
+            let _ = writeln!(out, "  warning: {w}");
+        }
+        if !ws.unknown_keys.is_empty() {
+            let _ = writeln!(out, "  unknown keys: {}", ws.unknown_keys.join(", "));
+        }
+        let counts: Vec<String> = ws
+            .counts
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "  events: {}",
+            if counts.is_empty() {
+                "none".to_string()
+            } else {
+                counts.join(", ")
+            }
+        );
+        if !ws.summary.is_empty() {
+            let _ = writeln!(
+                out,
+                "  {:<12} {:>8} {:>10} {:>10} {:>10} {:>10} {:>14} {:>9}",
+                "policy",
+                "episodes",
+                "rec. med",
+                "rec. max",
+                "esc. med",
+                "esc. max",
+                "rescued 1/2/3",
+                "escalated"
+            );
+            for s in &ws.summary {
+                let r = s.rescued_by_resume;
+                let _ = writeln!(
+                    out,
+                    "  {:<12} {:>8} {:>10} {:>10} {:>10} {:>10} {:>14} {:>9}",
+                    pair(s.policy, s.letter),
+                    s.episodes,
+                    secs(s.median_silence_to_recovery_secs),
+                    secs(s.max_silence_to_recovery_secs),
+                    secs(s.median_silence_to_escalation_secs),
+                    secs(s.max_silence_to_escalation_secs),
+                    format!("rescued {}/{}/{}", r[0], r[1], r[2]),
+                    s.escalated
+                );
+            }
+        }
+        for e in &ws.episodes {
+            let ended = match e.ended {
+                EpisodeEnd::Recovered => "recovered",
+                EpisodeEnd::Answered => "answered",
+                EpisodeEnd::Escalated => "escalated",
+                EpisodeEnd::Withdrawn => "withdrawn",
+                EpisodeEnd::Open => "open",
+            };
+            let resumes: Vec<String> = e
+                .resumes
+                .iter()
+                .map(|(n, o)| {
+                    format!(
+                        "{n}:{}",
+                        serde_json::to_value(o)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            let _ = writeln!(
+                out,
+                "  {} {} · {} · {ended}{} · silent since {} · resumes [{}]",
+                e.thread,
+                e.role,
+                e.policy
+                    .map_or_else(|| "-".to_string(), |p| pair(p, e.letter)),
+                e.end_attempt
+                    .map_or_else(String::new, |a| format!(" (attempt {a})")),
+                e.silent_since.as_deref().unwrap_or("-"),
+                resumes.join(", ")
+            );
+        }
+    }
+    out
+}
+
 fn status_line(t: &crate::facade::StatusThread) -> String {
     let indent = "  ".repeat(t.depth + 1);
     let state = if t.escalated {

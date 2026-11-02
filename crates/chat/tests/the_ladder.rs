@@ -4846,7 +4846,7 @@ fn confirmed_fixture(team: &Team, minutes: i64) -> String {
     thread
 }
 
-/// **Test 10** (design 8nx4 section 10, minus its `facade::liveness` paragraph — cut 6's): every
+/// **Test 10** (design 8nx4 section 10; its `facade::liveness` paragraph is the test below): every
 /// row carries the policy it was written under; the B slot's nudge and first stop carry S = T0,
 /// the resumed session's stop its own S (its process start, T0+1 020 — `S = max(L, P)`), the
 /// escalation the episode's S; a reply after resume 2 under A writes `answered` with `attempt` 2 as
@@ -4949,6 +4949,101 @@ fn every_row_carries_the_policy_and_every_episode_ends_in_exactly_one_end_row() 
     assert_eq!(
         (confirmed.policy_dead_resumes, confirmed.policy_notice),
         (Some(1), Some(false))
+    );
+}
+
+impl Team {
+    /// [`facade::liveness`] over this team's store, as `nxc liveness` reads it — the workspace's
+    /// own identity and policy, the day around T0.
+    fn liveness(&self) -> facade::WorkspaceLiveness {
+        let ws = Workspace::resolve(None, self.tmp.path()).expect("resolve workspace");
+        facade::liveness(
+            &self.store(),
+            &at(7_200),
+            facade::LivenessWindow {
+                from: "2026-10-23T10:00:00Z",
+                to: "2026-10-25T10:00:00Z",
+            },
+            &facade::LivenessWorkspace::of(&ws).expect("identity"),
+            &liveness_policy(&ws.config),
+        )
+        .expect("the report")
+    }
+}
+
+/// **Test 10's last paragraph** (design 8nx4 section 10; nxf 6j6v.t7xp): [`facade::liveness`] run
+/// over the rows the ladder ITSELF wrote, not a seeded log. The recover-then-hang slot under B is
+/// two episodes — `asked`, `stopped`, `continued`, `recovered` ended by life with resume 1
+/// rescuing it, then `asked`, `stopped`, `escalated` ended escalated after 1 resume and no second
+/// one — and test 9's plain B slot is one episode whose resume 1 was dead again.
+#[test]
+fn facade_liveness_over_the_ladders_own_rows_reads_its_episodes() {
+    let team_h = team();
+    let (thread, session) = continued_once(&team_h);
+    team_h.entry(&session, "assistant", &at(1_085), "{}");
+    follow_looks(&team_h, &thread, "coder", 1_140, 2_100);
+    let report = team_h.liveness();
+    let ids: HashMap<i64, String> = {
+        let store = team_h.store();
+        let mut st = store
+            .connection()
+            .prepare("SELECT id, action FROM recovery_log")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let shape: Vec<(Vec<&str>, facade::EpisodeEnd)> = report
+        .episodes
+        .iter()
+        .map(|e| (e.rows.iter().map(|id| ids[id].as_str()).collect(), e.ended))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (
+                vec!["asked", "stopped", "continued", "recovered"],
+                facade::EpisodeEnd::Recovered
+            ),
+            (
+                vec!["asked", "stopped", "escalated"],
+                facade::EpisodeEnd::Escalated
+            ),
+        ]
+    );
+    assert_eq!(
+        report.episodes[0].resumes,
+        vec![(1, facade::ResumeOutcome::Recovered)]
+    );
+    assert_eq!(
+        (
+            report.episodes[1].resumes.len(),
+            report.episodes[1].end_attempt
+        ),
+        (0, Some(1)),
+        "escalated after 1 resume, never a second"
+    );
+    assert_eq!(report.episodes[0].letter, Some('B'));
+    let b = &report.summary[0];
+    assert_eq!(
+        (b.letter, b.episodes, b.rescued_by_resume, b.escalated),
+        (Some('B'), 2, [1, 0, 0], 1)
+    );
+
+    let team_b = team();
+    b_fixture(&team_b);
+    let report = team_b.liveness();
+    assert_eq!(report.episodes.len(), 1, "{:#?}", report.episodes);
+    assert_eq!(
+        report.episodes[0].resumes,
+        vec![(1, facade::ResumeOutcome::DeadAgain)]
+    );
+    assert_eq!(report.episodes[0].ended, facade::EpisodeEnd::Escalated);
+    assert_eq!(
+        report.episodes[0].silence_to_escalation_secs,
+        Some(1_620),
+        "from S = T0 to the escalation"
     );
 }
 
