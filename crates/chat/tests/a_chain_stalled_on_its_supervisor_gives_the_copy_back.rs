@@ -59,6 +59,8 @@ const QUEUED: &str = "2026-11-02T09:21:00Z";
 const ENDED: &str = "2026-11-02T09:22:00Z";
 /// One minute after it: too early to call the chain stalled.
 const JUST_AFTER: &str = "2026-11-02T09:23:00Z";
+/// Five minutes after the empty slot opened at [`ENDED`] — when the tick first counts it out.
+const SLOT_COUNTS_OUT: &str = "2026-11-02T09:27:00Z";
 /// One second short of five minutes of quiet.
 const ONE_SECOND_SHORT: &str = "2026-11-02T09:26:59Z";
 /// Exactly five minutes of quiet.
@@ -133,10 +135,13 @@ impl Worker for LiveWorker {
     }
 }
 
-/// Records every window it is asked to arm — the one place an armed look is visible.
+/// Records every window it is asked to arm — the one place an armed look is visible. A thread's
+/// window (`schedule`, keyed by the thread) and a look (keyed by its slot) are recorded apart, as the
+/// service files them apart.
 #[derive(Default)]
 struct RecordingTimer {
     armed: Mutex<Vec<(String, String)>>,
+    looks: Mutex<Vec<(String, String, String)>>,
 }
 
 impl Timer for RecordingTimer {
@@ -154,6 +159,19 @@ impl Timer for RecordingTimer {
     }
     fn cancel(&self, _handle: &TimerHandle) -> nexus_chat::error::Result<()> {
         Ok(())
+    }
+    fn schedule_stranded_look(
+        &self,
+        slot: &str,
+        thread: &str,
+        deadline: &str,
+    ) -> nexus_chat::error::Result<TimerHandle> {
+        self.looks.lock().unwrap().push((
+            slot.to_string(),
+            thread.to_string(),
+            deadline.to_string(),
+        ));
+        Ok(TimerHandle(format!("recorded:stranded-look-{slot}")))
     }
 }
 
@@ -789,19 +807,105 @@ fn a_chain_with_a_slot_never_commissioned_is_revived_rather_than_parked() {
     let receipt = b.tick(QUIET, &rival.unwrap());
 
     kept(&b, &root, &receipt);
+    // Armed under the SLOT's own key, at the instant the slot counts out of the set…
+    assert_eq!(
+        *b.timer.looks.lock().unwrap(),
+        vec![(
+            format!("{EMPTY_SLOT}-revive"),
+            root.clone(),
+            SLOT_COUNTS_OUT.to_string()
+        )],
+    );
+    // …and NOT as the channel thread's own window, which it would have replaced.
     assert!(
-        b.timer
+        !b.timer
             .armed
             .lock()
             .unwrap()
             .iter()
-            .any(|(thread, at)| thread == &root && at == QUIET),
-        "a tick of the channel thread is armed: {:?}",
+            .any(|(thread, _)| thread == &root),
+        "the channel thread's window job is left alone: {:?}",
         b.timer.armed.lock().unwrap()
     );
 
     b.tick(QUIET, &root);
     assert_eq!(b.started("verifier"), 1, "the chain went on to verify");
+}
+
+/// **A revived chain that stalls AGAIN is taken.** The empty slot the revival moved past stays under
+/// the root for the operation's whole life; it is history, not the newest slot, and must not keep
+/// the rule declining when the verifier's advance is lost the same way the coder's was.
+#[test]
+fn a_revived_chain_that_stalls_again_is_taken() {
+    let b = Bench::new();
+    let (root, _, _, rival) = a_stalled_chain(
+        &b,
+        Stage {
+            empty_slot: true,
+            ..LOST_ADVANCE
+        },
+    );
+    let rival = rival.unwrap();
+    b.tick(QUIET, &root);
+    assert_eq!(b.started("verifier"), 1, "revived: the verifier runs");
+    let verifier = b.session_of("verifier");
+    let verify = b
+        .store()
+        .supervised_children(&root)
+        .unwrap()
+        .into_iter()
+        .find(|t| b.owes(t, QUIET) == vec![b.handle("verifier")])
+        .expect("the verify slot");
+
+    // The verifier answers while it still runs, ends, and the move after it is lost.
+    b.reply(
+        "2026-11-02T09:41:00Z",
+        &verifier,
+        "verifier",
+        &verify,
+        false,
+    );
+    b.worker.running.lock().unwrap().remove(&verifier);
+    b.store()
+        .mark_session_ended(&verifier, "2026-11-02T09:42:00Z")
+        .unwrap();
+    assert_eq!(b.owes(&root, QUIET), vec![b.supervisor()], "the premise");
+
+    let receipt = b.tick("2026-11-02T09:50:00Z", &rival);
+
+    assert_eq!(
+        receipt.handed_on.map(|h| h.occasion),
+        Some(ParkOccasion::StalledOnItsSupervisor),
+        "looks armed: {:?}",
+        b.timer.looks.lock().unwrap()
+    );
+    assert_eq!(b.started("solo"), 1);
+}
+
+/// **An OLD unended session on a thread a newer one replaced is history.** A start that failed and
+/// was redone, or a session a restart killed, leaves a row with no recorded end; only the NEWEST
+/// session of a thread is asked whether its end has landed.
+#[test]
+fn an_old_unended_session_replaced_by_a_newer_one_does_not_block_the_rule() {
+    let b = Bench::new();
+    let (root, build, _, rival) = a_stalled_chain(&b, LOST_ADVANCE);
+    let mut store = b.store();
+    // Minted before the coder's session, so it sorts as the older row on the same thread.
+    store
+        .create_pending_session("m-00OLDSTARTTHATFAILED00000", "coder")
+        .unwrap();
+    store
+        .record_session_thread("m-00OLDSTARTTHATFAILED00000", Some(&build))
+        .unwrap();
+    drop(store);
+
+    let receipt = b.tick(QUIET, &rival.unwrap());
+
+    let handed = receipt
+        .handed_on
+        .unwrap_or_else(|| panic!("the old row kept the copy: {:?}", receipt.warnings));
+    assert_eq!(handed.scope, scope_of(&root));
+    assert_eq!(handed.occasion, ParkOccasion::StalledOnItsSupervisor);
 }
 
 // ---- (b) the bound ------------------------------------------------------------------------------

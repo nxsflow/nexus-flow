@@ -312,11 +312,12 @@ der sie greift:
   ist.** Wenn der einzige Thread, der noch eine Antwort schuldet, ein Kanal-Thread ist, der auf
   `__channel__` wartet — die Engine selbst, die den nächsten Schritt öffnet oder konsolidiert —, gibt
   es dort keine Sitzung, die tot sein könnte. Ein solcher Vorgang wird übernommen, wenn neben einem
-  antwortenden Worker und keinem laufenden Prozess gilt: jede Sitzung darin hat ihr Ende gemeldet;
+  antwortenden Worker und keinem laufenden Prozess gilt: die neueste Sitzung jedes seiner Threads hat
+  ihr Ende gemeldet;
   nichts darin wartet auf die Kopie oder ist als fehlgeschlagener Start vermerkt; keine Rückgabe
-  darin ist unbeantwortet; keine deklarierte Hürde hat den nächsten Schritt abgelehnt, und kein
-  nächster Schritt ist beim Start gescheitert (beides wartet auf Sie — erneut fragen ist Ihr Zug,
-  und niemand soll Ihnen die Kopie wegnehmen, während Sie den Baum in Ordnung bringen); nichts davon
+  darin ist unbeantwortet; keine deklarierte Hürde hat den nächsten Schritt abgelehnt (das wartet
+  auf Sie — erneut fragen ist Ihr Zug, und niemand soll Ihnen die Kopie wegnehmen, während Sie den
+  Baum in Ordnung bringen); nichts davon
   ist über die Grenze hinweg offen; nichts pausiert an einer Verfügbarkeitsgrenze; und seit fünf
   Minuten ist darin überhaupt nichts geschehen — kein Thread geöffnet, keine Nachricht gepostet, kein
   Sitzungsende vermerkt. Die fünf Minuten verhindern, dass die Regel den Moment zwischen dem Ende

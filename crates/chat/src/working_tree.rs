@@ -1317,6 +1317,20 @@ impl ChatStore {
     /// literal rule the early follow-up costs a park the round may not have needed; the alternative
     /// cost the work. `orchestration::park_a_withdrawn_holder` carries the argument.
     pub fn note_withdrawn_holder(&mut self, scope_key: &str, by: &str, now: &str) -> Result<()> {
+        self.note_withdrawn_holder_as(scope_key, by, now, false)
+    }
+
+    /// [`Self::note_withdrawn_holder`], saying in the SAME statement whether the holder was IDLE —
+    /// nothing running in it to stop (nxf 6j6v.3rrv) — so its park can say truthfully why the copy
+    /// moved ([`crate::orchestration::ParkOccasion::WithdrawnIdle`]). One statement, so no reader can
+    /// find the marker without its kind.
+    pub(crate) fn note_withdrawn_holder_as(
+        &mut self,
+        scope_key: &str,
+        by: &str,
+        now: &str,
+        idle: bool,
+    ) -> Result<()> {
         let now = to_utc_rfc3339(now)?;
         // **Conditional on the lease it is about** (fix round 3 of this item's review, Code
         // Quality #5). `withdraw` reads the lease row and only afterwards discharges the round and
@@ -1329,23 +1343,12 @@ impl ChatStore {
         // round that never needed one. `SELECT ... WHERE EXISTS` in the one statement keeps the
         // read and the write atomic — no window between them for the lease to move in.
         self.connection().execute(
-            "INSERT INTO withdrawn_holders(scope_key, withdrawn_at, by)
-             SELECT ?1, ?2, ?3 WHERE EXISTS (
+            "INSERT INTO withdrawn_holders(scope_key, withdrawn_at, by, idle)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (
                  SELECT 1 FROM working_tree_lease WHERE scope_key = ?1
              )
-             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by, idle = 0",
-            params![scope_key, now, by],
-        )?;
-        Ok(())
-    }
-
-    /// **Mark the withdrawal of `scope_key` as one of an IDLE holder** (nxf 6j6v.3rrv) — nothing was
-    /// running in it to stop. Written right after [`Self::note_withdrawn_holder`], so its park can
-    /// say truthfully why the copy moved ([`crate::orchestration::ParkOccasion::WithdrawnIdle`]).
-    pub(crate) fn mark_withdrawn_holder_idle(&mut self, scope_key: &str) -> Result<()> {
-        self.connection().execute(
-            "UPDATE withdrawn_holders SET idle = 1 WHERE scope_key = ?1",
-            params![scope_key],
+             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by, idle = excluded.idle",
+            params![scope_key, now, by, idle],
         )?;
         Ok(())
     }
@@ -1387,6 +1390,19 @@ impl ChatStore {
         self.connection().execute(
             "DELETE FROM stopped_advances WHERE channel_thread = ?1",
             params![channel_thread],
+        )?;
+        Ok(())
+    }
+
+    /// Every stopped advance among `threads` goes — the operation was taken back (nxf 6j6v.3rrv).
+    pub(crate) fn forget_stopped_advances_in(&mut self, threads: &[String]) -> Result<()> {
+        if threads.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::to_string(threads).expect("thread ids serialize");
+        self.connection().execute(
+            "DELETE FROM stopped_advances WHERE channel_thread IN (SELECT value FROM json_each(?1))",
+            params![ids],
         )?;
         Ok(())
     }

@@ -287,11 +287,10 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   **One more shape counts as dead: a chain stalled on its own supervisor.** When the only thread
   still owing an answer is a channel thread waiting on `__channel__` — the engine itself, which
   opens the next step or consolidates — there is no session there to be dead. That operation is
-  taken when, besides the worker answering and nothing running: every session in it has reported
-  its end; nothing in it is queued for the copy or recorded as a start that failed; no hand-back
-  stands unanswered in it; no declared hurdle refused its next step, and no next step failed to
-  start (both wait for you — asking again is your move, and nothing should take the copy from under
-  you while you fix the tree); nothing of it is open across the border; nothing is on hold at an
+  taken when, besides the worker answering and nothing running: the newest session of each of its
+  threads has reported its end; nothing in it is queued for the copy or recorded as a start that failed; no hand-back
+  stands unanswered in it; no declared hurdle refused its next step (that waits for you — asking
+  again is your move, and nothing should take the copy from under you while you fix the tree); nothing of it is open across the border; nothing is on hold at an
   availability boundary; and nothing at all has happened in it for five minutes — no thread opened,
   no message posted, no session's end recorded. The five minutes are what keep this from catching
   the moment between one step's end and the opening of the next. The park commit and the tick's line

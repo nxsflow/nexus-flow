@@ -4109,11 +4109,17 @@ fn a_dead_holder_inside_its_bound(
         // and saying it on every tick of every live lease would be a warning nobody can act on.
         return Ok(None);
     };
-    let Some(occasion) = holder_is_provably_dead(ctx, store, &scope)? else {
-        // Neither occasion stands, so nothing is retrying a park under either.
-        forget_a_refusal_of_this_occasion(store, ParkOccasion::DiedInsideItsBound);
-        forget_a_refusal_of_this_occasion(store, ParkOccasion::StalledOnItsSupervisor);
-        return Ok(None);
+    let occasion = match holder_is_provably_dead(ctx, store, &scope)? {
+        HolderVerdict::Dead(occasion) => occasion,
+        verdict => {
+            // Neither occasion stands, so nothing is retrying a park under either.
+            forget_a_refusal_of_this_occasion(store, ParkOccasion::DiedInsideItsBound);
+            forget_a_refusal_of_this_occasion(store, ParkOccasion::StalledOnItsSupervisor);
+            if let HolderVerdict::Revivable(revival) = verdict {
+                warnings.extend(arm_a_revival(ctx, &revival));
+            }
+            return Ok(None);
+        }
     };
     if park_already_held {
         // `park_step`'s "at most ONE occasion acts per tick", for this occasion too: the same park
@@ -4166,6 +4172,32 @@ fn a_dead_holder_inside_its_bound(
     // the refusal is on `nxc status`, the retry is armed by `park_and_hand_on`, and nothing here is
     // reported because nothing moved.
     Ok(outcome.handed_on(holder, occasion))
+}
+
+/// **Arm the tick that revives a chain** (nxf 6j6v.3rrv) — under the SLOT's own key, through the
+/// stranded-look job, so it neither replaces the channel thread's window job nor is replaced by it,
+/// and at the instant the slot counts out of the set. A look that could not be armed is a finding,
+/// and the next sweep arms it again.
+fn arm_a_revival(ctx: &Ctx, revival: &Revival) -> Option<FailedConsequence> {
+    let key = format!("{}-revive", revival.slot);
+    match ctx
+        .timer
+        .schedule_stranded_look(&key, &revival.channel_thread, &revival.at)
+    {
+        Ok(_) => None,
+        Err(e) => {
+            let detail = format!(
+                "the tick that would move the chain on past slot {} (never commissioned) was not \
+                 armed ({e}) — run `nxc tick --thread {}`, or the next sweep arms it again",
+                revival.slot, revival.channel_thread
+            );
+            eprintln!("warning: {detail}");
+            Some(FailedConsequence::tick_unscheduled(
+                &revival.channel_thread,
+                detail,
+            ))
+        }
+    }
 }
 
 /// **Is the operation holding this working copy GONE, although its bound has not run out?** (nxf
@@ -4251,29 +4283,30 @@ fn holder_is_provably_dead(
     ctx: &Ctx,
     store: &ChatStore,
     scope: &WorkScope,
-) -> Result<Option<ParkOccasion>> {
+) -> Result<HolderVerdict> {
     // Cheapest first, and it is also the one that disqualifies a whole class of host: a workspace
     // whose worker cannot look pays one field read per tick for this entire mechanism.
     if !ctx.worker.answers_liveness() {
-        return Ok(None);
+        return Ok(HolderVerdict::NotDead);
     }
     let threads = store.work_scope_threads(scope)?;
     let owing = store.threads_owing_an_answer(&threads, ctx.now)?;
     if owing.is_empty() {
-        return Ok(None);
+        return Ok(HolderVerdict::NotDead);
     }
     if !sessions_still_running(ctx, store, &threads)?.is_empty() {
-        return Ok(None);
+        return Ok(HolderVerdict::NotDead);
     }
     // **An operation that owes nothing but its OWN SUPERVISOR's next move** (nxf 6j6v.3rrv) is the
     // one shape clause 4 cannot judge: the supervisor is the engine, not a session, so the owing
     // thread has no session of its own and the loop below would read it as a human being waited
     // for. It is asked by [`a_chain_stalled_on_its_supervisor`] instead, on evidence of its own.
     let occasion = if only_the_supervisor_owes(ctx, store, &owing)? {
-        if !a_chain_stalled_on_its_supervisor(ctx, store, &threads)? {
-            return Ok(None);
+        match a_chain_stalled_on_its_supervisor(ctx, store, &threads, &owing)? {
+            Stall::Stalled => ParkOccasion::StalledOnItsSupervisor,
+            Stall::NotStalled => return Ok(HolderVerdict::NotDead),
+            Stall::Revivable(revival) => return Ok(HolderVerdict::Revivable(revival)),
         }
-        ParkOccasion::StalledOnItsSupervisor
     } else {
         // ONE read for the whole clause, not one per owing thread (fix round 1): see
         // [`ChatStore::newest_sessions_in_threads`] for the N+1 that was here and why this table is
@@ -4281,10 +4314,11 @@ fn holder_is_provably_dead(
         let newest = store.newest_sessions_in_threads(&owing)?;
         for thread in &owing {
             let Some(session) = newest.get(thread) else {
-                return Ok(None); // nothing ever ran here: an obligation on a human, not a death
+                // nothing ever ran here: an obligation on a human, not a death
+                return Ok(HolderVerdict::NotDead);
             };
             if session.ended.is_some() {
-                return Ok(None);
+                return Ok(HolderVerdict::NotDead);
             }
         }
         ParkOccasion::DiedInsideItsBound
@@ -4293,9 +4327,42 @@ fn holder_is_provably_dead(
     // claim area, instead of a row read per hold to place it.
     let interrupted = store.interrupted_threads()?;
     if threads.iter().any(|t| interrupted.contains(t)) {
-        return Ok(None);
+        return Ok(HolderVerdict::NotDead);
     }
-    Ok(Some(occasion))
+    Ok(HolderVerdict::Dead(occasion))
+}
+
+/// **What [`holder_is_provably_dead`] found** (nxf 6j6v.3rrv) — a verdict, so the guard decides and
+/// writes nothing, and the sweep does what follows from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HolderVerdict {
+    /// Not provably gone: the holder keeps the copy.
+    NotDead,
+    /// Gone, and why — the occasion its work is parked under.
+    Dead(ParkOccasion),
+    /// Stalled only on a slot the engine opened and never commissioned: a tick of its channel
+    /// thread moves the chain on, so the sweep arms that tick instead of parking.
+    Revivable(Revival),
+}
+
+/// **Where and when to revive a chain** whose last slot was never commissioned (nxf 6j6v.3rrv).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Revival {
+    /// The slot that was never commissioned — the look is keyed on it, so it never replaces the
+    /// channel thread's own window job.
+    slot: String,
+    /// The channel thread whose tick moves the chain on.
+    channel_thread: String,
+    /// The slot's opening plus [`STALLED_CHAIN_QUIET_SECS`] — the first instant the tick counts it
+    /// out of the set.
+    at: String,
+}
+
+/// [`a_chain_stalled_on_its_supervisor`]'s answer.
+enum Stall {
+    Stalled,
+    NotStalled,
+    Revivable(Revival),
 }
 
 /// **How long an operation must have been QUIET before the engine calls its chain stalled** (nxf
@@ -4385,51 +4452,99 @@ impl OnItsWay {
 /// 3. **No advance was STOPPED for the requester** ([`ChatStore::stopped_advance_in`]) — a declared
 ///    hurdle refused the next step, or the step could not be started. Nothing retries either, by
 ///    design: asking again is the requester's move, and that person may be fixing the tree right now.
-/// 4. **Every session in the operation has a RECORDED end.** A process that is gone but whose
+/// 4. **The newest session of every thread has a RECORDED end.** A process that is gone but whose
 ///    `session ended` has not landed — the call can take thirty seconds and more on a busy database —
 ///    may still advance the chain when it does; such an operation is left to the dead-session rule.
-/// 5. **No slot the engine opened was left uncommissioned** ([`never_commissioned`]). That chain is
-///    not stalled, it is REVIVABLE: a tick of its channel thread moves it on. So this declines, and
-///    arms that tick, rather than parking the work of a chain about to continue.
+///    An older row on a thread that a newer session replaced is history and is not asked.
+/// 5. **The newest slot of its channel thread was not left uncommissioned** ([`never_commissioned`]).
+///    That chain is not stalled, it is REVIVABLE: a tick of its channel thread moves it on. So this
+///    answers [`Stall::Revivable`], and the sweep arms that tick rather than parking the work of a
+///    chain about to continue.
 /// 6. **It has been quiet for [`STALLED_CHAIN_QUIET_SECS`]** — so this cannot be the moment between
 ///    a step's end and the opening of the next one, which one process makes in one call.
 fn a_chain_stalled_on_its_supervisor(
     ctx: &Ctx,
     store: &ChatStore,
     threads: &[String],
-) -> Result<bool> {
+    owing: &[String],
+) -> Result<Stall> {
     if !OnItsWay::read(store, threads)?.is_empty() {
-        return Ok(false);
+        return Ok(Stall::NotStalled);
     }
     if store.unanswered_hand_back(threads)?.is_some() {
-        return Ok(false);
+        return Ok(Stall::NotStalled);
     }
-    if store.stopped_advance_in(threads)? {
-        return Ok(false);
+    // Asked of the threads that still owe the supervisor: a stop on a thread that has since moved
+    // on — delivered, withdrawn — waits for nobody.
+    if store.stopped_advance_in(owing)? {
+        return Ok(Stall::NotStalled);
     }
-    if !unended_sessions_under(store, threads)?.is_empty() {
-        return Ok(false);
+    // The NEWEST session of each thread, as the dead-session clause asks: an older row on the same
+    // thread — a start that failed and was redone, a session a restart killed and a newer one
+    // replaced — is history, and reading it as a pending end would block this rule for good on
+    // exactly the operations most likely to stall.
+    if store
+        .newest_sessions_in_threads(threads)?
+        .values()
+        .any(|row| row.ended.is_none())
+    {
+        return Ok(Stall::NotStalled);
     }
     let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
     for slot in store.thread_quorums(&ids, ctx.now)? {
         if !never_commissioned(ctx, store, &slot)? {
             continue;
         }
-        if let Some(channel_thread) = supervising_parent(store, &slot.thread_id)? {
-            // Best effort: a look that could not be armed is the next tick's to arm again.
-            let _ = ctx.timer.schedule(
-                &channel_thread,
-                ctx.now,
-                &crate::timer::tick_command(&channel_thread),
-            );
-            return Ok(false);
+        let Some(channel_thread) = supervising_parent(store, &slot.thread_id)? else {
+            continue;
+        };
+        // Only the NEWEST slot of its channel thread: an empty slot a revival has already moved
+        // past is history, and it must not keep the rule declining for the operation's whole life.
+        if newest_slot_of(store, &channel_thread)?.as_deref() != Some(slot.thread_id.as_str()) {
+            continue;
         }
+        let Some(created) = store.thread_created(&slot.thread_id)? else {
+            continue;
+        };
+        let at = crate::stranded::after(&created, STALLED_CHAIN_QUIET_SECS, "a revival")?;
+        return Ok(Stall::Revivable(Revival {
+            slot: slot.thread_id,
+            channel_thread,
+            at,
+        }));
     }
-    Ok(match store.newest_activity_in(threads)? {
+    let quiet = match store.newest_activity_in(threads)? {
         Some(at) => quiet_since(ctx.now, &at)?,
         // An operation with no recorded instant at all has nothing to wait out.
         None => true,
+    };
+    Ok(if quiet {
+        Stall::Stalled
+    } else {
+        Stall::NotStalled
     })
+}
+
+/// **The slot of `channel_thread` opened LAST** (nxf 6j6v.3rrv) — by the instant it was opened, so a
+/// thread id minted elsewhere cannot reorder it; ties go to the larger id.
+fn newest_slot_of(store: &ChatStore, channel_thread: &str) -> Result<Option<String>> {
+    use time::format_description::well_known::Rfc3339;
+    let mut newest: Option<(time::OffsetDateTime, String)> = None;
+    for slot in store.supervised_children(channel_thread)? {
+        let Some(created) = store.thread_created(&slot)? else {
+            continue;
+        };
+        let Ok(at) = time::OffsetDateTime::parse(&created, &Rfc3339) else {
+            continue;
+        };
+        if newest
+            .as_ref()
+            .is_none_or(|(seen, id)| at > *seen || (at == *seen && slot > *id))
+        {
+            newest = Some((at, slot));
+        }
+    }
+    Ok(newest.map(|(_, slot)| slot))
 }
 
 /// Whether `now` is at least [`STALLED_CHAIN_QUIET_SECS`] past `at`. An instant that does not parse
@@ -11485,16 +11600,9 @@ fn supervisor_advance_flow(
             ));
         }
         Err(e) => {
-            // Recorded for the refusal's reason above: nothing retries this, so it waits for the
-            // requester.
-            if let Err(note) =
-                store.note_stopped_advance(&channel_q.thread_id, target, "never_started", ctx.now)
-            {
-                eprintln!(
-                    "warning: could not record that the advance of thread {} was stopped: {note}",
-                    channel_q.thread_id
-                );
-            }
+            // NOT recorded as a stopped advance (nxf 6j6v.3rrv), unlike a declared refusal above:
+            // an error here is as often the machine's (a locked database) as anybody's decision, and
+            // a chain left standing on it is one the stalled-chain rule should be free to take.
             let detail = format!(
                 "step {target:?} of channel {:?} was never started: {e}. The flow stops here — the \
                  previous step's answer is durable, and nothing retries this",
@@ -17715,7 +17823,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
     let mut warnings: Vec<FailedConsequence> = Vec::new();
     if holds_the_copy {
         if let Some((key, scope)) = &holder {
-            store.note_withdrawn_holder(key, &withdrawn_by, ctx.now)?;
+            store.note_withdrawn_holder_as(key, &withdrawn_by, ctx.now, held_idle)?;
             // …and WHICH of its sessions this call is about to stop (nxf 6j6v.27b9): the only
             // ones the tick may ever send a further SIGTERM to. Written with the marker, before
             // the stops below, so no tick can find the marker without them.
@@ -17725,9 +17833,7 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
                 .map(|s| s.session.clone())
                 .collect();
             store.note_withdrawn_sessions(key, &stopping, ctx.now)?;
-            if held_idle {
-                store.mark_withdrawn_holder_idle(key)?;
-            }
+
             if let Some(finding) = arm_a_look_at_the_withdrawn_holder(ctx, store, scope) {
                 warnings.push(finding);
             }
@@ -17954,6 +18060,8 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         .chain(discharged.iter().cloned())
         .collect();
     interrupt_the_chain_above(ctx, store, thread_id, &taken_back, &withdrawn_qualified)?;
+    // The operation is taken back, so no advance in it is waiting for its requester any more.
+    store.forget_stopped_advances_in(&area)?;
 
     // **A discarded failed start can leave its claim area holding the copy with nothing in it**
     // (review of PR #32, Integrity #1). The area keeps the lease while anything in it still owes —
@@ -20182,18 +20290,20 @@ mod tests {
         // also the proof that what is being timed is the WHOLE check: an answer of `true` is only
         // reachable through all five clauses.
         assert!(
-            holder_is_provably_dead(&ctx, &store, &scope)
-                .unwrap()
-                .is_some(),
+            matches!(
+                holder_is_provably_dead(&ctx, &store, &scope).unwrap(),
+                HolderVerdict::Dead(_)
+            ),
             "the staging has to reach the end of the check, or the number means nothing"
         );
 
         let mut samples: Vec<std::time::Duration> = Vec::with_capacity(MEASURED_REPETITIONS);
         for _ in 0..MEASURED_REPETITIONS {
             let at = std::time::Instant::now();
-            let dead = holder_is_provably_dead(&ctx, &store, &scope)
-                .unwrap()
-                .is_some();
+            let dead = matches!(
+                holder_is_provably_dead(&ctx, &store, &scope).unwrap(),
+                HolderVerdict::Dead(_)
+            );
             samples.push(at.elapsed());
             assert!(dead);
         }
