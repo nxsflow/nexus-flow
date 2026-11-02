@@ -5,7 +5,7 @@
 
 > **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
 
-## Index (59)
+## Index (62)
 
 - **architecture-overview**: nexus-flow is an agent-native, offline-first suite — the board, the memory and the channel your agents work from — and nothing else.
 - **priority-storage-canonical-ordinal**: Priority is a plugin-named label at the SURFACE but stored as the canonical ORDINAL — never store the label, or --json stops being plugin-independent.
@@ -25,13 +25,13 @@
 - **sync-postgres-driver-needs-off-runtime**: The sync postgres driver owns its own runtime: inside async it panics, in a Drop it aborts — wrap every entry point, the Drop included.
 - **handover-lists-are-themselves-unverified**: A list handed over at closing time is itself unverified — derive it AGAIN from the vocabulary of the gap instead of working through it.
 - **gate-evidence-is-per-commit**: A gate result proves EXACTLY the tree it ran against — HEAD plus the working copy; a run that raced anything proves nothing, green or red.
-- **sweep-the-deleted-vocabulary**: After a removal you cannot grep for what is gone — search the vocabulary of what was DELETED, and compare against the branch base, not HEAD.
+- **sweep-the-deleted-vocabulary**: After a removal you cannot grep for what is gone - run bash xtask/sweep-retired-vocabulary.sh <base-ref>, search the DELETED vocabulary, and compare against the branch base, not HEAD.
 - **a-test-name-is-a-claim**: A test's NAME is a claim that can be false while all stays green — only mutation finds it, and a mutation that reds nothing is itself a finding.
 - **a-relayed-claim-becomes-yours**: If you hand out work and pass on the reports, you become the author of every claim you let through — a claim you cannot re-run is not evidence.
 - **the-board-is-local-and-not-in-git**: The board is git-ignored, single-device and lives outside the tree (.nxs is a symlink) — and there is no task type, only the plugin set.
 - **handover-notes-are-not-durable-memory**: Where a session stopped belongs in the session-handover skill, never in durable memory.
 - **shell-evaluates-long-descriptions**: Never pass a long description in double quotes — the shell evaluates backticks and angle brackets first; use a quoted heredoc and read it back.
-- **gates-run-in-ci-not-locally**: NEVER run cargo clippy locally — only the test file you changed, plus cargo fmt; CI is the gate, and this goes in EVERY subagent prompt.
+- **gates-run-in-ci-not-locally**: CI is the gate: push, gh workflow run ci.yml, check headSha; locally only fmt, touched test files, clippy -p <touched crate> once - never test --all or unscoped clippy.
 - **review-session-in-a-shared-checkout-mistakes-the-work-for-its-own**: A review session in a shared checkout can mistake foreign commits for its own work and refuse — say so up front, and forbid cargo there.
 - **the-project-language-is-english**: Write everything down in English — tickets, memories, commits, PRs, code, docs; speak to a human in their language, but never write it down.
 - **a-tickets-own-measurement-is-unverified**: A measurement pasted into a ticket is the TICKET'S evidence, not yours — re-run it before any removal, and hold when it comes out otherwise.
@@ -62,10 +62,13 @@
 - **golden-json-determinism-and-fixed-ids**: nxf JSON determinism needs serde_json WITHOUT preserve_order — xtask must never enable it, or feature unification breaks the goldens.
 - **macos-ci-jobs-are-two-different-machines**: macOS tests (hosted) is a GitHub 3-core runner, not the org Mac — a hosted red is often a race, and a green check list can hide a cancelled run.
 - **macos-libressl-no-ed25519-blake2b**: macOS system openssl is LibreSSL: no blake2b512, no Ed25519 — minisign-via-openssl cannot cover stock macOS; nxs self-update is the backstop.
+- **stuck-lease-release-without-restart**: A delivered run stuck holding the copy (vtg9): reply on the root to open a round, then withdraw at once; never restart the service while others run.
+- **dynamodb-local-has-no-table-id**: DynamoDB Local returned no TableId: test a re-created table via CreationDateTime more than 1 s apart, and TableId rules on constructed descriptions only.
 - **oidc-no-repository-owner-condition**: A GitHub OIDC role trust in the nxsflow accounts must NOT carry a repository_owner condition — it breaks AssumeRoleWithWebIdentity.
 - **changelog-check-needs-a-commit**: changelog check reads a three-dot diff, so it needs a COMMIT — a correct fragment sitting in the working tree reports as missing.
 - **release-ring-policy**: Several consecutive BETA releases are explicitly fine and NOT a backlog — an idea proves itself in the apps before the chain goes stable.
 - **release-cut-runbook**: The release runbook: set skip-changelog BEFORE the check finishes — adding it afterwards needs a toggle, a re-run replays the old state.
+- **persona-session-is-shared-across-threads**: A persona runs ONE real SDK session across all its threads, and the transcript records no user prompts - name the thread when you continue it.
 
 ## Full text
 
@@ -855,6 +858,14 @@ A tool for this lives at `xtask/sweep-retired-vocabulary.sh` — explicitly A RE
 GATE (it exits 0 either way and is not in CI). On its first run it found three places that two
 careful manual passes had missed, including a removed flag in LIVE source.
 
+## How to run it (migrated from CLAUDE.md, 2026-11-02)
+
+After a removal of a verb, a flag or a path, run:
+
+    bash xtask/sweep-retired-vocabulary.sh [<base-ref>]
+
+It lists files that still name a retired verb or path and that your change never opened. Every line it prints is for you to judge: a supersession note or a changelog fragment names a retired term correctly. Add your own removal to its vocabulary list; that list, and the exclusions with their reasons, are the whole content of the file. Its header also records the two shapes it cannot see (lines ADJACENT to lines you edited, and files INSIDE your own change set) and how to sweep for those by hand. Why it matters: prose is the surface an agent reads, so a help page or a system prompt naming a verb that no longer exists is a false map, not a cosmetic defect.
+
 ---
 
 ### `a-test-name-is-a-claim`
@@ -990,6 +1001,17 @@ READING BACK IS PART OF THE STEP: after every create/remember with a longer text
 
 ### `gates-run-in-ci-not-locally`
 
+## THE GATE PROCEDURE (migrated from CLAUDE.md, 2026-11-02)
+
+The project's gate is the CI workflow, not a local run. Locally run ONLY: `cargo fmt --all -- --check`; the test files your change touched (`cargo test -p <crate> --test <file>`); and clippy scoped to the crates your change touched, once before the push (`cargo clippy -p <crate> --all-targets -- -D warnings`, one `-p` per crate containing a file you created or edited; never without `-p`). Never `cargo test --all`, `cargo test --workspace`, or an unscoped clippy locally. Then:
+
+    git push origin HEAD
+    gh workflow run ci.yml --ref "$(git branch --show-current)"
+    run=$(gh run list --workflow ci.yml --branch "$(git branch --show-current)" --limit 1 --json databaseId -q '.[0].databaseId')
+    gh run watch "$run" --exit-status
+
+Check that the run's `headSha` is `git rev-parse HEAD` before you trust it: a run proves only the commit it ran on ([[gate-evidence-is-per-commit]]). If you hand over a gate result, give that commit and the run URL. If a job is red, the failing job's log (`gh run view "$run" --log-failed`) is the evidence.
+
 MEASURED 2026-09-03 against a real pull request and the transcript of the session that built it.
 Not a feeling — numbers.
 
@@ -1082,7 +1104,7 @@ QUEUED, so dispatching beside an open PR is safe (counter-measured over three di
 This does not work on a fork PR (nobody can dispatch there) — which becomes relevant the moment
 the repository is made public.
 
-## NEVER `cargo clippy` LOCALLY — MEASURED 2026-09-18, and it cost a day
+## `cargo clippy` LOCALLY: CRATE-SCOPED ONLY, ONCE BEFORE THE PUSH (owner, 2026-11-02; was: never, 2026-09-18)
 
 The rule above ("test narrowly, CI is the gate") was in place and STILL a subagent-driven run of
 eight tasks spent about fifteen hours of wall clock on local gates, because "the four commands"
@@ -1098,8 +1120,14 @@ moved it to the background and it was reissued.
 
 THE RULE, owner instruction of 2026-09-18:
 
-1. DO NOT run `cargo clippy` locally at all. Not `-p <crate>`, not `--all-targets`, not "once at
-   the end". CI runs it on every pull request and fails the run; that is the whole assurance.
+1. SUPERSEDED 2026-11-02 by owner decision. The rule used to be "no clippy locally at all". By
+   November a CI cycle had grown to 80+ min (quality-gates `Tests (debug)` alone 61 min), and on
+   6j6v.t7xp three red CI runs, each for a lint or compile error, cost ~70 min. So now: run
+   `cargo clippy -p <crate> --all-targets -- -D warnings` ONCE before the push, one `-p` per crate
+   that contains a file you created or edited. NEVER without `-p`, never `--all`/`--workspace`.
+   Clippy cannot lint a single file; the crate is its smallest scope. Not after every edit, not
+   per fix round, not in the background-and-reissue loop described below. The 15-25 min
+   measurement below still holds; it is now weighed against an 80+ min CI cycle.
 2. Run ONLY the test file(s) covering the code you just changed (`cargo test -p <crate> --test
    <file>` / `--lib <module>`), plus `cargo fmt --all`, which costs seconds.
 3. Do NOT re-run neighbouring suites "to be safe". A cross-suite break is what CI is for.
@@ -1945,6 +1973,18 @@ Homebrew is the channel.
 
 ---
 
+### `stuck-lease-release-without-restart`
+
+When a delivered nxc operation keeps holds_working_tree and needs_decision true with held_by_hand_back {kind: escalation} (vtg9), answering the escalation thread is refused ('round is over'), and withdraw refuses ('nothing running'). The working release path without a service restart (measured by manufakt 2026-10-20 on 0.216.0): one short reply on the ROOT opens a new round, then immediately run nxc withdraw --thread <root>. The coder is stopped, its state parked onto a branch, and after about 2-4 min the lease and the flag clear. Never restart the service while other workspaces run sessions (8n9a).
+
+---
+
+### `dynamodb-local-has-no-table-id`
+
+A DynamoDB Local (the one serving localhost:8000 on the development machine, version not checked; whether CI's amazon/dynamodb-local:latest behaves the same is UNVERIFIED) answered DescribeTable on 2026-10-23 (6j6v.dbmd MF-3) with a TableArn of the form arn:aws:dynamodb:ddblocal:000000000000:table/<name> and a CreationDateTime with millisecond precision, but with NO TableId (null). So a test that a re-created table of the same name has a new identity should see it through CreationDateTime: delete, wait MORE than one second, re-create (f6yb MF-4 / dbmd MF-4) — and must not rely on TableId. Rules on TableId itself (a new TableId means another table) are tested on constructed TableDescriptions only. ItemCount was current there (AWS refreshes it about every six hours), so EmptyStore after a purge behaves as on a fresh real table.
+
+---
+
 ### `oidc-no-repository-owner-condition`
 
 GitHub OIDC role trusts in the shared nxsflow AWS accounts must **NOT** include a
@@ -2078,3 +2118,9 @@ working tree reports as missing.
 (Absorbed on 2026-09-18: `release-pr-skip-changelog`, `release-no-fragment-promote` and
 `release-version-set-docs-gotcha`, which each carried one paragraph of the above and cost three
 more lines of the session-start index than the facts needed.)
+
+---
+
+### `persona-session-is-shared-across-threads`
+
+A persona's internal session (session_map) is ONE real Claude Agent SDK session continued across every thread that persona serves - e.g. the pm session m-01M5MSS6F6CNT77BZW5DZ6TGEB took turns for a0y8, m-01M5456J..., m-01M57STW... and m-01M5MSPF... within 20 minutes on 2026-10-23. Consequences: 'continue the same session' must NAME the thread and quote the task; 'no transcript activity' is a fact about the session, not one slot; a queued commission fired into that session arrives as a continuation (resume_real set) and must carry the body. The agent_transcript records assistant, tool and subagent entries with an 'at' timestamp, but NO user prompts - you cannot read from a transcript what a session was asked.
