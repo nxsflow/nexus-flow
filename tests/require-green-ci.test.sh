@@ -54,6 +54,9 @@ mkdir -p "$WORK/bin"
 # response bodies listed in $GH_REPLIES, one per invocation, so a test can model "still running,
 # then green". The last body is reused once the list runs out. `$GH_EXIT` (default 0) makes the
 # stub fail instead, which is how "GitHub could not be asked" is tested.
+#
+# A call for a run's JOBS (`…/runs/<id>/jobs`, 6j6v.ee3e) is answered from $GH_JOBS instead and
+# does not advance the replay; `$GH_JOBS_EXIT` makes only that call fail.
 cat > "$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -61,19 +64,29 @@ if [ "${GH_EXIT:-0}" != "0" ]; then
   echo "gh: simulated API failure" >&2
   exit "$GH_EXIT"
 fi
+# The real `gh api --jq` applies the filter itself; mirror just enough of that.
+filter=""
+want_filter=0
+jobs_call=0
+for arg in "$@"; do
+  if [ "$want_filter" = 1 ]; then filter="$arg"; want_filter=0; continue; fi
+  [ "$arg" = "--jq" ] && want_filter=1
+  case "$arg" in */runs/*/jobs*) jobs_call=1 ;; esac
+done
+if [ "$jobs_call" = 1 ]; then
+  if [ "${GH_JOBS_EXIT:-0}" != "0" ]; then
+    echo "gh: simulated jobs API failure" >&2
+    exit "$GH_JOBS_EXIT"
+  fi
+  if [ -n "$filter" ]; then jq -r "$filter" < "$GH_JOBS"; else cat "$GH_JOBS"; fi
+  exit 0
+fi
 n="$(cat "$GH_CALL_COUNT" 2>/dev/null || echo 0)"
 # shellcheck disable=SC2206  # deliberate word splitting: GH_REPLIES is a space-separated list
 replies=($GH_REPLIES)
 idx="$n"
 [ "$idx" -ge "${#replies[@]}" ] && idx=$(( ${#replies[@]} - 1 ))
 echo $(( n + 1 )) > "$GH_CALL_COUNT"
-# The real `gh api --jq` applies the filter itself; mirror just enough of that.
-filter=""
-want_filter=0
-for arg in "$@"; do
-  if [ "$want_filter" = 1 ]; then filter="$arg"; want_filter=0; continue; fi
-  [ "$arg" = "--jq" ] && want_filter=1
-done
 if [ -n "$filter" ]; then
   jq -c "$filter" < "${replies[$idx]}"
 else
@@ -82,25 +95,44 @@ fi
 STUB
 chmod +x "$WORK/bin/gh"
 
-# One `workflow_runs` body. Each argument is `status:conclusion:event`.
+# One `workflow_runs` body. Each argument is `status:conclusion:event[:display_title]`. The title
+# is what `ci.yml`'s `run-name` writes on a dispatch (6j6v.ee3e): `CI on <ref>: full gate` or
+# `CI on <ref>: debug only`. The gate does NOT trust it (the jobs decide, see `jobs_body`); the
+# cases carry it to show that a title which lies changes nothing.
 body() { # <file> <run…>
   local out="$1"; shift
   local runs="" r
   for r in "$@"; do
-    IFS=: read -r status conclusion event <<< "$r"
-    runs="$runs{\"id\":1,\"status\":\"$status\",\"conclusion\":$( [ "$conclusion" = "null" ] && echo null || echo "\"$conclusion\"" ),\"event\":\"$event\",\"html_url\":\"https://example.invalid/run\"},"
+    IFS=: read -r status conclusion event title <<< "$r"
+    title="${title:-Some commit subject}"
+    runs="$runs{\"id\":1,\"status\":\"$status\",\"conclusion\":$( [ "$conclusion" = "null" ] && echo null || echo "\"$conclusion\"" ),\"event\":\"$event\",\"display_title\":\"$title\",\"html_url\":\"https://example.invalid/run\"},"
   done
   printf '{"total_count":%d,"workflow_runs":[%s]}\n' "$#" "${runs%,}" > "$out"
 }
+
+# One `jobs` body for a run: a `quality-gates` job whose `Tests (release)` step concluded <c>, or
+# `none` for a run that has no such step at all (or no `quality-gates` job).
+jobs_body() { # <file> <conclusion|none>
+  if [ "$2" = none ]; then
+    printf '{"total_count":1,"jobs":[{"name":"lint","steps":[{"name":"Format","conclusion":"success"}]}]}\n' > "$1"
+  else
+    printf '{"total_count":2,"jobs":[{"name":"lint","steps":[]},{"name":"quality-gates","steps":[{"name":"Tests (debug)","conclusion":"success"},{"name":"Tests (release)","conclusion":"%s"}]}]}\n' "$2" > "$1"
+  fi
+}
+jobs_body "$WORK/jobs_release_ran.json" success
+jobs_body "$WORK/jobs_release_skipped.json" skipped
+jobs_body "$WORK/jobs_no_release_step.json" none
 
 # Run the gate against a list of canned bodies. Sets $RC and $OUT in THIS shell (never through a
 # command substitution, which would run the function in a subshell and lose both).
 #
 # The four knobs a case may pre-set are read and reset here, so a case can never leak one into the
-# next: $GH_EXIT, $RUN_TIMEOUT, $APPEAR_TIMEOUT.
+# next: $GH_EXIT, $RUN_TIMEOUT, $APPEAR_TIMEOUT, $JOBS, $GH_JOBS_EXIT.
 RC=0
 OUT=""
 GH_EXIT=0
+GH_JOBS_EXIT=0
+JOBS="$WORK/jobs_release_ran.json"
 RUN_TIMEOUT=0
 APPEAR_TIMEOUT=0
 run_gate() { # <body-file…>
@@ -111,6 +143,8 @@ run_gate() { # <body-file…>
     GH_REPLIES="$*" \
     GH_CALL_COUNT="$WORK/calls" \
     GH_EXIT="$GH_EXIT" \
+    GH_JOBS="$JOBS" \
+    GH_JOBS_EXIT="$GH_JOBS_EXIT" \
     GH_REPO="nxsflow/nexus-flow" \
     SHA="deadbeef" \
     CI_GATE_POLL=0 \
@@ -119,6 +153,8 @@ run_gate() { # <body-file…>
     bash "$GATE" 2>&1
   )" || RC=$?
   GH_EXIT=0
+  GH_JOBS_EXIT=0
+  JOBS="$WORK/jobs_release_ran.json"
   RUN_TIMEOUT=0
   APPEAR_TIMEOUT=0
 }
@@ -147,8 +183,38 @@ body "$WORK/green.json"        completed:success:push
 case_exit "a completed, successful push run passes" 0 "$WORK/green.json"
 says "…and says it is trusting that run rather than repeating it" "trusts that run instead of repeating it"
 
-body "$WORK/dispatch.json"     completed:success:workflow_dispatch
-case_exit "a workflow_dispatch run passes too (it runs the full both-profile gate)" 0 "$WORK/dispatch.json"
+body "$WORK/dispatch.json"     "completed:success:workflow_dispatch:CI on feat/x: full gate"
+case_exit "a workflow_dispatch run whose Tests (release) step succeeded passes too" 0 "$WORK/dispatch.json"
+
+# Since 6j6v.ee3e a branch dispatch runs the debug profile only unless asked for the full gate
+# (`-f full=true`), so being a dispatch no longer says the release profile ran. The gate asks the
+# run's JOBS whether `quality-gates` › `Tests (release)` concluded `success` — not its title, which
+# `ci.yml` computes from a second spelling of the condition and which could drift from the jobs.
+body "$WORK/dispatch_debug.json" "completed:success:workflow_dispatch:CI on feat/x: debug only"
+JOBS="$WORK/jobs_release_skipped.json"
+case_exit "a DEBUG-ONLY workflow_dispatch run does not count (its Tests (release) was skipped)" 1 "$WORK/dispatch_debug.json"
+says "…and the refusal names the input that asks for the full gate" "-f full=true"
+
+# The drift case the review named: a title that says `full gate` on a run that skipped the release
+# profile. Trusting the title would pass it; the jobs refuse it.
+JOBS="$WORK/jobs_release_skipped.json"
+case_exit "a dispatch TITLED full gate whose Tests (release) was skipped does not count" 1 "$WORK/dispatch.json"
+
+JOBS="$WORK/jobs_no_release_step.json"
+case_exit "a dispatch with no quality-gates › Tests (release) step at all does not count" 1 "$WORK/dispatch.json"
+
+# …and the other direction: the title is not needed either. Only the step decides.
+body "$WORK/dispatch_untitled.json" completed:success:workflow_dispatch
+case_exit "a dispatch whose Tests (release) succeeded passes whatever its title says" 0 "$WORK/dispatch_untitled.json"
+
+# A push run is full by construction on the refs it runs on; its jobs are never asked.
+GH_JOBS_EXIT=1
+case_exit "a green push run passes without asking for its jobs" 0 "$WORK/green.json"
+
+# Not being able to ask for the jobs is not permission either.
+GH_JOBS_EXIT=1
+case_exit "a failing jobs lookup fails the gate rather than counting the dispatch" 1 "$WORK/dispatch.json"
+says "…carrying the jobs API failure itself" "simulated jobs API failure"
 
 body "$WORK/green_among.json"  completed:failure:push completed:success:push
 case_exit "a green run passes even next to an earlier red attempt on the same commit" 0 "$WORK/green_among.json"
@@ -172,7 +238,7 @@ says "…and names the branch-dispatch route out, not only the tag-on-main one" 
 
 body "$WORK/none.json"
 case_exit "no run at all is a RED release, never a pass" 1 "$WORK/none.json"
-says "…and names what it looked for" "no push/workflow_dispatch run"
+says "…and names what it looked for" "no push run and no full-gate workflow_dispatch run"
 
 body "$WORK/running.json"      in_progress:null:push
 case_exit "a run that never finishes runs out of the wait and goes red" 1 "$WORK/running.json"
@@ -199,7 +265,7 @@ GH_EXIT=1
 APPEAR_TIMEOUT=60
 case_exit "a failing \`gh\` fails the gate rather than falling through" 1 "$WORK/green.json"
 says "…carrying the API failure itself" "simulated API failure"
-never_says "…and never mis-reports it as a missing CI run" "no push/workflow_dispatch run"
+never_says "…and never mis-reports it as a missing CI run" "no push run and no full-gate workflow_dispatch run"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

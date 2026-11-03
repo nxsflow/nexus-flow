@@ -304,13 +304,15 @@ and its `head-object` sidecar check now run **before** the GitHub pre-release, s
 never announce bytes the updater cannot serve.
 
 **Both paths pass the same `ci-green` gate** (6j6v.31rs): the run demands a green `ci.yml` run for
-the commit it is about, from a `push` or `workflow_dispatch` event, and never tests the tree itself.
+the commit it is about, from a `push` event or a FULL-GATE `workflow_dispatch` (`-f full=true`;
+since 6j6v.ee3e a branch dispatch without it is debug-only and does not count), and never tests the
+tree itself.
 For a tag on `main` that run exists already. For a **rehearsal on a feature branch it does not** —
 a branch gets only `pull_request` runs, which skip the release profile and therefore do not count.
 So a rehearsal is two steps now:
 
 ```bash
-gh workflow run ci.yml      --ref <branch>   # the full both-profile gate on that branch
+gh workflow run ci.yml      --ref <branch> -f full=true   # the full both-profile gate on that branch
 # …wait for it to go green…
 gh workflow run release.yml --ref <branch>   # the rehearsal itself
 ```
@@ -786,13 +788,17 @@ from the feature branch before merging — and note that this takes **two** disp
 order (6j6v.rvyp):
 
 ```bash
-gh workflow run ci.yml      --ref <branch>   # 1. the full both-profile gate ON THAT BRANCH
+gh workflow run ci.yml      --ref <branch> -f full=true   # 1. the full both-profile gate ON THAT BRANCH
 # …wait for that run to go green (~20-25 min, both profiles) — step 2 reads its verdict…
+# (do not dispatch ci.yml on that branch again meanwhile: the newer dispatch cancels this one)
 gh workflow run release.yml --ref <branch>   # 2. the rehearsal itself → staging bucket, no release
 ```
 
-Step 1 is not optional and not a formality: `release.yml`'s `ci-green` gate counts only `push` and
-`workflow_dispatch` runs of `ci.yml` (a `pull_request` run skips the release-profile tests, §5.1),
+Step 1 is not optional and not a formality: `release.yml`'s `ci-green` gate counts only `push` runs
+and FULL-GATE `workflow_dispatch` runs of `ci.yml` (a `pull_request` run skips the release-profile
+tests, §5.1; so does a branch dispatch without `-f full=true` since 6j6v.ee3e — the gate counts a
+dispatch only when its `quality-gates` › `Tests (release)` step concluded `success`, whatever the
+run's title says),
 while `ci.yml`'s own push filter is narrowed to `main` and `release/<major>.<minor>`. A feature
 branch therefore produces *only* runs that do not count, and dispatching `release.yml` first fails
 after a five-minute wait with `no green ci.yml run for commit <sha>`. Reproduced 2026-08-08: run

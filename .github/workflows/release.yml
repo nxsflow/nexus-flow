@@ -7,9 +7,10 @@ name: release
 #   - `workflow_dispatch`      → STAGING (https://staging.nxsflow.com/nxs): identical run against
 #                                the staging bucket, **NO GitHub release** — a pipeline rehearsal
 #                                for changes to the release tooling itself. On a FEATURE BRANCH
-#                                this needs TWO dispatches: `gh workflow run ci.yml --ref <branch>`
-#                                first (a branch gets only `pull_request` runs, which the `ci-green`
-#                                gate below does not count), then this one. Runbook: spec §10.1.
+#                                this needs TWO dispatches: `gh workflow run ci.yml --ref <branch>
+#                                -f full=true` first (a branch gets only `pull_request` runs and,
+#                                without the input, debug-only dispatches — neither of which the
+#                                `ci-green` gate below counts), then this one. Runbook: spec §10.1.
 #
 # build-once-promote: every artifact is built ONCE here (beta ring); promote.yml (85y.15)
 # later copies the very same bytes to stable. Validated bytes == shipped bytes — the in-
@@ -124,9 +125,10 @@ jobs:
   # BUNDLE build, both lean feature variants, the platform gates, `postgres-parity` and
   # `dynamodb-local` — not just the two `cargo test` invocations that were mirrored here.
   #
-  # `push`/`workflow_dispatch` runs ONLY. That is not a formality: `ci.yml`'s three release-profile
-  # steps carry `if: github.event_name != 'pull_request'`, so a `pull_request` run is a DIFFERENT,
-  # smaller gate. The release profile catches a class that has shipped before (a side effect inside
+  # `push` runs, and `workflow_dispatch` runs whose `Tests (release)` step succeeded, ONLY. That is
+  # not a formality: `ci.yml`'s release-profile steps run only on a full gate, so a `pull_request`
+  # run — and, since 6j6v.ee3e, a branch dispatch without `-f full=true` — is a DIFFERENT, smaller
+  # gate. The release profile catches a class that has shipped before (a side effect inside
   # `debug_assert!`, compiled out and silently no-op) and accepting a PR run would quietly drop it.
   ci-green:
     runs-on: ubuntu-latest

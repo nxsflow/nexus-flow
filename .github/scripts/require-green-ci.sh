@@ -11,10 +11,18 @@
 #   - A green run for this exact commit is the ONLY way out with exit 0.
 #   - No run, a red run, a cancelled run, a run that never finishes, or a failure to ASK GitHub at
 #     all ⇒ non-zero. There is no fallback that tests the tree itself and no path that shrugs.
-#   - Only `push` and `workflow_dispatch` runs count. `ci.yml`'s three release-profile steps carry
-#     `if: github.event_name != 'pull_request'`, so a `pull_request` run is a smaller gate — and the
-#     release profile catches a class (a side effect inside `debug_assert!`, compiled out of release
-#     and silently no-op) that has shipped from this repo once already.
+#   - Only `push` runs and FULL-GATE `workflow_dispatch` runs count. `ci.yml`'s release-profile
+#     steps run only when its `lint` job decides the run is a full one, so a `pull_request` run is a
+#     smaller gate — and the release profile catches a class (a side effect inside `debug_assert!`,
+#     compiled out of release and silently no-op) that has shipped from this repo once already.
+#   - A dispatch is NOT full by being a dispatch (6j6v.ee3e): on a feature branch it runs the debug
+#     profile only unless dispatched with `-f full=true`. So a green dispatch counts only when the
+#     run's own JOBS say the release profile ran: its `quality-gates` job has a `Tests (release)`
+#     step that concluded `success`. Skipped, missing, renamed — not a pass. The run's TITLE
+#     (`CI on <ref>: full gate` / `: debug only`, from `ci.yml`'s `run-name`) is for humans and is
+#     deliberately not read: it is computed from a second spelling of the condition the jobs use,
+#     and a title that drifted from the jobs must not be able to green-light a tag (review of
+#     6j6v.ee3e, Test Quality #1). A failing jobs lookup fails the gate like any other `gh` call.
 #
 # It waits rather than failing instantly when a run for the commit is still going: tagging the
 # instant a merge lands is normal, and "come back in fifteen minutes" is not a verdict. Both waits
@@ -72,6 +80,16 @@ runs_for_sha() {
     | jq -s '.'
 }
 
+# Did this (dispatch) run's `quality-gates` › `Tests (release)` step conclude `success`? Prints
+# `yes` or `no`. The assignment is a plain statement on purpose: inside `if`/`&&` bash would
+# suspend `set -e`, and a jobs lookup that fails must stop the gate, not read as `no` — or worse.
+release_profile_ran() { # <run-id>
+  local conclusions
+  conclusions="$(gh api --paginate "repos/${GH_REPO}/actions/runs/$1/jobs?per_page=100" \
+    --jq '.jobs[] | select(.name == "quality-gates") | .steps[]? | select(.name == "Tests (release)") | .conclusion')"
+  if printf '%s\n' "$conclusions" | grep -qx success; then echo yes; else echo no; fi
+}
+
 # One line per run, for a human reading a failed release.
 report() {
   printf '%s' "$1" | jq -r '.[] | "  \(.status)/\(.conclusion // "-")  \(.event)  \(.html_url)"'
@@ -81,8 +99,21 @@ start="$(date +%s)"
 while :; do
   runs="$(runs_for_sha)"
 
+  # A green push run is full by construction (push runs exist only on `main` and maintenance lines,
+  # where `ci.yml` always runs both profiles). A green dispatch must prove it, run by run.
   green="$(printf '%s' "$runs" \
-    | jq -r '[.[] | select(.status == "completed" and .conclusion == "success")] | first // empty | .html_url')"
+    | jq -r '[.[] | select(.event == "push" and .status == "completed" and .conclusion == "success")] | first // empty | .html_url')"
+  if [ -z "$green" ]; then
+    for id in $(printf '%s' "$runs" \
+      | jq -r '.[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success") | .id'); do
+      ran="$(release_profile_ran "$id")"
+      if [ "$ran" = yes ]; then
+        green="$(printf '%s' "$runs" | jq -r --argjson id "$id" '[.[] | select(.id == $id)] | first | .html_url')"
+        break
+      fi
+      echo "dispatch run ${id} is green but its Tests (release) did not run — a debug-only dispatch, not counted"
+    done
+  fi
   if [ -n "$green" ]; then
     echo "::notice::the quality gate is green for ${SHA} — ${green}"
     echo "the release trusts that run instead of repeating it"
@@ -114,13 +145,14 @@ while :; do
 
   # Both ways out are named, because the two callers arrive here from opposite directions and the
   # tag-on-`main` advice is useless to one of them (6j6v.rvyp): a STAGING REHEARSAL is dispatched on
-  # a feature branch on purpose, and a feature branch produces only `pull_request` runs — `ci.yml`'s
+  # a feature branch on purpose, and a feature branch produces only `pull_request` runs (and, since
+  # 6j6v.ee3e, debug-only dispatches unless `-f full=true` is given) — `ci.yml`'s
   # push filter is `[main, "release/<major>.<minor>"]` — which this gate does not count. So the
   # rehearser's first attempt always lands here, and without the second sentence they learn only
   # that the gate refuses, not that dispatching `ci.yml` on the same branch first is the way through.
-  echo "::error::no green ${CI_WORKFLOW} run for commit ${SHA}. A release trusts the quality gate for the commit it tags and never re-tests it, so this is fail-closed. A \`pull_request\` run does not count: it skips the release-profile tests on purpose. Two ways forward, depending on which you are doing: (1) RELEASING — push the commit to \`main\` (or to a \`release/<major>.<minor>\` line), let CI go green there, and tag THAT commit; (2) REHEARSING the pipeline on a feature branch — that branch has only \`pull_request\` runs, so establish the full gate on it first with \`gh workflow run ${CI_WORKFLOW} --ref <branch>\`, wait for that run to go green (~20-25 min, both profiles), then dispatch this workflow again. Runbook: docs/specs/release-management.md §10.1."
+  echo "::error::no green ${CI_WORKFLOW} run for commit ${SHA}. A release trusts the quality gate for the commit it tags and never re-tests it, so this is fail-closed. A \`pull_request\` run does not count, and neither does a branch dispatch without the full input: both skip the release-profile tests on purpose. Two ways forward, depending on which you are doing: (1) RELEASING — push the commit to \`main\` (or to a \`release/<major>.<minor>\` line), let CI go green there, and tag THAT commit; (2) REHEARSING the pipeline on a feature branch — that branch has only \`pull_request\` runs, so establish the full gate on it first with \`gh workflow run ${CI_WORKFLOW} --ref <branch> -f full=true\`, wait for that run to go green (~20-25 min, both profiles), then dispatch this workflow again. Runbook: docs/specs/release-management.md §10.1."
   if [ "$total" -eq 0 ]; then
-    echo "  found no push/workflow_dispatch run of ${CI_WORKFLOW} for this commit at all"
+    echo "  found no push run and no full-gate workflow_dispatch run of ${CI_WORKFLOW} for this commit at all"
   else
     report "$runs"
   fi
