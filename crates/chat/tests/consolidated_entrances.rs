@@ -574,9 +574,18 @@ fn the_group_is_gone_and_only_the_clocks_hand_survives_below_the_surface() {
     );
 
     // `liveness` has no such exception: it went entirely, with the run whose step it watched.
+    // The NAME came back in nxf 6j6v.t7xp for something else — `nxc liveness` is the owner's
+    // report over the ladder's recovery log, keyed by nothing — so what is pinned is that the run's
+    // watch did not come back with it: the group's leaf is refused, and the new verb takes no run
+    // or step to watch.
     assert!(
-        refused(&tmp, &["liveness"]).contains("unrecognized subcommand"),
+        refused(&tmp, &["workflow", "liveness"]).contains("unrecognized subcommand"),
         "the dead-man's watch was run-keyed and fell with the runs"
+    );
+    let err = refused(&tmp, &["liveness", "--run", "r-1"]);
+    assert!(
+        err.contains("unexpected argument"),
+        "the report watches no run: {err}"
     );
 }
 

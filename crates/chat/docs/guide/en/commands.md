@@ -775,6 +775,37 @@ threads show` does — you find the request and your own words, never another me
 operation reads every thread in it, but the text search stays inside the channels that opener is a
 member of. To find *what a session did* rather than what it said, read its transcript.
 
+### `nxc liveness [--from <RFC3339>] [--to <RFC3339>] [--everywhere]`
+
+The owner's report on how hanging sessions were handled, read from the coordinator's own recovery
+log: the comparison of the liveness policies of `[chat.liveness]` — A (`dead_resumes = 3`), B
+(`1`, the default) and C (`3` with `notice_at_first_stop = true`). The window is half-open
+(`--from` included, `--to` not) and defaults to the seven days up to now.
+
+Per workspace it shows the policy in force now (with what reading `[chat.liveness]` found wrong:
+invalid values and unknown keys), the policy pairs the window's rows were written under, how often
+each event happened (`asked`, `confirmed`, `recovered`, `stopped`, `continued`, `recommissioned`,
+`noticed`, `answered`, `escalated`, `withdrawn`), and every **episode** whose first row lies in the
+window. An episode is one slot's rows from a nudge, stop or resume to the row that ends it —
+`recovered`, `answered`, `escalated` or `withdrawn` — or `open` while none has come; a rung the
+coordinator took back at once (`already_running`, `no_process`, `cannot_ask`) is an episode
+`withdrawn`. Each resume carries what became of it, read from the slot's next row: `recovered`,
+`answered`, `dead_again`, `escalated`, `nudged_again`, `withdrawn`, or `pending`. The summary per
+policy pair is what you compare: median and maximum time from the silence to recovery and to
+escalation, how many episodes resume 1, 2 and 3 rescued, and how many ended escalated.
+
+`--everywhere` reads every workspace the service attends (`~/.nexusflow/workspaces.toml`), each
+under its own policy; a store that cannot be opened is one block `unreadable` with the error, and
+the others are complete. A `--from` or `--to` that is not an RFC3339 instant, or a window whose
+`--from` does not lie before its `--to`, is refused as a `validation` error before any workspace is
+read. `--json` is the whole document; without it, a table per workspace.
+
+**Only the owner at the terminal reads it.** Inside an agent session (`NXC_SESSION` set) it is
+refused `forbidden`: the report shows the recovery history of every operation, which no agent needs.
+That rule keeps agent sessions out; it is not a security boundary — it reads the environment, and
+whoever holds the shell can unset `NXC_SESSION`.
+An app reads the same document through `Engine::liveness` as the board's owner.
+
 ## Sessions and transcripts
 
 These are the role runtime's own plumbing. The agent sidecar writes them; one of them is a read you

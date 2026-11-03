@@ -1,0 +1,456 @@
+{
+  "from": "2026-10-24T00:00:00Z",
+  "to": "2026-10-25T00:00:00Z",
+  "workspaces": [
+    {
+      "config_warnings": [
+        ".nxs/config.toml: [chat.liveness] dead_resume is not a known key and is ignored"
+      ],
+      "counts": {
+        "answered": 2,
+        "asked": 13,
+        "confirmed": 1,
+        "continued": 6,
+        "escalated": 2,
+        "noticed": 1,
+        "recommissioned": 0,
+        "recovered": 4,
+        "stopped": 7,
+        "withdrawn": 1
+      },
+      "episodes": [
+        {
+          "end_attempt": 2,
+          "ended": "answered",
+          "first_nudge": "2026-10-24T09:10:00Z",
+          "letter": "A",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          },
+          "resumes": [
+            {
+              "attempt": 1,
+              "outcome": "dead_again"
+            },
+            {
+              "attempt": 2,
+              "outcome": "answered"
+            }
+          ],
+          "role": "ws/coder",
+          "rows": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 2400,
+          "silent_since": "2026-10-24T09:00:00Z",
+          "thread": "m-a"
+        },
+        {
+          "end_attempt": 1,
+          "ended": "escalated",
+          "first_nudge": "2026-10-24T11:10:00Z",
+          "letter": "B",
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          },
+          "resumes": [
+            {
+              "attempt": 1,
+              "outcome": "dead_again"
+            }
+          ],
+          "role": "ws/verifier",
+          "rows": [
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "silence_to_escalation_secs": 1920,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T11:00:00Z",
+          "thread": "m-b"
+        },
+        {
+          "end_attempt": 1,
+          "ended": "answered",
+          "first_nudge": "2026-10-24T13:10:00Z",
+          "letter": "C",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          },
+          "resumes": [
+            {
+              "attempt": 1,
+              "outcome": "answered"
+            }
+          ],
+          "role": "ws/coder",
+          "rows": [
+            13,
+            14,
+            15,
+            16,
+            17
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 1500,
+          "silent_since": "2026-10-24T13:00:00Z",
+          "thread": "m-c"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "recovered",
+          "first_nudge": "2026-10-24T14:10:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            18,
+            19
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 1200,
+          "silent_since": "2026-10-24T14:00:00Z",
+          "thread": "m-d"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-24T14:50:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            20
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T14:40:00Z",
+          "thread": "m-d"
+        },
+        {
+          "end_attempt": 1,
+          "ended": "recovered",
+          "first_nudge": "2026-10-24T15:10:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [
+            {
+              "attempt": 1,
+              "outcome": "recovered"
+            }
+          ],
+          "role": "ws/coder",
+          "rows": [
+            21,
+            22,
+            23,
+            24
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 1140,
+          "silent_since": "2026-10-24T15:00:00Z",
+          "thread": "m-e"
+        },
+        {
+          "end_attempt": 1,
+          "ended": "escalated",
+          "first_nudge": "2026-10-24T15:28:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            25,
+            26,
+            27
+          ],
+          "silence_to_escalation_secs": 900,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T15:18:00Z",
+          "thread": "m-e"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "recovered",
+          "first_nudge": "2026-10-24T16:10:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            28,
+            29,
+            30
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 2220,
+          "silent_since": "2026-10-24T16:00:00Z",
+          "thread": "m-f"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "withdrawn",
+          "first_nudge": null,
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            31
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": null,
+          "thread": "m-g"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-24T17:20:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            32
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T17:10:00Z",
+          "thread": "m-g"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "withdrawn",
+          "first_nudge": "2026-10-24T18:10:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            33,
+            34
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T18:00:00Z",
+          "thread": "m-h"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-24T00:00:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            40
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-23T23:50:00Z",
+          "thread": "m-u"
+        },
+        {
+          "end_attempt": null,
+          "ended": "open",
+          "first_nudge": "2026-10-25T00:30:00+02:00",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            41
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": null,
+          "silent_since": "2026-10-24T22:20:00Z",
+          "thread": "m-w"
+        },
+        {
+          "end_attempt": 0,
+          "ended": "recovered",
+          "first_nudge": "2026-10-24T23:55:00Z",
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "resumes": [],
+          "role": "ws/coder",
+          "rows": [
+            38,
+            39
+          ],
+          "silence_to_escalation_secs": null,
+          "silence_to_recovery_secs": 1500,
+          "silent_since": "2026-10-24T23:45:00Z",
+          "thread": "m-x"
+        }
+      ],
+      "letter_now": "B",
+      "policies_in_rows": [
+        {
+          "letter": "B",
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": null,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": "A",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          }
+        },
+        {
+          "letter": "C",
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          }
+        }
+      ],
+      "policy_now": {
+        "dead_resumes": 1,
+        "fell_back": false,
+        "notice_at_first_stop": false
+      },
+      "state": "read",
+      "summary": [
+        {
+          "episodes": 1,
+          "escalated": 1,
+          "letter": "B",
+          "max_silence_to_escalation_secs": 1920,
+          "max_silence_to_recovery_secs": null,
+          "median_silence_to_escalation_secs": 1920,
+          "median_silence_to_recovery_secs": null,
+          "policy": {
+            "dead_resumes": 1,
+            "notice_at_first_stop": false
+          },
+          "rescued_by_resume": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "episodes": 11,
+          "escalated": 1,
+          "letter": null,
+          "max_silence_to_escalation_secs": 900,
+          "max_silence_to_recovery_secs": 2220,
+          "median_silence_to_escalation_secs": 900,
+          "median_silence_to_recovery_secs": 1350,
+          "policy": {
+            "dead_resumes": 2,
+            "notice_at_first_stop": false
+          },
+          "rescued_by_resume": [
+            1,
+            0,
+            0
+          ]
+        },
+        {
+          "episodes": 1,
+          "escalated": 0,
+          "letter": "A",
+          "max_silence_to_escalation_secs": null,
+          "max_silence_to_recovery_secs": 2400,
+          "median_silence_to_escalation_secs": null,
+          "median_silence_to_recovery_secs": 2400,
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": false
+          },
+          "rescued_by_resume": [
+            0,
+            1,
+            0
+          ]
+        },
+        {
+          "episodes": 1,
+          "escalated": 0,
+          "letter": "C",
+          "max_silence_to_escalation_secs": null,
+          "max_silence_to_recovery_secs": 1500,
+          "median_silence_to_escalation_secs": null,
+          "median_silence_to_recovery_secs": 1500,
+          "policy": {
+            "dead_resumes": 3,
+            "notice_at_first_stop": true
+          },
+          "rescued_by_resume": [
+            1,
+            0,
+            0
+          ]
+        }
+      ],
+      "unknown_keys": [
+        "dead_resume"
+      ],
+      "workspace": {
+        "name": "<name>",
+        "path": "<root>"
+      }
+    }
+  ]
+}

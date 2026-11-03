@@ -778,6 +778,18 @@ const SURFACE: &[Member] = &[
               itself learns an invalid setting; it reads no messages.",
     },
     Member {
+        name: "liveness",
+        kind: Handle,
+        records: Recorded::Nothing,
+        causes: Causes::Nothing,
+        why: "The owner's liveness report over this handle's workspace (nxf 6j6v.t7xp): the \
+              ladder's own `recovery_log` rows cut into episodes and summarized per policy pair, \
+              so the owner can compare policies A, B and C. Not one of the eight because it asks \
+              nothing about the workspace's MESSAGES — it reads the supervisor's record of its \
+              own looks, next to `liveness_policy`, which is the policy those looks ran under. \
+              Owner only: a handle is refused as well as a non-owner.",
+    },
+    Member {
         name: "definitions",
         kind: Handle,
         records: Recorded::Nothing,

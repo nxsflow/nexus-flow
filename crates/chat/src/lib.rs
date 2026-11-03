@@ -21,6 +21,9 @@ pub mod guide;
 pub mod interruption;
 /// **The ladder: ask, continue, re-commission, escalate** (nxf 6j6v.558h).
 pub mod ladder;
+/// **The liveness report** (nxf 6j6v.t7xp) — private; its public face is re-exported from
+/// [`facade`].
+mod liveness_report;
 #[cfg(feature = "cli")]
 pub mod onboarding;
 
