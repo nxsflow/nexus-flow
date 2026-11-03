@@ -22,31 +22,109 @@ on:
     # only ever re-answered the question its PR run had already answered.
     branches: [main, "release/[0-9]+.[0-9]+"]
   pull_request:
-  # The escape hatch for the profile staggering below (6j6v.6e0e): dispatching this workflow on a
-  # branch runs the FULL both-profile gate there, because the skip keys on `pull_request`. Reach for
-  # it when a PR is exactly the kind of change the release profile exists to catch — a `debug_assert!`
-  # with a side effect, arithmetic that can overflow — instead of waiting for the push-to-main run.
-  # A dispatch input would add nothing: `workflow_dispatch` already carries the branch to run on.
+  # Dispatching this workflow on a branch is how an agent gets CI as its gate (the memory
+  # `gates-run-in-ci-not-locally`). Since 6j6v.ee3e such a dispatch is a DEBUG-ONLY run by default —
+  # the same jobs a `pull_request` run gets, no `Tests (release)`, no hosted macOS lane — because
+  # it is dispatched after every coder push, and the release profile plus the macOS lane roughly
+  # doubled each of those runs for an answer nobody needed until the merge.
+  #
+  # `-f full=true` asks for the FULL both-profile gate on the branch (the escape hatch of 6j6v.6e0e
+  # for the profile staggering below). It belongs ONCE per work order, before the merge, and it is
+  # what `.github/scripts/require-green-ci.sh` demands before a staging rehearsal can be tagged off a
+  # branch. A dispatch on `main` or on a `release/<major>.<minor>` line is always full.
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full both-profile gate (Tests (release), the hosted macOS lane)"
+        type: boolean
+        default: false
+
+# The title of a dispatched run says which gate it ran (6j6v.ee3e), because that is the ONE place
+# the REST API exposes it: `require-green-ci.sh` counts a dispatch toward a release only when its
+# title ends in `: full gate`. The condition is the `lint` job's `full` output below, spelled again
+# — a job-level `if:` cannot read a workflow-level value, and `run-name` cannot read a job's
+# output — so the two must change together. Push and pull-request runs evaluate to '' here, which
+# leaves GitHub's default title (the commit subject, the PR title) in place.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+  && format('CI on {0}: {1}', github.ref_name,
+  (inputs.full || github.ref_name == 'main'
+  || (startsWith(github.ref_name, 'release/') && !startsWith(github.ref_name, 'release/v')))
+  && 'full gate' || 'debug only')
+  || '' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 # One run per ref (6j6v.6e0e). Three pushes to a PR branch used to mean three FULL concurrent runs,
 # two of them already answered by the third — with no `concurrency` group nothing cancelled them.
-# Cancels on `pull_request` ONLY: a push run on `main` or on a `release/<major>.<minor>` maintenance
-# line is that ref's standing record of green (and the release-profile gate, below), so it must
-# always finish, even when the next push is already in flight.
+#
+# Cancels on `pull_request`, and on a `workflow_dispatch` on any ref that is NOT `main` and NOT a
+# `release/<major>.<minor>` maintenance line (6j6v.ee3e): a coder dispatches after every push, and a
+# superseded dispatch used to run to its end while the next one queued behind it (run 41433828026
+# waited 21 min that way). The newest dispatch on a branch wins, full or not.
+#
+# NEVER on `main` or a maintenance line, whatever the event: a push run there is that ref's
+# standing record of green (and the release-profile gate, below), so it must always finish, even
+# when the next push is already in flight. The flip side: a dispatch on `main` QUEUES behind the
+# push run for its whole length, and the push run is already the full proof — so nobody dispatches
+# on `main`. (`release/v<X.Y.Z>` preparation branches are not maintenance lines; see `push:`.)
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    || (github.event_name == 'workflow_dispatch' && github.ref_name != 'main'
+    && !(startsWith(github.ref_name, 'release/') && !startsWith(github.ref_name, 'release/v'))) }}
 
 # Least privilege: the quality gates only read the repo (checkout + build/test).
 permissions:
   contents: read
 
 jobs:
+  # ---- LINT FIRST, AND EVERY LONG JOB WAITS FOR IT (6j6v.ee3e) ------------------------------
+  #
+  # fmt and `clippy --all-targets` used to be steps inside `quality-gates`, so a lint error was
+  # found only by a job that also ran an hour of tests beside it — and the other long jobs ran their
+  # whole length in parallel regardless. On 6j6v.t7xp three red runs, each a lint or compile error,
+  # cost ~70 min. Now the long jobs declare `needs: lint`: a lint or compile error turns the run red
+  # within minutes and the hour-long jobs never start. What they lose is the head start of running
+  # alongside the lint, a few minutes of a run that is long anyway.
+  #
+  # Kept OUT of it on purpose: the per-platform clippy passes (`platform-gates-*`, each a short job
+  # on its own runner) and the drift gates and lean builds in `quality-gates`, which still run there
+  # ahead of the tests — moving them would add a second cold compile here for no earlier verdict.
+  #
+  # It is also where the run decides whether it is a FULL gate (output `full`): a push to `main` or
+  # a `release/<major>.<minor>` line, a dispatch there, or a dispatch with `-f full=true`. Every
+  # release-profile step and the hosted macOS lane run only then; a pull request and a default
+  # branch dispatch are debug-only. The same condition is spelled once more in `run-name` above.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      full: >-
+        ${{ github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch'
+        && (inputs.full || github.ref_name == 'main'
+        || (startsWith(github.ref_name, 'release/') && !startsWith(github.ref_name, 'release/v')))) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # Without the sidecar bundle on purpose: `crates/chat/build.rs` embeds `None` when it is
+      # absent and `NXF_EMBED_SIDECAR` is unset, and clippy lints the same code either way. The
+      # bundle is built, required and run in `quality-gates`, where the binaries are tested.
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
   quality-gates:
+    needs: lint
     runs-on: ubuntu-latest
     # About twice a normal run (45-80 min over the last 30 green runs on main). Without it a hang
     # costs GitHub's 6-hour default: on 2026-10-25 three hung lease tests held this job for ~2h
@@ -145,11 +223,7 @@ jobs:
           echo "the bundle loads its whole module graph and reaches query()"
           echo "NXF_EMBED_SIDECAR=require" >> "$GITHUB_ENV"
 
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy (warnings are errors)
-        run: cargo clippy --all-targets -- -D warnings
+      # fmt and `clippy --all-targets` moved to the `lint` job this one needs (6j6v.ee3e).
 
       # The self-hosted-runner boundary (nexus-flow-6j6v.2sb1). `platform-gates-macos` below and
       # `release.yml`'s darwin legs bill the ORG'S OWN Mac — not ephemeral, sharing a login session
@@ -240,8 +314,8 @@ jobs:
       # `default-features = false` variant, the one app-foundations embeds, has NO in-repo consumer
       # and NO local gate. It once stayed broken for a day behind six green checks (6j6v.qvfp).
       #
-      # fmt, clippy and the drift gates stay AHEAD of them: together they are under a minute and
-      # they fail on even cheaper mistakes.
+      # The drift gates stay AHEAD of them (fmt and clippy, in the `lint` job, ahead of this whole
+      # job): they are under a minute and they fail on even cheaper mistakes.
       #
       # The MCP seam (E9 #76u) is feature-gated and default-on, so the gates below build+test the
       # `mcp`-on variant. This is the OTHER variant: the lean `nxs` must still compile + lint clean
@@ -298,14 +372,16 @@ jobs:
       # second full optimizing compile of the workspace, measured at 288–393s, ~54% of the machine
       # time of an entire run (release steps across all three jobs: 427s of 793s, mean of 6 PR runs).
       # It now runs on every `push` to `main` and to every `release/<major>.<minor>` line, and on
-      # demand via `workflow_dispatch` — but not on the `pull_request` event.
+      # demand via a FULL `workflow_dispatch` (`-f full=true`, 6j6v.ee3e) — but not on the
+      # `pull_request` event and not on a default branch dispatch. The `lint` job's `full` output
+      # carries that decision to every release-profile step in this file.
       #
       # Coverage of anything that SHIPS is unchanged: a release is cut by tagging a commit on `main`
       # (or on a maintenance line), and every push to both branch classes runs this step. There is
       # no path from a PR to a published artifact that skips it — the skipped run is the one on a
       # tree whose release profile is re-checked minutes later, before it can go anywhere.
       - name: Tests (release)
-        if: github.event_name != 'pull_request'
+        if: needs.lint.outputs.full == 'true'
         run: cargo test --all --release
 
   # The PLATFORM-GATED halves of the sync daemon (6j6v.4t9p). Every job above runs on
@@ -458,14 +534,15 @@ jobs:
   #
   # ── WHEN IT RUNS, AND WHY NOT ON EVERY PULL REQUEST ──────────────────────────────────────────
   #
-  # `if: github.event_name != 'pull_request'` — the same staggering as `Tests (release)` and the
-  # job above, for the reason the ticket's own measurement gives. This repo is PRIVATE and GitHub
+  # `if: needs.lint.outputs.full == 'true'` — the same staggering as `Tests (release)`, for the
+  # reason the ticket's own measurement gives. (Until 6j6v.ee3e it was the job above's
+  # `github.event_name != 'pull_request'`; a default branch dispatch skips this lane now too.) This repo is PRIVATE and GitHub
   # bills macOS runner minutes at 10x (linux 1x, windows 2x), so a lane that compiles this
   # workspace is the most expensive thing in the file by an order of magnitude. The process rule
   # this pairs with is what makes that safe: after mitigating the review findings and BEFORE the
-  # merge, `ci.yml` is dispatched once on the branch, and a `workflow_dispatch` run is not a
-  # `pull_request` — so this lane, and the release-profile steps, run there. Once per WORK ORDER
-  # instead of once per PUSH, and still ahead of the merge.
+  # merge, `ci.yml` is dispatched once on the branch with `-f full=true` — so this lane, and the
+  # release-profile steps, run there. Once per WORK ORDER instead of once per PUSH, and still ahead
+  # of the merge.
   #
   # When 6j6v.zc9q flips the repository to public the calculus changes on both sides: hosted
   # runners are free for public repositories (`macos-latest` included), and a fork cannot dispatch
@@ -496,7 +573,8 @@ jobs:
   # push half — worth revisiting when `pull_request` is added with 6j6v.zc9q, not before.
   macos-tests:
     name: macOS tests (hosted)
-    if: github.event_name != 'pull_request'
+    needs: lint
+    if: needs.lint.outputs.full == 'true'
     runs-on: macos-latest
     # Generous next to the 30 of the jobs above, because this one COMPILES the workspace rather
     # than linting one package, and a cold cache on a 3-core hosted Mac is the worst case it has.
@@ -525,6 +603,7 @@ jobs:
   # is the gate that actually exercises them: a Postgres service provides the database, and
   # the `postgres` feature compiles the backend + the parity suite in.
   postgres-parity:
+    needs: lint
     runs-on: ubuntu-latest
     # About twice the slowest of the last 30 green runs (3-11 min); see `quality-gates`.
     timeout-minutes: 25
@@ -572,18 +651,18 @@ jobs:
         run: cargo test -p nxs-server --features postgres
 
       # Staggered with the same rule as `Tests (release)` above (6j6v.6e0e): the release profile is a
-      # push-to-`main`/maintenance-line gate, not a per-PR one. Kept uniform on purpose — a rule that
+      # push-to-`main`/maintenance-line gate (and a full dispatch's), not a per-PR one. Kept uniform on purpose — a rule that
       # holds for every job is one a reader can trust; exempting the two cheap parity steps would
       # forgo 72s of the 427s and leave "which profile runs where" to be looked up per job.
       # Debug and release use separate profile dirs, so the release run needs its OWN `nxs`: the
       # E2E resolves `target/release/nxf` and would otherwise abort on a binary that is not there.
       # Guarded by the same condition as the step it feeds, so a pull request pays nothing for it.
       - name: Build the shipped nxs/nxf binaries (release)
-        if: github.event_name != 'pull_request'
+        if: needs.lint.outputs.full == 'true'
         run: cargo build -p nxs --release
 
       - name: Postgres parity tests (release)
-        if: github.event_name != 'pull_request'
+        if: needs.lint.outputs.full == 'true'
         run: cargo test -p nxs-server --features postgres --release
 
   # The `postgres-parity` job above runs against a stock `postgres:16`, which has SSL **off** —
@@ -597,6 +676,7 @@ jobs:
   # throwaway CA minted in the job — no secret, nothing to rotate, and the CA-rejection path
   # becomes testable precisely because the CA is private.
   postgres-tls:
+    needs: lint
     runs-on: ubuntu-latest
     # Normally under 2 min; the margin is for a cold cache's compile, not for the tests. See
     # `quality-gates`.
@@ -737,9 +817,10 @@ jobs:
   # to be there) stays a hard failure, and the fork branch is reachable ONLY from a `pull_request`
   # event whose head repository is a fork — never from the push a release is tagged on.
   managed-postgres:
+    needs: lint
     runs-on: ubuntu-latest
     # **The endpoint is a SINGLETON, so this job is one too** (nxf 6j6v.4dtx). The workflow-level
-    # group above is `ci-${{ github.ref }}` and cancels only on `pull_request`, so two runs on
+    # group above is `ci-${{ github.ref }}` and cancels only within one ref, so two runs on
     # DIFFERENT refs never wait for each other — and our own release procedure guarantees exactly
     # that pair: merging a feature PR starts a push run on `main`, and cutting the version opens a
     # release PR moments later. Both contain this job, both talk to the one free-tier project, and
@@ -869,6 +950,7 @@ jobs:
   # C build, ~4 minutes cold) — Swatinem/rust-cache keeps that off the common path the same
   # way it already does for the postgres job above.
   dynamodb-local:
+    needs: lint
     runs-on: ubuntu-latest
     # About twice a normal run (28-62 min over the last 30 green runs); see `quality-gates`.
     timeout-minutes: 120
@@ -931,12 +1013,12 @@ jobs:
 
       # The release-profile run of the purge acceptance needs a current release `nxs` too.
       - name: Build the shipped nxs/nxf binaries (release)
-        if: github.event_name != 'pull_request'
+        if: needs.lint.outputs.full == 'true'
         run: cargo build -p nxs --release
 
       # Same staggering as the other two release steps (6j6v.6e0e).
       - name: DynamoDB Local tests (release)
-        if: github.event_name != 'pull_request'
+        if: needs.lint.outputs.full == 'true'
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
 
   # The relay as a consumer installs it (6j6v.907m): foundations' hosted-engine image runs

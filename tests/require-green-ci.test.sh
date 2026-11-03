@@ -82,13 +82,16 @@ fi
 STUB
 chmod +x "$WORK/bin/gh"
 
-# One `workflow_runs` body. Each argument is `status:conclusion:event`.
+# One `workflow_runs` body. Each argument is `status:conclusion:event[:display_title]`. The title
+# is what `ci.yml`'s `run-name` writes on a dispatch (6j6v.ee3e): `CI on <ref>: full gate` or
+# `CI on <ref>: debug only`. A run given no title gets the commit subject, as a push run does.
 body() { # <file> <run…>
   local out="$1"; shift
   local runs="" r
   for r in "$@"; do
-    IFS=: read -r status conclusion event <<< "$r"
-    runs="$runs{\"id\":1,\"status\":\"$status\",\"conclusion\":$( [ "$conclusion" = "null" ] && echo null || echo "\"$conclusion\"" ),\"event\":\"$event\",\"html_url\":\"https://example.invalid/run\"},"
+    IFS=: read -r status conclusion event title <<< "$r"
+    title="${title:-Some commit subject}"
+    runs="$runs{\"id\":1,\"status\":\"$status\",\"conclusion\":$( [ "$conclusion" = "null" ] && echo null || echo "\"$conclusion\"" ),\"event\":\"$event\",\"display_title\":\"$title\",\"html_url\":\"https://example.invalid/run\"},"
   done
   printf '{"total_count":%d,"workflow_runs":[%s]}\n' "$#" "${runs%,}" > "$out"
 }
@@ -147,8 +150,18 @@ body "$WORK/green.json"        completed:success:push
 case_exit "a completed, successful push run passes" 0 "$WORK/green.json"
 says "…and says it is trusting that run rather than repeating it" "trusts that run instead of repeating it"
 
-body "$WORK/dispatch.json"     completed:success:workflow_dispatch
-case_exit "a workflow_dispatch run passes too (it runs the full both-profile gate)" 0 "$WORK/dispatch.json"
+body "$WORK/dispatch.json"     "completed:success:workflow_dispatch:CI on feat/x: full gate"
+case_exit "a FULL-GATE workflow_dispatch run passes too (it runs both profiles)" 0 "$WORK/dispatch.json"
+
+# Since 6j6v.ee3e a branch dispatch runs the debug profile only unless asked for the full gate
+# (`-f full=true`), so being a dispatch no longer says the release profile ran. Only the title the
+# run carries does — and the gate reads that, fail-closed: no full-gate title, no pass.
+body "$WORK/dispatch_debug.json" "completed:success:workflow_dispatch:CI on feat/x: debug only"
+case_exit "a DEBUG-ONLY workflow_dispatch run does not count (it skips the release profile)" 1 "$WORK/dispatch_debug.json"
+says "…and the refusal names the input that asks for the full gate" "-f full=true"
+
+body "$WORK/dispatch_untitled.json" completed:success:workflow_dispatch
+case_exit "a dispatch run WITHOUT the full-gate title does not count either" 1 "$WORK/dispatch_untitled.json"
 
 body "$WORK/green_among.json"  completed:failure:push completed:success:push
 case_exit "a green run passes even next to an earlier red attempt on the same commit" 0 "$WORK/green_among.json"
@@ -172,7 +185,7 @@ says "…and names the branch-dispatch route out, not only the tag-on-main one" 
 
 body "$WORK/none.json"
 case_exit "no run at all is a RED release, never a pass" 1 "$WORK/none.json"
-says "…and names what it looked for" "no push/workflow_dispatch run"
+says "…and names what it looked for" "no push run and no full-gate workflow_dispatch run"
 
 body "$WORK/running.json"      in_progress:null:push
 case_exit "a run that never finishes runs out of the wait and goes red" 1 "$WORK/running.json"
@@ -199,7 +212,7 @@ GH_EXIT=1
 APPEAR_TIMEOUT=60
 case_exit "a failing \`gh\` fails the gate rather than falling through" 1 "$WORK/green.json"
 says "…carrying the API failure itself" "simulated API failure"
-never_says "…and never mis-reports it as a missing CI run" "no push/workflow_dispatch run"
+never_says "…and never mis-reports it as a missing CI run" "no push run and no full-gate workflow_dispatch run"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

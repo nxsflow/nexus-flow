@@ -31,7 +31,7 @@
 - **the-board-is-local-and-not-in-git**: The board is git-ignored, single-device and lives outside the tree (.nxs is a symlink) — and there is no task type, only the plugin set.
 - **handover-notes-are-not-durable-memory**: Where a session stopped belongs in the session-handover skill, never in durable memory.
 - **shell-evaluates-long-descriptions**: Never pass a long description in double quotes — the shell evaluates backticks and angle brackets first; use a quoted heredoc and read it back.
-- **gates-run-in-ci-not-locally**: CI is the gate: push, gh workflow run ci.yml, check headSha; locally only fmt, touched test files, clippy -p <crate> --lib --test <touched file> once - never --all-targets or test --all.
+- **gates-run-in-ci-not-locally**: CI is the gate: push, dispatch ci.yml (debug-only, cancels older), check headSha; full run once pre-merge, never on main; locally only fmt, touched tests, scoped clippy.
 - **review-session-in-a-shared-checkout-mistakes-the-work-for-its-own**: A review session in a shared checkout can mistake foreign commits for its own work and refuse — say so up front, and forbid cargo there.
 - **the-project-language-is-english**: Write everything down in English — tickets, memories, commits, PRs, code, docs; speak to a human in their language, but never write it down.
 - **a-tickets-own-measurement-is-unverified**: A measurement pasted into a ticket is the TICKET'S evidence, not yours — re-run it before any removal, and hold when it comes out otherwise.
@@ -1014,6 +1014,10 @@ The project's gate is the CI workflow, not a local run. Locally run ONLY: `cargo
     run=$(gh run list --workflow ci.yml --branch "$(git branch --show-current)" --limit 1 --json databaseId -q '.[0].databaseId')
     gh run watch "$run" --exit-status
 
+WHAT THAT DISPATCH RUNS (since 6j6v.ee3e, 2026-11-03): on a feature branch it is a DEBUG-ONLY run by default, the same jobs a pull_request run gets: no `Tests (release)`, no release steps in postgres-parity/dynamodb-local, no hosted macOS lane. Its title says so: `CI on <branch>: debug only`. It also CANCELS a run still in progress on the same branch, so a superseded dispatch no longer runs to its end while the next one queues behind it: dispatch after your last push and watch the newest run, never an older one. fmt and `clippy --all-targets` run first in their own `lint` job; every long job (quality-gates, postgres-*, managed-postgres, dynamodb-local, macOS tests) has `needs: lint`, so a lint or compile error turns the run red within minutes and the long jobs show as skipped.
+
+`gh workflow run ci.yml --ref <branch> -f full=true` asks for the FULL both-profile gate (title `CI on <branch>: full gate`). That is not a coder's per-push gate: see "The one full run belongs BEFORE the merge" below.
+
 Check that the run's `headSha` is `git rev-parse HEAD` before you trust it: a run proves only the commit it ran on ([[gate-evidence-is-per-commit]]). If you hand over a gate result, give that commit and the run URL. If a job is red, the failing job's log (`gh run view "$run" --log-failed`) is the evidence.
 
 MEASURED 2026-09-03 against a real pull request and the transcript of the session that built it.
@@ -1043,11 +1047,15 @@ internally.
 This agrees with [[gate-evidence-is-per-commit]]: "a gate runs ONCE, at the end, against the tree
 you are reporting — not behind every commit."
 
-## What CI does NOT see on a pull request
+## What CI does NOT see on a pull request (or on a default branch dispatch)
 
-Everything carrying `if: github.event_name != 'pull_request'`: `Tests (release)`
-(`cargo test --all --release`), `platform-gates-macos`, the `macOS tests (hosted)` job, and steps
-inside `postgres-parity` and `dynamodb-local`. Verified against `ci.yml` again on 2026-09-18.
+Everything carrying `if: needs.lint.outputs.full == 'true'`: `Tests (release)`
+(`cargo test --all --release`), the `macOS tests (hosted)` job, and the release steps inside
+`postgres-parity` and `dynamodb-local`. Since 6j6v.ee3e a branch dispatch without `-f full=true`
+skips the same set. `platform-gates-macos` (a short clippy on the org's own Mac) still carries
+`if: github.event_name != 'pull_request'` - that line is a security boundary pinned by
+`cargo xtask runners check` - so it runs on every dispatch, debug or full. Verified against
+`ci.yml` on 2026-11-03.
 
 CORRECTED 2026-09-05: this memory used to say that `#[cfg(target_os = "macos")]` tests run
 NOWHERE in CI. That is no longer true. There is now a dedicated `macOS tests (hosted)` job
@@ -1077,7 +1085,25 @@ No conflict at the core, but two sentences that are easy to misread:
 - "Verify GREEN — other tests still pass" and the checklist item "All tests pass" must NOT be read
   as a local `cargo test --all` per cycle. CI supplies that assurance here.
 
-## The one full run belongs BEFORE the merge — via workflow_dispatch
+## The one full run belongs BEFORE the merge — via workflow_dispatch -f full=true, by the merging step
+
+UPDATED 2026-11-03 (6j6v.ee3e). The coder's dispatches are debug-only now. The full both-profile
+gate runs ONCE per work order, before the merge, dispatched by the MERGING step - not by the coder
+on every push:
+
+    gh workflow run ci.yml --ref <branch> -f full=true
+
+and the merge waits for that run to go green (check its headSha, and that its title ends in
+`: full gate`). A release-only or macOS-only break then still surfaces while it belongs to a pull
+request.
+
+ON MAIN, THE PUSH RUN IS THE PROOF - NEVER DISPATCH ANOTHER RUN THERE. Measured 2026-11-02: right
+after a merge the merging step dispatched an extra full run on main while main's push run had just
+started. Nothing is cancelled on main (a push run there is main's standing record of green), so the
+dispatch queued behind the push run for an hour - and the push run alone already proved main green.
+After the merge, watch main's PUSH run for the merge commit; that run is always full.
+
+The rest of this section is the 2026-09-03 history of why the full run moved before the merge.
 
 MEASURED 2026-09-03 over the last 20 ci.yml runs:
 
@@ -1096,14 +1122,17 @@ way is NOT `pull_request` — so the release tests and the macOS lane come along
     After mitigating the review findings, after the last push, BEFORE the merge:
     dispatch ci.yml on the branch once and wait for green.
 
-Once per work order, not per push. Cost ~13 min, once. Gain: `main` does not go red, the release
+Once per work order, not per push. Cost ~13 min, once (2026-09 figure; a full run took 80+ min by
+November). Gain: `main` does not go red, the release
 is not blocked, and a release-only break surfaces while it still belongs to a pull request.
 
-A dispatch is also the ONLY way to get macOS coverage on a feature branch, because a PR run renders
-both macOS lanes `skipping` — confirmed on PR #478. And a dispatch cancels nothing: `ci.yml`'s
-`cancel-in-progress` is `${{ github.event_name == 'pull_request' }}`, evaluated on the run being
-QUEUED, so dispatching beside an open PR is safe (counter-measured over three dispatches on PR
-#465, one of them two seconds after the PR run started — all six runs completed `success`).
+A FULL dispatch is also the only way to get the hosted macOS test lane on a feature branch, because a
+PR run and a default dispatch render it `skipping`. CANCELLING (since 6j6v.ee3e): `ci.yml`'s
+`cancel-in-progress` is true for a `pull_request` run and for a `workflow_dispatch` on any ref that
+is not `main` or a `release/<major>.<minor>` line, evaluated on the run being QUEUED, and the group is
+`ci-<ref>`. So a dispatch never cancels the PR run (refs/pull/N/merge is another group), but a newer
+dispatch on the same branch DOES cancel an older one, full or not - so do not dispatch a debug run on
+a branch while the merging step's full run is still going there.
 
 This does not work on a fork PR (nobody can dispatch there) — which becomes relevant the moment
 the repository is made public.
