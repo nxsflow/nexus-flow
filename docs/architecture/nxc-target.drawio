@@ -1,0 +1,261 @@
+<mxfile host="65bd71144e">
+    <diagram id="nxc-target" name="nxc — target architecture">
+        <mxGraphModel dx="1467" dy="734" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1830" pageHeight="1120" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=28;fontStyle=1;fontColor=#1C1C1C;fontFamily=Merriweather;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%3A700%2C900;" value="nxc — target architecture (rebuild, epic 6j6v.2vtw)" vertex="1">
+                    <mxGeometry height="40" width="1300" x="40" y="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="sub" parent="1" style="text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=12;fontColor=#6B6B6B;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="One owner per run · events in · contracts first. Green: the core every host runs. Blue: other products and services. Dashed arrows: across machines through the relay." vertex="1">
+                    <mxGeometry height="24" width="1500" x="40" y="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_dev" parent="1" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9A9A94;dashed=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontColor=#1C1C1C;fontSize=16;fontStyle=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="Developer machine (e.g. MacBook) — nxs service, developer-machine profile" vertex="1">
+                    <mxGeometry height="990" width="1150" x="30" y="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="surf" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Surfaces&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;nxc CLI (three distinct actions, nxc watch), agents&#39; Bash, Engine API — append events, read status; never decide&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="330" x="60" y="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="decl" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Declarations&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;personas, channels, workflows as data · permissions · gate rules · context spec · who may call whom · trust confirmation&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="330" x="430" y="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="ctx" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Context assembler&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;standing context: ticket (nxf), rules (nxm), callable personas (nxc) · run context: verdicts, answers, status · built at session start, cached per run&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="350" x="800" y="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="inbox" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Event inbox&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;append-only · idempotency keys · commissions, replies, notes, facts, decisions · ordered per run and per sender&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="100" width="330" x="60" y="300" as="geometry"/>
+                </mxCell>
+                <mxCell id="engine" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Run engine — one state machine per run&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;pure reducer over the run&#39;s events · timers as data · human gates · failure classes · inbox routing via the entry persona · side threads · coalesced triggers · steppable, host-agnostic&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="130" width="330" x="430" y="290" as="geometry"/>
+                </mxCell>
+                <mxCell id="status" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Status engine&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;read model · value-free notifications (run, seq) · closed reason codes · finished runs kept · &#39;needs a person&#39; events&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="100" width="350" x="800" y="300" as="geometry"/>
+                </mxCell>
+                <mxCell id="store" parent="1" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=center;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Coordination store&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;own SQLite file · single writer · compare-and-set · per-run sequence · compaction&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="100" width="330" x="430" y="470" as="geometry"/>
+                </mxCell>
+                <mxCell id="sched" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Scheduler&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;machine-wide compute budget · applies the priority policy (no judgement) · visible queue · waiting steps give compute back&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="100" width="330" x="60" y="470" as="geometry"/>
+                </mxCell>
+                <mxCell id="mon" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Resource monitor&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;heavy jobs per process tree (cargo, Playwright) · CPU, memory, free disk, load&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="80" width="330" x="60" y="610" as="geometry"/>
+                </mxCell>
+                <mxCell id="wcm" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Working-copy manager&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;worktree per run · shared build cache · verified hand-over (branch, commit, clean) · external leases · nxf/nxm/nxc resolve to the main workspace&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="110" width="350" x="800" y="470" as="geometry"/>
+                </mxCell>
+                <mxCell id="runtime" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Session runtime&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;start spec in, facts out (heartbeat, replied, ended, usage, refusals) · decides nothing&lt;br&gt;adapters: Claude Agent SDK · Codex · Gemini CLI · Kiro CLI · local models&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="120" width="330" x="430" y="620" as="geometry"/>
+                </mxCell>
+                <mxCell id="sessions" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Agent sessions&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;work in their worktree · may open side threads to callable personas · answers return to the asker&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="80" width="330" x="430" y="790" as="geometry"/>
+                </mxCell>
+                <mxCell id="db" parent="1" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=center;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;db.sqlite (synced)&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;chat model (messages, threads) · nxf board · nxm memory&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="100" width="350" x="800" y="630" as="geometry"/>
+                </mxCell>
+                <mxCell id="sync" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F5FFE6;strokeColor=#84CC16;strokeWidth=2;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Sync (nxs) — extended for nxc&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;ops + run events, status, notifications · ordered and gap-free · signed commissions · target machine, exactly-once on wake · machine liveness and health · opt-in evidence&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="120" width="350" x="800" y="780" as="geometry"/>
+                </mxCell>
+                <mxCell id="note_dev" parent="1" style="text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=12;fontColor=#6B6B6B;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="The machine executes only commissions signed by a person or delegation it trusts. Local agents work offline: delegations are verified on the machine; tokens are needed only at the network boundary." vertex="1">
+                    <mxGeometry height="50" width="700" x="60" y="920" as="geometry"/>
+                </mxCell>
+                <mxCell id="relay" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D4D4CF;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Relay&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;signed op streams per workspace / person · per-stream authorisation · auth log and delegation ops (a0y8) · snapshots&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="120" width="260" x="1230" y="640" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_mf" parent="1" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#7A9CC6;dashed=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontColor=#1C1C1C;fontSize=16;fontStyle=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="manufakt.io (web + iPhone) — experiences on top of the contracts" vertex="1">
+                    <mxGeometry height="470" width="560" x="1230" y="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="cockpit" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#7A9CC6;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Remote cockpit&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;run as a sequence of steps · sessions · evidence · machine health · commission from the phone&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="500" x="1260" y="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="policy" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#7A9CC6;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Priority policy (Head of Product)&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;ranked, explicit priorities with reasons · owner overrides · sets order, never approvals&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="500" x="1260" y="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="reach" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#7A9CC6;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Reaching the owner&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;push notifications · escalation and approval UI · gate answers signed with the person&#39;s identity&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="90" width="500" x="1260" y="400" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_prod" parent="1" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#7A9CC6;dashed=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontColor=#1C1C1C;fontSize=16;fontStyle=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="Product server (e.g. nexflow.it helpers)" vertex="1">
+                    <mxGeometry height="200" width="560" x="1230" y="800" as="geometry"/>
+                </mxCell>
+                <mxCell id="prod" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#7A9CC6;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Same run engine, product profile&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;short bounded steps · storage trait → the product&#39;s backend · external timers · session runtime on a platform-chosen host · coalesced event triggers · no scheduler, no worktrees&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="120" width="500" x="1260" y="850" as="geometry"/>
+                </mxCell>
+                <mxCell id="ident" parent="1" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#7A9CC6;align=left;spacingLeft=14;spacingRight=14;verticalAlign=middle;fontColor=#1C1C1C;fontSize=13;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;" value="&lt;b&gt;Identity broker&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6B6B6B&quot; style=&quot;font-size: 12px;&quot;&gt;delegation per agent (a0y8) · scoped, revocable · short-lived tokens at the network boundary&lt;/font&gt;" vertex="1">
+                    <mxGeometry height="120" width="260" x="1530" y="640" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" edge="1" parent="1" source="surf" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0;" target="inbox" value="append event">
+                    <mxGeometry relative="1" x="-0.5264" y="-41" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e2" edge="1" parent="1" source="inbox" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="engine" value="in order">
+                    <mxGeometry relative="1" x="-0.1111" y="-10" as="geometry">
+                        <mxPoint x="10" y="-10" as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e3" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="store" value="persist (CAS)">
+                    <mxGeometry relative="1" x="-0.4212" y="37" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e4" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" target="status" value="state changed">
+                    <mxGeometry relative="1" x="-0.0244" y="-13" as="geometry">
+                        <mxPoint x="13" y="-13" as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e5" edge="1" parent="1" source="status" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.8;entryY=1;entryDx=0;entryDy=0;" target="surf" value="subscribe / read">
+                    <mxGeometry relative="1" x="0.6355" y="-8" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="975" y="272"/>
+                            <mxPoint x="324" y="272"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e6" edge="1" parent="1" source="decl" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="engine" value="pinned definition">
+                    <mxGeometry relative="1" x="-0.592" y="50" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e7" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.7;entryY=0;entryDx=0;entryDy=0;" target="sched" value="request session">
+                    <mxGeometry relative="1" x="0.4172" y="8" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="480" y="452"/>
+                            <mxPoint x="291" y="452"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e8" edge="1" parent="1" source="mon" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="sched" value="load, heavy jobs">
+                    <mxGeometry relative="1" x="0.1315" y="47" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e9" edge="1" parent="1" source="sched" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.8;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;" target="runtime" value="grant">
+                    <mxGeometry relative="1" x="-0.5365" y="-20" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="405" y="550"/>
+                            <mxPoint x="405" y="716"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e10" edge="1" parent="1" source="ctx" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="runtime" value="context for the start spec">
+                    <mxGeometry relative="1" x="0.0654" y="8" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1168" y="205"/>
+                            <mxPoint x="1168" y="600"/>
+                            <mxPoint x="595" y="600"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e11" edge="1" parent="1" source="runtime" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="sessions" value="start via adapter">
+                    <mxGeometry relative="1" x="-0.3684" y="49" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e12" edge="1" parent="1" source="runtime" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#65A30D;strokeWidth=2;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0;exitY=0.3;exitDx=0;exitDy=0;entryX=0.73;entryY=1;entryDx=0;entryDy=0;" target="inbox" value="facts">
+                    <mxGeometry relative="1" x="0.5058" y="-11" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="418" y="656"/>
+                            <mxPoint x="418" y="432"/>
+                            <mxPoint x="300" y="432"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e13" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.9;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="wcm" value="claim / hand over">
+                    <mxGeometry relative="1" x="0.142" y="8" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="790" y="407"/>
+                            <mxPoint x="790" y="440"/>
+                            <mxPoint x="975" y="440"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e14" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.97;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="db" value="post messages">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="776" y="416"/>
+                            <mxPoint x="776" y="680"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e15" edge="1" parent="1" source="status" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.9;entryY=0;entryDx=0;entryDy=0;" target="sync" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1185" y="350"/>
+                            <mxPoint x="1185" y="760"/>
+                            <mxPoint x="1115" y="760"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e16" edge="1" parent="1" source="db" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="sync" value="ops">
+                    <mxGeometry relative="1" x="-0.3684" y="16" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x1" edge="1" parent="1" source="sync" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.3;entryY=1;entryDx=0;entryDy=0;" target="relay" value="push / pull, in order">
+                    <mxGeometry relative="1" x="0.8585" y="59" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1308" y="840"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x2" edge="1" parent="1" source="relay" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=0.1;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="cockpit" value="run state, notifications">
+                    <mxGeometry relative="1" x="-0.5086" y="-64" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1256" y="620"/>
+                            <mxPoint x="1245" y="620"/>
+                            <mxPoint x="1245" y="205"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x3" edge="1" parent="1" source="reach" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.7;entryY=0;entryDx=0;entryDy=0;" target="relay" value="signed gate answers, notes">
+                    <mxGeometry relative="1" x="0.5306" y="-8" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1510" y="605"/>
+                            <mxPoint x="1412" y="605"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x4" edge="1" parent="1" source="policy" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.95;entryY=0;entryDx=0;entryDy=0;" target="relay" value="priority policy">
+                    <mxGeometry relative="1" x="0.1582" y="-10" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1775" y="325"/>
+                            <mxPoint x="1775" y="625"/>
+                            <mxPoint x="1477" y="625"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x5" edge="1" parent="1" source="prod" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.8;entryY=1;entryDx=0;entryDy=0;" target="relay" value="ops">
+                    <mxGeometry relative="1" x="0.8311" y="-19" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1510" y="800"/>
+                            <mxPoint x="1438" y="800"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="x6" edge="1" parent="1" source="ident" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#5B7FB0;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="relay" value="">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x7" edge="1" parent="1" source="sync" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6B6B6B;fontSize=11;fontColor=#4A4A4A;labelBackgroundColor=#FFFFFF;endArrow=block;endFill=1;fontFamily=Merriweather Sans;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DMerriweather%2BSans%3A300%2C400%2C700;;dashed=1;;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="sched" value="priority policy, commissions (from the relay)">
+                    <mxGeometry relative="1" x="0.0041" y="-11" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="905" y="1040"/>
+                            <mxPoint x="45" y="1040"/>
+                            <mxPoint x="45" y="520"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
