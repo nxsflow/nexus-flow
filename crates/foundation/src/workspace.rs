@@ -140,6 +140,21 @@ impl Workspace {
             None => discover(start),
         }
     }
+
+    /// Load the workspace whose root is EXACTLY `root` — its own `.nxs/` — and nothing else: no
+    /// walk upwards and no legacy `.nexusflow/` migration. For a caller that holds a registered
+    /// path and must not answer with whatever workspace lies above it (`nxc liveness
+    /// --everywhere`, nxf 6j6v.t7xp). A root with no `.nxs/replica.toml` is `no_workspace`.
+    pub fn at(root: &Path) -> Result<Workspace> {
+        let dir = root.join(WORKSPACE_DIR);
+        if !dir.join("replica.toml").is_file() {
+            return Err(NxfError::no_workspace(format!(
+                "no workspace at {}",
+                root.display()
+            )));
+        }
+        load(&dir)
+    }
 }
 
 /// Walk up from `start` looking for the nearest workspace directory with a replica file. A legacy
@@ -666,6 +681,52 @@ mod tests {
         assert!(
             msg.contains(&missing.join("replica.toml").display().to_string()),
             "error names the full path it tried: {msg}"
+        );
+    }
+
+    /// `Workspace::at` loads the root's OWN workspace and nothing above it: a subdirectory of a
+    /// workspace is `no_workspace` there, and a legacy `.nexusflow/` is neither used nor renamed.
+    #[test]
+    fn at_loads_only_the_roots_own_workspace() {
+        let tmp = TempDir::new().unwrap();
+        init(
+            tmp.path(),
+            &cfg_with_section("flow", "plugin", "issue-tracker"),
+        )
+        .unwrap();
+        assert_eq!(
+            Workspace::at(tmp.path()).expect("its own").dir,
+            tmp.path().join(WORKSPACE_DIR)
+        );
+
+        let sub = tmp.path().join("a");
+        std::fs::create_dir_all(&sub).unwrap();
+        let err = Workspace::at(&sub).expect_err("a parent's workspace is not this one");
+        assert!(
+            matches!(err.kind, crate::error::ErrorKind::NoWorkspace),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&format!("no workspace at {}", sub.display())),
+            "{err}"
+        );
+
+        let legacy = TempDir::new().unwrap();
+        std::fs::create_dir_all(legacy.path().join(LEGACY_WORKSPACE_DIR)).unwrap();
+        std::fs::write(
+            legacy
+                .path()
+                .join(LEGACY_WORKSPACE_DIR)
+                .join("replica.toml"),
+            "",
+        )
+        .unwrap();
+        Workspace::at(legacy.path()).expect_err("a legacy dir is not loaded in place");
+        assert!(legacy.path().join(LEGACY_WORKSPACE_DIR).is_dir());
+        assert!(
+            !legacy.path().join(WORKSPACE_DIR).exists(),
+            "never migrated"
         );
     }
 

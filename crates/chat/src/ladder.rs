@@ -166,7 +166,7 @@ impl RecoveryAction {
         }
     }
 
-    fn parse(raw: &str) -> Option<RecoveryAction> {
+    pub(crate) fn parse(raw: &str) -> Option<RecoveryAction> {
         Some(match raw {
             "asked" => RecoveryAction::Asked,
             "continued" => RecoveryAction::Continued,
@@ -627,6 +627,31 @@ impl ChatStore {
             .query_map(params![thread, role], log_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// **The whole workspace's record over a window** (nxf 6j6v.t7xp) — every row with
+    /// `from <= at < to`, compared as instants (a row whose `at` does not parse is outside every
+    /// window), ordered by `(thread, role, id)`: the liveness report's one read.
+    ///
+    /// **It reads the whole table and filters here**, so its cost follows the log's size, not the
+    /// window's. That is deliberate: `at` is compared as an INSTANT, and a stored `at` with an
+    /// offset (`+02:00`) does not sort as text among `Z` instants, so a SQL `WHERE at >= ?` would
+    /// drop rows that lie inside the window. The log is bounded by
+    /// [`forget_recovery_before`](Self::forget_recovery_before), which compares the same way.
+    pub(crate) fn recovery_log_between(&self, from: &str, to: &str) -> Result<Vec<RecoveryLogRow>> {
+        let conn = self.connection();
+        let mut st = conn.prepare(&format!(
+            "SELECT {LOG_COLS} FROM recovery_log ORDER BY thread, role, id"
+        ))?;
+        let rows = st
+            .query_map([], log_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| {
+                !crate::stranded::earlier(&r.at, from) && crate::stranded::earlier(&r.at, to)
+            })
+            .collect())
     }
 
     /// The slot's newest row of `action`, `None` before its first.

@@ -840,6 +840,40 @@ impl Engine {
         self.handle.workspace()
     }
 
+    /// **The liveness report of this workspace** (nxf 6j6v.t7xp; design 6j6v.pszd 6.4 as amended)
+    /// — the seam `nxc liveness` composes: counts, episodes and the per-policy summary the owner
+    /// compares policies A, B and C by, read from the ladder's own `recovery_log` rows.
+    ///
+    /// **Owner only.** Every other reader is refused `forbidden`, a [`Reader::Handle`] included:
+    /// the report exposes every operation's recovery history (round 3 CQ #3 / IR #6), so this
+    /// deliberately does not admit the way the conversation reads do.
+    ///
+    /// One workspace — this handle's: its identity from [`Engine::workspace`], its policy from
+    /// [`Engine::liveness_policy`]. `window` defaults to the seven days up to `now`.
+    pub fn liveness(
+        &self,
+        reader: Reader<'_>,
+        now: &str,
+        window: Option<facade::LivenessWindow<'_>>,
+    ) -> Result<facade::LivenessReport> {
+        facade::admit_liveness_reader(reader)?;
+        let (from, to) =
+            facade::resolve_liveness_window(now, window.map(|w| w.from), window.map(|w| w.to))?;
+        let window = facade::LivenessWindow {
+            from: &from,
+            to: &to,
+        };
+        let workspace = facade::LivenessWorkspace::of(&self.workspace())?;
+        let block = self
+            .handle
+            .try_with_state(|s| facade::liveness(&s.store, window, &workspace, &self.liveness))?;
+        Ok(facade::LivenessReport {
+            from: window.from.to_string(),
+            to: window.to.to_string(),
+            workspaces: vec![facade::WorkspaceBlock::Read(block)],
+        })
+    }
+
     /// **The liveness policy this handle runs its ladder under** (nxf 6j6v.t0jn; design 6j6v.pszd,
     /// 6.1): the `[chat.liveness]` section of the workspace it loaded, read once at open, with what
     /// that read found wrong — an invalid value or an unknown key, each of which ran the default
