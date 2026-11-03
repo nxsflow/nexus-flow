@@ -125,10 +125,10 @@ jobs:
   # BUNDLE build, both lean feature variants, the platform gates, `postgres-parity` and
   # `dynamodb-local` — not just the two `cargo test` invocations that were mirrored here.
   #
-  # `push` runs and FULL-GATE `workflow_dispatch` runs ONLY. That is not a formality: `ci.yml`'s
-  # release-profile steps run only when its `lint` job calls the run a full gate, so a
-  # `pull_request` run — and, since 6j6v.ee3e, a branch dispatch without `-f full=true` — is a
-  # DIFFERENT, smaller gate. The release profile catches a class that has shipped before (a side effect inside
+  # `push` runs, and `workflow_dispatch` runs whose `Tests (release)` step succeeded, ONLY. That is
+  # not a formality: `ci.yml`'s release-profile steps run only on a full gate, so a `pull_request`
+  # run — and, since 6j6v.ee3e, a branch dispatch without `-f full=true` — is a DIFFERENT, smaller
+  # gate. The release profile catches a class that has shipped before (a side effect inside
   # `debug_assert!`, compiled out and silently no-op) and accepting a PR run would quietly drop it.
   ci-green:
     runs-on: ubuntu-latest

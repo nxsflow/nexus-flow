@@ -20,6 +20,10 @@ on:
     # tagging a commit on `main` or on a maintenance line, and the push run on THAT branch is the
     # full both-profile gate (see `Tests (release)` below) — the preparation branch's own push run
     # only ever re-answered the question its PR run had already answered.
+    #
+    # The same set of refs is spelled twice more for dispatches (6j6v.ee3e): in the `concurrency`
+    # expression (never cancel there) and in the `lint` job's `full` output (always full there,
+    # with `run-name` repeating it for the title). Change one, look at the others.
     branches: [main, "release/[0-9]+.[0-9]+"]
   pull_request:
   # Dispatching this workflow on a branch is how an agent gets CI as its gate (the memory
@@ -39,12 +43,14 @@ on:
         type: boolean
         default: false
 
-# The title of a dispatched run says which gate it ran (6j6v.ee3e), because that is the ONE place
-# the REST API exposes it: `require-green-ci.sh` counts a dispatch toward a release only when its
-# title ends in `: full gate`. The condition is the `lint` job's `full` output below, spelled again
-# — a job-level `if:` cannot read a workflow-level value, and `run-name` cannot read a job's
-# output — so the two must change together. Push and pull-request runs evaluate to '' here, which
-# leaves GitHub's default title (the commit subject, the PR title) in place.
+# The title of a dispatched run says which gate it ran (6j6v.ee3e) — FOR HUMANS ONLY. The
+# condition is the `lint` job's `full` output below, spelled again (a job-level `if:` cannot read
+# a workflow-level value, and `run-name` cannot read a job's output), so the two should change
+# together; but nothing that gates depends on this copy. `require-green-ci.sh` never reads the
+# title: it counts a dispatch toward a release only when the run's `quality-gates` › `Tests
+# (release)` step concluded `success`, so a title that drifted from the jobs can mislabel a run
+# but can never green-light a tag. Push and pull-request runs evaluate to '' here, which leaves
+# GitHub's default title (the commit subject, the PR title) in place.
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
   && format('CI on {0}: {1}', github.ref_name,
@@ -97,7 +103,12 @@ jobs:
   # It is also where the run decides whether it is a FULL gate (output `full`): a push to `main` or
   # a `release/<major>.<minor>` line, a dispatch there, or a dispatch with `-f full=true`. Every
   # release-profile step and the hosted macOS lane run only then; a pull request and a default
-  # branch dispatch are debug-only. The same condition is spelled once more in `run-name` above.
+  # branch dispatch are debug-only. The same condition is spelled once more in `run-name` above
+  # (cosmetic: the release gate reads the `Tests (release)` step's conclusion, not the title).
+  # "Maintenance line" is spelled `release/` but not `release/v` here and in `concurrency`, which
+  # is wider than the `push:` filter's `release/[0-9]+.[0-9]+` (expressions have no regex); a
+  # dispatch on some other `release/x` ref is treated as a maintenance line — full, never
+  # cancelled — which errs toward MORE gate, not less.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 30

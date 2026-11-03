@@ -790,13 +790,15 @@ order (6j6v.rvyp):
 ```bash
 gh workflow run ci.yml      --ref <branch> -f full=true   # 1. the full both-profile gate ON THAT BRANCH
 # …wait for that run to go green (~20-25 min, both profiles) — step 2 reads its verdict…
+# (do not dispatch ci.yml on that branch again meanwhile: the newer dispatch cancels this one)
 gh workflow run release.yml --ref <branch>   # 2. the rehearsal itself → staging bucket, no release
 ```
 
 Step 1 is not optional and not a formality: `release.yml`'s `ci-green` gate counts only `push` runs
 and FULL-GATE `workflow_dispatch` runs of `ci.yml` (a `pull_request` run skips the release-profile
-tests, §5.1; so does a branch dispatch without `-f full=true` since 6j6v.ee3e — its run title ends in
-`: debug only`, and the gate counts a dispatch only when the title ends in `: full gate`),
+tests, §5.1; so does a branch dispatch without `-f full=true` since 6j6v.ee3e — the gate counts a
+dispatch only when its `quality-gates` › `Tests (release)` step concluded `success`, whatever the
+run's title says),
 while `ci.yml`'s own push filter is narrowed to `main` and `release/<major>.<minor>`. A feature
 branch therefore produces *only* runs that do not count, and dispatching `release.yml` first fails
 after a five-minute wait with `no green ci.yml run for commit <sha>`. Reproduced 2026-08-08: run

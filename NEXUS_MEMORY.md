@@ -1093,8 +1093,9 @@ on every push:
 
     gh workflow run ci.yml --ref <branch> -f full=true
 
-and the merge waits for that run to go green (check its headSha, and that its title ends in
-`: full gate`). A release-only or macOS-only break then still surfaces while it belongs to a pull
+and the merge waits for that run to go green (check its headSha, and that its quality-gates step
+`Tests (release)` concluded success - the title `: full gate` is only a label; the release gate
+`require-green-ci.sh` reads the step, never the title). A release-only or macOS-only break then still surfaces while it belongs to a pull
 request.
 
 ON MAIN, THE PUSH RUN IS THE PROOF - NEVER DISPATCH ANOTHER RUN THERE. Measured 2026-11-02: right

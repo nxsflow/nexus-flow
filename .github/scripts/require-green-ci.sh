@@ -16,10 +16,13 @@
 #     smaller gate — and the release profile catches a class (a side effect inside `debug_assert!`,
 #     compiled out of release and silently no-op) that has shipped from this repo once already.
 #   - A dispatch is NOT full by being a dispatch (6j6v.ee3e): on a feature branch it runs the debug
-#     profile only unless dispatched with `-f full=true`. `ci.yml`'s `run-name` titles every
-#     dispatch `CI on <ref>: full gate` or `CI on <ref>: debug only`, from the same condition the
-#     jobs use, and this gate counts a dispatch only when its title ENDS in `: full gate`. Anything
-#     else — the debug title, no title, a renamed workflow — is not a pass.
+#     profile only unless dispatched with `-f full=true`. So a green dispatch counts only when the
+#     run's own JOBS say the release profile ran: its `quality-gates` job has a `Tests (release)`
+#     step that concluded `success`. Skipped, missing, renamed — not a pass. The run's TITLE
+#     (`CI on <ref>: full gate` / `: debug only`, from `ci.yml`'s `run-name`) is for humans and is
+#     deliberately not read: it is computed from a second spelling of the condition the jobs use,
+#     and a title that drifted from the jobs must not be able to green-light a tag (review of
+#     6j6v.ee3e, Test Quality #1). A failing jobs lookup fails the gate like any other `gh` call.
 #
 # It waits rather than failing instantly when a run for the commit is still going: tagging the
 # instant a merge lands is normal, and "come back in fifteen minutes" is not a verdict. Both waits
@@ -72,11 +75,19 @@ runs_for_sha() {
   gh api --paginate \
     "repos/${GH_REPO}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&per_page=100" \
     --jq '.workflow_runs[]
-          | select(.event == "push"
-                   or (.event == "workflow_dispatch"
-                       and ((.display_title // "") | endswith(": full gate"))))
+          | select(.event == "push" or .event == "workflow_dispatch")
           | {id, status, conclusion, event, html_url}' \
     | jq -s '.'
+}
+
+# Did this (dispatch) run's `quality-gates` › `Tests (release)` step conclude `success`? Prints
+# `yes` or `no`. The assignment is a plain statement on purpose: inside `if`/`&&` bash would
+# suspend `set -e`, and a jobs lookup that fails must stop the gate, not read as `no` — or worse.
+release_profile_ran() { # <run-id>
+  local conclusions
+  conclusions="$(gh api --paginate "repos/${GH_REPO}/actions/runs/$1/jobs?per_page=100" \
+    --jq '.jobs[] | select(.name == "quality-gates") | .steps[]? | select(.name == "Tests (release)") | .conclusion')"
+  if printf '%s\n' "$conclusions" | grep -qx success; then echo yes; else echo no; fi
 }
 
 # One line per run, for a human reading a failed release.
@@ -88,8 +99,21 @@ start="$(date +%s)"
 while :; do
   runs="$(runs_for_sha)"
 
+  # A green push run is full by construction (push runs exist only on `main` and maintenance lines,
+  # where `ci.yml` always runs both profiles). A green dispatch must prove it, run by run.
   green="$(printf '%s' "$runs" \
-    | jq -r '[.[] | select(.status == "completed" and .conclusion == "success")] | first // empty | .html_url')"
+    | jq -r '[.[] | select(.event == "push" and .status == "completed" and .conclusion == "success")] | first // empty | .html_url')"
+  if [ -z "$green" ]; then
+    for id in $(printf '%s' "$runs" \
+      | jq -r '.[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success") | .id'); do
+      ran="$(release_profile_ran "$id")"
+      if [ "$ran" = yes ]; then
+        green="$(printf '%s' "$runs" | jq -r --argjson id "$id" '[.[] | select(.id == $id)] | first | .html_url')"
+        break
+      fi
+      echo "dispatch run ${id} is green but its Tests (release) did not run — a debug-only dispatch, not counted"
+    done
+  fi
   if [ -n "$green" ]; then
     echo "::notice::the quality gate is green for ${SHA} — ${green}"
     echo "the release trusts that run instead of repeating it"
