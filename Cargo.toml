@@ -28,3 +28,16 @@ version = "0.223.0"
 # full `cargo clean` — see the "Build cache" note in CLAUDE.md.
 [profile.dev]
 debug = "line-tables-only"
+
+# Optimise every THIRD-PARTY crate in the dev/test profile (nxf 6j6v.vewv). Measured on main run
+# 41648455950: `Tests (debug)` took 54 min of which 52.7 min was test EXECUTION (the warm compile
+# was 1m35s), and one binary — fold-ddb's `based_differential` — took 1731 s against 64 s in the
+# release run. A sample of that binary in debug put ~35% of its CPU in curve25519-dalek / sha2
+# (ed25519 signing of every generated op) and ~35% in the bundled SQLite's C parser and VM, both
+# built at -O0. Neither is workspace code, so they are optimised here and nothing else changes:
+# `"*"` matches NON-workspace packages only, so every workspace crate still builds at opt-level 0
+# with incremental compilation, and `debug-assertions` / `overflow-checks` stay ON for all of it —
+# the debug test run keeps catching what it exists to catch (a `debug_assert!` firing, an
+# overflow). The cost is paid once per dependency build and is held by the cache afterwards.
+[profile.dev.package."*"]
+opt-level = 2
