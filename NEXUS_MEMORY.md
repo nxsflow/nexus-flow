@@ -473,6 +473,19 @@ has reached tens of GB more than once. Two levers:
   "line-tables-only"` roughly halves `target/debug` while keeping file:line backtraces. It does
   not touch `debug_assert!` / `cargo test --release` (those gate on `cfg(debug_assertions)`, a
   separate knob). Nothing to run — it applies on the next build.
+- **Third-party crates are OPTIMISED in the dev/test profile** (6j6v.vewv, 2026-11-03):
+  `[profile.dev.package."*"] opt-level = 2` in the workspace `Cargo.toml`. `"*"` matches
+  non-workspace packages only, so workspace crates still build at opt-level 0 with incremental
+  compilation, and debug-assertions/overflow-checks stay on everywhere. Why: CI's
+  `Tests (debug)` had grown to 54 min, 52.7 of them EXECUTING tests (warm compile 1m35s, so
+  neither linking nor the number of test binaries was the cost). One binary, fold-ddb's
+  `based_differential`, took 1731 s against 64 s in release, and a sample put ~35% of its CPU in
+  curve25519-dalek/sha2 (ed25519 signing) and ~35% in the bundled SQLite, both at -O0. After the
+  change: `Tests (debug)` 14.5 min including the compile (run 41666096148, against 41648455950),
+  dynamodb-local's debug tests 8 min instead of 47, the same 335 binaries and 5833 tests. The
+  price is one slower dependency build (locally ~10 min once, on this machine), held by the cache
+  afterwards. Do not remove it to "speed up the build": the debug suite goes back to an hour. If
+  a debug test is slow again, sample it (`sample <pid> 15` on macOS) before reaching for shards.
 - **Prune by SIZE, not by age.** `cargo sweep --time 15` is the obvious call and it is the WRONG
   one here: churn on this workspace is roughly 60k files a day (parallel sessions, debug+release
   double builds, feature variants), so almost nothing is older than 15 days and the sweep reclaims
@@ -1162,6 +1175,8 @@ THE RULE, owner instruction of 2026-09-18:
    Clippy cannot lint a single file; the crate is its smallest scope. Not after every edit, not
    per fix round, not in the background-and-reissue loop described below. The 15-25 min
    measurement below still holds; it is now weighed against an 80+ min CI cycle.
+   (Since 6j6v.vewv, 2026-11-03, `Tests (debug)` is ~14.5 min again: third-party crates are
+   optimised in the dev profile, see [[build-test]]. The 61 min was -O0 crypto and SQLite.)
 2. Run ONLY the test file(s) covering the code you just changed (`cargo test -p <crate> --test
    <file>` / `--lib <module>`), plus `cargo fmt --all`, which costs seconds.
 3. Do NOT re-run neighbouring suites "to be safe". A cross-suite break is what CI is for.
