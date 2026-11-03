@@ -480,7 +480,8 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
          CREATE TABLE IF NOT EXISTS withdrawn_holders(
              scope_key    TEXT PRIMARY KEY,
              withdrawn_at TEXT NOT NULL,
-             by           TEXT NOT NULL
+             by           TEXT NOT NULL,
+             idle         INTEGER NOT NULL DEFAULT 0
          );
 
          -- **The sessions a withdrawal STOPPED, and whether the tick has asked them again** (nxf
@@ -811,7 +812,44 @@ pub fn try_apply_chat_views(conn: &Connection) -> rusqlite::Result<bool> {
              SELECT internal_id, thread FROM session_map WHERE thread IS NOT NULL;",
         )?;
     }
+    // **A withdrawal of an IDLE holder** (nxf 6j6v.3rrv): an operation that held the working copy
+    // with nothing running in it. Its park is a different occasion from a stopped round's, and the
+    // park commit says which, so the marker carries it. Device-local, NOT part of `upgraded` — no
+    // reducer writes the table; an existing row reads 0, a stopped round, which is what every
+    // marker written before this column was.
+    //
+    // In the `CREATE TABLE` above for a fresh store, so the ALTER runs only on an upgrade — and it
+    // tolerates a racer: this function runs unlocked on every open, so two processes opening an old
+    // store at once can both see the column missing, and the one that loses must not fail its open.
+    if !column_exists(conn, "withdrawn_holders", "idle")? {
+        add_the_idle_column(conn)?;
+    }
+    // **An advance the supervisor STOPPED for its requester** (nxf 6j6v.3rrv): a declared hurdle
+    // refused the next step, or the step could not be started. Nothing retries either — asking
+    // again is the requester's move — so the operation is waiting for a PERSON, and the
+    // stalled-chain rule must not take its working copy from under somebody fixing the tree. The
+    // row goes when a step of that channel thread opens. Device-local: the supervisor that stopped
+    // the advance runs on this machine.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS stopped_advances(
+             channel_thread TEXT PRIMARY KEY,
+             step           TEXT NOT NULL,
+             reason         TEXT NOT NULL,
+             at             TEXT NOT NULL
+         );",
+    )?;
     Ok(upgraded)
+}
+
+/// The upgrade of `withdrawn_holders` (nxf 6j6v.3rrv), with "duplicate column name" — another process
+/// added it between this one's look and its ALTER — read as the success it is.
+fn add_the_idle_column(conn: &Connection) -> rusqlite::Result<()> {
+    match conn
+        .execute_batch("ALTER TABLE withdrawn_holders ADD COLUMN idle INTEGER NOT NULL DEFAULT 0;")
+    {
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        other => other,
+    }
 }
 
 /// Whether a table exists (used to tell a fresh db — where `CREATE TABLE` installs the M2 columns —
@@ -856,6 +894,56 @@ mod tests {
             !try_apply_chat_views(&conn).unwrap(),
             "re-apply is idempotent: still no upgrade"
         );
+    }
+
+    /// nxf 6j6v.3rrv: a FRESH store gets `withdrawn_holders.idle` from its `CREATE TABLE` — the
+    /// ALTER is for an upgrade only, because this function runs unlocked on every open.
+    #[test]
+    fn a_fresh_store_has_the_idle_column_from_its_create_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE withdrawn_holders(
+                 scope_key TEXT PRIMARY KEY, withdrawn_at TEXT NOT NULL, by TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        // An OLD store: the upgrade adds it.
+        try_apply_chat_views(&conn).unwrap();
+        assert!(column_exists(&conn, "withdrawn_holders", "idle").unwrap());
+
+        let fresh = Connection::open_in_memory().unwrap();
+        try_apply_chat_views(&fresh).unwrap();
+        assert!(column_exists(&fresh, "withdrawn_holders", "idle").unwrap());
+        let sql: String = fresh
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'withdrawn_holders'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // SQLite rewrites the stored statement on an ALTER by appending `, idle INTEGER …` before
+        // the closing parenthesis; the schema's own `CREATE TABLE` lays the column out with the
+        // aligned spacing of its neighbours. Only the second is a fresh store's.
+        assert!(
+            sql.contains("idle         INTEGER"),
+            "the column is in the CREATE TABLE itself, not added by the upgrade: {sql}"
+        );
+    }
+
+    /// …and the upgrade survives losing a race: two processes opening an old store at once can both
+    /// see the column missing, and the second ALTER must read "duplicate column" as success.
+    #[test]
+    fn the_idle_upgrade_tolerates_a_racer_that_added_the_column_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE withdrawn_holders(
+                 scope_key TEXT PRIMARY KEY, withdrawn_at TEXT NOT NULL, by TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        add_the_idle_column(&conn).expect("the first adds it");
+        add_the_idle_column(&conn).expect("the one that lost the race does not fail its open");
+        assert!(column_exists(&conn, "withdrawn_holders", "idle").unwrap());
     }
 
     #[test]

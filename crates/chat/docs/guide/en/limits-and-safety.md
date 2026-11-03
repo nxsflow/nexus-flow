@@ -229,6 +229,14 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   round stopped escalates instead. A copy held by a chain that has simply died needs nobody to ask:
   the sweep below takes it on its own, past the bound or — since it can prove a chain is dead —
   inside it.
+
+  **It also takes back an operation that holds the copy with nothing running in it at all** — a
+  chain whose next step was never started, or a round held by an escalation nobody is going to
+  answer. This verb used to refuse that one with *nothing … is waiting or running*, which
+  was true and left nothing that could release the copy. Now its open threads are discharged, so
+  nothing is commissioned from it again, and the background tick parks its work and hands the copy
+  on as for a stopped round — under its own reason, `withdrawn_idle`, since no round was stopped. An operation that neither holds the copy nor runs anything is still
+  refused: there is nothing there to take back.
 - **How long a lease lasts: as long as the operation itself declared.** The bound is the latest
   `timeout:` still outstanding in the claim area — a round that says it has six hours holds the copy
   for six hours, and an operation whose steps *all* say minutes is reclaimable in minutes after a
@@ -237,6 +245,13 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   which is what every lease used to get regardless. So the two-hour number is now the answer for
   declarations that say nothing, not a budget imposed on ones that do — and a shorter bound is
   something you opt into by declaring `timeout:` along the chain.
+
+  **The bound is fixed when the lease is taken or renewed, and answering does not shorten it.** It
+  is the latest window outstanding at the moment the operation's last step was commissioned — not
+  the first thread's own deadline, and not recomputed as steps answer. A `coding` run whose last
+  rework step opened at 15:09 with `timeout: 6h` holds its bound until 21:09, even though its first
+  thread's deadline passed at 12:43. `nxc status` shows each thread's deadline; none of them is the
+  lease's bound unless it belongs to the step commissioned last.
 - **The backstop.** An abandoned lease stops refusing *future* acquisitions once its bound has
   passed, and a `tick` past that point hands the queue's turn out — a commission that parks schedules
   one for exactly that instant, so the drain happens with nobody around. (This page used to say the
@@ -268,6 +283,31 @@ collide **queues** instead of colliding. The mechanics, in the order they bite:
   on hold at an availability boundary, which has its own way back. An operation whose sessions all
   ended and handed the task back is **not** covered by this — it is waiting for you, and it keeps the
   thirty-minute rule above.
+
+  **One more shape counts as dead: a chain stalled on its own supervisor.** When the only thread
+  still owing an answer is a channel thread waiting on `__channel__` — the engine itself, which
+  opens the next step or consolidates — there is no session there to be dead. That operation is
+  taken when, besides the worker answering and nothing running: the newest session of each of its
+  threads has reported its end; nothing in it is queued for the copy or recorded as a start that failed; no hand-back
+  stands unanswered in it; no declared hurdle refused its next step (that waits for you — asking
+  again is your move, and nothing should take the copy from under you while you fix the tree); nothing of it is open across the border; nothing is on hold at an
+  availability boundary; and nothing at all has happened in it for five minutes — no thread opened,
+  no message posted, no session's end recorded. The five minutes are what keep this from catching
+  the moment between one step's end and the opening of the next. The park commit and the tick's line
+  name it as its own occasion, `stalled_on_its_supervisor`, not as a death. It was added after a run
+  whose advance to its next step was killed half-way (the sidecar's call timed out under a locked
+  database): the step it had answered was done, the next one was never started, and the copy was
+  held for hours with nothing that could ever move it.
+
+  The same incident left a step thread the engine had opened and never commissioned — no expected
+  answer, no message. A `tick` on the operation's first thread used to read it as a step still
+  working and answer `not_due` for ever; once it is five minutes old it is not counted as a step at
+  all, and the tick moves the chain on. Such a chain is revived rather than parked: while somebody
+  waits, the sweep arms that tick itself instead of taking the copy. That is one chance, not a
+  standing excuse: if a minute later the empty step is still the newest one — the tick could not move
+  the chain — the sweep parks it like any other stalled chain. With nobody waiting nothing
+  arms it before the empty step's own deadline — `nxc tick --thread <id>` on the operation's first
+  thread does it by hand.
 - **Whoever is already waiting goes first.** Reclaiming an expired lease hands the queue's turn out
   in the same step, so the chain that has been standing in line starts and the newcomer that just
   arrived takes its place at the back. This page used to be silent about it because the behaviour was

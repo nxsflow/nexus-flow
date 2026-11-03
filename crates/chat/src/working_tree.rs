@@ -1317,6 +1317,20 @@ impl ChatStore {
     /// literal rule the early follow-up costs a park the round may not have needed; the alternative
     /// cost the work. `orchestration::park_a_withdrawn_holder` carries the argument.
     pub fn note_withdrawn_holder(&mut self, scope_key: &str, by: &str, now: &str) -> Result<()> {
+        self.note_withdrawn_holder_as(scope_key, by, now, false)
+    }
+
+    /// [`Self::note_withdrawn_holder`], saying in the SAME statement whether the holder was IDLE —
+    /// nothing running in it to stop (nxf 6j6v.3rrv) — so its park can say truthfully why the copy
+    /// moved ([`crate::orchestration::ParkOccasion::WithdrawnIdle`]). One statement, so no reader can
+    /// find the marker without its kind.
+    pub(crate) fn note_withdrawn_holder_as(
+        &mut self,
+        scope_key: &str,
+        by: &str,
+        now: &str,
+        idle: bool,
+    ) -> Result<()> {
         let now = to_utc_rfc3339(now)?;
         // **Conditional on the lease it is about** (fix round 3 of this item's review, Code
         // Quality #5). `withdraw` reads the lease row and only afterwards discharges the round and
@@ -1329,14 +1343,82 @@ impl ChatStore {
         // round that never needed one. `SELECT ... WHERE EXISTS` in the one statement keeps the
         // read and the write atomic — no window between them for the lease to move in.
         self.connection().execute(
-            "INSERT INTO withdrawn_holders(scope_key, withdrawn_at, by)
-             SELECT ?1, ?2, ?3 WHERE EXISTS (
+            "INSERT INTO withdrawn_holders(scope_key, withdrawn_at, by, idle)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (
                  SELECT 1 FROM working_tree_lease WHERE scope_key = ?1
              )
-             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by",
-            params![scope_key, now, by],
+             ON CONFLICT(scope_key) DO UPDATE SET by = excluded.by, idle = excluded.idle",
+            params![scope_key, now, by, idle],
         )?;
         Ok(())
+    }
+
+    /// Whether the withdrawal standing for `scope_key` was one of an idle holder.
+    pub(crate) fn withdrawn_holder_is_idle(&self, scope_key: &str) -> Result<bool> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT idle FROM withdrawn_holders WHERE scope_key = ?1",
+                params![scope_key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some_and(|idle| idle != 0))
+    }
+
+    /// **Record that the supervisor STOPPED the advance of `channel_thread`** (nxf 6j6v.3rrv) — a
+    /// declared hurdle refused its next step, or the step could not be started. See the
+    /// `stopped_advances` table for why. A later stop of the same thread replaces the row.
+    pub(crate) fn note_stopped_advance(
+        &mut self,
+        channel_thread: &str,
+        step: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.connection().execute(
+            "INSERT INTO stopped_advances(channel_thread, step, reason, at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(channel_thread) DO UPDATE
+                SET step = excluded.step, reason = excluded.reason, at = excluded.at",
+            params![channel_thread, step, reason, now],
+        )?;
+        Ok(())
+    }
+
+    /// A step of `channel_thread` opened: whatever stopped its advance before is over.
+    pub(crate) fn forget_stopped_advance(&mut self, channel_thread: &str) -> Result<()> {
+        self.connection().execute(
+            "DELETE FROM stopped_advances WHERE channel_thread = ?1",
+            params![channel_thread],
+        )?;
+        Ok(())
+    }
+
+    /// Every stopped advance among `threads` goes — the operation was taken back (nxf 6j6v.3rrv).
+    pub(crate) fn forget_stopped_advances_in(&mut self, threads: &[String]) -> Result<()> {
+        if threads.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::to_string(threads).expect("thread ids serialize");
+        self.connection().execute(
+            "DELETE FROM stopped_advances WHERE channel_thread IN (SELECT value FROM json_each(?1))",
+            params![ids],
+        )?;
+        Ok(())
+    }
+
+    /// Whether any of `threads` has an advance standing STOPPED for its requester.
+    pub(crate) fn stopped_advance_in(&self, threads: &[String]) -> Result<bool> {
+        if threads.is_empty() {
+            return Ok(false);
+        }
+        let ids = serde_json::to_string(threads).expect("thread ids serialize");
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM stopped_advances
+                            WHERE channel_thread IN (SELECT value FROM json_each(?1)))",
+            params![ids],
+            |r| r.get::<_, bool>(0),
+        )?)
     }
 
     /// The marker recorded for `scope_key`, or `None` when its round was not withdrawn (or the copy
