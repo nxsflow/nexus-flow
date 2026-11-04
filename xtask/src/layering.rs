@@ -276,11 +276,11 @@ fn own_features(package: &Package, problems: &mut Vec<String>) {
 
 /// Who may import a new crate. A new crate's own imports are its row's business above.
 fn importer_rule(package: &Package, dep: &Dependency, problems: &mut Vec<String>) {
-    let imported = dep.name.as_str();
-    if !imported.starts_with(RUN_PREFIX) || imported == CONTRACTS {
+    let (importer, imported) = (package.name.as_str(), dep.name.as_str());
+    let guarded = imported.starts_with(RUN_PREFIX) && imported != CONTRACTS;
+    if !guarded || importer.starts_with(RUN_PREFIX) {
         return;
     }
-    let importer = package.name.as_str();
     let edge = format!("{importer} -> {imported}");
     if imported == HOST {
         if !HOST_IMPORTERS.contains(&importer) {
@@ -289,7 +289,7 @@ fn importer_rule(package: &Package, dep: &Dependency, problems: &mut Vec<String>
                 HOST_IMPORTERS.join(" and ")
             ));
         }
-    } else if !importer.starts_with(RUN_PREFIX) {
+    } else {
         problems.push(format!(
             "{edge}: {imported} is imported only by {RUN_PREFIX}* crates"
         ));

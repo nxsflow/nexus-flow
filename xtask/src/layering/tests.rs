@@ -137,6 +137,17 @@ fn an_edge_between_new_crates_outside_the_section_5_table_is_refused() {
 }
 
 #[test]
+fn a_new_crate_importing_the_host_outside_its_row_is_reported_once() {
+    let bad = with_dep("nexus-run-store-sqlite", dep("nexus-run-host"));
+    let problems = edge_problems(&bad);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("nexus-run-store-sqlite -> nexus-run-host"),
+        "{problems:?}"
+    );
+}
+
+#[test]
 fn a_new_crate_the_gate_has_no_row_for_is_refused() {
     let mut packages = legal();
     packages.push(pkg("nexus-run-other", vec![]));
