@@ -1,0 +1,17 @@
+[package]
+name = "nexus-run-contracts"
+version.workspace = true
+edition = "2021"
+description = "The four contracts of the nxc run engine as plain types: run events, storage trait, session start spec and facts, run status (DRAFT)"
+publish = false
+
+# Nothing from the workspace, ever: every new crate depends on this one, and any existing crate may
+# (spec 6j6v.zjyv §5). `cargo xtask layering check` holds the list below. serde_json stays WITHOUT
+# `preserve_order`: the goldens are byte-exact on sorted keys (memory
+# `golden-json-determinism-and-fixed-ids`).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+sha2 = "0.10"
+ulid = "1"

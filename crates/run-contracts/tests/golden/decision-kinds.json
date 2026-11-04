@@ -1,0 +1,26 @@
+{
+  "versions": [
+    {
+      "decision_kinds": [
+        "root_requested",
+        "claim_requested",
+        "run_queued",
+        "step_started",
+        "step_finished",
+        "rework",
+        "escalated",
+        "ceiling",
+        "timer_set",
+        "timer_cleared",
+        "liveness",
+        "held",
+        "parked",
+        "finishing",
+        "withdraw_forced",
+        "finished",
+        "ignored"
+      ],
+      "v": 1
+    }
+  ]
+}
