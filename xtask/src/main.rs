@@ -8,6 +8,7 @@ mod channels;
 mod deps;
 mod docs;
 mod facade;
+mod layering;
 mod macos_tests;
 mod platforms;
 mod runners;
@@ -66,6 +67,18 @@ enum Command {
     /// with its exceptions (nexus-flow-6j6v.2dn0; docs/runbooks/dependency-vulnerabilities.md).
     #[command(subcommand)]
     Deps(DepsCmd),
+    /// The nxc rebuild's layering gate: which crates may import which, the allowed external
+    /// dependencies, the size budget, no inline tests, and the engine's purity
+    /// (nexus-flow-6j6v.k8cw).
+    #[command(subcommand)]
+    Layering(LayeringCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum LayeringCmd {
+    /// Assert the dependency edges and sources of the `nexus-run-*` crates obey the layering rules
+    /// (CI gate, fail-closed).
+    Check,
 }
 
 #[derive(Subcommand, Debug)]
@@ -279,6 +292,10 @@ fn main() -> Result<()> {
         Command::MacosTests(MacosTestsCmd::Check) => {
             let inventory = macos_tests::check(&root)?;
             println!("macos-tests check ok — {inventory}");
+        }
+        Command::Layering(LayeringCmd::Check) => {
+            layering::run(&root)?;
+            println!("layering check: the nexus-run-* crates keep their edges and their budget");
         }
         Command::Deps(DepsCmd::Audit) => {
             println!("{}", deps::audit(&root)?);

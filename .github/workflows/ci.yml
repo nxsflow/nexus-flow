@@ -128,6 +128,18 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # The nxc rebuild's layering gate (6j6v.k8cw): which crates may import which, the external
+      # dependencies, the size budget, no inline tests, the engine's purity. A metadata and source
+      # lint, so it needs no engine build, and every later ticket of the rebuild is gated by it.
+      - name: Layering gate
+        run: cargo xtask layering check
+
+      # `decide` over the scripted cases in two separate processes, under a different clock and
+      # environment (6j6v.zjyv §11). It says so and passes until nexus-run-engine exists, and requires
+      # the test from then on.
+      - name: Engine determinism
+        run: bash .github/scripts/run-engine-determinism.sh
+
       # Without the sidecar bundle on purpose: `crates/chat/build.rs` embeds `None` when it is
       # absent and `NXF_EMBED_SIDECAR` is unset, and clippy lints the same code either way. The
       # bundle is built, required and run in `quality-gates`, where the binaries are tested.
