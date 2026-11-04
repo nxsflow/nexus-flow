@@ -1,7 +1,7 @@
 //! `ReasonCode` is one closed enum, and the list of §6.7 is generated from it. `tree_refused` is the
 //! only tree code in it; the detail is the separate closed `GitReason` and `TreeRefusal`.
 
-use nexus_run_contracts::{GitReason, ReasonCode, TreeRefusal, REMEDY_TABLE};
+use nexus_run_contracts::{GitReason, ReasonCode, SequenceKind, TreeRefusal, REMEDY_TABLE};
 use serde::Deserialize;
 
 /// §6.7 of the specification, typed in here on purpose: the one list that does not come from the enum.
@@ -63,6 +63,36 @@ fn the_golden_pins_the_reason_codes_the_git_reasons_and_the_tree_refusals() {
     assert_eq!(golden.reason_codes, ReasonCode::ALL);
     assert_eq!(golden.git_reasons, GitReason::ALL);
     assert_eq!(golden.tree_refusals, TreeRefusal::CODES);
+}
+
+/// The variant after `previous`, the first for `None`. The match is exhaustive on purpose: a new
+/// variant does not compile here until it is given its place in the walk.
+fn next_tree_refusal(previous: Option<&TreeRefusal>) -> Option<TreeRefusal> {
+    match previous {
+        None => Some(TreeRefusal::NotARepository),
+        Some(TreeRefusal::NotARepository) => Some(TreeRefusal::ForeignDirectory),
+        Some(TreeRefusal::ForeignDirectory) => Some(TreeRefusal::MidSequence {
+            what: SequenceKind::Merge,
+        }),
+        Some(TreeRefusal::MidSequence { .. }) => Some(TreeRefusal::Git {
+            reason: GitReason::FetchFailed,
+        }),
+        Some(TreeRefusal::Git { .. }) => None,
+    }
+}
+
+/// `CODES` is written by hand beside the enum, so this is what binds the two, and through them the
+/// golden, to the wire.
+#[test]
+fn the_tree_refusal_codes_are_what_every_variant_serialises_to() {
+    let first = next_tree_refusal(None);
+    let codes: Vec<String> = std::iter::successors(first, |r| next_tree_refusal(Some(r)))
+        .map(|refusal| {
+            let wire = serde_json::to_value(&refusal).unwrap();
+            wire["code"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(codes, TreeRefusal::CODES);
 }
 
 #[test]
