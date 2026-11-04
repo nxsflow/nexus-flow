@@ -122,11 +122,26 @@ impl Timestamp {
         Some(Self(i64::try_from(millis).ok()?))
     }
 
-    /// This instant moved forward by `span`.
+    /// This instant moved forward by `span`, stopping at the last instant the wire form can write. A
+    /// `Secs` read off the wire can be any `u64`, and a later instant could not be written back.
     pub const fn plus(self, span: Secs) -> Self {
-        Self(self.0 + span.0 as i64 * 1000)
+        let millis = span.0.saturating_mul(1000);
+        let millis = if millis > LAST_WRITABLE_MILLIS as u64 {
+            LAST_WRITABLE_MILLIS
+        } else {
+            millis as i64
+        };
+        let moved = self.0.saturating_add(millis);
+        Self(if moved > LAST_WRITABLE_MILLIS {
+            LAST_WRITABLE_MILLIS
+        } else {
+            moved
+        })
     }
 }
+
+/// `9999-12-31T23:59:59.999Z`: RFC 3339 has four digits for the year.
+const LAST_WRITABLE_MILLIS: i64 = 253_402_300_799_999;
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -198,6 +198,23 @@ fn a_timestamp_before_1970_keeps_its_millisecond() {
 }
 
 #[test]
+fn a_timestamp_moves_forward_by_a_span() {
+    let at = Timestamp::parse("2026-11-04T10:00:00.250Z").unwrap();
+    assert_eq!(at.plus(Secs(90)).to_string(), "2026-11-04T10:01:30.250Z");
+}
+
+#[test]
+fn a_huge_span_stops_at_the_last_instant_the_wire_can_write() {
+    let last = "9999-12-31T23:59:59.999Z";
+    let at = Timestamp::parse("2026-11-04T10:00:00.000Z").unwrap();
+    for span in [u64::MAX, i64::MAX as u64, u64::MAX / 1000, 400_000_000_000] {
+        assert_eq!(at.plus(Secs(span)).to_string(), last, "span {span}");
+    }
+    let at_the_end = Timestamp::parse(last).unwrap();
+    assert_eq!(at_the_end.plus(Secs(1)).to_string(), last);
+}
+
+#[test]
 fn a_run_id_is_r_and_a_ulid() {
     assert!(RunId::parse("r-01JAAAAAAAAAAAAAAAAAAAAAAA").is_some());
     assert!(RunId::parse("01JAAAAAAAAAAAAAAAAAAAAAAA").is_none());
@@ -262,6 +279,20 @@ fn storage_golden_is_byte_exact_and_pins_the_errors_and_their_order() {
     let names: Vec<_> = every_error.iter().map(StoreError::kind).collect();
     assert_eq!(golden.store_errors, names);
     assert_eq!(golden.store_error_precedence, StoreError::PRECEDENCE);
+}
+
+#[test]
+fn the_precedence_names_the_kinds_of_its_variants() {
+    let first_wins = [
+        StoreError::Fenced,
+        StoreError::SeqMismatch,
+        StoreError::DuplicateKey { seq: 1 },
+        StoreError::CasFailed { key: "k".into() },
+    ];
+    assert_eq!(
+        first_wins.each_ref().map(StoreError::kind),
+        StoreError::PRECEDENCE
+    );
 }
 
 #[derive(Serialize, Deserialize)]
