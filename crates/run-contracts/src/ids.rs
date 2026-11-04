@@ -103,23 +103,36 @@ impl Secs {
 /// An instant, UTC, at millisecond precision, written with EXACTLY three fractional digits so golden
 /// bytes cannot flap. Precision finer than a millisecond is truncated on the way in, so a value equals
 /// its own round trip. The host writes these from its clock; nothing here reads one.
+///
+/// Every value is inside the years the wire form can write, 0000 to 9999, so writing one never fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(i64);
 
 impl Timestamp {
+    /// A value outside the writable years stops at their end.
     pub const fn from_unix_millis(millis: i64) -> Self {
-        Self(millis)
+        if millis < FIRST_WRITABLE_MILLIS {
+            Self(FIRST_WRITABLE_MILLIS)
+        } else if millis > LAST_WRITABLE_MILLIS {
+            Self(LAST_WRITABLE_MILLIS)
+        } else {
+            Self(millis)
+        }
     }
 
     pub const fn unix_millis(self) -> i64 {
         self.0
     }
 
-    /// `None` unless the text is RFC 3339. Any offset and precision is read; UTC milliseconds are kept.
+    /// `None` unless the text is RFC 3339 and its instant, in UTC, is inside the writable years: an
+    /// offset can push it out. Any offset and precision is read; UTC milliseconds are kept.
     pub fn parse(text: &str) -> Option<Self> {
         let at = OffsetDateTime::parse(text, &Rfc3339).ok()?;
         let millis = at.unix_timestamp_nanos().div_euclid(1_000_000);
-        Some(Self(i64::try_from(millis).ok()?))
+        let millis = i64::try_from(millis).ok()?;
+        (FIRST_WRITABLE_MILLIS..=LAST_WRITABLE_MILLIS)
+            .contains(&millis)
+            .then_some(Self(millis))
     }
 
     /// This instant moved forward by `span`, stopping at the last instant the wire form can write. A
@@ -131,16 +144,12 @@ impl Timestamp {
         } else {
             millis as i64
         };
-        let moved = self.0.saturating_add(millis);
-        Self(if moved > LAST_WRITABLE_MILLIS {
-            LAST_WRITABLE_MILLIS
-        } else {
-            moved
-        })
+        Self::from_unix_millis(self.0.saturating_add(millis))
     }
 }
 
-/// `9999-12-31T23:59:59.999Z`: RFC 3339 has four digits for the year.
+/// `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: RFC 3339 has four digits for the year.
+const FIRST_WRITABLE_MILLIS: i64 = -62_167_219_200_000;
 const LAST_WRITABLE_MILLIS: i64 = 253_402_300_799_999;
 
 impl fmt::Display for Timestamp {
@@ -169,7 +178,10 @@ impl Serialize for Timestamp {
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let text = String::deserialize(d)?;
-        Self::parse(&text)
-            .ok_or_else(|| serde::de::Error::custom(format!("not an RFC 3339 instant: {text}")))
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "not an RFC 3339 instant in years 0000 to 9999: {text}"
+            ))
+        })
     }
 }

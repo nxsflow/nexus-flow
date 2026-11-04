@@ -214,6 +214,61 @@ fn a_huge_span_stops_at_the_last_instant_the_wire_can_write() {
     assert_eq!(at_the_end.plus(Secs(1)).to_string(), last);
 }
 
+const FIRST_WRITABLE: &str = "0000-01-01T00:00:00.000Z";
+const LAST_WRITABLE: &str = "9999-12-31T23:59:59.999Z";
+
+#[test]
+fn an_offset_that_pushes_the_instant_past_the_wire_form_is_refused() {
+    for text in [
+        "9999-12-31T23:59:59.999-01:00",
+        "0000-01-01T00:00:00+01:00",
+        "0000-01-01T00:59:59.999+01:00",
+    ] {
+        assert_eq!(Timestamp::parse(text), None, "{text}");
+        let quoted = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<Timestamp>(&quoted).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_first_and_the_last_writable_instant_round_trip() {
+    for (read, written) in [
+        (FIRST_WRITABLE, FIRST_WRITABLE),
+        ("0000-01-01T01:00:00+01:00", FIRST_WRITABLE),
+        (LAST_WRITABLE, LAST_WRITABLE),
+        ("9999-12-31T22:59:59.999-01:00", "9999-12-31T23:59:59.999Z"),
+    ] {
+        let at = Timestamp::parse(read).unwrap_or_else(|| panic!("{read} was refused"));
+        assert_eq!(at.to_string(), written, "from {read}");
+        assert_eq!(Timestamp::parse(&at.to_string()), Some(at), "{read}");
+    }
+}
+
+#[test]
+fn millis_outside_the_wire_form_stop_at_its_ends() {
+    let first = Timestamp::parse(FIRST_WRITABLE).unwrap();
+    let last = Timestamp::parse(LAST_WRITABLE).unwrap();
+    for (millis, end) in [
+        (i64::MIN, first),
+        (first.unix_millis() - 1, first),
+        (last.unix_millis() + 1, last),
+        (i64::MAX, last),
+    ] {
+        let at = Timestamp::from_unix_millis(millis);
+        assert_eq!(at, end, "{millis}");
+        assert_eq!(
+            serde_json::to_value(at).unwrap(),
+            end.to_string(),
+            "{millis}"
+        );
+    }
+    let inside = last.unix_millis() - 1;
+    assert_eq!(Timestamp::from_unix_millis(inside).unix_millis(), inside);
+}
+
 #[test]
 fn a_run_id_is_r_and_a_ulid() {
     assert!(RunId::parse("r-01JAAAAAAAAAAAAAAAAAAAAAAA").is_some());
