@@ -191,6 +191,11 @@ impl std::error::Error for BackendError {}
 
 /// The Rust face of contract (c). A backend holds no in-memory queue a crash could lose, and it never
 /// reads the run store or the chat model.
+///
+/// The identity guard every signal goes through (pid and start time re-verified before each kill) is
+/// not part of this trait. Its home in this slice is `run-session-claude`'s `procs` module, and the
+/// host uses it through its existing dependency; the first non-Claude backend moves it to a crate of
+/// its own.
 pub trait SessionBackend: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn start(&self, spec: &StartSpec) -> Result<StartOutcome, BackendError>;
