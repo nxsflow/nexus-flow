@@ -11,9 +11,9 @@
 //! ticket freezes them. Specification: the description of epic 6j6v.zjyv.
 //!
 //! Evolution is additive. A reader accepts unknown fields and keeps them on a round trip, and an
-//! unknown kind is kept as [`UnknownBody`] rather than refused. Adding a decision kind is the one
-//! addition that also raises [`CONTRACT_V`], because a reducer that folds past a decision it does
-//! not know diverges silently (§13).
+//! unknown kind is kept as [`UnknownBody`] rather than refused; a known kind with a bad field is
+//! refused. Adding a decision kind is the one addition that also raises [`CONTRACT_V`], because a
+//! reducer that folds past a decision it does not know diverges silently (§13).
 
 mod codes;
 pub mod events;

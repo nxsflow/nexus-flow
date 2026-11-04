@@ -2,7 +2,9 @@
 //! input (which folds to nothing) from an unknown decision (which it must refuse to fold past).
 //! Adding a decision kind changes the variant list AND the contract version.
 
-use nexus_run_contracts::{Decision, Event, EventBody, GitReason, ReasonCode, CONTRACT_V};
+use nexus_run_contracts::{
+    Decision, Event, EventBody, GitReason, ReasonCode, SessionFact, CONTRACT_V,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -108,6 +110,164 @@ fn a_known_kind_is_neither_unknown_input_nor_unknown_decision() {
 fn a_body_with_no_kind_is_refused_rather_than_kept() {
     let raw = envelope("cli", json!({ "message": "m-1" }));
     assert!(serde_json::from_value::<Event>(raw).is_err());
+}
+
+/// The fields a body may leave out: `Option`s, which read an absent field as `None`.
+const OPTIONAL_FIELDS: &[(&str, &str)] = &[
+    ("tree_prepared", "found"),
+    ("resume", "slot"),
+    ("withdrawn", "message"),
+    ("run_queued", "behind"),
+    ("parked", "slot"),
+    ("finishing", "reason"),
+    ("finished", "reason"),
+];
+
+/// A value no field of any body can read: a struct takes an array too, but not this first element.
+fn mistyped() -> Value {
+    json!([[]])
+}
+
+fn body_fields(raw: &Value) -> Vec<String> {
+    raw["body"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|field| *field != "kind")
+        .cloned()
+        .collect()
+}
+
+/// The golden holds exactly every kind, which `golden.rs` proves, so this walks every kind there is.
+#[test]
+fn a_known_kind_with_a_missing_required_field_is_refused_naming_the_field() {
+    for raw in golden_events() {
+        let kind = raw["body"]["kind"].as_str().unwrap().to_owned();
+        for field in body_fields(&raw) {
+            if OPTIONAL_FIELDS.contains(&(kind.as_str(), field.as_str())) {
+                continue;
+            }
+            let mut damaged = raw.clone();
+            damaged["body"].as_object_mut().unwrap().remove(&field);
+            let refusal = serde_json::from_value::<Event>(damaged)
+                .map(|event| format!("{:?}", event.body))
+                .expect_err(&format!("{kind} without {field} was accepted"));
+            assert!(
+                refusal.to_string().contains(&format!("`{field}`")),
+                "{kind} without {field}: {refusal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_known_kind_with_a_mistyped_field_is_refused() {
+    for raw in golden_events() {
+        let kind = raw["body"]["kind"].as_str().unwrap().to_owned();
+        for field in body_fields(&raw) {
+            let mut damaged = raw.clone();
+            damaged["body"][&field] = mistyped();
+            let read = serde_json::from_value::<Event>(damaged);
+            assert!(read.is_err(), "{kind} with a bad {field}: {read:?}");
+        }
+    }
+}
+
+/// The kinds the two walks above cannot damage, because they carry no field at all.
+#[test]
+fn only_the_kinds_without_a_field_escape_the_damage_walks() {
+    let empty: Vec<String> = golden_events()
+        .iter()
+        .filter(|raw| body_fields(raw).is_empty())
+        .map(|raw| raw["body"]["kind"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        empty,
+        [
+            "root_requested",
+            "claim_requested",
+            "claim_taken",
+            "withdraw_forced",
+            "claim_released"
+        ]
+    );
+}
+
+#[test]
+fn a_damaged_answer_is_refused_rather_than_folded_to_nothing() {
+    let raw = envelope("cli", json!({ "kind": "answer", "question": "q" }));
+    let refusal = serde_json::from_value::<Event>(raw).unwrap_err();
+    assert!(refusal.to_string().contains("disposition"), "{refusal}");
+}
+
+#[test]
+fn every_fact_kind_is_in_the_damage_walk() {
+    let walked: Vec<Value> = every_fact()
+        .iter()
+        .map(|fact| fact["kind"].clone())
+        .collect();
+    assert_eq!(walked, SessionFact::KINDS);
+}
+
+/// One whole fact of every kind.
+fn every_fact() -> Vec<Value> {
+    vec![
+        json!({ "kind": "started", "backend_session_id": "b", "pid": 7 }),
+        json!({ "kind": "heartbeat", "beat": "model_output" }),
+        json!({
+            "kind": "usage",
+            "model": "m",
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read_tokens": 3,
+            "cache_write_tokens": 4,
+            "turns": 5,
+        }),
+        json!({ "kind": "permission_refused", "rule": "r", "program": "p" }),
+        json!({ "kind": "ended", "cause": { "code": "lost" } }),
+    ]
+}
+
+fn fact_event(fact: Value) -> Value {
+    envelope(
+        "adapter",
+        json!({ "kind": "session_fact", "session_key": "r/build/v1/coder/a1", "fact": fact }),
+    )
+}
+
+#[test]
+fn a_known_fact_kind_with_a_damaged_field_is_refused() {
+    for fact in every_fact() {
+        let kind = fact["kind"].as_str().unwrap().to_owned();
+        let (event, _) = round_trip(&fact_event(fact.clone()));
+        assert!(
+            matches!(&event.body, EventBody::SessionFact { fact, .. } if !matches!(fact, SessionFact::Unknown(_))),
+            "{kind} did not read as its kind"
+        );
+        for (field, _) in fact
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(f, _)| *f != "kind")
+        {
+            let mut bad = fact.clone();
+            bad[field] = mistyped();
+            let read = serde_json::from_value::<Event>(fact_event(bad));
+            assert!(read.is_err(), "{kind} with a bad {field}: {read:?}");
+            if (kind.as_str(), field.as_str()) == ("started", "pid") {
+                continue;
+            }
+            let mut without = fact.clone();
+            without.as_object_mut().unwrap().remove(field);
+            let refusal = serde_json::from_value::<Event>(fact_event(without))
+                .map(|event| format!("{:?}", event.body))
+                .expect_err(&format!("{kind} without {field} was accepted"));
+            assert!(
+                refusal.to_string().contains(&format!("`{field}`")),
+                "{kind} without {field}: {refusal}"
+            );
+        }
+    }
 }
 
 #[test]

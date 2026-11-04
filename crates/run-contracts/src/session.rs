@@ -4,9 +4,9 @@
 //! The start spec carries the commission body, so it is NEVER persisted into the run log (M8). Facts
 //! reach the store through `enqueue` from the session ledger, never as a direct append.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::events::UnknownBody;
+use crate::events::{kinded_enum, read_kind, UnknownBody};
 use crate::ids::{MessageId, SessionKey, Timestamp};
 
 /// The only variables a session's environment may carry.
@@ -63,39 +63,54 @@ pub struct Turn {
     pub text: String,
 }
 
-/// What a session reported. Every variant is a fact, not a conclusion.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SessionFact {
-    /// `pid` is absent where the host has no process.
-    Started {
-        backend_session_id: String,
-        #[serde(default)]
-        pid: Option<u32>,
-    },
-    Heartbeat {
-        beat: HeartbeatKind,
-    },
-    Usage {
-        model: String,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-        turns: u32,
-    },
-    /// `program` is the fail-closed basename of the first shell word, `<unparsed>`, or the tool's name.
-    /// No arguments and no hash, so a secret in an argument never reaches the log.
-    PermissionRefused {
-        rule: String,
-        program: String,
-    },
-    Ended {
-        cause: EndCause,
-    },
-    /// A fact kind this version does not know.
-    #[serde(untagged)]
+kinded_enum! {
+    /// What a session reported. Every variant is a fact, not a conclusion. Read by `kind` first, as
+    /// [`crate::EventBody`] is.
+    #[serde(remote = "Self")]
+    SessionFact {
+        /// `pid` is absent where the host has no process.
+        Started = "started" {
+            backend_session_id: String,
+            #[serde(default)]
+            pid: Option<u32>,
+        },
+        Heartbeat = "heartbeat" { beat: HeartbeatKind },
+        Usage = "usage" {
+            model: String,
+            input_tokens: u64,
+            output_tokens: u64,
+            cache_read_tokens: u64,
+            cache_write_tokens: u64,
+            turns: u32,
+        },
+        /// `program` is the fail-closed basename of the first shell word, `<unparsed>`, or the tool's name.
+        /// No arguments and no hash, so a secret in an argument never reaches the log.
+        PermissionRefused = "permission_refused" { rule: String, program: String },
+        Ended = "ended" { cause: EndCause },
+    }
+    /// A fact kind this version does not know. A known kind with a bad field is refused instead.
+    #[serde(skip)]
     Unknown(UnknownBody),
+}
+
+impl Serialize for SessionFact {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unknown(unknown) => unknown.serialize(s),
+            known => Self::serialize(known, s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionFact {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let (kind, raw) = read_kind(d)?;
+        if Self::KINDS.contains(&kind.as_str()) {
+            Self::deserialize(raw).map_err(serde::de::Error::custom)
+        } else {
+            Ok(Self::Unknown(UnknownBody { kind, raw }))
+        }
+    }
 }
 
 /// Signs of life. A `model_output` re-arms `quiet`; a busy period opens and closes around overlapping

@@ -28,9 +28,9 @@ pub enum Origin {
 
 /// One event of a run's log.
 ///
-/// `extra` holds whatever a newer writer put on the event that this version does not know, at any
-/// depth of the envelope or body, so it survives a round trip. It is written back merged, and the
-/// output's keys are sorted, not in insertion order.
+/// `extra` holds whatever a newer writer put on the event that this version does not know, in the
+/// envelope, the body and the objects nested in them, not inside an array, so it survives a round trip.
+/// It is written back merged, and the output's keys are sorted, not in insertion order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub run: RunId,
@@ -179,8 +179,8 @@ macro_rules! kinded_enum {
         }
         $($tail:tt)*
     ) => {
-        $(#[$meta])*
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+        $(#[$meta])*
         #[serde(tag = "kind")]
         pub enum $name {
             $($(#[$vmeta])* #[serde(rename = $kind)] $variant $({ $($field)* })?,)+
@@ -193,10 +193,16 @@ macro_rules! kinded_enum {
         }
     };
 }
+pub(crate) use kinded_enum;
 
 kinded_enum! {
     /// What an event says. The inputs are this enum's own variants; every decision is one
     /// [`Decision`], on the wire flat beside them, under its own `kind`.
+    ///
+    /// `remote = "Self"` makes the derives inherent functions, so the trait impls below can choose by
+    /// `kind` first: a known kind goes to its typed reader alone, and its field error reaches the caller.
+    /// The two `skip` variants carry their own `kind`, and those impls read and write them.
+    #[serde(remote = "Self")]
     EventBody {
         /// The first event of every run. Only this one creates a run. It carries no return address, no
         /// body and no refs: those wait in `pending/<run>`.
@@ -251,11 +257,37 @@ kinded_enum! {
         TimerFired = "timer_fired" { timer: String, fire_at: Timestamp },
     }
     /// A decision of the reducer.
-    #[serde(untagged)]
+    #[serde(skip)]
     Decision(Decision),
-    /// A kind this version does not know. See [`Event::is_unknown_decision`].
-    #[serde(untagged)]
+    /// A kind in neither list of this version. See [`Event::is_unknown_decision`]. A known kind with a
+    /// bad field is never this: it is refused, or a damaged input would fold to nothing.
+    #[serde(skip)]
     Unknown(UnknownBody),
+}
+
+impl Serialize for EventBody {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Decision(decision) => decision.serialize(s),
+            Self::Unknown(unknown) => unknown.serialize(s),
+            input => Self::serialize(input, s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EventBody {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let (kind, raw) = read_kind(d)?;
+        if Decision::KINDS.contains(&kind.as_str()) {
+            Decision::deserialize(raw)
+                .map(Self::Decision)
+                .map_err(serde::de::Error::custom)
+        } else if Self::KINDS.contains(&kind.as_str()) {
+            Self::deserialize(raw).map_err(serde::de::Error::custom)
+        } else {
+            Ok(Self::Unknown(UnknownBody { kind, raw }))
+        }
+    }
 }
 
 kinded_enum! {
@@ -317,16 +349,15 @@ impl Serialize for UnknownBody {
     }
 }
 
-impl<'de> Deserialize<'de> for UnknownBody {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = Value::deserialize(d)?;
-        let kind = raw
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom("an event body carries a kind"))?
-            .to_owned();
-        Ok(Self { kind, raw })
-    }
+/// A body read whole, with the `kind` that decides what reads it next.
+pub(crate) fn read_kind<'de, D: Deserializer<'de>>(d: D) -> Result<(String, Value), D::Error> {
+    let raw = Value::deserialize(d)?;
+    let kind = raw
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| serde::de::Error::custom("an event body carries a kind"))?
+        .to_owned();
+    Ok((kind, raw))
 }
 
 /// The pinned flow definition: `hash` is the SHA-256 of its canonical JSON, and the definition itself
