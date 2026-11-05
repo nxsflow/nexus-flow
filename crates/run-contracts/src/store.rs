@@ -26,9 +26,11 @@ pub type StoreResult<T> = Result<T, StoreError>;
 ///
 /// Rules every backend keeps: CAS keys in one call are distinct; no `append` carries a CAS on an
 /// `owner/*` key, because the lease changes only through `compare_and_set`; an `owner/*` key is never
-/// deleted and its epoch never restarts (`Protected`); only `commissioned` creates a run
-/// (`UnknownRun` otherwise). Errors follow [`StoreError::PRECEDENCE`], so every backend reports the
-/// same error for the same state.
+/// deleted and its epoch never restarts (`Protected`); an `effect/<run>/*` value records the epoch that
+/// wrote it, and a write under any other epoch than the run's current one is `Fenced`; only
+/// `commissioned` creates a run (`UnknownRun` otherwise). The store assigns `seq`, whatever an event
+/// carries, and `finished` leaves no timer of its run armed. Errors follow [`StoreError::PRECEDENCE`],
+/// so every backend reports the same error for the same state.
 pub trait RunStore: Send + Sync {
     /// Puts an INPUT into the run's inbox with no fence and no sequence, atomically with `cas`. A key
     /// already in the inbox OR the log is `Enqueued::Duplicate` and writes nothing.
@@ -147,7 +149,7 @@ pub enum StoreError {
     VersionTooOld { max_v: u32 },
     /// The store is locked. Retried next tick, never counted against the input.
     Busy,
-    /// A delete of an `owner/*` key.
+    /// A delete of an `owner/*` key, a write that would lower its epoch, or one riding in a list.
     Protected { key: Key },
     /// An input other than `commissioned` for a run the store does not know.
     UnknownRun,

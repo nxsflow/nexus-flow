@@ -406,3 +406,22 @@ fn a_commissioned_past_the_first_position_is_refused() {
     assert_eq!(err.kind(), "invalid_event");
     assert_eq!(fixtures::log_keys(&store, &run).len(), 1);
 }
+
+#[test]
+fn append_reads_nothing_before_it_holds_the_write_lock() {
+    // `BEGIN IMMEDIATE`: under a held lock even a wrong fence answers `Busy`, because the fence is only
+    // compared inside the transaction that will write. A deferred one would answer `Fenced` from a
+    // snapshot that may already be stale.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.sqlite");
+    let store = fixtures::open(&path);
+    let run = fixtures::run_id();
+    let fence = fixtures::owned_run(&store, &run);
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let err = store
+        .append(&run, 1, fence + 1, &[fixtures::input(&run, "k")], &[], &[])
+        .unwrap_err();
+    assert_eq!(err, StoreError::Busy);
+    holder.execute_batch("ROLLBACK").unwrap();
+}
