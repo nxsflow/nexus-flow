@@ -152,17 +152,23 @@ fn waiting_for(state: &RunState, view: &RunView) -> Option<String> {
 
 fn needs(state: &RunState, view: &RunView) -> Option<Needs> {
     match view {
-        RunView::NeedsDecision { questions } => {
+        RunView::NeedsDecision { .. } => {
             let first = state.open_questions().next()?;
+            let message = match &first.asked {
+                Asked::Escalation { message, .. } => message,
+                Asked::Ceiling { last_verdict, .. } => last_verdict,
+            };
             Some(Needs {
                 kind: NeedsKind::Decision,
-                question: questions.first().cloned(),
+                question: Some(first.id.clone()),
+                message: Some(message.clone()),
                 since: first.since,
             })
         }
         RunView::Parked { .. } => state.parked_since().map(|since| Needs {
             kind: NeedsKind::Person,
             question: None,
+            message: None,
             since,
         }),
         _ => None,

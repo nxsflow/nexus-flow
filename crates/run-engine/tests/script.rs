@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nexus_run_contracts::status::{MEMBER_STATES, STEP_STATES};
 use nexus_run_contracts::{
     Base, Decision, Disposition, EndCause, Event, EventBody, FlowRef, HeartbeatKind,
     LivenessPolicy, MessageId, Origin, ParkOutcome, RunId, Secs, SessionFact, Slot, StopKind,
@@ -200,7 +201,18 @@ impl Script {
             assert!(self.state.timers.is_empty(), "a timer outlived the run");
             assert!(effects.is_empty(), "a finished run owes {effects:?}");
         }
-        if let Some(reason) = status(&self.state).reason {
+        let projected = status(&self.state);
+        for step in &projected.steps {
+            assert!(STEP_STATES.contains(&step.state.as_str()), "{}", step.state);
+            for member in &step.members {
+                assert!(
+                    MEMBER_STATES.contains(&member.state.as_str()),
+                    "{}",
+                    member.state
+                );
+            }
+        }
+        if let Some(reason) = projected.reason {
             self.codes.insert(reason.as_str().to_owned());
         }
     }

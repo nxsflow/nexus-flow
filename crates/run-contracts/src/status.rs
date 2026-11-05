@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::codes::{closed_code, tolerant_tagged, ReasonCode};
 use crate::events::{Base, Outcome, ParkOutcome, TreeRefusal};
-use crate::ids::{Handle, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
+use crate::ids::{Handle, Key, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
 
 /// The fixed values of `waiting_for`. The others name a party: the reply of a persona, a decision of the
 /// requester, or the holder of the directory.
@@ -20,6 +20,14 @@ pub const WAITING_FOR_FIXED: &[&str] = &[
     "a fold that does not panic",
     "the park",
     "the chat store",
+];
+
+/// The words of `StepStatus.state`.
+pub const STEP_STATES: &[&str] = &["open", "done"];
+
+/// The words of `MemberStatus.state`.
+pub const MEMBER_STATES: &[&str] = &[
+    "pending", "starting", "running", "quiet", "nudged", "stopping", "replied", "ended",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -168,7 +176,10 @@ closed_code! {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Needs {
     pub kind: NeedsKind,
-    pub question: Option<MessageId>,
+    /// What `answer.question` takes: the key of the event that asked.
+    pub question: Option<Key>,
+    /// What to read before answering: the escalating reply, or a ceiling's last verdict.
+    pub message: Option<MessageId>,
     pub since: Timestamp,
 }
 

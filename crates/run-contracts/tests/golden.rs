@@ -5,12 +5,12 @@
 
 use std::collections::BTreeSet;
 
-use nexus_run_contracts::status::WAITING_FOR_FIXED;
+use nexus_run_contracts::status::{MEMBER_STATES, STEP_STATES, WAITING_FOR_FIXED};
 use nexus_run_contracts::{
     Appended, Capabilities, Decision, Disposition, DrainedFact, Enqueued, Event, EventBody,
-    FlowRef, Liveness, LivenessPolicy, Origin, ReasonCode, RunId, RunRow, RunStatus, Secs,
-    SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer, Timestamp,
-    CONTRACTS_STATUS, ENV_ALLOWLIST,
+    FlowRef, Key, Liveness, LivenessPolicy, MessageId, Origin, ReasonCode, RunId, RunRow,
+    RunStatus, Secs, SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer,
+    Timestamp, CONTRACTS_STATUS, ENV_ALLOWLIST,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -383,6 +383,40 @@ fn run_status_golden_is_byte_exact() {
     );
     assert_eq!(local.observed_at.to_string(), "2026-11-04T10:00:12.000Z");
     assert!(WAITING_FOR_FIXED.contains(&status.waiting_for.unwrap().as_str()));
+}
+
+/// What a client answers with is the `question` an `answer` takes: the key of the event that asked, and
+/// the two are not the same type by accident. `message` is the text a person reads before answering.
+#[test]
+fn needs_carries_the_key_an_answer_takes_and_the_message_apart() {
+    let status: RunStatus = assert_byte_exact("run-status.json");
+    let needs = status.needs.unwrap();
+    let answer = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Answer { question, .. } => Some(question),
+            _ => None,
+        })
+        .unwrap();
+    let question: Option<Key> = needs.question;
+    assert_eq!(question, Some(answer));
+    let message: Option<MessageId> = needs.message;
+    assert!(message.unwrap().starts_with("m-"));
+}
+
+#[test]
+fn every_state_word_in_the_golden_is_a_published_one() {
+    let status: RunStatus = assert_byte_exact("run-status.json");
+    for step in &status.steps {
+        assert!(STEP_STATES.contains(&step.state.as_str()), "{}", step.state);
+        for member in &step.members {
+            assert!(
+                MEMBER_STATES.contains(&member.state.as_str()),
+                "{}",
+                member.state
+            );
+        }
+    }
 }
 
 /// Every key in a JSON value, however deep.

@@ -1,7 +1,7 @@
 //! The status projection (§6.2, contract (d)): what a person reads, from state alone.
 
 use nexus_run_contracts::status::{NeedsKind, RunState as StatusState};
-use nexus_run_contracts::{EndCause, Outcome, ParkOutcome, ReasonCode, RunId, Secs};
+use nexus_run_contracts::{Disposition, EndCause, Outcome, ParkOutcome, ReasonCode, RunId, Secs};
 use nexus_run_engine::status;
 
 const HOLDER: &str = "r-01JBBBBBBBBBBBBBBBBBBBBBBB";
@@ -95,8 +95,36 @@ cases! {
         let needs = got.needs.unwrap();
         assert_eq!(needs.kind, NeedsKind::Decision);
         assert_eq!(needs.question, Some(format!("escalated/{key}")));
+        assert_eq!(needs.message.as_deref(), Some("m"));
         assert_eq!(needs.since, asked);
         assert!(got.next_action.unwrap().contains("nxc reply --thread m-root"));
+    }
+
+    fn the_question_status_names_is_the_key_an_answer_takes(s) {
+        s.reach_first_session();
+        let key = s.latest_key("build", None);
+        s.input(s.started(&key));
+        s.input(s.reply_with(&key, "m-why", true, false));
+        let question = status(&s.state).needs.unwrap().question.unwrap();
+        s.input(s.answer(&question, Disposition::Continue, "m-answer"));
+        assert!(
+            !s.decisions().iter().any(|line| line.starts_with("ignored")),
+            "the answer was taken: {:?}", s.decisions()
+        );
+        assert!(s.state.open_questions().next().is_none());
+    }
+
+    fn once_the_last_question_is_answered_status_no_longer_needs_a_decision(s) {
+        s.reach_first_session();
+        let key = s.latest_key("build", None);
+        s.input(s.started(&key));
+        s.input(s.reply_with(&key, "m-why", true, false));
+        let question = status(&s.state).needs.unwrap().question.unwrap();
+        assert_eq!(status(&s.state).state, StatusState::NeedsDecision);
+        s.input(s.answer(&question, Disposition::Continue, "m-answer"));
+        let got = status(&s.state);
+        assert_eq!(got.needs, None, "a stale needs_decision must not exist");
+        assert_eq!(got.state, StatusState::Running);
     }
 
     fn a_hold_says_until_when_and_has_no_question(s) {
@@ -123,7 +151,10 @@ cases! {
         assert_eq!(got.state, StatusState::Parked);
         assert_eq!(got.reason, Some(ReasonCode::PermissionRefused));
         let needs = got.needs.unwrap();
-        assert_eq!((needs.kind, needs.question, needs.since), (NeedsKind::Person, None, parked));
+        assert_eq!(
+            (needs.kind, needs.question, needs.message, needs.since),
+            (NeedsKind::Person, None, None, parked)
+        );
     }
 
     fn a_run_level_park_says_since_when_too(s) {

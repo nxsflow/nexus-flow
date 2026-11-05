@@ -19,6 +19,16 @@
     "subprocess_moved",
     "blind"
   ],
+  "member_states": [
+    "pending",
+    "starting",
+    "running",
+    "quiet",
+    "nudged",
+    "stopping",
+    "replied",
+    "ended"
+  ],
   "needs_kind": [
     "decision",
     "person"
@@ -53,6 +63,10 @@
     "cherry_pick",
     "revert",
     "bisect"
+  ],
+  "step_states": [
+    "open",
+    "done"
   ],
   "stop_kind": [
     "term",

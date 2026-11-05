@@ -2,7 +2,7 @@
 //! input (which folds to nothing) from an unknown decision (which it must refuse to fold past).
 //! Adding a decision kind changes the variant list AND the contract version.
 
-use nexus_run_contracts::status::{NeedsKind, RunState, Verdict};
+use nexus_run_contracts::status::{NeedsKind, RunState, Verdict, MEMBER_STATES, STEP_STATES};
 use nexus_run_contracts::{
     Decision, Disposition, EndCause, Event, EventBody, GitReason, HeartbeatKind, Origin, Outcome,
     ParkOutcome, ReasonCode, RunStatus, SequenceKind, SessionFact, StepOutcome, StopKind,
@@ -757,7 +757,9 @@ fn every_closed_enum_on_the_wire_is_exempted_by_name() {
 fn the_golden_pins_every_list_a_writer_may_use() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/enum-values.json");
     let golden: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let lists: [(&str, &[&str]); 12] = [
+    let lists: [(&str, &[&str]); 14] = [
+        ("step_states", STEP_STATES),
+        ("member_states", MEMBER_STATES),
         ("disposition", Disposition::ALL),
         ("end_cause", EndCause::ALL),
         ("heartbeat_kind", HeartbeatKind::ALL),
