@@ -187,6 +187,7 @@ fn only_the_kinds_without_a_field_escape_the_damage_walks() {
             "root_requested",
             "claim_requested",
             "claim_taken",
+            "resume_run",
             "withdraw_forced",
             "claim_released"
         ]
@@ -224,6 +225,7 @@ fn every_fact() -> Vec<Value> {
             "turns": 5,
         }),
         json!({ "kind": "permission_refused", "rule": "r", "program": "p" }),
+        json!({ "kind": "group_lingering", "pids": [7] }),
         json!({ "kind": "ended", "cause": { "code": "lost" } }),
     ]
 }

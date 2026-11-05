@@ -251,6 +251,10 @@ kinded_enum! {
         Answer = "answer" { question: Key, disposition: Disposition, message: MessageId },
         /// A root reply while the run is `Held` or `Parked`: a resumable condition has no question id.
         Resume = "resume" { slot: Option<Slot> },
+        /// A root reply while the RUN itself is parked (`root_failed`, `tree_refused`, `poison_input`):
+        /// no slot holds that condition, so `resume` cannot name it. Added by 6j6v.r426; an input, so it
+        /// does not raise the version.
+        ResumeRun = "resume_run",
         /// The human exit, valid in every non-final state. `message` is absent while no root thread exists.
         Withdrawn = "withdrawn" { message: Option<MessageId>, by: WithdrawnBy },
         /// A due timer, keyed `timer/<id>/<fire_at>`, so a re-armed timer's firing is a distinct input.
@@ -390,16 +394,17 @@ pub struct Base {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParkOutcome {
     /// Committed on a fresh `nxs/park/run-<run>/<instant>` branch.
-    Committed {
-        branch: String,
-        commit: String,
+    Committed { branch: String, commit: String },
+    /// HEAD was already on the run's own branch, and a commit was made or local commits lie ahead of
+    /// `origin/<branch>`: a clean branch with nothing ahead is `Clean`.
+    OnOwnBranch { branch: String, commit: String },
+    /// Nothing to save, and nothing local ahead of the remote, so no notice is owed. `branch` is where
+    /// HEAD stood; absent on a detached HEAD at the base. Absent on the wire when `None`, so a writer
+    /// from before this field reads the same.
+    Clean {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
-    /// HEAD was already on the run's own branch.
-    OnOwnBranch {
-        branch: String,
-        commit: String,
-    },
-    Clean,
     /// The directory is gone; nothing is left to save, which releases the claim.
     Missing,
     /// The claim key names another run, so no git ran.
