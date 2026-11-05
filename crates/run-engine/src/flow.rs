@@ -2,6 +2,8 @@
 //! the result, so `decide` receives a definition and compiles nothing, and a later edit of the
 //! declaration changes new runs only (RN7).
 
+use std::collections::BTreeSet;
+
 use nexus_run_contracts::{FlowRef, Handle, StepId};
 use serde::{Deserialize, Serialize};
 
@@ -225,6 +227,15 @@ pub enum CompileRefusal {
     NoMembers {
         channel: String,
     },
+    /// `FlowDef::step` finds the first of two, so edges and visits would address the wrong one.
+    DuplicateStep {
+        id: String,
+    },
+    /// Two slots with one key: the second reply reads as a duplicate and the step never completes.
+    DuplicateMember {
+        channel: String,
+        handle: String,
+    },
 }
 
 /// Compiles `flow` for slice 1. A step whose target is `review`'s name is a fan-out from that channel;
@@ -258,6 +269,10 @@ pub fn compile(flow: &ChannelDecl, review: &ChannelDecl) -> Result<FlowDef, Comp
             note(&review.name, &review.timeout);
         }
         steps.push(compile_step(flow, review, declared, is_fan_out)?);
+    }
+    let ids: Vec<StepId> = steps.iter().map(|step| step.id.clone()).collect();
+    if let Some(id) = first_duplicate(&ids) {
+        return Err(CompileRefusal::DuplicateStep { id: id.clone() });
     }
     check_references(&steps)?;
     Ok(FlowDef {
@@ -315,6 +330,12 @@ fn fan_out(review: &ChannelDecl) -> Result<StepKind, CompileRefusal> {
     for member in &review.members {
         check_id(member)?;
     }
+    if let Some(handle) = first_duplicate(&review.members) {
+        return Err(CompileRefusal::DuplicateMember {
+            channel: channel(),
+            handle: handle.clone(),
+        });
+    }
     Ok(StepKind::FanOut {
         members: review.members.clone(),
         expects: FanOutExpects::All,
@@ -331,6 +352,11 @@ fn check_id(id: &str) -> Result<(), CompileRefusal> {
         return Err(CompileRefusal::BadId { id: id.to_owned() });
     }
     Ok(())
+}
+
+fn first_duplicate(ids: &[String]) -> Option<&String> {
+    let mut seen = BTreeSet::new();
+    ids.iter().find(|id| !seen.insert(*id))
 }
 
 fn check_references(steps: &[StepDef]) -> Result<(), CompileRefusal> {

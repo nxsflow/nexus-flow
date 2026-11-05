@@ -312,6 +312,43 @@ fn a_fan_out_to_a_channel_with_no_members_is_refused_because_no_slot_would_ever_
 }
 
 #[test]
+fn two_steps_under_one_id_are_refused_because_edges_would_address_the_wrong_one() {
+    let (mut coding, review) = real();
+    let again = coding.steps[1].clone();
+    coding.steps.push(again);
+    assert_eq!(
+        compile(&coding, &review),
+        Err(CompileRefusal::DuplicateStep {
+            id: "verify".into()
+        })
+    );
+}
+
+#[test]
+fn a_member_named_twice_is_refused_because_its_two_slots_would_share_one_key() {
+    let (coding, _) = real();
+    let review = review_with(
+        "members: [code-quality, test-quality, integrity]",
+        "members: [code-quality, test-quality, code-quality]",
+    );
+    assert_eq!(
+        compile(&coding, &review),
+        Err(CompileRefusal::DuplicateMember {
+            channel: "review".into(),
+            handle: "code-quality".into()
+        })
+    );
+}
+
+#[test]
+fn one_persona_in_two_steps_is_not_a_duplicate() {
+    let (_, review) = real();
+    let coding = coding_with("target: verifier", "target: coder");
+    let def = compile(&coding, &review).unwrap();
+    assert_eq!(step(&def, "build").members(), step(&def, "verify").members());
+}
+
+#[test]
 fn max_passes_defaults_to_one_on_a_declared_back_edge() {
     let (_, review) = real();
     let text = include_str!("../../tests/fixtures/coding.yaml").replacen(
