@@ -2289,6 +2289,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-run-engine"
+version = "0.223.0"
+dependencies = [
+ "nexus-run-contracts",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "nexus-run-store-sqlite"
 version = "0.223.0"
 dependencies = [
