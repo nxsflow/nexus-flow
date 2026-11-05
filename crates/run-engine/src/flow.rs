@@ -221,6 +221,10 @@ pub enum CompileRefusal {
     NoSteps {
         channel: String,
     },
+    /// A fan-out with nobody to commission opens no slot: no timer, no reply, and the run hangs (RN3).
+    NoMembers {
+        channel: String,
+    },
 }
 
 /// Compiles `flow` for slice 1. A step whose target is `review`'s name is a fan-out from that channel;
@@ -305,6 +309,9 @@ fn fan_out(review: &ChannelDecl) -> Result<StepKind, CompileRefusal> {
         .summary_prompt
         .clone()
         .ok_or_else(|| CompileRefusal::SummaryWithoutPrompt { channel: channel() })?;
+    if review.members.is_empty() {
+        return Err(CompileRefusal::NoMembers { channel: channel() });
+    }
     for member in &review.members {
         check_id(member)?;
     }

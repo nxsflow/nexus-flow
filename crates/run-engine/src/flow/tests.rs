@@ -294,6 +294,24 @@ fn a_channel_with_no_steps_is_refused() {
 }
 
 #[test]
+fn a_fan_out_to_a_channel_with_no_members_is_refused_because_no_slot_would_ever_answer() {
+    let (coding, _) = real();
+    let members = "members: [code-quality, test-quality, integrity]\n";
+    for review in [
+        review_with(members, "members: []\n"),
+        // A misspelled key parses as no members at all.
+        review_with(members, "member: [code-quality, test-quality, integrity]\n"),
+    ] {
+        assert_eq!(
+            compile(&coding, &review),
+            Err(CompileRefusal::NoMembers {
+                channel: "review".into()
+            })
+        );
+    }
+}
+
+#[test]
 fn max_passes_defaults_to_one_on_a_declared_back_edge() {
     let (_, review) = real();
     let text = include_str!("../../tests/fixtures/coding.yaml").replacen(
