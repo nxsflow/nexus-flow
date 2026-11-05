@@ -628,6 +628,16 @@ pub fn grace_timer(nth: u8, slot: &Slot) -> String {
     format!("stop_grace/{nth}/{}", slot_suffix(slot))
 }
 
+/// Which grace of a stop a timer id names, the one reader of the form `grace_timer` writes.
+pub(crate) fn grace_nth(timer: &str) -> Option<u8> {
+    timer
+        .strip_prefix("stop_grace/")?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
+}
+
 pub const ROOT_DEADLINE_TIMER: &str = "root_deadline";
 pub const TREE_WINDOW_TIMER: &str = "tree_window";
 

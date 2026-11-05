@@ -345,7 +345,10 @@ fn one_persona_in_two_steps_is_not_a_duplicate() {
     let (_, review) = real();
     let coding = coding_with("target: verifier", "target: coder");
     let def = compile(&coding, &review).unwrap();
-    assert_eq!(step(&def, "build").members(), step(&def, "verify").members());
+    assert_eq!(
+        step(&def, "build").members(),
+        step(&def, "verify").members()
+    );
 }
 
 #[test]

@@ -7,12 +7,13 @@ use nexus_run_contracts::{
 
 use crate::guard::{delivery_key, ignored_reason, is_deferred, resume_target};
 use crate::state::{
-    Asked, GraceFired, Ladder, ParkPhase, Phase, Process, RunState, SlotCondition, SlotState,
-    StartCause, TreePhase,
+    grace_nth, Asked, GraceFired, Ladder, ParkPhase, Phase, Process, RunState, SlotCondition,
+    SlotState, StartCause, TreePhase,
 };
 
 /// Folds one input. One `decide` ignored folds to nothing.
 pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
+    // `decide` has asked already; `evolve` comes here without it, and the two must fold alike.
     if ignored_reason(state, input).is_some() {
         return;
     }
@@ -165,7 +166,7 @@ fn apply_firing(
         RootDeadline => state.root_periods += 1,
         TreeWindow => state.tree_cancel_owed = true,
         StopGrace => {
-            let fired = if timer.starts_with("stop_grace/2/") {
+            let fired = if grace_nth(timer) == Some(2) {
                 GraceFired::Second
             } else {
                 GraceFired::First

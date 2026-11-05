@@ -4,7 +4,7 @@
 use nexus_run_contracts::{Decision, ReasonCode, Slot, TimerPurpose, Timestamp};
 
 use crate::guard::is_deferred;
-use crate::state::{timer_slot, ROOT_DEADLINE_TIMER};
+use crate::state::{grace_nth, timer_slot, ROOT_DEADLINE_TIMER};
 
 use super::Emit;
 
@@ -93,7 +93,7 @@ impl Emit<'_> {
     /// The second grace ran out. Unforced, that is the last rung: the slot parks `would_not_stop`, the host
     /// never pretends it is gone and never SIGKILLs on its own. Forced, the signal table owes the kill.
     fn grace_over(&mut self, timer: &str, slot: Slot) {
-        if !timer.starts_with("stop_grace/2/") {
+        if grace_nth(timer) != Some(2) {
             return;
         }
         let forced = self

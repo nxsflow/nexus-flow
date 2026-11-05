@@ -216,11 +216,8 @@ impl Emit<'_> {
             reason,
             until,
         });
-        self.push(Decision::TimerSet {
-            timer: crate::state::slot_timer(TimerPurpose::HoldRetry, slot),
-            fire_at: until,
-            purpose: TimerPurpose::HoldRetry,
-        });
+        let timer = crate::state::slot_timer(TimerPurpose::HoldRetry, slot);
+        self.set_timer_at(timer, until, TimerPurpose::HoldRetry);
     }
 
     /// The backend's `resets_at` clamped to the policy's window, or the policy's own retry without one.

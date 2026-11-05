@@ -21,6 +21,9 @@ mod session;
 mod timers;
 
 /// The next decisions of a run for one input. An input that changes nothing returns one `ignored`.
+///
+/// `def` must be the definition `state` was pinned to: `evolve` reads `state.def`, so another one would
+/// make this list and its replay disagree.
 pub fn decide(state: &RunState, input: &Event, def: &FlowDef) -> Vec<Decision> {
     if let Some(reason) = ignored_reason(state, input) {
         return vec![Decision::Ignored {
@@ -68,7 +71,10 @@ impl Emit<'_> {
     }
 
     pub fn set_timer(&mut self, timer: String, span: Secs, purpose: TimerPurpose) {
-        let fire_at = self.at.plus(span);
+        self.set_timer_at(timer, self.at.plus(span), purpose);
+    }
+
+    pub fn set_timer_at(&mut self, timer: String, fire_at: Timestamp, purpose: TimerPurpose) {
         self.push(Decision::TimerSet {
             timer,
             fire_at,
