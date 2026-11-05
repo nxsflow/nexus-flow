@@ -77,7 +77,8 @@ const ROWS: &[Row] = &[
             "nexus-run-session-claude",
         ],
         external: &["serde", "serde_json", "time", "ulid"],
-        dev_external: &["tempfile"],
+        // What a host test does to the file behind the store's back: the held lock, a damaged row.
+        dev_external: &["rusqlite", "tempfile"],
     },
 ];
 
@@ -245,6 +246,10 @@ fn own_edges(package: &Package, workspace: &BTreeSet<&str>, problems: &mut Vec<S
     for dep in &package.dependencies {
         let name = dep.name.as_str();
         let edge = format!("{} -> {name}", package.name);
+        if package.name == HOST && name == HOST && dep.is_dev() {
+            // The host's own tests enabling `test-support`, so a plain `cargo test --all` runs them.
+            continue;
+        }
         if workspace.contains(name) {
             if !row.workspace.contains(&name) {
                 problems.push(format!(

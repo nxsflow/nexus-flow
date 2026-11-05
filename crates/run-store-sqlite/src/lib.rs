@@ -215,3 +215,45 @@ pub(crate) fn stored_run_id(text: &str) -> StoreResult<RunId> {
         what: "a run row holds no run id".to_owned(),
     })
 }
+
+impl SqliteRunStore {
+    /// Every inbox row of a run, oldest first, each read on its own, so a damaged row hides nothing behind
+    /// it. It is how status counts what the owner has not folded, how the bridge counts pending answers, and
+    /// how the host finds a withdrawal on a run it cannot fold (§13).
+    pub fn waiting_inputs(&self, run: &RunId) -> StoreResult<Vec<StoreResult<Event>>> {
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare("SELECT key, body FROM inbox WHERE run = ?1 ORDER BY rowid")
+            .map_err(db)?;
+        let rows = statement
+            .query_map([run.as_str()], |row| Ok((row.get(0)?, row.get(1).ok())))
+            .map_err(db)?;
+        rows.map(|row| {
+            let (key, body) = row.map_err(db)?;
+            Ok(decode_event(key, None, body))
+        })
+        .collect()
+    }
+
+    /// What of a run's log still reads, in order, skipping the rows that do not. Only for a run whose
+    /// fold has failed: the withdraw exit and the read-only status still need to know what it held (§13).
+    pub fn load_readable(&self, run: &RunId) -> StoreResult<Vec<Event>> {
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare("SELECT seq, key, body FROM events WHERE run = ?1 ORDER BY seq")
+            .map_err(db)?;
+        let rows = statement
+            .query_map([run.as_str()], |row| {
+                Ok((row.get::<_, Seq>(0)?, row.get(1)?, row.get(2).ok()))
+            })
+            .map_err(db)?;
+        let mut readable = Vec::new();
+        for row in rows {
+            let (seq, key, body) = row.map_err(db)?;
+            if let Ok(event) = decode_event(key, Some(seq), body) {
+                readable.push(event);
+            }
+        }
+        Ok(readable)
+    }
+}

@@ -2299,6 +2299,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-run-host"
+version = "0.224.0"
+dependencies = [
+ "nexus-run-contracts",
+ "nexus-run-engine",
+ "nexus-run-host",
+ "nexus-run-store-sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ulid",
+]
+
+[[package]]
 name = "nexus-run-store-sqlite"
 version = "0.224.0"
 dependencies = [
