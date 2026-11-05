@@ -116,8 +116,8 @@ impl RunStore for SqliteRunStore {
         .transpose()
     }
 
-    fn due_timers(&self, _now: Timestamp) -> StoreResult<Vec<Timer>> {
-        Ok(Vec::new())
+    fn due_timers(&self, now: Timestamp) -> StoreResult<Vec<Timer>> {
+        timers::due(&self.conn(), now)
     }
 
     fn compare_and_set(
@@ -206,7 +206,7 @@ impl RunStore for SqliteRunStore {
 }
 
 /// A run id the store wrote itself, so one that does not read is a damaged file.
-fn stored_run_id(text: &str) -> StoreResult<RunId> {
+pub(crate) fn stored_run_id(text: &str) -> StoreResult<RunId> {
     RunId::parse(text).ok_or_else(|| StoreError::Backend {
         what: "a run row holds no run id".to_owned(),
     })
