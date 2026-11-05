@@ -10,7 +10,8 @@ use crate::codes::{closed_code, tolerant_tagged};
 use crate::events::{kinded_enum, read_tag, UnknownBody};
 use crate::ids::{MessageId, SessionKey, Timestamp};
 
-/// The only variables a session's environment may carry.
+/// The variables every session's environment carries. This list is the baseline: variables a project
+/// declares (ID4) come on top of it, in [`StartSpec::env`], with no change on the wire.
 pub const ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",

@@ -3,6 +3,11 @@
 //! one envelope, and a replay folds all of them in order.
 //!
 //! The log carries ids, handles and codes, never bodies and never paths (PV1, M6).
+//!
+//! The commit, branch and refusal fields it holds are there because the run itself needs them, for the
+//! discharge and the park notice, and they stay on the machine that holds the run. It is not synced as it
+//! stands: sync carries an allowlist, so an unknown field never travels. Component 9 builds that
+//! allowlist, and it must recheck `refused` and `pids`, which SY5 does not name.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -261,13 +266,17 @@ kinded_enum! {
             needs_rework: bool,
         },
         /// The commissioner's answer. `question` is the key of the `escalated` or `ceiling` event that
-        /// asked. `accept` is valid at a ceiling only.
+        /// asked. `accept` is valid at a ceiling only. A human-gate answer arrives as a NEW input kind,
+        /// never as fields on this one: an older engine folds an unknown kind to nothing, which fails
+        /// closed, while it would keep and ignore an unknown field here, which fails open.
         Answer = "answer" { question: Key, disposition: Disposition, message: MessageId },
-        /// A root reply while the run is `Held` or `Parked`: a resumable condition has no question id.
+        /// `Resume` comes from an explicit action, never a root reply: asking why a run stopped must not
+        /// restart it. A plain root reply is an answer only while a question is open, and a resumable
+        /// condition has no question id. It acts on a slot `Held` or `Parked`.
         Resume = "resume" { slot: Option<Slot> },
-        /// A root reply while the RUN itself is parked (`root_failed`, `tree_refused`, `poison_input`):
-        /// no slot holds that condition, so `resume` cannot name it. Added by 6j6v.r426; an input, so it
-        /// does not raise the version.
+        /// `ResumeRun` comes from an explicit action, never a root reply, while the RUN itself is parked
+        /// (`root_failed`, `tree_refused`, `poison_input`): no slot holds that condition, so `resume`
+        /// cannot name it. Added by 6j6v.r426; an input, so it does not raise the version.
         ResumeRun = "resume_run",
         /// The human exit, valid in every non-final state. `message` is absent while no root thread exists.
         Withdrawn = "withdrawn" { message: Option<MessageId>, by: WithdrawnBy },

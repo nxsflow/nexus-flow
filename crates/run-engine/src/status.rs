@@ -130,9 +130,9 @@ fn slot_word(state: &SlotState) -> &'static str {
 fn waiting_for(state: &RunState, view: &RunView) -> Option<String> {
     match view {
         RunView::Finished { .. } => None,
-        RunView::NeedsDecision { .. } | RunView::Parked { .. } | RunView::Held { .. } => {
-            Some(format!("a decision of {}", state.requester))
-        }
+        RunView::NeedsDecision { .. } => Some(format!("a decision of {}", state.requester)),
+        RunView::Held { .. } => Some(format!("the retry, or a resume by {}", state.requester)),
+        RunView::Parked { .. } => Some(format!("a resume by {}", state.requester)),
         RunView::Queued { behind } => behind.as_ref().map(|holder| format!("the holder {holder}")),
         RunView::Finishing { .. } => match &state.phase {
             Phase::Finishing {
@@ -204,7 +204,7 @@ fn next_action(state: &RunState, view: &RunView) -> Option<String> {
             "nxc reply --thread {root} - answers; nxc withdraw --thread {root} ends the run"
         )),
         RunView::Held { .. } | RunView::Parked { .. } => Some(format!(
-            "nxc reply --thread {root} - resumes; nxc withdraw --thread {root} ends the run"
+            "nxc resume --thread {root} resumes; nxc withdraw --thread {root} ends the run"
         )),
         _ => None,
     }

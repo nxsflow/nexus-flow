@@ -6,6 +6,15 @@
 //! whole where it is unavailable, so a `null` inside it means only "the directory is gone". Status carries
 //! ids and codes; the one text is a tree refusal's scrubbed `text`, read from its kv row and gone when
 //! the run finishes.
+//!
+//! Commit, branch, failure class, grade and log excerpts are evidence: opt-in per stream and never in the
+//! portable status. Evidence arrives later as its own optional field (SY5, dqem.19wp).
+//!
+//! `waiting_for` and `next_action` are for people and are never parsed. `verdict` and `last_fact` are as
+//! of `seq`, no claim about now: a reader derives an age with its own clock (R4).
+//!
+//! A status reader never refuses on a higher `v`: it renders what it knows, a field it does not know is
+//! dropped, and a value of an enum it does not know is rendered as it reads.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +22,8 @@ use crate::codes::{closed_code, tolerant_tagged, ReasonCode};
 use crate::events::{Base, Outcome, ParkOutcome, TreeRefusal};
 use crate::ids::{Handle, Key, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
 
-/// The fixed values of `waiting_for`. The others name a party: the reply of a persona, a decision of the
-/// requester, or the holder of the directory.
+/// The fixed values of `waiting_for`. The others name a party: the reply of a persona, a decision or a
+/// resume of the requester, or the holder of the directory.
 pub const WAITING_FOR_FIXED: &[&str] = &[
     "a newer nxs",
     "a fold that does not panic",

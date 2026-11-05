@@ -6,6 +6,17 @@ use nexus_run_engine::status;
 
 const HOLDER: &str = "r-01JBBBBBBBBBBBBBBBBBBBBBBB";
 
+/// Asking "why is this stopped?" must not restart a run: a plain reply is an answer only while a question
+/// is open, so the texts of a hold and a park send a person to the explicit verb (p71m, the objection).
+fn assert_names_the_explicit_action(got: &nexus_run_contracts::RunStatus) {
+    let action = got.next_action.as_deref().unwrap();
+    assert!(action.contains("nxc resume --thread m-root"), "{action}");
+    assert!(action.contains("nxc withdraw --thread m-root"), "{action}");
+    assert!(!action.contains("nxc reply"), "{action}");
+    let waiting = got.waiting_for.as_deref().unwrap();
+    assert!(!waiting.contains("a decision of"), "{waiting}");
+}
+
 cases! {
     fn status_carries_the_flow_and_the_claim(s) {
         s.input(s.commissioned());
@@ -125,6 +136,46 @@ cases! {
         let got = status(&s.state);
         assert_eq!(got.needs, None, "a stale needs_decision must not exist");
         assert_eq!(got.state, StatusState::Running);
+    }
+
+    fn a_question_is_answered_by_a_reply_and_waits_for_a_decision(s) {
+        s.reach_first_session();
+        let key = s.latest_key("build", None);
+        s.input(s.started(&key));
+        s.input(s.reply_with(&key, "m-why", true, false));
+        let got = status(&s.state);
+        assert_eq!(got.waiting_for.as_deref(), Some("a decision of person"));
+        assert!(got.next_action.unwrap().contains("nxc reply --thread m-root"));
+    }
+
+    fn a_held_run_names_nxc_resume_and_invites_no_reply(s) {
+        s.reach_first_session();
+        let key = s.latest_key("build", None);
+        s.input(s.started(&key));
+        s.input(s.ended(&key, EndCause::ProviderUnavailable));
+        let got = status(&s.state);
+        assert!(matches!(got.state, StatusState::Held { .. }));
+        assert_names_the_explicit_action(&got);
+    }
+
+    fn a_parked_run_names_nxc_resume_and_invites_no_reply(s) {
+        s.reach_first_session();
+        let key = s.latest_key("build", None);
+        s.input(s.started(&key));
+        s.input(s.ended(&key, EndCause::PermissionRefused { rule: "r".into(), program: "p".into() }));
+        let got = status(&s.state);
+        assert_eq!(got.state, StatusState::Parked);
+        assert_names_the_explicit_action(&got);
+    }
+
+    fn a_run_level_park_names_nxc_resume_too(s) {
+        s.input(s.commissioned());
+        s.fire("root_deadline");
+        s.fire("root_deadline");
+        s.fire("root_deadline");
+        let got = status(&s.state);
+        assert_eq!(got.state, StatusState::Parked);
+        assert_names_the_explicit_action(&got);
     }
 
     fn a_hold_says_until_when_and_has_no_question(s) {
