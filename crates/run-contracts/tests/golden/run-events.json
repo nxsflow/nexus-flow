@@ -510,6 +510,7 @@
     "body": {
       "kind": "held",
       "reason": "usage_limit",
+      "resets_at": "2026-11-11T10:00:00.000Z",
       "slot": {
         "attempt": 1,
         "member": "coder",

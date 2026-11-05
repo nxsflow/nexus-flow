@@ -784,11 +784,13 @@ pub fn render(decision: &Decision, now: Timestamp) -> String {
             slot,
             reason,
             until,
+            resets_at,
         } => format!(
-            "held {} {} until={}",
+            "held {} {} until={}{}",
             slot_name(slot),
             reason.as_str(),
-            from_now(until)
+            from_now(until),
+            resets_at.map_or(String::new(), |at| format!(" resets_at={}", from_now(&at)))
         ),
         Decision::Parked { slot, reason } => format!(
             "parked {} {}",

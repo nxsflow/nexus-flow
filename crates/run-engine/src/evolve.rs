@@ -141,10 +141,13 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
             slot,
             reason,
             until,
+            resets_at,
         } => {
             let order = next_order(state);
             if let Some(record) = record_of(state, slot) {
-                record.holds += 1;
+                if resets_at.is_none() {
+                    record.holds += 1;
+                }
                 record.condition = Some(SlotCondition::Held {
                     reason: reason.clone(),
                     until: *until,

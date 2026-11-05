@@ -331,8 +331,9 @@ kinded_enum! {
         TimerCleared = "timer_cleared" { timer: String },
         /// The ladder's conclusion about a session: `quiet` or `hung`.
         Liveness = "liveness" { slot: Slot, reason: ReasonCode, since: Timestamp },
-        /// On hold, not failed.
-        Held = "held" { slot: Slot, reason: ReasonCode, until: Timestamp },
+        /// On hold, not failed. `until` is the retry, clamped to the policy's window; `resets_at` is what
+        /// the backend named, which alone says the hold spends nothing of `max_holds`.
+        Held = "held" { slot: Slot, reason: ReasonCode, until: Timestamp, resets_at: Option<Timestamp> },
         /// Needs a person. `slot` is absent for a run-level park (`root_failed`, `tree_refused`).
         Parked = "parked" { slot: Option<Slot>, reason: ReasonCode },
         /// Every outcome passes through here: stop, park, deliver, release.

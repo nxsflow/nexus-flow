@@ -200,7 +200,10 @@ impl Emit<'_> {
         });
     }
 
-    /// On hold, not failed. Holds are counted apart from attempts, up to `max_holds` (cn4p).
+    /// On hold, not failed. Holds are counted apart from attempts, up to `max_holds` (cn4p), and only one
+    /// with no named reset counts: a daily retry of a seven-day limit is not a backend failing to answer.
+    /// A backend that keeps naming new resets holds a run for as long as it does; that state is visible
+    /// and withdrawable.
     fn hold(
         &mut self,
         index: usize,
@@ -208,7 +211,7 @@ impl Emit<'_> {
         reason: ReasonCode,
         resets_at: Option<Timestamp>,
     ) {
-        if self.state.slots[index].holds >= self.state.policy.max_holds {
+        if resets_at.is_none() && self.state.slots[index].holds >= self.state.policy.max_holds {
             self.push(Decision::Parked {
                 slot: Some(slot.clone()),
                 reason: ReasonCode::HoldLimit,
@@ -220,6 +223,7 @@ impl Emit<'_> {
             slot: slot.clone(),
             reason,
             until,
+            resets_at,
         });
         let timer = crate::state::slot_timer(&TimerPurpose::HoldRetry, slot);
         self.set_timer_at(timer, until, TimerPurpose::HoldRetry);

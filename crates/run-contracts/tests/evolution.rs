@@ -122,6 +122,7 @@ const OPTIONAL_FIELDS: &[(&str, &str)] = &[
     ("resume", "slot"),
     ("withdrawn", "message"),
     ("run_queued", "behind"),
+    ("held", "resets_at"),
     ("parked", "slot"),
     ("finishing", "reason"),
     ("finished", "reason"),

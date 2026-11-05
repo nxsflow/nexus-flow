@@ -171,7 +171,7 @@ cases! {
         let resets = s.now.plus(Secs::hours(2));
         s.input(s.ended(&a1, EndCause::UsageLimit { resets_at: Some(resets) })).expect(&[
             "timer_cleared quiet/build/v1/coder/a1",
-            "held build/v1/coder/a1 usage_limit until=+7200s",
+            "held build/v1/coder/a1 usage_limit until=+7200s resets_at=+7200s",
             "timer_set hold_retry/build/v1/coder/a1 +7200s hold_retry",
         ]);
         assert_eq!(s.state.view(), RunView::Held { reason: ReasonCode::UsageLimit, until: resets });
@@ -194,7 +194,7 @@ cases! {
             "timer_set hold_retry/build/v1/coder/a2 +1800s hold_retry",
         ]);
         let index = s.state.find(&a2).unwrap();
-        assert_eq!(s.state.slots[index].holds, 2);
+        assert_eq!(s.state.slots[index].holds, 1, "only the hold with no named reset counts");
         assert_eq!(s.state.slots[index].restarts, 0, "holds spend no attempts");
     }
 
@@ -221,16 +221,70 @@ cases! {
         assert!(s.state.slots[a7].resume);
     }
 
+    fn a_seven_day_limit_holds_through_its_daily_retries_without_parking(s) {
+        first(s);
+        let resets = s.now.plus(Secs::hours(7 * 24));
+        for attempt in 1..=7 {
+            let key = s.key("build", 1, "coder", attempt);
+            s.input(s.started(&key));
+            s.input(s.ended(&key, EndCause::UsageLimit { resets_at: Some(resets) }));
+            assert!(matches!(s.state.view(), RunView::Held { reason: ReasonCode::UsageLimit, .. }), "day {attempt}");
+            assert_eq!(s.state.slots[s.state.find(&key).unwrap()].holds, 0, "a named reset spends no hold");
+            s.fire(&format!("hold_retry/build/v1/coder/a{attempt}"));
+        }
+        assert_eq!(s.now, resets, "the seventh retry is the reset itself");
+        let key = s.key("build", 1, "coder", 8);
+        s.input(s.started(&key));
+        s.input(s.reply(&key, "m-after-the-reset"));
+        assert!(matches!(s.slot_state(&key), SlotState::Replied { .. }));
+    }
+
+    fn a_usage_limit_with_no_reset_named_still_parks_at_max_holds(s) {
+        first(s);
+        for attempt in 1..=5 {
+            let key = s.key("build", 1, "coder", attempt);
+            s.input(s.started(&key));
+            s.input(s.ended(&key, EndCause::UsageLimit { resets_at: None }));
+            s.fire(&format!("hold_retry/build/v1/coder/a{attempt}"));
+        }
+        let a6 = s.key("build", 1, "coder", 6);
+        s.input(s.started(&a6));
+        s.input(s.ended(&a6, EndCause::UsageLimit { resets_at: None })).expect(&[
+            "timer_cleared quiet/build/v1/coder/a6",
+            "parked build/v1/coder/a6 hold_limit",
+        ]);
+    }
+
+    fn holds_with_a_named_reset_leave_the_budget_of_the_ones_without(s) {
+        first(s);
+        for attempt in 1..=5 {
+            let key = s.key("build", 1, "coder", attempt);
+            s.input(s.started(&key));
+            s.input(s.ended(&key, EndCause::ProviderUnavailable));
+            s.fire(&format!("hold_retry/build/v1/coder/a{attempt}"));
+        }
+        let a6 = s.key("build", 1, "coder", 6);
+        s.input(s.started(&a6));
+        let resets = s.now.plus(Secs::hours(1));
+        s.input(s.ended(&a6, EndCause::UsageLimit { resets_at: Some(resets) }));
+        assert!(matches!(s.state.view(), RunView::Held { .. }), "a named reset holds even at the limit");
+        s.fire("hold_retry/build/v1/coder/a6");
+        let a7 = s.key("build", 1, "coder", 7);
+        s.input(s.started(&a7));
+        s.input(s.ended(&a7, EndCause::ProviderUnavailable));
+        assert!(s.decided("parked build/v1/coder/a7 hold_limit"), "the count stood where it was");
+    }
+
     fn the_hold_retry_is_clamped_to_the_policy_window(s) {
         let a1 = first(s);
         s.input(s.started(&a1));
         s.input(s.ended(&a1, EndCause::UsageLimit { resets_at: Some(s.now.plus(Secs(5))) }));
-        assert!(s.decisions().contains(&"held build/v1/coder/a1 usage_limit until=+60s".to_owned()));
+        assert!(s.decisions().contains(&"held build/v1/coder/a1 usage_limit until=+60s resets_at=+5s".to_owned()));
         s.fire("hold_retry/build/v1/coder/a1");
         let a2 = s.key("build", 1, "coder", 2);
         s.input(s.started(&a2));
         s.input(s.ended(&a2, EndCause::UsageLimit { resets_at: Some(s.now.plus(Secs::hours(100))) }));
-        assert!(s.decisions().contains(&"held build/v1/coder/a2 usage_limit until=+86400s".to_owned()));
+        assert!(s.decisions().contains(&"held build/v1/coder/a2 usage_limit until=+86400s resets_at=+360000s".to_owned()));
     }
 
     fn a_hold_retried_by_a_person_before_its_time_clears_the_timer_and_restarts(s) {

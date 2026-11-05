@@ -133,6 +133,23 @@ fn answer_carries_its_question_disposition_and_message() {
     assert!(answers[0].2.starts_with("m-"));
 }
 
+/// `until` is when the run retries, clamped to the policy; `resets_at` is what the backend named. Only a
+/// hold without one counts toward `max_holds`, and a writer from before the field reads as without one.
+#[test]
+fn a_hold_carries_the_reset_the_backend_named_apart_from_its_retry() {
+    let held = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Decision(Decision::Held {
+                until, resets_at, ..
+            }) => Some((until, resets_at)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(held.0.to_string(), "2026-11-04T10:10:00.500Z");
+    assert_eq!(held.1.unwrap().to_string(), "2026-11-11T10:00:00.000Z");
+}
+
 #[test]
 fn root_opened_carries_the_thread_and_the_root_message() {
     let opened = events()
