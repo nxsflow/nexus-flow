@@ -10652,9 +10652,19 @@ fn arm_a_look_at_the_round_at(ctx: &Ctx, round: &str, at: &str) -> Option<Failed
     let key = format!("{round}-round");
     match ctx.timer.schedule_stranded_look(&key, round, at) {
         Ok(_) => None,
+        // **A service that is down is said once, by the call, not once per look**, the rule
+        // [`crate::stranded::arm_look`] keeps: the look is in the book, and the
+        // `service_not_running` finding the outermost verbs add already says nothing attends it.
+        Err(e) if ctx.timer.service_fault().is_some() => {
+            eprintln!(
+                "warning: the look at round {round} is booked for {at}, and nothing attends this \
+                 workspace to honour it yet: {e}"
+            );
+            None
+        }
         Err(e) => {
             let detail = format!(
-                "the tick that would ask the members round {round} still lacks was not armed ({e}) \
+                "the tick that would ask any member round {round} still lacks was not armed ({e}) \
                  — run `nxc tick --thread {round}`"
             );
             eprintln!("warning: {detail}");

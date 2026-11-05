@@ -676,12 +676,30 @@ fn a_review_slot_whose_mint_fails_is_owed_with_no_session_and_recommissioned_whe
         "CREATE TRIGGER no_verifier_mint BEFORE INSERT ON session_map WHEN NEW.role = 'verifier'
          BEGIN SELECT RAISE(ABORT, 'the session could not be minted (injected)'); END;",
     );
-    let refused = team.try_commission(T0, "owner", None, "review", "review it");
-    assert!(
-        refused.is_err(),
-        "the channel's spawn failure is propagated"
-    );
+    // **Not an `Err` since nxf 6j6v.1q0h.** A failed mint is a `rusqlite::Error`, which the foundation
+    // flattens to `io`, the kind a locked database has too. Its `?` in the fan-out is what abandoned
+    // every member behind it, so the call now goes on and says so on its receipt.
+    let receipt = team
+        .try_commission(T0, "owner", None, "review", "review it")
+        .expect("a member's failed start does not fail the send");
     team.sql("DROP TRIGGER no_verifier_mint;");
+    let said = receipt
+        .warnings
+        .iter()
+        .find(|f| f.class == ConsequenceClass::StepSkipped)
+        .unwrap_or_else(|| panic!("the failure is on the receipt: {:?}", receipt.warnings));
+    assert!(
+        said.detail.contains("verifier") && said.detail.contains("could not be minted"),
+        "it names the member and the cause: {}",
+        said.detail
+    );
+    assert!(
+        team.worker
+            .all()
+            .iter()
+            .any(|r| r.role.handle == "reviewer"),
+        "and the member behind the failed start was asked all the same"
+    );
 
     let root = team
         .status(T0)

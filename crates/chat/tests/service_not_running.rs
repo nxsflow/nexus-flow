@@ -13,11 +13,11 @@
 //!
 //! **This is the one suite that deliberately unpins `NXC_TIMER` from `dry`**, since the backend IS
 //! what is under test — so it owes the argument `no_test_arms_the_real_scheduler.rs` makes. It
-//! arms nothing: a `send --to <persona>` carries no window, and the verbs here declare no
-//! `timeout:`. And if it ever did, it could not reach outside its own fixture — the working
-//! directory is the `TempDir` workspace (which is what an unpinned `ServiceTimer` resolves its
-//! deadline book from) and `$HOME` is a `TempDir` too, so both files such a schedule would touch
-//! are inside this test's own sandbox.
+//! arms no window: a `send --to <persona>` carries none, and the verbs here declare no `timeout:`.
+//! A send to a `parallel` channel does book the look that brings its round back (nxf 6j6v.1q0h), and
+//! that cannot reach outside the fixture either — the working directory is the `TempDir` workspace
+//! (which is what an unpinned `ServiceTimer` resolves its deadline book from) and `$HOME` is a
+//! `TempDir` too, so both files a schedule touches are inside this test's own sandbox.
 
 use std::path::Path;
 
@@ -168,9 +168,10 @@ fn a_send_into_a_registered_workspace_with_no_service_says_so_by_class() {
 #[test]
 fn a_send_to_a_declared_channel_reports_it_too_even_with_no_window_to_arm() {
     // The branch the class was built for and the one no test drove (review of PR #393, Test
-    // Quality #2). A channel with no declared `timeout:` arms nothing, so `TickUnscheduled` — the
-    // only report there used to be — can never fire here. If this send is silent, the whole "it
-    // does not need a window" argument is untrue.
+    // Quality #2). A channel with no declared `timeout:` arms no window, and the look it does book
+    // for its round is not reported as `TickUnscheduled` while the service is down: that is said
+    // once, by the class below. If this send is silent, the whole "it does not need a window"
+    // argument is untrue.
     let tmp = workspace();
     let home = TempDir::new().unwrap();
     service_home(home.path(), tmp.path(), true);
@@ -193,6 +194,54 @@ fn a_send_to_a_declared_channel_reports_it_too_even_with_no_window_to_arm() {
     assert_eq!(
         receipt["target"], "channel",
         "and this really was the channel branch: {receipt}"
+    );
+}
+
+#[test]
+fn a_dead_service_is_not_reported_a_second_time_for_a_rounds_look_but_the_look_is_booked() {
+    // The way back from a fan-out that stopped short has to outlive the service's absence: a service
+    // that starts later honours what the book holds (nxf 6j6v.1q0h).
+    let tmp = workspace();
+    let home = TempDir::new().unwrap();
+    service_home(home.path(), tmp.path(), true);
+
+    let receipt = send_to_under(&tmp, &home, "pair");
+    let thread = receipt["thread_id"].as_str().expect("the round's thread");
+    let book = std::fs::read_to_string(nxs_service::timers::path_in(&tmp.path().join(".nxs")))
+        .expect("the deadline book was written");
+    assert!(
+        book.contains(&format!("{thread}-round")),
+        "the look at the round is in the book though nothing attends it yet: {book}"
+    );
+}
+
+#[test]
+fn with_no_service_fault_to_carry_it_a_rounds_unarmed_look_is_said_by_its_own_class() {
+    // An unregistered workspace has no `service_not_running` finding, so nothing else on this
+    // receipt says that a round left short would not come back by itself.
+    let tmp = workspace();
+    let home = TempDir::new().unwrap();
+    service_home(home.path(), tmp.path(), false);
+
+    let receipt = send_to_under(&tmp, &home, "pair");
+    let found = warnings(&receipt);
+    assert!(
+        !found.iter().any(|w| w["class"] == "service_not_running"),
+        "nobody registered it, so no service is at fault: {receipt}"
+    );
+    let entry = found
+        .iter()
+        .find(|w| w["class"] == "tick_unscheduled")
+        .unwrap_or_else(|| panic!("the unarmed look must be said here: {receipt}"));
+    assert_eq!(
+        entry["thread"].as_str(),
+        receipt["thread_id"].as_str(),
+        "named on the round it was armed for"
+    );
+    let detail = entry["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("nxc tick --thread"),
+        "and the way out: {detail}"
     );
 }
 
