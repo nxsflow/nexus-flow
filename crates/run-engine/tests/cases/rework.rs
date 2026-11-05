@@ -256,7 +256,7 @@ cases! {
 }
 
 fn status_reason(s: &Script) -> String {
-    nexus_run_engine::status(&s.state, 0, s.now)
+    nexus_run_engine::status(&s.state)
         .reason
         .map(|r| r.as_str().to_owned())
         .unwrap_or_default()

@@ -200,7 +200,7 @@ impl Script {
             assert!(self.state.timers.is_empty(), "a timer outlived the run");
             assert!(effects.is_empty(), "a finished run owes {effects:?}");
         }
-        if let Some(reason) = status(&self.state, 0, self.now).reason {
+        if let Some(reason) = status(&self.state).reason {
             self.codes.insert(reason.as_str().to_owned());
         }
     }

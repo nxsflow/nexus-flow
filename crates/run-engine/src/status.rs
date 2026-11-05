@@ -1,18 +1,18 @@
-//! The status projection, pure. The host adds `owner` and the live `tree` fields around it (§6.6).
+//! The status projection, pure: what folds from the log, with no clock and no inbox. The host adds `local`
+//! around it (§6.6).
 
 use nexus_run_contracts::status::{
-    ClaimStatus, FlowStatus, MemberStatus, Needs, NeedsKind, Owner, RunState as StatusState,
-    RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
+    ClaimStatus, FlowStatus, MemberStatus, Needs, NeedsKind, RunState as StatusState, RunStatus,
+    SlotLiveness, StepStatus, Verdict,
 };
-use nexus_run_contracts::{ReasonCode, Timestamp, CONTRACT_V};
+use nexus_run_contracts::{ReasonCode, CONTRACT_V};
 
 use crate::state::{
     Asked, ParkPhase, Phase, RunState, RunView, SlotCondition, SlotRecord, SlotState,
 };
 
-/// Run status at `now`. `pending_inputs` are inputs still in the inbox: reported as pending, so status
-/// never claims a reply arrived before the owner folded it.
-pub fn status(state: &RunState, pending_inputs: u32, now: Timestamp) -> RunStatus {
+/// Run status as of `state.seq`, with `local` left to the host.
+pub fn status(state: &RunState) -> RunStatus {
     let view = state.view();
     let outcome = match &view {
         RunView::Finished { outcome } => Some(outcome.clone()),
@@ -34,27 +34,12 @@ pub fn status(state: &RunState, pending_inputs: u32, now: Timestamp) -> RunStatu
             held: state.claim_since.is_some() && !state.is_finished(),
             since: state.claim_since,
         },
-        owner: Owner {
-            attended: false,
-            last_seen: None,
-        },
-        tree: TreeStatus {
-            path: String::new(),
-            base: state.base.clone(),
-            found: state.found.clone(),
-            commit: None,
-            branch: None,
-            dirty: None,
-            in_flight: None,
-            parked: state.parked.clone(),
-            refusal: None,
-        },
-        steps: step_statuses(state, now),
-        pending_inputs,
+        steps: step_statuses(state),
         waiting_for: waiting_for(state, &view),
         needs: needs(state, &view),
         reason: reason(state, &view),
         next_action: next_action(state, &view),
+        local: None,
     }
 }
 
@@ -73,7 +58,7 @@ fn status_state(view: &RunView) -> StatusState {
     }
 }
 
-fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
+fn step_statuses(state: &RunState) -> Vec<StepStatus> {
     let mut steps = Vec::new();
     let order = state.def.steps.iter().map(|step| &step.id);
     for (id, visit) in order.filter_map(|id| state.visits.get(id).map(|visit| (id, visit))) {
@@ -81,7 +66,7 @@ fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
             .slots
             .iter()
             .filter(|r| r.slot.step == *id && r.slot.visit == *visit && !state.is_superseded(r))
-            .map(|record| member_status(state, record, now))
+            .map(|record| member_status(state, record))
             .collect();
         let finished = state
             .finished_steps
@@ -106,10 +91,7 @@ fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
     steps
 }
 
-fn member_status(state: &RunState, record: &SlotRecord, now: Timestamp) -> MemberStatus {
-    let quiet_for_s = record.last_fact.map_or(0, |at| {
-        u64::try_from((now.unix_millis() - at.unix_millis()) / 1000).unwrap_or(0)
-    });
+fn member_status(state: &RunState, record: &SlotRecord) -> MemberStatus {
     let verdict = match &record.state {
         SlotState::Pending | SlotState::Starting { .. } | SlotState::Quiet { .. } => Verdict::Quiet,
         SlotState::Nudged { .. } => Verdict::Suspect,
@@ -125,7 +107,6 @@ fn member_status(state: &RunState, record: &SlotRecord, now: Timestamp) -> Membe
         state: slot_word(&record.state).to_owned(),
         liveness: SlotLiveness {
             last_fact: record.last_fact,
-            quiet_for_s,
             verdict,
         },
         pids: record.pids.clone(),

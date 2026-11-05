@@ -160,7 +160,7 @@ cases! {
             "timer_cleared quiet/build/v1/coder/a1",
             "parked build/v1/coder/a1 permission_refused",
         ]);
-        let status = nexus_run_engine::status(&s.state, 0, s.now);
+        let status = nexus_run_engine::status(&s.state);
         let member = &status.steps[0].members[0];
         assert_eq!(member.refused.as_deref(), Some("Bash(git push:*): git"));
     }

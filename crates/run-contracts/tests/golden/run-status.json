@@ -9,6 +9,41 @@
     "hash": "sha256:abababababababababababababababababababababababababababababababab",
     "name": "coding"
   },
+  "local": {
+    "observed_at": "2026-11-04T10:00:12.000Z",
+    "owner": {
+      "attended": true,
+      "last_seen": "2026-11-04T10:00:00.000Z"
+    },
+    "pending_inputs": 1,
+    "tree": {
+      "base": {
+        "branch": "main",
+        "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78"
+      },
+      "branch": null,
+      "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78",
+      "dirty": false,
+      "found": {
+        "kind": "clean"
+      },
+      "in_flight": {
+        "op": "prepare",
+        "since": "2026-11-04T10:00:00.000Z",
+        "step": "fetch"
+      },
+      "parked": null,
+      "path": "/work/nexus-flow-v2",
+      "refusal": {
+        "at": "2026-11-04T10:00:00.000Z",
+        "reason": {
+          "code": "git",
+          "reason": "lock_held"
+        },
+        "text": "the scrubbed text"
+      }
+    }
+  },
   "needs": {
     "kind": "decision",
     "question": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
@@ -16,11 +51,6 @@
   },
   "next_action": "nxc withdraw --run r-01JAAAAAAAAAAAAAAAAAAAAAAA",
   "outcome": null,
-  "owner": {
-    "attended": true,
-    "last_seen": "2026-11-04T10:00:00.000Z"
-  },
-  "pending_inputs": 1,
   "reason": "tree_refused",
   "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
   "seq": 17,
@@ -38,7 +68,6 @@
           "handle": "coder",
           "liveness": {
             "last_fact": "2026-11-04T10:00:00.000Z",
-            "quiet_for_s": 12,
             "verdict": "working"
           },
           "pids": [],
@@ -54,33 +83,6 @@
       "visit": 1
     }
   ],
-  "tree": {
-    "base": {
-      "branch": "main",
-      "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78"
-    },
-    "branch": null,
-    "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78",
-    "dirty": false,
-    "found": {
-      "kind": "clean"
-    },
-    "in_flight": {
-      "op": "prepare",
-      "since": "2026-11-04T10:00:00.000Z",
-      "step": "fetch"
-    },
-    "parked": null,
-    "path": "/work/nexus-flow-v2",
-    "refusal": {
-      "at": "2026-11-04T10:00:00.000Z",
-      "reason": {
-        "code": "git",
-        "reason": "lock_held"
-      },
-      "text": "the scrubbed text"
-    }
-  },
   "v": 1,
   "waiting_for": "the park"
 }

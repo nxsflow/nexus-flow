@@ -140,7 +140,7 @@ cases! {
     fn a_reason_code_this_version_does_not_know_is_rendered_as_it_reads(s) {
         running(s);
         s.input(EventBody::Withdrawn { message: None, by: WithdrawnBy::Unknown(LATER.into()) });
-        let status = nexus_run_engine::status(&s.state, 0, s.now);
+        let status = nexus_run_engine::status(&s.state);
         assert_eq!(status.reason, Some(ReasonCode::Unknown(LATER.into())));
     }
 }

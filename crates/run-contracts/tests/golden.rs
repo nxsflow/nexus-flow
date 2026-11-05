@@ -375,12 +375,61 @@ fn session_golden_is_byte_exact_and_pins_the_environment_allowlist() {
 #[test]
 fn run_status_golden_is_byte_exact() {
     let status: RunStatus = assert_byte_exact("run-status.json");
-    assert_eq!(status.tree.in_flight.unwrap().step, "fetch");
+    let local = status.local.unwrap();
+    assert_eq!(local.tree.in_flight.unwrap().step, "fetch");
     assert_eq!(
-        status.owner.last_seen.unwrap().to_string(),
+        local.owner.last_seen.unwrap().to_string(),
         "2026-11-04T10:00:00.000Z"
     );
+    assert_eq!(local.observed_at.to_string(), "2026-11-04T10:00:12.000Z");
     assert!(WAITING_FOR_FIXED.contains(&status.waiting_for.unwrap().as_str()));
+}
+
+/// Every key in a JSON value, however deep.
+fn keys_in(value: &serde_json::Value, keys: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                keys.insert(key.clone());
+                keys_in(inner, keys);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| keys_in(item, keys)),
+        _ => {}
+    }
+}
+
+/// The part that folds from the log and may leave the machine: commit and branch are evidence, opt-in
+/// per stream, and a path carries the account's name (SY5, dqem.19wp, PV1).
+#[test]
+fn a_status_without_local_is_byte_exact_and_holds_nothing_read_from_the_machine() {
+    let status: RunStatus = assert_byte_exact("run-status-portable.json");
+    assert!(status.local.is_none());
+    let wire = serde_json::to_value(&status).unwrap();
+    let mut keys = BTreeSet::new();
+    keys_in(&wire, &mut keys);
+    for local_only in [
+        "local",
+        "tree",
+        "commit",
+        "branch",
+        "path",
+        "dirty",
+        "owner",
+        "pending_inputs",
+        "observed_at",
+        "quiet_for_s",
+    ] {
+        assert!(!keys.contains(local_only), "{local_only} is in {keys:?}");
+    }
+}
+
+#[test]
+fn the_two_status_goldens_differ_by_local_alone() {
+    let read = |name: &str| serde_json::from_str::<serde_json::Value>(&golden(name)).unwrap();
+    let mut whole = read("run-status.json");
+    whole.as_object_mut().unwrap().remove("local");
+    assert_eq!(whole, read("run-status-portable.json"));
 }
 
 #[test]

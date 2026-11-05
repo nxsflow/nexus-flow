@@ -37,8 +37,8 @@ pub use session::{
     Prompt, SessionBackend, SessionFact, StartOutcome, StartSpec, Turn, ENV_ALLOWLIST,
 };
 pub use status::{
-    ClaimStatus, FlowStatus, InFlight, MemberStatus, Needs, NeedsKind, Owner, Refusal, RunState,
-    RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
+    ClaimStatus, FlowStatus, InFlight, LocalStatus, MemberStatus, Needs, NeedsKind, Owner, Refusal,
+    RunState, RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
 };
 pub use store::{
     Appended, Cas, Enqueued, RunRow, RunStore, StoreError, StoreLimits, StoreResult, Timer,
