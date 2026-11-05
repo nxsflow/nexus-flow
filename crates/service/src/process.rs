@@ -6,6 +6,12 @@
 //! compared for change only — converting mach units to ms would round a `gh run watch` (tens of ms
 //! per minute) to zero, which is the case this exists to keep alive.
 //!
+//! **A new process is life too** (nxf 6j6v.k6nf). Linux's raw unit is itself a clock tick of 10 ms,
+//! and a finished child takes its CPU with it, so `sleep 60; gh ...` reads the same count and the
+//! same counter for as long as the shell has not spent one whole tick. Measured on Linux over the
+//! whole idle window, that is a false stop. What changes at every round is WHICH processes run, so
+//! a sample says that as well ([`SubprocessSample::lineup`]).
+//!
 //! **Which processes**: every descendant of a pid whose start lies at or after `since`, with the
 //! slack [`born_together`](crate::heartbeat::born_together) concedes. That is what excludes `node`,
 //! `claude`, a stdio MCP server started at init and a background job of an earlier call, without a
@@ -30,6 +36,9 @@ pub struct SubprocessSample {
     /// macOS, clock ticks on Linux. Compared for change only; never converted, never printed with
     /// a unit.
     pub cpu_units: u64,
+    /// Which processes they are: Σ pid. Compared for change only, as `cpu_units` is. Replacing any
+    /// one process by another changes it, though count and counter may stand still.
+    pub lineup: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +83,7 @@ pub fn descendants_started_since(pid: u32, since: SystemTime) -> Option<Subproce
     let mut sample = SubprocessSample {
         count: 0,
         cpu_units: 0,
+        lineup: 0,
     };
     for child in tree {
         if !started_under(crate::heartbeat::process_started_at(child), since) {
@@ -85,6 +95,7 @@ pub fn descendants_started_since(pid: u32, since: SystemTime) -> Option<Subproce
         };
         sample.count = sample.count.saturating_add(1);
         sample.cpu_units = sample.cpu_units.saturating_add(cpu);
+        sample.lineup = sample.lineup.saturating_add(u64::from(child));
     }
     Some(sample)
 }
@@ -298,6 +309,80 @@ mod tests {
             Some(since - slack - Duration::from_secs(1)),
             since
         ));
+    }
+
+    /// **A process replaced by another moves the sample, whatever the counter says** (nxf
+    /// 6j6v.k6nf). The shape of `sleep 60; gh ...` on Linux, where neither the waiting shell nor the
+    /// new `sleep` spends one whole clock tick: count and CPU stand still, only the process is new.
+    /// macOS's counter is fine enough to move here anyway, so only Linux can show this one red.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_child_replaced_under_a_waiting_parent_changes_the_sample() {
+        use std::os::unix::process::CommandExt;
+        let mut parent = std::process::Command::new("sh")
+            .args(["-c", "while :; do sleep 600; done"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = parent.id();
+        let child_other_than = |gone: Option<u32>| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let kids = descendants(pid).unwrap_or_default();
+                if let ([only], true) = (&kids[..], kids.first().copied() != gone) {
+                    return Some(*only);
+                }
+                if std::time::Instant::now() > deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let first = child_other_than(None);
+        // Let the exec of the first `sleep` finish: it moves the counter on its own.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let before = descendants_started_since(pid, SystemTime::UNIX_EPOCH);
+        // SAFETY: `kill` touches no caller memory; the pid is the child this test just listed.
+        unsafe {
+            libc::kill(
+                first.expect("the first sleep") as libc::pid_t,
+                libc::SIGKILL,
+            )
+        };
+        let second = child_other_than(first);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let after = descendants_started_since(pid, SystemTime::UNIX_EPOCH);
+        // SAFETY: as above; the negative pid names this test's own process group.
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        let _ = parent.wait();
+        assert!(second.is_some(), "the loop started no second sleep");
+        assert_ne!(before, after, "one process was replaced by another");
+    }
+
+    /// A tree nothing happens in reads the same at every look, or a hung job would never be stopped.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_tree_that_only_waits_reads_the_same_sample() {
+        use std::os::unix::process::CommandExt;
+        let mut parent = std::process::Command::new("sh")
+            .args(["-c", "sleep 600 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = parent.id();
+        // Settling takes as long as the exec does; a tree that never settles fails here.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut settled = false;
+        while !settled && std::time::Instant::now() < deadline {
+            let before = descendants_started_since(pid, SystemTime::UNIX_EPOCH);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let after = descendants_started_since(pid, SystemTime::UNIX_EPOCH);
+            settled = before == after && before.is_some_and(|s| s.count == 1);
+        }
+        // SAFETY: the negative pid names this test's own process group.
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        let _ = parent.wait();
+        assert!(settled, "a sleeping child must read as unmoving");
     }
 
     /// A start that cannot be read is COUNTED, whatever `since` is — the generous side.
