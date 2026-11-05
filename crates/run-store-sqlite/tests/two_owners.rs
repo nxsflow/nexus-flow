@@ -151,7 +151,7 @@ fn two_threads_only_the_holder_appends_and_the_other_takes_over_after_it_stops_r
                     let expires = last.expires_at.unix_millis() - fixtures::t0().unix_millis();
                     clock.store(expires, Ordering::SeqCst);
                 }
-                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_millis(1));
             };
             while let Some(key) = retry_busy(|| step(&host_b, &run, &lease)).unwrap() {
                 appended.push(key);
