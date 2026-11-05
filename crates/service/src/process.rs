@@ -16,6 +16,10 @@
 
 use std::time::SystemTime;
 
+/// [`descendants_started_since`]'s slack in seconds: how long before `since` a process may have
+/// started and still count. A caller that needs a narrower window moves `since` up by the difference.
+pub const SINCE_SLACK_SECS: i64 = crate::heartbeat::START_TIME_SLACK.as_secs() as i64;
+
 /// One reading of the processes started under an open call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct SubprocessSample {
@@ -281,6 +285,19 @@ mod tests {
             Duration::from_secs(60),
             "the slack itself"
         );
+    }
+
+    /// A caller narrows the window by this number, so it must be the slack the filter really uses.
+    #[test]
+    fn since_slack_secs_is_the_filters_own_slack() {
+        use std::time::Duration;
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let slack = Duration::from_secs(SINCE_SLACK_SECS as u64);
+        assert!(started_under(Some(since - slack), since));
+        assert!(!started_under(
+            Some(since - slack - Duration::from_secs(1)),
+            since
+        ));
     }
 
     /// A start that cannot be read is COUNTED, whatever `since` is — the generous side.

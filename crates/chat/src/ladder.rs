@@ -11,6 +11,9 @@
 //!   the one text that offers `nxc confirm --rest`; nudged and still lifeless after
 //!   [`NUDGE_WAIT_SECS`], it is dead and stopped (SIGTERM). The state machine of one look is
 //!   `live` below, step by step as design 8nx4 section 4 numbers them.
+//!   A session whose turn ended while its process waits for background work is measured like one
+//!   inside a tool call: the processes its calls started are its life, and past the bound of one
+//!   call it is hung (nxf 6j6v.c3cm).
 //! - **B — hold.** A slot whose session is on hold is the resume's; the ladder takes up only the
 //!   holds nothing will: a resume the provider refused (→ D), a hold that names no instant and
 //!   waits on nobody (→ C one grace after it was taken).
@@ -76,6 +79,12 @@ pub(crate) fn dead_resumes(ctx: &Ctx) -> u32 {
 /// tool call before the call counts as hung. Generous on purpose: a step that watches CI waits on a
 /// run of 60–80 minutes, and the quality gates alone may take 150.
 pub const TOOL_CALL_BOUND_SECS: i64 = 10_800;
+/// How long before the session's first call a descendant may have started and still count as work
+/// of its calls while its turn has ended. Two seconds, because a Linux start is reconstructed and can
+/// be a second off either way. Far narrower than the sample's own slack on purpose: the model's CLI
+/// and a stdio MCP server start seconds before the first call and spend CPU for ever, so inside that
+/// slack they would keep a hung session reading as moving until [`TOOL_CALL_BOUND_SECS`].
+const BACKGROUND_START_SLACK_SECS: i64 = 2;
 /// **How long a claim holds** before another look may take the slot — a rung's trigger is a process
 /// spawn, seconds; renewed every half of it while the trigger runs.
 pub const CLAIM_SECS: i64 = 60;
@@ -1188,6 +1197,72 @@ impl ChatStore {
             .optional()?)
     }
 
+    /// **The background wait the slot's session is in** (nxf 6j6v.c3cm, 6j6v.y5a2), when it is in
+    /// one: the slot's turn is the session's latest and the newest entry of its main conversation is
+    /// a `result`, so the model has finished speaking, while the look found the process alive. The
+    /// SDK holds a process past its `result` for a background task's notification; its call returned
+    /// at once ("running in background"), so no tool call is open and no ask can reach it.
+    ///
+    /// **Whether anything runs under it is not said here** — the sample measures that. `None` too
+    /// for a session that made no call in this process, which has started nothing to wait for.
+    pub(crate) fn slot_background_wait(
+        &self,
+        session: &str,
+        thread: &str,
+        process_start: &str,
+    ) -> Result<Option<BackgroundWait>> {
+        let Some((start, None)) = self.slot_turn(session, thread)? else {
+            return Ok(None);
+        };
+        let conn = self.connection();
+        let newest: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, at FROM agent_transcript
+                  WHERE internal_session = ?1 AND seq >= ?2 AND parent_tool_use_id IS NULL
+                    AND kind IN ('assistant', 'thinking', 'tool_use', 'tool_result', 'result',
+                                 'error', 'turn_start', 'session_init')
+                  ORDER BY seq DESC LIMIT 1",
+                params![session, start],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some(("result", Some(turn_ended_at))) =
+            newest.as_ref().map(|(k, at)| (k.as_str(), at.clone()))
+        else {
+            return Ok(None);
+        };
+        // The oldest call of THIS process: a job can have been started by any of them, in an earlier
+        // turn too. Newest first, because a session's early rows are the ones nobody needs.
+        let mut st = conn.prepare(
+            "SELECT at FROM agent_transcript
+              WHERE internal_session = ?1 AND kind = 'tool_use' AND parent_tool_use_id IS NULL
+                AND at IS NOT NULL
+              ORDER BY seq DESC",
+        )?;
+        let mut first_call = None;
+        for at in st.query_map([session], |r| r.get::<_, String>(0))? {
+            let at = at?;
+            if earlier(&at, process_start) {
+                break;
+            }
+            first_call = Some(at);
+        }
+        let Some(first_call) = first_call else {
+            return Ok(None);
+        };
+        // The sample concedes its own slack below `since`; moved up by all but ours.
+        let sample_since = after(
+            &first_call,
+            nxs_service::process::SINCE_SLACK_SECS - BACKGROUND_START_SLACK_SECS,
+            "the background wait's sample",
+        )?;
+        Ok(Some(BackgroundWait {
+            turn_ended_at,
+            first_call,
+            sample_since,
+        }))
+    }
+
     /// The newest hold of `session`, standing or not, with the outcome its resume recorded.
     pub(crate) fn latest_hold(&self, session: &str) -> Result<Option<HoldRow>> {
         Ok(self
@@ -1515,6 +1590,18 @@ impl Signal {
     }
 }
 
+/// **A session whose turn ended while its process stays alive** — see
+/// [`ChatStore::slot_background_wait`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundWait {
+    /// The `result` that ended the turn.
+    pub(crate) turn_ended_at: String,
+    /// The first call of this process: a movement before it is not one of its calls' work.
+    first_call: String,
+    /// The `since` the sample is taken with, and stored under.
+    pub(crate) sample_since: String,
+}
+
 /// **What one look knows about a live session's life** (design 8nx4 sections 1 and 2).
 ///
 /// `L` ([`Life::own`]) is the session's OWN life: a model entry of the slot's current span, the
@@ -1523,10 +1610,14 @@ impl Signal {
 /// no nudge comes earlier than ten minutes after the process's start (round 3 CQ #5). `P`
 /// ([`Life::process_start`]) is the row's `trigger_clock`, which only a process start moves.
 struct Life {
-    /// `L` and where it came from — `M`, the last movement of the open call's subprocesses, among
-    /// its candidates (present only while an open call stands, the host samples it and a sample
-    /// with a process under the call has been stored).
+    /// `L` and where it came from — `M`, the last movement of the open call's subprocesses or of a
+    /// background wait's, among its candidates (present only while one stands, the host samples it
+    /// and a sample with a process under it has been stored).
     own: Option<(String, Signal)>,
+    /// `M`, on its own.
+    moved_at: Option<String>,
+    /// The background wait this look found, when no call is open.
+    wait: Option<BackgroundWait>,
     /// `P`.
     process_start: String,
     /// `max(S + SILENCE_SECS, M + SUBPROCESS_IDLE_SECS)`; on a host that cannot sample an open
@@ -1548,6 +1639,7 @@ impl Life {
         row: &OwedStart,
         session: &str,
         call: Option<&OpenToolCall>,
+        wait: Option<BackgroundWait>,
     ) -> Result<Life> {
         let (t, h) = (row.thread.as_str(), row.role.as_str());
         let entry = store.slot_last_own_output(session, t, ctx.now)?;
@@ -1561,14 +1653,21 @@ impl Life {
         };
         let mut moved_at = None;
         let mut blind_call = false;
-        if let Some(call) = call {
-            match ctx.worker.subprocess_sample(session, &call.since) {
+        // An open call and a background wait are watched alike: a wait is a call the SDK returned
+        // early, and its work is the same processes. Only a blind host differs: a call stands under
+        // its own bound, a wait keeps the silence rule, since nothing says one is really there.
+        let watched = match (call, &wait) {
+            (Some(call), _) => Some((call.since.as_str(), call.since.as_str())),
+            (None, Some(w)) => Some((w.sample_since.as_str(), w.first_call.as_str())),
+            (None, None) => None,
+        };
+        if let Some((since, floor)) = watched {
+            match ctx.worker.subprocess_sample(session, since) {
                 Some(sample) => {
-                    let moved =
-                        store.store_subprocess_sample(t, h, row, &call.since, sample, ctx.now)?;
-                    moved_at = moved.filter(|m| !earlier(m, &call.since));
+                    let moved = store.store_subprocess_sample(t, h, row, since, sample, ctx.now)?;
+                    moved_at = moved.filter(|m| !earlier(m, floor));
                 }
-                None => blind_call = true,
+                None => blind_call = call.is_some(),
             }
         }
         let mut own: Option<(String, Signal)> = None;
@@ -1617,6 +1716,8 @@ impl Life {
         };
         Ok(Life {
             own,
+            moved_at,
+            wait,
             process_start,
             due,
             pulse,
@@ -1697,7 +1798,11 @@ fn live(
     if let Some(ceiling) = ceiling_reached(store, row, ctx.now)? {
         return escalate(ctx, store, row, coordinator, ceiling, findings);
     }
-    let life = Life::observe(ctx, store, row, session, call.as_ref())?;
+    let wait = match call {
+        Some(_) => None,
+        None => store.slot_background_wait(session, t, &row.trigger_clock)?,
+    };
+    let life = Life::observe(ctx, store, row, session, call.as_ref(), wait)?;
     if row.stop_requested_at.is_some() {
         return step_stop_in_flight(ctx, store, row, coordinator, &recheck, findings);
     }
@@ -1707,10 +1812,36 @@ fn live(
     if row.asked_at.is_some() {
         return step_nudge_pending(ctx, store, row, coordinator, &life, &recheck, findings);
     }
+    // Movement holds off the silence, not for ever: past the bound of one tool call, as hung.
+    if let (Some(wait), Some(_)) = (&life.wait, &life.moved_at) {
+        let bound = after(
+            &wait.turn_ended_at,
+            TOOL_CALL_BOUND_SECS,
+            "the background wait's bound",
+        )?;
+        if reached(ctx.now, &bound) {
+            return escalate(ctx, store, row, coordinator, hung_wait(wait), findings);
+        }
+    }
     if reached(ctx.now, &life.due) {
         return step_due(ctx, store, row, coordinator, &life, &recheck, findings);
     }
     step_alive(ctx, store, row, &life, &recheck, findings)
+}
+
+/// The occasion of a background wait past the bound of one tool call.
+fn hung_wait(wait: &BackgroundWait) -> Occasion {
+    Occasion {
+        observed: Observation::Silent,
+        judged_from: wait.turn_ended_at.clone(),
+        detail: format!(
+            "its process is alive and its turn ended at {} while processes its calls started keep \
+             moving — past the bound of {} h for one call, so the background work is taken as \
+             hung; a nudge cannot reach a session whose turn has ended",
+            wait.turn_ended_at,
+            TOOL_CALL_BOUND_SECS / 3600
+        ),
+    }
 }
 
 /// The occasion of a tool call past its own bound.
@@ -2094,10 +2225,24 @@ fn step_dead(
             "no life of its own since it was nudged at {asked} (silent since {})",
             life.silent_since
         ),
-        None => format!(
-            "its process started at {} and produced nothing of its own since",
-            life.process_start
-        ),
+        None => match &life.wait {
+            Some(wait) => format!(
+                "its turn ended at {} and {}",
+                wait.turn_ended_at,
+                life.moved_at.as_ref().map_or_else(
+                    || "no process its calls started was seen moving".to_string(),
+                    |m| format!("the processes its calls started last moved at {m}"),
+                )
+            ),
+            None if life.since_its_start() => format!(
+                "its process is alive and showed no life of its own on this slot since {}",
+                life.silent_since
+            ),
+            None => format!(
+                "its process started at {} and produced nothing of its own since",
+                life.process_start
+            ),
+        },
     };
     let id = store.log_rung(
         ctx.liveness,
@@ -3248,27 +3393,46 @@ fn signs_of_life(
         Some(s) => store.slot_open_tool_call(s, t)?,
         None => None,
     };
-    let blind = match (row.session.as_deref(), &call) {
-        (Some(s), Some(call)) if running => ctx.worker.subprocess_sample(s, &call.since).is_none(),
+    let wait = match (row.session.as_deref(), &call) {
+        (Some(s), None) => store.slot_background_wait(s, t, &row.trigger_clock)?,
+        _ => None,
+    };
+    if let Some(wait) = &wait {
+        lines.push(format!(
+            "- its turn ended at {}; no tool call is open and no ask can reach it",
+            wait.turn_ended_at
+        ));
+    }
+    // What stands now, and the `since` its sample is stored under. A sample stored for anything else
+    // says nothing about this: the row keeps the last one of an earlier call.
+    let standing = match (&call, &wait) {
+        (Some(call), _) => Some(("the open call", call.since.as_str())),
+        (None, Some(wait)) => Some(("its calls", wait.sample_since.as_str())),
+        (None, None) => None,
+    };
+    let blind = match (row.session.as_deref(), standing) {
+        (Some(s), Some((_, since))) if running => ctx.worker.subprocess_sample(s, since).is_none(),
         _ => false,
     };
-    lines.push(
-        match (
+    lines.push(match standing {
+        None => "- subprocesses: not measured — no tool call is open".to_string(),
+        Some(_) if blind => "- subprocesses: this host reports no subprocess signals".to_string(),
+        Some((what, since)) if row.subprocess_since.as_deref() == Some(since) => match (
             &row.subprocess_moved_at,
             row.subprocess_count,
             row.subprocess_cpu_units,
         ) {
-            _ if blind => "- subprocesses: this host reports no subprocess signals".to_string(),
             (Some(m), Some(n), Some(cpu)) => format!(
-            "- last subprocess movement: at {m} — {n} process(es) under the open call, the CPU \
-             counter standing at {cpu}"
-        ),
+                "- last subprocess movement: at {m} — {n} process(es) under {what}, the CPU \
+                 counter standing at {cpu}"
+            ),
             (None, Some(n), Some(cpu)) => {
-                format!("- subprocesses: {n} under the open call, never moving (CPU counter {cpu})")
+                format!("- subprocesses: {n} under {what}, never moving (CPU counter {cpu})")
             }
             _ => "- subprocesses: none sampled".to_string(),
         },
-    );
+        Some(_) => "- subprocesses: none sampled".to_string(),
+    });
     for r in store.slot_recovery_log(t, h)? {
         let outcome = r.outcome.as_deref().unwrap_or("in flight");
         match action_of(&r) {
@@ -3467,6 +3631,46 @@ mod tests {
                 params![kind, tool_use_id, at, data],
             )
             .unwrap();
+    }
+
+    /// **A background wait is exactly a slot whose newest main entry is a `result`, with a call of
+    /// this process behind it.** Anything the model or the runtime wrote after the `result` means the
+    /// session was woken; a subagent's entry does not; another slot's turn takes the session away;
+    /// a call of an earlier process is not this process's work.
+    #[test]
+    fn slot_background_wait_is_a_result_as_the_newest_main_entry_with_a_call_of_this_process() {
+        let wait = |store: &ChatStore| store.slot_background_wait("s-1", "t-1", &at(100)).unwrap();
+        let store = ChatStore::open_in_memory(1);
+        entry(&store, "tool_use", &at(10), Some("old"), "{}");
+        entry(&store, "turn_start", &at(100), None, r#"{"thread":"t-1"}"#);
+        entry(&store, "result", &at(101), None, "{}");
+        assert_eq!(wait(&store), None, "no call of this process behind it");
+        entry(&store, "tool_use", &at(110), Some("one"), "{}");
+        assert_eq!(wait(&store), None, "the model is still in its turn");
+        entry(&store, "tool_use", &at(120), Some("two"), "{}");
+        entry(&store, "result", &at(130), None, "{}");
+        let found = wait(&store).expect("a wait");
+        assert_eq!(found.turn_ended_at, at(130));
+        assert_eq!(found.first_call, at(110), "the oldest call of this process");
+        assert_eq!(
+            found.sample_since,
+            at(110 + nxs_service::process::SINCE_SLACK_SECS - BACKGROUND_START_SLACK_SECS),
+        );
+        store
+            .connection()
+            .execute(
+                "INSERT INTO agent_transcript(internal_session, seq, kind, parent_tool_use_id, at, data)
+                 VALUES ('s-1', 99, 'assistant', 'one', ?1, '{}')",
+                [at(131)],
+            )
+            .unwrap();
+        assert!(wait(&store).is_some(), "a subagent's entry changes nothing");
+        entry(&store, "session_init", &at(140), None, "{}");
+        assert_eq!(wait(&store), None, "woken");
+        entry(&store, "result", &at(150), None, "{}");
+        assert!(wait(&store).is_some(), "and waiting again");
+        entry(&store, "turn_start", &at(160), None, r#"{"thread":"t-2"}"#);
+        assert_eq!(wait(&store), None, "another slot's turn holds the session");
     }
 
     /// **The session's own life is model output only** (nxf 6j6v.1r61, design 8nx4 section 1, round

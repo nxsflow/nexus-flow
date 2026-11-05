@@ -694,7 +694,10 @@ Sidecar steht `true`.
 koordinierten Slots verstummt, ohne Antwort endet oder nie startet, handelt der Koordinator, bevor
 jemand gefragt wird: Er stupst die laufende Sitzung an, sobald sie an diesem Slot 10 Minuten kein
 eigenes Lebenszeichen gegeben hat, stoppt sie, wenn fünf weitere ohne vergehen, setzt die beendete
-in derselben Sitzung fort oder startet den Slot mit seiner ursprünglichen Aufgabe neu. Ein Anstupsen
+in derselben Sitzung fort oder startet den Slot mit seiner ursprünglichen Aufgabe neu. In einem
+Tool-Aufruf oder nach einem Zug, der endete, um auf Hintergrundarbeit zu warten, zählen die Prozesse,
+die ihre Aufrufe gestartet haben, als Lebenszeichen: 30 Minuten ohne Bewegung treten an die Stelle der
+10, und Arbeit, die sich nach 3 Stunden noch bewegt, wird als hängend eskaliert. Ein Anstupsen
 zählt keinen Versuch; eine Fortsetzung oder ein Neustart schon — drei insgesamt, und standardmäßig
 wird eine Sitzung, die nach einem davon wieder tot ist, eskaliert —, und eine Wiederaufnahme dauert
 höchstens zwei bis sechs Stunden. `recovery` sagt, wie weit er kam (`attempt`, `of`, `action`, `at`,

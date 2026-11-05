@@ -5388,3 +5388,195 @@ fn a_withdrawn_row_the_log_refuses_still_lets_the_sweep_forget_the_owed_row() {
         .collect();
     assert_eq!(actions, ["asked"]);
 }
+
+// ---- a turn that ended over background work (nxf 6j6v.c3cm, 6j6v.y5a2) -----------------------------
+
+/// **The field shape of c3cm**, read off the three transcripts: the call that starts the job returns
+/// at once ("Command running in background"), the model says one line and the turn ENDS with a
+/// `result`, while the process stays alive for the job's notification. No call is open, and the ask
+/// door closed at that `result`. The turn: T0; the call and its return at +60; the `result` at +61.
+fn a_coder_whose_turn_ended_over_a_background_job(team: &Team) -> (String, String) {
+    let thread = team
+        .commission(T0, "coder", "Run the long probe.")
+        .thread_id;
+    let session = team.worker.last("coder").internal_session;
+    team.worker.run(&session);
+    team.worker.no_door.lock().unwrap().insert(session.clone());
+    team.turn(&session, &thread, &at(0));
+    team.tool_call(&session, "toolu_bg", "Bash", &at(60));
+    team.tool_returned(&session, "toolu_bg", &at(60));
+    team.entry(&session, "assistant", &at(61), "{\"text\":\"It runs.\"}");
+    team.entry(&session, "result", &at(61), "{\"isError\":false}");
+    (thread, session)
+}
+
+/// Moving descendants keep a session whose turn ended from being nudged, stopped or logged at all —
+/// where `origin/main` answered `cannot_ask` at +661 and stopped at +961, the field's 16 minutes.
+#[test]
+fn a_turn_that_ended_over_moving_background_work_is_left_alone_for_forty_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_whose_turn_ended_over_a_background_job(&team);
+    for (i, s) in (121..=61 + 2_400).step_by(60).enumerate() {
+        team.sample(&session, 3, 1_000 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.stops().is_empty(), "{:?}", team.worker.stops());
+    assert!(team.log(&thread, "coder").is_empty());
+}
+
+/// **A patient wait**: a counter that moves by one unit a look (`gh run watch`, a poll loop with
+/// sleeps) is progress for a wait as it is for a call — there is no CPU floor to fall under.
+#[test]
+fn a_poll_loop_after_the_turn_ended_moving_one_unit_a_look_is_not_stopped() {
+    let team = team();
+    let (thread, session) = a_coder_whose_turn_ended_over_a_background_job(&team);
+    for (i, s) in (121..=61 + 7_200).step_by(60).enumerate() {
+        team.sample(&session, 2, 500 + i as u64);
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.stops().is_empty(), "{:?}", team.worker.stops());
+    assert!(team.log(&thread, "coder").is_empty());
+}
+
+/// **The stated bound for a hang**: descendants that stop moving at +601 read as dead at M + 30
+/// minutes (the closed door's `cannot_ask`) and are stopped five minutes later — never before.
+#[test]
+fn background_work_that_freezes_is_stopped_at_its_last_movement_plus_thirty_five_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_whose_turn_ended_over_a_background_job(&team);
+    let frozen_at = 601;
+    for (i, s) in (121..=frozen_at + 2_160).step_by(60).enumerate() {
+        if s <= frozen_at {
+            team.sample(&session, 1, 100 * (i as u64 + 1));
+        }
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    assert_eq!(
+        log[0],
+        (
+            "asked".to_string(),
+            Some("cannot_ask".to_string()),
+            frozen_at + 1_800
+        ),
+        "{log:?}"
+    );
+    assert_eq!(log[1].0, "stopped", "{log:?}");
+    assert_eq!(log[1].2, frozen_at + 1_800 + 300, "{log:?}");
+    assert_eq!(team.worker.stops(), vec![session.clone()]);
+    let detail: String = team
+        .store()
+        .connection()
+        .query_row(
+            "SELECT detail FROM recovery_log WHERE action = 'stopped'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !detail.contains("produced nothing of its own since")
+            && detail.contains(&at(61))
+            && detail.contains(&at(frozen_at)),
+        "the stop names what it measured: the turn's end and the last movement: {detail}"
+    );
+}
+
+/// **Nothing under an ended turn is no reason to wait**: with no descendant there is nothing to
+/// measure, so the silence rule stands — the session is stopped fifteen minutes after its last life.
+#[test]
+fn a_turn_that_ended_with_nothing_running_under_it_is_stopped_after_fifteen_minutes() {
+    let team = team();
+    let (thread, session) = a_coder_whose_turn_ended_over_a_background_job(&team);
+    team.sample(&session, 0, 0);
+    for s in (121..=1_021).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let log = team.log_at(&thread, "coder");
+    assert_eq!(log[0].2, 661, "{log:?}");
+    assert_eq!(log[1].0, "stopped", "{log:?}");
+    assert_eq!(log[1].2, 961, "{log:?}");
+}
+
+/// **Moving is not a licence**: work that never stops moving — a dev server, a runaway loop — is
+/// taken as hung at the same bound a single tool call gets, counted from the turn's end, and
+/// escalated once.
+#[test]
+fn background_work_that_outlives_the_bound_is_escalated_as_hung_once() {
+    use nexus_chat::ladder::TOOL_CALL_BOUND_SECS;
+    let team = team();
+    let (thread, session) = a_coder_whose_turn_ended_over_a_background_job(&team);
+    for (i, s) in (61 + 1_200..61 + TOOL_CALL_BOUND_SECS)
+        .step_by(1_200)
+        .enumerate()
+    {
+        team.sample(&session, 2, 100 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    team.sample(&session, 2, 7);
+    team.tick(&at(61 + TOOL_CALL_BOUND_SECS - 1), &thread);
+    assert!(escalations(&team.messages(&thread)).is_empty(), "not yet");
+    team.sample(&session, 2, 8);
+    team.tick(&at(61 + TOOL_CALL_BOUND_SECS), &thread);
+    let escalated = escalations(&team.messages(&thread));
+    assert_eq!(escalated.len(), 1, "{:?}", team.messages(&thread));
+    assert!(
+        escalated[0].contains("background") && escalated[0].contains(&at(61)),
+        "{}",
+        escalated[0]
+    );
+    team.sample(&session, 2, 9);
+    team.tick(&at(61 + TOOL_CALL_BOUND_SECS + 600), &thread);
+    assert_eq!(escalations(&team.messages(&thread)).len(), 1, "once");
+}
+
+/// **The status does not claim what it did not measure** (the field's "last subprocess movement at
+/// 08:19:52": a call that had returned before the turn ended). The sample of an earlier call says
+/// nothing about what stands now, so it is not offered as the open call's, and a stop names the
+/// state the session was really in.
+#[test]
+fn the_summary_names_no_earlier_calls_movement_as_what_stands_now() {
+    let team = team();
+    let (thread, session) = a_running_coder_with_own_life_at_t0(&team);
+    team.worker.no_door.lock().unwrap().insert(session.clone());
+    team.tool_call(&session, "toolu_bg", "Bash", &at(60));
+    team.tool_returned(&session, "toolu_bg", &at(60));
+    team.entry(&session, "result", &at(61), "{\"isError\":false}");
+    // The first stop spends the one recovery the default allows; the session is continued.
+    for s in (121..=961).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    team.worker.stop(&session);
+    team.ended(&at(961), &session, Some("told to stop (SIGTERM)"));
+    team.tick(&at(1_021), &thread);
+    team.tick(&at(1_081), &thread);
+    team.worker.run(&session);
+    team.turn(&session, &thread, &at(1_100));
+    // A foreground call whose children the look samples moving, as the field's 08:19:52 was.
+    team.tool_call(&session, "toolu_fg", "Bash", &at(1_110));
+    for (i, s) in (1_170..=1_350).step_by(60).enumerate() {
+        team.sample(&session, 2, 100 * (i as u64 + 1));
+        team.tick(&at(s), &thread);
+    }
+    team.tool_returned(&session, "toolu_fg", &at(1_360));
+    team.entry(&session, "assistant", &at(1_361), "{\"text\":\"Done.\"}");
+    team.entry(&session, "result", &at(1_361), "{\"isError\":false}");
+    // A host that cannot sample from here on: nothing about the ended turn was measured.
+    team.worker.samples.lock().unwrap().remove(&session);
+    for s in (1_410..=2_310).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    let escalated = escalations(&team.messages(&thread));
+    assert_eq!(escalated.len(), 1, "{:?}", team.log(&thread, "coder"));
+    assert!(
+        !escalated[0].contains("under the open call")
+            && !escalated[0].contains("last subprocess movement")
+            && !escalated[0].contains("produced nothing of its own since"),
+        "{}",
+        escalated[0]
+    );
+    assert!(
+        escalated[0].contains(&format!("its turn ended at {}", at(1_361))),
+        "{}",
+        escalated[0]
+    );
+}

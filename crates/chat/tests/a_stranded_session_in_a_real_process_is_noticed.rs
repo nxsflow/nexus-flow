@@ -1063,3 +1063,159 @@ fn a_hung_session_in_the_real_sidecar_is_nudged_stopped_and_continued_naming_its
         std::panic::resume_unwind(e);
     }
 }
+
+// ---- a turn that ended over background work, in real processes (nxf 6j6v.c3cm) --------------------
+
+/// The field's transcript shape over a real process tree: the call returns "running in background"
+/// at +60 and the turn ends with a `result` at +61, while `script` keeps running under the stand-in.
+fn a_turn_ended_over(root: &Path, script: &str) -> (String, String, Child) {
+    let (thread, slot, s, child) = a_live_turn_over(root, Some(script));
+    ended_over_a_background_call(root, &s, 60);
+    (thread, slot, child)
+}
+
+fn ended_over_a_background_call(root: &Path, session: &str, secs: i64) {
+    append(
+        root,
+        &at(secs + 1),
+        session,
+        &[
+            line(
+                "tool_use",
+                secs,
+                Some("toolu_bg"),
+                serde_json::json!({ "name": "Bash", "input": { "command": "./long-probe.sh" } }),
+            ),
+            line(
+                "tool_result",
+                secs,
+                Some("toolu_bg"),
+                serde_json::json!({ "content": "Command running in background with ID: b1.", "isError": false }),
+            ),
+            line(
+                "assistant",
+                secs + 1,
+                None,
+                serde_json::json!({ "text": "It runs." }),
+            ),
+            line(
+                "result",
+                secs + 1,
+                None,
+                serde_json::json!({ "isError": false }),
+            ),
+        ],
+    );
+}
+
+/// Each look comes once the real tree under `pid` has really moved since the one before; returns
+/// the rungs after looks spaced further apart than the idle bound, so a look that saw no movement
+/// would have acted.
+fn looks_over_a_moving_tree(root: &Path, thread: &str, pid: u32) -> Vec<(String, Option<String>)> {
+    let idle = nexus_chat::ladder::SUBPROCESS_IDLE_SECS;
+    let sample = || nexus_chat_test_sample(pid);
+    let mut last = sample();
+    let mut secs = 61 + nexus_chat::ladder::SILENCE_SECS;
+    for _ in 0..3 {
+        assert!(within(60, || sample() != last), "the real tree never moved");
+        last = sample();
+        tick(root, &at(secs), thread);
+        secs += idle - 1;
+    }
+    rungs(root)
+}
+
+/// **The first case of c3cm, with real children**: a job under an ended turn that works and starts
+/// new descendants as it goes. `origin/main` answers `cannot_ask` at the first look and stops it.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_working_job_under_an_ended_turn_with_new_descendants_is_neither_asked_nor_stopped() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, slot, child) = a_turn_ended_over(root, WORKING_CHILD);
+    let rows = looks_over_a_moving_tree(root, &thread, child.id());
+    kill_tree(child);
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(escalations_in(root, &slot), 0);
+}
+
+/// **The merger of c3cm, with real children**: a poll loop that does nothing but sleep and look, the
+/// patient wait that spends next to no CPU. It still moves — every round is a new short-lived
+/// descendant — and that is what is measured.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_patient_poll_loop_under_an_ended_turn_is_neither_asked_nor_stopped() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, slot, child) =
+        a_turn_ended_over(root, "sh -c 'while :; do sleep 0.2; done' & wait");
+    let rows = looks_over_a_moving_tree(root, &thread, child.id());
+    kill_tree(child);
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(escalations_in(root, &slot), 0);
+}
+
+/// **The opposite error, with real children**: a job that hangs — a process that blocks and never
+/// spends CPU again — is stopped at its last movement plus thirty-five minutes, and not before.
+/// `origin/main` acts at the silence's ten minutes instead.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_hung_job_under_an_ended_turn_is_stopped_within_its_bound() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, _slot, child) = a_turn_ended_over(root, "sleep 600 & wait");
+    // Settled first: a process still exec'ing moves, and M is to be the look below.
+    let sample = || nexus_chat_test_sample(child.id());
+    assert!(
+        within(30, || {
+            let before = sample();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            before == sample() && before.is_some_and(|s| s.count > 0)
+        }),
+        "the blocked tree never settled"
+    );
+    let moved = 61 + 60;
+    let idle = nexus_chat::ladder::SUBPROCESS_IDLE_SECS;
+    tick(root, &at(moved), &thread);
+    tick(root, &at(moved + idle - 1), &thread);
+    let before_the_bound = rungs(root);
+    tick(root, &at(moved + idle), &thread);
+    tick(
+        root,
+        &at(moved + idle + nexus_chat::ladder::NUDGE_WAIT_SECS),
+        &thread,
+    );
+    let actions: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
+    kill_tree(child);
+    assert!(before_the_bound.is_empty(), "{before_the_bound:?}");
+    assert_eq!(actions[..2], ["asked".to_string(), "stopped".to_string()]);
+}
+
+/// **What the session's own runtime spends is not its work.** The model's CLI and a stdio MCP server
+/// are descendants that use CPU for ever and started before the session's first call: they must not
+/// keep an ended turn alive, or a hung session would read as moving until the bound. Real instants
+/// here, because the filter compares with real process starts: the first call is stamped ten
+/// seconds after the busy child really started.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_busy_process_older_than_the_sessions_first_call_is_no_sign_of_its_work() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, _slot, s, child) = a_live_turn_over(root, Some(WORKING_CHILD));
+    let t0 =
+        time::OffsetDateTime::parse(T0, &time::format_description::well_known::Rfc3339).unwrap();
+    let first_call = (time::OffsetDateTime::now_utc() - t0).whole_seconds() + 10;
+    ended_over_a_background_call(root, &s, first_call);
+    tick(
+        root,
+        &at(first_call + 1 + nexus_chat::ladder::SILENCE_SECS),
+        &thread,
+    );
+    let actions: Vec<String> = rungs(root).into_iter().map(|(a, _)| a).collect();
+    kill_tree(child);
+    assert_eq!(
+        actions,
+        ["asked".to_string()],
+        "the silence rule's: nothing of the session's calls runs"
+    );
+}
