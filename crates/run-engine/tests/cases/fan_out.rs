@@ -72,6 +72,10 @@ cases! {
             "timer_set start_deadline/finish/v1/finisher/a1 +180s start_deadline",
         ]);
         assert!(s.state.open_questions().next().is_none(), "the consolidator cannot ask");
+        assert!(
+            matches!(s.slot_state(&synth), SlotState::Replied { escalate: false, needs_rework: false, .. }),
+            "the bits are dropped when the reply folds, not merely left unread"
+        );
     }
 
     fn one_member_sending_it_back_routes_it_back_and_the_synthesis_is_its_verdict(s) {
