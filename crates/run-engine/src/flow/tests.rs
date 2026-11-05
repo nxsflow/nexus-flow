@@ -349,6 +349,47 @@ fn one_persona_in_two_steps_is_not_a_duplicate() {
 }
 
 #[test]
+fn a_ceiling_of_zero_is_refused_because_its_back_edge_could_never_be_taken() {
+    let (_, review) = real();
+    let coding = coding_with("max_passes: 3", "max_passes: 0");
+    assert_eq!(
+        compile(&coding, &review),
+        Err(CompileRefusal::ZeroMaxPasses {
+            step: "verify".into()
+        })
+    );
+}
+
+#[test]
+fn a_next_chain_that_closes_on_itself_is_refused_because_no_ceiling_bounds_it() {
+    let (mut coding, review) = real();
+    coding.steps[3].next = Some("build".into());
+    assert_eq!(
+        compile(&coding, &review),
+        Err(CompileRefusal::NextCycle {
+            step: "build".into()
+        })
+    );
+}
+
+#[test]
+fn a_next_cycle_the_first_step_never_reaches_is_refused_too() {
+    let (mut coding, review) = real();
+    coding.steps.push(StepDecl {
+        id: "stray".into(),
+        target: "coder".into(),
+        next: Some("stray".into()),
+        ..StepDecl::default()
+    });
+    assert_eq!(
+        compile(&coding, &review),
+        Err(CompileRefusal::NextCycle {
+            step: "stray".into()
+        })
+    );
+}
+
+#[test]
 fn max_passes_defaults_to_one_on_a_declared_back_edge() {
     let (_, review) = real();
     let text = include_str!("../../tests/fixtures/coding.yaml").replacen(

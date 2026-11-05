@@ -236,6 +236,14 @@ pub enum CompileRefusal {
         channel: String,
         handle: String,
     },
+    /// A back edge that can never be taken: the first verdict sending work back is already the ceiling.
+    ZeroMaxPasses {
+        step: String,
+    },
+    /// A chain of `next` with no end: only back edges have a ceiling, so nothing would stop it.
+    NextCycle {
+        step: String,
+    },
 }
 
 /// Compiles `flow` for slice 1. A step whose target is `review`'s name is a fan-out from that channel;
@@ -275,6 +283,7 @@ pub fn compile(flow: &ChannelDecl, review: &ChannelDecl) -> Result<FlowDef, Comp
         return Err(CompileRefusal::DuplicateStep { id: id.clone() });
     }
     check_references(&steps)?;
+    check_next_chains(&steps)?;
     Ok(FlowDef {
         name: flow.name.clone(),
         steps,
@@ -290,6 +299,11 @@ fn compile_step(
     is_fan_out: bool,
 ) -> Result<StepDef, CompileRefusal> {
     check_id(&declared.id)?;
+    if declared.max_passes == Some(0) {
+        return Err(CompileRefusal::ZeroMaxPasses {
+            step: declared.id.clone(),
+        });
+    }
     let (kind, channel) = if is_fan_out {
         (fan_out(review)?, review.name.clone())
     } else {
@@ -367,6 +381,30 @@ fn check_references(steps: &[StepDef]) -> Result<(), CompileRefusal> {
             if !known(name) {
                 return Err(CompileRefusal::UnknownStep { name: name.clone() });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Over `next` alone: a back edge is meant to cycle, and `max_passes` bounds it.
+fn check_next_chains(steps: &[StepDef]) -> Result<(), CompileRefusal> {
+    let next_of = |step: &StepDef| {
+        let next = step.next.as_ref()?;
+        steps.iter().find(|candidate| candidate.id == *next)
+    };
+    for start in steps {
+        let mut at = start;
+        // A chain with an end visits every step at most once.
+        for _ in 0..steps.len() {
+            match next_of(at) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        if next_of(at).is_some() {
+            return Err(CompileRefusal::NextCycle {
+                step: start.id.clone(),
+            });
         }
     }
     Ok(())
