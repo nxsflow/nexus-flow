@@ -1,0 +1,70 @@
+{
+  "appended": {
+    "last_seq": 17,
+    "timers": [
+      {
+        "change": "armed",
+        "fire_at": "2026-11-04T10:10:00.500Z",
+        "timer": "quiet/build/v1/coder/a1"
+      },
+      {
+        "change": "cleared",
+        "fire_at": "2026-11-04T10:00:00.000Z",
+        "timer": "start_deadline/build/v1/coder/a1"
+      },
+      {
+        "change": "fired",
+        "fire_at": "2026-11-04T10:00:00.000Z",
+        "timer": "stop_grace/build/v1/coder/a1/1"
+      }
+    ]
+  },
+  "due_timer": {
+    "fire_at": "2026-11-04T10:10:00.500Z",
+    "purpose": "quiet",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "timer": "quiet/build/v1/coder/a1"
+  },
+  "enqueued": [
+    "accepted",
+    "duplicate"
+  ],
+  "limits_declared": {
+    "max_event_bytes": 16384,
+    "max_events_per_append": 24,
+    "max_events_per_run": 5000,
+    "max_inbox_depth": 100
+  },
+  "limits_sqlite": {
+    "max_event_bytes": null,
+    "max_events_per_append": null,
+    "max_events_per_run": null,
+    "max_inbox_depth": null
+  },
+  "run_row": {
+    "commissioned_at": "2026-11-04T10:00:00.000Z",
+    "finished": false,
+    "last_seq": 17,
+    "max_v": 1,
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "workspace_id": "6j6v"
+  },
+  "store_error_precedence": [
+    "fenced",
+    "seq_mismatch",
+    "duplicate_key",
+    "cas_failed"
+  ],
+  "store_errors": [
+    "fenced",
+    "seq_mismatch",
+    "duplicate_key",
+    "cas_failed",
+    "version_too_old",
+    "busy",
+    "protected",
+    "unknown_run",
+    "invalid_event",
+    "backend"
+  ]
+}

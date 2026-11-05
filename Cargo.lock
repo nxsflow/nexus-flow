@@ -2278,6 +2278,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-run-contracts"
+version = "0.223.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "ulid",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

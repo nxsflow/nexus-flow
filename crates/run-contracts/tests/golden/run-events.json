@@ -1,0 +1,906 @@
+[
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "flow": {
+        "hash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "kind": "commissioned",
+      "policy": {
+        "call_bound": 10800,
+        "confirm_within": 300,
+        "hold_retry": 1800,
+        "hold_retry_max": 86400,
+        "hold_retry_min": 60,
+        "max_attempts": 3,
+        "max_holds": 5,
+        "quiet_after": 600,
+        "root_deadline": 60,
+        "start_deadline": 180,
+        "stop_grace": 300,
+        "subprocess_idle": 1800,
+        "tree_window": 600,
+        "wake_jump": 120
+      },
+      "requester": "owner",
+      "root_thread": "m-01JCCCCCCCCCCCCCCCCCCCCCCC",
+      "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+      "workspace_id": "6j6v"
+    },
+    "key": "commission/m-01JCCCCCCCCCCCCCCCCCCCCCCC",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 1,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "root_requested"
+    },
+    "key": "decision/1/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 2,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "root_opened",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "thread": "m-01JCCCCCCCCCCCCCCCCCCCCCCC"
+    },
+    "key": "root_opened/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 3,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "claim_requested"
+    },
+    "key": "decision/3/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 4,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "holder": "r-01JBBBBBBBBBBBBBBBBBBBBBBB",
+      "kind": "claim_busy"
+    },
+    "key": "claim_busy/r-01JAAAAAAAAAAAAAAAAAAAAAAA/1",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 5,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "behind": "r-01JBBBBBBBBBBBBBBBBBBBBBBB",
+      "kind": "run_queued"
+    },
+    "key": "decision/5/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 6,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "claim_taken"
+    },
+    "key": "claim_taken/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 7,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "attempt": 1,
+      "kind": "step_started",
+      "members": [
+        "coder"
+      ],
+      "step": "build",
+      "visit": 1
+    },
+    "key": "decision/7/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 8,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_refused",
+      "reason": {
+        "code": "git",
+        "reason": "fetch_failed"
+      }
+    },
+    "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/1",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 9,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "parked",
+      "reason": "tree_refused",
+      "slot": null
+    },
+    "key": "decision/9/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 10,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "resume",
+      "slot": null
+    },
+    "key": "input/r-01JAAAAAAAAAAAAAAAAAAAAAAA/01JEEEEEEEEEEEEEEEEEEEEEEE",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 11,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_refused",
+      "reason": {
+        "code": "mid_sequence",
+        "what": "cherry_pick"
+      }
+    },
+    "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/2",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 12,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_refused",
+      "reason": {
+        "code": "not_a_repository"
+      }
+    },
+    "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/3",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 13,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_refused",
+      "reason": {
+        "code": "foreign_directory"
+      }
+    },
+    "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/4",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 14,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "base": {
+        "branch": "main",
+        "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78"
+      },
+      "found": {
+        "branch": "nxs/park/run-r-01JAAAAAAAAAAAAAAAAAAAAAAA/20261104T100000Z",
+        "commit": "1111111111111111111111111111111111111111",
+        "kind": "committed"
+      },
+      "kind": "tree_prepared"
+    },
+    "key": "tree_prepared/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 15,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fire_at": "2026-11-04T10:10:00.500Z",
+      "kind": "timer_set",
+      "purpose": "start_deadline",
+      "timer": "start_deadline/build/v1/coder/a1"
+    },
+    "key": "decision/15/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 16,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "backend_session_id": "bdf74718",
+        "kind": "started",
+        "pid": 4242
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/0",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 17,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "timer_cleared",
+      "timer": "start_deadline/build/v1/coder/a1"
+    },
+    "key": "decision/17/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 18,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "beat": "model_output",
+        "kind": "heartbeat"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/64",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 19,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "beat": "calls_open",
+        "kind": "heartbeat"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/96",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 20,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "beat": "subprocess_moved",
+        "kind": "heartbeat"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/128",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 21,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "beat": "calls_closed",
+        "kind": "heartbeat"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/160",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 22,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 40,
+        "input_tokens": 10,
+        "kind": "usage",
+        "model": "opus",
+        "output_tokens": 20,
+        "turns": 1
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/192",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 23,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "kind": "permission_refused",
+        "program": "curl",
+        "rule": "Bash(curl *)"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/256",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 24,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fire_at": "2026-11-04T10:10:00.500Z",
+      "kind": "timer_fired",
+      "timer": "quiet/build/v1/coder/a1"
+    },
+    "key": "timer/quiet/build/v1/coder/a1/2026-11-04T10:10:00.500Z",
+    "origin": "timer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 25,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "liveness",
+      "reason": "quiet",
+      "since": "2026-11-04T10:00:00.000Z",
+      "slot": {
+        "attempt": 1,
+        "member": "coder",
+        "step": "build",
+        "visit": 1
+      }
+    },
+    "key": "decision/25/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 26,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "nudged",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "nudged/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/1",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 27,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "stop_signalled",
+      "nth": 1,
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1",
+      "signal": "term"
+    },
+    "key": "stop_signalled/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/1",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 28,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "stop_signalled",
+      "nth": 2,
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1",
+      "signal": "kill"
+    },
+    "key": "stop_signalled/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/2",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 29,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "usage_limit",
+          "resets_at": "2026-11-04T10:10:00.500Z"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/320",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 30,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "held",
+      "reason": "usage_limit",
+      "slot": {
+        "attempt": 1,
+        "member": "coder",
+        "step": "build",
+        "visit": 1
+      },
+      "until": "2026-11-04T10:10:00.500Z"
+    },
+    "key": "decision/30/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 31,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "exit",
+          "status": null
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/384",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 32,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "turn_complete"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/448",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 33,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "provider_unavailable"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/512",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 34,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "permission_refused",
+          "program": "curl",
+          "rule": "Bash(curl *)"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/576",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 35,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "stopped_by_host"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/640",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 36,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "cause": {
+          "code": "lost"
+        },
+        "kind": "ended"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/704",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 37,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "parked",
+      "reason": "would_not_stop",
+      "slot": {
+        "attempt": 1,
+        "member": "coder",
+        "step": "build",
+        "visit": 1
+      }
+    },
+    "key": "decision/37/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 38,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "escalate": true,
+      "kind": "reply",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "needs_rework": false,
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "reply/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 39,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "escalated",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "question": "decision/39/1",
+      "slot": {
+        "attempt": 1,
+        "member": "coder",
+        "step": "build",
+        "visit": 1
+      }
+    },
+    "key": "decision/39/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 40,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "disposition": "continue",
+      "kind": "answer",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "question": "decision/39/1"
+    },
+    "key": "answer/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 41,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "step_finished",
+      "outcome": "needs_rework",
+      "step": "verify",
+      "visit": 2
+    },
+    "key": "decision/41/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 42,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "declaring": "verify",
+      "from": "verify",
+      "kind": "rework",
+      "pass": 2,
+      "to": "build"
+    },
+    "key": "decision/41/2",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 43,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "ceiling",
+      "last_verdict": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "pass": 4,
+      "question": "decision/41/3",
+      "step": "verify"
+    },
+    "key": "decision/41/3",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 44,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "disposition": "accept",
+      "kind": "answer",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+      "question": "decision/41/3"
+    },
+    "key": "answer/m-01JCCCCCCCCCCCCCCCCCCCCCCC",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 45,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "resume",
+      "slot": {
+        "attempt": 1,
+        "member": "coder",
+        "step": "build",
+        "visit": 1
+      }
+    },
+    "key": "input/r-01JAAAAAAAAAAAAAAAAAAAAAAA/01JFFFFFFFFFFFFFFFFFFFFFFF",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 46,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "by": "requester",
+      "kind": "withdrawn",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD"
+    },
+    "key": "withdraw/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 47,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "finishing",
+      "outcome": "withdrawn",
+      "reason": "withdrawn_by_requester"
+    },
+    "key": "decision/47/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 48,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "by": "owner",
+      "kind": "withdrawn",
+      "message": null
+    },
+    "key": "withdraw/m-01JCCCCCCCCCCCCCCCCCCCCCCC",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 49,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "withdraw_forced"
+    },
+    "key": "decision/49/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 50,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "input_seq": 49,
+      "kind": "ignored",
+      "reason": "already_finishing"
+    },
+    "key": "decision/49/2",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 51,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "branch": "nxs/park/run-r-01JAAAAAAAAAAAAAAAAAAAAAAA/20261104T100000Z",
+        "commit": "1111111111111111111111111111111111111111",
+        "kind": "committed"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 52,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "branch": "feat/x",
+        "commit": "2222222222222222222222222222222222222222",
+        "kind": "on_own_branch"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/own",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 53,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "kind": "clean"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/clean",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 54,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "kind": "missing"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/missing",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 55,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "kind": "not_held"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/not_held",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 56,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "delivered",
+      "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD"
+    },
+    "key": "delivered/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 57,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "claim_released"
+    },
+    "key": "claim_released/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 58,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "finished",
+      "outcome": "withdrawn",
+      "reason": "withdrawn_by_requester"
+    },
+    "key": "decision/58/1",
+    "origin": "reducer",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 59,
+    "v": 1
+  }
+]

@@ -1,0 +1,106 @@
+{
+  "git_reasons": [
+    "bound_exceeded",
+    "fetch_failed",
+    "lock_held",
+    "exit_nonzero"
+  ],
+  "reason_codes": [
+    "stale_timer",
+    "duplicate_reply",
+    "late_reply_after_skip",
+    "unknown_session",
+    "final_state",
+    "already_finishing",
+    "quiet",
+    "hung",
+    "start_failed",
+    "lost",
+    "exit",
+    "turn_complete",
+    "stopped_by_host",
+    "would_not_stop",
+    "root_failed",
+    "tree_refused",
+    "poison_input",
+    "permission_refused",
+    "ended_without_reply",
+    "fan_out_incomplete",
+    "usage_limit",
+    "provider_unavailable",
+    "hold_limit",
+    "ceiling",
+    "accepted_by_requester",
+    "withdrawn_by_requester",
+    "withdrawn_by_owner",
+    "delivered"
+  ],
+  "remedy_table": [
+    [
+      "run Created: no root_opened",
+      "root_failed"
+    ],
+    [
+      "run Running, tree Unprepared: refused",
+      "tree_refused"
+    ],
+    [
+      "slot Starting: no started fact",
+      "start_failed"
+    ],
+    [
+      "slot Quiet or Nudged: no fact after the nudge",
+      "hung"
+    ],
+    [
+      "slot Stopping: alive after the second SIGTERM",
+      "would_not_stop"
+    ],
+    [
+      "slot Replied, process live: alive after the second SIGTERM",
+      "would_not_stop"
+    ],
+    [
+      "slot Ended turn_complete without a reply",
+      "ended_without_reply"
+    ],
+    [
+      "slot Ended exit without a reply",
+      "start_failed"
+    ],
+    [
+      "slot Ended lost without a reply",
+      "lost"
+    ],
+    [
+      "slot Ended usage_limit",
+      "usage_limit"
+    ],
+    [
+      "slot Ended provider_unavailable",
+      "provider_unavailable"
+    ],
+    [
+      "slot Ended usage_limit or provider_unavailable: over max_holds",
+      "hold_limit"
+    ],
+    [
+      "slot Ended permission_refused",
+      "permission_refused"
+    ],
+    [
+      "fan-out member out of attempts",
+      "fan_out_incomplete"
+    ],
+    [
+      "inbox row that will not fold",
+      "poison_input"
+    ]
+  ],
+  "tree_refusals": [
+    "not_a_repository",
+    "foreign_directory",
+    "mid_sequence",
+    "git"
+  ]
+}
