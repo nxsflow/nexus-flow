@@ -90,8 +90,9 @@ pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// **How often one rung's failed start is tried again on the same rung** (round 2 TQ #6): one
 /// re-commission or continue with its retries is ONE attempt and ONE log row — three starts in all,
 /// as a direct send gets (`orchestration::MAX_START_ATTEMPTS`). Past that, the next try is a new
-/// rung and a new attempt, so a start that never succeeds still reaches [`MAX_RECOVERY_ATTEMPTS`]
-/// within minutes rather than at the thread's deadline.
+/// rung and a new attempt, so a start that fails for anything but load still reaches
+/// [`MAX_RECOVERY_ATTEMPTS`] within minutes rather than at the thread's deadline. One that fails on
+/// load is waited out up to the ceiling ([`Done::FailedOnLoad`]).
 pub const RUNG_START_RETRIES: u32 = 2;
 /// The wall-clock ceiling's floor: two hours.
 pub const RECOVERY_CEILING_FLOOR_SECS: i64 = 7_200;
@@ -2317,6 +2318,25 @@ fn ceiling_reached(store: &ChatStore, row: &OwedStart, now: &str) -> Result<Opti
         return Ok(None);
     }
     let ceiling = recovery_ceiling_secs(declared_window(store, &row.thread)?);
+    // **A start that never succeeded is said as that** (nxf 6j6v.1q0h), not as a session's silence:
+    // nothing ran, so nothing was silent.
+    let failed_start = store.newest_rung(&row.thread, &row.role)?.and_then(|last| {
+        last.outcome
+            .as_deref()
+            .and_then(failure_of)
+            .map(str::to_string)
+    });
+    if let Some(why) = failed_start {
+        return Ok(Some(Occasion {
+            observed: Observation::NeverStarted,
+            judged_from: started.to_string(),
+            detail: format!(
+                "its start was tried from {started} until the ceiling of {} h and never succeeded; \
+                 the last failure: {why}",
+                ceiling / 3600
+            ),
+        }));
+    }
     Ok(Some(Occasion {
         observed: Observation::Silent,
         judged_from: started.to_string(),
@@ -2526,6 +2546,12 @@ enum Done {
     Refused(String),
     /// It failed this time; the next look tries again.
     Failed(String),
+    /// **It failed on the machine, and that says nothing about the member** (nxf 6j6v.1q0h): a lock,
+    /// a 30-second `nxf prime` under load. The next look tries again as after [`Done::Failed`], but
+    /// it never spends the budget's last attempt: three rungs of three starts a minute apart went by
+    /// in nine minutes of load and recorded a reviewer as stranded, over a command that took 0.6 s
+    /// once the load had passed. The wall-clock ceiling is what bounds it.
+    FailedOnLoad(String),
 }
 
 /// **Run one rung under the claim** — or rung E, when the budget or the ceiling is spent.
@@ -2635,7 +2661,9 @@ fn under_the_claim(
     match &done {
         Done::Acted(o) | Done::Nothing(o) => store.settle_rung_as(log, *o)?,
         Done::Refused(why) => store.settle_rung(log, &format!("refused: {why}"))?,
-        Done::Failed(why) => store.settle_rung(log, &failed_outcome(why))?,
+        Done::Failed(why) | Done::FailedOnLoad(why) => {
+            store.settle_rung(log, &failed_outcome(why))?
+        }
     }
     after_the_rung(
         ctx,
@@ -2710,7 +2738,15 @@ fn after_the_rung(
             store.set_next_look(t, h, &next)?;
             None
         }
-        Done::Failed(why) => {
+        Done::Failed(why) | Done::FailedOnLoad(why) => {
+            // The attempt that would spend the budget is taken back. The episode's start stays: it
+            // is what the ceiling that bounds this counts from.
+            if counted
+                && matches!(done, Done::FailedOnLoad(_))
+                && row.attempts + 1 >= MAX_RECOVERY_ATTEMPTS
+            {
+                store.revert_attempt(t, h, false)?;
+            }
             let detail = format!(
                 "the {} of {h} on thread {t} failed: {why}; the next look tries again",
                 rung.action().as_str()
@@ -2798,6 +2834,9 @@ fn classify(e: TriggerError) -> Done {
             ) =>
         {
             Done::Refused(inner.to_string())
+        }
+        TriggerError::Failed(inner) if inner.kind == crate::error::ErrorKind::Io => {
+            Done::FailedOnLoad(inner.to_string())
         }
         other => Done::Failed(other.to_string()),
     }

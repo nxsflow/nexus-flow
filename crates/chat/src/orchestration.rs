@@ -6861,9 +6861,9 @@ pub fn coordinator_commission(
 ///   needs: return the receipt with the failure in [`TriggerReceipt::warnings`], because discarding
 ///   it behind an `Err` made "the message is durably in the channel and nobody is working on it"
 ///   indistinguishable from "nothing happened".
-/// * [`Propagated`](SpawnFailure::Propagated) — what the CHANNEL fan-out needs: it keeps the
-///   pre-existing contract `crate::surface::SendToReceipt::spawned` states for the channel path
-///   (reaching `Ok` means every member started), error KIND included.
+/// * [`Propagated`](SpawnFailure::Propagated) — what the CHANNEL fan-out needs: the kind of the
+///   error decides there. A failure waiting cannot change fails the call with its kind; one waiting
+///   can change becomes a finding and the member is retried ([`supervisor_fan_out`], nxf 6j6v.1q0h).
 ///
 /// **nxf 6j6v.93zd considered turning the fan-out into `Reported` and did not, so the reason is
 /// written here rather than left as an omission.** That item gave every receipt a
@@ -8880,13 +8880,14 @@ struct SupervisorFanOut<'a> {
 /// which is precisely why the sidecar's `--if-unanswered` teardown net never fired for a channel
 /// member.
 ///
-/// A member's spawn failure still propagates — reaching `Ok` here means every member started, which
-/// is what `surface::SendToReceipt::spawned` promises for the channel path.
-/// [`coordinator_commission`]
-/// reports such a failure in its receipt's `warnings` instead of erring (nxf 6j6v.hpv8), so it is
-/// converted back here. **That stayed so under nxf 6j6v.93zd, deliberately** — see
-/// [`SpawnFailure::Propagated`]'s own doc for the argument, which is that a propagated fan-out
-/// failure is loud and discards nothing, and 93zd's subject is the failures that are silent.
+/// **A member's start that fails on the machine does not stop the others** (nxf 6j6v.1q0h): it is a
+/// finding on this call's receipt and the member is tried again, so reaching `Ok` means every member
+/// was started or is being retried. A failure waiting cannot change still propagates, loudly, as
+/// [`SpawnFailure::Propagated`]'s own doc argues; the members behind it are then asked by
+/// [`supervisor_complete_the_round`].
+///
+/// [`coordinator_commission`] reports such a failure in its receipt's `warnings` instead of erring
+/// (nxf 6j6v.hpv8), so it is converted back here.
 fn supervisor_fan_out(
     ctx: &Ctx,
     store: &mut ChatStore,
@@ -8911,6 +8912,14 @@ fn supervisor_fan_out(
         crate::channel::Flow::Sequential => &req.members[..1],
     };
     let sup = as_supervisor(ctx, hop);
+    // **The way back is armed before anybody is started** (nxf 6j6v.1q0h). This loop can stop at any
+    // member without a word: under `working_tree: exclusive` it runs inside `nxc session ended`,
+    // which the sidecar kills after thirty seconds, and three starts do not fit into that on a busy
+    // machine. A killed process reports nothing, and on a round it left empty no later event exists
+    // that could notice — so the look goes in first.
+    if req.channel.flow == crate::channel::Flow::Parallel {
+        findings.extend(arm_a_look_at_the_round(ctx, req.channel_thread));
+    }
     let mut opened = Vec::with_capacity(steps.len());
     for target in steps {
         // **`opened` travels INTO the gate** (nxf 6j6v.2d00). On a `parallel` channel this loop is
@@ -8918,7 +8927,32 @@ fn supervisor_fan_out(
         // already spawned the ones before this target, whose sessions are alive by the time the
         // next member's gate runs. Without this the brought-along hurdle read them as an earlier
         // step still writing and failed the whole `send --to <channel>`; see `preconditions_hold`.
-        match open_flow_step(&sup, store, req, target, None, findings, &opened)? {
+        let step = match open_flow_step(&sup, store, req, target, None, findings, &opened) {
+            // **A start that failed on the machine costs nobody behind it** (nxf 6j6v.1q0h): `?`
+            // here abandoned every later member, and `database is locked` on the third of three
+            // left a round of two that passed. Its slot stays owed for its coordinator, or counts
+            // as missing when it got no further than that ([`supervisor_complete_the_round`]).
+            Err(e)
+                if req.channel.flow == crate::channel::Flow::Parallel
+                    && start_failure_is_transient(&e) =>
+            {
+                let detail = format!(
+                    "member {target:?} of channel {:?} could not be started: {e}. This is load or a \
+                     timeout, so it is tried again; the round does not close without it",
+                    req.channel.name
+                );
+                eprintln!("warning: {detail}");
+                findings.push(FailedConsequence::step_skipped(
+                    Some(req.channel_thread),
+                    None,
+                    step_skip_reason(&e),
+                    detail,
+                ));
+                continue;
+            }
+            other => other?,
+        };
+        match step {
             StepOpened::Opened(thread) => opened.push(thread),
             // **A refused fan-out is LOUD** (nxf 6j6v.n92p). This runs inside the write path of the
             // `send --to <channel>` that asked, with the requester waiting on the return — so the
@@ -9613,15 +9647,23 @@ fn members_and_the_ones_still_waiting(
         }
         let owed = owed_session_of(store, member)?;
         let coordinates = worker.is_some_and(crate::stranded::worker_can_coordinate);
-        let reason = if coordinates && slot_is_coordinated(now, store, member, 0)? {
-            Some(Unsettled::Coordinated)
-        } else {
-            match member_answer_is_still_coming(now, store, member, owed.as_deref(), &facts)? {
-                Some(coming) => Some(Unsettled::StillComing(coming)),
-                None => owed_session_not_running(store, member, worker)?
-                    .map(|session| Unsettled::NotRunning { session }),
-            }
-        };
+        // **A nested round is settled by closing, never by its window** (nxf 6j6v.1q0h): while it
+        // owes its own supervisor's answer it is still that supervisor's to finish or to stop, and
+        // the flow above reading a round that reviewed nothing as a lapsed step moved on past it.
+        let round_not_closed = member
+            .outstanding
+            .iter()
+            .all(|h| bare_handle_of(h) == crate::channel::SUPERVISOR_HANDLE);
+        let reason =
+            if coordinates && (round_not_closed || slot_is_coordinated(now, store, member, 0)?) {
+                Some(Unsettled::Coordinated)
+            } else {
+                match member_answer_is_still_coming(now, store, member, owed.as_deref(), &facts)? {
+                    Some(coming) => Some(Unsettled::StillComing(coming)),
+                    None => owed_session_not_running(store, member, worker)?
+                        .map(|session| Unsettled::NotRunning { session }),
+                }
+            };
         if let Some(reason) = reason {
             member.stale = false;
             unsettled.push((member.thread_id.clone(), reason));
@@ -10109,6 +10151,9 @@ fn supervisor_after_reply(
 
 /// Is the SET complete? If it is, consolidate.
 ///
+/// **On a `parallel` channel the set is first held against what it declares** (nxf 6j6v.1q0h): a
+/// member with no slot is missing, not absent from the quorum ([`missing_members`]).
+///
 /// A member thread counts as settled when it is `complete` (its member answered this turn) **or**
 /// `stale` (its own deadline struck) — hq71 §3's "when all have answered or the deadline strikes",
 /// read against the per-member threads nxf 6j6v.pf6j puts the deadline on. Since nxf 6j6v.nf38 that
@@ -10148,6 +10193,26 @@ fn supervisor_consider_set(
     let declared = declared_channel_of(ctx, &channel_q).cloned();
     let all = supervised_member_threads(ctx, store, channel_thread)?;
     let members = current_pass(store, declared.as_ref(), &channel_q, all)?;
+
+    // **A ROUND IS JUDGED AGAINST WHAT IT DECLARES, NOT AGAINST WHAT EXISTS** (nxf 6j6v.1q0h). The
+    // set below is derived from the tree, so a fan-out that stopped short is a settled set the
+    // moment the members it reached have answered. A declared member nobody asked is missing, and
+    // until it has answered or the round has stopped over it, nothing further down runs.
+    let whole = declared.as_ref().filter(|c| round_must_be_whole(c));
+    let members = match whole {
+        Some(_) => commissioned_slots(ctx, store, members)?,
+        None => members,
+    };
+    if let Some(channel) = whole {
+        if !missing_members(store, channel, &channel_q, &members)?.is_empty() {
+            return supervisor_complete_the_round(ctx, store, channel, &channel_q, &members, hop);
+        }
+        if let Some(note) = lapsed_members_note(&channel_q, &members) {
+            if member_set_is_settled(&members) {
+                return supervisor_stop_the_round(ctx, store, &channel_q, &members, &note, hop);
+            }
+        }
+    }
 
     // **THE FLOW MAY NOT BE OVER** (nxf 6j6v.hq71). A settled set ends a `parallel` channel, because
     // it asked everyone at once. An ORDERED one asked exactly ONE step, so what matters is whether
@@ -10348,6 +10413,264 @@ fn supervisor_consider_set(
         }
     }
     supervisor_consolidate(ctx, store, &channel_q, escalated, None, hop)
+}
+
+/// **A channel whose every declared member must answer for its round to close** (nxf 6j6v.1q0h) — a
+/// `parallel` one, whose fan-out asks everybody at once. `expects: all` and a declared subset alike:
+/// [`crate::channel::fan_out_targets`] reads which, and a member a subset leaves out is not missing.
+/// An ordered flow opens its steps one at a time, so what it has not opened yet is not missing.
+fn round_must_be_whole(channel: &ChannelDecl) -> bool {
+    channel.flow == crate::channel::Flow::Parallel && !channel.is_stepped()
+}
+
+/// The slots of a round without the ones the engine opened and never commissioned
+/// ([`never_commissioned`]): nothing was asked there and nothing will answer, so such a slot holds
+/// no member's place and must not hold the set open once the member is asked on a slot of its own.
+fn commissioned_slots(
+    ctx: &Ctx,
+    store: &ChatStore,
+    slots: Vec<ThreadQuorum>,
+) -> Result<Vec<ThreadQuorum>> {
+    let mut kept = Vec::with_capacity(slots.len());
+    for slot in slots {
+        if !never_commissioned(ctx, store, &slot)? {
+            kept.push(slot);
+        }
+    }
+    Ok(kept)
+}
+
+/// **The members this round declares and has no slot for** — the fan-out as the declaration says it,
+/// less the requester, less whoever a slot was opened for. The one comparison the tree cannot make
+/// by itself.
+///
+/// A slot answers for the member it names and for the role a session was started as on it, because
+/// its register can be retargeted later: a member handed to a person or taken back by a withdrawal
+/// still had its turn, and asking it again would undo that.
+fn missing_members(
+    store: &ChatStore,
+    channel: &ChannelDecl,
+    channel_q: &ThreadQuorum,
+    slots: &[ThreadQuorum],
+) -> Result<Vec<String>> {
+    let requester = channel_q.opener.as_deref().map_or("", bare_handle_of);
+    let mut opened: Vec<String> = slots
+        .iter()
+        .filter_map(|s| slot_target(s, channel_q.channel_id.as_deref()))
+        .collect();
+    for slot in slots {
+        opened.extend(
+            store
+                .sessions_in_thread(&slot.thread_id)?
+                .into_iter()
+                .map(|row| row.role),
+        );
+    }
+    Ok(crate::channel::fan_out_targets(channel, requester)
+        .into_iter()
+        .filter(|target| !opened.contains(target))
+        .collect())
+}
+
+/// **How a round closes when a member's window ran out with no answer**: its note, naming them.
+/// `None` when every member answered. A window is the one thing that ends a round on a worker that
+/// cannot look at its sessions, so it may end one; it is not a member's answer, so it may not end
+/// one as a pass.
+fn lapsed_members_note(channel_q: &ThreadQuorum, slots: &[ThreadQuorum]) -> Option<String> {
+    let lapsed: Vec<String> = slots
+        .iter()
+        .filter(|s| s.stale && !s.complete)
+        .filter_map(|s| slot_target(s, channel_q.channel_id.as_deref()))
+        .collect();
+    (!lapsed.is_empty()).then(|| {
+        format!(
+            "This round did not complete: {} gave no answer inside the declared window, so it is \
+             stopped rather than passed.",
+            lapsed.join(", ")
+        )
+    })
+}
+
+/// **Close a round that cannot be whole, as an escalation** — once the members it does have are
+/// through, and on the one path that runs no synthesis ([`supervisor_consolidate`] with `escalated`):
+/// a verdict made of part of a round is what let a change reach the finisher with a reviewer missing.
+/// Until then it arms a look, so a member's own window or answer is not the only thing that comes back.
+fn supervisor_stop_the_round(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    channel_q: &ThreadQuorum,
+    slots: &[ThreadQuorum],
+    note: &str,
+    hop: CheckedHop,
+) -> Result<SupervisorRun> {
+    let declared = declared_channel_of(ctx, channel_q).cloned();
+    let others_through = slots.iter().all(|m| m.complete || m.stale);
+    if !others_through || a_member_session_is_still_writing(ctx, store, declared.as_ref(), slots)? {
+        return Ok(SupervisorRun {
+            warnings: arm_a_look_at_the_round(ctx, &channel_q.thread_id)
+                .into_iter()
+                .collect(),
+            ..SupervisorRun::default()
+        });
+    }
+    supervisor_consolidate(ctx, store, channel_q, true, Some(note), hop)
+}
+
+/// **Ask the declared members nobody has asked** (nxf 6j6v.1q0h) — the supervisor's own way back from
+/// a fan-out that stopped short, reached from a member's answer and from a tick.
+///
+/// **Not while another process may still be in the middle of it.** A fan-out runs for as long as its
+/// starts take, so a member with no slot may simply not be reached YET: nothing is opened until the
+/// round's newest slot is [`STALLED_CHAIN_QUIET_SECS`] old, the wait the engine keeps for its own
+/// unfinished business. Until then this arms the look that comes back when that is over.
+///
+/// **Load is waited out, up to [`crate::ladder::RECOVERY_CEILING_FLOOR_SECS`]**; what waiting cannot
+/// change, or a machine that stays broken for that long, stops the round for its commissioner, with
+/// the reason ([`supervisor_stop_the_round`]).
+fn supervisor_complete_the_round(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    channel: &ChannelDecl,
+    channel_q: &ThreadQuorum,
+    slots: &[ThreadQuorum],
+    hop: CheckedHop,
+) -> Result<SupervisorRun> {
+    let round = channel_q.thread_id.as_str();
+    let mut run = SupervisorRun::default();
+    // Taken back, and its work not parked yet: nothing starts in that tree.
+    if let Some(scope) = a_withdrawn_claim_awaiting_its_park(store, round)? {
+        run.warnings
+            .extend(arm_a_look_at_the_withdrawn_holder(ctx, store, &scope));
+        return Ok(run);
+    }
+    let mut newest = store.thread_created(round)?.unwrap_or_default();
+    for slot in store.supervised_children(round)? {
+        if let Some(created) = store.thread_created(&slot)? {
+            newest = newest.max(created);
+        }
+    }
+    let due = crate::stranded::after(&newest, STALLED_CHAIN_QUIET_SECS, "the fan-out's quiet")?;
+    if !crate::stranded::reached(ctx.now, &due) {
+        run.warnings
+            .extend(arm_a_look_at_the_round_at(ctx, round, &due));
+        return Ok(run);
+    }
+    let created = store.thread_created(round)?.unwrap_or_default();
+    let ceiling = crate::stranded::after(
+        &created,
+        crate::ladder::RECOVERY_CEILING_FLOOR_SECS,
+        "the round's ceiling",
+    )?;
+    let body = current_request(store, round)?
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+    let spec = match channel.timeout.as_deref() {
+        Some(when) => Some(facade::resolve_deadline_spec(
+            ctx.now,
+            when,
+            "the channel's declared `timeout`",
+        )?),
+        None => None,
+    };
+    let deadline = spec
+        .as_ref()
+        .map(|s| s.at.clone())
+        .or_else(|| channel_q.deadline.clone());
+    let fan = SupervisorFanOut {
+        channel,
+        channel_id: channel_q.channel_id.as_deref().unwrap_or_default(),
+        channel_thread: round,
+        body: &body,
+        // Unused on this path: the members to open are named one by one.
+        members: &[],
+        deadline: deadline.as_deref(),
+        idle_window: spec.as_ref().and_then(|s| s.window),
+        kind: MessageKind::Task,
+        priority: Priority::Normal,
+        model: None,
+    };
+    let sup = as_supervisor(ctx, hop);
+    // The look first, for the reason [`supervisor_fan_out`] arms its own: this can be killed too.
+    run.warnings.extend(arm_a_look_at_the_round(ctx, round));
+    let mut opened: Vec<String> = slots.iter().map(|s| s.thread_id.clone()).collect();
+    let mut cannot_run: Vec<String> = Vec::new();
+    for target in missing_members(store, channel, channel_q, slots)? {
+        match open_flow_step(&sup, store, &fan, &target, None, &mut run.warnings, &opened) {
+            Ok(StepOpened::Opened(thread)) => opened.push(thread),
+            Ok(StepOpened::Refused(refusal)) => {
+                cannot_run.push(refusal.detail(&target, &channel.name));
+            }
+            Err(e)
+                if start_failure_is_transient(&e)
+                    && !crate::stranded::reached(ctx.now, &ceiling) =>
+            {
+                let detail = format!(
+                    "member {target:?} of channel {:?} could not be started: {e}. This is load or \
+                     a timeout, so it is tried again; the round does not close without it",
+                    channel.name
+                );
+                eprintln!("warning: {detail}");
+                run.warnings.push(FailedConsequence::step_skipped(
+                    Some(round),
+                    None,
+                    step_skip_reason(&e),
+                    detail,
+                ));
+            }
+            Err(e) => cannot_run.push(format!("{target} could not be started: {e}")),
+        }
+    }
+    if cannot_run.is_empty() {
+        return Ok(run);
+    }
+    let note = format!(
+        "This round did not complete and nothing was passed: {}.",
+        cannot_run.join("; ")
+    );
+    let stopped = supervisor_stop_the_round(ctx, store, channel_q, slots, &note, hop)?;
+    run.warnings.extend(stopped.warnings);
+    Ok(SupervisorRun {
+        warnings: run.warnings,
+        ..stopped
+    })
+}
+
+/// [`arm_a_look_at_the_round_at`], one [`STALLED_CHAIN_QUIET_SECS`] from now.
+fn arm_a_look_at_the_round(ctx: &Ctx, round: &str) -> Option<FailedConsequence> {
+    match crate::stranded::after(ctx.now, STALLED_CHAIN_QUIET_SECS, "a look at a round") {
+        Ok(at) => arm_a_look_at_the_round_at(ctx, round, &at),
+        Err(e) => {
+            eprintln!("warning: no look at round {round} could be armed: {e}");
+            Some(FailedConsequence::tick_unscheduled(round, e.to_string()))
+        }
+    }
+}
+
+/// **The tick that brings a round back** — under a key of its own, through the stranded-look job, so
+/// it neither replaces the channel thread's window job nor is replaced by it ([`arm_a_revival`]).
+fn arm_a_look_at_the_round_at(ctx: &Ctx, round: &str, at: &str) -> Option<FailedConsequence> {
+    let key = format!("{round}-round");
+    match ctx.timer.schedule_stranded_look(&key, round, at) {
+        Ok(_) => None,
+        // **A service that is down is said once, by the call, not once per look**, the rule
+        // [`crate::stranded::arm_look`] keeps: the look is in the book, and the
+        // `service_not_running` finding the outermost verbs add already says nothing attends it.
+        Err(e) if ctx.timer.service_fault().is_some() => {
+            eprintln!(
+                "warning: the look at round {round} is booked for {at}, and nothing attends this \
+                 workspace to honour it yet: {e}"
+            );
+            None
+        }
+        Err(e) => {
+            let detail = format!(
+                "the tick that would ask any member round {round} still lacks was not armed ({e}) \
+                 — run `nxc tick --thread {round}`"
+            );
+            eprintln!("warning: {detail}");
+            Some(FailedConsequence::tick_unscheduled(round, detail))
+        }
+    }
 }
 
 /// **The declared state machine, run once for the step that just settled** (nxf 6j6v.553s (d)+(a))
@@ -15022,7 +15345,14 @@ pub fn on_channel_complete(
                 // after an interruption asks where the tree stood when it was woken, and this is
                 // that moment.
                 refs: with_working_copy(ctx, Refs::default()),
-                body: "[pass_through delivered]".to_string(),
+                // **An escalation delivered nothing, and its record does not say it did** (nxf
+                // 6j6v.1q0h): a round that reviewed nothing used to close as "[pass_through
+                // delivered]", and that was what a reader of `nxc status` found.
+                body: if consolidation.escalated {
+                    "[stopped: escalated]".to_string()
+                } else {
+                    "[pass_through delivered]".to_string()
+                },
             });
             // **This is where unverified member content enters an LLM-trusted trigger** (nxf
             // 6j6v.k1gb). `compose_pass_through_wake` renders every member's raw body into the
@@ -18935,8 +19265,9 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // current pass, which such a slot never joins (it carries no run mark and no target).
     //
     // Unless it is the ONLY slot: a board left with no members at all reads as a thread with no
-    // set, and that branch of [`tick_move`] would consolidate a round nobody ever answered. That
-    // shape stays as it was — held, and the dead-holder sweep's to take when somebody waits.
+    // set, and that branch of [`tick_move`] would consolidate a round nobody ever answered. On an
+    // ordered flow that shape stays as it was — held, and the dead-holder sweep's to take when
+    // somebody waits. A `parallel` round asks its members instead, just below (nxf 6j6v.1q0h).
     let mut kept = Vec::with_capacity(members.len());
     for slot in &members {
         if !never_commissioned(ctx, store, slot)? {
@@ -19075,6 +19406,50 @@ fn tick_the_thread(ctx: &Ctx, store: &mut ChatStore, req: TickRequest) -> Result
     // **What the settled set MEANS is a THIRD question and it is asked here** (nxf 6j6v.rs9k): a set
     // that is settled ends a `parallel` channel, and it ends an ordered one only if the step that
     // settled it was the LAST one. See [`TickMove`].
+    // **Whether the round is WHOLE comes before all of that** (nxf 6j6v.1q0h), for the reason
+    // [`supervisor_consider_set`] asks it first. Here it is also the only thing that stands between
+    // a round with no slot at all and the branch of [`tick_move`] that reads it as "a thread with no
+    // set" and consolidates it at its own window.
+    if let Some(channel) = declared_channel_of(ctx, &q)
+        .filter(|c| round_must_be_whole(c))
+        .filter(|_| q.expects == [supervisor_qualified(ctx.origin)])
+        .cloned()
+    {
+        let slots = commissioned_slots(ctx, store, members.clone())?;
+        let stopping = match missing_members(store, &channel, &q, &slots)?.is_empty() {
+            false => Some(supervisor_complete_the_round(
+                ctx, store, &channel, &q, &slots, hop,
+            )?),
+            true if member_set_is_settled(&slots) => match lapsed_members_note(&q, &slots) {
+                Some(note) => Some(supervisor_stop_the_round(
+                    ctx, store, &q, &slots, &note, hop,
+                )?),
+                None => None,
+            },
+            true => None,
+        };
+        if let Some(run) = stopping {
+            let (acted, reason, delivered) = match run.completed {
+                Some(outcome) => (true, "acted", Some(outcome.delivered)),
+                None => (false, TICK_ROUND_INCOMPLETE, None),
+            };
+            return Ok(TickReceipt {
+                thread_id: thread_id.to_string(),
+                acted,
+                reason: reason.to_string(),
+                delivered,
+                woke: run.woke,
+                wake_skipped: run.wake_skipped,
+                held: run.held,
+                warnings: run.warnings,
+                outstanding,
+                working_tree: None,
+                parked: None,
+                handed_on: None,
+                liveness: Default::default(),
+            });
+        }
+    }
     let mut mv = tick_move(ctx, store, &q, &members)?;
     // **…and a FOURTH question, on a channel that needs the working copy alone** (nxf 6j6v.10yb):
     // is a session behind one of these slots still running? The PUSH path asks it inside
@@ -19657,6 +20032,11 @@ fn a_member_session_is_still_writing(
 /// "nothing to do" over a flow that just started its next step.
 pub(crate) const TICK_ADVANCED: &str = "advanced";
 
+/// The reason a tick reports on a round that lacks a declared member (nxf 6j6v.1q0h) and has not
+/// been stopped over it: it asked them, or it will once a fan-out still running cannot be the one
+/// asking. Named once, for [`TICK_ADVANCED`]'s reason: nothing to do is not what happened.
+pub(crate) const TICK_ROUND_INCOMPLETE: &str = "round_incomplete";
+
 /// The reason a tick declines when the ONLY thing left is a live process (nxf 6j6v.10yb; review of
 /// PR #361, Code Quality #1). Named once, for [`TICK_ADVANCED`]'s reason: the CLI branches on it to
 /// print what the board is waiting for instead of "nothing to do", and a second spelling would let
@@ -19864,9 +20244,9 @@ fn tick_move(
 /// over-inclusion on an underivable pass is inherited with it: the report may then name a lapsed
 /// slot of an earlier pass, which is the same direction that function argues for at its own site.
 ///
-/// **`Flow::Sequential` only, and that is not timidity.** On a `parallel` channel a lapse means
-/// "that member did not answer" and nothing more — nobody was skipped over, no order was cut short,
-/// and `outstanding` on the receipt already names who is missing. In an ordered flow the lapse is
+/// **`Flow::Sequential` only, and that is not timidity.** A `parallel` round with a lapsed member
+/// does not reach a delivery at all: it stops as an escalation that names who is missing
+/// ([`lapsed_members_note`], nxf 6j6v.1q0h). In an ordered flow the lapse is
 /// load-bearing: it is what let the flow move on (or end), so it belongs in the record of what this
 /// call did.
 fn lapsed_step_findings(

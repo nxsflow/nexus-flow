@@ -200,6 +200,16 @@ escalates the round within three minutes of the session's last start. And a step
 still coming waits with its window paused: queued for the working copy, a retry due, on a quota
 hold, waiting on a round it commissioned itself, or with an answer held for it.
 
+**A round closes only with every member it declares.** A `parallel` channel is judged against its
+declared members (`expects`, all of them by default), not against the threads that happen to exist.
+A member nobody was asked — the process that opened the round was killed, or a start failed — counts
+as missing: the round neither completes nor runs its synthesis, and the supervisor asks that member
+itself once five minutes have passed without a new slot, so a fan-out still running in another
+process is not doubled. A start that fails on load or a timeout is tried again up to the recovery
+ceiling and is not reported as a member that will not answer. A member that finally cannot run, or
+whose window ran out without an answer, stops the round: it goes to whoever commissioned it as an
+escalation naming the member, runs no synthesis, and the chain above it does not go on.
+
 **A member that will not answer is recorded as STRANDED.** Every tick looks at each session that
 owes an answer, two minutes after it was last started. A session that announced its end, or whose
 start was given up, is recorded at that look; one with no end at all needs a second look a minute

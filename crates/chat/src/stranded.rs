@@ -2731,12 +2731,18 @@ pub(crate) fn record(
         store.set_stranded_summary(&rec, summary)?;
     }
     let step = step_name(store, &rec);
+    // **Who never ran did not decline to answer** (nxf 6j6v.1q0h): a commissioner told that a member
+    // "will not answer" looks at the member, when what failed was the start.
+    let what = match rec.observed {
+        Observation::NeverStarted | Observation::StartGivenUp => "could not be started",
+        _ => "will not answer",
+    };
     let finding = FailedConsequence::stranded(
         ConsequenceClass::SessionStranded,
         Some(&rec.thread),
         rec.session.as_deref(),
         format!(
-            "step {step} on thread {} is stranded: {} will not answer — observation {}: {}; \
+            "step {step} on thread {} is stranded: {} {what} — observation {}: {}; \
              recorded at {}, escalated to the commissioner",
             rec.thread,
             session_words(&rec),

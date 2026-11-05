@@ -538,7 +538,7 @@ fn a_tick_that_wakes_successfully_omits_the_skip_key_entirely() {
 }
 
 #[test]
-fn tick_past_deadline_with_partial_replies_completes_on_timeout_summarize() {
+fn tick_past_deadline_with_partial_replies_runs_no_synthesis_and_tells_the_requester() {
     let tmp = workspace();
     let roles = personas_dir(&tmp);
     write_role(&roles, "pm");
@@ -593,19 +593,19 @@ fn tick_past_deadline_with_partial_replies_completes_on_timeout_summarize() {
     assert_eq!(v["outstanding"], serde_json::json!(["local/carol"]), "{v}");
 
     let lines = trigger_header_lines(&dry);
+    // Since nxf 6j6v.1q0h: a verdict is not made of part of a round. A synthesis over bob's answer
+    // alone is what said "incomplete" and still returned pass, so the round goes to its requester
+    // as an escalation, naming who is missing.
     assert_eq!(
         lines.len(),
         3,
-        "exactly one synthesizer spawned over the partial replies: {lines:?}"
+        "exactly one wake, no synthesizer: {lines:?}"
     );
-    assert_eq!(field(&lines[2], "role"), "__synth__");
-    assert!(
-        !lines.iter().any(|l| l.contains("role=pm")),
-        "pm must not be woken yet — only phase 1 has run: {lines:?}"
-    );
+    assert_eq!(field(&lines[2], "role"), "pm");
+    let log = std::fs::read_to_string(&dry).unwrap();
+    assert!(log.contains("carol gave no answer"), "{log}");
 
-    // A duplicate tick (simulating the timer firing twice, or a leftover job outliving phase 1)
-    // must not spawn a second synthesizer — the idempotency gate (§4) catches the phase-1 marker.
+    // A duplicate tick (the timer firing twice, or a leftover job) changes nothing.
     let out = nxc(&tmp)
         .env("NXC_NOW", "2026-07-22T00:05:00Z")
         .env("NXC_WORKER", "dry")
@@ -621,7 +621,7 @@ fn tick_past_deadline_with_partial_replies_completes_on_timeout_summarize() {
     assert_eq!(
         lines_after.len(),
         3,
-        "no second synthesizer spawned: {lines_after:?}"
+        "no second wake, and no synthesizer: {lines_after:?}"
     );
 }
 

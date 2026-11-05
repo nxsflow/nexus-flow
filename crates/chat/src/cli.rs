@@ -3067,6 +3067,15 @@ fn print_tick_result(json: bool, r: &crate::orchestration::TickReceipt) {
              again once it has.",
             r.thread_id
         );
+    } else if r.reason == crate::orchestration::TICK_ROUND_INCOMPLETE {
+        println!(
+            "tick on thread {}: this round lacks a declared member and does not close without it{}",
+            r.thread_id,
+            r.warnings
+                .first()
+                .map(|w| format!(": {w}"))
+                .unwrap_or_default()
+        );
     } else if r.reason == crate::orchestration::TICK_ADVANCED {
         // **Not acted, and not a no-op either** (nxf 6j6v.rs9k): an ordered flow whose step let its
         // window run out moved on to the next step, which routed no completion and delivered

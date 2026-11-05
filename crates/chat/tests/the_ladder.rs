@@ -157,6 +157,10 @@ impl Worker for Hand {
                     "`nxf prime --db .nxs/db.sqlite` exceeded the 30s wall-clock timeout \
                      (injected)",
                 )),
+                // A start that waiting does not fix, and that no refusal explains either.
+                "gone" => TriggerError::Failed(nexus_chat::error::NxfError::not_found(
+                    "the role's runtime is gone (injected)",
+                )),
                 "already_running" => TriggerError::AlreadyRunning {
                     session: req.internal_session.clone(),
                     pid: 4242,
@@ -988,7 +992,9 @@ fn a_slot_that_never_got_a_session_is_recommissioned_with_its_original_body_into
             },
         )
     });
-    assert!(refused.is_err());
+    // The round runs: a member whose start failed on the store costs nobody behind it, and its slot
+    // is its coordinator's (nxf 6j6v.1q0h).
+    assert!(refused.is_ok(), "{:?}", refused.err());
     team.sql("DROP TRIGGER no_verifier_mint;");
     let root = team
         .status(T0)
@@ -1057,14 +1063,30 @@ fn a_slot_that_never_got_a_session_is_recommissioned_with_its_original_body_into
         )
     );
 
-    // The member answers; the round consolidates once. (The fan-out stopped at the failed mint, so
-    // the verifier's is the round's only slot.)
+    // The member answers, and the round does not close on that: the failed mint no longer stops the
+    // fan-out, so the reviewer behind it was asked too (nxf 6j6v.1q0h), and with its answer the round
+    // consolidates once.
     team.reply(
         &at(210),
         "verifier",
         &fresh.internal_session,
         &slot,
         "verified",
+    );
+    assert!(
+        !team
+            .messages(&root)
+            .iter()
+            .any(|(sender, _, _)| sender.contains("/__")),
+        "one of two answers does not close it"
+    );
+    let reviewer = team.worker.last("reviewer");
+    team.reply(
+        &at(220),
+        "reviewer",
+        &reviewer.internal_session,
+        reviewer.reply_thread.as_deref().unwrap(),
+        "looks fine",
     );
     let root_messages = team.messages(&root);
     let delivered = root_messages
@@ -1374,7 +1396,7 @@ fn a_failed_rung_older_than_the_slots_clock_waits_out_the_new_clocks_grace() {
 fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds() {
     let team = team();
     let thread = a_slot_due_for_a_recommission(&team);
-    *team.worker.refuse_every.lock().unwrap() = Some("prime_timeout");
+    *team.worker.refuse_every.lock().unwrap() = Some("gone");
 
     let mut now = 130;
     team.tick(&at(now), &thread);
@@ -1428,7 +1450,66 @@ fn a_recommission_that_never_starts_is_escalated_by_the_looks_the_service_holds(
     assert_eq!(log.last().map(|(a, _)| a.as_str()), Some("escalated"));
     let posted = escalations(&team.messages(&thread));
     assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(posted[0].contains("is gone"), "{}", posted[0]);
+}
+
+/// **A start that fails on load spends no budget** (nxf 6j6v.1q0h). The measured run recorded a
+/// reviewer as stranded nine minutes into a `nxf prime` timeout that was over once the load was. It
+/// is tried until the ceiling, it says that it could not be started, and it is answered by a start
+/// that works.
+#[test]
+fn a_recommission_failing_on_load_is_tried_until_the_ceiling_and_says_so() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    *team.worker.refuse_every.lock().unwrap() = Some("prime_timeout");
+
+    let mut now = 130;
+    team.tick(&at(now), &thread);
+    while escalations(&team.messages(&thread)).is_empty() {
+        let next = team
+            .book
+            .held_look(&thread, "coder")
+            .unwrap_or_else(|| panic!("no look held for the owed slot at +{now}s"));
+        now = secs_of(&next);
+        team.tick(&at(now), &thread);
+        assert!(
+            now <= 130 + nexus_chat::ladder::RECOVERY_CEILING_CAP_SECS,
+            "it ends at the ceiling, not after it"
+        );
+    }
+
+    assert!(
+        now >= 130 + nexus_chat::ladder::RECOVERY_CEILING_FLOOR_SECS - 120,
+        "not before the ceiling: escalated at +{now}s"
+    );
+    let posted = escalations(&team.messages(&thread));
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(posted[0].contains("never succeeded"), "{}", posted[0]);
     assert!(posted[0].contains("wall-clock timeout"), "{}", posted[0]);
+}
+
+/// The load passes inside the ceiling, and the next look starts the member after all.
+#[test]
+fn a_recommission_failing_on_load_starts_once_the_load_has_passed() {
+    let team = team();
+    let thread = a_slot_due_for_a_recommission(&team);
+    *team.worker.refuse_every.lock().unwrap() = Some("prime_timeout");
+    let started = team.worker.of("coder").len();
+    for s in (130..=1_330).step_by(60) {
+        team.tick(&at(s), &thread);
+    }
+    assert!(escalations(&team.messages(&thread)).is_empty());
+    assert_eq!(
+        team.worker.of("coder").len(),
+        started,
+        "nothing started yet"
+    );
+
+    *team.worker.refuse_every.lock().unwrap() = None;
+    team.tick(&at(1_390), &thread);
+
+    assert_eq!(team.worker.of("coder").len(), started + 1, "it started");
+    assert!(escalations(&team.messages(&thread)).is_empty());
 }
 
 /// **A look inside the grace arms the grace's end** (nxf 6j6v.yts5, the judge's half). A rung that
@@ -3894,7 +3975,7 @@ fn a_dead_verdict_whose_recommission_keeps_failing_escalates_after_the_budget() 
     assert!(team.worker.asks().is_empty());
     team.worker.stop(&session);
     team.ended(&at(600), &session, None);
-    *team.worker.refuse_every.lock().unwrap() = Some("prime_timeout");
+    *team.worker.refuse_every.lock().unwrap() = Some("gone");
     follow_looks(&team, &thread, "coder", 660, 1_500);
     let log = team.log(&thread, "coder");
     let failed = log
