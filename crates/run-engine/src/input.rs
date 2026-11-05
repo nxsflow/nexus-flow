@@ -1,12 +1,14 @@
 //! What an INPUT does to state. An input is a claim about the world: it records the fact and moves the
 //! slot it names. What follows from it is `decide`'s, in decisions folded after it.
 
-use nexus_run_contracts::{Disposition, EndCause, Event, EventBody, HeartbeatKind, SessionFact};
+use nexus_run_contracts::{
+    Disposition, EndCause, Event, EventBody, HeartbeatKind, ReasonCode, SessionFact,
+};
 
 use crate::guard::{delivery_key, ignored_reason, is_deferred, resume_target};
 use crate::state::{
-    Asked, GraceFired, Ladder, ParkPhase, Phase, Process, ReasonCodeExt, RunState, SlotCondition,
-    SlotState, StartCause, TreePhase,
+    Asked, GraceFired, Ladder, ParkPhase, Phase, Process, RunState, SlotCondition, SlotState,
+    StartCause, TreePhase,
 };
 
 /// Folds one input. One `decide` ignored folds to nothing.
@@ -103,7 +105,7 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
                 let record = &mut state.slots[index];
                 let would_not_stop = matches!(
                     &record.condition,
-                    Some(SlotCondition::Parked { reason, .. }) if reason.is_would_not_stop()
+                    Some(SlotCondition::Parked { reason, .. }) if *reason == ReasonCode::WouldNotStop
                 );
                 record.condition = None;
                 if would_not_stop {
@@ -129,14 +131,14 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
                 }
                 if matches!(
                     &record.condition,
-                    Some(SlotCondition::Parked { reason, .. }) if reason.is_would_not_stop()
+                    Some(SlotCondition::Parked { reason, .. }) if *reason == ReasonCode::WouldNotStop
                 ) {
                     record.condition = None;
                 }
             }
         }
-        EventBody::TimerFired { timer, .. } => {
-            let deferred = is_deferred(state, input);
+        EventBody::TimerFired { timer, fire_at } => {
+            let deferred = is_deferred(state, timer, *fire_at, input.at);
             let armed = state.timers.remove(timer);
             if !deferred {
                 if let Some(armed) = armed {
@@ -264,7 +266,10 @@ fn revive(record: &mut crate::state::SlotRecord) {
     };
 }
 
-fn set_open_call(record: &mut crate::state::SlotRecord, value: Option<nexus_run_contracts::Timestamp>) {
+fn set_open_call(
+    record: &mut crate::state::SlotRecord,
+    value: Option<nexus_run_contracts::Timestamp>,
+) {
     if let SlotState::Running { open_call, .. } = &mut record.state {
         match value {
             // One busy period: the sidecar reports it once, and a repeat keeps its first instant.

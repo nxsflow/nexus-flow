@@ -2,16 +2,17 @@
 //! unchanged; an unknown DECISION is an error, because folding past it would diverge silently (§13).
 
 use nexus_run_contracts::{
-    Decision, Event, EventBody, Handle, Outcome, ReasonCode, Seq, Slot, StepId, TimerPurpose, Timestamp,
+    Decision, Event, EventBody, Handle, Outcome, ReasonCode, Seq, Slot, StepId, TimerPurpose,
+    Timestamp,
 };
 
+use crate::flow::SYNTH;
 use crate::input::apply_input;
 use crate::state::{
     timer_slot, AfterStop, ArmedTimer, Asked, FinishedStep, Ladder, ParkPhase, Phase, Question,
     RunCondition, RunState, SlotCondition, SlotRecord, SlotState, StartCause, TreePhase, TurnKind,
     TurnPart, VerdictRef,
 };
-use crate::flow::SYNTH;
 
 /// A decision kind this version does not know, read from the log of a newer writer. The host does not
 /// step such a run; status projects it read-only, `waiting_for: "a newer nxs"`.
@@ -227,7 +228,12 @@ fn apply_liveness(state: &mut RunState, slot: &Slot, reason: &ReasonCode, since:
     };
 }
 
-fn apply_finishing(state: &mut RunState, outcome: Outcome, reason: Option<ReasonCode>, at: Timestamp) {
+fn apply_finishing(
+    state: &mut RunState,
+    outcome: Outcome,
+    reason: Option<ReasonCode>,
+    at: Timestamp,
+) {
     state.phase = Phase::Finishing {
         outcome,
         reason,

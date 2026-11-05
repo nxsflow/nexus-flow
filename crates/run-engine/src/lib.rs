@@ -14,14 +14,16 @@ mod status;
 pub use decide::decide;
 pub use effects::{pending_effects, stop_signal, DeliverBody, Effect, SignalKind};
 pub use evolve::{evolve, UnknownDecision};
-pub use guard::DELIVERED_PREFIX;
-pub use status::status;
 pub use flow::{
     compile, ChannelDecl, CompileRefusal, DeclaredTree, Expects, FanOutExpects, FlowDef,
-    IgnoredTimeout, OnComplete, StepDecl, StepDef, StepKind, Synthesis, WorkingTree, SUPERVISOR, SYNTH,
+    IgnoredTimeout, OnComplete, StepDecl, StepDef, StepKind, Synthesis, WorkingTree, SUPERVISOR,
+    SYNTH,
 };
+pub use guard::DELIVERED_PREFIX;
 pub use state::{
-    grace_timer, slot_timer, AfterStop, ArmedTimer, Asked, FinishedStep, GraceFired, Ladder, ParkPhase,
-    Phase, Process, Question, RunCondition, RunState, RunView, SlotCondition, SlotRecord, SlotState,
-    StartCause, TreePhase, TurnKind, TurnPart, VerdictRef, ROOT_DEADLINE_TIMER, TREE_WINDOW_TIMER,
+    grace_timer, run_row, slot_row, slot_timer, AfterStop, ArmedTimer, Asked, FinishedStep,
+    GraceFired, Ladder, ParkPhase, Phase, Process, Question, RunCondition, RunState, RunView,
+    SlotCondition, SlotExample, SlotRecord, SlotState, StartCause, TreePhase, TurnKind, TurnPart,
+    VerdictRef, ROOT_DEADLINE_TIMER, RUN_ROWS, SLOT_ROWS, TREE_WINDOW_TIMER,
 };
+pub use status::status;

@@ -7,15 +7,16 @@
 //! the same state, so an `evolve` that disagrees with what `decide` simulated cannot pass.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nexus_run_contracts::{
-    Base, Decision, Disposition, EndCause, Event, EventBody, FlowRef, HeartbeatKind, LivenessPolicy,
-    MessageId, Origin, ParkOutcome, RunId, Secs, SessionFact, Slot, StopKind, Timestamp, TreeRefusal,
-    WithdrawnBy,
+    Base, Decision, Disposition, EndCause, Event, EventBody, FlowRef, HeartbeatKind,
+    LivenessPolicy, MessageId, Origin, ParkOutcome, RunId, Secs, SessionFact, Slot, StopKind,
+    Timestamp, TreeRefusal, WithdrawnBy,
 };
 use nexus_run_engine::{
-    compile, decide, evolve, pending_effects, ChannelDecl, DeliverBody, Effect, FlowDef, RunState,
+    compile, decide, evolve, pending_effects, status, ChannelDecl, DeliverBody, Effect, FlowDef,
+    RunState, SlotState,
 };
 
 pub const RUN: &str = "r-01JAAAAAAAAAAAAAAAAAAAAAAA";
@@ -51,11 +52,15 @@ pub struct Script {
     pub state: RunState,
     pub log: Vec<Event>,
     pub lists: Vec<Vec<Decision>>,
+    /// Where a fold of `log` starts: the initial state, or the state a case was handed.
+    origin: RunState,
     pub now: Timestamp,
     start: Timestamp,
     seq: u64,
     next_message: u32,
     recorder: BTreeMap<String, u32>,
+    /// Every reason code this script saw: in a decision, an end cause or the status of the run.
+    pub codes: BTreeSet<String>,
     last: Vec<Decision>,
 }
 
@@ -71,8 +76,10 @@ impl Script {
 
     pub fn with(def: FlowDef, policy: LivenessPolicy, start: i64) -> Self {
         let run = RunId::parse(RUN).unwrap();
+        let origin = RunState::initial(run, def.clone());
         Self {
-            state: RunState::initial(run, def.clone()),
+            state: origin.clone(),
+            origin,
             def,
             policy,
             log: Vec::new(),
@@ -82,6 +89,27 @@ impl Script {
             seq: 0,
             next_message: 0,
             recorder: BTreeMap::new(),
+            codes: BTreeSet::new(),
+            last: Vec::new(),
+        }
+    }
+
+    /// A script that carries on from a state somebody else reached, under its own definition.
+    pub fn from_state(state: RunState) -> Self {
+        let run_at = Timestamp::from_unix_millis(CLOCK_START);
+        Self {
+            def: state.def.clone(),
+            policy: state.policy.clone(),
+            seq: state.seq,
+            origin: state.clone(),
+            state,
+            log: Vec::new(),
+            lists: Vec::new(),
+            now: run_at,
+            start: run_at,
+            next_message: 0,
+            recorder: BTreeMap::new(),
+            codes: BTreeSet::new(),
             last: Vec::new(),
         }
     }
@@ -95,23 +123,93 @@ impl Script {
         let key = input.key.unwrap_or_else(|| format!("input/{}", self.seq));
         let event = Event::new(run.clone(), self.seq, self.now, key, origin, input.body);
         let decisions = decide(&self.state, &event, &self.def);
+        assert_eq!(
+            decide(&self.state, &event, &self.def),
+            decisions,
+            "decide twice"
+        );
 
         // Folded first, as the reducer's own log order has it: the input, then what it decided.
         self.fold(event.clone());
-        let mut written = Vec::with_capacity(decisions.len());
         for (index, decision) in decisions.iter().enumerate() {
             self.seq += 1;
             let key = format!("{}/d{index}", event.key);
             let body = EventBody::Decision(decision.clone());
             let event = Event::new(run.clone(), self.seq, self.now, key, Origin::Reducer, body);
-            written.push(event.clone());
             self.fold(event);
         }
         self.record(&decisions);
         self.lists.push(decisions.clone());
         self.last = decisions;
         self.assert_a_replay_agrees();
+        self.assert_invariants();
         self
+    }
+
+    /// A decision the host appends itself: `parked { poison_input }` has no input behind it (§13).
+    pub fn host_decision(&mut self, decision: Decision) -> &mut Self {
+        self.seq += 1;
+        let event = Event::new(
+            self.state.run.clone(),
+            self.seq,
+            self.now,
+            format!("host/{}", self.seq),
+            Origin::Host,
+            EventBody::Decision(decision.clone()),
+        );
+        self.fold(event);
+        self.record(std::slice::from_ref(&decision));
+        self.lists.push(vec![decision]);
+        self.assert_invariants();
+        self
+    }
+
+    /// What no case may ever see, checked after every input of every case.
+    fn assert_invariants(&mut self) {
+        let effects = self.effects();
+        for effect in &effects {
+            if let Effect::StopSession {
+                kind: StopKind::Kill,
+                session_key,
+                ..
+            } = effect
+            {
+                assert!(
+                    self.state.withdrawn,
+                    "a SIGKILL of {session_key} is owed and nobody withdrew: {:?}",
+                    self.lists.last()
+                );
+            }
+            if let Effect::StartSession { session_key, .. } = effect {
+                assert!(
+                    self.state.tree_prepared(),
+                    "{session_key} starts before the tree"
+                );
+            }
+        }
+        if !self.state.tree_prepared() {
+            for (timer, armed) in &self.state.timers {
+                assert_ne!(
+                    armed.purpose,
+                    nexus_run_contracts::TimerPurpose::StartDeadline,
+                    "{timer} is armed with no prepared tree"
+                );
+            }
+        }
+        if self.state.is_finished() {
+            assert!(self.state.timers.is_empty(), "a timer outlived the run");
+            assert!(effects.is_empty(), "a finished run owes {effects:?}");
+        }
+        if let Some(reason) = status(&self.state, 0, self.now).reason {
+            self.codes.insert(reason.as_str().to_owned());
+        }
+    }
+
+    pub fn fold_state(&self) -> RunState {
+        self.log
+            .iter()
+            .try_fold(self.origin.clone(), evolve)
+            .expect("the log folds")
     }
 
     fn fold(&mut self, event: Event) {
@@ -124,35 +222,109 @@ impl Script {
     }
 
     fn record(&mut self, decisions: &[Decision]) {
-        for effect in pending_effects(&self.state) {
-            if let Effect::Deliver { key, .. } = effect {
-                self.recorder.entry(format!("owed:{key}")).or_insert(1);
+        for decision in decisions {
+            match decision {
+                Decision::Finished { reason, .. } | Decision::Finishing { reason, .. } => {
+                    if matches!(decision, Decision::Finished { .. }) {
+                        *self.recorder.entry("finished".to_owned()).or_default() += 1;
+                    }
+                    if let Some(reason) = reason {
+                        self.codes.insert(reason.as_str().to_owned());
+                    }
+                }
+                Decision::Ignored { reason, .. }
+                | Decision::Liveness { reason, .. }
+                | Decision::Held { reason, .. }
+                | Decision::Parked { reason, .. } => {
+                    self.codes.insert(reason.as_str().to_owned());
+                }
+                _ => {}
             }
         }
-        for decision in decisions {
-            if let Decision::Finished { .. } = decision {
-                *self.recorder.entry("finished".to_owned()).or_default() += 1;
-            }
+        if let Some(Event {
+            body:
+                EventBody::SessionFact {
+                    fact: SessionFact::Ended { cause },
+                    ..
+                },
+            ..
+        }) = self
+            .log
+            .iter()
+            .rev()
+            .find(|e| !matches!(e.body, EventBody::Decision(_)))
+        {
+            self.codes.insert(cause_code(cause).to_owned());
         }
     }
 
     fn assert_a_replay_agrees(&self) {
-        let run = RunId::parse(RUN).unwrap();
-        let replayed = self
-            .log
-            .iter()
-            .try_fold(RunState::initial(run, self.def.clone()), evolve)
-            .expect("the log folds");
-        assert_eq!(replayed, self.state, "a fold of the log differs from the run");
+        assert_eq!(
+            self.fold_state(),
+            self.state,
+            "a fold of the log differs from the run"
+        );
     }
 
     /// Asserts the decision list of the last input, field by field. See [`render`].
     #[track_caller]
-    pub fn expect(&mut self, expected: &[&str]) -> &mut Self {
+    pub fn expect<S: AsRef<str>>(&mut self, expected: &[S]) -> &mut Self {
         let got = self.decisions();
-        let want: Vec<String> = expected.iter().map(|line| (*line).to_owned()).collect();
+        let want: Vec<String> = expected
+            .iter()
+            .map(|line| line.as_ref().to_owned())
+            .collect();
         assert_eq!(got, want, "the decision list");
         self
+    }
+
+    /// An input whose list must hold nothing: the one thing `expect(&[])` cannot infer a type for.
+    #[track_caller]
+    pub fn expect_none(&mut self) -> &mut Self {
+        self.expect::<&str>(&[])
+    }
+
+    /// The effects owed for this one session.
+    pub fn effects_of(&self, key: &str) -> Vec<Effect> {
+        self.effects()
+            .into_iter()
+            .filter(|effect| match effect {
+                Effect::StartSession { session_key, .. }
+                | Effect::NudgeSession { session_key, .. }
+                | Effect::StopSession { session_key, .. } => session_key == key,
+                _ => false,
+            })
+            .collect()
+    }
+
+    pub fn slot_state(&self, key: &str) -> SlotState {
+        let index = self
+            .state
+            .find(key)
+            .unwrap_or_else(|| panic!("no slot {key}"));
+        self.state.slots[index].state.clone()
+    }
+
+    /// Passes every step on the way until `step` is the one running.
+    pub fn pass_until(&mut self, step: &str) -> &mut Self {
+        while self.state.current_step.as_deref() != Some(step) {
+            let current = self.state.current_step.clone().expect("a step is running");
+            if current == "judge" {
+                self.run_fan_out_to_pass("judge");
+            } else {
+                self.run_step_to_pass(&current);
+            }
+        }
+        self
+    }
+
+    /// Whether any input of this script decided exactly this. Only for lines with no relative instant:
+    /// an instant renders against the clock at the time of asking.
+    pub fn decided(&self, line: &str) -> bool {
+        self.lists
+            .iter()
+            .flatten()
+            .any(|decision| render(decision, self.now) == line)
     }
 
     pub fn decisions(&self) -> Vec<String> {
@@ -365,38 +537,27 @@ impl Script {
             .unwrap_or_else(|| panic!("{timer} is not armed: {:?}", self.state.timers.keys()))
             .fire_at;
         self.now = self.now.max(due);
-        let input = self.fired(timer);
-        self.input(input)
+        self.input(self.fired(timer))
     }
 
     // ------------------------------------------------------------------ whole walks
 
     /// From nothing to the first step started on a prepared tree.
     pub fn to_first_session(&mut self) -> &mut Self {
-        let i = self.commissioned();
-        self.input(i);
-        let i = self.root_opened();
-        self.input(i);
-        let i = self.claim_taken();
-        self.input(i);
-        let i = self.tree_prepared();
-        self.input(i)
+        self.input(self.commissioned());
+        self.input(self.root_opened());
+        self.input(self.claim_taken());
+        self.input(self.tree_prepared())
     }
 
     /// The session started, replied without a bit, and its process gone.
     pub fn answer_session(&mut self, key: &str, escalate: bool, needs_rework: bool) -> MessageId {
-        if matches!(
-            self.state.slots[self.state.find(key).unwrap()].state,
-            nexus_run_engine::SlotState::Starting { .. }
-        ) {
-            let i = self.started(key);
-            self.input(i);
+        if matches!(self.slot_state(key), SlotState::Starting { .. }) {
+            self.input(self.started(key));
         }
         let message = self.message();
-        let i = self.reply_with(key, &message, escalate, needs_rework);
-        self.input(i);
-        let i = self.ended(key, EndCause::TurnComplete);
-        self.input(i);
+        self.input(self.reply_with(key, &message, escalate, needs_rework));
+        self.input(self.ended(key, EndCause::TurnComplete));
         message
     }
 
@@ -443,12 +604,9 @@ impl Script {
 
     /// `Finishing` from a delivered outcome onward: the park, the delivery, the release.
     pub fn finish_clean(&mut self) -> &mut Self {
-        let i = self.tree_parked_clean();
-        self.input(i);
-        let i = self.delivered();
-        self.input(i);
-        let i = self.claim_released();
-        self.input(i)
+        self.input(self.tree_parked_clean());
+        self.input(self.delivered());
+        self.input(self.claim_released())
     }
 
     /// Every message this script delivered, by effect key.
@@ -462,8 +620,18 @@ impl Script {
             .collect()
     }
 
-    pub fn fired_at_relative(&self, at: Timestamp) -> i64 {
-        (at.unix_millis() - self.start.unix_millis()) / 1000
+    /// Every decision of this script with its instants as seconds from the script's start, one line per
+    /// decision and an empty line per input: what a different clock must not change.
+    pub fn transcript(&self) -> String {
+        let mut text = String::new();
+        for list in &self.lists {
+            for decision in list {
+                text.push_str(&render(decision, self.start));
+                text.push('\n');
+            }
+            text.push('\n');
+        }
+        text
     }
 }
 
@@ -490,8 +658,23 @@ fn origin_of(body: &EventBody) -> Origin {
     }
 }
 
+fn cause_code(cause: &EndCause) -> &'static str {
+    match cause {
+        EndCause::TurnComplete => "turn_complete",
+        EndCause::Exit { .. } => "exit",
+        EndCause::UsageLimit { .. } => "usage_limit",
+        EndCause::ProviderUnavailable => "provider_unavailable",
+        EndCause::PermissionRefused { .. } => "permission_refused",
+        EndCause::StoppedByHost => "stopped_by_host",
+        EndCause::Lost => "lost",
+    }
+}
+
 fn slot_name(slot: &Slot) -> String {
-    format!("{}/v{}/{}/a{}", slot.step, slot.visit, slot.member, slot.attempt)
+    format!(
+        "{}/v{}/{}/a{}",
+        slot.step, slot.visit, slot.member, slot.attempt
+    )
 }
 
 fn word<T: serde::Serialize>(value: &T) -> String {
@@ -515,32 +698,73 @@ pub fn render(decision: &Decision, now: Timestamp) -> String {
             "run_queued behind={}",
             behind.as_ref().map_or("none".to_owned(), |b| b.to_string())
         ),
-        Decision::StepStarted { step, visit, attempt, members } => {
-            format!("step_started {step} v{visit} a{attempt} [{}]", members.join(","))
+        Decision::StepStarted {
+            step,
+            visit,
+            attempt,
+            members,
+        } => {
+            format!(
+                "step_started {step} v{visit} a{attempt} [{}]",
+                members.join(",")
+            )
         }
-        Decision::StepFinished { step, visit, outcome } => {
+        Decision::StepFinished {
+            step,
+            visit,
+            outcome,
+        } => {
             format!("step_finished {step} v{visit} {}", word(outcome))
         }
-        Decision::Rework { from, to, declaring, pass } => {
+        Decision::Rework {
+            from,
+            to,
+            declaring,
+            pass,
+        } => {
             format!("rework {from}->{to} declaring={declaring} pass={pass}")
         }
-        Decision::Escalated { question, slot, message } => {
-            format!("escalated question={question} slot={} message={message}", slot_name(slot))
+        Decision::Escalated {
+            question,
+            slot,
+            message,
+        } => {
+            format!(
+                "escalated question={question} slot={} message={message}",
+                slot_name(slot)
+            )
         }
-        Decision::Ceiling { question, step, pass, last_verdict } => {
+        Decision::Ceiling {
+            question,
+            step,
+            pass,
+            last_verdict,
+        } => {
             format!("ceiling question={question} step={step} pass={pass} verdict={last_verdict}")
         }
-        Decision::TimerSet { timer, fire_at, purpose } => {
+        Decision::TimerSet {
+            timer,
+            fire_at,
+            purpose,
+        } => {
             format!("timer_set {timer} {} {}", from_now(fire_at), word(purpose))
         }
         Decision::TimerCleared { timer } => format!("timer_cleared {timer}"),
-        Decision::Liveness { slot, reason, since } => format!(
+        Decision::Liveness {
+            slot,
+            reason,
+            since,
+        } => format!(
             "liveness {} {} since={}",
             slot_name(slot),
             reason.as_str(),
             from_now(since)
         ),
-        Decision::Held { slot, reason, until } => format!(
+        Decision::Held {
+            slot,
+            reason,
+            until,
+        } => format!(
             "held {} {} until={}",
             slot_name(slot),
             reason.as_str(),
@@ -562,6 +786,9 @@ pub fn render(decision: &Decision, now: Timestamp) -> String {
             word(outcome),
             reason.as_ref().map_or("none", |r| r.as_str())
         ),
-        Decision::Ignored { input_seq: _, reason } => format!("ignored {}", reason.as_str()),
+        Decision::Ignored {
+            input_seq: _,
+            reason,
+        } => format!("ignored {}", reason.as_str()),
     }
 }

@@ -2,9 +2,13 @@
 //! worker and enqueues the result as an input, so a crash between an append and an effect is recovered by
 //! deriving it again (§6.2, §8.3). Effects carry ids, never text.
 
-use nexus_run_contracts::{Key, MessageId, Outcome, ParkOutcome, RunId, SessionKey, StepId, StopKind};
+use nexus_run_contracts::{
+    Key, MessageId, Outcome, ParkOutcome, RunId, SessionKey, StepId, StopKind,
+};
 
-use crate::state::{GraceFired, ParkPhase, Phase, RunState, SlotRecord, SlotState, TreePhase, TurnPart};
+use crate::state::{
+    GraceFired, ParkPhase, Phase, RunState, SlotRecord, SlotState, TreePhase, TurnPart,
+};
 
 /// The signal the stop table owes.
 pub type SignalKind = StopKind;
@@ -89,7 +93,9 @@ pub fn pending_effects(state: &RunState) -> Vec<Effect> {
         }
         Phase::Queued { .. } => vec![Effect::TakeClaim { workspace }],
         Phase::Running { tree } => running_effects(state, *tree, workspace),
-        Phase::Finishing { tree, outcome, .. } => finishing_effects(state, tree, *outcome, workspace),
+        Phase::Finishing { tree, outcome, .. } => {
+            finishing_effects(state, tree, *outcome, workspace)
+        }
     }
 }
 
@@ -215,15 +221,18 @@ fn result_deliveries(
     let run = &state.run;
     let step = state.current_step.clone();
     let verdict = step.as_deref().and_then(|step| state.verdict_of(step));
-    let result = (format!("result/{run}"), match (outcome, &verdict) {
-        (Outcome::Withdrawn | Outcome::Failed, _) | (_, None) => DeliverBody::Discharge {
-            pass: step.as_deref().map_or(0, |step| state.pass_of(step)),
-            step: step.clone(),
-            verdict: last_verdict(state),
-            parked: Some(parked.clone()),
+    let result = (
+        format!("result/{run}"),
+        match (outcome, &verdict) {
+            (Outcome::Withdrawn | Outcome::Failed, _) | (_, None) => DeliverBody::Discharge {
+                pass: step.as_deref().map_or(0, |step| state.pass_of(step)),
+                step: step.clone(),
+                verdict: last_verdict(state),
+                parked: Some(parked.clone()),
+            },
+            (_, Some(verdict)) => DeliverBody::Message(verdict.message.clone()),
         },
-        (_, Some(verdict)) => DeliverBody::Message(verdict.message.clone()),
-    });
+    );
     let mut deliveries = vec![result];
     if outcome != Outcome::Withdrawn {
         // Only a commit made, or local commits ahead of the remote: a clean branch owes no notice.

@@ -1,12 +1,14 @@
 //! The status projection, pure. The host adds `owner` and the live `tree` fields around it (§6.6).
 
 use nexus_run_contracts::status::{
-    ClaimStatus, FlowStatus, MemberStatus, Needs, NeedsKind, Owner, RunState as StatusState, RunStatus,
-    SlotLiveness, StepStatus, TreeStatus, Verdict,
+    ClaimStatus, FlowStatus, MemberStatus, Needs, NeedsKind, Owner, RunState as StatusState,
+    RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
 };
 use nexus_run_contracts::{Outcome, ReasonCode, Timestamp, CONTRACT_V};
 
-use crate::state::{ParkPhase, Phase, RunState, RunView, SlotCondition, SlotRecord, SlotState};
+use crate::state::{
+    Asked, ParkPhase, Phase, RunState, RunView, SlotCondition, SlotRecord, SlotState,
+};
 
 /// Run status at `now`. `pending_inputs` are inputs still in the inbox: reported as pending, so status
 /// never claims a reply arrived before the owner folded it.
@@ -194,6 +196,10 @@ fn needs(state: &RunState, view: &RunView, _now: Timestamp) -> Option<Needs> {
 fn reason(state: &RunState, view: &RunView) -> Option<ReasonCode> {
     match view {
         RunView::Held { reason, .. } | RunView::Parked { reason } => Some(reason.clone()),
+        RunView::NeedsDecision { .. } => state.open_questions().find_map(|q| match q.asked {
+            Asked::Ceiling { .. } => Some(ReasonCode::Ceiling),
+            Asked::Escalation { .. } => None,
+        }),
         RunView::Finished { .. } | RunView::Finishing { .. } => match &state.phase {
             Phase::Finishing { reason, .. } | Phase::Finished { reason, .. } => {
                 // A slot that will not stop parks a finishing run with the outcome kept.

@@ -16,4 +16,22 @@ macro_rules! case_test {
 
 include!("group.rs");
 
-mod happy;
+mod groups;
+
+/// §12.1: every reason code of §6.7 appears in at least one case, by what the cases actually folded.
+#[test]
+fn every_reason_code_appears_in_at_least_one_case() {
+    let mut seen = std::collections::BTreeSet::new();
+    for group in groups::ALL {
+        for (_, case) in *group {
+            let mut script = script::Script::coding();
+            case(&mut script);
+            seen.append(&mut script.codes);
+        }
+    }
+    let missing: Vec<&&str> = nexus_run_contracts::ReasonCode::ALL
+        .iter()
+        .filter(|code| !seen.contains(**code))
+        .collect();
+    assert!(missing.is_empty(), "no case reaches {missing:?}");
+}

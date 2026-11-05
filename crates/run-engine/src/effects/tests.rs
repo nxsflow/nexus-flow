@@ -30,7 +30,11 @@ fn unforced_two_sent_owes_nothing_in_the_second_grace_and_nothing_after_it() {
 fn unforced_never_owes_a_kill_whatever_the_counts_say() {
     for sent in 0..=u8::MAX {
         for fired in [Not, First, Second] {
-            assert_ne!(stop_signal(false, sent, fired), Some(Kill), "{sent} {fired:?}");
+            assert_ne!(
+                stop_signal(false, sent, fired),
+                Some(Kill),
+                "{sent} {fired:?}"
+            );
         }
     }
 }

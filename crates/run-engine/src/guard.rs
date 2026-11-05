@@ -2,7 +2,8 @@
 //! input changes no state, so the two can never disagree: both ask here.
 
 use nexus_run_contracts::{
-    Disposition, EndCause, Event, EventBody, ReasonCode, SessionFact, Slot, TimerPurpose, TreeRefusal,
+    Disposition, EndCause, Event, EventBody, ReasonCode, SessionFact, Slot, TimerPurpose,
+    Timestamp, TreeRefusal,
 };
 
 use crate::effects::{owed_deliveries, ready_to_release};
@@ -45,9 +46,10 @@ pub(crate) fn ignored_reason(state: &RunState, input: &Event) -> Option<ReasonCo
                 ..
             }
         )),
-        EventBody::Delivered { .. } => out_of_state(delivery_key(input).is_some_and(|key| {
-            owed_deliveries(state).iter().any(|(owed, _)| owed == key)
-        })),
+        EventBody::Delivered { .. } => out_of_state(
+            delivery_key(input)
+                .is_some_and(|key| owed_deliveries(state).iter().any(|(owed, _)| owed == key)),
+        ),
         EventBody::Nudged { session_key } => match record(state, session_key) {
             None => Some(UnknownSession),
             Some(r) => out_of_state(matches!(r.state, SlotState::Quiet { .. })),
@@ -178,10 +180,12 @@ pub(crate) fn resume_target(state: &RunState, slot: Option<&Slot>) -> Option<usi
 /// a machine waking, or a service coming back. It is put off once, by `wake_jump`, which is two adapter
 /// samples: a session that is alive has shown a fact by then and re-armed it, and only a session still
 /// silent then takes the rung. Pure, because lateness is in the input (LV1, §12.6).
-pub(crate) fn is_deferred(state: &RunState, input: &Event) -> bool {
-    let EventBody::TimerFired { timer, fire_at } = &input.body else {
-        return false;
-    };
+pub(crate) fn is_deferred(
+    state: &RunState,
+    timer: &str,
+    fire_at: Timestamp,
+    at: Timestamp,
+) -> bool {
     let Some(armed) = state.timers.get(timer) else {
         return false;
     };
@@ -197,10 +201,9 @@ pub(crate) fn is_deferred(state: &RunState, input: &Event) -> bool {
         | TimerPurpose::CallBound
         | TimerPurpose::HoldRetry => false,
     };
-    let late = input.at.unix_millis() - fire_at.unix_millis();
+    let late = at.unix_millis() - fire_at.unix_millis();
     destructive && late > RunState::millis(state.policy.wake_jump)
 }
-
 /// A refusal no retry can clear: a person has to move the directory (§5).
 pub(crate) fn is_permanent(reason: &TreeRefusal) -> bool {
     matches!(

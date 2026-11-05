@@ -4,7 +4,7 @@
 //! what comes later in a list reads the state the earlier ones made, and a replay cannot reach another.
 
 use nexus_run_contracts::{
-    Decision, Disposition, Event, EventBody, ReasonCode, Secs, SessionFact, Slot, TimerPurpose, Timestamp,
+    Decision, Disposition, Event, EventBody, ReasonCode, Secs, Slot, TimerPurpose, Timestamp,
     WithdrawnBy,
 };
 
@@ -13,8 +13,7 @@ use crate::flow::FlowDef;
 use crate::guard::{ignored_reason, is_permanent, resume_target};
 use crate::input::apply_input;
 use crate::state::{
-    slot_timer, Asked, Phase, RunState, SlotCondition, SlotState, ROOT_DEADLINE_TIMER,
-    TREE_WINDOW_TIMER,
+    slot_timer, Asked, Phase, RunState, SlotCondition, ROOT_DEADLINE_TIMER, TREE_WINDOW_TIMER,
 };
 
 mod route;
@@ -204,8 +203,7 @@ impl Emit<'_> {
                 self.clear_slot_timer(&slot, TimerPurpose::HoldRetry);
                 self.restart(&slot);
             }
-            Some(SlotCondition::Parked { reason, .. })
-                if *reason == ReasonCode::WouldNotStop => {}
+            Some(SlotCondition::Parked { reason, .. }) if *reason == ReasonCode::WouldNotStop => {}
             Some(SlotCondition::Parked { .. }) => self.restart(&slot),
             None => {}
         }
@@ -241,9 +239,6 @@ impl Emit<'_> {
         self.finish_run(nexus_run_contracts::Outcome::Withdrawn, reason);
     }
 }
-
-/// `SessionFact` is matched in `session`; re-exported so that module's signature stays short.
-pub(crate) type Fact = SessionFact;
 
 #[cfg(test)]
 mod tests;

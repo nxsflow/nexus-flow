@@ -2,13 +2,14 @@
 //! the restart budget and the holds (§6.5).
 
 use nexus_run_contracts::{
-    Decision, EndCause, HeartbeatKind, ReasonCode, Slot, TimerPurpose, Timestamp,
+    Decision, EndCause, HeartbeatKind, ReasonCode, SessionFact as Fact, Slot, TimerPurpose,
+    Timestamp,
 };
 
 use crate::flow::SYNTH;
 use crate::state::{grace_timer, AfterStop, SlotState};
 
-use super::{Emit, Fact};
+use super::Emit;
 
 impl Emit<'_> {
     fn index(&self, session_key: &str) -> Option<usize> {
@@ -30,7 +31,10 @@ impl Emit<'_> {
         };
         let record = &self.state.slots[index];
         let slot = record.slot.clone();
-        let sent = record.state.ladder().map_or(0, |ladder| ladder.signals_sent);
+        let sent = record
+            .state
+            .ladder()
+            .map_or(0, |ladder| ladder.signals_sent);
         if sent == 1 || sent == 2 {
             let span = self.state.policy.stop_grace;
             self.set_timer(grace_timer(sent, &slot), span, TimerPurpose::StopGrace);
@@ -160,8 +164,9 @@ impl Emit<'_> {
                     slot: Some(slot.clone()),
                     reason: ReasonCode::PermissionRefused,
                 }),
-                // The engine's own stop: the state that ordered it says what follows.
-                EndCause::StoppedByHost => self.arm_ready(),
+                // An ordered stop arrives through `Stopping` or a replied slot, above. No state ordered
+                // this one, so nothing would ever follow it: the session is gone, as if lost.
+                EndCause::StoppedByHost => self.restart_or_park(index, slot, ReasonCode::Lost),
             },
         }
     }
@@ -175,7 +180,10 @@ impl Emit<'_> {
             return;
         }
         let in_fan_out = slot.member != SYNTH
-            && self.def.step(&slot.step).is_some_and(|step| step.is_fan_out());
+            && self
+                .def
+                .step(&slot.step)
+                .is_some_and(|step| step.is_fan_out());
         let reason = if in_fan_out {
             ReasonCode::FanOutIncomplete
         } else {
@@ -188,7 +196,13 @@ impl Emit<'_> {
     }
 
     /// On hold, not failed. Holds are counted apart from attempts, up to `max_holds` (cn4p).
-    fn hold(&mut self, index: usize, slot: &Slot, reason: ReasonCode, resets_at: Option<Timestamp>) {
+    fn hold(
+        &mut self,
+        index: usize,
+        slot: &Slot,
+        reason: ReasonCode,
+        resets_at: Option<Timestamp>,
+    ) {
         if self.state.slots[index].holds >= self.state.policy.max_holds {
             self.push(Decision::Parked {
                 slot: Some(slot.clone()),

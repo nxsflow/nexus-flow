@@ -2,8 +2,8 @@
 
 use nexus_run_contracts::{Decision, Outcome, ReasonCode, Slot, StepOutcome, TimerPurpose};
 
-use crate::state::{SlotState, SlotRecord};
 use crate::flow::SYNTH;
+use crate::state::{SlotRecord, SlotState};
 
 use super::Emit;
 
@@ -188,7 +188,10 @@ impl Emit<'_> {
             .timers
             .iter()
             .filter(|(_, armed)| {
-                !matches!(armed.purpose, TimerPurpose::StopGrace | TimerPurpose::WindDown)
+                !matches!(
+                    armed.purpose,
+                    TimerPurpose::StopGrace | TimerPurpose::WindDown
+                )
             })
             .map(|(timer, _)| timer.clone())
             .collect();

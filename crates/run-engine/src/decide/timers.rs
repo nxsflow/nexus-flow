@@ -4,7 +4,7 @@
 use nexus_run_contracts::{Decision, ReasonCode, Slot, TimerPurpose, Timestamp};
 
 use crate::guard::is_deferred;
-use crate::state::{timer_slot, RunState, ROOT_DEADLINE_TIMER};
+use crate::state::{timer_slot, ROOT_DEADLINE_TIMER};
 
 use super::Emit;
 
@@ -13,7 +13,7 @@ impl Emit<'_> {
         let Some(armed) = self.before.timers.get(timer).copied() else {
             return;
         };
-        if deferred(self.before, timer, fire_at, self.at) {
+        if is_deferred(self.before, timer, fire_at, self.at) {
             let span = self.state.policy.wake_jump;
             self.set_timer(timer.to_owned(), span, armed.purpose);
             return;
@@ -25,7 +25,9 @@ impl Emit<'_> {
                 slot: None,
                 reason: ReasonCode::TreeRefused,
             }),
-            (TimerPurpose::StartDeadline, Some(slot)) => self.conclude(slot, ReasonCode::StartFailed),
+            (TimerPurpose::StartDeadline, Some(slot)) => {
+                self.conclude(slot, ReasonCode::StartFailed)
+            }
             (TimerPurpose::Quiet, Some(slot)) => self.quiet(&slot),
             (TimerPurpose::SubprocessIdle, Some(slot)) => {
                 self.clear_slot_timer(&slot, TimerPurpose::CallBound);
@@ -106,20 +108,4 @@ impl Emit<'_> {
             });
         }
     }
-}
-
-fn deferred(before: &RunState, timer: &str, fire_at: Timestamp, at: Timestamp) -> bool {
-    let run = before.run.clone();
-    let probe = nexus_run_contracts::Event::new(
-        run,
-        0,
-        at,
-        "",
-        nexus_run_contracts::Origin::Timer,
-        nexus_run_contracts::EventBody::TimerFired {
-            timer: timer.to_owned(),
-            fire_at,
-        },
-    );
-    is_deferred(before, &probe)
 }

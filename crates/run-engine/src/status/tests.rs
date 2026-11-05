@@ -14,7 +14,11 @@ fn a_run_nothing_has_folded_into_says_created_and_reports_its_pending_inputs() {
         working_tree: WorkingTree::Exclusive,
         ignored_timeouts: Vec::new(),
     };
-    let got = status(&RunState::initial(run, def), 3, Timestamp::from_unix_millis(0));
+    let got = status(
+        &RunState::initial(run, def),
+        3,
+        Timestamp::from_unix_millis(0),
+    );
     assert_eq!(got.state, StatusState::Created);
     assert_eq!(got.pending_inputs, 3);
     assert!(!got.finished);

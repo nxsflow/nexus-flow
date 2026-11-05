@@ -16,14 +16,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nexus_run_contracts::{
-    Base, EndCause, Handle, Key, LivenessPolicy, MessageId, Outcome, ParkOutcome, ReasonCode, RunId,
-    Secs, Seq, Slot, StepId, StepOutcome, TimerPurpose, Timestamp,
+    Base, EndCause, Handle, Key, LivenessPolicy, MessageId, Outcome, ParkOutcome, ReasonCode,
+    RunId, Secs, Seq, Slot, StepId, StepOutcome, TimerPurpose, Timestamp,
 };
 
 use crate::flow::{FlowDef, SYNTH};
 
 mod examples;
-pub use examples::ROW_COUNT;
+pub use examples::{run_row, slot_row, SlotExample, RUN_ROWS, SLOT_ROWS};
 
 /// Everything `fold(evolve, initial, log)` knows about a run. It holds the run's pinned definition,
 /// because `evolve` and `pending_effects` have no other way to know what a step's turn is made of.
@@ -180,7 +180,10 @@ pub struct TurnPart {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnKind {
     Root,
-    Reply { step: StepId, member: Handle },
+    Reply {
+        step: StepId,
+        member: Handle,
+    },
     Task,
     Obligation,
     /// The commissioner's answer or reasons.
@@ -423,12 +426,8 @@ impl RunState {
     /// The projection of §6.3. See the table at the top of this file.
     pub fn view(&self) -> RunView {
         match &self.phase {
-            Phase::Finished { outcome, .. } => {
-                return RunView::Finished { outcome: *outcome }
-            }
-            Phase::Finishing { outcome, .. } => {
-                return RunView::Finishing { outcome: *outcome }
-            }
+            Phase::Finished { outcome, .. } => return RunView::Finished { outcome: *outcome },
+            Phase::Finishing { outcome, .. } => return RunView::Finishing { outcome: *outcome },
             Phase::Queued { behind } => {
                 return RunView::Queued {
                     behind: behind.clone(),
@@ -578,17 +577,6 @@ impl RunState {
     /// `policy` read as milliseconds, for comparing two instants.
     pub(crate) fn millis(span: Secs) -> i64 {
         i64::try_from(span.0.saturating_mul(1000)).unwrap_or(i64::MAX)
-    }
-}
-
-/// The reason a stop's last rung parks with.
-pub(crate) trait ReasonCodeExt {
-    fn is_would_not_stop(&self) -> bool;
-}
-
-impl ReasonCodeExt for ReasonCode {
-    fn is_would_not_stop(&self) -> bool {
-        *self == Self::WouldNotStop
     }
 }
 
