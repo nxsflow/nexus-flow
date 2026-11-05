@@ -7,7 +7,7 @@ use nexus_run_engine::{DeliverBody, Effect, Process, RunView, SlotState};
 use crate::script::Script;
 
 fn to_finisher_replied(s: &mut Script) -> String {
-    s.to_first_session();
+    s.reach_first_session();
     s.pass_until("finish");
     let key = s.latest_key("finish", None);
     s.input(s.started(&key));
@@ -17,7 +17,7 @@ fn to_finisher_replied(s: &mut Script) -> String {
 
 cases! {
     fn a_reply_then_its_end_folds_onto_the_slot_and_owes_no_stop(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply(&key, "m-1"));
@@ -32,7 +32,7 @@ cases! {
     }
 
     fn an_end_then_its_reply_is_ignored_final_state_and_the_restart_stands(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.ended(&key, EndCause::Exit { status: None }));
@@ -40,7 +40,7 @@ cases! {
     }
 
     fn with_budget_spent_an_end_then_its_reply_is_ignored_final_state(s) {
-        s.to_first_session();
+        s.reach_first_session();
         for attempt in 1..=3 {
             let key = s.key("build", 1, "coder", attempt);
             s.input(s.started(&key));
@@ -51,7 +51,7 @@ cases! {
     }
 
     fn the_next_step_with_another_persona_starts_while_a_replied_process_winds_down(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply(&key, "m-1")).expect(&[
@@ -64,7 +64,7 @@ cases! {
     }
 
     fn a_resume_waits_for_the_previous_process_of_the_same_persona(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let coder = s.latest_key("build", None);
         s.input(s.started(&coder));
         s.input(s.reply(&coder, "m-1"));
@@ -89,7 +89,7 @@ cases! {
     }
 
     fn an_overdue_reply_is_stopped_by_the_same_ladder(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply(&key, "m-1"));
@@ -176,7 +176,7 @@ cases! {
     }
 
     fn a_dead_leader_with_a_live_group_moves_a_running_slot_to_stopping_and_is_no_end(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.fact(&key, SessionFact::GroupLingering { pids: vec![11, 12] })).expect(&[
@@ -206,7 +206,7 @@ cases! {
     }
 
     fn a_dead_leader_with_a_live_group_on_a_replied_slot_starts_its_stop_and_keeps_the_step_done(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply(&key, "m-1"));

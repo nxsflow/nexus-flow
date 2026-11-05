@@ -5,7 +5,7 @@ use nexus_run_engine::{Effect, SlotState};
 
 cases! {
     fn a_late_reply_after_a_restart_is_ignored_and_the_new_attempt_stands(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let a1 = s.key("build", 1, "coder", 1);
         s.input(s.started(&a1));
         s.input(s.ended(&a1, EndCause::Exit { status: None }));
@@ -17,7 +17,7 @@ cases! {
     }
 
     fn a_reply_while_the_engine_is_stopping_the_attempt_is_ignored_as_late(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let a1 = s.key("build", 1, "coder", 1);
         s.input(s.started(&a1));
         s.fire("quiet/build/v1/coder/a1");
@@ -26,7 +26,7 @@ cases! {
     }
 
     fn a_duplicate_reply_is_ignored_and_an_old_verdict_is_never_counted_twice(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply(&key, "m-1"));
@@ -37,7 +37,7 @@ cases! {
     }
 
     fn a_started_for_a_superseded_attempt_owes_its_stop_and_changes_nothing_else(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let a1 = s.key("build", 1, "coder", 1);
         s.input(s.started(&a1));
         s.input(s.ended(&a1, EndCause::Lost));
@@ -55,14 +55,14 @@ cases! {
     }
 
     fn a_started_on_a_slot_that_already_runs_changes_nothing(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let a1 = s.key("build", 1, "coder", 1);
         s.input(s.started(&a1));
         s.input(s.started(&a1)).expect(&["ignored out_of_state"]);
     }
 
     fn a_fact_for_a_session_nobody_knows_is_ignored(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.input(s.started("no-such-session")).expect(&["ignored unknown_session"]);
         s.input(s.reply("no-such-session", "m")).expect(&["ignored unknown_session"]);
         s.input(s.nudged("no-such-session")).expect(&["ignored unknown_session"]);
@@ -70,7 +70,7 @@ cases! {
     }
 
     fn a_stale_timer_changes_nothing_and_its_re_arm_fires_on_its_own_instant(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         let stale = s.fired("quiet/build/v1/coder/a1");
@@ -88,7 +88,7 @@ cases! {
     }
 
     fn a_timer_fired_twice_acts_once(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         let once = s.fired("quiet/build/v1/coder/a1");
@@ -98,7 +98,7 @@ cases! {
     }
 
     fn every_input_to_a_finished_run_is_ignored_final_state(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.pass_until("finish");
         s.run_step_to_pass("finish");
         s.finish_clean();
@@ -111,7 +111,7 @@ cases! {
     }
 
     fn a_reply_to_a_run_already_finishing_is_ignored(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.withdrawn());
@@ -129,7 +129,7 @@ cases! {
     }
 
     fn an_unknown_input_folds_to_nothing_and_decides_ignored(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let before = s.state.clone();
         let unknown = nexus_run_contracts::UnknownBody {
             kind: "from_the_future".into(),
@@ -142,7 +142,7 @@ cases! {
     }
 
     fn a_nudge_result_for_a_slot_no_longer_quiet_is_ignored(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.nudged(&key)).expect(&["ignored out_of_state"]);
@@ -150,7 +150,7 @@ cases! {
     }
 
     fn a_signal_record_the_log_already_holds_is_ignored(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.fire("quiet/build/v1/coder/a1");

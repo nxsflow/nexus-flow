@@ -9,7 +9,7 @@ use nexus_run_engine::{Effect, RunView, SlotState, TurnKind};
 use crate::script::{slot, Script};
 
 fn first(s: &mut Script) -> String {
-    s.to_first_session();
+    s.reach_first_session();
     s.key("build", 1, "coder", 1)
 }
 
@@ -265,7 +265,7 @@ cases! {
     }
 
     fn resume_without_a_slot_picks_the_oldest_condition(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.pass_until("judge");
         let (old, new) = (s.key("judge", 1, "integrity", 1), s.key("judge", 1, "test-quality", 1));
         s.input(s.ended(&old, EndCause::PermissionRefused { rule: "r".into(), program: "p".into() }));

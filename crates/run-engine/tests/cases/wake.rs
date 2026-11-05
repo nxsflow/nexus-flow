@@ -9,7 +9,7 @@ use crate::script::Script;
 const HOURS: u64 = 3 * 3600;
 
 fn running(s: &mut Script) -> String {
-    s.to_first_session();
+    s.reach_first_session();
     let key = s.latest_key("build", None);
     s.input(s.started(&key));
     key
@@ -25,7 +25,7 @@ fn fire_late(s: &mut Script, timer: &str) {
 
 cases! {
     fn a_starting_slot_survives_the_wake_and_a_start_after_it_counts(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         fire_late(s, "start_deadline/build/v1/coder/a1");
         s.expect(&["timer_set start_deadline/build/v1/coder/a1 +120s start_deadline"]);
@@ -35,7 +35,7 @@ cases! {
     }
 
     fn a_starting_slot_still_silent_one_sample_after_the_wake_takes_the_rung(s) {
-        s.to_first_session();
+        s.reach_first_session();
         fire_late(s, "start_deadline/build/v1/coder/a1");
         s.fire("start_deadline/build/v1/coder/a1").expect(&[
             "liveness build/v1/coder/a1 start_failed since=+0s",
@@ -89,7 +89,7 @@ cases! {
     }
 
     fn a_timer_fired_inside_the_jump_is_no_wake(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let timer = "start_deadline/build/v1/coder/a1";
         let due = s.state.timers[timer].fire_at;
         let input = s.fired(timer);
@@ -99,7 +99,7 @@ cases! {
     }
 
     fn a_clock_set_behind_fires_a_timer_when_it_passes_it_and_defers_nothing(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let timer = "start_deadline/build/v1/coder/a1";
         let due = s.state.timers[timer].fire_at;
         let input = s.fired(timer);

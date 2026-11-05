@@ -308,7 +308,7 @@ fn assert_next_rung(example: &SlotExample) {
 #[test]
 fn a_delivered_run_has_no_discharge_and_a_withdrawn_one_has_no_result() {
     let mut delivered = Script::coding();
-    delivered.to_first_session();
+    delivered.reach_first_session();
     delivered.pass_until("finish");
     delivered.run_step_to_pass("finish");
     delivered.input(delivered.tree_parked_clean());
@@ -318,7 +318,7 @@ fn a_delivered_run_has_no_discharge_and_a_withdrawn_one_has_no_result() {
     ));
 
     let mut withdrawn = Script::coding();
-    withdrawn.to_first_session();
+    withdrawn.reach_first_session();
     withdrawn.pass_until("finish");
     let key = withdrawn.latest_key("finish", None);
     withdrawn.input(withdrawn.started(&key));

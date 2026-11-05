@@ -191,7 +191,7 @@ cases! {
     }
 
     fn a_missing_directory_at_the_park_releases_because_nothing_is_left_to_save(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.withdrawn());

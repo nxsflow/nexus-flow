@@ -29,7 +29,7 @@ cases! {
     }
 
     fn a_running_step_names_who_owes_the_reply_when_the_step_began_and_the_base(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let began = s.now;
         s.advance(90);
         let got = status(&s.state, 0, s.now);
@@ -47,7 +47,7 @@ cases! {
     }
 
     fn the_quiet_time_is_counted_from_the_last_fact(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.advance(90);
@@ -56,7 +56,7 @@ cases! {
     }
 
     fn a_finished_step_says_so_with_its_outcome(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let got = status(&s.state, 0, s.now);
         let build = got.steps.iter().find(|step| step.id == "build").unwrap();
@@ -66,7 +66,7 @@ cases! {
     }
 
     fn a_question_is_named_as_a_decision_with_its_age(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         let asked = s.now;
@@ -82,7 +82,7 @@ cases! {
     }
 
     fn a_hold_says_until_when_and_has_no_question(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         let until = s.now.plus(Secs::hours(1));
@@ -94,7 +94,7 @@ cases! {
     }
 
     fn a_park_needs_a_person_and_says_since_when(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.advance(600);
@@ -119,7 +119,7 @@ cases! {
     }
 
     fn outcome_is_set_exactly_when_finished_is_true(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.pass_until("finish");
         s.run_step_to_pass("finish");
         let finishing = status(&s.state, 0, s.now);

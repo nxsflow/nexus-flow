@@ -26,12 +26,10 @@ fn send_back(s: &mut Script, step: &str) {
 
 /// Reworks up to the ceiling, asserting both counters on every hop, then the verdict that hits it.
 fn to_the_ceiling(s: &mut Script, step: &str, first_build_visit: u32) -> String {
-    let mut visit = first_build_visit;
-    for pass in 1..=3 {
+    for (pass, visit) in (1..=3).zip(first_build_visit..) {
         send_back(s, step);
         assert_eq!(s.state.passes[step], pass, "{step}'s own count");
         assert_eq!(s.state.visits["build"], visit, "build's visit");
-        visit += 1;
     }
     s.pass_until(step);
     let visit = s.state.visits[step];
@@ -46,7 +44,7 @@ fn to_the_ceiling(s: &mut Script, step: &str, first_build_visit: u32) -> String 
 
 /// The whole list of a verdict that sends the work back, at each hop.
 fn walk_edge(s: &mut Script, step: &str, member: &str) {
-    s.to_first_session();
+    s.reach_first_session();
     for pass in 1..=3u32 {
         s.pass_until(step);
         let visit = s.state.visits[step];
@@ -83,7 +81,7 @@ fn walk_edge(s: &mut Script, step: &str, member: &str) {
 
 cases! {
     fn a_verify_verdict_sends_the_work_back_with_the_verdict_in_the_turn(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let key = s.latest_key("verify", None);
         s.input(s.started(&key));
@@ -120,7 +118,7 @@ cases! {
     }
 
     fn the_judge_edge_counts_three_passes_and_the_fourth_verdict_asks(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let question = to_the_ceiling(s, "judge", 2);
         assert_eq!(s.state.visits["build"], 4);
         let synth_message = s.state.verdict_of("judge").unwrap().message;
@@ -131,7 +129,7 @@ cases! {
     }
 
     fn verify_rework_then_judge_rework_starts_build_v2_and_v3_on_two_counts(s) {
-        s.to_first_session();
+        s.reach_first_session();
         send_back(s, "verify");
         assert_eq!(s.key("build", 2, "coder", 1), s.latest_key("build", None));
         send_back(s, "judge");
@@ -142,7 +140,7 @@ cases! {
     }
 
     fn verify_reworks_never_spend_the_ceiling_of_judge(s) {
-        s.to_first_session();
+        s.reach_first_session();
         for _ in 0..3 {
             send_back(s, "verify");
         }
@@ -157,7 +155,7 @@ cases! {
     }
 
     fn the_ceiling_holds_the_claim_and_owes_one_question(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let question = to_the_ceiling(s, "verify", 2);
         let key = format!("question/{question}");
         assert_eq!(s.deliveries(), vec![(key.clone(), DeliverBody::Question(question.clone()))]);
@@ -170,7 +168,7 @@ cases! {
     }
 
     fn continue_at_the_ceiling_buys_one_pass_and_the_next_ceiling_asks_again(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let question = to_the_ceiling(s, "verify", 2);
         s.input(s.answer(&question, Disposition::Continue, "m-go-on")).expect(&[
             "rework verify->build declaring=verify pass=4",
@@ -193,7 +191,7 @@ cases! {
     }
 
     fn accept_at_the_ceiling_starts_the_next_step_with_the_overruled_verdict_and_the_reasons(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let question = to_the_ceiling(s, "verify", 2);
         let verdict = s.state.verdict_of("verify").unwrap().message;
         s.input(s.answer(&question, Disposition::Accept, "m-reasons")).expect(&[
@@ -219,7 +217,7 @@ cases! {
     }
 
     fn accept_at_the_last_steps_ceiling_ends_the_run_accepted_by_requester(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let question = to_the_ceiling(s, "finish", 2);
         let verdict = s.state.verdict_of("finish").unwrap().message;
         s.input(s.answer(&question, Disposition::Accept, "m-reasons")).expect(&[
@@ -234,7 +232,7 @@ cases! {
     }
 
     fn a_needs_rework_bit_on_a_step_with_no_back_edge_passes(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         s.input(s.started(&key));
         s.input(s.reply_with(&key, "m-x", false, true));
@@ -242,7 +240,7 @@ cases! {
     }
 
     fn a_later_ceiling_of_the_same_step_and_pass_after_an_accept_is_a_new_question(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let first = to_the_ceiling(s, "verify", 2);
         s.input(s.answer(&first, Disposition::Accept, "m-accept"));
         send_back(s, "judge");

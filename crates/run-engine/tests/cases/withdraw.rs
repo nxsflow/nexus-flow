@@ -9,7 +9,7 @@ use nexus_run_engine::{DeliverBody, Effect, RunView, SlotState};
 use crate::script::Script;
 
 fn running(s: &mut Script) -> String {
-    s.to_first_session();
+    s.reach_first_session();
     let key = s.latest_key("build", None);
     s.input(s.started(&key));
     key
@@ -134,7 +134,7 @@ cases! {
     }
 
     fn a_second_withdraw_keeps_the_outcome_and_forces_an_open_stop(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.pass_until("finish");
         let key = s.latest_key("finish", None);
         s.input(s.started(&key));
@@ -153,7 +153,7 @@ cases! {
     }
 
     fn a_withdraw_with_nothing_to_force_is_already_finishing(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.pass_until("finish");
         s.run_step_to_pass("finish");
         s.input(s.withdrawn()).expect(&["ignored already_finishing"]);
@@ -214,7 +214,7 @@ cases! {
     }
 
     fn a_withdrawal_while_a_slot_waits_for_its_personas_end_starts_nothing(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let coder = s.latest_key("build", None);
         s.input(s.started(&coder));
         s.input(s.reply(&coder, "m"));

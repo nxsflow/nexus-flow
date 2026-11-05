@@ -6,7 +6,7 @@ use nexus_run_engine::{DeliverBody, Effect, RunView, TurnKind, TurnPart};
 use crate::script::{slot, Script};
 
 fn to_judge(s: &mut Script) {
-    s.to_first_session();
+    s.reach_first_session();
     s.pass_until("judge");
     for member in ["code-quality", "test-quality", "integrity"] {
         let key = s.key("judge", 1, member, 1);
@@ -16,7 +16,7 @@ fn to_judge(s: &mut Script) {
 
 /// A verifier asks; its process winds down; the answer resumes it.
 fn verifier_asks(s: &mut Script) -> (String, String) {
-    s.to_first_session();
+    s.reach_first_session();
     s.run_step_to_pass("build");
     let key = s.latest_key("verify", None);
     s.input(s.started(&key));
@@ -26,7 +26,7 @@ fn verifier_asks(s: &mut Script) -> (String, String) {
 
 cases! {
     fn an_escalation_asks_the_moment_the_reply_folds_and_holds_the_claim(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let key = s.latest_key("verify", None);
         s.input(s.started(&key));

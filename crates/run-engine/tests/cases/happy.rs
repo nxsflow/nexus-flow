@@ -58,7 +58,7 @@ cases! {
     }
 
     fn the_first_step_gets_the_root_and_its_obligation(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let key = s.latest_key("build", None);
         assert_eq!(turn_of(s, &key), vec![
             (TurnKind::Root, Some("m-root-message".to_owned())),
@@ -67,7 +67,7 @@ cases! {
     }
 
     fn verify_declares_no_input_and_is_handed_no_reply(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let key = s.latest_key("verify", None);
         assert_eq!(turn_of(s, &key), vec![
@@ -77,7 +77,7 @@ cases! {
     }
 
     fn judge_gets_the_preceding_reply_and_its_task(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let verified = s.run_step_to_pass("verify");
         let key = s.key("judge", 1, "integrity", 1);
@@ -90,7 +90,7 @@ cases! {
     }
 
     fn finish_gets_the_replies_of_verify_and_judge_as_it_declares(s) {
-        s.to_first_session();
+        s.reach_first_session();
         s.run_step_to_pass("build");
         let verified = s.run_step_to_pass("verify");
         let judged = s.run_fan_out_to_pass("judge");
@@ -104,7 +104,7 @@ cases! {
     }
 
     fn only_a_step_that_declares_resume_starts_with_it(s) {
-        s.to_first_session();
+        s.reach_first_session();
         let build = s.latest_key("build", None);
         assert!(matches!(s.effects_of(&build)[0], Effect::StartSession { resume: true, .. }));
         s.run_step_to_pass("build");

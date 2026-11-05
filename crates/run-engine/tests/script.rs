@@ -550,7 +550,7 @@ impl Script {
     // ------------------------------------------------------------------ whole walks
 
     /// From nothing to the first step started on a prepared tree.
-    pub fn to_first_session(&mut self) -> &mut Self {
+    pub fn reach_first_session(&mut self) -> &mut Self {
         self.input(self.commissioned());
         self.input(self.root_opened());
         self.input(self.claim_taken());

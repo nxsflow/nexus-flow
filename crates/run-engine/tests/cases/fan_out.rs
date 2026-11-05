@@ -7,7 +7,7 @@ use nexus_run_engine::{Effect, RunView, SlotState, TurnKind};
 use crate::script::Script;
 
 fn to_judge(s: &mut Script) {
-    s.to_first_session();
+    s.reach_first_session();
     s.pass_until("judge");
 }
 

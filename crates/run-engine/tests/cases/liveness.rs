@@ -6,7 +6,7 @@ use nexus_run_engine::{Effect, SlotState};
 use crate::script::Script;
 
 fn running(s: &mut Script) -> String {
-    s.to_first_session();
+    s.reach_first_session();
     let key = s.latest_key("build", None);
     s.input(s.started(&key)).expect(&[
         "timer_cleared start_deadline/build/v1/coder/a1",
