@@ -1,0 +1,89 @@
+{
+  "claim": {
+    "held": false,
+    "since": null,
+    "workspace_id": "6j6v"
+  },
+  "finished": false,
+  "flow": {
+    "hash": "sha256:abababababababababababababababababababababababababababababababab",
+    "name": "coding"
+  },
+  "local": {
+    "observed_at": "2026-11-04T10:00:12.000Z",
+    "owner": {
+      "attended": true,
+      "last_seen": "2026-11-04T10:00:00.000Z"
+    },
+    "pending_inputs": 1,
+    "tree": {
+      "base": {
+        "branch": "main",
+        "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78"
+      },
+      "branch": null,
+      "commit": "9cc372bc10d794dbc462f7db1acbc10abf86fb78",
+      "dirty": false,
+      "found": {
+        "kind": "clean"
+      },
+      "in_flight": {
+        "op": "prepare",
+        "since": "2026-11-04T10:00:00.000Z",
+        "step": "fetch"
+      },
+      "parked": null,
+      "path": "/work/nexus-flow-v2",
+      "refusal": {
+        "at": "2026-11-04T10:00:00.000Z",
+        "reason": {
+          "code": "git",
+          "reason": "lock_held"
+        },
+        "text": "the scrubbed text"
+      }
+    }
+  },
+  "needs": {
+    "kind": "decision",
+    "message": "m-01JDDDDDDDDDDDDDDDDDDDDDDD",
+    "question": "decision/39/1",
+    "since": "2026-11-04T10:00:00.000Z"
+  },
+  "next_action": "nxc withdraw --run r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+  "outcome": null,
+  "reason": "tree_refused",
+  "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+  "seq": 17,
+  "state": {
+    "behind": "r-01JBBBBBBBBBBBBBBBBBBBBBBB",
+    "name": "queued"
+  },
+  "steps": [
+    {
+      "ended": null,
+      "id": "build",
+      "members": [
+        {
+          "attempt": 1,
+          "handle": "coder",
+          "liveness": {
+            "last_fact": "2026-11-04T10:00:00.000Z",
+            "verdict": "working"
+          },
+          "pids": [],
+          "refused": null,
+          "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1",
+          "state": "running"
+        }
+      ],
+      "outcome": null,
+      "pass": 1,
+      "started": "2026-11-04T10:00:00.000Z",
+      "state": "open",
+      "visit": 1
+    }
+  ],
+  "v": 1,
+  "waiting_for": "the park"
+}

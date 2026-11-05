@@ -6,14 +6,19 @@
 //! - (c) session start spec and facts: [`session`]
 //! - (d) run status: [`status`]
 //!
-//! The liveness policy pinned on `commissioned` is [`policy`]. These are DRAFTS
-//! ([`CONTRACTS_STATUS`]): the external reviews on board item 6j6v.p71m come first, and a later
-//! ticket freezes them. Specification: the description of epic 6j6v.zjyv.
+//! The liveness policy pinned on `commissioned` is [`policy`]. These are frozen as v1
+//! ([`CONTRACTS_STATUS`]), after the external reviews on board item 6j6v.p71m, and the wire as it was
+//! frozen is `tests/golden/v1/`. Specification: the description of epic 6j6v.zjyv.
 //!
 //! Evolution is additive. A reader accepts unknown fields and keeps them on a round trip, and an
-//! unknown kind is kept as [`UnknownBody`] rather than refused; a known kind with a bad field is
-//! refused. Adding a decision kind is the one addition that also raises [`CONTRACT_V`], because a
-//! reducer that folds past a decision it does not know diverges silently (§13).
+//! unknown kind or enum value is kept as `Unknown` rather than refused; a known kind with a bad field,
+//! or a value of the wrong type, is refused. A new field on a logged kind is an `Option`, because a
+//! known kind missing a required field is refused, which would make every written run unreadable.
+//!
+//! What a reader cannot fold past raises [`CONTRACT_V`]: a new decision kind, and a new value of an enum
+//! only decisions carry ([`StepOutcome`], [`Outcome`], [`TimerPurpose`]). A reducer that folds past
+//! either diverges silently (§13), so a reader that meets one refuses ownership and projects status
+//! read-only. An unknown value in an input folds by the rule on its enum instead, and refuses nothing.
 
 mod codes;
 pub mod events;
@@ -46,9 +51,11 @@ pub use store::{
     TimerChange, TimerChangeKind,
 };
 
-/// Drafts until the freeze ticket; manufakt.io's review is still outstanding.
-pub const CONTRACTS_STATUS: &str = "draft";
+/// Frozen at the end of both external reviews (6j6v.cck2). A breaking change from here on raises
+/// [`CONTRACT_V`], and that version's reader still reads v1.
+pub const CONTRACTS_STATUS: &str = "frozen-v1";
 
-/// The version every wire object carries as `v`. Adding a [`Decision`] kind raises it, because a
-/// reader cannot safely fold past a decision it does not know; `tests/evolution.rs` holds the rule.
+/// The version every wire object carries as `v`. Adding a [`Decision`] kind or a value of an enum only
+/// decisions carry raises it, because a reader cannot safely fold past either; `tests/evolution.rs`
+/// holds the rule.
 pub const CONTRACT_V: u32 = 1;

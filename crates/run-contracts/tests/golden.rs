@@ -10,7 +10,7 @@ use nexus_run_contracts::{
     Appended, Capabilities, Decision, Disposition, DrainedFact, Enqueued, Event, EventBody,
     FlowRef, Key, Liveness, LivenessPolicy, MessageId, Origin, ReasonCode, RunId, RunRow,
     RunStatus, Secs, SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer,
-    Timestamp, CONTRACTS_STATUS, ENV_ALLOWLIST, LOCAL_TENANT,
+    Timestamp, CONTRACTS_STATUS, CONTRACT_V, ENV_ALLOWLIST, LOCAL_TENANT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -500,6 +500,7 @@ fn the_two_status_goldens_differ_by_local_alone() {
 }
 
 #[test]
-fn the_contracts_are_still_drafts() {
-    assert_eq!(CONTRACTS_STATUS, "draft");
+fn the_contracts_are_frozen_as_v1() {
+    assert_eq!(CONTRACTS_STATUS, "frozen-v1");
+    assert_eq!(CONTRACT_V, 1);
 }

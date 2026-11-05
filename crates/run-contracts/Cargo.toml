@@ -2,7 +2,7 @@
 name = "nexus-run-contracts"
 version.workspace = true
 edition = "2021"
-description = "The four contracts of the nxc run engine as plain types: run events, storage trait, session start spec and facts, run status (DRAFT)"
+description = "The four contracts of the nxc run engine as plain types: run events, storage trait, session start spec and facts, run status (frozen as v1)"
 publish = false
 
 # Nothing from the workspace, ever: every new crate depends on this one, and any existing crate may

@@ -4,13 +4,15 @@
 
 use nexus_run_contracts::status::{NeedsKind, RunState, Verdict, MEMBER_STATES, STEP_STATES};
 use nexus_run_contracts::{
-    Decision, Disposition, EndCause, Event, EventBody, GitReason, HeartbeatKind, Origin, Outcome,
-    ParkOutcome, ReasonCode, RunStatus, SequenceKind, SessionFact, StepOutcome, StopKind,
-    TimerPurpose, TreeRefusal, UnknownBody, WithdrawnBy, CONTRACT_V,
+    Appended, Decision, Disposition, EndCause, Event, EventBody, GitReason, HeartbeatKind, Origin,
+    Outcome, ParkOutcome, ReasonCode, RunRow, RunStatus, SequenceKind, SessionFact, StartSpec,
+    StepOutcome, StopKind, TimerPurpose, TreeRefusal, UnknownBody, WithdrawnBy, CONTRACT_V,
+    LOCAL_TENANT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 fn golden_events() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/run-events.json");
@@ -841,4 +843,103 @@ fn an_unknown_kind_under_an_unknown_origin_reads_as_an_input() {
     assert_eq!(event.origin, Origin::Unknown(LATER.to_owned()));
     assert!(event.is_unknown_input());
     assert!(!event.is_unknown_decision());
+}
+
+/// Nothing in a payload can claim where it came from: the host sets the envelope's origin (M6). That the
+/// host does so from where the input really came is the host's own test.
+#[test]
+fn no_event_body_carries_an_origin() {
+    for raw in golden_events() {
+        assert!(
+            raw["body"].get("origin").is_none(),
+            "{}",
+            raw["body"]["kind"]
+        );
+    }
+}
+
+/// The wire of v1 as it was frozen: these files never change, whatever the goldens beside them become, so
+/// every later reader of this crate has to read them. Each hash is the file, so a file that moved says so
+/// here and not in a reader nobody runs against it.
+const FROZEN_V1: &[(&str, &str)] = &[
+    (
+        "run-events.json",
+        "187018af90f47942e050c2e1d3720c4512fcc489c68041ca929ef7599118b58d",
+    ),
+    (
+        "run-status.json",
+        "7b55af50824fa31196961beb8d91ddd8a32d67b9504c81cf4efb08f3c216ab75",
+    ),
+    (
+        "run-status-portable.json",
+        "69f02cd1890c6b2106df9b039809166af290b6a168bbce232606818bf6e40cea",
+    ),
+    (
+        "storage.json",
+        "ba94f5548f6871fee7feccd3fc7f119573af0169bf64cca2a2122ee9d21a807f",
+    ),
+    (
+        "session.json",
+        "a3dc7f6ffebdaedb2d3dabb685eb3d7b640813571b92e62a7da985c97d5e19e1",
+    ),
+];
+
+fn frozen_v1(name: &str) -> String {
+    let path = format!("{}/tests/golden/v1/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+#[test]
+fn the_frozen_v1_files_are_the_ones_that_were_frozen() {
+    for (name, pinned) in FROZEN_V1 {
+        let digest = Sha256::digest(frozen_v1(name).as_bytes());
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, *pinned, "{name} changed: v1 is frozen");
+    }
+}
+
+/// Written back through the types, as a reader that keeps what it reads has to.
+fn assert_reads_back<T: Serialize + DeserializeOwned>(name: &str) -> T {
+    let raw: Value = serde_json::from_str(&frozen_v1(name)).unwrap();
+    let read: T = serde_json::from_value(raw.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(serde_json::to_value(&read).unwrap(), raw, "{name}");
+    read
+}
+
+#[test]
+fn a_frozen_v1_log_reads_under_these_types_with_nothing_unknown_in_it() {
+    let events: Vec<Event> = assert_reads_back("run-events.json");
+    assert!(!events.is_empty());
+    for event in events {
+        assert_eq!(event.v, 1, "seq {}", event.seq);
+        assert!(!event.is_unknown_decision(), "seq {}", event.seq);
+        assert!(!event.is_unknown_input(), "seq {}", event.seq);
+        assert!(
+            !matches!(event.origin, Origin::Unknown(_)),
+            "seq {}",
+            event.seq
+        );
+    }
+}
+
+#[test]
+fn a_frozen_v1_status_reads_under_these_types_with_and_without_local() {
+    let whole: RunStatus = assert_reads_back("run-status.json");
+    assert!(whole.local.is_some());
+    assert_eq!(whole.v, 1);
+    assert!(!matches!(whole.state, RunState::Unknown(_)));
+    let portable: RunStatus = assert_reads_back("run-status-portable.json");
+    assert!(portable.local.is_none());
+}
+
+#[test]
+fn the_frozen_v1_storage_and_session_shapes_read_under_these_types() {
+    let storage: Value = serde_json::from_str(&frozen_v1("storage.json")).unwrap();
+    let row: RunRow = serde_json::from_value(storage["run_row"].clone()).unwrap();
+    assert_eq!(row.tenant, LOCAL_TENANT);
+    let appended: Appended = serde_json::from_value(storage["appended"].clone()).unwrap();
+    assert_eq!(appended.last_seq, row.last_seq);
+    let session: Value = serde_json::from_str(&frozen_v1("session.json")).unwrap();
+    let spec: StartSpec = serde_json::from_value(session["start_spec"].clone()).unwrap();
+    assert_eq!(spec.v, 1);
 }
