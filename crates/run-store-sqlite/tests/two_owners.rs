@@ -29,6 +29,14 @@ fn retry_busy<T>(mut call: impl FnMut() -> Result<T, StoreError>) -> Result<T, S
     }
 }
 
+struct StopsOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopsOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 fn commission_with_inputs(store: &SqliteRunStore, run: &RunId, inputs: usize) -> Vec<String> {
     store
         .enqueue(run, &fixtures::commissioned(run), &[])
@@ -106,6 +114,8 @@ fn two_threads_only_the_holder_appends_and_the_other_takes_over_after_it_stops_r
     let (a_appended, a_last, b_appended, b_lease) = std::thread::scope(|scope| {
         let holder = scope.spawn(|| {
             // Keeps stepping, and renewing across half an expiry, then stops renewing halfway through.
+            // The guard says so on a panic too, or the other host would wait for it forever.
+            let _stops = StopsOnDrop(&a_stopped);
             let mut appended = Vec::new();
             let mut lease = a_lease.clone();
             for _ in 0..6 {
@@ -116,7 +126,6 @@ fn two_threads_only_the_holder_appends_and_the_other_takes_over_after_it_stops_r
                 let key = retry_busy(|| step(&host_a, &run, &lease)).unwrap().unwrap();
                 appended.push(key);
             }
-            a_stopped.store(true, Ordering::SeqCst);
             (appended, lease)
         });
         let other = scope.spawn(|| {
