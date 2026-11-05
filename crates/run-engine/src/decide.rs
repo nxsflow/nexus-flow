@@ -83,7 +83,7 @@ impl Emit<'_> {
     }
 
     pub fn set_slot_timer(&mut self, slot: &Slot, span: Secs, purpose: TimerPurpose) {
-        self.set_timer(slot_timer(purpose, slot), span, purpose);
+        self.set_timer(slot_timer(&purpose, slot), span, purpose);
     }
 
     /// Cancels a timer if it is armed: `timer_cleared` is only ever a cancellation.
@@ -96,7 +96,7 @@ impl Emit<'_> {
     }
 
     pub fn clear_slot_timer(&mut self, slot: &Slot, purpose: TimerPurpose) {
-        self.clear_timer(&slot_timer(purpose, slot));
+        self.clear_timer(&slot_timer(&purpose, slot));
     }
 
     /// Cancels every timer of this slot.
@@ -166,10 +166,10 @@ impl Emit<'_> {
                 question,
                 disposition,
                 ..
-            } => self.answer(question, *disposition),
+            } => self.answer(question, disposition),
             EventBody::Resume { slot } => self.resume(slot.as_ref()),
             EventBody::ResumeRun => self.resume_run(),
-            EventBody::Withdrawn { by, .. } => self.withdrawn(*by),
+            EventBody::Withdrawn { by, .. } => self.withdrawn(by),
             EventBody::TimerFired { timer, fire_at } => self.timer_fired(timer, *fire_at),
             EventBody::Decision(_) | EventBody::Unknown(_) => {}
         }
@@ -185,12 +185,12 @@ impl Emit<'_> {
             outcome, reason, ..
         } = &self.state.phase
         {
-            let (outcome, reason) = (*outcome, reason.clone());
+            let (outcome, reason) = (outcome.clone(), reason.clone());
             self.push(Decision::Finished { outcome, reason });
         }
     }
 
-    fn answer(&mut self, question: &str, disposition: Disposition) {
+    fn answer(&mut self, question: &str, disposition: &Disposition) {
         let Some(asked) = self
             .before
             .questions
@@ -205,6 +205,8 @@ impl Emit<'_> {
             Asked::Ceiling { step, pass, .. } => match disposition {
                 Disposition::Continue => self.one_more_pass(&step, pass),
                 Disposition::Accept => self.accept(&step),
+                // The guard ignores an unknown disposition, so it never gets here.
+                Disposition::Unknown(_) => {}
             },
         }
     }
@@ -244,7 +246,7 @@ impl Emit<'_> {
         }
     }
 
-    fn withdrawn(&mut self, by: WithdrawnBy) {
+    fn withdrawn(&mut self, by: &WithdrawnBy) {
         if self.before.is_finishing() {
             self.push(Decision::WithdrawForced);
             return;
@@ -252,6 +254,8 @@ impl Emit<'_> {
         let reason = match by {
             WithdrawnBy::Requester => ReasonCode::WithdrawnByRequester,
             WithdrawnBy::Owner => ReasonCode::WithdrawnByOwner,
+            // The human exit never closes: a party this version does not know still withdraws.
+            WithdrawnBy::Unknown(raw) => ReasonCode::Unknown(raw.clone()),
         };
         self.finish_run(nexus_run_contracts::Outcome::Withdrawn, reason);
     }

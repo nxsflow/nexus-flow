@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nexus_run_contracts::status::{MEMBER_STATES, STEP_STATES};
 use nexus_run_contracts::{
     Base, Decision, Disposition, EndCause, Event, EventBody, FlowRef, HeartbeatKind,
     LivenessPolicy, MessageId, Origin, ParkOutcome, RunId, Secs, SessionFact, Slot, StopKind,
@@ -200,7 +201,18 @@ impl Script {
             assert!(self.state.timers.is_empty(), "a timer outlived the run");
             assert!(effects.is_empty(), "a finished run owes {effects:?}");
         }
-        if let Some(reason) = status(&self.state, 0, self.now).reason {
+        let projected = status(&self.state);
+        for step in &projected.steps {
+            assert!(STEP_STATES.contains(&step.state.as_str()), "{}", step.state);
+            for member in &step.members {
+                assert!(
+                    MEMBER_STATES.contains(&member.state.as_str()),
+                    "{}",
+                    member.state
+                );
+            }
+        }
+        if let Some(reason) = projected.reason {
             self.codes.insert(reason.as_str().to_owned());
         }
     }
@@ -372,6 +384,7 @@ impl Script {
         EventBody::Commissioned {
             run: self.state.run.clone(),
             workspace_id: WORKSPACE.to_owned(),
+            tenant: nexus_run_contracts::LOCAL_TENANT.to_owned(),
             flow: FlowRef {
                 hash: self.def.flow_ref().hash,
             },
@@ -674,6 +687,7 @@ fn cause_code(cause: &EndCause) -> &'static str {
         EndCause::PermissionRefused { .. } => "permission_refused",
         EndCause::StoppedByHost => "stopped_by_host",
         EndCause::Lost => "lost",
+        EndCause::Unknown(_) => "unknown",
     }
 }
 
@@ -771,11 +785,13 @@ pub fn render(decision: &Decision, now: Timestamp) -> String {
             slot,
             reason,
             until,
+            resets_at,
         } => format!(
-            "held {} {} until={}",
+            "held {} {} until={}{}",
             slot_name(slot),
             reason.as_str(),
-            from_now(until)
+            from_now(until),
+            resets_at.map_or(String::new(), |at| format!(" resets_at={}", from_now(&at)))
         ),
         Decision::Parked { slot, reason } => format!(
             "parked {} {}",

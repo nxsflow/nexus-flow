@@ -10,7 +10,7 @@ use super::Emit;
 
 impl Emit<'_> {
     pub fn timer_fired(&mut self, timer: &str, fire_at: Timestamp) {
-        let Some(armed) = self.before.timers.get(timer).copied() else {
+        let Some(armed) = self.before.timers.get(timer).cloned() else {
             return;
         };
         if is_deferred(self.before, timer, fire_at, self.at) {
@@ -40,8 +40,9 @@ impl Emit<'_> {
             }
             (TimerPurpose::StopGrace, Some(slot)) => self.grace_over(timer, slot),
             (TimerPurpose::HoldRetry, Some(slot)) => self.restart(&slot),
-            // `overdue` and the stop it owes are the input's own fold.
-            (TimerPurpose::WindDown, _) | (_, None) => {}
+            // `overdue` and the stop it owes are the input's own fold. A decision holding an unknown
+            // purpose refuses ownership, so none is ever armed in a state a reader steps.
+            (TimerPurpose::WindDown | TimerPurpose::Unknown(_), _) | (_, None) => {}
         }
     }
 

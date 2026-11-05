@@ -43,12 +43,11 @@ cases! {
         assert_eq!(s.state.base, Some(Base { branch: "main".into(), commit: "c0".into() }));
     }
 
-    fn what_prepare_rescued_is_named_in_state_and_status(s) {
+    fn what_prepare_rescued_is_named_in_state_for_the_host_to_report(s) {
         unprepared(s);
         let found = ParkOutcome::Committed { branch: "nxs/park/old".into(), commit: "abc".into() };
         s.input(EventBody::TreePrepared { base: s.base(), found: Some(found.clone()) });
-        assert_eq!(s.state.found, Some(found.clone()));
-        assert_eq!(nexus_run_engine::status(&s.state, 0, s.now).tree.found, Some(found));
+        assert_eq!(s.state.found, Some(found));
     }
 
     fn a_permanent_refusal_parks_the_run_at_once(s) {

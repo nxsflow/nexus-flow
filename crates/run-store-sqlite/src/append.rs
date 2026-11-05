@@ -12,8 +12,7 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use nexus_run_contracts::{
-    Appended, Cas, Enqueued, Epoch, Event, EventBody, Key, Origin, RunId, Seq, StoreError,
-    StoreResult,
+    Appended, Cas, Enqueued, Epoch, Event, EventBody, Key, RunId, Seq, StoreError, StoreResult,
 };
 
 use crate::lease::{check_epoch_keeps_rising, check_owner_value, current_epoch, is_owner_key};
@@ -130,7 +129,7 @@ pub(crate) fn enqueue(
             run.as_str(),
             event.key,
             event.at.unix_millis(),
-            origin_text(event.origin)?,
+            event.origin.as_str(),
             wire(&waiting_input)?,
         ],
     )
@@ -212,6 +211,7 @@ fn check_event(run: &RunId, event: &Event) -> StoreResult<()> {
     let EventBody::Commissioned {
         run: named,
         workspace_id,
+        tenant,
         root_thread,
         ..
     } = &event.body
@@ -226,6 +226,11 @@ fn check_event(run: &RunId, event: &Event) -> StoreResult<()> {
             "commissioned.workspace_id is the opaque id, never a path".to_owned(),
         ));
     }
+    if tenant.is_empty() || tenant.contains(['/', '\\']) {
+        return Err(invalid(
+            "commissioned.tenant is an opaque id, never a path".to_owned(),
+        ));
+    }
     let id_form = root_thread
         .strip_prefix("m-")
         .and_then(|ulid| RunId::parse(&format!("r-{ulid}")));
@@ -237,14 +242,20 @@ fn check_event(run: &RunId, event: &Event) -> StoreResult<()> {
     Ok(())
 }
 
-/// `commissioned` opens a log, so it is its first event, and `workspace_id` never changes after it.
+/// `commissioned` opens a log, so it is its first event, and `workspace_id` and `tenant` never change
+/// after it.
 fn check_commissioned_position(
     events: &[Event],
     last_seq: Seq,
     row: Option<&RunRowState>,
 ) -> StoreResult<()> {
     for (index, event) in events.iter().enumerate() {
-        let EventBody::Commissioned { workspace_id, .. } = &event.body else {
+        let EventBody::Commissioned {
+            workspace_id,
+            tenant,
+            ..
+        } = &event.body
+        else {
             continue;
         };
         if last_seq != 0 || index != 0 {
@@ -255,6 +266,9 @@ fn check_commissioned_position(
         }
         if row.is_some_and(|row| &row.workspace_id != workspace_id) {
             return Err(invalid("commissioned changes workspace_id".to_owned()));
+        }
+        if row.is_some_and(|row| &row.tenant != tenant) {
+            return Err(invalid("commissioned changes tenant".to_owned()));
         }
     }
     Ok(())
@@ -275,17 +289,19 @@ pub(crate) struct RunRowState {
     pub(crate) last_seq: Seq,
     pub(crate) max_v: u32,
     pub(crate) workspace_id: String,
+    pub(crate) tenant: String,
 }
 
 pub(crate) fn read_run(conn: &Connection, run: &RunId) -> StoreResult<Option<RunRowState>> {
     conn.query_row(
-        "SELECT last_seq, max_v, workspace_id FROM runs WHERE run = ?1",
+        "SELECT last_seq, max_v, workspace_id, tenant FROM runs WHERE run = ?1",
         [run.as_str()],
         |row| {
             Ok(RunRowState {
                 last_seq: row.get(0)?,
                 max_v: row.get(1)?,
                 workspace_id: row.get(2)?,
+                tenant: row.get(3)?,
             })
         },
     )
@@ -295,13 +311,18 @@ pub(crate) fn read_run(conn: &Connection, run: &RunId) -> StoreResult<Option<Run
 
 /// The row of a run `commissioned` creates. `max_v` stays 0 until something is appended.
 pub(crate) fn create_run(tx: &Transaction<'_>, run: &RunId, event: &Event) -> StoreResult<()> {
-    let EventBody::Commissioned { workspace_id, .. } = &event.body else {
+    let EventBody::Commissioned {
+        workspace_id,
+        tenant,
+        ..
+    } = &event.body
+    else {
         return Err(StoreError::UnknownRun);
     };
     tx.execute(
-        "INSERT INTO runs (run, workspace_id, finished, last_seq, max_v, commissioned_at)
-         VALUES (?1, ?2, 0, 0, 0, ?3)",
-        params![run.as_str(), workspace_id, event.at.unix_millis()],
+        "INSERT INTO runs (run, workspace_id, tenant, finished, last_seq, max_v, commissioned_at)
+         VALUES (?1, ?2, ?3, 0, 0, 0, ?4)",
+        params![run.as_str(), workspace_id, tenant, event.at.unix_millis()],
     )
     .map_err(db)?;
     Ok(())
@@ -342,7 +363,7 @@ fn insert_event(tx: &Transaction<'_>, event: &Event, seq: Seq) -> StoreResult<()
             event.at.unix_millis(),
             event.v,
             event.key,
-            origin_text(event.origin)?,
+            event.origin.as_str(),
             wire(&positioned)?,
         ],
     )
@@ -353,11 +374,4 @@ fn insert_event(tx: &Transaction<'_>, event: &Event, seq: Seq) -> StoreResult<()
 pub(crate) fn wire(event: &Event) -> StoreResult<String> {
     serde_json::to_string(event)
         .map_err(|_| invalid(format!("event {} cannot be written", event.key)))
-}
-
-pub(crate) fn origin_text(origin: Origin) -> StoreResult<String> {
-    serde_json::to_value(origin)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| invalid("an origin is a word".to_owned()))
 }

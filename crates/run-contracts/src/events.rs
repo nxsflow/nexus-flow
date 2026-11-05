@@ -3,27 +3,36 @@
 //! one envelope, and a replay folds all of them in order.
 //!
 //! The log carries ids, handles and codes, never bodies and never paths (PV1, M6).
+//!
+//! The commit, branch and refusal fields it holds are there because the run itself needs them, for the
+//! discharge and the park notice, and they stay on the machine that holds the run. It is not synced as it
+//! stands: sync carries an allowlist, so an unknown field never travels. Component 9 builds that
+//! allowlist, and it must recheck `refused` and `pids`, which SY5 does not name.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::codes::{GitReason, ReasonCode};
+use crate::codes::{closed_code, tolerant_tagged, GitReason, ReasonCode};
 use crate::ids::{Handle, Key, MessageId, RunId, Seq, SessionKey, Slot, StepId, Timestamp};
 use crate::policy::LivenessPolicy;
 use crate::session::SessionFact;
 use crate::CONTRACT_V;
 
-/// Who appended an event, set by the host from where the input really came and never taken from a
-/// payload (M6). It carries no person.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Origin {
-    Cli,
-    Host,
-    Adapter,
-    Reducer,
-    Timer,
+/// The tenant of a run in slice 1: "the single tenant of this store", never a real binding.
+pub const LOCAL_TENANT: &str = "local";
+
+closed_code! {
+    /// Who appended an event, set by the host from where the input really came and never taken from a
+    /// payload (M6). It carries no person. An event folds by its kind, and an unknown origin is never
+    /// `reducer`.
+    Origin {
+        Cli = "cli",
+        Host = "host",
+        Adapter = "adapter",
+        Reducer = "reducer",
+        Timer = "timer",
+    }
 }
 
 /// One event of a run's log.
@@ -65,10 +74,15 @@ impl Event {
         }
     }
 
-    /// A kind this version does not know, appended by the reducer of a newer one. Folding past it would
-    /// diverge silently, so a reader refuses ownership of the run and projects status read-only (§13).
+    /// A decision this version cannot fold: a kind it does not know, appended by the reducer of a newer
+    /// one, or a known kind holding a value it does not know. Folding past either would diverge silently,
+    /// so a reader refuses ownership of the run and projects status read-only (§13).
     pub fn is_unknown_decision(&self) -> bool {
-        matches!(self.body, EventBody::Unknown(_)) && self.origin == Origin::Reducer
+        match &self.body {
+            EventBody::Unknown(_) => self.origin == Origin::Reducer,
+            EventBody::Decision(decision) => decision.holds_unknown_value(),
+            _ => false,
+        }
     }
 
     /// A kind this version does not know from anywhere else: a claim about the world, which folds to
@@ -98,7 +112,7 @@ impl Serialize for Event {
             at: self.at,
             v: self.v,
             key: self.key.clone(),
-            origin: self.origin,
+            origin: self.origin.clone(),
             body: self.body.clone(),
         };
         let Value::Object(mut wire) =
@@ -209,6 +223,11 @@ kinded_enum! {
         Commissioned = "commissioned" {
             run: RunId,
             workspace_id: String,
+            /// Who this run belongs to: required, opaque, immutable, and no person. In slice 1 it is
+            /// [`LOCAL_TENANT`]. A later real value is never a stream id or a person id in clear (PV1).
+            /// A run with tenant `local` does not leave its machine: component 9 maps it at the boundary
+            /// or refuses to sync it, and a mapping binds the synced copy and rewrites no log.
+            tenant: String,
             flow: FlowRef,
             policy: LivenessPolicy,
             root_thread: MessageId,
@@ -247,13 +266,17 @@ kinded_enum! {
             needs_rework: bool,
         },
         /// The commissioner's answer. `question` is the key of the `escalated` or `ceiling` event that
-        /// asked. `accept` is valid at a ceiling only.
+        /// asked. `accept` is valid at a ceiling only. A human-gate answer arrives as a NEW input kind,
+        /// never as fields on this one: an older engine folds an unknown kind to nothing, which fails
+        /// closed, while it would keep and ignore an unknown field here, which fails open.
         Answer = "answer" { question: Key, disposition: Disposition, message: MessageId },
-        /// A root reply while the run is `Held` or `Parked`: a resumable condition has no question id.
+        /// `Resume` comes from an explicit action, never a root reply: asking why a run stopped must not
+        /// restart it. A plain root reply is an answer only while a question is open, and a resumable
+        /// condition has no question id. It acts on a slot `Held` or `Parked`.
         Resume = "resume" { slot: Option<Slot> },
-        /// A root reply while the RUN itself is parked (`root_failed`, `tree_refused`, `poison_input`):
-        /// no slot holds that condition, so `resume` cannot name it. Added by 6j6v.r426; an input, so it
-        /// does not raise the version.
+        /// `ResumeRun` comes from an explicit action, never a root reply, while the RUN itself is parked
+        /// (`root_failed`, `tree_refused`, `poison_input`): no slot holds that condition, so `resume`
+        /// cannot name it. Added by 6j6v.r426; an input, so it does not raise the version.
         ResumeRun = "resume_run",
         /// The human exit, valid in every non-final state. `message` is absent while no root thread exists.
         Withdrawn = "withdrawn" { message: Option<MessageId>, by: WithdrawnBy },
@@ -281,7 +304,7 @@ impl Serialize for EventBody {
 
 impl<'de> Deserialize<'de> for EventBody {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let (kind, raw) = read_kind(d)?;
+        let (kind, raw) = read_tag(d, "kind")?;
         if Decision::KINDS.contains(&kind.as_str()) {
             Decision::deserialize(raw)
                 .map(Self::Decision)
@@ -325,8 +348,9 @@ kinded_enum! {
         TimerCleared = "timer_cleared" { timer: String },
         /// The ladder's conclusion about a session: `quiet` or `hung`.
         Liveness = "liveness" { slot: Slot, reason: ReasonCode, since: Timestamp },
-        /// On hold, not failed.
-        Held = "held" { slot: Slot, reason: ReasonCode, until: Timestamp },
+        /// On hold, not failed. `until` is the retry, clamped to the policy's window; `resets_at` is what
+        /// the backend named, which alone says the hold spends nothing of `max_holds`.
+        Held = "held" { slot: Slot, reason: ReasonCode, until: Timestamp, resets_at: Option<Timestamp> },
         /// Needs a person. `slot` is absent for a run-level park (`root_failed`, `tree_refused`).
         Parked = "parked" { slot: Option<Slot>, reason: ReasonCode },
         /// Every outcome passes through here: stop, park, deliver, release.
@@ -340,8 +364,35 @@ kinded_enum! {
     }
 }
 
-/// A body whose `kind` this version does not know, kept whole so it survives a round trip.
-#[derive(Clone, Debug, PartialEq)]
+impl Decision {
+    /// Whether this decision holds a value of an enum only decisions carry that this version does not
+    /// know. `ReasonCode` is not among them: it only explains, and folds the same whatever it says, so
+    /// it stays open and adding a code raises no version.
+    pub fn holds_unknown_value(&self) -> bool {
+        match self {
+            Self::StepFinished { outcome, .. } => matches!(outcome, StepOutcome::Unknown(_)),
+            Self::Finishing { outcome, .. } | Self::Finished { outcome, .. } => {
+                matches!(outcome, Outcome::Unknown(_))
+            }
+            Self::TimerSet { purpose, .. } => matches!(purpose, TimerPurpose::Unknown(_)),
+            _ => false,
+        }
+    }
+}
+
+impl EventBody {
+    /// The `kind` this body has on the wire.
+    pub fn kind(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|wire| wire.get("kind").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default()
+    }
+}
+
+/// An object whose tag this version does not know, kept whole so it survives a round trip. `kind` is the
+/// tag's value, whatever the field is called.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnknownBody {
     pub kind: String,
     pub raw: Value,
@@ -353,13 +404,16 @@ impl Serialize for UnknownBody {
     }
 }
 
-/// A body read whole, with the `kind` that decides what reads it next.
-pub(crate) fn read_kind<'de, D: Deserializer<'de>>(d: D) -> Result<(String, Value), D::Error> {
+/// An object read whole, with the value of the tag that decides what reads it next.
+pub(crate) fn read_tag<'de, D: Deserializer<'de>>(
+    d: D,
+    tag: &str,
+) -> Result<(String, Value), D::Error> {
     let raw = Value::deserialize(d)?;
     let kind = raw
-        .get("kind")
+        .get(tag)
         .and_then(Value::as_str)
-        .ok_or_else(|| serde::de::Error::custom("an event body carries a kind"))?
+        .ok_or_else(|| serde::de::Error::custom(format!("this object carries a {tag}")))?
         .to_owned();
     Ok((kind, raw))
 }
@@ -389,112 +443,111 @@ pub struct Base {
     pub commit: String,
 }
 
-/// What a park left behind.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ParkOutcome {
-    /// Committed on a fresh `nxs/park/run-<run>/<instant>` branch.
-    Committed { branch: String, commit: String },
-    /// HEAD was already on the run's own branch, and a commit was made or local commits lie ahead of
-    /// `origin/<branch>`: a clean branch with nothing ahead is `Clean`.
-    OnOwnBranch { branch: String, commit: String },
-    /// Nothing to save, and nothing local ahead of the remote, so no notice is owed. `branch` is where
-    /// HEAD stood; absent on a detached HEAD at the base. Absent on the wire when `None`, so a writer
-    /// from before this field reads the same.
-    Clean {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-    },
-    /// The directory is gone; nothing is left to save, which releases the claim.
-    Missing,
-    /// The claim key names another run, so no git ran.
-    NotHeld,
+tolerant_tagged! {
+    /// What a park left behind. An unknown one is recorded, the run goes on, and no park notice is owed.
+    ParkOutcome, tag = "kind" {
+        /// Committed on a fresh `nxs/park/run-<run>/<instant>` branch.
+        Committed = "committed" { branch: String, commit: String },
+        /// HEAD was already on the run's own branch, and a commit was made or local commits lie ahead of
+        /// `origin/<branch>`: a clean branch with nothing ahead is `Clean`.
+        OnOwnBranch = "on_own_branch" { branch: String, commit: String },
+        /// Nothing to save, and nothing local ahead of the remote, so no notice is owed. `branch` is where
+        /// HEAD stood; absent on a detached HEAD at the base. Absent on the wire when `None`, so a writer
+        /// from before this field reads the same.
+        Clean = "clean" {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            branch: Option<String>,
+        },
+        /// The directory is gone; nothing is left to save, which releases the claim.
+        Missing = "missing",
+        /// The claim key names another run, so no git ran.
+        NotHeld = "not_held",
+    }
 }
 
-/// Why a tree operation was refused: closed, and without text. The first two are permanent, the others
-/// transient. `tree_refused` in [`ReasonCode`] is the park this leads to, never this detail.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
-pub enum TreeRefusal {
-    NotARepository,
-    ForeignDirectory,
-    MidSequence { what: SequenceKind },
-    Git { reason: GitReason },
+tolerant_tagged! {
+    /// Why a tree operation was refused: closed, and without text. The first two are permanent, the others
+    /// transient, and an unknown one is permanent, so it parks. `tree_refused` in [`ReasonCode`] is the
+    /// park this leads to, never this detail.
+    TreeRefusal, tag = "code" {
+        NotARepository = "not_a_repository",
+        ForeignDirectory = "foreign_directory",
+        MidSequence = "mid_sequence" { what: SequenceKind },
+        Git = "git" { reason: GitReason },
+    }
 }
 
-impl TreeRefusal {
-    /// The codes of this type. The golden pins them beside `ReasonCode::ALL` and `GitReason::ALL`.
-    pub const CODES: &'static [&'static str] = &[
-        "not_a_repository",
-        "foreign_directory",
-        "mid_sequence",
-        "git",
-    ];
+closed_code! {
+    /// The sequence a tree is in the middle of. A code, because the log carries no text. An unknown one
+    /// is still `mid_sequence`.
+    SequenceKind {
+        Merge = "merge",
+        Rebase = "rebase",
+        CherryPick = "cherry_pick",
+        Revert = "revert",
+        Bisect = "bisect",
+    }
 }
 
-/// The sequence a tree is in the middle of. A code, because the log carries no text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SequenceKind {
-    Merge,
-    Rebase,
-    CherryPick,
-    Revert,
-    Bisect,
+closed_code! {
+    /// `continue` is exactly one more pass; `accept` takes the verdict as it stands, at a ceiling only. An
+    /// unknown one folds to `ignored`, and the question stays open.
+    Disposition {
+        Continue = "continue",
+        Accept = "accept",
+    }
 }
 
-/// `continue` is exactly one more pass; `accept` takes the verdict as it stands, at a ceiling only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Disposition {
-    Continue,
-    Accept,
+closed_code! {
+    /// An unknown one still withdraws, because the human exit never closes, with the raw value as the
+    /// reason.
+    WithdrawnBy {
+        Requester = "requester",
+        Owner = "owner",
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WithdrawnBy {
-    Requester,
-    Owner,
+closed_code! {
+    /// SIGTERM or SIGKILL. A kill is a person's act, and only a withdrawal's `forced` reaches it. An
+    /// unknown one counts as a signal sent, and is never assumed a kill.
+    StopKind {
+        Term = "term",
+        Kill = "kill",
+    }
 }
 
-/// SIGTERM or SIGKILL. A kill is a person's act, and only a withdrawal's `forced` reaches it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopKind {
-    Term,
-    Kill,
+closed_code! {
+    /// Carried by a decision: adding a value raises [`CONTRACT_V`].
+    StepOutcome {
+        Pass = "pass",
+        NeedsRework = "needs_rework",
+        Escalated = "escalated",
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StepOutcome {
-    Pass,
-    NeedsRework,
-    Escalated,
+closed_code! {
+    /// How a run ended. There is no `rework_limit`: the ceiling asks, it never stops quietly. Carried by a
+    /// decision: adding a value raises [`CONTRACT_V`].
+    Outcome {
+        Delivered = "delivered",
+        Withdrawn = "withdrawn",
+        Accepted = "accepted",
+        Failed = "failed",
+    }
 }
 
-/// How a run ended. There is no `rework_limit`: the ceiling asks, it never stops quietly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    Delivered,
-    Withdrawn,
-    Accepted,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TimerPurpose {
-    RootDeadline,
-    StartDeadline,
-    Quiet,
-    Confirm,
-    CallBound,
-    SubprocessIdle,
-    StopGrace,
-    WindDown,
-    HoldRetry,
-    TreeWindow,
+closed_code! {
+    /// Carried by a decision: adding a value raises [`CONTRACT_V`].
+    TimerPurpose {
+        RootDeadline = "root_deadline",
+        StartDeadline = "start_deadline",
+        Quiet = "quiet",
+        Confirm = "confirm",
+        CallBound = "call_bound",
+        SubprocessIdle = "subprocess_idle",
+        StopGrace = "stop_grace",
+        WindDown = "wind_down",
+        HoldRetry = "hold_retry",
+        TreeWindow = "tree_window",
+    }
 }

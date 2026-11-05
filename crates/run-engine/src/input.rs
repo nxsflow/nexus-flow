@@ -101,7 +101,7 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
             question,
             disposition,
             message,
-        } => apply_answer(state, question, *disposition, message),
+        } => apply_answer(state, question, disposition, message),
         EventBody::Resume { slot } => {
             if let Some(index) = resume_target(state, slot.as_ref()) {
                 let record = &mut state.slots[index];
@@ -144,7 +144,7 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
             let armed = state.timers.remove(timer);
             if !deferred {
                 if let Some(armed) = armed {
-                    apply_firing(state, timer, armed.purpose, input);
+                    apply_firing(state, timer, &armed.purpose, input);
                 }
             }
         }
@@ -158,7 +158,7 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
 fn apply_firing(
     state: &mut RunState,
     timer: &str,
-    purpose: nexus_run_contracts::TimerPurpose,
+    purpose: &nexus_run_contracts::TimerPurpose,
     input: &Event,
 ) {
     use nexus_run_contracts::TimerPurpose::{RootDeadline, StopGrace, TreeWindow, WindDown};
@@ -239,7 +239,7 @@ fn apply_fact(state: &mut RunState, index: usize, fact: &SessionFact, input: &Ev
                 HeartbeatKind::CallsClosed => set_open_call(record, None),
                 HeartbeatKind::SubprocessMoved => record.sampling = true,
                 HeartbeatKind::Blind => record.blind = true,
-                HeartbeatKind::ModelOutput => {}
+                HeartbeatKind::ModelOutput | HeartbeatKind::Unknown(_) => {}
             }
         }
         SessionFact::Usage { .. } => revive(record),
@@ -333,7 +333,7 @@ fn apply_reply(
     };
 }
 
-fn apply_answer(state: &mut RunState, question: &str, disposition: Disposition, message: &str) {
+fn apply_answer(state: &mut RunState, question: &str, disposition: &Disposition, message: &str) {
     let Some(position) = state.questions.iter().position(|q| q.id == question) else {
         return;
     };
@@ -349,6 +349,7 @@ fn apply_answer(state: &mut RunState, question: &str, disposition: Disposition, 
                 verdict,
             })
         }
-        (Asked::Ceiling { .. }, Disposition::Continue) => None,
+        // The guard ignores an unknown disposition, so it never gets here.
+        (Asked::Ceiling { .. }, Disposition::Continue | Disposition::Unknown(_)) => None,
     };
 }

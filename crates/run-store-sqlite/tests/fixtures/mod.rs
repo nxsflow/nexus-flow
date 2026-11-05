@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use nexus_run_contracts::{
     Decision, Event, EventBody, FlowRef, LivenessPolicy, Origin, Outcome, RunId, RunStore,
-    TimerPurpose, Timestamp,
+    TimerPurpose, Timestamp, LOCAL_TENANT,
 };
 use nexus_run_store_sqlite::SqliteRunStore;
 
@@ -46,6 +46,7 @@ pub fn commissioned_body(run: &RunId) -> EventBody {
     EventBody::Commissioned {
         run: run.clone(),
         workspace_id: "6j6v".into(),
+        tenant: LOCAL_TENANT.into(),
         flow: FlowRef {
             hash: "sha256:00".into(),
         },

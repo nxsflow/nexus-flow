@@ -2,11 +2,17 @@
 //! input (which folds to nothing) from an unknown decision (which it must refuse to fold past).
 //! Adding a decision kind changes the variant list AND the contract version.
 
+use nexus_run_contracts::status::{NeedsKind, RunState, Verdict, MEMBER_STATES, STEP_STATES};
 use nexus_run_contracts::{
-    Decision, Event, EventBody, GitReason, ReasonCode, SessionFact, CONTRACT_V,
+    Appended, Decision, Disposition, EndCause, Event, EventBody, GitReason, HeartbeatKind, Origin,
+    Outcome, ParkOutcome, ReasonCode, RunRow, RunStatus, SequenceKind, SessionFact, StartSpec,
+    StepOutcome, StopKind, TimerPurpose, TreeRefusal, UnknownBody, WithdrawnBy, CONTRACT_V,
+    LOCAL_TENANT,
 };
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 fn golden_events() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/run-events.json");
@@ -118,6 +124,7 @@ const OPTIONAL_FIELDS: &[(&str, &str)] = &[
     ("resume", "slot"),
     ("withdrawn", "message"),
     ("run_queued", "behind"),
+    ("held", "resets_at"),
     ("parked", "slot"),
     ("finishing", "reason"),
     ("finished", "reason"),
@@ -298,16 +305,25 @@ fn a_code_from_a_newer_version_reads_as_unknown_and_is_in_no_list() {
     assert!(!GitReason::ALL.contains(&"a_later_git"));
 }
 
-/// The decision-kind history: which list each contract version shipped.
+/// What each contract version shipped of the things a reader cannot fold past: the decision kinds, and
+/// the values of the enums only decisions carry.
 #[derive(Deserialize)]
 struct History {
     versions: Vec<Pin>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Pin {
     v: u32,
     decision_kinds: Vec<String>,
+    decision_values: DecisionValues,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct DecisionValues {
+    outcome: Vec<String>,
+    step_outcome: Vec<String>,
+    timer_purpose: Vec<String>,
 }
 
 fn history() -> Vec<Pin> {
@@ -319,23 +335,26 @@ fn history() -> Vec<Pin> {
     history.versions
 }
 
-/// The rule: the code's list is the list pinned for the code's version, and a version's list is
-/// different from the one before it, so a new kind has to come with a new version.
-fn check_pins(kinds: &[String], v: u32, history: &[Pin]) -> Result<(), String> {
+/// The rule: the code's lists are the lists pinned for the code's version, and a version's lists differ
+/// from the ones before it, so a new kind or value has to come with a new version.
+fn check_pins(code: &Pin, history: &[Pin]) -> Result<(), String> {
+    let v = code.v;
     let pin = history
         .iter()
         .find(|pin| pin.v == v)
         .ok_or_else(|| format!("CONTRACT_V {v} has no entry in decision-kinds.json"))?;
-    if pin.decision_kinds != kinds {
+    if pin != code {
         return Err(format!(
-            "the decision kinds differ from the list pinned for v{v}: raise CONTRACT_V and add a \
-             version to decision-kinds.json"
+            "the decision kinds or values differ from the lists pinned for v{v}: raise CONTRACT_V \
+             and add a version to decision-kinds.json"
         ));
     }
     for pair in history.windows(2) {
-        if pair[1].v != pair[0].v + 1 || pair[1].decision_kinds == pair[0].decision_kinds {
+        let same = pair[1].decision_kinds == pair[0].decision_kinds
+            && pair[1].decision_values == pair[0].decision_values;
+        if pair[1].v != pair[0].v + 1 || same {
             return Err(format!(
-                "v{} does not change the list of v{}",
+                "v{} does not change the lists of v{}",
                 pair[1].v, pair[0].v
             ));
         }
@@ -343,49 +362,584 @@ fn check_pins(kinds: &[String], v: u32, history: &[Pin]) -> Result<(), String> {
     Ok(())
 }
 
-fn current_kinds() -> Vec<String> {
-    Decision::KINDS.iter().map(|k| (*k).to_owned()).collect()
+fn owned(list: &[&str]) -> Vec<String> {
+    list.iter().map(|value| (*value).to_owned()).collect()
+}
+
+/// The lists of this code, as what they would be pinned as.
+fn current() -> Pin {
+    Pin {
+        v: CONTRACT_V,
+        decision_kinds: owned(Decision::KINDS),
+        decision_values: DecisionValues {
+            outcome: owned(Outcome::ALL),
+            step_outcome: owned(StepOutcome::ALL),
+            timer_purpose: owned(TimerPurpose::ALL),
+        },
+    }
+}
+
+fn with_new_kind() -> Pin {
+    let mut pin = current();
+    pin.decision_kinds.push("step_skipped".into());
+    pin
 }
 
 #[test]
-fn the_decision_kinds_are_the_list_pinned_for_contract_v() {
-    check_pins(&current_kinds(), CONTRACT_V, &history()).unwrap();
+fn the_decision_kinds_and_values_are_the_lists_pinned_for_contract_v() {
+    check_pins(&current(), &history()).unwrap();
 }
 
 #[test]
 fn a_new_decision_kind_under_the_same_version_is_refused() {
-    let mut kinds = current_kinds();
-    kinds.push("step_skipped".into());
-    let refusal = check_pins(&kinds, CONTRACT_V, &history()).unwrap_err();
+    let refusal = check_pins(&with_new_kind(), &history()).unwrap_err();
     assert!(refusal.contains("raise CONTRACT_V"), "{refusal}");
 }
 
 #[test]
+fn a_new_value_of_a_decision_enum_under_the_same_version_is_refused() {
+    for change in [
+        |values: &mut DecisionValues| values.outcome.push(LATER.into()),
+        |values: &mut DecisionValues| values.step_outcome.push(LATER.into()),
+        |values: &mut DecisionValues| values.timer_purpose.push(LATER.into()),
+    ] {
+        let mut pin = current();
+        change(&mut pin.decision_values);
+        let refusal = check_pins(&pin, &history()).unwrap_err();
+        assert!(refusal.contains("raise CONTRACT_V"), "{refusal}");
+    }
+}
+
+#[test]
 fn a_new_decision_kind_with_a_raised_version_and_no_pin_is_refused() {
-    let mut kinds = current_kinds();
-    kinds.push("step_skipped".into());
-    let refusal = check_pins(&kinds, CONTRACT_V + 1, &history()).unwrap_err();
+    let mut pin = with_new_kind();
+    pin.v = CONTRACT_V + 1;
+    let refusal = check_pins(&pin, &history()).unwrap_err();
     assert!(refusal.contains("no entry"), "{refusal}");
 }
 
 #[test]
-fn a_raised_version_that_keeps_the_list_is_refused() {
+fn a_raised_version_that_keeps_the_lists_is_refused() {
+    let mut pin = current();
+    pin.v = CONTRACT_V + 1;
     let mut pins = history();
-    pins.push(Pin {
-        v: CONTRACT_V + 1,
-        decision_kinds: current_kinds(),
-    });
-    assert!(check_pins(&current_kinds(), CONTRACT_V + 1, &pins).is_err());
+    pins.push(pin.clone());
+    assert!(check_pins(&pin, &pins).is_err());
 }
 
 #[test]
 fn a_new_decision_kind_with_a_raised_version_and_its_pin_is_accepted() {
-    let mut kinds = current_kinds();
-    kinds.push("step_skipped".into());
+    let mut pin = with_new_kind();
+    pin.v = CONTRACT_V + 1;
     let mut pins = history();
-    pins.push(Pin {
-        v: CONTRACT_V + 1,
-        decision_kinds: kinds.clone(),
-    });
-    check_pins(&kinds, CONTRACT_V + 1, &pins).unwrap();
+    pins.push(pin.clone());
+    check_pins(&pin, &pins).unwrap();
+}
+
+/// A value no version of this contract has written.
+const LATER: &str = "a_later_value";
+
+fn later_code() -> Value {
+    json!(LATER)
+}
+
+fn later_tagged(tag: &str) -> Value {
+    json!({ tag: LATER, "from_the_future": 1 })
+}
+
+/// Every place the log carries a closed enum, as (the body's kind, where in the event, an unknown value
+/// of it).
+fn log_positions() -> Vec<(&'static str, &'static str, Value)> {
+    vec![
+        ("commissioned", "/origin", later_code()),
+        ("stop_signalled", "/body/signal", later_code()),
+        ("answer", "/body/disposition", later_code()),
+        ("withdrawn", "/body/by", later_code()),
+        ("step_finished", "/body/outcome", later_code()),
+        ("finishing", "/body/outcome", later_code()),
+        ("finished", "/body/outcome", later_code()),
+        ("timer_set", "/body/purpose", later_code()),
+        ("tree_prepared", "/body/found", later_tagged("kind")),
+        ("tree_parked", "/body/outcome", later_tagged("kind")),
+        ("tree_refused", "/body/reason", later_tagged("code")),
+        (
+            "tree_refused",
+            "/body/reason",
+            json!({ "code": "mid_sequence", "what": LATER }),
+        ),
+        (
+            "tree_refused",
+            "/body/reason",
+            json!({ "code": "git", "reason": LATER }),
+        ),
+        ("session_fact", "/body/fact/beat", later_code()),
+        ("session_fact", "/body/fact/cause", later_tagged("code")),
+    ]
+}
+
+/// The golden event of this kind that has `pointer`, with the value there replaced.
+fn golden_with(kind: &str, pointer: &str, value: &Value) -> Value {
+    let mut raw = golden_events()
+        .into_iter()
+        .find(|e| e["body"]["kind"] == kind && e.pointer(pointer).is_some())
+        .unwrap_or_else(|| panic!("the golden holds no {kind} with {pointer}"));
+    *raw.pointer_mut(pointer).unwrap() = value.clone();
+    raw
+}
+
+#[test]
+fn an_unknown_value_of_any_enum_in_the_log_is_read_and_kept_on_a_round_trip() {
+    for (kind, pointer, value) in log_positions() {
+        let raw = golden_with(kind, pointer, &value);
+        let event: Result<Event, _> = serde_json::from_value(raw.clone());
+        let event = event.unwrap_or_else(|e| panic!("{kind} {pointer} {value}: {e}"));
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            raw,
+            "{kind} {pointer}"
+        );
+    }
+}
+
+/// An unknown value is a string, or an object with its tag: anything else is damage, not the future.
+#[test]
+fn a_mistyped_enum_value_stays_refused() {
+    for (kind, pointer, value) in log_positions() {
+        let damaged = if value.is_string() {
+            json!(7)
+        } else {
+            json!({ "no_tag_here": 1 })
+        };
+        let raw = golden_with(kind, pointer, &damaged);
+        let read = serde_json::from_value::<Event>(raw);
+        assert!(read.is_err(), "{kind} {pointer}: {read:?}");
+    }
+}
+
+fn golden_status() -> Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/run-status.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Every place status carries a closed enum, beyond the ones the log already walks.
+fn status_positions() -> Vec<(&'static str, Value)> {
+    vec![
+        ("/state", later_tagged("name")),
+        ("/needs/kind", later_code()),
+        ("/outcome", later_code()),
+        ("/steps/0/outcome", later_code()),
+        ("/steps/0/members/0/liveness/verdict", later_code()),
+    ]
+}
+
+#[test]
+fn an_unknown_value_of_any_enum_in_status_is_read_and_kept_on_a_round_trip() {
+    for (pointer, value) in status_positions() {
+        let mut raw = golden_status();
+        *raw.pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("the golden has no {pointer}")) = value;
+        let status: Result<RunStatus, _> = serde_json::from_value(raw.clone());
+        let status = status.unwrap_or_else(|e| panic!("{pointer}: {e}"));
+        assert_eq!(serde_json::to_value(&status).unwrap(), raw, "{pointer}");
+    }
+}
+
+#[test]
+fn a_status_reader_never_refuses_on_a_higher_v() {
+    let mut raw = golden_status();
+    raw["v"] = json!(CONTRACT_V + 7);
+    raw["a_field_of_that_version"] = json!({ "n": 1 });
+    let status: RunStatus = serde_json::from_value(raw).expect("a reader renders what it knows");
+    assert_eq!(status.v, CONTRACT_V + 7);
+}
+
+/// A list of words: its wire form, what it does not know, and that a non-word is still damage.
+fn assert_a_word_list<T>(name: &str, all: &[&str], known: fn(&T) -> bool, unknown: T)
+where
+    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    for word in all {
+        let read: T = serde_json::from_value(json!(word)).unwrap();
+        assert!(known(&read), "{name}: {word} read as {read:?}");
+        assert_eq!(serde_json::to_value(&read).unwrap(), json!(word), "{name}");
+    }
+    let read: T = serde_json::from_value(later_code()).unwrap();
+    assert_eq!(read, unknown, "{name}");
+    assert_eq!(serde_json::to_value(&read).unwrap(), later_code(), "{name}");
+    assert!(serde_json::from_value::<T>(json!(7)).is_err(), "{name}");
+}
+
+macro_rules! word_lists {
+    ($($name:ident),+ $(,)?) => {
+        $(assert_a_word_list::<$name>(
+            stringify!($name),
+            $name::ALL,
+            |read| !matches!(read, $name::Unknown(_)),
+            $name::Unknown(LATER.to_owned()),
+        );)+
+    };
+}
+
+#[test]
+fn every_word_list_keeps_its_wire_form_and_reads_what_it_does_not_know() {
+    word_lists![
+        Origin,
+        Disposition,
+        WithdrawnBy,
+        StopKind,
+        StepOutcome,
+        Outcome,
+        TimerPurpose,
+        SequenceKind,
+        HeartbeatKind,
+        Verdict,
+        NeedsKind,
+        ReasonCode,
+        GitReason,
+    ];
+}
+
+fn assert_a_tagged_list<T>(
+    name: &str,
+    tag: &str,
+    samples: Vec<T>,
+    all: &[&str],
+    unknown: fn(UnknownBody) -> T,
+) where
+    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let written: Vec<Value> = samples
+        .iter()
+        .map(|sample| serde_json::to_value(sample).unwrap()[tag].clone())
+        .collect();
+    assert_eq!(written, all, "{name}: one sample per value, in order");
+    for sample in samples {
+        let wire = serde_json::to_value(&sample).unwrap();
+        assert_eq!(serde_json::from_value::<T>(wire).unwrap(), sample, "{name}");
+    }
+    let raw = later_tagged(tag);
+    let read: T = serde_json::from_value(raw.clone()).unwrap();
+    let kept = UnknownBody {
+        kind: LATER.to_owned(),
+        raw: raw.clone(),
+    };
+    assert_eq!(read, unknown(kept), "{name}");
+    assert_eq!(serde_json::to_value(&read).unwrap(), raw, "{name}");
+    assert!(
+        serde_json::from_value::<T>(json!({ "no_tag_here": 1 })).is_err(),
+        "{name}"
+    );
+    assert!(
+        serde_json::from_value::<T>(json!({ tag: 7 })).is_err(),
+        "{name}"
+    );
+}
+
+#[test]
+fn every_tagged_list_keeps_its_wire_form_and_reads_what_it_does_not_know() {
+    let branch = || "b".to_owned();
+    let commit = || "c".to_owned();
+    let at = nexus_run_contracts::Timestamp::parse("2026-11-05T10:00:00.000Z").unwrap();
+    assert_a_tagged_list(
+        "ParkOutcome",
+        "kind",
+        vec![
+            ParkOutcome::Committed {
+                branch: branch(),
+                commit: commit(),
+            },
+            ParkOutcome::OnOwnBranch {
+                branch: branch(),
+                commit: commit(),
+            },
+            ParkOutcome::Clean { branch: None },
+            ParkOutcome::Missing,
+            ParkOutcome::NotHeld,
+        ],
+        ParkOutcome::ALL,
+        ParkOutcome::Unknown,
+    );
+    assert_a_tagged_list(
+        "TreeRefusal",
+        "code",
+        vec![
+            TreeRefusal::NotARepository,
+            TreeRefusal::ForeignDirectory,
+            TreeRefusal::MidSequence {
+                what: SequenceKind::Merge,
+            },
+            TreeRefusal::Git {
+                reason: GitReason::LockHeld,
+            },
+        ],
+        TreeRefusal::ALL,
+        TreeRefusal::Unknown,
+    );
+    assert_a_tagged_list(
+        "EndCause",
+        "code",
+        vec![
+            EndCause::TurnComplete,
+            EndCause::Exit { status: Some(1) },
+            EndCause::UsageLimit { resets_at: None },
+            EndCause::ProviderUnavailable,
+            EndCause::PermissionRefused {
+                rule: "r".into(),
+                program: "p".into(),
+            },
+            EndCause::StoppedByHost,
+            EndCause::Lost,
+        ],
+        EndCause::ALL,
+        EndCause::Unknown,
+    );
+    assert_a_tagged_list(
+        "RunState",
+        "name",
+        vec![
+            RunState::Created,
+            RunState::Queued { behind: None },
+            RunState::Running,
+            RunState::NeedsDecision,
+            RunState::Held { until: at },
+            RunState::Parked,
+            RunState::Finishing,
+            RunState::Finished,
+        ],
+        RunState::ALL,
+        RunState::Unknown,
+    );
+}
+
+/// In-process return values of one binary, never persisted, so nothing written can hold a later value.
+const EXEMPT_IN_PROCESS: &[&str] = &[
+    "Capability",
+    "TimerChangeKind",
+    "Enqueued",
+    "StartOutcome",
+    "Liveness",
+];
+
+/// A closed `pub enum` that reads from the wire is a list of the two walks above or one of the exempt:
+/// a new one fails here until somebody has decided which. The macros declare the tolerant ones, so what
+/// this finds spelled out is a derive that would refuse a later value.
+#[test]
+fn every_closed_enum_on_the_wire_is_exempted_by_name() {
+    let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut closed = Vec::new();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim().strip_prefix("pub enum ") else {
+                continue;
+            };
+            let name = rest.split_whitespace().next().unwrap();
+            if name.starts_with('$') {
+                continue; // The macros' own declaration: what they declare is tolerant.
+            }
+            let derives_a_reader = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|above| {
+                    above.trim_start().starts_with('#') || above.trim_start().starts_with("///")
+                })
+                .any(|above| above.contains("Deserialize"));
+            if derives_a_reader {
+                closed.push(name.to_owned());
+            }
+        }
+    }
+    closed.sort();
+    let mut exempt = owned(EXEMPT_IN_PROCESS);
+    exempt.sort();
+    assert_eq!(closed, exempt);
+}
+
+#[test]
+fn the_golden_pins_every_list_a_writer_may_use() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/enum-values.json");
+    let golden: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let lists: [(&str, &[&str]); 14] = [
+        ("step_states", STEP_STATES),
+        ("member_states", MEMBER_STATES),
+        ("disposition", Disposition::ALL),
+        ("end_cause", EndCause::ALL),
+        ("heartbeat_kind", HeartbeatKind::ALL),
+        ("needs_kind", NeedsKind::ALL),
+        ("origin", Origin::ALL),
+        ("park_outcome", ParkOutcome::ALL),
+        ("run_state", RunState::ALL),
+        ("sequence_kind", SequenceKind::ALL),
+        ("stop_kind", StopKind::ALL),
+        ("tree_refusal", TreeRefusal::ALL),
+        ("verdict", Verdict::ALL),
+        ("withdrawn_by", WithdrawnBy::ALL),
+    ];
+    assert_eq!(golden.as_object().unwrap().len(), lists.len());
+    for (name, list) in lists {
+        assert_eq!(golden[name], json!(list), "{name}");
+    }
+}
+
+/// (the decision, the field holding an enum only decisions carry).
+const DECISION_POSITIONS: &[(&str, &str)] = &[
+    ("step_finished", "/body/outcome"),
+    ("finishing", "/body/outcome"),
+    ("finished", "/body/outcome"),
+    ("timer_set", "/body/purpose"),
+];
+
+#[test]
+fn a_known_decision_holding_an_unknown_value_counts_as_an_unknown_decision() {
+    for (kind, pointer) in DECISION_POSITIONS {
+        let raw = golden_with(kind, pointer, &later_code());
+        let (event, back) = round_trip(&raw);
+        assert_eq!(back, raw);
+        assert!(event.is_unknown_decision(), "{kind}");
+        assert!(!event.is_unknown_input(), "{kind}");
+        assert_eq!(event.body.kind(), *kind);
+    }
+}
+
+/// Whoever appended it: the host appends `parked { poison_input }` itself, so the rule reads the body.
+#[test]
+fn a_decision_holding_an_unknown_value_counts_as_one_whatever_its_origin_says() {
+    let mut raw = golden_with("finished", "/body/outcome", &later_code());
+    raw["origin"] = json!("host");
+    assert!(round_trip(&raw).0.is_unknown_decision());
+}
+
+/// An unknown value in an INPUT folds by its enum's rule, so it never refuses ownership: that is what
+/// keeps a phone's newer `disposition` from taking a run away from its host.
+#[test]
+fn an_input_holding_an_unknown_value_is_no_unknown_decision() {
+    for (kind, pointer, value) in log_positions() {
+        if DECISION_POSITIONS.contains(&(kind, pointer)) || pointer == "/origin" {
+            continue;
+        }
+        let (event, _) = round_trip(&golden_with(kind, pointer, &value));
+        assert!(!event.is_unknown_decision(), "{kind} {pointer}");
+        assert!(!event.is_unknown_input(), "{kind} {pointer}");
+    }
+}
+
+/// `ReasonCode` explains and folds the same whatever it says, and a withdrawal by an unknown party writes
+/// its raw value there: it is the one enum a decision holds that stays open.
+#[test]
+fn a_decision_holding_an_unknown_reason_code_folds_as_usual() {
+    for kind in ["held", "parked", "liveness", "ignored"] {
+        let raw = golden_with(kind, "/body/reason", &later_code());
+        assert!(!round_trip(&raw).0.is_unknown_decision(), "{kind}");
+    }
+}
+
+/// An unknown origin is never `reducer`, so an unknown kind under one is an input and folds to nothing.
+#[test]
+fn an_unknown_kind_under_an_unknown_origin_reads_as_an_input() {
+    let raw = envelope(LATER, json!({ "kind": "a_later_kind" }));
+    let (event, back) = round_trip(&raw);
+    assert_eq!(back, raw);
+    assert_eq!(event.origin, Origin::Unknown(LATER.to_owned()));
+    assert!(event.is_unknown_input());
+    assert!(!event.is_unknown_decision());
+}
+
+/// Nothing in a payload can claim where it came from: the host sets the envelope's origin (M6). That the
+/// host does so from where the input really came is the host's own test.
+#[test]
+fn no_event_body_carries_an_origin() {
+    for raw in golden_events() {
+        assert!(
+            raw["body"].get("origin").is_none(),
+            "{}",
+            raw["body"]["kind"]
+        );
+    }
+}
+
+/// The wire of v1 as it was frozen: these files never change, whatever the goldens beside them become, so
+/// every later reader of this crate has to read them. Each hash is the file, so a file that moved says so
+/// here and not in a reader nobody runs against it.
+const FROZEN_V1: &[(&str, &str)] = &[
+    (
+        "run-events.json",
+        "187018af90f47942e050c2e1d3720c4512fcc489c68041ca929ef7599118b58d",
+    ),
+    (
+        "run-status.json",
+        "7b55af50824fa31196961beb8d91ddd8a32d67b9504c81cf4efb08f3c216ab75",
+    ),
+    (
+        "run-status-portable.json",
+        "69f02cd1890c6b2106df9b039809166af290b6a168bbce232606818bf6e40cea",
+    ),
+    (
+        "storage.json",
+        "ba94f5548f6871fee7feccd3fc7f119573af0169bf64cca2a2122ee9d21a807f",
+    ),
+    (
+        "session.json",
+        "a3dc7f6ffebdaedb2d3dabb685eb3d7b640813571b92e62a7da985c97d5e19e1",
+    ),
+];
+
+fn frozen_v1(name: &str) -> String {
+    let path = format!("{}/tests/golden/v1/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+#[test]
+fn the_frozen_v1_files_are_the_ones_that_were_frozen() {
+    for (name, pinned) in FROZEN_V1 {
+        let digest = Sha256::digest(frozen_v1(name).as_bytes());
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, *pinned, "{name} changed: v1 is frozen");
+    }
+}
+
+/// Written back through the types, as a reader that keeps what it reads has to.
+fn assert_reads_back<T: Serialize + DeserializeOwned>(name: &str) -> T {
+    let raw: Value = serde_json::from_str(&frozen_v1(name)).unwrap();
+    let read: T = serde_json::from_value(raw.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(serde_json::to_value(&read).unwrap(), raw, "{name}");
+    read
+}
+
+#[test]
+fn a_frozen_v1_log_reads_under_these_types_with_nothing_unknown_in_it() {
+    let events: Vec<Event> = assert_reads_back("run-events.json");
+    assert!(!events.is_empty());
+    for event in events {
+        assert_eq!(event.v, 1, "seq {}", event.seq);
+        assert!(!event.is_unknown_decision(), "seq {}", event.seq);
+        assert!(!event.is_unknown_input(), "seq {}", event.seq);
+        assert!(
+            !matches!(event.origin, Origin::Unknown(_)),
+            "seq {}",
+            event.seq
+        );
+    }
+}
+
+#[test]
+fn a_frozen_v1_status_reads_under_these_types_with_and_without_local() {
+    let whole: RunStatus = assert_reads_back("run-status.json");
+    assert!(whole.local.is_some());
+    assert_eq!(whole.v, 1);
+    assert!(!matches!(whole.state, RunState::Unknown(_)));
+    let portable: RunStatus = assert_reads_back("run-status-portable.json");
+    assert!(portable.local.is_none());
+}
+
+#[test]
+fn the_frozen_v1_storage_and_session_shapes_read_under_these_types() {
+    let storage: Value = serde_json::from_str(&frozen_v1("storage.json")).unwrap();
+    let row: RunRow = serde_json::from_value(storage["run_row"].clone()).unwrap();
+    assert_eq!(row.tenant, LOCAL_TENANT);
+    let appended: Appended = serde_json::from_value(storage["appended"].clone()).unwrap();
+    assert_eq!(appended.last_seq, row.last_seq);
+    let session: Value = serde_json::from_str(&frozen_v1("session.json")).unwrap();
+    let spec: StartSpec = serde_json::from_value(session["start_spec"].clone()).unwrap();
+    assert_eq!(spec.v, 1);
 }

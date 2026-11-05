@@ -126,6 +126,9 @@ cases! {
             "ceiling question={question} step=judge pass=4 verdict={synth_message}"
         )));
         assert_eq!(status_reason(s), "ceiling");
+        let needs = nexus_run_engine::status(&s.state).needs.unwrap();
+        assert_eq!(needs.question, Some(question.clone()));
+        assert_eq!(needs.message, Some(synth_message.clone()));
     }
 
     fn verify_rework_then_judge_rework_starts_build_v2_and_v3_on_two_counts(s) {
@@ -256,7 +259,7 @@ cases! {
 }
 
 fn status_reason(s: &Script) -> String {
-    nexus_run_engine::status(&s.state, 0, s.now)
+    nexus_run_engine::status(&s.state)
         .reason
         .map(|r| r.as_str().to_owned())
         .unwrap_or_default()

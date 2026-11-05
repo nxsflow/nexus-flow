@@ -2,11 +2,10 @@
 //! disagrees with the log. A timer id has one row, whatever re-arms it.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use serde_json::Value;
 
 use nexus_run_contracts::{
-    Decision, Event, EventBody, RunId, StoreError, StoreResult, Timer, TimerChange,
-    TimerChangeKind, TimerPurpose, Timestamp,
+    Decision, Event, EventBody, RunId, StoreResult, Timer, TimerChange, TimerChangeKind,
+    TimerPurpose, Timestamp,
 };
 
 use crate::db;
@@ -31,7 +30,7 @@ pub(crate) fn apply(
                 fire_at,
                 purpose,
             }) => {
-                arm(tx, run, timer, *fire_at, *purpose)?;
+                arm(tx, run, timer, *fire_at, purpose)?;
                 changes.push(change(timer, TimerChangeKind::Armed, *fire_at));
             }
             EventBody::Decision(Decision::TimerCleared { timer }) => {
@@ -76,9 +75,10 @@ pub(crate) fn due(conn: &Connection, now: Timestamp) -> StoreResult<Vec<Timer>> 
     let mut due = Vec::new();
     for row in rows {
         let (run, timer, fire_at, purpose) = row.map_err(db)?;
-        let Ok(purpose) = serde_json::from_value::<TimerPurpose>(Value::String(purpose)) else {
+        let purpose = TimerPurpose::parse(&purpose);
+        if matches!(purpose, TimerPurpose::Unknown(_)) {
             continue;
-        };
+        }
         due.push(Timer {
             run: crate::stored_run_id(&run)?,
             timer,
@@ -102,19 +102,19 @@ fn arm(
     run: &RunId,
     timer: &str,
     fire_at: Timestamp,
-    purpose: TimerPurpose,
+    purpose: &TimerPurpose,
 ) -> StoreResult<()> {
-    let purpose = serde_json::to_value(purpose)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| StoreError::Backend {
-            what: "a timer purpose is a word".to_owned(),
-        })?;
     tx.execute(
         "INSERT INTO timers (run, timer, fire_at, purpose, state) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (run, timer) DO UPDATE SET
              fire_at = excluded.fire_at, purpose = excluded.purpose, state = excluded.state",
-        params![run.as_str(), timer, fire_at.unix_millis(), purpose, ARMED],
+        params![
+            run.as_str(),
+            timer,
+            fire_at.unix_millis(),
+            purpose.as_str(),
+            ARMED
+        ],
     )
     .map_err(db)?;
     Ok(())

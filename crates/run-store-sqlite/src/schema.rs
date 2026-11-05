@@ -49,6 +49,7 @@ const TABLES: &str = "
     CREATE TABLE IF NOT EXISTS runs (
         run             TEXT PRIMARY KEY,
         workspace_id    TEXT    NOT NULL,
+        tenant          TEXT    NOT NULL,
         finished        INTEGER NOT NULL,
         last_seq        INTEGER NOT NULL,
         max_v           INTEGER NOT NULL,

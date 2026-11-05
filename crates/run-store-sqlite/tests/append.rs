@@ -2,7 +2,7 @@
 
 mod fixtures;
 
-use nexus_run_contracts::{Cas, RunStore, StoreError};
+use nexus_run_contracts::{Cas, EventBody, RunStore, StoreError};
 use nexus_run_store_sqlite::SqliteRunStore;
 
 fn cas(key: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Cas {
@@ -201,12 +201,51 @@ fn a_finished_event_closes_the_run_row() {
     let fence = fixtures::owned_run(&store, &run);
     let row = store.open_runs().unwrap().remove(0);
     assert_eq!(row.workspace_id, "6j6v");
+    assert_eq!(row.tenant, "local");
     assert_eq!(row.commissioned_at, fixtures::t0());
     assert_eq!((row.last_seq, row.max_v, row.finished), (1, 1, false));
     store
         .append(&run, 1, fence, &[fixtures::finished(&run, "end")], &[], &[])
         .unwrap();
     assert!(store.open_runs().unwrap().is_empty());
+}
+
+/// The run row is bound by the enqueue that created it, and the commission the owner appends says the
+/// same or is refused. A store never moves a run to another workspace or tenant.
+#[test]
+fn an_append_of_a_commission_cannot_change_the_workspace_or_the_tenant() {
+    let (_dir, store) = fixtures::temp_store();
+    let run = fixtures::run_id();
+    store
+        .enqueue(&run, &fixtures::commissioned(&run), &[])
+        .unwrap();
+    let fence = store
+        .acquire_or_renew(&run, "host-a", fixtures::t0())
+        .unwrap()
+        .epoch;
+    for (workspace, tenant) in [("6j6v", "another"), ("another", "local")] {
+        let mut moved = fixtures::commissioned(&run);
+        let EventBody::Commissioned {
+            workspace_id,
+            tenant: written,
+            ..
+        } = &mut moved.body
+        else {
+            panic!("a commission");
+        };
+        *workspace_id = workspace.into();
+        *written = tenant.into();
+        let err = store
+            .append(&run, 0, fence, &[moved], &[], &[])
+            .unwrap_err();
+        assert_eq!(err.kind(), "invalid_event", "{workspace} {tenant}");
+    }
+    let row = store.open_runs().unwrap().remove(0);
+    assert_eq!(
+        (row.workspace_id.as_str(), row.tenant.as_str()),
+        ("6j6v", "local")
+    );
+    assert_eq!(row.last_seq, 0);
 }
 
 #[test]

@@ -1,0 +1,84 @@
+{
+  "capabilities": {
+    "backend": "claude",
+    "capabilities": [
+      "resume",
+      "nudge",
+      "stop",
+      "usage",
+      "permission_rules",
+      "subprocess_sample"
+    ]
+  },
+  "drained_fact": {
+    "fact": {
+      "beat": "model_output",
+      "kind": "heartbeat"
+    },
+    "offset": 64
+  },
+  "env_allowlist": [
+    "PATH",
+    "HOME",
+    "USER",
+    "NXC_DB",
+    "NXC_ORIGIN",
+    "NXC_HOP",
+    "NXC_SIDECAR",
+    "NXC_WORKER",
+    "NXC_SESSION",
+    "NXC_ACTOR"
+  ],
+  "liveness": [
+    {
+      "state": "dead"
+    },
+    {
+      "moved_at": "2026-11-04T10:10:00.500Z",
+      "open_call": "2026-11-04T10:00:00.000Z",
+      "state": "alive"
+    },
+    {
+      "moved_at": null,
+      "open_call": null,
+      "state": "alive"
+    }
+  ],
+  "start_outcomes": [
+    "spawned",
+    "reattached",
+    "waiting",
+    "lost"
+  ],
+  "start_spec": {
+    "cwd": "/work/nexus-flow-v2",
+    "env": [
+      {
+        "name": "NXC_ACTOR",
+        "value": "coder"
+      },
+      {
+        "name": "NXC_SESSION",
+        "value": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+      }
+    ],
+    "ledger_dir": "/logs/v2/session",
+    "model": "opus",
+    "prompt": {
+      "declaration_hash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "system_prompt": "the standing text",
+      "use_claude_code_preset": true
+    },
+    "resume": "bdf74718",
+    "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "turn": {
+      "text": "the root message, the task and the obligation block",
+      "thread": "m-01JDDDDDDDDDDDDDDDDDDDDDDD"
+    },
+    "v": 1
+  }
+}

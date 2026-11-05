@@ -1,5 +1,6 @@
 //! `evolve` applies any event. Replay is `fold(evolve, initial, log)`. An unknown INPUT leaves the state
-//! unchanged; an unknown DECISION is an error, because folding past it would diverge silently (§13).
+//! unchanged; an unknown DECISION, whether of a kind or of a value in a known kind, is an error, because
+//! folding past it would diverge silently (§13).
 
 use nexus_run_contracts::{
     Decision, Event, EventBody, Handle, Outcome, ReasonCode, Seq, Slot, StepId, TimerPurpose,
@@ -14,8 +15,8 @@ use crate::state::{
     TurnPart, VerdictRef,
 };
 
-/// A decision kind this version does not know, read from the log of a newer writer. The host does not
-/// step such a run; status projects it read-only, `waiting_for: "a newer nxs"`.
+/// A decision this version cannot fold, read from the log of a newer writer: `kind` is its kind, known or
+/// not. The host does not step such a run; status projects it read-only, `waiting_for: "a newer nxs"`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnknownDecision {
     pub kind: String,
@@ -24,11 +25,13 @@ pub struct UnknownDecision {
 
 /// Applies one event of the log.
 pub fn evolve(mut state: RunState, event: &Event) -> Result<RunState, UnknownDecision> {
-    match &event.body {
-        EventBody::Unknown(unknown) if event.is_unknown_decision() => Err(UnknownDecision {
-            kind: unknown.kind.clone(),
+    if event.is_unknown_decision() {
+        return Err(UnknownDecision {
+            kind: event.body.kind(),
             seq: event.seq,
-        }),
+        });
+    }
+    match &event.body {
         EventBody::Decision(decision) => {
             apply_decision(&mut state, decision, event.at);
             state.seq = event.seq;
@@ -68,7 +71,7 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
         } => state.finished_steps.push(FinishedStep {
             step: step.clone(),
             visit: *visit,
-            outcome: *outcome,
+            outcome: outcome.clone(),
             at,
         }),
         Decision::Rework {
@@ -119,7 +122,7 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
                 timer.clone(),
                 ArmedTimer {
                     fire_at: *fire_at,
-                    purpose: *purpose,
+                    purpose: purpose.clone(),
                 },
             );
             if *purpose == TimerPurpose::StartDeadline {
@@ -138,10 +141,13 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
             slot,
             reason,
             until,
+            resets_at,
         } => {
             let order = next_order(state);
             if let Some(record) = record_of(state, slot) {
-                record.holds += 1;
+                if resets_at.is_none() {
+                    record.holds += 1;
+                }
                 record.condition = Some(SlotCondition::Held {
                     reason: reason.clone(),
                     until: *until,
@@ -171,11 +177,11 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
             });
         }
         Decision::Finishing { outcome, reason } => {
-            apply_finishing(state, *outcome, reason.clone(), at);
+            apply_finishing(state, outcome.clone(), reason.clone(), at);
         }
         Decision::Finished { outcome, reason } => {
             state.phase = Phase::Finished {
-                outcome: *outcome,
+                outcome: outcome.clone(),
                 reason: reason.clone(),
             };
             state.timers.clear();

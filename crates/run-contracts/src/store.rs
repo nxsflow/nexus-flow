@@ -3,7 +3,7 @@
 //! owner for a sequence number, and inputs are accepted while no owner is alive.
 //!
 //! The named keys, all strings: `owner/<run>` (the per-run lease, compact serde_json of
-//! `{owner_id, epoch, expires_at}`), `claim/<workspace_id>` (the run holding the directory),
+//! `{owner_id, epoch, expires_at}`; see the tombstone rule on [`RunStore`]), `claim/<workspace_id>` (the run holding the directory),
 //! `flow/<hash>` (written once, never deleted while an open run references it), `pending/<run>`
 //! (the commission body, deleted by the append that folds `root_opened` or `finished`), `thread/<id>`,
 //! `session/<session_key>`, `persona_session/<run>/<handle>`, `effect/<run>/<key>`,
@@ -22,7 +22,17 @@ use crate::ids::{Epoch, Key, RunId, Seq, Timestamp};
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
-/// One log per run behind this trait, SQLite in slice 1.
+/// One log per run behind this trait, SQLite in slice 1. The trait is synchronous on purpose: a step of
+/// the owner is one bounded call, and a backend that needs anything else hides it behind this trait.
+///
+/// A store instance is scoped to one tenant when it is opened. No call on a store instance reaches
+/// another tenant's rows, a reconciler's `due_timers` and `open_runs` included. That is a rule for any
+/// shared store, not one backend's limit. A deny fence (PV3) sits in the read path above this trait, so no
+/// method takes a principal: the owner calls these, not a reader.
+///
+/// The tombstone rule: `owner/<run>` survives a purge holding only `owner_id`, `epoch` and `expires_at`,
+/// because the fence must never restart. So `owner_id` is an opaque host id and never identifies a person:
+/// no person's name, no user name and no machine name.
 ///
 /// Rules every backend keeps: CAS keys in one call are distinct; no `append` carries a CAS on an
 /// `owner/*` key, because the lease changes only through `compare_and_set`; an `owner/*` key is never
@@ -112,12 +122,13 @@ pub struct Timer {
     pub purpose: TimerPurpose,
 }
 
-/// A run the store knows. `workspace_id` is opaque and immutable, set by `commissioned`; `max_v` is
-/// the highest `v` ever appended to the run.
+/// A run the store knows. `workspace_id` and `tenant` are opaque and immutable, set by `commissioned`;
+/// `max_v` is the highest `v` ever appended to the run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRow {
     pub run: RunId,
     pub workspace_id: String,
+    pub tenant: String,
     pub finished: bool,
     pub last_seq: Seq,
     pub max_v: u32,

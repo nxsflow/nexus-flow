@@ -1,21 +1,42 @@
 //! Contract (d): run status, read-only with no subscription. `finished` is the single machine field,
-//! and `outcome` is set exactly when it is true. The engine projects most of this purely from state;
-//! the host adds `owner` and `tree` around that projection. Status carries ids and codes; the one text
-//! is a tree refusal's scrubbed `text`, read from its kv row and gone when the run finishes.
+//! and `outcome` is set exactly when it is true.
+//!
+//! [`RunStatus`] holds what folds purely from the log, as of `seq`, with no clock and no place in it, so
+//! it reads the same anywhere. [`LocalStatus`] is what the machine that holds the run can add, absent as a
+//! whole where it is unavailable, so a `null` inside it means only "the directory is gone". Status carries
+//! ids and codes; the one text is a tree refusal's scrubbed `text`, read from its kv row and gone when
+//! the run finishes.
+//!
+//! Commit, branch, failure class, grade and log excerpts are evidence: opt-in per stream and never in the
+//! portable status. Evidence arrives later as its own optional field (SY5, dqem.19wp).
+//!
+//! `waiting_for` and `next_action` are for people and are never parsed. `verdict` and `last_fact` are as
+//! of `seq`, no claim about now: a reader derives an age with its own clock (R4).
+//!
+//! A status reader never refuses on a higher `v`: it renders what it knows, a field it does not know is
+//! dropped, and a value of an enum it does not know is rendered as it reads.
 
 use serde::{Deserialize, Serialize};
 
-use crate::codes::ReasonCode;
+use crate::codes::{closed_code, tolerant_tagged, ReasonCode};
 use crate::events::{Base, Outcome, ParkOutcome, TreeRefusal};
-use crate::ids::{Handle, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
+use crate::ids::{Handle, Key, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
 
-/// The fixed values of `waiting_for`. The others name a party: the reply of a persona, a decision of the
-/// requester, or the holder of the directory.
+/// The fixed values of `waiting_for`. The others name a party: the reply of a persona, a decision or a
+/// resume of the requester, or the holder of the directory.
 pub const WAITING_FOR_FIXED: &[&str] = &[
     "a newer nxs",
     "a fold that does not panic",
     "the park",
     "the chat store",
+];
+
+/// The words of `StepStatus.state`.
+pub const STEP_STATES: &[&str] = &["open", "done"];
+
+/// The words of `MemberStatus.state`.
+pub const MEMBER_STATES: &[&str] = &[
+    "pending", "starting", "running", "quiet", "nudged", "stopping", "replied", "ended",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,15 +49,24 @@ pub struct RunStatus {
     pub outcome: Option<Outcome>,
     pub state: RunState,
     pub claim: ClaimStatus,
-    pub owner: Owner,
-    pub tree: TreeStatus,
     pub steps: Vec<StepStatus>,
-    /// Inputs in the inbox the owner has not folded yet: status never claims a reply arrived before that.
-    pub pending_inputs: u32,
     pub waiting_for: Option<String>,
     pub needs: Option<Needs>,
     pub reason: Option<ReasonCode>,
     pub next_action: Option<String>,
+    /// What the machine that holds the run adds. Absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalStatus>,
+}
+
+/// What only the machine that holds the run can say, read when `observed_at` says.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalStatus {
+    pub observed_at: Timestamp,
+    pub owner: Owner,
+    /// Inputs in the inbox the owner has not folded yet: status never claims a reply arrived before that.
+    pub pending_inputs: u32,
+    pub tree: TreeStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,23 +75,20 @@ pub struct FlowStatus {
     pub hash: String,
 }
 
-/// The run's state. `NeedsDecision`, `Held` and `Parked` are projections of slot facts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "name", rename_all = "snake_case")]
-pub enum RunState {
-    Created,
-    /// `behind` is a v2 run of this workspace, never a v1 thread.
-    Queued {
-        behind: Option<RunId>,
-    },
-    Running,
-    NeedsDecision,
-    Held {
-        until: Timestamp,
-    },
-    Parked,
-    Finishing,
-    Finished,
+tolerant_tagged! {
+    /// The run's state. `NeedsDecision`, `Held` and `Parked` are projections of slot facts. An unknown one
+    /// is rendered as it reads.
+    RunState, tag = "name" {
+        Created = "created",
+        /// `behind` is a v2 run of this workspace, never a v1 thread.
+        Queued = "queued" { behind: Option<RunId> },
+        Running = "running",
+        NeedsDecision = "needs_decision",
+        Held = "held" { until: Timestamp },
+        Parked = "parked",
+        Finishing = "finishing",
+        Finished = "finished",
+    }
 }
 
 /// The run's claim on its directory. It has no time limit and ends with the run.
@@ -80,7 +107,8 @@ pub struct Owner {
 }
 
 /// The v2 working directory. `path` is derived at status time and never stored. `commit`, `branch` and
-/// `dirty` are read live, and `null` when the directory is missing.
+/// `dirty` are read live, and `null` when the directory is missing. `base`, `found` and `parked` come
+/// from the log, and they carry commit and branch, so they are local too.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreeStatus {
     pub path: String,
@@ -138,32 +166,36 @@ pub struct MemberStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotLiveness {
     pub last_fact: Option<Timestamp>,
-    pub quiet_for_s: u64,
     pub verdict: Verdict,
 }
 
-/// `working`: a fact within `quiet_after`. `quiet`: a declared wait, or no fact yet inside the window.
-/// `suspect`: nudged, waiting for confirmation. `hung`: the ladder is exhausted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    Working,
-    Quiet,
-    Suspect,
-    Hung,
+closed_code! {
+    /// `working`: a fact within `quiet_after`. `quiet`: a declared wait, or no fact yet inside the window.
+    /// `suspect`: nudged, waiting for confirmation. `hung`: the ladder is exhausted. An unknown one is
+    /// rendered as it reads.
+    Verdict {
+        Working = "working",
+        Quiet = "quiet",
+        Suspect = "suspect",
+        Hung = "hung",
+    }
 }
 
 /// What the run needs from a person. A hold or a park has no question id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Needs {
     pub kind: NeedsKind,
-    pub question: Option<MessageId>,
+    /// What `answer.question` takes: the key of the event that asked.
+    pub question: Option<Key>,
+    /// What to read before answering: the escalating reply, or a ceiling's last verdict.
+    pub message: Option<MessageId>,
     pub since: Timestamp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NeedsKind {
-    Decision,
-    Person,
+closed_code! {
+    /// An unknown one is rendered as it reads.
+    NeedsKind {
+        Decision = "decision",
+        Person = "person",
+    }
 }

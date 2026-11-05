@@ -56,12 +56,16 @@ impl Emit<'_> {
                     self.set_slot_timer(&slot, span, TimerPurpose::Quiet);
                 }
             }
-            Fact::Heartbeat { beat } => self.rearm(index, &slot, was_quiet, Some(*beat)),
-            Fact::Usage { .. } | Fact::PermissionRefused { .. } => {
+            Fact::Heartbeat {
+                beat: HeartbeatKind::Unknown(_),
+            }
+            | Fact::Usage { .. }
+            | Fact::PermissionRefused { .. } => {
                 if was_quiet {
                     self.rearm(index, &slot, true, None);
                 }
             }
+            Fact::Heartbeat { beat } => self.rearm(index, &slot, was_quiet, Some(beat)),
             Fact::GroupLingering { .. } => self.group_lingering(&slot, &was),
             Fact::Ended { cause } => self.ended(index, &slot, &was, cause),
             Fact::Unknown(_) => {}
@@ -88,7 +92,7 @@ impl Emit<'_> {
     /// Re-arms the signs of life for what is now true of the slot. While a call is open `quiet` does not
     /// run. `subprocess_idle` needs a host that samples; `call_bound` applies to a BLIND host only, and is
     /// armed from the call's start until a sample proves this host is not blind.
-    fn rearm(&mut self, index: usize, slot: &Slot, was_quiet: bool, beat: Option<HeartbeatKind>) {
+    fn rearm(&mut self, index: usize, slot: &Slot, was_quiet: bool, beat: Option<&HeartbeatKind>) {
         use HeartbeatKind::{Blind, CallsClosed, CallsOpen, ModelOutput, SubprocessMoved};
         use TimerPurpose::{CallBound, Confirm, Quiet, SubprocessIdle};
         if was_quiet {
@@ -150,7 +154,8 @@ impl Emit<'_> {
                 EndCause::TurnComplete => {
                     self.restart_or_park(index, slot, ReasonCode::EndedWithoutReply);
                 }
-                EndCause::Exit { .. } => {
+                // An end this version does not know takes the `exit` row: restart, then park.
+                EndCause::Exit { .. } | EndCause::Unknown(_) => {
                     self.restart_or_park(index, slot, ReasonCode::StartFailed);
                 }
                 EndCause::Lost => self.restart_or_park(index, slot, ReasonCode::Lost),
@@ -195,7 +200,10 @@ impl Emit<'_> {
         });
     }
 
-    /// On hold, not failed. Holds are counted apart from attempts, up to `max_holds` (cn4p).
+    /// On hold, not failed. Holds are counted apart from attempts, up to `max_holds` (cn4p), and only one
+    /// with no named reset counts: a daily retry of a seven-day limit is not a backend failing to answer.
+    /// A backend that keeps naming new resets holds a run for as long as it does; that state is visible
+    /// and withdrawable.
     fn hold(
         &mut self,
         index: usize,
@@ -203,7 +211,7 @@ impl Emit<'_> {
         reason: ReasonCode,
         resets_at: Option<Timestamp>,
     ) {
-        if self.state.slots[index].holds >= self.state.policy.max_holds {
+        if resets_at.is_none() && self.state.slots[index].holds >= self.state.policy.max_holds {
             self.push(Decision::Parked {
                 slot: Some(slot.clone()),
                 reason: ReasonCode::HoldLimit,
@@ -215,8 +223,9 @@ impl Emit<'_> {
             slot: slot.clone(),
             reason,
             until,
+            resets_at,
         });
-        let timer = crate::state::slot_timer(TimerPurpose::HoldRetry, slot);
+        let timer = crate::state::slot_timer(&TimerPurpose::HoldRetry, slot);
         self.set_timer_at(timer, until, TimerPurpose::HoldRetry);
     }
 

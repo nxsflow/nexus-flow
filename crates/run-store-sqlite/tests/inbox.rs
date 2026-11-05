@@ -358,6 +358,7 @@ fn a_run_with_only_an_inbox_row_is_open() {
     let row = store.open_runs().unwrap().remove(0);
     assert_eq!(row.run, run);
     assert_eq!(row.workspace_id, "6j6v");
+    assert_eq!(row.tenant, "local");
     assert_eq!(row.commissioned_at, fixtures::t0());
     assert_eq!((row.last_seq, row.max_v, row.finished), (0, 0, false));
 }
@@ -374,13 +375,14 @@ fn a_second_commission_of_a_known_run_under_a_new_key_is_refused() {
 }
 
 #[test]
-fn a_commission_with_a_path_for_a_workspace_or_a_non_id_thread_is_refused() {
+fn a_commission_with_a_path_for_a_workspace_or_tenant_or_a_non_id_thread_is_refused() {
     let (_dir, path, store) = store_with_path();
     let run = fixtures::run_id();
     for bad in [
         EventBody::Commissioned {
             run: run.clone(),
             workspace_id: "/Users/someone/repo".into(),
+            tenant: "local".into(),
             flow: nexus_run_contracts::FlowRef { hash: "h".into() },
             policy: Default::default(),
             root_thread: fixtures::ROOT_THREAD.into(),
@@ -389,9 +391,28 @@ fn a_commission_with_a_path_for_a_workspace_or_a_non_id_thread_is_refused() {
         EventBody::Commissioned {
             run: run.clone(),
             workspace_id: "6j6v".into(),
+            tenant: "local".into(),
             flow: nexus_run_contracts::FlowRef { hash: "h".into() },
             policy: Default::default(),
             root_thread: "the text of the commission".into(),
+            requester: "r".into(),
+        },
+        EventBody::Commissioned {
+            run: run.clone(),
+            workspace_id: "6j6v".into(),
+            tenant: String::new(),
+            flow: nexus_run_contracts::FlowRef { hash: "h".into() },
+            policy: Default::default(),
+            root_thread: fixtures::ROOT_THREAD.into(),
+            requester: "r".into(),
+        },
+        EventBody::Commissioned {
+            run: run.clone(),
+            workspace_id: "6j6v".into(),
+            tenant: "/Users/someone".into(),
+            flow: nexus_run_contracts::FlowRef { hash: "h".into() },
+            policy: Default::default(),
+            root_thread: fixtures::ROOT_THREAD.into(),
             requester: "r".into(),
         },
     ] {

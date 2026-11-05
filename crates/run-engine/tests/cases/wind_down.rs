@@ -159,7 +159,7 @@ cases! {
         assert!(s.effects().is_empty());
         assert_eq!(s.state.outcome(), Some(Outcome::Delivered));
         assert_eq!(
-            nexus_run_engine::status(&s.state, 0, s.now).reason,
+            nexus_run_engine::status(&s.state).reason,
             Some(ReasonCode::WouldNotStop)
         );
 
@@ -188,7 +188,7 @@ cases! {
         };
         assert!(!ladder.forced, "only a withdrawal forces a stop");
         assert_eq!(s.state.visits["build"], 1);
-        let status = nexus_run_engine::status(&s.state, 0, s.now);
+        let status = nexus_run_engine::status(&s.state);
         assert_eq!(status.steps[0].members[0].pids, vec![11, 12]);
         s.input(s.stop_signalled(&key, 1, StopKind::Term));
         // A repeat of the fact restarts nothing and moves no rung.

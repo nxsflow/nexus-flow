@@ -67,7 +67,7 @@ pub fn slot_row(state: &SlotState) -> usize {
         } => 8,
         SlotState::Ended { cause } => match cause {
             EndCause::TurnComplete => 9,
-            EndCause::Exit { .. } => 10,
+            EndCause::Exit { .. } | EndCause::Unknown(_) => 10,
             EndCause::UsageLimit { .. } => 11,
             EndCause::ProviderUnavailable => 12,
             EndCause::PermissionRefused { .. } => 13,
@@ -245,6 +245,7 @@ impl Walk {
         walk.input(EventBody::Commissioned {
             run,
             workspace_id: "workspace".to_owned(),
+            tenant: nexus_run_contracts::LOCAL_TENANT.to_owned(),
             flow: FlowRef {
                 hash: "sha256:example".to_owned(),
             },

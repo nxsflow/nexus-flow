@@ -5,12 +5,12 @@
 
 use std::collections::BTreeSet;
 
-use nexus_run_contracts::status::WAITING_FOR_FIXED;
+use nexus_run_contracts::status::{MEMBER_STATES, STEP_STATES, WAITING_FOR_FIXED};
 use nexus_run_contracts::{
     Appended, Capabilities, Decision, Disposition, DrainedFact, Enqueued, Event, EventBody,
-    FlowRef, Liveness, LivenessPolicy, Origin, ReasonCode, RunId, RunRow, RunStatus, Secs,
-    SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer, Timestamp,
-    CONTRACTS_STATUS, ENV_ALLOWLIST,
+    FlowRef, Key, Liveness, LivenessPolicy, MessageId, Origin, ReasonCode, RunId, RunRow,
+    RunStatus, Secs, SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer,
+    Timestamp, CONTRACTS_STATUS, CONTRACT_V, ENV_ALLOWLIST, LOCAL_TENANT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,23 @@ fn answer_carries_its_question_disposition_and_message() {
     assert!(answers[0].2.starts_with("m-"));
 }
 
+/// `until` is when the run retries, clamped to the policy; `resets_at` is what the backend named. Only a
+/// hold without one counts toward `max_holds`, and a writer from before the field reads as without one.
+#[test]
+fn a_hold_carries_the_reset_the_backend_named_apart_from_its_retry() {
+    let held = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Decision(Decision::Held {
+                until, resets_at, ..
+            }) => Some((until, resets_at)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(held.0.to_string(), "2026-11-04T10:10:00.500Z");
+    assert_eq!(held.1.unwrap().to_string(), "2026-11-11T10:00:00.000Z");
+}
+
 #[test]
 fn root_opened_carries_the_thread_and_the_root_message() {
     let opened = events()
@@ -145,6 +162,22 @@ fn root_opened_carries_the_thread_and_the_root_message() {
     assert!(opened.0.starts_with("m-"));
     assert!(opened.1.starts_with("m-"));
     assert_ne!(opened.0, opened.1);
+}
+
+/// Required from the first run, so no reader carries an "absent" branch; `local` is the slice-1 value.
+#[test]
+fn commissioned_and_the_run_row_carry_the_tenant_of_this_store() {
+    let tenant = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Commissioned { tenant, .. } => Some(tenant),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(tenant, LOCAL_TENANT);
+    assert_eq!(LOCAL_TENANT, "local");
+    let storage: StorageGolden = assert_byte_exact("storage.json");
+    assert_eq!(storage.run_row.tenant, LOCAL_TENANT);
 }
 
 #[test]
@@ -375,15 +408,99 @@ fn session_golden_is_byte_exact_and_pins_the_environment_allowlist() {
 #[test]
 fn run_status_golden_is_byte_exact() {
     let status: RunStatus = assert_byte_exact("run-status.json");
-    assert_eq!(status.tree.in_flight.unwrap().step, "fetch");
+    let local = status.local.unwrap();
+    assert_eq!(local.tree.in_flight.unwrap().step, "fetch");
     assert_eq!(
-        status.owner.last_seen.unwrap().to_string(),
+        local.owner.last_seen.unwrap().to_string(),
         "2026-11-04T10:00:00.000Z"
     );
+    assert_eq!(local.observed_at.to_string(), "2026-11-04T10:00:12.000Z");
     assert!(WAITING_FOR_FIXED.contains(&status.waiting_for.unwrap().as_str()));
 }
 
+/// What a client answers with is the `question` an `answer` takes: the key of the event that asked, and
+/// the two are not the same type by accident. `message` is the text a person reads before answering.
 #[test]
-fn the_contracts_are_still_drafts() {
-    assert_eq!(CONTRACTS_STATUS, "draft");
+fn needs_carries_the_key_an_answer_takes_and_the_message_apart() {
+    let status: RunStatus = assert_byte_exact("run-status.json");
+    let needs = status.needs.unwrap();
+    let answer = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Answer { question, .. } => Some(question),
+            _ => None,
+        })
+        .unwrap();
+    let question: Option<Key> = needs.question;
+    assert_eq!(question, Some(answer));
+    let message: Option<MessageId> = needs.message;
+    assert!(message.unwrap().starts_with("m-"));
+}
+
+#[test]
+fn every_state_word_in_the_golden_is_a_published_one() {
+    let status: RunStatus = assert_byte_exact("run-status.json");
+    for step in &status.steps {
+        assert!(STEP_STATES.contains(&step.state.as_str()), "{}", step.state);
+        for member in &step.members {
+            assert!(
+                MEMBER_STATES.contains(&member.state.as_str()),
+                "{}",
+                member.state
+            );
+        }
+    }
+}
+
+/// Every key in a JSON value, however deep.
+fn keys_in(value: &serde_json::Value, keys: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                keys.insert(key.clone());
+                keys_in(inner, keys);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| keys_in(item, keys)),
+        _ => {}
+    }
+}
+
+/// The part that folds from the log and may leave the machine: commit and branch are evidence, opt-in
+/// per stream, and a path carries the account's name (SY5, dqem.19wp, PV1).
+#[test]
+fn a_status_without_local_is_byte_exact_and_holds_nothing_read_from_the_machine() {
+    let status: RunStatus = assert_byte_exact("run-status-portable.json");
+    assert!(status.local.is_none());
+    let wire = serde_json::to_value(&status).unwrap();
+    let mut keys = BTreeSet::new();
+    keys_in(&wire, &mut keys);
+    for local_only in [
+        "local",
+        "tree",
+        "commit",
+        "branch",
+        "path",
+        "dirty",
+        "owner",
+        "pending_inputs",
+        "observed_at",
+        "quiet_for_s",
+    ] {
+        assert!(!keys.contains(local_only), "{local_only} is in {keys:?}");
+    }
+}
+
+#[test]
+fn the_two_status_goldens_differ_by_local_alone() {
+    let read = |name: &str| serde_json::from_str::<serde_json::Value>(&golden(name)).unwrap();
+    let mut whole = read("run-status.json");
+    whole.as_object_mut().unwrap().remove("local");
+    assert_eq!(whole, read("run-status-portable.json"));
+}
+
+#[test]
+fn the_contracts_are_frozen_as_v1() {
+    assert_eq!(CONTRACTS_STATUS, "frozen-v1");
+    assert_eq!(CONTRACT_V, 1);
 }
