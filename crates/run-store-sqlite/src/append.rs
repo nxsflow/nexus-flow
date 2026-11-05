@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use nexus_run_contracts::{
-    Appended, Cas, Epoch, Event, EventBody, Key, Origin, RunId, Seq, StoreError, StoreResult,
+    Appended, Cas, Enqueued, Epoch, Event, EventBody, Key, Origin, RunId, Seq, StoreError,
+    StoreResult,
 };
 
 use crate::lease::{check_owner_write, current_epoch, is_owner_key};
@@ -84,6 +85,58 @@ pub(crate) fn append(
         last_seq: seq,
         timers,
     })
+}
+
+pub(crate) fn enqueue(
+    conn: &mut Connection,
+    run: &RunId,
+    event: &Event,
+    cas: &[Cas],
+) -> StoreResult<Enqueued> {
+    check_call(run, std::slice::from_ref(event), cas)?;
+    let tx = immediate(conn)?;
+    let waiting: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM inbox WHERE run = ?1 AND key = ?2",
+            [run.as_str(), &event.key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    if waiting.is_some() || logged_seq(&tx, run, &event.key)?.is_some() {
+        return Ok(Enqueued::Duplicate);
+    }
+    let commissioned = matches!(event.body, EventBody::Commissioned { .. });
+    match (read_run(&tx, run)?, commissioned) {
+        (None, true) => create_run(&tx, run, event)?,
+        (None, false) => return Err(StoreError::UnknownRun),
+        (Some(_), true) => {
+            return Err(invalid(format!(
+                "commissioned {} for a run that has one",
+                event.key
+            )))
+        }
+        (Some(_), false) => {}
+    }
+    for item in cas {
+        apply_cas(&tx, item)?;
+    }
+    // An input has no position until it is appended.
+    let mut waiting_input = event.clone();
+    waiting_input.seq = 0;
+    tx.execute(
+        "INSERT INTO inbox (run, key, at, origin, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            run.as_str(),
+            event.key,
+            event.at.unix_millis(),
+            origin_text(event.origin)?,
+            wire(&waiting_input)?,
+        ],
+    )
+    .map_err(db)?;
+    tx.commit().map_err(db)?;
+    Ok(Enqueued::Accepted)
 }
 
 pub(crate) fn immediate(conn: &mut Connection) -> StoreResult<Transaction<'_>> {

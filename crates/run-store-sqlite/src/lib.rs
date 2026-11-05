@@ -74,10 +74,8 @@ pub(crate) fn db(error: rusqlite::Error) -> StoreError {
 }
 
 impl RunStore for SqliteRunStore {
-    fn enqueue(&self, _run: &RunId, _event: &Event, _cas: &[Cas]) -> StoreResult<Enqueued> {
-        Err(StoreError::Backend {
-            what: "not yet".to_owned(),
-        })
+    fn enqueue(&self, run: &RunId, event: &Event, cas: &[Cas]) -> StoreResult<Enqueued> {
+        append::enqueue(&mut self.conn(), run, event, cas)
     }
 
     fn append(
@@ -100,8 +98,22 @@ impl RunStore for SqliteRunStore {
         )
     }
 
-    fn next_input(&self, _run: &RunId) -> StoreResult<Option<Event>> {
-        Ok(None)
+    fn next_input(&self, run: &RunId) -> StoreResult<Option<Event>> {
+        let row: Option<(String, String)> = self
+            .conn()
+            .query_row(
+                "SELECT key, body FROM inbox WHERE run = ?1 ORDER BY rowid LIMIT 1",
+                [run.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(|(key, body)| {
+            serde_json::from_str(&body).map_err(|_| StoreError::Backend {
+                what: format!("inbox row {key} of {run} does not decode"),
+            })
+        })
+        .transpose()
     }
 
     fn due_timers(&self, _now: Timestamp) -> StoreResult<Vec<Timer>> {
