@@ -41,6 +41,17 @@ pub fn decide(state: &RunState, input: &Event, def: &FlowDef) -> Vec<Decision> {
     emit.out
 }
 
+/// The key a host writes a decision under, with the input's own key and the decision's place in the list.
+/// A question's id IS the key of the event that asked (§6.3), which is what an answer names.
+pub fn decision_key(input_key: &str, index: usize, decision: &Decision) -> String {
+    match decision {
+        Decision::Escalated { question, .. } | Decision::Ceiling { question, .. } => {
+            question.clone()
+        }
+        _ => format!("{input_key}/d{index}"),
+    }
+}
+
 /// The list being written, and the state it has reached.
 pub(crate) struct Emit<'a> {
     pub before: &'a RunState,

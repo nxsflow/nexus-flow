@@ -102,7 +102,8 @@ cases! {
             "timer_cleared tree_window",
             "parked run tree_refused",
         ]);
-        assert_eq!(s.state.tree_refusals, 1, "keyed tree_refused/<run>/1 next");
+        let run = s.state.run.clone();
+        assert_eq!(s.state.tree_refused_key(), format!("tree_refused/{run}/1"));
 
         s.input(EventBody::ResumeRun).expect(&["timer_set tree_window +600s tree_window"]);
         assert_eq!(s.effects(), vec![Effect::PrepareTree { workspace: s.workspace() }]);
@@ -112,7 +113,7 @@ cases! {
             "timer_cleared tree_window",
             "parked run tree_refused",
         ]);
-        assert_eq!(s.state.tree_refusals, 2, "keyed tree_refused/<run>/2 next");
+        assert_eq!(s.state.tree_refused_key(), format!("tree_refused/{run}/2"));
 
         s.input(EventBody::ResumeRun).expect(&["timer_set tree_window +600s tree_window"]);
         assert_eq!(s.effects(), vec![Effect::PrepareTree { workspace: s.workspace() }]);
@@ -174,7 +175,8 @@ cases! {
         assert_eq!(s.state.claim_changes, 1);
         s.input(busy(HOLDER_B)).expect(&[format!("run_queued behind={HOLDER_B}")]);
         s.input(busy(HOLDER_A)).expect(&[format!("run_queued behind={HOLDER_A}")]);
-        assert_eq!(s.state.claim_changes, 3, "A -> B -> A logs three");
+        let run = s.state.run.clone();
+        assert_eq!(s.state.claim_busy_key(), format!("claim_busy/{run}/3"), "A -> B -> A logs three");
         assert_eq!(s.effects(), vec![Effect::TakeClaim { workspace: s.workspace() }]);
     }
 

@@ -15,8 +15,8 @@ use nexus_run_contracts::{
     Timestamp, TreeRefusal, WithdrawnBy,
 };
 use nexus_run_engine::{
-    compile, decide, evolve, pending_effects, status, ChannelDecl, DeliverBody, Effect, FlowDef,
-    RunState, SlotState,
+    compile, decide, decision_key, delivered_key, evolve, pending_effects, status, ChannelDecl,
+    DeliverBody, Effect, FlowDef, RunState, SlotState,
 };
 
 pub const RUN: &str = "r-01JAAAAAAAAAAAAAAAAAAAAAAA";
@@ -133,7 +133,7 @@ impl Script {
         self.fold(event.clone());
         for (index, decision) in decisions.iter().enumerate() {
             self.seq += 1;
-            let key = format!("{}/d{index}", event.key);
+            let key = decision_key(&event.key, index, decision);
             let body = EventBody::Decision(decision.clone());
             let event = Event::new(run.clone(), self.seq, self.now, key, Origin::Reducer, body);
             self.fold(event);
@@ -402,8 +402,11 @@ impl Script {
         }
     }
 
-    pub fn tree_refused(&self, reason: TreeRefusal) -> EventBody {
-        EventBody::TreeRefused { reason }
+    pub fn tree_refused(&self, reason: TreeRefusal) -> Input {
+        Input {
+            body: EventBody::TreeRefused { reason },
+            key: Some(self.state.tree_refused_key()),
+        }
     }
 
     pub fn tree_parked_clean(&self) -> EventBody {
@@ -432,7 +435,7 @@ impl Script {
             body: EventBody::Delivered {
                 message: format!("m-delivered-{key}"),
             },
-            key: Some(format!("delivered/{key}")),
+            key: Some(delivered_key(key)),
         }
     }
 

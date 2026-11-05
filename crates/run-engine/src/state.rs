@@ -67,6 +67,8 @@ pub struct RunState {
     pub tree_cancel_owed: bool,
     pub base: Option<Base>,
     pub found: Option<ParkOutcome>,
+    /// What `tree_parked` recorded, kept to the end for status and the discharge.
+    pub parked: Option<ParkOutcome>,
     /// The effect keys `delivered` recorded.
     pub delivered: BTreeSet<String>,
     /// A person withdrew: every stop from here on is forced, and only this ever forces one.
@@ -111,6 +113,7 @@ pub enum ParkPhase {
 pub struct RunCondition {
     pub reason: ReasonCode,
     pub order: u64,
+    pub since: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +200,8 @@ pub enum TurnKind {
 pub struct SlotRecord {
     pub slot: Slot,
     pub state: SlotState,
+    /// When this attempt's `step_started` folded.
+    pub created_at: Timestamp,
     /// Whether this attempt's `StartSession` resumes the persona's backend session.
     pub resume: bool,
     pub turn: Vec<TurnPart>,
@@ -231,6 +236,7 @@ pub enum SlotCondition {
     Parked {
         reason: ReasonCode,
         order: u64,
+        since: Timestamp,
     },
 }
 
@@ -417,6 +423,7 @@ impl RunState {
             tree_cancel_owed: false,
             base: None,
             found: None,
+            parked: None,
             delivered: BTreeSet::new(),
             withdrawn: false,
             next_order: 0,
@@ -462,7 +469,7 @@ impl RunState {
 
     fn oldest_park(&self) -> Option<ReasonCode> {
         let slots = self.current_conditions().filter_map(|c| match c {
-            SlotCondition::Parked { reason, order } => Some((*order, reason.clone())),
+            SlotCondition::Parked { reason, order, .. } => Some((*order, reason.clone())),
             SlotCondition::Held { .. } => None,
         });
         let run = self.condition.iter().map(|c| (c.order, c.reason.clone()));
@@ -470,6 +477,19 @@ impl RunState {
             .chain(run)
             .min_by_key(|(order, _)| *order)
             .map(|(_, reason)| reason)
+    }
+
+    /// Since when the oldest park has stood.
+    pub fn parked_since(&self) -> Option<Timestamp> {
+        let slots = self.current_conditions().filter_map(|c| match c {
+            SlotCondition::Parked { order, since, .. } => Some((*order, *since)),
+            SlotCondition::Held { .. } => None,
+        });
+        let run = self.condition.iter().map(|c| (c.order, c.since));
+        slots
+            .chain(run)
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, since)| since)
     }
 
     /// The conditions on seats' latest attempts.
@@ -568,6 +588,16 @@ impl RunState {
                 }),
                 _ => None,
             })
+    }
+
+    /// The key of the next `tree_refused` input: counted, so a refusal after a resume is a new one.
+    pub fn tree_refused_key(&self) -> String {
+        format!("tree_refused/{}/{}", self.run, self.tree_refusals)
+    }
+
+    /// The key of the next `claim_busy` input: per holder change, so an unchanged holder writes nothing.
+    pub fn claim_busy_key(&self) -> String {
+        format!("claim_busy/{}/{}", self.run, self.claim_changes)
     }
 
     pub fn pass_of(&self, step: &str) -> u32 {

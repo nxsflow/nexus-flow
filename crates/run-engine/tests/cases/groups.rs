@@ -16,6 +16,8 @@ pub mod races;
 pub mod rework;
 #[path = "root.rs"]
 pub mod root;
+#[path = "status.rs"]
+pub mod status;
 #[path = "tree.rs"]
 pub mod tree;
 #[path = "wake.rs"]
@@ -36,6 +38,7 @@ pub const ALL: &[&[Case]] = &[
     races::ALL,
     rework::ALL,
     root::ALL,
+    status::ALL,
     tree::ALL,
     wake::ALL,
     wind_down::ALL,

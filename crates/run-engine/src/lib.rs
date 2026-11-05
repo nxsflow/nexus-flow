@@ -11,7 +11,7 @@ mod input;
 mod state;
 mod status;
 
-pub use decide::decide;
+pub use decide::{decide, decision_key};
 pub use effects::{pending_effects, stop_signal, DeliverBody, Effect, SignalKind};
 pub use evolve::{evolve, UnknownDecision};
 pub use flow::{
@@ -19,7 +19,7 @@ pub use flow::{
     IgnoredTimeout, OnComplete, StepDecl, StepDef, StepKind, Synthesis, WorkingTree, SUPERVISOR,
     SYNTH,
 };
-pub use guard::DELIVERED_PREFIX;
+pub use guard::delivered_key;
 pub use state::{
     grace_timer, run_row, slot_row, slot_timer, AfterStop, ArmedTimer, Asked, FinishedStep,
     GraceFired, Ladder, ParkPhase, Phase, Process, Question, RunCondition, RunState, RunView,

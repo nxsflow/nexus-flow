@@ -42,6 +42,11 @@ cases! {
             vec![(format!("question/{question}"), DeliverBody::Question(question))]
         );
         assert!(s.state.claim_since.is_some());
+        // The question id is the key the event that asked was written under.
+        let asked = s.log.iter().find(|e| {
+            matches!(&e.body, EventBody::Decision(nexus_run_contracts::Decision::Escalated { .. }))
+        });
+        assert_eq!(asked.unwrap().key, format!("escalated/{key}"));
     }
 
     fn the_answer_reaches_the_same_slot_with_resume_after_the_old_process_ended(s) {

@@ -60,7 +60,7 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
             visit,
             attempt,
             members,
-        } => apply_step_started(state, step, *visit, *attempt, members),
+        } => apply_step_started(state, step, *visit, *attempt, members, at),
         Decision::StepFinished {
             step,
             visit,
@@ -158,6 +158,7 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
                 record.condition = Some(SlotCondition::Parked {
                     reason: reason.clone(),
                     order,
+                    since: at,
                 });
             }
         }
@@ -166,6 +167,7 @@ pub(crate) fn apply_decision(state: &mut RunState, decision: &Decision, at: Time
             state.condition = Some(RunCondition {
                 reason: reason.clone(),
                 order,
+                since: at,
             });
         }
         Decision::Finishing { outcome, reason } => {
@@ -270,6 +272,7 @@ fn apply_step_started(
     visit: u32,
     attempt: u32,
     members: &[Handle],
+    at: Timestamp,
 ) {
     if matches!(state.phase, Phase::Queued { .. } | Phase::Created) {
         state.phase = Phase::Running {
@@ -280,7 +283,8 @@ fn apply_step_started(
     state.current_step = Some(step.clone());
     let cause = state.pending_start.take();
     for member in members {
-        let record = new_record(state, step, visit, attempt, member, cause.as_ref());
+        let mut record = new_record(state, step, visit, attempt, member, cause.as_ref());
+        record.created_at = at;
         state.slots.push(record);
     }
 }
@@ -303,6 +307,7 @@ fn new_record(
             attempt,
         },
         state: SlotState::Pending,
+        created_at: Timestamp::from_unix_millis(0),
         resume: declared_resume,
         turn: Vec::new(),
         base_turn: Vec::new(),

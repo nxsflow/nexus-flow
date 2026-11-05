@@ -53,6 +53,7 @@ pub(crate) fn apply_input(state: &mut RunState, input: &Event) {
             state.tree_cancel_owed = false;
         }
         EventBody::TreeParked { outcome } => {
+            state.parked = Some(outcome.clone());
             if let Phase::Finishing { tree, .. } = &mut state.phase {
                 *tree = ParkPhase::Parked {
                     outcome: outcome.clone(),

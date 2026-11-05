@@ -4,7 +4,7 @@ use nexus_run_contracts::status::{
     ClaimStatus, FlowStatus, MemberStatus, Needs, NeedsKind, Owner, RunState as StatusState,
     RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
 };
-use nexus_run_contracts::{Outcome, ReasonCode, Timestamp, CONTRACT_V};
+use nexus_run_contracts::{ReasonCode, Timestamp, CONTRACT_V};
 
 use crate::state::{
     Asked, ParkPhase, Phase, RunState, RunView, SlotCondition, SlotRecord, SlotState,
@@ -46,13 +46,13 @@ pub fn status(state: &RunState, pending_inputs: u32, now: Timestamp) -> RunStatu
             branch: None,
             dirty: None,
             in_flight: None,
-            parked: parked_outcome(state),
+            parked: state.parked.clone(),
             refusal: None,
         },
         steps: step_statuses(state, now),
         pending_inputs,
         waiting_for: waiting_for(state, &view),
-        needs: needs(state, &view, now),
+        needs: needs(state, &view),
         reason: reason(state, &view),
         next_action: next_action(state, &view),
     }
@@ -73,19 +73,10 @@ fn status_state(view: &RunView) -> StatusState {
     }
 }
 
-fn parked_outcome(state: &RunState) -> Option<nexus_run_contracts::ParkOutcome> {
-    match &state.phase {
-        Phase::Finishing {
-            tree: ParkPhase::Parked { outcome },
-            ..
-        } => Some(outcome.clone()),
-        _ => None,
-    }
-}
-
 fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
     let mut steps = Vec::new();
-    for (id, visit) in &state.visits {
+    let order = state.def.steps.iter().map(|step| &step.id);
+    for (id, visit) in order.filter_map(|id| state.visits.get(id).map(|visit| (id, visit))) {
         let members: Vec<MemberStatus> = state
             .slots
             .iter()
@@ -103,7 +94,11 @@ fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
             pass: state.pass_of(id),
             state: if finished.is_some() { "done" } else { "open" }.to_owned(),
             outcome: finished.map(|f| f.outcome),
-            started: None,
+            started: state
+                .slots
+                .iter()
+                .find(|r| r.slot.step == *id && r.slot.visit == *visit)
+                .map(|r| r.created_at),
             ended: finished.map(|f| f.at),
             members,
         });
@@ -174,7 +169,7 @@ fn waiting_for(state: &RunState, view: &RunView) -> Option<String> {
     }
 }
 
-fn needs(state: &RunState, view: &RunView, _now: Timestamp) -> Option<Needs> {
+fn needs(state: &RunState, view: &RunView) -> Option<Needs> {
     match view {
         RunView::NeedsDecision { questions } => {
             let first = state.open_questions().next()?;
@@ -184,10 +179,10 @@ fn needs(state: &RunState, view: &RunView, _now: Timestamp) -> Option<Needs> {
                 since: first.since,
             })
         }
-        RunView::Parked { .. } => Some(Needs {
+        RunView::Parked { .. } => state.parked_since().map(|since| Needs {
             kind: NeedsKind::Person,
             question: None,
-            since: state.claim_since.unwrap_or(Timestamp::from_unix_millis(0)),
+            since,
         }),
         _ => None,
     }
@@ -224,9 +219,6 @@ fn next_action(state: &RunState, view: &RunView) -> Option<String> {
         RunView::Held { .. } | RunView::Parked { .. } => Some(format!(
             "nxc reply --thread {root} - resumes; nxc withdraw --thread {root} ends the run"
         )),
-        RunView::Finished {
-            outcome: Outcome::Withdrawn,
-        } => None,
         _ => None,
     }
 }

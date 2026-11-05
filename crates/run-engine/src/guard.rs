@@ -156,8 +156,12 @@ pub(crate) fn delivery_key(input: &Event) -> Option<&str> {
     input.key.strip_prefix(DELIVERED_PREFIX)
 }
 
-/// The host keys a `delivered` input `delivered/<the effect's key>`, which says which delivery it records.
-pub const DELIVERED_PREFIX: &str = "delivered/";
+const DELIVERED_PREFIX: &str = "delivered/";
+
+/// The key a host enqueues a `delivered` input under, which is what says which delivery it records.
+pub fn delivered_key(effect_key: &str) -> String {
+    format!("{DELIVERED_PREFIX}{effect_key}")
+}
 
 /// The condition a `resume` acts on: the named slot's, or without one the oldest there is (§6.5).
 pub(crate) fn resume_target(state: &RunState, slot: Option<&Slot>) -> Option<usize> {
