@@ -163,6 +163,17 @@
   {
     "at": "2026-11-04T10:00:00.000Z",
     "body": {
+      "kind": "resume_run"
+    },
+    "key": "resume_run/r-01JAAAAAAAAAAAAAAAAAAAAAAA/1",
+    "origin": "cli",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 12,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
       "kind": "tree_refused",
       "reason": {
         "code": "mid_sequence",
@@ -172,7 +183,7 @@
     "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/2",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 12,
+    "seq": 13,
     "v": 1
   },
   {
@@ -186,7 +197,7 @@
     "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/3",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 13,
+    "seq": 14,
     "v": 1
   },
   {
@@ -200,7 +211,7 @@
     "key": "tree_refused/r-01JAAAAAAAAAAAAAAAAAAAAAAA/4",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 14,
+    "seq": 15,
     "v": 1
   },
   {
@@ -220,7 +231,7 @@
     "key": "tree_prepared/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 15,
+    "seq": 16,
     "v": 1
   },
   {
@@ -234,7 +245,7 @@
     "key": "decision/15/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 16,
+    "seq": 17,
     "v": 1
   },
   {
@@ -251,7 +262,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/0",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 17,
+    "seq": 18,
     "v": 1
   },
   {
@@ -263,7 +274,7 @@
     "key": "decision/17/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 18,
+    "seq": 19,
     "v": 1
   },
   {
@@ -279,7 +290,42 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/64",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 19,
+    "seq": 20,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "beat": "blind",
+        "kind": "heartbeat"
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/64-blind",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 21,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "fact": {
+        "kind": "group_lingering",
+        "pids": [
+          4242,
+          4243
+        ]
+      },
+      "kind": "session_fact",
+      "session_key": "r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1"
+    },
+    "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/64-lingering",
+    "origin": "adapter",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 22,
     "v": 1
   },
   {
@@ -295,7 +341,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/96",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 20,
+    "seq": 23,
     "v": 1
   },
   {
@@ -311,7 +357,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/128",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 21,
+    "seq": 24,
     "v": 1
   },
   {
@@ -327,7 +373,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/160",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 22,
+    "seq": 25,
     "v": 1
   },
   {
@@ -348,7 +394,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/192",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 23,
+    "seq": 26,
     "v": 1
   },
   {
@@ -365,7 +411,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/256",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 24,
+    "seq": 27,
     "v": 1
   },
   {
@@ -378,7 +424,7 @@
     "key": "timer/quiet/build/v1/coder/a1/2026-11-04T10:10:00.500Z",
     "origin": "timer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 25,
+    "seq": 28,
     "v": 1
   },
   {
@@ -397,7 +443,7 @@
     "key": "decision/25/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 26,
+    "seq": 29,
     "v": 1
   },
   {
@@ -409,7 +455,7 @@
     "key": "nudged/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/1",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 27,
+    "seq": 30,
     "v": 1
   },
   {
@@ -423,7 +469,7 @@
     "key": "stop_signalled/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/1",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 28,
+    "seq": 31,
     "v": 1
   },
   {
@@ -437,7 +483,7 @@
     "key": "stop_signalled/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/2",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 29,
+    "seq": 32,
     "v": 1
   },
   {
@@ -456,7 +502,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/320",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 30,
+    "seq": 33,
     "v": 1
   },
   {
@@ -475,7 +521,7 @@
     "key": "decision/30/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 31,
+    "seq": 34,
     "v": 1
   },
   {
@@ -494,7 +540,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/384",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 32,
+    "seq": 35,
     "v": 1
   },
   {
@@ -512,7 +558,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/448",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 33,
+    "seq": 36,
     "v": 1
   },
   {
@@ -530,7 +576,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/512",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 34,
+    "seq": 37,
     "v": 1
   },
   {
@@ -550,7 +596,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/576",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 35,
+    "seq": 38,
     "v": 1
   },
   {
@@ -568,7 +614,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/640",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 36,
+    "seq": 39,
     "v": 1
   },
   {
@@ -586,7 +632,7 @@
     "key": "fact/r-01JAAAAAAAAAAAAAAAAAAAAAAA/build/v1/coder/a1/704",
     "origin": "adapter",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 37,
+    "seq": 40,
     "v": 1
   },
   {
@@ -604,7 +650,7 @@
     "key": "decision/37/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 38,
+    "seq": 41,
     "v": 1
   },
   {
@@ -619,7 +665,7 @@
     "key": "reply/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 39,
+    "seq": 42,
     "v": 1
   },
   {
@@ -638,7 +684,7 @@
     "key": "decision/39/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 40,
+    "seq": 43,
     "v": 1
   },
   {
@@ -652,7 +698,7 @@
     "key": "answer/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 41,
+    "seq": 44,
     "v": 1
   },
   {
@@ -666,7 +712,7 @@
     "key": "decision/41/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 42,
+    "seq": 45,
     "v": 1
   },
   {
@@ -681,7 +727,7 @@
     "key": "decision/41/2",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 43,
+    "seq": 46,
     "v": 1
   },
   {
@@ -696,7 +742,7 @@
     "key": "decision/41/3",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 44,
+    "seq": 47,
     "v": 1
   },
   {
@@ -710,7 +756,7 @@
     "key": "answer/m-01JCCCCCCCCCCCCCCCCCCCCCCC",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 45,
+    "seq": 48,
     "v": 1
   },
   {
@@ -727,7 +773,7 @@
     "key": "input/r-01JAAAAAAAAAAAAAAAAAAAAAAA/01JFFFFFFFFFFFFFFFFFFFFFFF",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 46,
+    "seq": 49,
     "v": 1
   },
   {
@@ -740,7 +786,7 @@
     "key": "withdraw/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 47,
+    "seq": 50,
     "v": 1
   },
   {
@@ -753,7 +799,7 @@
     "key": "decision/47/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 48,
+    "seq": 51,
     "v": 1
   },
   {
@@ -766,7 +812,7 @@
     "key": "withdraw/m-01JCCCCCCCCCCCCCCCCCCCCCCC",
     "origin": "cli",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 49,
+    "seq": 52,
     "v": 1
   },
   {
@@ -777,7 +823,7 @@
     "key": "decision/49/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 50,
+    "seq": 53,
     "v": 1
   },
   {
@@ -790,7 +836,7 @@
     "key": "decision/49/2",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 51,
+    "seq": 54,
     "v": 1
   },
   {
@@ -806,7 +852,7 @@
     "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 52,
+    "seq": 55,
     "v": 1
   },
   {
@@ -822,7 +868,7 @@
     "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/own",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 53,
+    "seq": 56,
     "v": 1
   },
   {
@@ -836,7 +882,22 @@
     "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/clean",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 54,
+    "seq": 57,
+    "v": 1
+  },
+  {
+    "at": "2026-11-04T10:00:00.000Z",
+    "body": {
+      "kind": "tree_parked",
+      "outcome": {
+        "branch": "feat/x",
+        "kind": "clean"
+      }
+    },
+    "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/clean-on-branch",
+    "origin": "host",
+    "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "seq": 58,
     "v": 1
   },
   {
@@ -850,7 +911,7 @@
     "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/missing",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 55,
+    "seq": 59,
     "v": 1
   },
   {
@@ -864,7 +925,7 @@
     "key": "tree_parked/r-01JAAAAAAAAAAAAAAAAAAAAAAA/not_held",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 56,
+    "seq": 60,
     "v": 1
   },
   {
@@ -876,7 +937,7 @@
     "key": "delivered/m-01JDDDDDDDDDDDDDDDDDDDDDDD",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 57,
+    "seq": 61,
     "v": 1
   },
   {
@@ -887,7 +948,7 @@
     "key": "claim_released/r-01JAAAAAAAAAAAAAAAAAAAAAAA",
     "origin": "host",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 58,
+    "seq": 62,
     "v": 1
   },
   {
@@ -900,7 +961,7 @@
     "key": "decision/58/1",
     "origin": "reducer",
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
-    "seq": 59,
+    "seq": 63,
     "v": 1
   }
 ]

@@ -53,7 +53,8 @@ const ROWS: &[Row] = &[
         name: "nexus-run-engine",
         workspace: &[CONTRACTS],
         external: &["serde", "serde_json", "sha2"],
-        dev_external: &[],
+        // The compiler's tests read the real channel declarations, which are YAML.
+        dev_external: &["serde_yaml"],
     },
     Row {
         name: "nexus-run-store-sqlite",

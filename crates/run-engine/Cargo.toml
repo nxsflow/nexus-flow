@@ -1,0 +1,16 @@
+[package]
+name = "nexus-run-engine"
+version.workspace = true
+edition = "2021"
+description = "The pure reducer of the nxc run engine: the flow compiler, evolve, decide, pending_effects and the status projection. No I/O, no clock, no threads"
+publish = false
+
+# Its row in `cargo xtask layering check` holds this list. Nothing from the old engine, ever.
+[dependencies]
+nexus-run-contracts = { path = "../run-contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The compiler is tested on the real channel declarations, which are YAML.
+[dev-dependencies]
+serde_yaml = "0.9"

@@ -12,6 +12,9 @@ const SECTION_6_7: &[&str] = &[
     "unknown_session",
     "final_state",
     "already_finishing",
+    // Added by the engine ticket (6j6v.r426): `ignored` needs a code for an input the present state has
+    // no use for. §6.7 names no such code; a finding on the ticket says so.
+    "out_of_state",
     "quiet",
     "hung",
     "start_failed",

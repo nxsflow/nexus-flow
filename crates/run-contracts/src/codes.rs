@@ -59,6 +59,8 @@ closed_code! {
         UnknownSession = "unknown_session",
         FinalState = "final_state",
         AlreadyFinishing = "already_finishing",
+        /// An input that is valid in general and has no use in the run's present state.
+        OutOfState = "out_of_state",
         Quiet = "quiet",
         Hung = "hung",
         StartFailed = "start_failed",

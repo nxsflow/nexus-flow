@@ -12,6 +12,7 @@
     "unknown_session",
     "final_state",
     "already_finishing",
+    "out_of_state",
     "quiet",
     "hung",
     "start_failed",

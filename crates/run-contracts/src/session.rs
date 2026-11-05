@@ -86,6 +86,9 @@ kinded_enum! {
         /// `program` is the fail-closed basename of the first shell word, `<unparsed>`, or the tool's name.
         /// No arguments and no hash, so a secret in an argument never reaches the log.
         PermissionRefused = "permission_refused" { rule: String, program: String },
+        /// The leader is dead and its process group is not empty, so this is NOT an end (§6.4 item 9):
+        /// no restart, resume or release until the group is gone. Added by 6j6v.r426.
+        GroupLingering = "group_lingering" { pids: Vec<u32> },
         Ended = "ended" { cause: EndCause },
     }
     /// A fact kind this version does not know. A known kind with a bad field is refused instead.
@@ -114,7 +117,8 @@ impl<'de> Deserialize<'de> for SessionFact {
 }
 
 /// Signs of life. A `model_output` re-arms `quiet`; a busy period opens and closes around overlapping
-/// calls; `subprocess_moved` says a sample of an open call's process tree changed.
+/// calls; `subprocess_moved` says a sample of an open call's process tree changed; `blind` says this
+/// host cannot sample at all, which is the only case `call_bound` applies to (§6.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeartbeatKind {
@@ -122,6 +126,7 @@ pub enum HeartbeatKind {
     CallsOpen,
     CallsClosed,
     SubprocessMoved,
+    Blind,
 }
 
 /// Why a session ended, as the adapter mapped the raw SDK outcome by its fixture table. The raw message
