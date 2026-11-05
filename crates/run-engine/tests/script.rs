@@ -307,7 +307,10 @@ impl Script {
 
     /// Passes every step on the way until `step` is the one running.
     pub fn pass_until(&mut self, step: &str) -> &mut Self {
-        while self.state.current_step.as_deref() != Some(step) {
+        for _ in 0..16 {
+            if self.state.current_step.as_deref() == Some(step) {
+                return self;
+            }
             let current = self.state.current_step.clone().expect("a step is running");
             if current == "judge" {
                 self.run_fan_out_to_pass("judge");
@@ -315,7 +318,8 @@ impl Script {
                 self.run_step_to_pass(&current);
             }
         }
-        self
+        // A reducer that stopped advancing must turn a case red, never hang it.
+        panic!("the run never reached {step}: {:?}", self.state.view());
     }
 
     /// Whether any input of this script decided exactly this. Only for lines with no relative instant:
