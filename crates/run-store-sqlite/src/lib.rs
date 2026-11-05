@@ -3,8 +3,9 @@
 //!
 //! One connection per process, in WAL, with the `busy_timeout` its opener asks for: 100 ms for the host,
 //! below its 200 ms tick budget, and 5 s for the CLI bridge. A held lock answers `Busy` and never blocks
-//! past that. This store declares no bounds of its own, and no write here depends on one of another
-//! backend.
+//! past that. A stored row that does not decode is `DamagedRow`, named and never quoted; what a host
+//! does about one is the host's decision (6j6v.m8we). This store declares no bounds of its own, and no
+//! write here depends on one of another backend.
 
 mod append;
 mod lease;
@@ -99,21 +100,17 @@ impl RunStore for SqliteRunStore {
     }
 
     fn next_input(&self, run: &RunId) -> StoreResult<Option<Event>> {
-        let row: Option<(String, String)> = self
+        let row: Option<(String, Option<String>)> = self
             .conn()
             .query_row(
                 "SELECT key, body FROM inbox WHERE run = ?1 ORDER BY rowid LIMIT 1",
                 [run.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1).ok())),
             )
             .optional()
             .map_err(db)?;
-        row.map(|(key, body)| {
-            serde_json::from_str(&body).map_err(|_| StoreError::Backend {
-                what: format!("inbox row {key} of {run} does not decode"),
-            })
-        })
-        .transpose()
+        row.map(|(key, body)| decode_event(key, None, body))
+            .transpose()
     }
 
     fn due_timers(&self, now: Timestamp) -> StoreResult<Vec<Timer>> {
@@ -184,18 +181,16 @@ impl RunStore for SqliteRunStore {
     fn load(&self, run: &RunId, from_seq: Seq) -> StoreResult<Vec<Event>> {
         let conn = self.conn();
         let mut statement = conn
-            .prepare("SELECT seq, body FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq")
+            .prepare("SELECT seq, key, body FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq")
             .map_err(db)?;
         let rows = statement
             .query_map(params![run.as_str(), from_seq], |row| {
-                Ok((row.get::<_, Seq>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, Seq>(0)?, row.get(1)?, row.get(2).ok()))
             })
             .map_err(db)?;
         rows.map(|row| {
-            let (seq, body) = row.map_err(db)?;
-            serde_json::from_str(&body).map_err(|_| StoreError::Backend {
-                what: format!("event {seq} of {run} does not decode"),
-            })
+            let (seq, key, body) = row.map_err(db)?;
+            decode_event(key, Some(seq), body)
         })
         .collect()
     }
@@ -203,6 +198,13 @@ impl RunStore for SqliteRunStore {
     fn limits(&self) -> StoreLimits {
         StoreLimits::default()
     }
+}
+
+/// A body that does not read as an event, text or not, is `DamagedRow`: the serde error stays out of it,
+/// because it can quote the row, and an error reaches log lines (PV1).
+fn decode_event(key: Key, seq: Option<Seq>, body: Option<String>) -> StoreResult<Event> {
+    body.and_then(|body| serde_json::from_str(&body).ok())
+        .ok_or(StoreError::DamagedRow { key, seq })
 }
 
 /// A run id the store wrote itself, so one that does not read is a damaged file.

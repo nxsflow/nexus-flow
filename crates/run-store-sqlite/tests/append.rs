@@ -275,3 +275,134 @@ fn the_sqlite_store_declares_no_bounds() {
     let (_dir, store) = fixtures::temp_store();
     assert_eq!(store.limits(), nexus_run_contracts::StoreLimits::default());
 }
+
+#[test]
+fn a_held_write_lock_makes_append_busy_within_the_timeout_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.sqlite");
+    let store = SqliteRunStore::open(&path, std::time::Duration::from_millis(100)).unwrap();
+    let run = fixtures::run_id();
+    let fence = fixtures::owned_run(&store, &run);
+
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let err = store
+        .append(&run, 1, fence, &[fixtures::input(&run, "k")], &[], &[])
+        .unwrap_err();
+    // An upper bound only, and a wide one: the machine may be loaded, and the point is that the call
+    // comes back while the lock is still held rather than waiting it out.
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(err, StoreError::Busy);
+    holder.execute_batch("ROLLBACK").unwrap();
+
+    assert_eq!(fixtures::log_keys(&store, &run).len(), 1, "nothing landed");
+    store
+        .append(&run, 1, fence, &[fixtures::input(&run, "k")], &[], &[])
+        .unwrap();
+}
+
+#[test]
+fn every_writing_call_answers_busy_under_a_held_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.sqlite");
+    let store = fixtures::open(&path);
+    let run = fixtures::run_id();
+    fixtures::owned_run(&store, &run);
+
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        store
+            .enqueue(&run, &fixtures::input(&run, "k"), &[])
+            .unwrap_err(),
+        StoreError::Busy
+    );
+    assert_eq!(
+        store
+            .compare_and_set("thread/x", None, Some(b"v"))
+            .unwrap_err(),
+        StoreError::Busy
+    );
+    // A reader is not blocked by a writer in WAL.
+    assert_eq!(fixtures::log_keys(&store, &run).len(), 1);
+    holder.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn the_opener_decides_how_long_a_call_waits_for_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.sqlite");
+    let wait = std::time::Duration::from_millis(1500);
+    let store = SqliteRunStore::open(&path, wait).unwrap();
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let err = store
+        .compare_and_set("thread/x", None, Some(b"v"))
+        .unwrap_err();
+    // A lower bound, which load can only make safer.
+    assert!(started.elapsed() >= std::time::Duration::from_millis(1000));
+    assert_eq!(err, StoreError::Busy);
+    holder.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn an_append_below_the_runs_max_v_is_refused_and_leaves_the_inbox_alone() {
+    let (_dir, store) = fixtures::temp_store();
+    let run = fixtures::run_id();
+    let fence = fixtures::owned_run(&store, &run);
+    let mut newer = fixtures::input(&run, "newer");
+    newer.v = 2;
+    store.append(&run, 1, fence, &[newer], &[], &[]).unwrap();
+    assert_eq!(store.open_runs().unwrap()[0].max_v, 2);
+
+    let waiting = fixtures::input(&run, "waiting");
+    store.enqueue(&run, &waiting, &[]).unwrap();
+
+    let err = store
+        .append(
+            &run,
+            2,
+            fence,
+            std::slice::from_ref(&waiting),
+            std::slice::from_ref(&waiting.key),
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(err, StoreError::VersionTooOld { max_v: 2 });
+    assert_eq!(store.next_input(&run).unwrap().unwrap().key, "waiting");
+
+    // It also comes before the key check, so a host too old for the run cannot consume its row through
+    // a `DuplicateKey`.
+    let err = store
+        .append(
+            &run,
+            2,
+            fence,
+            &[fixtures::commissioned(&run)],
+            std::slice::from_ref(&waiting.key),
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(err, StoreError::VersionTooOld { max_v: 2 });
+    assert_eq!(store.next_input(&run).unwrap().unwrap().key, "waiting");
+
+    let mut same = fixtures::input(&run, "same");
+    same.v = 2;
+    store.append(&run, 2, fence, &[same], &[], &[]).unwrap();
+}
+
+#[test]
+fn a_commissioned_past_the_first_position_is_refused() {
+    let (_dir, store) = fixtures::temp_store();
+    let run = fixtures::run_id();
+    let fence = fixtures::owned_run(&store, &run);
+    let mut again = fixtures::commissioned(&run);
+    again.key = "commission/another".into();
+    let err = store
+        .append(&run, 1, fence, &[again], &[], &[])
+        .unwrap_err();
+    assert_eq!(err.kind(), "invalid_event");
+    assert_eq!(fixtures::log_keys(&store, &run).len(), 1);
+}

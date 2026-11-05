@@ -120,8 +120,9 @@ fn decode_instant(bytes: &[u8]) -> Option<Timestamp> {
 }
 
 fn decode_lease(key: &str, bytes: &[u8]) -> StoreResult<Lease> {
-    serde_json::from_slice(bytes).map_err(|_| StoreError::Backend {
-        what: format!("{key} does not decode"),
+    serde_json::from_slice(bytes).map_err(|_| StoreError::DamagedRow {
+        key: key.to_owned(),
+        seq: None,
     })
 }
 

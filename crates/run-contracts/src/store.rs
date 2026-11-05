@@ -155,6 +155,10 @@ pub enum StoreError {
     InvalidEvent { what: String },
     /// Anything else the backend reports.
     Backend { what: String },
+    /// A stored row or value that does not decode: a known kind with a bad field among them, which is
+    /// refused rather than read as unknown. `seq` is its position when it is in the log. It carries the
+    /// row's name and nothing of its content, so an input row can still be named in `consume`.
+    DamagedRow { key: Key, seq: Option<Seq> },
 }
 
 impl StoreError {
@@ -176,6 +180,7 @@ impl StoreError {
             Self::UnknownRun => "unknown_run",
             Self::InvalidEvent { .. } => "invalid_event",
             Self::Backend { .. } => "backend",
+            Self::DamagedRow { .. } => "damaged_row",
         }
     }
 }
@@ -195,6 +200,11 @@ impl fmt::Display for StoreError {
             Self::UnknownRun => f.write_str("no such run"),
             Self::InvalidEvent { what } => write!(f, "invalid event: {what}"),
             Self::Backend { what } => write!(f, "store backend: {what}"),
+            Self::DamagedRow { key, seq: None } => write!(f, "{key} does not decode"),
+            Self::DamagedRow {
+                key,
+                seq: Some(seq),
+            } => write!(f, "{key} at seq {seq} does not decode"),
         }
     }
 }
