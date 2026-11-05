@@ -330,6 +330,10 @@ fn storage_golden_is_byte_exact_and_pins_the_errors_and_their_order() {
         StoreError::UnknownRun,
         StoreError::InvalidEvent { what: "w".into() },
         StoreError::Backend { what: "w".into() },
+        StoreError::DamagedRow {
+            key: "input/r/1".into(),
+            seq: None,
+        },
     ];
     let names: Vec<_> = every_error.iter().map(StoreError::kind).collect();
     assert_eq!(golden.store_errors, names);

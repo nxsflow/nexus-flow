@@ -26,9 +26,11 @@ pub type StoreResult<T> = Result<T, StoreError>;
 ///
 /// Rules every backend keeps: CAS keys in one call are distinct; no `append` carries a CAS on an
 /// `owner/*` key, because the lease changes only through `compare_and_set`; an `owner/*` key is never
-/// deleted and its epoch never restarts (`Protected`); only `commissioned` creates a run
-/// (`UnknownRun` otherwise). Errors follow [`StoreError::PRECEDENCE`], so every backend reports the
-/// same error for the same state.
+/// deleted and its epoch never restarts (`Protected`); an `effect/<run>/*` value records the epoch that
+/// wrote it, and a write under any other epoch than the run's current one is `Fenced`; only
+/// `commissioned` creates a run (`UnknownRun` otherwise). The store assigns `seq`, whatever an event
+/// carries, and `finished` leaves no timer of its run armed. Errors follow [`StoreError::PRECEDENCE`],
+/// so every backend reports the same error for the same state.
 pub trait RunStore: Send + Sync {
     /// Puts an INPUT into the run's inbox with no fence and no sequence, atomically with `cas`. A key
     /// already in the inbox OR the log is `Enqueued::Duplicate` and writes nothing.
@@ -147,7 +149,7 @@ pub enum StoreError {
     VersionTooOld { max_v: u32 },
     /// The store is locked. Retried next tick, never counted against the input.
     Busy,
-    /// A delete of an `owner/*` key.
+    /// A delete of an `owner/*` key, a write that would lower its epoch, or one riding in a list.
     Protected { key: Key },
     /// An input other than `commissioned` for a run the store does not know.
     UnknownRun,
@@ -155,6 +157,10 @@ pub enum StoreError {
     InvalidEvent { what: String },
     /// Anything else the backend reports.
     Backend { what: String },
+    /// A stored row or value that does not decode: a known kind with a bad field among them, which is
+    /// refused rather than read as unknown. `seq` is its position when it is in the log. It carries the
+    /// row's name and nothing of its content, so an input row can still be named in `consume`.
+    DamagedRow { key: Key, seq: Option<Seq> },
 }
 
 impl StoreError {
@@ -176,6 +182,7 @@ impl StoreError {
             Self::UnknownRun => "unknown_run",
             Self::InvalidEvent { .. } => "invalid_event",
             Self::Backend { .. } => "backend",
+            Self::DamagedRow { .. } => "damaged_row",
         }
     }
 }
@@ -195,6 +202,11 @@ impl fmt::Display for StoreError {
             Self::UnknownRun => f.write_str("no such run"),
             Self::InvalidEvent { what } => write!(f, "invalid event: {what}"),
             Self::Backend { what } => write!(f, "store backend: {what}"),
+            Self::DamagedRow { key, seq: None } => write!(f, "{key} does not decode"),
+            Self::DamagedRow {
+                key,
+                seq: Some(seq),
+            } => write!(f, "{key} at seq {seq} does not decode"),
         }
     }
 }

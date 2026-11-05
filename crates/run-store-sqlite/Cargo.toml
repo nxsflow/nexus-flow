@@ -1,0 +1,16 @@
+[package]
+name = "nexus-run-store-sqlite"
+version.workspace = true
+edition = "2021"
+description = "The nxc run engine's coordination store on SQLite: the run log, the inbox, the timer index and the per-run owner lease"
+publish = false
+
+# Its row in `cargo xtask layering check` holds this list. Nothing from the old engine, ever.
+[dependencies]
+nexus-run-contracts = { path = "../run-contracts" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

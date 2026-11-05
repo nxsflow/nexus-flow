@@ -65,6 +65,7 @@
     "protected",
     "unknown_run",
     "invalid_event",
-    "backend"
+    "backend",
+    "damaged_row"
   ]
 }
