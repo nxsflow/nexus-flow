@@ -253,8 +253,8 @@ pub struct SendToReceipt {
     /// [`queued_behind`]/[`queue_position`] already make there: a fan-out has one receipt for N
     /// triggers and there is no field on it that could say "member 3 of 5 did not spawn" (see
     /// `open_declared_channel_and_fan_out`'s own comment) — a channel branch that returns `Ok` at
-    /// all already means every member's [`orchestration::trigger_role`] call succeeded, because that
-    /// verb still propagates `Err` synchronously on this path (untouched by this ticket). `false` on
+    /// all means every member was started, waits in the queue, or is being retried after a start
+    /// that failed on load, which `warnings` names (nxf 6j6v.1q0h). `false` on
     /// the CONVERSATION path, where no role is ever addressed at all — nothing was asked to spawn,
     /// so nothing did.
     ///
@@ -560,8 +560,10 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             queue_position: None,
             expects: receipt.board.expects,
             deadline: receipt.board.deadline.clone(),
-            // `channel_open`'s fan-out propagates `Err` synchronously on a member trigger FAILURE,
-            // so reaching `Ok` here means no member failed to start.
+            // `channel_open`'s fan-out propagates `Err` synchronously on a member trigger failure
+            // that waiting cannot change. One that waiting can change is on `warnings` below and is
+            // retried (nxf 6j6v.1q0h), so reaching `Ok` here means every member was started, is
+            // being retried, or waits in the queue.
             //
             // **It does not mean every member is running**, and this comment used to say it did
             // (corrected under nxf 6j6v.1xw1). A member whose trigger loses the working-tree race is
@@ -584,8 +586,8 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             // explaining that the channel path had nothing to report — which was the defect, not the
             // design: the board's declared `timeout:` is armed inside that call, and a caller whose
             // window was never armed read `warnings: []` over a round nothing would ever release.
-            // Real fan-out FAILURES still propagate as `Err` here, unchanged; what travels is what
-            // is genuinely best-effort.
+            // A failure waiting cannot change still propagates as `Err` here; what travels is what
+            // is genuinely best-effort, and since nxf 6j6v.1q0h a member's start that is retried.
             // **Plus the state of the machine itself** (nxf 6j6v.0j12): a fan-out whose windows
             // were all armed successfully still reports nothing running to honour them, and a
             // channel that declares no `timeout:` at all now reports it too — where before it was
