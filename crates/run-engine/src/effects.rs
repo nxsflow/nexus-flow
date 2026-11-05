@@ -94,7 +94,7 @@ pub fn pending_effects(state: &RunState) -> Vec<Effect> {
         Phase::Queued { .. } => vec![Effect::TakeClaim { workspace }],
         Phase::Running { tree } => running_effects(state, *tree, workspace),
         Phase::Finishing { tree, outcome, .. } => {
-            finishing_effects(state, tree, *outcome, workspace)
+            finishing_effects(state, tree, outcome, workspace)
         }
     }
 }
@@ -150,7 +150,7 @@ fn stop_effect(record: &SlotRecord, session_key: SessionKey) -> Option<Effect> {
 fn finishing_effects(
     state: &RunState,
     tree: &ParkPhase,
-    occasion: Outcome,
+    occasion: &Outcome,
     workspace: String,
 ) -> Vec<Effect> {
     let stops: Vec<Effect> = state
@@ -164,7 +164,7 @@ fn finishing_effects(
     if *tree == ParkPhase::Unparked {
         return vec![Effect::ParkTree {
             workspace,
-            occasion,
+            occasion: occasion.clone(),
         }];
     }
     let deliveries = deliver_effects(state);
@@ -197,7 +197,7 @@ pub(crate) fn owed_deliveries(state: &RunState) -> Vec<(Key, DeliverBody)> {
             outcome,
             tree: ParkPhase::Parked { outcome: parked },
             ..
-        } => result_deliveries(state, *outcome, parked),
+        } => result_deliveries(state, outcome, parked),
         Phase::Running { .. } => state
             .open_questions()
             .map(|q| {
@@ -215,7 +215,7 @@ pub(crate) fn owed_deliveries(state: &RunState) -> Vec<(Key, DeliverBody)> {
 
 fn result_deliveries(
     state: &RunState,
-    outcome: Outcome,
+    outcome: &Outcome,
     parked: &ParkOutcome,
 ) -> Vec<(Key, DeliverBody)> {
     let run = &state.run;
@@ -234,8 +234,9 @@ fn result_deliveries(
         },
     );
     let mut deliveries = vec![result];
-    if outcome != Outcome::Withdrawn {
-        // Only a commit made, or local commits ahead of the remote: a clean branch owes no notice.
+    if *outcome != Outcome::Withdrawn {
+        // Only a commit made, or local commits ahead of the remote: a clean branch owes no notice, and
+        // neither does an outcome this version cannot read.
         if let ParkOutcome::Committed { branch, commit }
         | ParkOutcome::OnOwnBranch { branch, commit } = parked
         {

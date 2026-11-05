@@ -1,10 +1,11 @@
-//! The closed code lists of the run log (§6.7): `ReasonCode`, and `GitReason` beside it. One
-//! definition produces the enum, its wire form and `ALL`, so the published list cannot drift from the
-//! enum. A writer only ever uses the named codes. A code from a newer version reads as `Unknown(raw)`
-//! and survives a round trip; it is in no list.
+//! The closed lists of the contracts: `ReasonCode` and `GitReason` here (§6.7), and every other enum the
+//! log, the envelope or status carries beside its own contract. One definition produces the enum, its
+//! wire form and `ALL`, so the published list cannot drift from the enum. A writer only ever uses the
+//! named values. A value from a newer version reads as `Unknown` and survives a round trip; it is in no
+//! list. What a reader does with one is in `tests/evolution.rs`: a decision holding it refuses ownership
+//! ([`crate::Event::is_unknown_decision`]), and an input holding it folds by the rule of its enum.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
+/// A list of plain words on the wire.
 macro_rules! closed_code {
     ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident = $wire:literal,)+ }) => {
         $(#[$meta])*
@@ -34,19 +35,69 @@ macro_rules! closed_code {
             }
         }
 
-        impl Serialize for $name {
-            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 s.serialize_str(self.as_str())
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                Ok(Self::parse(&String::deserialize(d)?))
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let text = <String as serde::Deserialize>::deserialize(d)?;
+                Ok(Self::parse(&text))
             }
         }
     };
 }
+pub(crate) use closed_code;
+
+/// A list of objects told apart by the tag field `$tag`. `remote = "Self"` makes the derives inherent
+/// functions, so the trait impls can look at the tag first: a known one goes to its typed reader alone
+/// and its field error reaches the caller, and any other is kept whole.
+macro_rules! tolerant_tagged {
+    (
+        $(#[$meta:meta])*
+        $name:ident, tag = $tag:literal {
+            $($(#[$vmeta:meta])* $variant:ident = $wire:literal $({ $($field:tt)* })?,)+
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+        #[serde(remote = "Self", tag = $tag)]
+        pub enum $name {
+            $($(#[$vmeta])* #[serde(rename = $wire)] $variant $({ $($field)* })?,)+
+            /// A value this version does not know, kept whole as it was read.
+            #[serde(skip)]
+            Unknown($crate::events::UnknownBody),
+        }
+
+        impl $name {
+            /// Every value a writer of this version may use, in declaration order.
+            pub const ALL: &'static [&'static str] = &[$($wire),+];
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                match self {
+                    Self::Unknown(unknown) => serde::Serialize::serialize(unknown, s),
+                    known => Self::serialize(known, s),
+                }
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let (kind, raw) = $crate::events::read_tag(d, $tag)?;
+                if Self::ALL.contains(&kind.as_str()) {
+                    Self::deserialize(raw).map_err(serde::de::Error::custom)
+                } else {
+                    Ok(Self::Unknown($crate::events::UnknownBody { kind, raw }))
+                }
+            }
+        }
+    };
+}
+pub(crate) use tolerant_tagged;
 
 closed_code! {
     /// Why a decision stopped or skipped something (ST4), and how a session ended. `tree_refused` is the

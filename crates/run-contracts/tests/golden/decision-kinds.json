@@ -20,6 +20,31 @@
         "finished",
         "ignored"
       ],
+      "decision_values": {
+        "outcome": [
+          "delivered",
+          "withdrawn",
+          "accepted",
+          "failed"
+        ],
+        "step_outcome": [
+          "pass",
+          "needs_rework",
+          "escalated"
+        ],
+        "timer_purpose": [
+          "root_deadline",
+          "start_deadline",
+          "quiet",
+          "confirm",
+          "call_bound",
+          "subprocess_idle",
+          "stop_grace",
+          "wind_down",
+          "hold_retry",
+          "tree_window"
+        ]
+      },
       "v": 1
     }
   ]

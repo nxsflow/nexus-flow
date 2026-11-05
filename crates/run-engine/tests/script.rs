@@ -674,6 +674,7 @@ fn cause_code(cause: &EndCause) -> &'static str {
         EndCause::PermissionRefused { .. } => "permission_refused",
         EndCause::StoppedByHost => "stopped_by_host",
         EndCause::Lost => "lost",
+        EndCause::Unknown(_) => "unknown",
     }
 }
 

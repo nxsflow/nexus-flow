@@ -1,7 +1,8 @@
 //! Unit tests of what the cases cannot reach through the harness: `decide` on a decision handed as input.
 
 use nexus_run_contracts::{
-    Decision, Event, EventBody, Origin, ReasonCode, RunId, Slot, Timestamp, UnknownBody,
+    Decision, Event, EventBody, Origin, Outcome, ReasonCode, RunId, Slot, StepOutcome,
+    TimerPurpose, Timestamp, UnknownBody,
 };
 
 use super::{decide, decision_key};
@@ -66,6 +67,63 @@ fn an_unknown_decision_refuses_to_fold_naming_its_kind_and_seq() {
             seq: 9
         })
     );
+}
+
+/// A newer writer's value in a decision this version knows the kind of. Folding past it would diverge as
+/// silently as an unknown kind, so it refuses the same way, and an input's unknown value does not.
+#[test]
+fn a_known_decision_holding_an_unknown_value_refuses_to_fold_naming_its_kind_and_seq() {
+    let run = RunId::parse("r-01JAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+    let later = "a_later_value".to_owned();
+    let at = Timestamp::from_unix_millis(0);
+    for (decision, kind) in [
+        (
+            Decision::StepFinished {
+                step: "s".into(),
+                visit: 1,
+                outcome: StepOutcome::Unknown(later.clone()),
+            },
+            "step_finished",
+        ),
+        (
+            Decision::Finishing {
+                outcome: Outcome::Unknown(later.clone()),
+                reason: None,
+            },
+            "finishing",
+        ),
+        (
+            Decision::Finished {
+                outcome: Outcome::Unknown(later.clone()),
+                reason: None,
+            },
+            "finished",
+        ),
+        (
+            Decision::TimerSet {
+                timer: "t".into(),
+                fire_at: at,
+                purpose: TimerPurpose::Unknown(later.clone()),
+            },
+            "timer_set",
+        ),
+    ] {
+        let event = Event::new(
+            run.clone(),
+            9,
+            at,
+            "k",
+            Origin::Reducer,
+            EventBody::Decision(decision),
+        );
+        assert_eq!(
+            evolve(RunState::initial(run.clone(), def()), &event),
+            Err(UnknownDecision {
+                kind: kind.into(),
+                seq: 9
+            })
+        );
+    }
 }
 
 #[test]

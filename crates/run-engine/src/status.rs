@@ -14,8 +14,8 @@ use crate::state::{
 /// never claims a reply arrived before the owner folded it.
 pub fn status(state: &RunState, pending_inputs: u32, now: Timestamp) -> RunStatus {
     let view = state.view();
-    let outcome = match view {
-        RunView::Finished { outcome } => Some(outcome),
+    let outcome = match &view {
+        RunView::Finished { outcome } => Some(outcome.clone()),
         _ => None,
     };
     RunStatus {
@@ -93,7 +93,7 @@ fn step_statuses(state: &RunState, now: Timestamp) -> Vec<StepStatus> {
             visit: *visit,
             pass: state.pass_of(id),
             state: if finished.is_some() { "done" } else { "open" }.to_owned(),
-            outcome: finished.map(|f| f.outcome),
+            outcome: finished.map(|f| f.outcome.clone()),
             started: state
                 .slots
                 .iter()

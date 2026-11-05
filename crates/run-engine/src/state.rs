@@ -124,7 +124,7 @@ pub struct FinishedStep {
     pub at: Timestamp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArmedTimer {
     pub fire_at: Timestamp,
     pub purpose: TimerPurpose,
@@ -433,8 +433,16 @@ impl RunState {
     /// The projection of §6.3. See the table at the top of this file.
     pub fn view(&self) -> RunView {
         match &self.phase {
-            Phase::Finished { outcome, .. } => return RunView::Finished { outcome: *outcome },
-            Phase::Finishing { outcome, .. } => return RunView::Finishing { outcome: *outcome },
+            Phase::Finished { outcome, .. } => {
+                return RunView::Finished {
+                    outcome: outcome.clone(),
+                }
+            }
+            Phase::Finishing { outcome, .. } => {
+                return RunView::Finishing {
+                    outcome: outcome.clone(),
+                }
+            }
             Phase::Queued { behind } => {
                 return RunView::Queued {
                     behind: behind.clone(),
@@ -506,7 +514,9 @@ impl RunState {
 
     pub fn outcome(&self) -> Option<Outcome> {
         match &self.phase {
-            Phase::Finishing { outcome, .. } | Phase::Finished { outcome, .. } => Some(*outcome),
+            Phase::Finishing { outcome, .. } | Phase::Finished { outcome, .. } => {
+                Some(outcome.clone())
+            }
             _ => None,
         }
     }
@@ -619,8 +629,8 @@ pub(crate) fn slot_suffix(slot: &Slot) -> String {
 }
 
 /// The id of a slot's timer: the first one's `start_deadline/build/v1/coder/a1`.
-pub fn slot_timer(purpose: TimerPurpose, slot: &Slot) -> String {
-    format!("{}/{}", purpose_word(purpose), slot_suffix(slot))
+pub fn slot_timer(purpose: &TimerPurpose, slot: &Slot) -> String {
+    format!("{}/{}", purpose.as_str(), slot_suffix(slot))
 }
 
 /// The id of the `nth` grace of a stop: `stop_grace/1/...` or `stop_grace/2/...`.
@@ -640,21 +650,6 @@ pub(crate) fn grace_nth(timer: &str) -> Option<u8> {
 
 pub const ROOT_DEADLINE_TIMER: &str = "root_deadline";
 pub const TREE_WINDOW_TIMER: &str = "tree_window";
-
-fn purpose_word(purpose: TimerPurpose) -> &'static str {
-    match purpose {
-        TimerPurpose::RootDeadline => "root_deadline",
-        TimerPurpose::StartDeadline => "start_deadline",
-        TimerPurpose::Quiet => "quiet",
-        TimerPurpose::Confirm => "confirm",
-        TimerPurpose::CallBound => "call_bound",
-        TimerPurpose::SubprocessIdle => "subprocess_idle",
-        TimerPurpose::StopGrace => "stop_grace",
-        TimerPurpose::WindDown => "wind_down",
-        TimerPurpose::HoldRetry => "hold_retry",
-        TimerPurpose::TreeWindow => "tree_window",
-    }
-}
 
 /// The slot a timer id names, by its last four segments. Ids hold no other `/`, by the compiler's rule.
 pub(crate) fn timer_slot(timer: &str) -> Option<Slot> {

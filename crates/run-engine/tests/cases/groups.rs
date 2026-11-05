@@ -20,6 +20,8 @@ pub mod root;
 pub mod status;
 #[path = "tree.rs"]
 pub mod tree;
+#[path = "unknown_values.rs"]
+pub mod unknown_values;
 #[path = "wake.rs"]
 pub mod wake;
 #[path = "wind_down.rs"]
@@ -40,6 +42,7 @@ pub const ALL: &[&[Case]] = &[
     root::ALL,
     status::ALL,
     tree::ALL,
+    unknown_values::ALL,
     wake::ALL,
     wind_down::ALL,
     withdraw::ALL,

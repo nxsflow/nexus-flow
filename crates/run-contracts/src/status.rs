@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::codes::ReasonCode;
+use crate::codes::{closed_code, tolerant_tagged, ReasonCode};
 use crate::events::{Base, Outcome, ParkOutcome, TreeRefusal};
 use crate::ids::{Handle, MessageId, RunId, Seq, SessionKey, StepId, Timestamp};
 
@@ -45,23 +45,20 @@ pub struct FlowStatus {
     pub hash: String,
 }
 
-/// The run's state. `NeedsDecision`, `Held` and `Parked` are projections of slot facts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "name", rename_all = "snake_case")]
-pub enum RunState {
-    Created,
-    /// `behind` is a v2 run of this workspace, never a v1 thread.
-    Queued {
-        behind: Option<RunId>,
-    },
-    Running,
-    NeedsDecision,
-    Held {
-        until: Timestamp,
-    },
-    Parked,
-    Finishing,
-    Finished,
+tolerant_tagged! {
+    /// The run's state. `NeedsDecision`, `Held` and `Parked` are projections of slot facts. An unknown one
+    /// is rendered as it reads.
+    RunState, tag = "name" {
+        Created = "created",
+        /// `behind` is a v2 run of this workspace, never a v1 thread.
+        Queued = "queued" { behind: Option<RunId> },
+        Running = "running",
+        NeedsDecision = "needs_decision",
+        Held = "held" { until: Timestamp },
+        Parked = "parked",
+        Finishing = "finishing",
+        Finished = "finished",
+    }
 }
 
 /// The run's claim on its directory. It has no time limit and ends with the run.
@@ -142,15 +139,16 @@ pub struct SlotLiveness {
     pub verdict: Verdict,
 }
 
-/// `working`: a fact within `quiet_after`. `quiet`: a declared wait, or no fact yet inside the window.
-/// `suspect`: nudged, waiting for confirmation. `hung`: the ladder is exhausted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    Working,
-    Quiet,
-    Suspect,
-    Hung,
+closed_code! {
+    /// `working`: a fact within `quiet_after`. `quiet`: a declared wait, or no fact yet inside the window.
+    /// `suspect`: nudged, waiting for confirmation. `hung`: the ladder is exhausted. An unknown one is
+    /// rendered as it reads.
+    Verdict {
+        Working = "working",
+        Quiet = "quiet",
+        Suspect = "suspect",
+        Hung = "hung",
+    }
 }
 
 /// What the run needs from a person. A hold or a park has no question id.
@@ -161,9 +159,10 @@ pub struct Needs {
     pub since: Timestamp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NeedsKind {
-    Decision,
-    Person,
+closed_code! {
+    /// An unknown one is rendered as it reads.
+    NeedsKind {
+        Decision = "decision",
+        Person = "person",
+    }
 }

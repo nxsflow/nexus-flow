@@ -12,8 +12,7 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use nexus_run_contracts::{
-    Appended, Cas, Enqueued, Epoch, Event, EventBody, Key, Origin, RunId, Seq, StoreError,
-    StoreResult,
+    Appended, Cas, Enqueued, Epoch, Event, EventBody, Key, RunId, Seq, StoreError, StoreResult,
 };
 
 use crate::lease::{check_epoch_keeps_rising, check_owner_value, current_epoch, is_owner_key};
@@ -130,7 +129,7 @@ pub(crate) fn enqueue(
             run.as_str(),
             event.key,
             event.at.unix_millis(),
-            origin_text(event.origin)?,
+            event.origin.as_str(),
             wire(&waiting_input)?,
         ],
     )
@@ -342,7 +341,7 @@ fn insert_event(tx: &Transaction<'_>, event: &Event, seq: Seq) -> StoreResult<()
             event.at.unix_millis(),
             event.v,
             event.key,
-            origin_text(event.origin)?,
+            event.origin.as_str(),
             wire(&positioned)?,
         ],
     )
@@ -353,11 +352,4 @@ fn insert_event(tx: &Transaction<'_>, event: &Event, seq: Seq) -> StoreResult<()
 pub(crate) fn wire(event: &Event) -> StoreResult<String> {
     serde_json::to_string(event)
         .map_err(|_| invalid(format!("event {} cannot be written", event.key)))
-}
-
-pub(crate) fn origin_text(origin: Origin) -> StoreResult<String> {
-    serde_json::to_value(origin)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| invalid("an origin is a word".to_owned()))
 }

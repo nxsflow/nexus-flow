@@ -74,6 +74,7 @@ pub(crate) fn ignored_reason(state: &RunState, input: &Event) -> Option<ReasonCo
             ..
         } => finishing.or(out_of_state(state.open_questions().any(|q| {
             q.id == *question
+                && !matches!(disposition, Disposition::Unknown(_))
                 && !(*disposition == Disposition::Accept
                     && matches!(q.asked, Asked::Escalation { .. }))
         }))),
@@ -193,7 +194,7 @@ pub(crate) fn is_deferred(
     let Some(armed) = state.timers.get(timer) else {
         return false;
     };
-    let destructive = match armed.purpose {
+    let destructive = match &armed.purpose {
         TimerPurpose::StartDeadline
         | TimerPurpose::Confirm
         | TimerPurpose::StopGrace
@@ -203,16 +204,18 @@ pub(crate) fn is_deferred(
         TimerPurpose::Quiet
         | TimerPurpose::SubprocessIdle
         | TimerPurpose::CallBound
-        | TimerPurpose::HoldRetry => false,
+        | TimerPurpose::HoldRetry
+        | TimerPurpose::Unknown(_) => false,
     };
     let late = at.unix_millis() - fire_at.unix_millis();
     destructive && late > RunState::millis(state.policy.wake_jump)
 }
-/// A refusal no retry can clear: a person has to move the directory (§5).
+/// A refusal no retry can clear: a person has to move the directory (§5). One this version does not know
+/// is treated as one, so a retry never runs blind.
 pub(crate) fn is_permanent(reason: &TreeRefusal) -> bool {
     matches!(
         reason,
-        TreeRefusal::NotARepository | TreeRefusal::ForeignDirectory
+        TreeRefusal::NotARepository | TreeRefusal::ForeignDirectory | TreeRefusal::Unknown(_)
     )
 }
 

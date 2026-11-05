@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::events::{kinded_enum, read_kind, UnknownBody};
+use crate::codes::{closed_code, tolerant_tagged};
+use crate::events::{kinded_enum, read_tag, UnknownBody};
 use crate::ids::{MessageId, SessionKey, Timestamp};
 
 /// The only variables a session's environment may carry.
@@ -107,7 +108,7 @@ impl Serialize for SessionFact {
 
 impl<'de> Deserialize<'de> for SessionFact {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let (kind, raw) = read_kind(d)?;
+        let (kind, raw) = read_tag(d, "kind")?;
         if Self::KINDS.contains(&kind.as_str()) {
             Self::deserialize(raw).map_err(serde::de::Error::custom)
         } else {
@@ -116,31 +117,32 @@ impl<'de> Deserialize<'de> for SessionFact {
     }
 }
 
-/// Signs of life. A `model_output` re-arms `quiet`; a busy period opens and closes around overlapping
-/// calls; `subprocess_moved` says a sample of an open call's process tree changed; `blind` says this
-/// host cannot sample at all, which is the only case `call_bound` applies to (§6.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeartbeatKind {
-    ModelOutput,
-    CallsOpen,
-    CallsClosed,
-    SubprocessMoved,
-    Blind,
+closed_code! {
+    /// Signs of life. A `model_output` re-arms `quiet`; a busy period opens and closes around overlapping
+    /// calls; `subprocess_moved` says a sample of an open call's process tree changed; `blind` says this
+    /// host cannot sample at all, which is the only case `call_bound` applies to (§6.5). An unknown one is
+    /// a fact like any other (§6.5) and re-arms nothing else.
+    HeartbeatKind {
+        ModelOutput = "model_output",
+        CallsOpen = "calls_open",
+        CallsClosed = "calls_closed",
+        SubprocessMoved = "subprocess_moved",
+        Blind = "blind",
+    }
 }
 
-/// Why a session ended, as the adapter mapped the raw SDK outcome by its fixture table. The raw message
-/// never reaches the log.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
-pub enum EndCause {
-    TurnComplete,
-    Exit { status: Option<i32> },
-    UsageLimit { resets_at: Option<Timestamp> },
-    ProviderUnavailable,
-    PermissionRefused { rule: String, program: String },
-    StoppedByHost,
-    Lost,
+tolerant_tagged! {
+    /// Why a session ended, as the adapter mapped the raw SDK outcome by its fixture table. The raw message
+    /// never reaches the log. An unknown one takes the `exit` row of §6.5: restart, then park.
+    EndCause, tag = "code" {
+        TurnComplete = "turn_complete",
+        Exit = "exit" { status: Option<i32> },
+        UsageLimit = "usage_limit" { resets_at: Option<Timestamp> },
+        ProviderUnavailable = "provider_unavailable",
+        PermissionRefused = "permission_refused" { rule: String, program: String },
+        StoppedByHost = "stopped_by_host",
+        Lost = "lost",
+    }
 }
 
 /// What a backend can do. The engine uses only what is declared.

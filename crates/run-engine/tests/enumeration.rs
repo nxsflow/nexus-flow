@@ -29,8 +29,8 @@ fn drive_to_finished(s: &mut Script) -> Vec<StopKind> {
                 kind,
                 nth,
             }) => {
-                signals.push(*kind);
-                let (key, kind, nth) = (session_key.clone(), *kind, *nth);
+                signals.push(kind.clone());
+                let (key, kind, nth) = (session_key.clone(), kind.clone(), *nth);
                 s.input(s.stop_signalled(&key, nth, kind));
                 s.input(s.ended(&key, EndCause::StoppedByHost));
             }
@@ -293,6 +293,7 @@ fn assert_next_rung(example: &SlotExample) {
             // The table's remedy is immediate: with one attempt budgeted, it parked.
             EndCause::TurnComplete
             | EndCause::Exit { .. }
+            | EndCause::Unknown(_)
             | EndCause::Lost
             | EndCause::PermissionRefused { .. }
             | EndCause::StoppedByHost => {

@@ -1,0 +1,77 @@
+{
+  "disposition": [
+    "continue",
+    "accept"
+  ],
+  "end_cause": [
+    "turn_complete",
+    "exit",
+    "usage_limit",
+    "provider_unavailable",
+    "permission_refused",
+    "stopped_by_host",
+    "lost"
+  ],
+  "heartbeat_kind": [
+    "model_output",
+    "calls_open",
+    "calls_closed",
+    "subprocess_moved",
+    "blind"
+  ],
+  "needs_kind": [
+    "decision",
+    "person"
+  ],
+  "origin": [
+    "cli",
+    "host",
+    "adapter",
+    "reducer",
+    "timer"
+  ],
+  "park_outcome": [
+    "committed",
+    "on_own_branch",
+    "clean",
+    "missing",
+    "not_held"
+  ],
+  "run_state": [
+    "created",
+    "queued",
+    "running",
+    "needs_decision",
+    "held",
+    "parked",
+    "finishing",
+    "finished"
+  ],
+  "sequence_kind": [
+    "merge",
+    "rebase",
+    "cherry_pick",
+    "revert",
+    "bisect"
+  ],
+  "stop_kind": [
+    "term",
+    "kill"
+  ],
+  "tree_refusal": [
+    "not_a_repository",
+    "foreign_directory",
+    "mid_sequence",
+    "git"
+  ],
+  "verdict": [
+    "working",
+    "quiet",
+    "suspect",
+    "hung"
+  ],
+  "withdrawn_by": [
+    "requester",
+    "owner"
+  ]
+}
