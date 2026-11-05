@@ -16,7 +16,7 @@ use nexus_run_contracts::{
     StoreResult,
 };
 
-use crate::lease::{check_owner_write, current_epoch, is_owner_key};
+use crate::lease::{check_epoch_keeps_rising, check_owner_value, current_epoch, is_owner_key};
 use crate::{db, EFFECT_PREFIX};
 
 pub(crate) fn append(
@@ -146,6 +146,10 @@ pub(crate) fn immediate(conn: &mut Connection) -> StoreResult<Transaction<'_>> {
 
 /// One compare-and-set. A failed comparison is `CasFailed`, and the caller's return rolls back.
 pub(crate) fn apply_cas(tx: &Transaction<'_>, item: &Cas) -> StoreResult<()> {
+    let owner_key = is_owner_key(&item.key);
+    if owner_key {
+        check_owner_value(&item.key, item.to.as_deref())?;
+    }
     if item.key.starts_with(EFFECT_PREFIX) {
         if let Some(value) = &item.to {
             crate::lease::check_effect_write(tx, &item.key, value)?;
@@ -162,8 +166,8 @@ pub(crate) fn apply_cas(tx: &Transaction<'_>, item: &Cas) -> StoreResult<()> {
             key: item.key.clone(),
         });
     }
-    if is_owner_key(&item.key) {
-        check_owner_write(&item.key, current.as_deref(), item.to.as_deref())?;
+    if owner_key {
+        check_epoch_keeps_rising(&item.key, current.as_deref(), item.to.as_deref())?;
     }
     match &item.to {
         Some(value) => tx.execute(

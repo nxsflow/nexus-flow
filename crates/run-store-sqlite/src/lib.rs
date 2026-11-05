@@ -22,7 +22,7 @@ use nexus_run_contracts::{
     StoreLimits, StoreResult, Timer, Timestamp,
 };
 
-pub use lease::{Lease, LEASE_EXPIRY};
+pub use lease::{EffectEntry, Lease, LEASE_EXPIRY};
 
 const EFFECT_PREFIX: &str = "effect/";
 
