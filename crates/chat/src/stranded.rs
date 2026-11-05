@@ -87,6 +87,7 @@ pub(crate) const STRANDED_DDL: &str = "
         subprocess_cpu_units INTEGER,
         subprocess_moved_at TEXT,
         subprocess_since    TEXT,
+        subprocess_lineup   INTEGER,
         PRIMARY KEY(thread, role)
     );
     CREATE INDEX IF NOT EXISTS owed_starts_by_session ON owed_starts(session);
@@ -252,6 +253,11 @@ pub(crate) fn add_ladder_columns(conn: &rusqlite::Connection) -> rusqlite::Resul
             "owed_starts",
             "subprocess_since",
             "ALTER TABLE owed_starts ADD COLUMN subprocess_since TEXT;",
+        ),
+        (
+            "owed_starts",
+            "subprocess_lineup",
+            "ALTER TABLE owed_starts ADD COLUMN subprocess_lineup INTEGER;",
         ),
         (
             "session_map",
@@ -467,6 +473,8 @@ pub(crate) struct OwedStart {
     /// The open call the sample was taken under (its `since`): a sample of another call is no
     /// prior sample (review of pass 1, Integrity #1).
     pub subprocess_since: Option<String>,
+    /// Which processes the last sample found ([`nxs_service::process::SubprocessSample::lineup`]).
+    pub subprocess_lineup: Option<u64>,
 }
 
 /// **One row the one-time backfill writes** (nxf 6j6v.kgfn) — an open coordinated slot opened before
@@ -637,7 +645,8 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StrandedRecord> {
 const OWED_COLS: &str = "thread, role, session, trigger_clock, triggered, coordinator, \
      backfilled, attempts, recovering_until, recovery_started_at, asked_at, last_progress_at, \
      abandoned, abandoned_at, confirmations, rest_total_secs, confirmed_until, stop_requested_at, \
-     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at, subprocess_since";
+     stop_signals, subprocess_count, subprocess_cpu_units, subprocess_moved_at, subprocess_since, \
+     subprocess_lineup";
 
 fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
     let triggered: i64 = r.get(4)?;
@@ -671,6 +680,9 @@ fn owed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwedStart> {
             .and_then(|n| u64::try_from(n).ok()),
         subprocess_moved_at: r.get(21)?,
         subprocess_since: r.get(22)?,
+        subprocess_lineup: r
+            .get::<_, Option<i64>>(23)?
+            .and_then(|n| u64::try_from(n).ok()),
     })
 }
 
@@ -802,7 +814,8 @@ impl ChatStore {
         let n = conn.execute(
             "UPDATE owed_starts SET asked_at = NULL, stop_requested_at = NULL, stop_signals = 0,
                     confirmed_until = NULL, subprocess_count = NULL, subprocess_cpu_units = NULL,
-                    subprocess_moved_at = NULL, subprocess_since = NULL, trigger_clock = ?3,
+                    subprocess_moved_at = NULL, subprocess_since = NULL,
+                    subprocess_lineup = NULL, trigger_clock = ?3,
                     triggered = 1
               WHERE role = ?1 AND session = ?2",
             params![role, session, now],
@@ -3244,6 +3257,7 @@ mod tests {
             "subprocess_cpu_units",
             "subprocess_moved_at",
             "subprocess_since",
+            "subprocess_lineup",
         ] {
             assert!(
                 column_exists(&conn, "owed_starts", column).unwrap(),
@@ -3638,7 +3652,8 @@ mod tests {
                 "UPDATE owed_starts SET attempts = 1, asked_at = '{T1}', recovery_started_at = '{T1}',
                         stop_requested_at = '{T1}', stop_signals = 2, confirmed_until = '{T1}',
                         confirmations = 2, rest_total_secs = 600, subprocess_count = 3,
-                        subprocess_cpu_units = 99, subprocess_moved_at = '{T1}'"
+                        subprocess_cpu_units = 99, subprocess_moved_at = '{T1}',
+                        subprocess_lineup = 7"
             ))
             .unwrap();
         assert_eq!(s.reset_for_a_new_process("ws/pm", "m-p", T2).unwrap(), 2);
@@ -3653,9 +3668,10 @@ mod tests {
                     &row.confirmed_until,
                     row.subprocess_count,
                     row.subprocess_cpu_units,
-                    &row.subprocess_moved_at
+                    &row.subprocess_moved_at,
+                    row.subprocess_lineup
                 ),
-                (&None, &None, 0, &None, None, None, &None),
+                (&None, &None, 0, &None, None, None, &None, None),
                 "{thread}"
             );
             assert_eq!(

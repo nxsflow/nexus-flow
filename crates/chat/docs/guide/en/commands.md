@@ -645,8 +645,8 @@ quiet, ends without answering or never starts, the coordinator acts before anybo
 nudges the running session once it has shown no life of its own on that slot for 10 minutes,
 stops it when five more pass without any, continues the ended one in the same session, or starts
 the slot afresh with its original task. Inside a tool call, or after a turn that ended to wait for
-background work, the processes its calls started count as life: 30 minutes without movement take the
-place of the 10, and work still moving after 3 hours is escalated as hung. A nudge counts no attempt; a continuation or a fresh start
+background work, the processes its calls started count as life: CPU they spend and any new process among them is
+movement, 30 minutes without movement take the place of the 10, and work still moving after 3 hours is escalated as hung. A nudge counts no attempt; a continuation or a fresh start
 does — three in all, and by default a session found dead again after one is escalated — and one
 recovery runs two to six hours at most. `recovery` says how far it got (`attempt`, `of`, `action`,
 `at`, `last_activity`, `next_look`), `stale` reads `false` beside it, and the line says it in place

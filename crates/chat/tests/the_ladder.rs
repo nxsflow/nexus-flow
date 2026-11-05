@@ -636,9 +636,18 @@ impl Team {
 
     /// What `session`'s open call samples from now on.
     fn sample(&self, session: &str, count: u32, cpu_units: u64) {
+        self.sample_of(session, count, cpu_units, 0);
+    }
+
+    /// …with the processes themselves named too: their identity sum.
+    fn sample_of(&self, session: &str, count: u32, cpu_units: u64, lineup: u64) {
         self.worker.samples.lock().unwrap().insert(
             session.to_string(),
-            Some(SubprocessSample { count, cpu_units }),
+            Some(SubprocessSample {
+                count,
+                cpu_units,
+                lineup,
+            }),
         );
     }
 
@@ -3916,6 +3925,22 @@ fn a_subprocess_that_works_tens_of_milliseconds_a_minute_keeps_the_call_alive() 
         team.tick(&at(s), &thread);
     }
     assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+}
+
+/// **A poll loop on a host that counts CPU coarsely** (nxf 6j6v.k6nf): `sleep 60; gh ...` shows one
+/// shell and one `sleep` at every look, and a Linux clock tick is longer than what either spends, so
+/// count and CPU counter both stand still. Only the processes are new. That is movement: a new
+/// process started under the call is the plainest work there is.
+#[test]
+fn a_process_replaced_by_a_new_one_is_movement_though_count_and_cpu_stand_still() {
+    let team = team();
+    let (thread, session) = a_coder_inside_one_call(&team);
+    for (i, s) in (120..=60 + 2_400).step_by(60).enumerate() {
+        team.sample_of(&session, 2, 500, 9_000 + i as u64);
+        team.tick(&at(s), &thread);
+    }
+    assert!(team.worker.asks().is_empty(), "{:?}", team.worker.asks());
+    assert!(team.log(&thread, "coder").is_empty());
 }
 
 /// A sample that freezes is nudged at the look at its last movement plus 30 minutes exactly.

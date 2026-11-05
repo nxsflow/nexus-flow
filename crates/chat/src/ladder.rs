@@ -848,8 +848,9 @@ impl ChatStore {
     }
 
     /// **Store one sample of the open call's subprocesses** and answer `M`: the instant the sample
-    /// last moved. Any change of `(count, cpu)` is a movement, and so is the first sample with a
-    /// process in it; a call that never had one under it has no `M` (design 8nx4 section 1 (b)).
+    /// last moved. Any change of `(count, cpu, lineup)` is a movement, and so is the first sample
+    /// with a process in it; a call that never had one under it has no `M` (design 8nx4 section 1
+    /// (b)). A row sampled before the lineup was kept reads one movement at its next look, once.
     /// The sample is the CALL's (`call_since`, the call's open instant): a sample stored under an
     /// earlier call is no prior sample, so a call with nothing under it never inherits the `M` of
     /// the call before it (review of pass 1, Integrity #1).
@@ -865,13 +866,21 @@ impl ChatStore {
         let same_call = row.subprocess_since.as_deref() == Some(call_since);
         let (before, prior_moved_at) = if same_call {
             (
-                (row.subprocess_count, row.subprocess_cpu_units),
+                (
+                    row.subprocess_count,
+                    row.subprocess_cpu_units,
+                    row.subprocess_lineup,
+                ),
                 row.subprocess_moved_at.clone(),
             )
         } else {
-            ((None, None), None)
+            ((None, None, None), None)
         };
-        let after = (Some(sample.count), Some(sample.cpu_units));
+        let after = (
+            Some(sample.count),
+            Some(sample.cpu_units),
+            Some(sample.lineup),
+        );
         let had_a_process = before.0.is_some_and(|c| c > 0);
         let moved = before != after && (sample.count > 0 || had_a_process);
         let moved_at = if moved {
@@ -881,7 +890,7 @@ impl ChatStore {
         };
         self.connection().execute(
             "UPDATE owed_starts SET subprocess_count = ?3, subprocess_cpu_units = ?4,
-                    subprocess_moved_at = ?5, subprocess_since = ?6
+                    subprocess_moved_at = ?5, subprocess_since = ?6, subprocess_lineup = ?7
               WHERE thread = ?1 AND role = ?2",
             params![
                 thread,
@@ -889,7 +898,8 @@ impl ChatStore {
                 i64::from(sample.count),
                 i64::try_from(sample.cpu_units).unwrap_or(i64::MAX),
                 moved_at,
-                call_since
+                call_since,
+                i64::try_from(sample.lineup).unwrap_or(i64::MAX)
             ],
         )?;
         Ok(moved_at)

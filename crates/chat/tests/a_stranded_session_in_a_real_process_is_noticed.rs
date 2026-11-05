@@ -1155,6 +1155,47 @@ fn a_patient_poll_loop_under_an_ended_turn_is_neither_asked_nor_stopped() {
     assert_eq!(escalations_in(root, &slot), 0);
 }
 
+/// **A poll loop whose rounds spend no measurable CPU** (nxf 6j6v.k6nf): the shape of `sleep 60; gh
+/// ...` on Linux, where neither the shell nor its next `sleep` spends one whole clock tick, so count
+/// and counter read the same at every look. One round passes between looks, forced by ending the
+/// `sleep` the loop is in, so the red does not depend on timing. Every look must see the new process.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_poll_loop_whose_rounds_spend_no_measurable_cpu_is_not_stopped() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let (thread, slot, child) =
+        a_turn_ended_over(root, "sh -c 'while :; do sleep 600; done' & wait");
+    let the_sleep = || {
+        nxs_service::process::descendants_with_start(child.id())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .find(|&pid| {
+                nxs_service::process::descendants_with_start(pid).is_some_and(|c| c.is_empty())
+            })
+    };
+    let idle = nexus_chat::ladder::SUBPROCESS_IDLE_SECS;
+    let mut secs = 61 + nexus_chat::ladder::SILENCE_SECS;
+    let mut replaced = true;
+    for _ in 0..4 {
+        let Some(old) = the_sleep() else {
+            replaced = false;
+            break;
+        };
+        // SAFETY: as in `kill_tree` — a plain pid under this test's own stand-in, signalled once.
+        unsafe { libc::kill(old as libc::pid_t, libc::SIGKILL) };
+        replaced &= within(30, || the_sleep().is_some_and(|new| new != old));
+        tick(root, &at(secs), &thread);
+        secs += idle - 1;
+    }
+    let rows = rungs(root);
+    kill_tree(child);
+    assert!(replaced, "the loop did not start its next round");
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(escalations_in(root, &slot), 0);
+}
+
 /// **The opposite error, with real children**: a job that hangs — a process that blocks and never
 /// spends CPU again — is stopped at its last movement plus thirty-five minutes, and not before.
 /// `origin/main` acts at the silence's ten minutes instead.
