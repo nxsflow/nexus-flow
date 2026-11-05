@@ -110,7 +110,10 @@ fn append_with_consume_deletes_the_row_in_its_transaction() {
         )
         .unwrap_err();
     assert_eq!(err, StoreError::SeqMismatch);
-    assert_eq!(inbox_keys(&path, &run), [commission.key.clone()]);
+    assert_eq!(
+        inbox_keys(&path, &run),
+        std::slice::from_ref(&commission.key)
+    );
 
     let list = [Cas {
         key: "thread/x".into(),
@@ -130,7 +133,7 @@ fn append_with_consume_deletes_the_row_in_its_transaction() {
     assert_eq!(err.kind(), "cas_failed");
     assert_eq!(
         inbox_keys(&path, &run),
-        [commission.key.clone()],
+        std::slice::from_ref(&commission.key),
         "a rolled-back append gives the row back"
     );
 

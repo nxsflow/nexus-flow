@@ -130,7 +130,9 @@ fn two_threads_only_the_holder_appends_and_the_other_takes_over_after_it_stops_r
                     Err(other) => panic!("{other:?}"),
                 }
                 let guess = fixtures::input(&run, "a-guessed-fence");
-                let fenced = retry_busy(|| host_b.append(&run, 0, 0, &[guess.clone()], &[], &[]));
+                let fenced = retry_busy(|| {
+                    host_b.append(&run, 0, 0, std::slice::from_ref(&guess), &[], &[])
+                });
                 assert_eq!(fenced.unwrap_err(), StoreError::Fenced);
                 if a_stopped.load(Ordering::SeqCst) {
                     // The holder is gone and has stopped moving the clock, so it moves past the last
