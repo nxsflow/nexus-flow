@@ -149,7 +149,7 @@ impl RunStore for SqliteRunStore {
         let conn = self.conn();
         let mut statement = conn
             .prepare(
-                "SELECT run, workspace_id, last_seq, max_v, commissioned_at FROM runs
+                "SELECT run, workspace_id, tenant, last_seq, max_v, commissioned_at FROM runs
                  WHERE finished = 0 ORDER BY commissioned_at, run",
             )
             .map_err(db)?;
@@ -158,17 +158,19 @@ impl RunStore for SqliteRunStore {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Seq>(2)?,
-                    row.get::<_, u32>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Seq>(3)?,
+                    row.get::<_, u32>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(db)?;
         rows.map(|row| {
-            let (run, workspace_id, last_seq, max_v, commissioned_at) = row.map_err(db)?;
+            let (run, workspace_id, tenant, last_seq, max_v, commissioned_at) = row.map_err(db)?;
             Ok(RunRow {
                 run: stored_run_id(&run)?,
                 workspace_id,
+                tenant,
                 finished: false,
                 last_seq,
                 max_v,

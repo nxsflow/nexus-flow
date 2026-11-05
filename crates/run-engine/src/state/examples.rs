@@ -245,6 +245,7 @@ impl Walk {
         walk.input(EventBody::Commissioned {
             run,
             workspace_id: "workspace".to_owned(),
+            tenant: nexus_run_contracts::LOCAL_TENANT.to_owned(),
             flow: FlowRef {
                 hash: "sha256:example".to_owned(),
             },

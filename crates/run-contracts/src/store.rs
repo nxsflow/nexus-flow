@@ -112,12 +112,13 @@ pub struct Timer {
     pub purpose: TimerPurpose,
 }
 
-/// A run the store knows. `workspace_id` is opaque and immutable, set by `commissioned`; `max_v` is
-/// the highest `v` ever appended to the run.
+/// A run the store knows. `workspace_id` and `tenant` are opaque and immutable, set by `commissioned`;
+/// `max_v` is the highest `v` ever appended to the run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRow {
     pub run: RunId,
     pub workspace_id: String,
+    pub tenant: String,
     pub finished: bool,
     pub last_seq: Seq,
     pub max_v: u32,

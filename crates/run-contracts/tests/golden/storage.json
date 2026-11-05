@@ -47,6 +47,7 @@
     "last_seq": 17,
     "max_v": 1,
     "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+    "tenant": "local",
     "workspace_id": "6j6v"
   },
   "store_error_precedence": [

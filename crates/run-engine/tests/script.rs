@@ -384,6 +384,7 @@ impl Script {
         EventBody::Commissioned {
             run: self.state.run.clone(),
             workspace_id: WORKSPACE.to_owned(),
+            tenant: nexus_run_contracts::LOCAL_TENANT.to_owned(),
             flow: FlowRef {
                 hash: self.def.flow_ref().hash,
             },

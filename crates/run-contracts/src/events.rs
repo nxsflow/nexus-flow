@@ -14,6 +14,9 @@ use crate::policy::LivenessPolicy;
 use crate::session::SessionFact;
 use crate::CONTRACT_V;
 
+/// The tenant of a run in slice 1: "the single tenant of this store", never a real binding.
+pub const LOCAL_TENANT: &str = "local";
+
 closed_code! {
     /// Who appended an event, set by the host from where the input really came and never taken from a
     /// payload (M6). It carries no person. An event folds by its kind, and an unknown origin is never
@@ -215,6 +218,11 @@ kinded_enum! {
         Commissioned = "commissioned" {
             run: RunId,
             workspace_id: String,
+            /// Who this run belongs to: required, opaque, immutable, and no person. In slice 1 it is
+            /// [`LOCAL_TENANT`]. A later real value is never a stream id or a person id in clear (PV1).
+            /// A run with tenant `local` does not leave its machine: component 9 maps it at the boundary
+            /// or refuses to sync it, and a mapping binds the synced copy and rewrites no log.
+            tenant: String,
             flow: FlowRef,
             policy: LivenessPolicy,
             root_thread: MessageId,

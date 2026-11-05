@@ -10,7 +10,7 @@ use nexus_run_contracts::{
     Appended, Capabilities, Decision, Disposition, DrainedFact, Enqueued, Event, EventBody,
     FlowRef, Key, Liveness, LivenessPolicy, MessageId, Origin, ReasonCode, RunId, RunRow,
     RunStatus, Secs, SessionFact, Slot, StartOutcome, StartSpec, StoreError, StoreLimits, Timer,
-    Timestamp, CONTRACTS_STATUS, ENV_ALLOWLIST,
+    Timestamp, CONTRACTS_STATUS, ENV_ALLOWLIST, LOCAL_TENANT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -162,6 +162,22 @@ fn root_opened_carries_the_thread_and_the_root_message() {
     assert!(opened.0.starts_with("m-"));
     assert!(opened.1.starts_with("m-"));
     assert_ne!(opened.0, opened.1);
+}
+
+/// Required from the first run, so no reader carries an "absent" branch; `local` is the slice-1 value.
+#[test]
+fn commissioned_and_the_run_row_carry_the_tenant_of_this_store() {
+    let tenant = events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::Commissioned { tenant, .. } => Some(tenant),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(tenant, LOCAL_TENANT);
+    assert_eq!(LOCAL_TENANT, "local");
+    let storage: StorageGolden = assert_byte_exact("storage.json");
+    assert_eq!(storage.run_row.tenant, LOCAL_TENANT);
 }
 
 #[test]

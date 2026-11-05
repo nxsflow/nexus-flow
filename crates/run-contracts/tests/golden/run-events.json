@@ -25,6 +25,7 @@
       "requester": "owner",
       "root_thread": "m-01JCCCCCCCCCCCCCCCCCCCCCCC",
       "run": "r-01JAAAAAAAAAAAAAAAAAAAAAAA",
+      "tenant": "local",
       "workspace_id": "6j6v"
     },
     "key": "commission/m-01JCCCCCCCCCCCCCCCCCCCCCCC",

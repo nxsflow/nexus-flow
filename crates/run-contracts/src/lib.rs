@@ -27,6 +27,7 @@ pub use codes::{GitReason, ReasonCode, REMEDY_TABLE};
 pub use events::{
     Base, Decision, Disposition, Event, EventBody, FlowRef, Origin, Outcome, ParkOutcome,
     SequenceKind, StepOutcome, StopKind, TimerPurpose, TreeRefusal, UnknownBody, WithdrawnBy,
+    LOCAL_TENANT,
 };
 pub use ids::{
     Epoch, Handle, Key, MessageId, RunId, Secs, Seq, SessionKey, Slot, StepId, Timestamp,
