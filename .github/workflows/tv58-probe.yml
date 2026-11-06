@@ -19,7 +19,9 @@ jobs:
         working-directory: agent-sidecar
         run: npm ci
       - name: Probe
-        run: bash .github/tv58-probe/run.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out" 300 7
+        run: bash .github/tv58-probe/run.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out" 60 1
+      - name: Probe, second round
+        run: bash .github/tv58-probe/run2.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out2"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -29,3 +31,5 @@ jobs:
             ${{ runner.temp }}/out/**/ladder.log
             ${{ runner.temp }}/out/samples.jsonl
             ${{ runner.temp }}/out/analysis.txt
+            ${{ runner.temp }}/out2/**/sdk.jsonl
+            ${{ runner.temp }}/out2/**/ladder.log

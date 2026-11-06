@@ -12,6 +12,7 @@ print "leader $pid\n";
 my $reaped = 0; my $t0 = time;
 sleep 1 while (time - $t0 < $life);
 st("before", $pid); st("before", -$pid); group($pid,"before");
+if ($ENV{LADDER}) { print "LADDER $ENV{LADDER}\n"; kill('KILL', $ENV{LADDER} eq 'kill-leader' ? $pid : -$pid); sleep 3; st("after", $pid); st("after", -$pid); my $w = waitpid($pid, WNOHANG); print "waitpid -> $w\n"; st("reaped", $pid); st("reaped", -$pid); print "survivors:\n"; print map { "   $_" } grep { /sleep 600|$pid/ } `ps -A -o pid=,ppid=,pgid=,stat=,command= | cut -c1-170`; print "DONE\n"; exit 0; }
 print "SIGTERM group\n"; kill('TERM', -$pid); 
 for my $w (1,4,15) { sleep $w; st("term+$w unreaped", $pid); st("term+$w unreaped", -$pid); group($pid,"term+$w"); }
 my $w = waitpid($pid, WNOHANG); print "waitpid WNOHANG -> $w status=$?\n"; $reaped = 1 if $w == $pid;

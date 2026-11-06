@@ -10,7 +10,8 @@ async function* input() {
   yield { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: prompt } };
   await new Promise((r) => stop.signal.addEventListener("abort", r)); // the input stays open, as the sidecar's does
 }
-const options = { abortController: stop, cwd: dir, permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
+if (process.env.PROBE_CLOSE_AT_RESULT) { /* closes the input at the first result, as the sidecar does */ }
+const options = { abortController: stop, cwd: dir, ...(process.env.PROBE_PERM === "default" ? { permissionMode: "default" } : { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true }),
   includePartialMessages: true, forwardSubagentText: true, settingSources: [], model: process.env.PROBE_MODEL || "claude-haiku-4-5",
   env: process.env, stderr: (s) => log({ stderr: s.slice(0, 300) }) };
 if (mcp) options.mcpServers = { burner: { type: "stdio", command: "node", args: [mcp] } };
