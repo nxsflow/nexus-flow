@@ -373,8 +373,17 @@ jobs:
       # bar, and nextest's number is if anything flattered — it ran third, on a page cache the
       # other two had just warmed. So the switch is declined WITH a number, and the trap it would
       # have carried (nextest silently runs no doctests) never gets bought.
+      #
+      # `--no-fail-fast`, and the steps after it run when this one went red (6j6v.jmxk). A red used to
+      # stop `cargo test` at its first failing target and skip everything behind it, so one sporadic
+      # test left the rest of the gate unmeasured: run 41940495057 stopped at the facade's `engine`
+      # target, and the targets after it and the purge-seam step below never ran. "Ran" is spelled as
+      # this step's outcome rather than `always()` on purpose: when an EARLIER step of the job is what
+      # went red, this one is `skipped`, and so is everything that asks about it. What it costs: a
+      # red job now takes as long as a green one, on a full run with the release profile in it.
       - name: Tests (debug)
-        run: cargo test --all
+        id: tests_debug
+        run: cargo test --all --no-fail-fast
 
       # The purge's test seams (6j6v.f6yb) exist only behind the `test-seams` feature, which only
       # this package's own tests turn on — so every test above ran a relay WITH them. This builds
@@ -382,6 +391,7 @@ jobs:
       # purge with every NXF_RELAY_TEST_PURGE_* variable set: it must exit 0 with the target empty.
       # The release workflow runs the same script against the release artefact (MF-4).
       - name: The shipped nxf-relay carries no purge test seam
+        if: ${{ !cancelled() && (steps.tests_debug.outcome == 'success' || steps.tests_debug.outcome == 'failure') }}
         run: |
           cargo build -p nxs-server --bin nxf-relay --release
           bash crates/server/scripts/purge-seam-inertness.sh target/release/nxf-relay
@@ -404,8 +414,8 @@ jobs:
       # no path from a PR to a published artifact that skips it — the skipped run is the one on a
       # tree whose release profile is re-checked minutes later, before it can go anywhere.
       - name: Tests (release)
-        if: needs.lint.outputs.full == 'true'
-        run: cargo test --all --release
+        if: ${{ !cancelled() && needs.lint.outputs.full == 'true' && (steps.tests_debug.outcome == 'success' || steps.tests_debug.outcome == 'failure') }}
+        run: cargo test --all --release --no-fail-fast
 
   # The PLATFORM-GATED halves of the sync daemon (6j6v.4t9p). Every job above runs on
   # ubuntu-latest, which means `#[cfg(target_os = "macos")]` and `#[cfg(not(unix))]` code was
@@ -670,8 +680,10 @@ jobs:
       - name: Build the shipped nxs/nxf binaries the relay E2E drives
         run: cargo build -p nxs
 
+      # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: Postgres parity tests (debug)
-        run: cargo test -p nxs-server --features postgres
+        id: tests_debug
+        run: cargo test -p nxs-server --features postgres --no-fail-fast
 
       # Staggered with the same rule as `Tests (release)` above (6j6v.6e0e): the release profile is a
       # push-to-`main`/maintenance-line gate (and a full dispatch's), not a per-PR one. Kept uniform on purpose — a rule that
@@ -681,12 +693,13 @@ jobs:
       # E2E resolves `target/release/nxf` and would otherwise abort on a binary that is not there.
       # Guarded by the same condition as the step it feeds, so a pull request pays nothing for it.
       - name: Build the shipped nxs/nxf binaries (release)
-        if: needs.lint.outputs.full == 'true'
+        id: build_release
+        if: ${{ !cancelled() && needs.lint.outputs.full == 'true' && (steps.tests_debug.outcome == 'success' || steps.tests_debug.outcome == 'failure') }}
         run: cargo build -p nxs --release
 
       - name: Postgres parity tests (release)
-        if: needs.lint.outputs.full == 'true'
-        run: cargo test -p nxs-server --features postgres --release
+        if: ${{ !cancelled() && steps.build_release.outcome == 'success' }}
+        run: cargo test -p nxs-server --features postgres --release --no-fail-fast
 
   # The `postgres-parity` job above runs against a stock `postgres:16`, which has SSL **off** —
   # so `sslmode=prefer` negotiates plaintext there and the entire `tokio-postgres-rustls`/`ring`
@@ -744,30 +757,35 @@ jobs:
           docker exec pgtls psql -U postgres -tAc "show ssl;" | grep -qx on
 
       # Two invocations, because the trust anchor is process-global env (see the suite's header).
+      # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: TLS handshake succeeds and the session is really encrypted
+        id: tls_handshake
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
           NXF_RELAY_PG_TLS_MODE: ca
         run: |
           export NXF_RELAY_PG_CA_FILE="$RUNNER_TEMP/pgtls/ca.crt"
-          cargo test -p nxs-server --features postgres --test postgres_tls -- --nocapture
+          cargo test -p nxs-server --features postgres --no-fail-fast --test postgres_tls -- --nocapture
 
       - name: An untrusted server certificate is refused
+        id: tls_refused
+        if: ${{ !cancelled() && (steps.tls_handshake.outcome == 'success' || steps.tls_handshake.outcome == 'failure') }}
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
           NXF_RELAY_PG_TLS_MODE: no-ca
-        run: cargo test -p nxs-server --features postgres --test postgres_tls -- --nocapture
+        run: cargo test -p nxs-server --features postgres --no-fail-fast --test postgres_tls -- --nocapture
 
       # The rest of the Postgres surface, driven over a REAL TLS connection rather than the
       # plaintext one `postgres-parity` uses — same suites, different transport.
       - name: Parity + runtime-context suites over TLS
+        if: ${{ !cancelled() && (steps.tls_refused.outcome == 'success' || steps.tls_refused.outcome == 'failure') }}
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
         run: |
           export NXF_RELAY_PG_CA_FILE="$RUNNER_TEMP/pgtls/ca.crt"
           # `purge_pg`: the purge dials its own connection through `tls_pg`; here it is proven
           # over a real TLS session (MF-7 — the plaintext job above cannot).
-          cargo test -p nxs-server --features postgres \
+          cargo test -p nxs-server --features postgres --no-fail-fast \
             --test postgres_parity --test postgres_in_runtime --test purge_pg
 
       - name: Stop Postgres
@@ -945,17 +963,18 @@ jobs:
       # job is meant to become a required check, and a required check that flakes is worse than a
       # slow one.
       - name: Storage parity against the managed endpoint
+        id: managed_parity
         if: steps.proof.outputs.mode == 'managed'
         run: |
-          cargo test -p nxs-server --features postgres \
+          cargo test -p nxs-server --features postgres --no-fail-fast \
             --test postgres_parity --test postgres_in_runtime -- --test-threads=1
 
       # …and the whole path: two workspaces, the shipped relay binary, an item travelling A -> B,
       # and a relay restart in the middle. Same test the service-container job runs.
       - name: Two workspaces, the shipped relay, an item travelling A → B
-        if: steps.proof.outputs.mode == 'managed'
+        if: ${{ !cancelled() && steps.proof.outputs.mode == 'managed' && (steps.managed_parity.outcome == 'success' || steps.managed_parity.outcome == 'failure') }}
         run: |
-          cargo test -p nxs-server --features postgres --test relay_e2e \
+          cargo test -p nxs-server --features postgres --no-fail-fast --test relay_e2e \
             -- --nocapture --test-threads=1
 
       # The other half of the owner's rule: when something above failed, say WHICH KIND of failure
@@ -1021,8 +1040,10 @@ jobs:
       - name: Build the shipped nxs/nxf binaries the purge acceptance drives
         run: cargo build -p nxs
 
+      # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: DynamoDB Local tests (debug)
-        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb
+        id: tests_debug
+        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --no-fail-fast
 
       # The board-fold purge's test seams (6j6v.dbmd) exist only behind `nxs-fold-ddb`'s
       # `test-seams` feature, which only its own tests turn on. This builds `nxf-fold-purge` the
@@ -1030,19 +1051,21 @@ jobs:
       # stream on DynamoDB Local with every NXF_FOLD_TEST_PURGE_* variable set: it must exit 0 with
       # the partition empty. The release workflow runs the same script on the tagged commit (MF-2).
       - name: The shipped nxf-fold-purge carries no purge test seam
+        if: ${{ !cancelled() && (steps.tests_debug.outcome == 'success' || steps.tests_debug.outcome == 'failure') }}
         run: |
           cargo build -p nxs-fold-ddb --bin nxf-fold-purge --features dynamodb --release
           bash crates/fold-ddb/scripts/fold-purge-seam-inertness.sh target/release/nxf-fold-purge "$NXF_RELAY_DDB_ENDPOINT"
 
       # The release-profile run of the purge acceptance needs a current release `nxs` too.
       - name: Build the shipped nxs/nxf binaries (release)
-        if: needs.lint.outputs.full == 'true'
+        id: build_release
+        if: ${{ !cancelled() && needs.lint.outputs.full == 'true' && (steps.tests_debug.outcome == 'success' || steps.tests_debug.outcome == 'failure') }}
         run: cargo build -p nxs --release
 
       # Same staggering as the other two release steps (6j6v.6e0e).
       - name: DynamoDB Local tests (release)
-        if: needs.lint.outputs.full == 'true'
-        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release
+        if: ${{ !cancelled() && steps.build_release.outcome == 'success' }}
+        run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --release --no-fail-fast
 
   # The relay as a consumer installs it (6j6v.907m): foundations' hosted-engine image runs
   # `cargo install --locked --git … nxs-server --features dynamodb --bin nxf-relay`. `cargo install`
