@@ -258,9 +258,13 @@ pub fn bound(tree: GitTree) -> GitTree {
     tree
 }
 
-/// The result of what is in flight. The ceiling only ends a hung test; no assertion rests on it.
+/// What ends a hung test, and nothing else: no assertion rests on it. So it stands far above what a loaded machine
+/// takes, and above every bound a test runs a real child under.
+pub const HANG_CEILING: Duration = Duration::from_secs(600);
+
+/// The result of what is in flight.
 pub fn finished(tree: &GitTree) -> TreeResult {
-    let until = Instant::now() + Duration::from_secs(120);
+    let until = Instant::now() + HANG_CEILING;
     loop {
         if let Some((_, result)) = tree.poll() {
             return result;
@@ -270,9 +274,9 @@ pub fn finished(tree: &GitTree) -> TreeResult {
     }
 }
 
-/// Waits for what a process elsewhere does. The ceiling only ends a hung test.
+/// Waits for what a process or a thread elsewhere does, however long a loaded machine takes.
 pub fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let limit = Instant::now() + Duration::from_secs(60);
+    let limit = Instant::now() + HANG_CEILING;
     while !done() {
         assert!(Instant::now() < limit, "never happened: {what}");
         std::thread::sleep(Duration::from_millis(5));

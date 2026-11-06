@@ -7,6 +7,8 @@
 
 mod common;
 
+use common::tree::until;
+
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -109,17 +111,6 @@ impl Bench {
             spawning: false,
             locks_before: Vec::new(),
         }
-    }
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !done() {
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "not observed within a minute: {what}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -634,13 +625,14 @@ fn an_operation_blocking_longer_than_the_lease_leaves_the_tick_going() {
         rig.has(&second, "claim_busy"),
         "and waits visibly behind the first"
     );
-    for _ in 0..30 {
+    // The worker is a thread: when it gets to the result past the delay is the machine's to say.
+    until("the result folded", || {
         rig.host.tick(rig.now());
         epochs.push(rig.store.lease(&first).unwrap().unwrap().epoch);
         expires.push(rig.store.lease(&first).unwrap().unwrap().expires_at);
         rig.clock.advance(1_000);
-        std::thread::sleep(Duration::from_millis(1));
-    }
+        rig.has(&first, "tree_prepared")
+    });
     assert!(
         epochs.iter().all(|epoch| *epoch == 1),
         "the lease never changed hands"
@@ -777,13 +769,10 @@ fn a_takeover_with_an_operation_in_flight_kills_the_child_and_folds_one_result()
     assert!(SystemProcesses.is_alive(pid, &start));
 
     rig.clock.advance(31_000);
-    for _ in 0..50 {
+    until("the new owner's prepare folded", || {
         second.tick(rig.now());
-        if rig.has(&run, "tree_prepared") {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+        rig.has(&run, "tree_prepared")
+    });
     assert_eq!(second_tree.begins(), 1, "the new owner began its own");
     assert!(
         !SystemProcesses.is_alive(pid, &start),
@@ -859,14 +848,11 @@ fn a_result_of_a_host_that_lost_the_lease_is_dropped_and_the_new_owners_folds() 
         "the stale result reached the inbox"
     );
 
-    for _ in 0..200 {
+    until("the new owner's prepare folded", || {
         rig.clock.advance(10_000);
         second.tick(rig.now());
-        std::thread::sleep(Duration::from_millis(1));
-        if rig.has(&run, "tree_prepared") {
-            break;
-        }
-    }
+        rig.has(&run, "tree_prepared")
+    });
     let base = rig.events(&run).iter().find_map(|event| match &event.body {
         EventBody::TreePrepared { base, .. } => Some(base.commit.clone()),
         _ => None,
@@ -1043,16 +1029,11 @@ fn a_closing_window_cancels_the_operation_in_flight() {
             .script(vec![TreeStep::Delay(Duration::from_secs(36_000))]);
     }
     let run = rig.commission("work").run;
-    let check = run.clone();
-    for _ in 0..400 {
+    until("the run is parked on the refusal", || {
         rig.host.tick(rig.now());
         rig.clock.advance(1_000);
-        std::thread::sleep(Duration::from_millis(1));
-        if rig.has(&check, "tree_refused") {
-            break;
-        }
-    }
-    assert!(rig.has(&run, "tree_refused"), "{:?}", rig.kinds());
+        rig.has(&run, "tree_refused")
+    });
     assert!(
         rig.tree.cancels() >= 1,
         "the operation in flight was cancelled"

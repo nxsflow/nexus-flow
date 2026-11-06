@@ -1441,7 +1441,7 @@ mod under_a_host {
             std::thread::sleep(Duration::from_millis(1));
         };
         // The clock stands until the remote really has the connection: the bound then passes on a fetch in its wait.
-        let limit = Instant::now() + Duration::from_secs(60);
+        let limit = Instant::now() + crate::common::tree::HANG_CEILING;
         while accepted.load(Ordering::SeqCst) == 0 {
             assert!(
                 Instant::now() < limit,
@@ -1461,7 +1461,7 @@ mod under_a_host {
             group_members(pid)
         );
         let key = format!("tree_refusal/{first}");
-        let limit = Instant::now() + Duration::from_secs(60);
+        let limit = Instant::now() + crate::common::tree::HANG_CEILING;
         while rig.store.get(&key).unwrap().is_none() {
             assert!(Instant::now() < limit, "no refusal: {:?}", rig.kinds());
             tick(&mut rig, 500);
