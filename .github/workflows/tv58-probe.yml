@@ -1,0 +1,31 @@
+name: tv58 throwaway process probe
+# Throwaway (6j6v.tv58 step 0): the real CLI on Linux, against a local fake Messages API. Removed before the hand-over.
+on:
+  push:
+    branches: [feat/tv58-claude-adapter]
+    paths: [".github/tv58-probe/**", ".github/workflows/tv58-probe.yml"]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Sidecar dependencies
+        working-directory: agent-sidecar
+        run: npm ci
+      - name: Probe
+        run: bash .github/tv58-probe/run.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out" 300 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-linux
+          path: |
+            ${{ runner.temp }}/out/**/sdk.jsonl
+            ${{ runner.temp }}/out/**/ladder.log
+            ${{ runner.temp }}/out/samples.jsonl
+            ${{ runner.temp }}/out/analysis.txt
