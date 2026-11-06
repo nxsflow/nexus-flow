@@ -584,10 +584,12 @@ jobs:
   #
   # ── SCOPE ────────────────────────────────────────────────────────────────────────────────────
   #
-  # Three packages, not `--all`: those are the ones that hold macOS-gated tests, and the drift gate
-  # in `quality-gates` is what keeps that list honest — adding such a test to a fourth package
-  # fails there by name, on ubuntu, for free. Everything else about those crates is already proved
-  # on ubuntu minutes earlier.
+  # Named packages, not `--all`. `nxs`, `nexus-chat` and `nxs-service` hold macOS-gated tests, and
+  # the drift gate in `quality-gates` is what keeps that part of the list honest: adding such a test
+  # to another package fails there by name, on ubuntu, for free. `nexus-run-host` and
+  # `nexus-run-session-claude` are here by hand, and the gate cannot see them: their macOS code sits
+  # in `src/` (the start-time reader) while their tests carry no `cfg(macos)`. Everything else about
+  # these crates is already proved on ubuntu minutes earlier.
   #
   # No sidecar bundle is built here, unlike `quality-gates`: `crates/chat/build.rs` falls back to
   # the source-tree sidecar when the bundle is absent, and the one test that could notice passes
@@ -629,7 +631,7 @@ jobs:
       # failing binary's verdict from THAT log, not the first one and a second 10x run to find the
       # rest.
       - name: Tests (debug, macOS)
-        run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service -p nexus-run-host
+        run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service -p nexus-run-host -p nexus-run-session-claude
 
   # The durable Postgres backend (spec §5/§10) is verified by differential parity against
   # a REAL Postgres. The parity tests skip themselves unless DATABASE_URL is set, so this
