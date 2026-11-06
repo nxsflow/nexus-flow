@@ -3,7 +3,7 @@ name: tv58 throwaway process probe
 on:
   push:
     branches: [feat/tv58-claude-adapter]
-    paths: [".github/tv58-probe/**", ".github/workflows/tv58-probe.yml"]
+    paths: [".github/tv58-probe/**", ".github/workflows/tv58-probe.yml", "crates/run-session-claude/**"]
 permissions:
   contents: read
 jobs:
@@ -15,21 +15,14 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - name: Sidecar dependencies
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Sidecar bundle
         working-directory: agent-sidecar
-        run: npm ci
-      - name: Probe
-        run: bash .github/tv58-probe/run.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out" 60 1
-      - name: Probe, second round
-        run: bash .github/tv58-probe/run2.sh "$PWD/agent-sidecar/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" "$RUNNER_TEMP/out2"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: probe-linux
-          path: |
-            ${{ runner.temp }}/out/**/sdk.jsonl
-            ${{ runner.temp }}/out/**/ladder.log
-            ${{ runner.temp }}/out/samples.jsonl
-            ${{ runner.temp }}/out/analysis.txt
-            ${{ runner.temp }}/out2/**/sdk.jsonl
-            ${{ runner.temp }}/out2/**/ladder.log
+        run: |
+          npm ci
+          npm run build
+      - name: The real bundle under the real adapter
+        run: cargo test -p nexus-run-session-claude --test real_sidecar -- --ignored --test-threads=1 --nocapture
+      - name: The real adapter's other real-process tests
+        run: cargo test -p nexus-run-session-claude -p nexus-run-host --test stop --test sample --test reattach --test ledger --test real_backend --test tree_review_fixes
