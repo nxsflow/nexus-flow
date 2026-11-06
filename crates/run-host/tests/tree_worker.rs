@@ -828,9 +828,12 @@ fn a_result_of_a_host_that_lost_the_lease_is_dropped_and_the_new_owners_folds() 
     second.tick(rig.now());
     assert_eq!(second_tree.begins(), 1, "the new owner began its own");
 
-    // The old owner's operation ends, and its host polls the result with the lease gone.
-    rig.clock.advance(10_000);
+    // The old owner's operation ends, and its host polls the result with the lease gone. Its delay starts when
+    // its thread gets there, which can be after the jump above, so the clock keeps moving, with the new owner
+    // renewing, or the old host would take the run back. Slowly: the new owner's own delay has to outlast this.
     until("the old host polled its worker's result", || {
+        rig.clock.advance(100);
+        second.tick(rig.now());
         rig.host.tick(rig.now());
         !rig.tree.busy()
     });
