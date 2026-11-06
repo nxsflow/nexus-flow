@@ -226,6 +226,27 @@ fn a_dev_edge_may_enable_test_support() {
 }
 
 #[test]
+fn the_hosts_own_dev_edge_may_enable_test_support_so_its_tests_run_in_a_plain_cargo_test() {
+    let mut own = dev_dep("nexus-run-host");
+    own["features"] = json!(["test-support"]);
+    assert!(check(&with_dep("nexus-run-host", own)).is_ok());
+}
+
+#[test]
+fn a_normal_self_edge_of_the_host_and_a_dev_self_edge_of_another_crate_stay_refused() {
+    let problem = check(&with_dep("nexus-run-host", dep("nexus-run-host"))).unwrap_err();
+    assert!(
+        problem.to_string().contains("outside the crate table"),
+        "{problem:#}"
+    );
+    let problem = check(&with_dep("nexus-run-engine", dev_dep("nexus-run-engine"))).unwrap_err();
+    assert!(
+        problem.to_string().contains("outside the crate table"),
+        "{problem:#}"
+    );
+}
+
+#[test]
 fn a_normal_edge_enabling_test_support_is_refused() {
     let message = refused(check(&with_host_feature("nexus-chat", None)));
     assert!(message.contains("nexus-chat"), "{message}");

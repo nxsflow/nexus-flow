@@ -151,3 +151,58 @@ fn a_damaged_lease_is_named_and_never_passes_the_fence() {
         expected
     );
 }
+
+#[test]
+fn waiting_inputs_reads_each_row_on_its_own_so_a_damaged_one_hides_nothing_behind_it() {
+    let (_dir, raw, store, run, _fence) = store_with_run();
+    store
+        .enqueue(&run, &fixtures::input(&run, "before"), &[])
+        .unwrap();
+    raw.execute(
+        "INSERT INTO inbox (run, key, at, origin, body) VALUES (?1, 'damaged', 0, 'cli', ?2)",
+        [run.as_str(), &known_kind_with_a_bad_field()],
+    )
+    .unwrap();
+    store
+        .enqueue(&run, &fixtures::input(&run, "behind"), &[])
+        .unwrap();
+    let waiting = store.waiting_inputs(&run).unwrap();
+    assert_eq!(waiting.len(), 3);
+    assert_eq!(waiting[0].as_ref().unwrap().key, "before");
+    assert_says_nothing_of_the_row(waiting[1].as_ref().unwrap_err());
+    assert_eq!(waiting[2].as_ref().unwrap().key, "behind");
+}
+
+#[test]
+fn load_readable_skips_a_damaged_row_where_load_refuses_the_log() {
+    let (_dir, raw, store, run, fence) = store_with_run();
+    let before = store.load(&run, 0).unwrap().len() as u64;
+    for (index, key) in ["first", "second", "third"].iter().enumerate() {
+        store
+            .append(
+                &run,
+                before + index as u64,
+                fence,
+                &[fixtures::input(&run, key)],
+                &[],
+                &[],
+            )
+            .unwrap();
+    }
+    raw.execute(
+        "UPDATE events SET body = ?2 WHERE run = ?1 AND key = 'second'",
+        [run.as_str(), &known_kind_with_a_bad_field()],
+    )
+    .unwrap();
+    assert!(matches!(
+        store.load(&run, 0),
+        Err(StoreError::DamagedRow { seq: Some(_), .. })
+    ));
+    let readable = store.load_readable(&run).unwrap();
+    let keys: Vec<&str> = readable.iter().map(|event| event.key.as_str()).collect();
+    assert!(
+        keys.contains(&"first") && keys.contains(&"third"),
+        "{keys:?}"
+    );
+    assert!(!keys.contains(&"second"));
+}
