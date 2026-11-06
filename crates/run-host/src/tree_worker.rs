@@ -27,12 +27,12 @@ use nexus_run_store_sqlite::{Lease, SqliteRunStore};
 
 use crate::boundary::{crash_at, Boundary};
 use crate::ports::Clock;
-use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::tree_child::{
     clear_locks_of_a_gone_group, gated, git_locks, group_gone_soon, own_process_group, Output,
     DRAIN_GRACE,
 };
 use crate::tree_ledger::{LedgerEntry, TreeLedger};
+use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
 
 /// The overall deadline of one operation, beside the bound on each of its calls. A clone's own bound is
 /// 10 min, a fetch's 2 min, and every other call is 60 s.
@@ -346,7 +346,7 @@ impl TreeCx<'_> {
                     return if output.wait_for_end(DRAIN_GRACE) {
                         Ok(output.into_step(status.success()))
                     } else {
-                        Err(TreeStop::OutputUncollected)
+                        Err(self.end_child(child, TreeStop::OutputUncollected, dir, locks))
                     };
                 }
                 Ok(None) => {}
@@ -374,7 +374,10 @@ impl TreeCx<'_> {
     ) -> TreeStop {
         let guard = self.shared.guard.as_ref();
         if let Some((pid, start_time)) = self.child.take() {
-            guard.kill_group(pid, &start_time);
+            // A leader already ended and reaped cannot vouch for its group, so what is left goes member by member.
+            if !guard.kill_group(pid, &start_time) {
+                guard.kill_members(pid, &start_time);
+            }
         }
         // Our own child: reaped, or it answers alive as a zombie (§8.3).
         let _ = child.kill();

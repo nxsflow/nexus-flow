@@ -42,6 +42,7 @@ pub(crate) fn refuse_without_parent_or_root<T>(root: &Path, dir: &Path) -> Resul
 pub(crate) struct RootIdentity {
     url: String,
     link: PathBuf,
+    root: PathBuf,
 }
 
 pub(crate) fn root_identity(git: &mut Git<'_, '_>, root: &Path) -> Result<RootIdentity, Stopped> {
@@ -62,7 +63,13 @@ pub(crate) fn root_identity(git: &mut Git<'_, '_>, root: &Path) -> Result<RootId
             format!("the root's .nxs does not resolve: {error}"),
         )
     })?;
-    Ok(RootIdentity { url, link })
+    let root = root.canonicalize().or_else(|error| {
+        refused(
+            exit_nonzero(),
+            format!("the root does not resolve: {error}"),
+        )
+    })?;
+    Ok(RootIdentity { url, link, root })
 }
 
 /// Step (0): a directory present is this repository's clone, or it is left alone. A MISSING link is not a verdict, a
@@ -77,6 +84,17 @@ pub(crate) fn check_identity(
         "remedy: move {} aside, and the next prepare clones",
         dir.display()
     );
+    // The origin and the link of the registered root itself pass everything below, and this engine would then check
+    // out and commit in the old engine's tree.
+    if dir.canonicalize().ok().as_ref() == Some(&identity.root) {
+        return refused(
+            TreeRefusal::ForeignDirectory,
+            format!(
+                "{} resolves to the registered root; {move_aside}",
+                dir.display()
+            ),
+        );
+    }
     if !dir.is_dir()
         || !git
             .ask("identity", dir, &["rev-parse", "--git-dir"])?
@@ -187,7 +205,8 @@ fn sibling_prefix(dir: &Path) -> String {
     )
 }
 
-/// What a crash during a clone left. Nothing writes there by now: the worker killed any child the ledger named.
+/// What a crash during a clone left, and only that: the suffix this engine mints is a ULID, so a person's own
+/// `<dir>.cloning-backup` is theirs. Nothing writes there by now: the worker killed any child the ledger named.
 fn remove_clone_siblings(dir: &Path) -> Result<(), Stopped> {
     let Some(parent) = dir.parent() else {
         return Ok(());
@@ -197,7 +216,12 @@ fn remove_clone_siblings(dir: &Path) -> Result<(), Stopped> {
     };
     let prefix = sibling_prefix(dir);
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = entry.file_name();
+        let ours = name
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| ulid::Ulid::from_string(suffix).is_ok());
+        if ours {
             fs::remove_dir_all(entry.path()).or_else(|error| {
                 refused(
                     exit_nonzero(),
@@ -257,16 +281,42 @@ fn finish_clone(
 /// `<default>`, as the clone recorded it in `refs/remotes/origin/HEAD`, readable without network. An empty remote,
 /// a `remote set-head -d` and a default branch `fetch --prune` took away all leave no base to prepare on.
 pub(crate) fn default_branch(git: &mut Git<'_, '_>, dir: &Path) -> Result<String, Stopped> {
+    match read_default(git, dir)? {
+        DefaultBranch::Known(default) => Ok(default),
+        DefaultBranch::Unset => refused(
+            exit_nonzero(),
+            format!("the clone records no default branch: origin/HEAD is not set, the remote may be empty; {SET_HEAD_REMEDY}"),
+        ),
+        DefaultBranch::Dangling(default) => refused(
+            exit_nonzero(),
+            format!("origin/HEAD is dangling: it names {default}, which the remote no longer has; {SET_HEAD_REMEDY}"),
+        ),
+    }
+}
+
+/// The default branch where the clone still knows one. A park takes the answer as it comes: it has to end, and work
+/// can be saved without a base.
+pub(crate) fn known_default(git: &mut Git<'_, '_>, dir: &Path) -> Result<Option<String>, Stopped> {
+    Ok(match read_default(git, dir)? {
+        DefaultBranch::Known(default) => Some(default),
+        DefaultBranch::Unset | DefaultBranch::Dangling(_) => None,
+    })
+}
+
+enum DefaultBranch {
+    Known(String),
+    Unset,
+    Dangling(String),
+}
+
+fn read_default(git: &mut Git<'_, '_>, dir: &Path) -> Result<DefaultBranch, Stopped> {
     let head = git.ask(
         "default",
         dir,
         &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
     )?;
     if !head.success {
-        return refused(
-            exit_nonzero(),
-            format!("the clone records no default branch: origin/HEAD is not set, the remote may be empty; {SET_HEAD_REMEDY}"),
-        );
+        return Ok(DefaultBranch::Unset);
     }
     let full = line_of("default", &head)?;
     let default = full
@@ -274,16 +324,16 @@ pub(crate) fn default_branch(git: &mut Git<'_, '_>, dir: &Path) -> Result<String
         .unwrap_or(&full)
         .to_owned();
     let commit = format!("refs/remotes/origin/{default}^{{commit}}");
-    if !git
-        .ask("default", dir, &["rev-parse", "-q", "--verify", &commit])?
-        .success
-    {
-        return refused(
-            exit_nonzero(),
-            format!("origin/HEAD is dangling: it names {default}, which the remote no longer has; {SET_HEAD_REMEDY}"),
-        );
-    }
-    Ok(default)
+    Ok(
+        if git
+            .ask("default", dir, &["rev-parse", "-q", "--verify", &commit])?
+            .success
+        {
+            DefaultBranch::Known(default)
+        } else {
+            DefaultBranch::Dangling(default)
+        },
+    )
 }
 
 /// Step (2). `found` has to survive a failed fetch and a crash, so it is derived from the tree: `save_work` answers
@@ -295,7 +345,7 @@ fn rescue(
     dir: &Path,
     default: &str,
 ) -> Result<Option<ParkOutcome>, Stopped> {
-    match save_work(git, run, dir, default, "found_dirty_at_prepare")? {
+    match save_work(git, run, dir, Some(default), "found_dirty_at_prepare")? {
         ParkOutcome::Clean { .. } => earlier_rescue(git, run, dir),
         outcome => Ok(Some(outcome)),
     }

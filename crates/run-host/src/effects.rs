@@ -158,13 +158,19 @@ impl Host {
     }
 
     /// What the run owes now, in the order `pending_effects` gives it. `TakeClaim` is the tick's last part.
-    pub(crate) fn execute_run(&mut self, row: &RunRow, epoch: Epoch, now: Timestamp) {
+    pub(crate) fn execute_run(
+        &mut self,
+        row: &RunRow,
+        epoch: Epoch,
+        now: Timestamp,
+        turn_owed: bool,
+    ) {
         let Some(state) = self.loaded_state(row) else {
             return;
         };
         self.cancel_if_withdrawn(&state);
         for effect in pending_effects(&state) {
-            if !self.may_work() {
+            if !self.may_work(turn_owed) {
                 return;
             }
             // Immediately before each effect: a host that lost the run executes nothing for it (§7).
@@ -470,10 +476,7 @@ impl Host {
             let Phase::Queued { behind } = &state.phase else {
                 continue;
             };
-            self.turn_owed = std::mem::take(&mut owed);
-            let may = self.may_work();
-            self.turn_owed = false;
-            if !may {
+            if !self.may_work(std::mem::take(&mut owed)) {
                 return;
             }
             let run = &row.run;

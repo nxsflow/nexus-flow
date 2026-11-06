@@ -7,10 +7,10 @@ use std::path::Path;
 use nexus_run_contracts::{GitReason, ParkOutcome, RunId, SequenceKind, Timestamp, TreeRefusal};
 
 use super::prepare::{
-    check_identity, default_branch, parent_and_root_exist, refuse_without_parent_or_root,
+    check_identity, known_default, parent_and_root_exist, refuse_without_parent_or_root,
     root_identity,
 };
-use super::runner::{line_of, sequence_in_progress, Git};
+use super::runner::{failed, line_of, sequence_in_progress, Git};
 use super::{exists, Stopped};
 use crate::boundary::{crash_at, Boundary};
 use crate::tree_child::git_locks;
@@ -43,8 +43,9 @@ pub(crate) fn park(
         Err(stopped) if is_a_mismatch(&stopped) => return Ok(ParkOutcome::NotHeld),
         checked => checked?,
     }
-    let default = default_branch(git, dir)?;
-    save_work(git, run, dir, &default, occasion)
+    // Refused at prepare, where a run would start on no base. A withdrawal has to end, and saving needs no base.
+    let default = known_default(git, dir)?;
+    save_work(git, run, dir, default.as_deref(), occasion)
 }
 
 fn is_a_mismatch(stopped: &Stopped) -> bool {
@@ -61,18 +62,18 @@ fn is_a_mismatch(stopped: &Stopped) -> bool {
 /// or the window ends it.
 fn refuse_unfinished(dir: &Path) -> Result<(), Stopped> {
     if let Some(kind) = sequence_in_progress(dir) {
-        let abort = match kind {
-            SequenceKind::Merge => "merge",
-            SequenceKind::Rebase => "rebase",
-            SequenceKind::CherryPick => "cherry-pick",
-            SequenceKind::Revert => "revert",
-            SequenceKind::Bisect => "bisect reset #",
-            SequenceKind::Unknown(_) => "<the sequence>",
+        let remedy = match kind {
+            SequenceKind::Merge => "`git merge --abort`",
+            SequenceKind::Rebase => "`git rebase --abort`",
+            SequenceKind::CherryPick => "`git cherry-pick --abort`",
+            SequenceKind::Revert => "`git revert --abort`",
+            SequenceKind::Bisect => "`git bisect reset`",
+            SequenceKind::Unknown(_) => "finishing or aborting the sequence",
         };
         return Err(Stopped::Refused(
             TreeRefusal::MidSequence { what: kind },
             format!(
-                "{} is in the middle of a sequence; remedy: `git {abort} --abort` there",
+                "{} is in the middle of a sequence; remedy: {remedy} there",
                 dir.display()
             ),
         ));
@@ -118,7 +119,11 @@ fn identity_fallback(git: &mut Git<'_, '_>, dir: &Path) -> Result<Vec<String>, S
 }
 
 fn commit(git: &mut Git<'_, '_>, run: &RunId, dir: &Path, occasion: &str) -> Result<(), Stopped> {
-    git.run("add", dir, &["add", "-A"])?;
+    let bound = git.bounds.park;
+    let added = git.call("add", dir, &["add", "-A"], bound)?;
+    if !added.success {
+        return Err(failed("add", &added));
+    }
     let message = format!("park of run {run}: {occasion} at {}", git.cx.now());
     let fallback = identity_fallback(git, dir)?;
     let mut args: Vec<&str> = fallback.iter().map(String::as_str).collect();
@@ -130,7 +135,10 @@ fn commit(git: &mut Git<'_, '_>, run: &RunId, dir: &Path, occasion: &str) -> Res
         "-m",
         &message,
     ]);
-    git.run("commit", dir, &args)?;
+    let committed = git.call("commit", dir, &args, bound)?;
+    if !committed.success {
+        return Err(failed("commit", &committed));
+    }
     Ok(())
 }
 
@@ -140,7 +148,7 @@ fn ahead_of_the_remote(
     git: &mut Git<'_, '_>,
     dir: &Path,
     branch: &str,
-    base_ref: &str,
+    base_ref: Option<&str>,
 ) -> Result<bool, Stopped> {
     let upstream = format!("refs/remotes/origin/{branch}");
     let known = git
@@ -155,7 +163,15 @@ fn ahead_of_the_remote(
             ],
         )?
         .success;
-    let from = if known { upstream.as_str() } else { base_ref };
+    let from = if known {
+        upstream.as_str()
+    } else {
+        match base_ref {
+            Some(base_ref) => base_ref,
+            // Nothing to measure against: a person hears of a branch once too often rather than never.
+            None => return Ok(true),
+        }
+    };
     let count = git.text(
         "ahead",
         dir,
@@ -166,12 +182,14 @@ fn ahead_of_the_remote(
 
 /// Saves what the tree holds, or says there is nothing to save. A HEAD on the run's own branch is used as it is; a HEAD
 /// on the local default branch or detached gets a fresh park branch, unless it is clean and holds nothing the base
-/// lacks: ancestry, not inequality, so a clean HEAD behind the base gets no empty branch.
+/// lacks: ancestry, not inequality, so a clean HEAD behind the base gets no empty branch. With no base known (`default`
+/// is `None`, a park only) the branch HEAD stands on is used as it is, and a detached HEAD always gets a name, since
+/// nothing can say it holds nothing of its own.
 pub(crate) fn save_work(
     git: &mut Git<'_, '_>,
     run: &RunId,
     dir: &Path,
-    default: &str,
+    default: Option<&str>,
     occasion: &str,
 ) -> Result<ParkOutcome, Stopped> {
     refuse_unfinished(dir)?;
@@ -186,17 +204,21 @@ pub(crate) fn save_work(
         .run("status", dir, &["status", "--porcelain"])?
         .stdout
         .is_empty();
-    let base_ref = format!("refs/remotes/origin/{default}");
+    let base_ref = default.map(|default| format!("refs/remotes/origin/{default}"));
     let (branch, fresh) = match current {
-        Some(branch) if branch != default => (branch, false),
+        Some(branch) if Some(branch.as_str()) != default => (branch, false),
         current => {
-            let behind_or_at = git
-                .ask(
-                    "ancestry",
-                    dir,
-                    &["merge-base", "--is-ancestor", "HEAD", &base_ref],
-                )?
-                .success;
+            let behind_or_at = match &base_ref {
+                Some(base_ref) => {
+                    git.ask(
+                        "ancestry",
+                        dir,
+                        &["merge-base", "--is-ancestor", "HEAD", base_ref],
+                    )?
+                    .success
+                }
+                None => false,
+            };
             if !dirty && behind_or_at {
                 return Ok(ParkOutcome::Clean { branch: current });
             }
@@ -215,7 +237,8 @@ pub(crate) fn save_work(
     }
     // Another run's park branch was noticed when that run parked.
     let owes_a_notice = dirty
-        || (!branch.starts_with(PARK_PREFIX) && ahead_of_the_remote(git, dir, &branch, &base_ref)?);
+        || (!branch.starts_with(PARK_PREFIX)
+            && ahead_of_the_remote(git, dir, &branch, base_ref.as_deref())?);
     Ok(if owes_a_notice {
         ParkOutcome::OnOwnBranch { branch, commit }
     } else {

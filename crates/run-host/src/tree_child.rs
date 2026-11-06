@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::session_stub::ProcessGuard;
 use crate::tree_worker::StepOutput;
+use nexus_run_session_claude::procs::ProcessGuard;
 
 /// What one stream of one child may hold in memory. What is past it is read and dropped, so the child never
 /// blocks on a full pipe. Every call the tree parses is far below this, and a dirty status is dirty at any length.
@@ -218,6 +218,9 @@ pub(crate) fn run_bounded(
                 return if output.wait_for_end(DRAIN_GRACE) {
                     Ok(output.into_step(status.success()))
                 } else {
+                    if let Some(start_time) = &start_time {
+                        guard.kill_members(child.id(), start_time);
+                    }
                     Err("a helper still holds git's output".to_owned())
                 };
             }

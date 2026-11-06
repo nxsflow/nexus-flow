@@ -117,8 +117,6 @@ pub struct Host {
     /// Where each part of the tick goes on, by index into the open runs: an open run finishing moves it by one,
     /// and that only changes whose turn is next. Lost on a restart, like the rest of what is in memory.
     next_turn: [usize; 3],
-    /// The run being stepped has this tick's one turn, whatever is left of the budget.
-    pub(crate) turn_owed: bool,
 }
 
 /// An opaque host id: no person, no user name, no machine name (the tombstone rule of contract (b)). It is
@@ -156,7 +154,6 @@ impl Host {
             report: TickReport::default(),
             started_at: Instant::now(),
             next_turn: [0; 3],
-            turn_owed: false,
         }
     }
 
@@ -180,14 +177,14 @@ impl Host {
     }
 
     /// Whether this tick may go on. The budget is real time, whatever the injected clock says. A `Busy` stops
-    /// everything; a budget that ran out stops everything but the turn a part of the tick owes (see `each_run`).
-    pub(crate) fn may_work(&mut self) -> bool {
+    /// everything; a budget that ran out stops everything but a turn the caller says is owed (see `each_run`).
+    pub(crate) fn may_work(&mut self, turn_owed: bool) -> bool {
         if self.report.busy {
             return false;
         }
         if self.started_at.elapsed() >= self.budget {
             self.report.yielded = true;
-            return self.turn_owed;
+            return turn_owed;
         }
         true
     }
@@ -207,17 +204,17 @@ impl Host {
         self.runs.retain(|run, _| open.contains(run));
         let owned = self.leases(&rows, now);
         self.mark_seen(&rows, now);
-        self.each_run(Part::Drain, &owned, |host, row, epoch| {
-            host.drain_run(row, epoch, now)
+        self.each_run(Part::Drain, &owned, |host, row, epoch, turn_owed| {
+            host.drain_run(row, epoch, now, turn_owed)
         });
         self.poll_tree(&owned, now);
         self.fire_due_timers(&owned, now);
-        self.each_run(Part::Fold, &owned, |host, row, epoch| {
-            host.fold_run(row, epoch)
+        self.each_run(Part::Fold, &owned, |host, row, epoch, turn_owed| {
+            host.fold_run(row, epoch, turn_owed)
         });
-        self.each_run(Part::Execute, &owned, |host, row, epoch| {
+        self.each_run(Part::Execute, &owned, |host, row, epoch, turn_owed| {
             host.withdraw_exit(row, epoch, now);
-            host.execute_run(row, epoch, now);
+            host.execute_run(row, epoch, now, turn_owed);
         });
         self.take_claims(&owned, now);
         self.report
@@ -272,7 +269,7 @@ impl Host {
         &mut self,
         part: Part,
         owned: &[(RunRow, Epoch)],
-        mut step: impl FnMut(&mut Self, &RunRow, Epoch),
+        mut step: impl FnMut(&mut Self, &RunRow, Epoch, bool),
     ) {
         // A tick that holds nothing, a `Busy` at the first lease, has not been through the runs.
         if owned.is_empty() {
@@ -281,20 +278,19 @@ impl Host {
         let start = self.next_turn[part as usize] % owned.len();
         for offset in 0..owned.len() {
             let index = (start + offset) % owned.len();
-            self.turn_owed = offset == 0;
-            if !self.may_work() {
-                self.turn_owed = false;
+            // The first run of each part has this tick's one turn, whatever is left of the budget.
+            let turn_owed = offset == 0;
+            if !self.may_work(turn_owed) {
                 self.next_turn[part as usize] = index;
                 return;
             }
             let (row, epoch) = &owned[index];
-            let caught = catch_unwind(AssertUnwindSafe(|| step(self, row, *epoch)));
+            let caught = catch_unwind(AssertUnwindSafe(|| step(self, row, *epoch, turn_owed)));
             if caught.is_err() {
                 self.log(&row.run, "a step panicked", "skipped until the next tick");
                 self.runs.remove(&row.run);
             }
         }
-        self.turn_owed = false;
     }
 
     pub(crate) fn note_store_error(&mut self, error: &StoreError) {
@@ -329,7 +325,7 @@ impl Host {
 
     /// Drains every session of this run that may have a process (§9). The facts reach the inbox before the
     /// offset moves, so a crash delivers a fact twice and the key makes the second a `Duplicate`.
-    fn drain_run(&mut self, row: &RunRow, _epoch: Epoch, now: Timestamp) {
+    fn drain_run(&mut self, row: &RunRow, _epoch: Epoch, now: Timestamp, turn_owed: bool) {
         let Some(state) = self.loaded_state(row) else {
             return;
         };
@@ -345,7 +341,7 @@ impl Host {
             })
             .collect();
         for (session_key, stopping) in live {
-            if !self.may_work() {
+            if !self.may_work(turn_owed) {
                 return;
             }
             self.drain_session(&row.run, &session_key, stopping, now);

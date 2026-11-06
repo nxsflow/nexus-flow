@@ -230,6 +230,7 @@ impl DeclarationPort for FilePorts {
         Ok(PersonaDecl {
             handle: handle.to_owned(),
             model: Some("a-model".to_owned()),
+            permissions: Some("acceptEdits".to_owned()),
             ..PersonaDecl::default()
         })
     }

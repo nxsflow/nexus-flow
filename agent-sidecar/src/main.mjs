@@ -23,11 +23,15 @@ import {
   STOPPED_EXIT_CODE,
 } from "./spec-helpers.mjs";
 import { createNormalizer, availabilityBoundary } from "./transcript.mjs";
+import { runFactsMode } from "./facts.mjs";
 
 function arg(name) {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
+
+// The v2 engine's door (spec 6j6v.zjyv §9): nothing below this line runs in facts mode, and nothing below it changed.
+if (process.argv.includes("--facts")) await runFactsMode({ query, specPath: arg("--spec") });
 
 const spec = JSON.parse(readFileSync(arg("--spec"), "utf8"));
 

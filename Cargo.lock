@@ -2307,12 +2307,24 @@ dependencies = [
  "nexus-run-contracts",
  "nexus-run-engine",
  "nexus-run-host",
+ "nexus-run-session-claude",
  "nexus-run-store-sqlite",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "ulid",
+]
+
+[[package]]
+name = "nexus-run-session-claude"
+version = "0.224.0"
+dependencies = [
+ "libc",
+ "nexus-run-contracts",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

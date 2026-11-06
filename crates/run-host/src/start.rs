@@ -231,7 +231,7 @@ impl Host {
     ) -> Result<Option<StartSpec>, StoreError> {
         let handle = slot.member.as_str();
         let declarations = &self.ports.declarations;
-        let (prompt, tools, model) = if handle == SYNTH {
+        let (prompt, tools, model, permissions) = if handle == SYNTH {
             let model = match &step.kind {
                 StepKind::FanOut {
                     synthesis: Some(synthesis),
@@ -247,6 +247,7 @@ impl Host {
                 },
                 vec!["Bash(nxc reply:*)".to_owned()],
                 model,
+                None,
             )
         } else {
             let (Ok(bundle), Ok(persona)) = (
@@ -263,6 +264,7 @@ impl Host {
                 },
                 bundle.granted_tools,
                 persona.model,
+                persona.permissions,
             )
         };
         let run = &state.run;
@@ -287,6 +289,7 @@ impl Host {
             resume,
             model,
             tools,
+            permissions,
             ledger_dir: layout
                 .ledger_dir(session_key)
                 .to_string_lossy()

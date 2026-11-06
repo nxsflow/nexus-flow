@@ -14,12 +14,12 @@ use std::time::Duration;
 use nexus_run_contracts::{Base, GitReason, ParkOutcome, RunId, TreeRefusal};
 
 use crate::boundary::{crash_at, Boundary};
-use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::tree_ledger::TreeLedger;
 use crate::tree_worker::{
     InFlight, StepOutput, TreeBinding, TreeCx, TreeOp, TreeResult, TreeRunner, TreeStop,
     TreeWorker, WorkTree, OPERATION_DEADLINE,
 };
+use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
 
 const BOUND: Duration = Duration::from_secs(120);
 

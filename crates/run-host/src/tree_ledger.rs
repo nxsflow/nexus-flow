@@ -10,7 +10,7 @@ use nexus_run_contracts::status::InFlight as InFlightStatus;
 use nexus_run_contracts::{Epoch, RunId, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::session_stub::ProcessGuard;
+use nexus_run_session_claude::procs::ProcessGuard;
 
 /// How long a ledger entry that says a spawn is under way, with no child record yet, is waited on: the child
 /// writes that record as its first act (§8.3's `spawn.json` and `child.json`, the same gap). Real time, because

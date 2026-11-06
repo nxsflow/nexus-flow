@@ -162,7 +162,7 @@ pub(crate) fn failed(step: &str, output: &StepOutput) -> Stopped {
     )
 }
 
-/// The sequence the tree is in the middle of, from the files git keeps for it (the list `park.rs:750` keeps).
+/// The sequence the tree is in the middle of, from the files git keeps for it (the list `crates/chat/src/park.rs` keeps in `mid_sequence`).
 pub(crate) fn sequence_in_progress(dir: &Path) -> Option<SequenceKind> {
     let git = dir.join(".git");
     [

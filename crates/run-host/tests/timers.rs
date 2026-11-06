@@ -29,6 +29,13 @@ fn hung_coder(info: &SessionInfo) -> Cue {
     }
 }
 
+fn unkillable_coder(info: &SessionInfo) -> Cue {
+    match info.step.as_str() {
+        "build" => Cue::Unkillable,
+        _ => Cue::Silent,
+    }
+}
+
 /// A rig with the coder `Running`, its `quiet` timer 80 minutes ahead.
 fn coder_running(dir: &std::path::Path) -> (Rig, RunId, String, nexus_run_contracts::Timestamp) {
     let mut rig = Rig::scripted(dir, CLOCK_START, Box::new(silent_coder));
@@ -286,6 +293,64 @@ fn a_silent_session_still_takes_the_rung_after_the_wake() {
     let check = run.clone();
     rig.step_ms = 5_000;
     rig.run_until(800, move |rig| was_stopped(rig, &check));
+}
+
+/// §6.5, must-fix of the design review (round 4, TQ #5): a process even SIGKILL does not end. The run stays where it is,
+/// with the claim held, for a person: it does not pretend the session is gone, and it owes nothing more.
+#[test]
+fn a_backend_that_never_confirms_after_a_kill_holds_the_claim_and_ends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(unkillable_coder));
+    rig.policy = nexus_run_contracts::LivenessPolicy {
+        stop_grace: Secs(60),
+        ..rig.policy.clone()
+    };
+    rig.step_ms = 5_000;
+    let receipt = rig.commission("work");
+    let run = receipt.run;
+    let key = format!("{run}/build/v1/coder/a1");
+    let probe = key.clone();
+    rig.run_until(800, move |rig| {
+        rig.backend
+            .timeline()
+            .iter()
+            .any(|e| e.session_key == probe)
+    });
+
+    bridge::withdraw(
+        &rig.bridge,
+        &receipt.root_thread,
+        &Rig::requester(),
+        "stop",
+        rig.now(),
+    )
+    .unwrap();
+    let probe = key.clone();
+    rig.run_until(800, move |rig| {
+        rig.backend
+            .timeline()
+            .iter()
+            .any(|e| e.session_key == probe && e.what == "kill")
+    });
+    for _ in 0..400 {
+        rig.tick();
+    }
+
+    assert!(!rig.is_finished(&run), "the run ended with a process alive");
+    assert!(
+        rig.store.get_claim_holder().is_some(),
+        "the claim was released"
+    );
+    let ended = rig.events(&run).into_iter().any(|e| {
+        matches!(
+            e.body,
+            EventBody::SessionFact {
+                fact: nexus_run_contracts::SessionFact::Ended { .. },
+                ..
+            }
+        )
+    });
+    assert!(!ended, "an end nothing confirmed reached the log");
 }
 
 /// Exactly the table's signals across a restart (§6.5): 10 minutes in `Stopping` under the simulated clock give
