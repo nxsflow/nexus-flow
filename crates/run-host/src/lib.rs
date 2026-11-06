@@ -18,12 +18,13 @@ pub mod start;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub(crate) mod tree_effects;
+pub mod tree_ledger;
 pub mod tree_worker;
 
 pub use boundary::Boundary;
 pub use host::{mint_owner_id, Host, Layout, LogSink, Ports, TickReport, TICK_BUDGET};
+pub use tree_ledger::{LedgerEntry, TreeLedger, SPAWN_GRACE};
 pub use tree_worker::{
-    tree_state, InFlight, LeaseView, LedgerEntry, StepOutput, TreeBinding, TreeCx, TreeLedger,
-    TreeOp, TreeResult, TreeRunner, TreeState, TreeStateError, TreeStop, TreeWorker, WorkTree,
-    OPERATION_DEADLINE,
+    tree_state, InFlight, LeaseView, StepOutput, TreeBinding, TreeCx, TreeOp, TreeResult,
+    TreeRunner, TreeState, TreeStateError, TreeStop, TreeWorker, WorkTree, OPERATION_DEADLINE,
 };

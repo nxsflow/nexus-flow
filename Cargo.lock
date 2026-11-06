@@ -2167,6 +2167,8 @@ dependencies = [
  "libc",
  "nexus-flow-core",
  "nexus-memory",
+ "nexus-run-contracts",
+ "nexus-run-host",
  "nxs-foundation",
  "nxs-guide",
  "nxs-init",

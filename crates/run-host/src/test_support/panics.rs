@@ -7,6 +7,20 @@ use std::sync::{Mutex, PoisonError};
 static ON_INPUT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static ON_REPLAY: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static CAS_FAILS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static BUSY: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// The append of this input answers `Busy` until [`clear`], with the store otherwise free.
+pub fn busy_on_append(key: &str) {
+    BUSY.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key.to_owned());
+}
+
+pub(crate) fn busy_on(key: &str) -> bool {
+    BUSY.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(key)
+}
 
 /// The append of this input carries a comparison that cannot hold, however often it is re-read.
 pub fn cas_fails_on(key: &str) {
@@ -40,6 +54,9 @@ pub fn panic_on_replay(key: &str) {
 }
 
 pub fn clear(key: &str) {
+    BUSY.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(key);
     ON_INPUT
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

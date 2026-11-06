@@ -152,6 +152,25 @@ fn busy_never_consumes_a_healthy_reply_and_never_counts() {
     assert!(rig.events(&run).iter().any(|e| e.key == key), "it folded");
 }
 
+/// `Busy` on the append alone, with the store free for everything else, so a count would land if one were taken.
+#[test]
+fn a_busy_append_writes_no_count_however_often_it_happens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rig, run, _) = rig_with_a_running_coder(dir.path());
+    let key = enqueue_reply(&rig, &run, "busy-append");
+    panics::busy_on_append(&key);
+    for _ in 0..6 {
+        let report = rig.host.tick(rig.now());
+        assert!(report.busy);
+    }
+    assert_eq!(rig.store.get(&format!("poison/{run}/{key}")).unwrap(), None);
+    assert_eq!(waiting(&rig, &run), 1, "the reply is still there");
+    assert!(!parked_on_poison(&rig, &run));
+    panics::clear(&key);
+    rig.tick();
+    assert!(rig.events(&run).iter().any(|e| e.key == key), "it folded");
+}
+
 #[test]
 fn a_cas_failure_a_retry_does_not_clear_is_counted_then_parks() {
     let dir = tempfile::tempdir().unwrap();

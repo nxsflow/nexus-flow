@@ -7,7 +7,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use nexus_run_contracts::{EventBody, GitReason, RunStore, TreeRefusal};
+use nexus_run_contracts::{GitReason, RunStore, TreeRefusal};
 use nexus_run_host::bridge::{self, ReplyFlags};
 use nexus_run_host::ports::Refs;
 use nexus_run_host::test_support::scripted_backend::{pass, Cue};
@@ -103,7 +103,6 @@ fn the_marker_reaches_no_event_no_host_log_line_and_no_kv_row_after_finished() {
         assert!(!wire.contains("token"), "a URL's secret in the log: {wire}");
     }
     let lines = lines.lock().unwrap();
-    assert!(!lines.is_empty() || lines.is_empty());
     for line in lines.iter() {
         assert!(!line.contains(MARKER), "in a host log line: {line}");
     }
@@ -212,5 +211,4 @@ fn every_kv_row_of_a_finished_run_is_reachable_by_the_stated_derivation() {
             || key == &format!("host-seen/{WORKSPACE}");
         assert!(reachable, "{key} cannot be found from the run");
     }
-    let _ = EventBody::ResumeRun;
 }

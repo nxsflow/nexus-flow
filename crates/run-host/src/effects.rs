@@ -29,7 +29,7 @@ pub(crate) struct PendingCommission {
 }
 
 /// Where an effect's ledger entry stands.
-pub(crate) enum Phase2 {
+pub(crate) enum EntryPhase {
     /// Written now, or found from before a crash: the world may hold the effect already.
     Pending,
     Done(String),
@@ -92,11 +92,11 @@ impl Host {
             .compare_and_set(&full, current.as_deref(), Some(&value))
     }
 
-    fn entry_phase(&self, run: &RunId, key: &str, epoch: Epoch) -> Result<Phase2, StoreError> {
+    fn entry_phase(&self, run: &RunId, key: &str, epoch: Epoch) -> Result<EntryPhase, StoreError> {
         let state = self.entry_or_write(run, key, epoch, PENDING)?;
         Ok(match state.strip_prefix(DONE) {
-            Some(id) => Phase2::Done(id.to_owned()),
-            None => Phase2::Pending,
+            Some(id) => EntryPhase::Done(id.to_owned()),
+            None => EntryPhase::Pending,
         })
     }
 
@@ -239,8 +239,8 @@ impl Host {
         let run = &state.run;
         let ledger = format!("root/{run}");
         let message = match self.entry_phase(run, &ledger, epoch)? {
-            Phase2::Done(id) => id,
-            Phase2::Pending => {
+            EntryPhase::Done(id) => id,
+            EntryPhase::Pending => {
                 let Some(bytes) = self.store.get(&format!("pending/{run}"))? else {
                     self.log(run, "owes its root", "and no commission waits for it");
                     return Ok(());
@@ -301,8 +301,8 @@ impl Host {
     ) -> Result<(), StoreError> {
         let run = &state.run;
         let message = match self.entry_phase(run, key, epoch)? {
-            Phase2::Done(id) => id,
-            Phase2::Pending => {
+            EntryPhase::Done(id) => id,
+            EntryPhase::Pending => {
                 let Some(id) = self.find_or_post(
                     run,
                     epoch,

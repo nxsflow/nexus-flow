@@ -14,13 +14,13 @@ use std::process::Command;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use nexus_run_contracts::{Event, EventBody, LivenessPolicy, RunId, RunStore, Secs, Timestamp};
+use nexus_run_contracts::{Event, LivenessPolicy, RunId, RunStore, Secs, Timestamp};
 use nexus_run_store_sqlite::SqliteRunStore;
 
 use crate::bridge::{self, BridgeCtx, Caller, CommissionReceipt, ReplyFlags, HOST_BUSY_TIMEOUT};
 use crate::host::{Host, Layout, Ports, TickReport};
 use crate::ports::{Clock, Refs};
-use crate::tree_worker::TreeLedger;
+use crate::tree_ledger::TreeLedger;
 pub use file_ports::{coding_decl, read_port_lines, review_decl, FilePorts, PortLine};
 use scripted_backend::{pass, Cue, Scenario, ScriptedBackend, SessionInfo};
 use scripted_tree::ScriptedTree;
@@ -358,7 +358,7 @@ impl Rig {
     }
 }
 
-/// Where a test's scenario can look at a session's seat.
+/// The scenario where every session replies and passes.
 pub fn replies_pass(_: &SessionInfo) -> Cue {
     pass()
 }
@@ -392,22 +392,6 @@ pub fn scenario_named(name: &str) -> Scenario {
         }),
         _ => Box::new(replies_pass),
     }
-}
-
-/// Whether anything in a log says this event body kind with this key prefix.
-pub fn events_with_prefix<'a>(events: &'a [Event], prefix: &str) -> Vec<&'a Event> {
-    events
-        .iter()
-        .filter(|e| e.key.starts_with(prefix))
-        .collect()
-}
-
-/// A delivered result of this log, by its body.
-pub fn delivered_count(events: &[Event]) -> usize {
-    events
-        .iter()
-        .filter(|event| matches!(event.body, EventBody::Delivered { .. }))
-        .count()
 }
 
 impl Rig {

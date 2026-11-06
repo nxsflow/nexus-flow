@@ -20,17 +20,16 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use nexus_run_contracts::status::InFlight as InFlightStatus;
 use nexus_run_contracts::{
     Base, Epoch, GitReason, Outcome, ParkOutcome, RunId, RunStore, StoreError, Timestamp,
     TreeRefusal,
 };
 use nexus_run_store_sqlite::{Lease, SqliteRunStore};
-use serde::{Deserialize, Serialize};
 
 use crate::boundary::{crash_at, Boundary};
 use crate::ports::Clock;
 use crate::session_stub::{ProcessGuard, SystemProcesses};
+use crate::tree_ledger::{LedgerEntry, TreeLedger};
 
 /// The overall deadline of one operation, beside the bound on each of its calls. A clone's own bound is
 /// 10 min, a fetch's 2 min, and every other call is 60 s.
@@ -56,6 +55,12 @@ impl TreeOp {
     pub fn run(&self) -> &RunId {
         match self {
             Self::Prepare { run, .. } | Self::Park { run, .. } => run,
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        match self {
+            Self::Prepare { dir, .. } | Self::Park { dir, .. } => dir,
         }
     }
 
@@ -120,83 +125,6 @@ pub struct TreeBinding {
     pub clock: Arc<dyn Clock>,
 }
 
-/// One entry of the ledger file. `pid` and `start_time` are absent until the child exists: a crash in that
-/// gap leaves a bounded child nobody can name, and the next prepare reads the tree before it acts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerEntry {
-    pub run: RunId,
-    pub op: String,
-    pub step: String,
-    pub pid: Option<u32>,
-    pub start_time: Option<String>,
-    pub began_at: Timestamp,
-    pub owner_id: String,
-    pub epoch: Epoch,
-    /// Whether `index.lock` was there before the child: only a lock a call can prove it created is cleared.
-    pub lock_existed_before: bool,
-}
-
-/// The file `<agent-logs>/v2/tree/<workspace_id>.json`.
-#[derive(Clone, Debug)]
-pub struct TreeLedger {
-    path: PathBuf,
-}
-
-impl TreeLedger {
-    pub fn new(agent_logs: &Path, workspace_id: &str) -> Self {
-        Self {
-            path: agent_logs
-                .join("v2")
-                .join("tree")
-                .join(format!("{workspace_id}.json")),
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// `None` for a file that is gone, and for one that does not read: a torn entry names nobody to kill.
-    pub fn read(&self) -> Option<LedgerEntry> {
-        let bytes = fs::read(&self.path).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    /// By temp file and rename, so a reader never meets half an entry.
-    pub fn write(&self, entry: &LedgerEntry) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temp = self.path.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_vec(entry)?)?;
-        fs::rename(&temp, &self.path)
-    }
-
-    pub fn delete(&self) {
-        // A file already gone is the wanted state.
-        let _ = fs::remove_file(&self.path);
-    }
-
-    /// Deletes the entry only if `owner_id` wrote it: a worker that lost its run finishes after the new
-    /// owner's worker has written, and that entry is not its to remove.
-    fn delete_own(&self, owner_id: &str) {
-        if self.read().is_some_and(|entry| entry.owner_id == owner_id) {
-            self.delete();
-        }
-    }
-
-    /// `tree.in_flight` of status: the entry with its pid checked, a dead child reading as none.
-    pub fn in_flight(&self, guard: &dyn ProcessGuard) -> Option<InFlightStatus> {
-        let entry = self.read()?;
-        let (pid, start_time) = (entry.pid?, entry.start_time?);
-        guard.is_alive(pid, &start_time).then_some(InFlightStatus {
-            op: entry.op,
-            step: entry.step,
-            since: entry.began_at,
-        })
-    }
-}
-
 /// What the status read of a directory answers (§5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TreeState {
@@ -250,6 +178,8 @@ impl TreeStop {
         }
     }
 }
+
+const BEGIN_STEP: &str = "begin";
 
 /// What one child left behind, as bytes: output is never decoded lossily (6j6v.2af2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,6 +252,7 @@ impl TreeCx<'_> {
     fn entry(&self, step: &str, child: Option<(u32, String)>, lock_existed: bool) -> LedgerEntry {
         let (pid, start_time) = child.unzip();
         LedgerEntry {
+            spawning: step != BEGIN_STEP,
             run: self.op.run().clone(),
             op: self.op.name().to_owned(),
             step: step.to_owned(),
@@ -339,7 +270,7 @@ impl TreeCx<'_> {
     pub fn spawn(
         &mut self,
         step: &str,
-        mut command: Command,
+        command: Command,
         bound: Duration,
         dir: &Path,
     ) -> Result<StepOutput, TreeStop> {
@@ -350,9 +281,12 @@ impl TreeCx<'_> {
         let lock_existed = dir.join(".git").join("index.lock").exists();
         crash_at(Boundary::BeforeTreeLedger);
         let ledger = &self.shared.ledger;
+        // A record of the last child must not name this one.
+        let _ = fs::remove_file(ledger.child_record());
         ledger
             .write(&self.entry(step, None, lock_existed))
             .map_err(|_| TreeStop::SpawnFailed)?;
+        let mut command = recording_itself(command, &ledger.child_record());
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -421,6 +355,34 @@ fn read_all<R: Read + Send + 'static>(source: Option<R>) -> std::thread::JoinHan
         }
         bytes
     })
+}
+
+/// The same command, writing its own pid before it becomes the program: `exec` keeps the pid, the process group
+/// and the start time, so what it wrote is the identity the ledger means.
+#[cfg(unix)]
+fn recording_itself(command: Command, record: &Path) -> Command {
+    let mut wrapped = Command::new("sh");
+    wrapped
+        .arg("-c")
+        .arg(r#"printf %s "$$" > "$0"; exec "$@""#)
+        .arg(record)
+        .arg(command.get_program())
+        .args(command.get_args());
+    if let Some(dir) = command.get_current_dir() {
+        wrapped.current_dir(dir);
+    }
+    for (name, value) in command.get_envs() {
+        match value {
+            Some(value) => wrapped.env(name, value),
+            None => wrapped.env_remove(name),
+        };
+    }
+    wrapped
+}
+
+#[cfg(not(unix))]
+fn recording_itself(command: Command, _record: &Path) -> Command {
+    command
 }
 
 #[cfg(unix)]
@@ -503,15 +465,35 @@ impl<R: TreeRunner> TreeWorker<R> {
     }
 
     /// The ledger read of `begin`: what a recorded entry means for this host.
-    fn settle_ledger(&self, binding: &TreeBinding) -> Result<(), InFlight> {
+    fn settle_ledger(&self, binding: &TreeBinding, op: &TreeOp) -> Result<(), InFlight> {
         let Some(entry) = self.shared.ledger.read() else {
             return Ok(());
         };
         if entry.owner_id != binding.owner_id && owner_is_live(&entry, binding) {
             return Err(InFlight);
         }
-        if let (Some(pid), Some(start_time)) = (entry.pid, entry.start_time.as_deref()) {
-            self.shared.guard.kill_group(pid, start_time);
+        let had_a_child = entry.pid.is_some() || self.shared.ledger.self_recorded_pid().is_some();
+        match (entry.pid, entry.start_time.as_deref()) {
+            (Some(pid), Some(start_time)) => {
+                self.shared.guard.kill_group(pid, start_time);
+            }
+            _ => {
+                // The parent died before it recorded the child: the child's own record names it. Until the
+                // grace is over the child may still be on its way to writing that.
+                let own = self.shared.ledger.self_recorded_pid();
+                if own.is_none() && entry.spawning && self.shared.ledger.within_spawn_grace() {
+                    return Err(InFlight);
+                }
+                if let Some(pid) = own {
+                    if let Some(start_time) = self.shared.guard.start_time(pid) {
+                        self.shared.guard.kill_group(pid, &start_time);
+                    }
+                }
+            }
+        }
+        // A lock this call can prove it made (§5): none was there before the child, and the child is gone.
+        if had_a_child && !entry.lock_existed_before {
+            let _ = fs::remove_file(op.dir().join(".git").join("index.lock"));
         }
         self.shared.ledger.delete();
         Ok(())
@@ -589,7 +571,7 @@ fn run_bound<R: TreeRunner>(
     crash_at(Boundary::BeforeTreeLedger);
     if shared
         .ledger
-        .write(&cx.entry("begin", None, false))
+        .write(&cx.entry(BEGIN_STEP, None, false))
         .is_err()
     {
         return TreeStop::SpawnFailed.into_result();
@@ -617,7 +599,7 @@ impl<R: TreeRunner> WorkTree for TreeWorker<R> {
         if in_flight.is_some() {
             return Err(InFlight);
         }
-        self.settle_ledger(&binding)?;
+        self.settle_ledger(&binding, &op)?;
         let jobs = self.sender().ok_or(InFlight)?;
         *in_flight = Some(op.clone());
         self.shared.cancel.store(false, Ordering::SeqCst);

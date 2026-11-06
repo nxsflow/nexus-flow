@@ -18,7 +18,7 @@ use nexus_run_contracts::{
 use nexus_run_host::bridge;
 use nexus_run_host::ports::Clock;
 use nexus_run_host::session_stub::{ProcessGuard, SystemProcesses};
-use nexus_run_host::test_support::scripted_backend::{pass, Cue, SessionInfo};
+use nexus_run_host::test_support::scripted_backend::{Cue, SessionInfo};
 use nexus_run_host::test_support::scripted_tree::{ScriptedTree, TreeStep};
 use nexus_run_host::test_support::{replies_pass, Rig, SimClock, StoreProbe, CLOCK_START};
 use nexus_run_host::{
@@ -107,6 +107,7 @@ impl Bench {
             owner_id: owner.to_owned(),
             epoch,
             lock_existed_before: false,
+            spawning: false,
         }
     }
 }
@@ -135,6 +136,9 @@ fn orphan() -> (Child, u32, String) {
     let child = Command::new("sleep")
         .arg("600")
         .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     let pid = child.id();
@@ -323,6 +327,112 @@ fn this_hosts_own_recorded_child_is_killed() {
     assert_dies(child);
 }
 
+/// The crash between a child's spawn and its record: the child wrote its own pid as its first act, and a restarted
+/// host kills by that, so no orphan writes beside the operation it re-runs (§8.3).
+#[test]
+fn a_child_only_it_recorded_is_killed_by_its_own_record() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+    let (child, pid, _) = orphan();
+    let mut entry = bench.entry(OTHER, 3, None);
+    entry.spawning = true;
+    bench.ledger.write(&entry).unwrap();
+    std::fs::write(bench.ledger.child_record(), pid.to_string()).unwrap();
+    tree.begin(bench.prepare())
+        .expect("the owner's lease moved on");
+    assert_dies(child);
+    until("the operation's result", || tree.poll().is_some());
+    assert!(
+        !bench.ledger.child_record().exists(),
+        "the record goes with the entry"
+    );
+}
+
+/// With no record yet the child may still be starting: `InFlight`, and the grace bounds it.
+#[test]
+fn an_announced_spawn_with_no_record_is_waited_on_for_the_grace_only() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+    let mut entry = bench.entry(OTHER, 3, None);
+    entry.spawning = true;
+    bench.ledger.write(&entry).unwrap();
+    assert_eq!(
+        tree.begin(bench.prepare()),
+        Err(InFlight),
+        "it may be starting"
+    );
+    until("the grace ended", || tree.begin(bench.prepare()).is_ok());
+    until("the operation's result", || tree.poll().is_some());
+}
+
+/// The recorded pid is the one the worker's own spawn wrote: the wrapper's `exec` keeps it.
+#[test]
+fn a_real_child_records_itself_with_the_pid_the_ledger_holds() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    tree.script(vec![sleeper()]);
+    tree.begin(bench.prepare()).unwrap();
+    let mut entry = None;
+    until("the child is recorded by the parent", || {
+        entry = tree.ledger().read().filter(|e| e.pid.is_some());
+        entry.is_some()
+    });
+    let entry = entry.unwrap();
+    let record = bench.ledger.child_record();
+    until("the child recorded itself", || {
+        std::fs::read_to_string(&record).ok().as_deref()
+            == Some(entry.pid.unwrap().to_string().as_str())
+    });
+    tree.cancel();
+    until("the result", || tree.poll().is_some());
+}
+
+/// What `lock_existed_before` is for (§5): a child killed here may have left `index.lock` behind, and the call can
+/// prove it created it, because the ledger says none was there before it. Left in place, the park that re-runs would
+/// fail on it for ever.
+#[test]
+fn a_lock_the_killed_child_created_is_cleared_and_one_that_was_there_before_is_not() {
+    for existed_before in [false, true] {
+        let bench = Bench::new();
+        let tree = bench.tree();
+        bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+        let git_dir = bench._dir.path().join("v2").join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let lock = git_dir.join("index.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let (child, pid, start) = orphan();
+        let mut entry = bench.entry(OTHER, 3, Some((pid, start)));
+        entry.lock_existed_before = existed_before;
+        bench.ledger.write(&entry).unwrap();
+        tree.begin(bench.prepare()).unwrap();
+        assert_dies(child);
+        assert_eq!(
+            lock.exists(),
+            existed_before,
+            "lock_existed_before = {existed_before}"
+        );
+        until("the operation's result", || tree.poll().is_some());
+    }
+}
+
+/// With no child recorded and none that recorded itself, nothing proves who made the lock.
+#[test]
+fn a_lock_with_no_recorded_child_behind_it_is_left_alone() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+    let git_dir = bench._dir.path().join("v2").join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let lock = git_dir.join("index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    bench.ledger.write(&bench.entry(OTHER, 3, None)).unwrap();
+    tree.begin(bench.prepare()).unwrap();
+    assert!(lock.exists(), "a lock nobody can answer for was removed");
+    until("the operation's result", || tree.poll().is_some());
+}
+
 /// A recorded pid now held by a process with another start time is not the child: pid reuse never kills it.
 #[test]
 fn a_pid_with_another_start_time_is_not_signalled() {
@@ -387,6 +497,37 @@ fn a_real_childs_bound_passing_with_the_deadline_kills_it() {
         !SystemProcesses.is_alive(pid, &start)
     });
     until("the result", || tree.poll().is_some());
+}
+
+/// A worker that lost its run finishes after the new owner's worker wrote: that entry is not its to remove, or
+/// the new owner's child could no longer be named.
+#[test]
+fn a_stale_worker_finishing_late_leaves_the_new_owners_ledger_entry_alone() {
+    let bench = Bench::new();
+    let stale = bench.tree();
+    stale.script(vec![TreeStep::Delay(Duration::from_secs(10))]);
+    stale.begin(bench.prepare()).unwrap();
+    until("the stale worker wrote its entry", || {
+        bench.ledger.read().is_some()
+    });
+
+    bench.leases.set(OTHER, 8, CLOCK_START + 60_000);
+    let (child, pid, start) = orphan();
+    bench
+        .ledger
+        .write(&bench.entry(OTHER, 8, Some((pid, start.clone()))))
+        .unwrap();
+    let mut result = None;
+    until("the stale worker finished", || {
+        bench.clock.advance(1_000);
+        result = stale.poll();
+        result.is_some()
+    });
+    let kept = bench.ledger.read().expect("the new owner's entry stays");
+    assert_eq!(kept.owner_id, OTHER);
+    assert_eq!(kept.pid, Some(pid));
+    SystemProcesses.kill_group(pid, &start);
+    assert_dies(child);
 }
 
 /// A clock that panics on demand, which is how a panic reaches the worker while a child runs.
@@ -664,6 +805,75 @@ fn a_takeover_with_an_operation_in_flight_kills_the_child_and_folds_one_result()
     assert_eq!(prepared, 1, "one result folded");
 }
 
+/// A result is enqueued only under a live lease (round 6): what the old owner's worker found out is dropped, even
+/// though it finished first, and the run folds what the new owner found.
+#[test]
+fn a_result_of_a_host_that_lost_the_lease_is_dropped_and_the_new_owners_folds() {
+    let prepared_at = |commit: &str| {
+        TreeStep::Answer(TreeResult::Prepared {
+            base: nexus_run_contracts::Base {
+                branch: "main".to_owned(),
+                commit: commit.to_owned(),
+            },
+            found: None,
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    rig.tree.script(vec![
+        TreeStep::Delay(Duration::from_secs(40)),
+        prepared_at("from-the-old-owner"),
+    ]);
+    let (mut second, second_tree) = rig.second_host();
+    second_tree.script(vec![
+        TreeStep::Delay(Duration::from_secs(600)),
+        prepared_at("from-the-new-owner"),
+    ]);
+    let run = rig.commission("work").run;
+    let check = run.clone();
+    rig.step_ms = 0;
+    rig.run_until(50, move |rig| {
+        rig.has(&check, "step_started") && rig.tree.begins() == 1
+    });
+    rig.clock.advance(31_000);
+    second.tick(rig.now());
+    assert_eq!(second_tree.begins(), 1, "the new owner began its own");
+
+    // The old owner's operation ends, and its host polls the result with the lease gone.
+    rig.clock.advance(10_000);
+    until("the old host polled its worker's result", || {
+        rig.host.tick(rig.now());
+        !rig.tree.busy()
+    });
+    for _ in 0..5 {
+        rig.host.tick(rig.now());
+        second.tick(rig.now());
+    }
+    assert!(!rig.has(&run, "tree_prepared"), "the stale result folded");
+    let waiting = rig.store.waiting_inputs(&run).unwrap();
+    assert!(
+        !waiting
+            .iter()
+            .flatten()
+            .any(|e| matches!(e.body, EventBody::TreePrepared { .. })),
+        "the stale result reached the inbox"
+    );
+
+    for _ in 0..200 {
+        rig.clock.advance(10_000);
+        second.tick(rig.now());
+        std::thread::sleep(Duration::from_millis(1));
+        if rig.has(&run, "tree_prepared") {
+            break;
+        }
+    }
+    let base = rig.events(&run).iter().find_map(|event| match &event.body {
+        EventBody::TreePrepared { base, .. } => Some(base.commit.clone()),
+        _ => None,
+    });
+    assert_eq!(base.as_deref(), Some("from-the-new-owner"));
+}
+
 // ---------------------------------------------------------------------- refusals and the window
 
 fn refused(text: &str) -> TreeStep {
@@ -874,6 +1084,24 @@ fn a_clock_jump_past_the_window_does_not_park_before_the_minimum_attempts() {
     );
 }
 
+/// The same without a jump: a window so short it closes before three attempts could run still waits for them.
+#[test]
+fn a_short_window_does_not_park_before_the_minimum_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = refusing_rig(dir.path(), 1);
+    for _ in 0..50 {
+        rig.tree.script(vec![refused("the network is down")]);
+    }
+    let run = rig.commission("work").run;
+    let check = run.clone();
+    rig.run_until(600, move |rig| rig.has(&check, "tree_refused"));
+    assert!(
+        rig.tree.begins() >= 3,
+        "parked after {} attempts",
+        rig.tree.begins()
+    );
+}
+
 /// A park's window changes nothing observable (§6.5): the claim stays held and it retries, however long, status
 /// says so, and only the recorded park releases.
 #[test]
@@ -966,5 +1194,4 @@ fn a_run_that_never_held_the_claim_records_not_held_and_begins_nothing() {
         Some(holder.as_str()),
         "the holder keeps its claim"
     );
-    let _ = pass;
 }

@@ -5,9 +5,9 @@ mod common;
 
 use nexus_run_contracts::{EventBody, RunId, RunStore, StartSpec, TimerPurpose};
 use nexus_run_engine::{slot_timer, SlotState, SUPERVISOR, SYNTH};
-use nexus_run_host::bridge::{self, Caller, ReplyFlags};
+use nexus_run_host::bridge::{self, ReplyFlags};
 use nexus_run_host::test_support::scripted_backend::{pass, Cue, SessionInfo};
-use nexus_run_host::test_support::{replies_pass, scenario_named, PortLine, Rig, CLOCK_START};
+use nexus_run_host::test_support::{scenario_named, PortLine, Rig, CLOCK_START};
 
 fn spec(rig: &Rig, key: &str) -> StartSpec {
     let bytes = std::fs::read(rig.dir.join("agent-logs/v2").join(key).join("spec.json"))
@@ -114,7 +114,7 @@ fn the_turn_is_the_message_the_thread_holds() {
 #[test]
 fn a_v2_session_is_primed_for_v2_and_nxc_send_is_absent_from_what_it_receives() {
     let dir = tempfile::tempdir().unwrap();
-    let (rig, run) = finished_rig(dir.path(), "rework");
+    let (rig, _) = finished_rig(dir.path(), "rework");
     let asked = rig.ports.asked.lock().unwrap().clone();
     let prompts: Vec<&String> = asked.iter().filter(|l| l.starts_with("prompt ")).collect();
     assert!(!prompts.is_empty());
@@ -136,7 +136,6 @@ fn a_v2_session_is_primed_for_v2_and_nxc_send_is_absent_from_what_it_receives() 
             "{key} is told it cannot commission"
         );
     }
-    let _ = run;
 }
 
 /// `--needs-rework` exactly where the step declares `on_needs_rework`, asserted per step (§6.4 item 3).
@@ -234,6 +233,8 @@ fn start_deadline_is_armed_by_tree_prepared_and_persona_session_when_started_fol
         if rig.spawned().contains(&key) {
             break;
         }
+        // The worker's delay starts when its thread gets there, so the clock has to keep moving.
+        rig.clock.advance(1_000);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(rig.has(&run, "tree_prepared"));
@@ -401,11 +402,6 @@ fn the_synthesis_turn_is_the_three_replies_and_the_definitions_prompt() {
         .contains("Consolidate the three verdicts."));
     assert_eq!(started.resume, None);
     assert_eq!(started.tools, ["Bash(nxc reply:*)"]);
-    let caller_of = Caller {
-        actor: SYNTH.to_owned(),
-        session: Some(format!("{run}/judge/v1/{SYNTH}/a1")),
-    };
-    assert_eq!(caller_of.actor, SYNTH);
 }
 
 #[test]
@@ -447,5 +443,4 @@ fn the_delivered_result_is_the_finishers_reply_on_the_root_thread_once() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, SUPERVISOR);
     assert_eq!(results[0].1, "the pull request is open");
-    let _ = replies_pass;
 }

@@ -54,7 +54,7 @@ impl Host {
         else {
             return Ok(());
         };
-        let Some(text) = self.compose_turn(state, &slot, &step, turn, &thread) else {
+        let Some(text) = self.compose_turn(&slot, &step, turn, &thread) else {
             return Ok(());
         };
         let Some(spec) = self.start_spec(state, &slot, &step, session_key, thread, text, resume)?
@@ -133,7 +133,7 @@ impl Host {
             &step.opener,
             &Refs::default(),
             &post_key,
-            |host| host.compose_turn(state, slot, step, turn, &thread),
+            |host| host.compose_turn(slot, step, turn, &thread),
         );
         if posted.is_none() {
             return Ok(None);
@@ -177,7 +177,6 @@ impl Host {
     /// obligation come from the definition and from here. `None` leaves the effect owed.
     fn compose_turn(
         &self,
-        state: &RunState,
         slot: &Slot,
         step: &StepDef,
         turn: &[TurnPart],
@@ -203,7 +202,6 @@ impl Host {
         if slot.attempt > 1 && step.next.is_none() {
             sections.insert(0, compose::EARLIER_ATTEMPT.to_owned());
         }
-        let _ = state;
         Some(sections.join("\n\n"))
     }
 

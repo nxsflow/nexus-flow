@@ -26,7 +26,8 @@ use crate::ports::{DeclarationPort, MessagePort, PortError, Refs};
 use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::start::{mint_thread_id, ThreadRoute};
 use crate::tree_effects::StoredRefusal;
-use crate::tree_worker::{tree_state, TreeLedger};
+use crate::tree_ledger::TreeLedger;
+use crate::tree_worker::tree_state;
 
 /// The bridge's `busy_timeout`, the old store's value, so a reply posted into the chat store is not followed
 /// by a visible enqueue failure over a short stall (§7).
@@ -184,7 +185,7 @@ pub fn commission(
         },
     );
     let flow_key = format!("flow/{}", hash.hash);
-    let mut cas = vec![
+    let cas = vec![
         Cas {
             key: format!("pending/{run}"),
             from: None,
@@ -215,7 +216,6 @@ pub fn commission(
             Err(error) => return Err(error.into()),
         }
     }
-    cas.clear();
     Ok(CommissionReceipt {
         run,
         root_thread,

@@ -31,6 +31,19 @@ fn input_hook(key: &str) {
 #[inline(always)]
 fn input_hook(_key: &str) {}
 
+/// A scripted `Busy` on this input's append, one tick at a time and with no lock: a lock held for the whole tick
+/// refuses the poison count's own write too, and could not tell a counted `Busy` from an uncounted one.
+#[cfg(feature = "test-support")]
+fn busy_hook(key: &str) -> bool {
+    crate::test_support::panics::busy_on(key)
+}
+
+#[cfg(not(feature = "test-support"))]
+#[inline(always)]
+fn busy_hook(_key: &str) -> bool {
+    false
+}
+
 /// The comparison a scripted `CasFailed` rides on: it can never hold, so no re-read clears it.
 #[cfg(feature = "test-support")]
 fn cas_hook(key: &str, cas: &mut Vec<Cas>) {
@@ -281,10 +294,13 @@ impl Host {
             };
             crash_at(Boundary::BeforeAppend);
             wrote("append");
-            match self
-                .store
-                .append(run, state.seq, epoch, &events, &consume, &cas)
-            {
+            let appended = if busy_hook(key) {
+                Err(StoreError::Busy)
+            } else {
+                self.store
+                    .append(run, state.seq, epoch, &events, &consume, &cas)
+            };
+            match appended {
                 Ok(_) => {
                     self.cache(run).state = Some(next);
                     self.report.folded += 1;

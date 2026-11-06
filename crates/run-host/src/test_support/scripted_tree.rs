@@ -11,12 +11,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use nexus_run_contracts::{Base, ParkOutcome, RunId};
+use nexus_run_contracts::{Base, GitReason, ParkOutcome, RunId, TreeRefusal};
 
 use crate::boundary::{crash_at, Boundary};
 use crate::session_stub::{ProcessGuard, SystemProcesses};
+use crate::tree_ledger::TreeLedger;
 use crate::tree_worker::{
-    InFlight, TreeBinding, TreeCx, TreeLedger, TreeOp, TreeResult, TreeRunner, TreeStop,
+    InFlight, StepOutput, TreeBinding, TreeCx, TreeOp, TreeResult, TreeRunner, TreeStop,
     TreeWorker, WorkTree, OPERATION_DEADLINE,
 };
 
@@ -101,23 +102,39 @@ fn run_script(
     Ok(default_result(op))
 }
 
-fn git(
+/// Why a repository operation stopped: the worker stopped it, or git refused, which is a transient refusal the
+/// host retries. A failed call is never passed over, or a park would report a commit it did not make.
+enum Stopped {
+    Worker(TreeStop),
+    Refused(TreeResult),
+}
+
+impl From<TreeStop> for Stopped {
+    fn from(stop: TreeStop) -> Self {
+        Self::Worker(stop)
+    }
+}
+
+fn git_call(
     cx: &mut TreeCx<'_>,
     dir: &Path,
     step: &str,
     args: &[&str],
-) -> Result<(bool, String), TreeStop> {
+) -> Result<StepOutput, TreeStop> {
     let mut command = Command::new("git");
-    command.current_dir(dir).args([
-        "-c",
-        "user.name=nxs",
-        "-c",
-        "user.email=nxs@localhost",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=",
-    ]);
+    command
+        .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "-c",
+            "user.name=nxs",
+            "-c",
+            "user.email=nxs@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=",
+        ]);
     for var in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -127,28 +144,61 @@ fn git(
         command.env_remove(var);
     }
     command.args(args);
-    let output = cx.spawn(step, command, BOUND, dir)?;
-    Ok((
-        output.success,
-        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-    ))
+    cx.spawn(step, command, BOUND, dir)
+}
+
+fn git(cx: &mut TreeCx<'_>, dir: &Path, step: &str, args: &[&str]) -> Result<String, Stopped> {
+    let output = git_call(cx, dir, step, args)?;
+    if !output.success {
+        return Err(Stopped::Refused(TreeResult::Refused {
+            reason: TreeRefusal::Git {
+                reason: GitReason::ExitNonzero,
+            },
+            text: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Every lock under `.git` but the index's, which the worker answers for: this harness kills git at every step, and
+/// a kill can leave `HEAD.lock` or a ref's. Nothing else writes here, because the claim is held.
+fn clear_stale_ref_locks(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            clear_stale_ref_locks(&path);
+        } else if path.extension().is_some_and(|ext| ext == "lock")
+            && path.file_name().is_some_and(|name| name != "index.lock")
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn run_repo(op: &TreeOp, origin: &Path, cx: &mut TreeCx<'_>) -> Result<TreeResult, TreeStop> {
-    match op {
+    clear_stale_ref_locks(&op.dir().join(".git"));
+    let done = match op {
         TreeOp::Prepare { run, dir, .. } => prepare(run, dir, origin, cx),
         TreeOp::Park { run, dir, .. } => {
             if !dir.exists() {
                 return Ok(TreeResult::Parked(ParkOutcome::Missing));
             }
-            let base = base_of(dir, cx)?;
-            park(run, dir, &base, cx).map(TreeResult::Parked)
+            base_of(dir, cx)
+                .and_then(|base| park(run, dir, &base, cx))
+                .map(TreeResult::Parked)
         }
+    };
+    match done {
+        Ok(result) | Err(Stopped::Refused(result)) => Ok(result),
+        Err(Stopped::Worker(stop)) => Err(stop),
     }
 }
 
-fn base_of(dir: &Path, cx: &mut TreeCx<'_>) -> Result<Base, TreeStop> {
-    let (_, commit) = git(cx, dir, "base", &["rev-parse", "origin/main"])?;
+fn base_of(dir: &Path, cx: &mut TreeCx<'_>) -> Result<Base, Stopped> {
+    let commit = git(cx, dir, "base", &["rev-parse", "origin/main"])?;
     Ok(Base {
         branch: "main".to_owned(),
         commit,
@@ -161,7 +211,7 @@ fn prepare(
     dir: &Path,
     origin: &Path,
     cx: &mut TreeCx<'_>,
-) -> Result<TreeResult, TreeStop> {
+) -> Result<TreeResult, Stopped> {
     let parent = dir.parent().unwrap_or(Path::new("."));
     let stem = dir
         .file_name()
@@ -194,7 +244,7 @@ fn prepare(
     }
     git(cx, dir, "fetch", &["fetch", "-q", "origin"])?;
     let base = base_of(dir, cx)?;
-    let (_, status) = git(cx, dir, "status", &["status", "--porcelain"])?;
+    let status = git(cx, dir, "status", &["status", "--porcelain"])?;
     let found = if status.is_empty() {
         None
     } else {
@@ -211,17 +261,15 @@ fn prepare(
 
 /// A HEAD on the run's own branch is used as it is; a HEAD on the default branch or detached gets a park
 /// branch, unless it is clean at the base. A retry after a crash finds HEAD on its park branch and reuses it.
-fn park(
-    run: &RunId,
-    dir: &Path,
-    base: &Base,
-    cx: &mut TreeCx<'_>,
-) -> Result<ParkOutcome, TreeStop> {
-    let (on_branch, current) = git(cx, dir, "head", &["symbolic-ref", "-q", "--short", "HEAD"])?;
-    let (_, status) = git(cx, dir, "status", &["status", "--porcelain"])?;
+fn park(run: &RunId, dir: &Path, base: &Base, cx: &mut TreeCx<'_>) -> Result<ParkOutcome, Stopped> {
+    // A detached HEAD answers non-zero here, which is an answer and no refusal.
+    let head = git_call(cx, dir, "head", &["symbolic-ref", "-q", "--short", "HEAD"])?;
+    let on_branch = head.success;
+    let current = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    let status = git(cx, dir, "status", &["status", "--porcelain"])?;
     let dirty = !status.is_empty();
-    let (_, head) = git(cx, dir, "rev-parse", &["rev-parse", "HEAD"])?;
-    if !on_branch && !dirty && head == base.commit {
+    let commit_now = git(cx, dir, "rev-parse", &["rev-parse", "HEAD"])?;
+    if !on_branch && !dirty && commit_now == base.commit {
         return Ok(ParkOutcome::Clean { branch: None });
     }
     let on_park = on_branch && current.starts_with("nxs/park/");
@@ -243,7 +291,7 @@ fn park(
             &["commit", "-q", "--no-verify", "-m", &message],
         )?;
     }
-    let (_, commit) = git(cx, dir, "rev-parse", &["rev-parse", "HEAD"])?;
+    let commit = git(cx, dir, "rev-parse", &["rev-parse", "HEAD"])?;
     crash_at(Boundary::AfterParkCommitBeforeTreeParked);
     Ok(if fresh || on_park {
         ParkOutcome::Committed { branch, commit }

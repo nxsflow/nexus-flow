@@ -7,8 +7,8 @@ use nexus_run_contracts::{
     Decision, EventBody, Origin, ReasonCode, RunId, RunStore, SessionFact, LOCAL_TENANT,
 };
 use nexus_run_host::bridge::{
-    self, answer, commission, live_sessions, open_store, reply, session_of, status, withdraw,
-    Caller, Refused, ReplyFlags,
+    answer, commission, live_sessions, open_store, reply, session_of, status, withdraw, Caller,
+    Refused, ReplyFlags,
 };
 use nexus_run_host::mint_owner_id;
 use nexus_run_host::ports::Refs;
@@ -669,5 +669,4 @@ fn owner_id_is_opaque_and_names_nobody() {
         3,
         "owner_id, epoch, expires_at: {stored}"
     );
-    let _ = bridge::HOST_BUSY_TIMEOUT;
 }
