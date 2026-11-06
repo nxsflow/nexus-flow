@@ -66,6 +66,10 @@ pub enum Cue {
     WriteFile {
         name: String,
     },
+    /// Writes a file into its working directory and leaves it uncommitted, then replies and passes.
+    WriteFileThenPass {
+        name: String,
+    },
     /// Reports these facts, one per tick, then stays silent.
     Facts(Vec<SessionFact>),
     /// Ends on its own with this cause, without a reply.
@@ -245,7 +249,21 @@ impl ScriptedBackend {
                     self.set_phase(key, 2);
                 }
             }
-            (2, Cue::Reply { .. }) => self.end(key, EndCause::TurnComplete),
+            (1, Cue::WriteFileThenPass { name }) => {
+                let cwd = fs::read_to_string(dir.join("cwd")).expect("the cwd is known");
+                fs::write(Path::new(&cwd).join(name), b"work").expect("the file is written");
+                let thread = fs::read_to_string(dir.join("thread")).expect("the thread is known");
+                let caller = Caller {
+                    actor: info.member.clone(),
+                    session: Some(key.to_owned()),
+                };
+                if reply(bridge, &thread, &caller, "done", ReplyFlags::default(), now).is_ok() {
+                    self.set_phase(key, 2);
+                }
+            }
+            (2, Cue::Reply { .. } | Cue::WriteFileThenPass { .. }) => {
+                self.end(key, EndCause::TurnComplete)
+            }
             (1, Cue::WriteFile { name }) => {
                 let cwd = fs::read_to_string(dir.join("cwd")).expect("the cwd is known");
                 fs::write(Path::new(&cwd).join(name), b"work").expect("the file is written");

@@ -1404,3 +1404,41 @@ fn a_lock_of_a_child_killed_at_its_bound_is_cleared_with_the_group_gone() {
     assert!(!made.exists(), "the killed child's lock stayed");
     assert!(planted.exists(), "a lock from before it was removed");
 }
+
+/// Real processes, and a group that will not be confirmed gone: nothing proves the child stopped writing.
+struct GroupStays;
+
+impl ProcessGuard for GroupStays {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_time(pid)
+    }
+
+    fn kill_group(&self, pid: u32, start_time: &str) -> bool {
+        SystemProcesses.kill_group(pid, start_time)
+    }
+
+    fn group_gone(&self, _pgid: u32) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_lock_stays_while_the_group_is_not_confirmed_gone() {
+    let bench = Bench::new();
+    let tree = ScriptedTree::with_guard(bench.ledger.clone(), Arc::new(GroupStays));
+    bench.bind(&tree, bench.clock.clone());
+    bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+    let git_dir = bench._dir.path().join("v2").join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let lock = git_dir.join("index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let (child, pid, start) = orphan();
+    bench
+        .ledger
+        .write(&bench.entry(OTHER, 3, Some((pid, start))))
+        .unwrap();
+    tree.begin(bench.prepare()).unwrap();
+    assert_dies(child);
+    assert!(lock.exists(), "cleared with the group not confirmed gone");
+    until("the operation's result", || tree.poll().is_some());
+}

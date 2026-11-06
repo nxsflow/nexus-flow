@@ -259,3 +259,33 @@ fn a_write_still_succeeds_and_says_so_when_the_projection_cannot_be_written() {
         .success();
     assert!(String::from_utf8_lossy(&recalled.get_output().stdout).contains("auth uses JWT"));
 }
+
+/// The v2 working directory (6j6v.zjyv §6.6): a clone beside the root whose `.nxs` is a link to the root's target
+/// resolves the same store, and a write from it regenerates ITS document, never the root's. A session reads memory
+/// from the store, so this is only about which checkout's tracked file moves. Pinned so the projection cannot
+/// silently change sides.
+#[cfg(unix)]
+#[test]
+fn a_write_from_a_linked_directory_regenerates_that_directorys_document_and_not_the_roots() {
+    let tmp = seeded();
+    let root_doc = doc(&tmp);
+    let linked = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join(".nxs").canonicalize().unwrap(),
+        linked.path().join(".nxs"),
+    )
+    .unwrap();
+    nxm(&linked)
+        .args([
+            "remember",
+            "a fact written from the linked directory",
+            "--introduction",
+            "A fact written from the linked directory.",
+            "--key",
+            "from-the-linked-directory",
+        ])
+        .assert()
+        .success();
+    assert!(doc(&linked).contains("from-the-linked-directory"));
+    assert_eq!(doc(&tmp), root_doc, "the root's document moved");
+}

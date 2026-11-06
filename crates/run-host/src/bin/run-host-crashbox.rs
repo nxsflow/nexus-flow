@@ -1,6 +1,7 @@
 //! One tick loop against a temp store (§12.4): `run-host-crashbox <dir> <script>`. It commissions on its first
 //! start, runs until the run finished, and a restart is simply running it again on the same directory. It
-//! aborts where `NXR_CRASH_AT` says.
+//! aborts where `NXR_CRASH_AT` says. Under `NXR_TREE=git` it works on the real `GitTree` instead of the scripted tree.
+//! `run-host-crashbox <dir> tree-state` is the other process that asks about a directory, as the CLI does.
 //!
 //! The clock is a file, because a restart continues it, and each run starts a lease expiry later than the
 //! last tick: the aborted host's lease has to run out, as it does for a real restart.
@@ -9,8 +10,13 @@ use std::fs;
 use std::path::Path;
 
 use nexus_run_contracts::RunId;
+use nexus_run_host::git_tree::tree_state;
 use nexus_run_host::ports::{Clock, SystemClock};
-use nexus_run_host::test_support::{scenario_named, Rig, CLOCK_START, REQUESTER};
+use nexus_run_host::session_stub::SystemProcesses;
+use nexus_run_host::test_support::{
+    scenario_named, Rig, RigTree, CLOCK_START, REQUESTER, WORKSPACE,
+};
+use nexus_run_host::TreeLedger;
 
 const STEP_MS: i64 = 2_000;
 /// How much faster than the wall the shared clock runs: a 30 s lease expires in 1.5 s.
@@ -23,7 +29,7 @@ fn read_clock(dir: &Path) -> i64 {
         .unwrap_or(CLOCK_START)
 }
 
-fn commissioned_run(rig: &Rig, marker: &Path, body: &str) -> RunId {
+fn commissioned_run<T: RigTree>(rig: &Rig<T>, marker: &Path, body: &str) -> RunId {
     if let Some(run) = fs::read_to_string(marker)
         .ok()
         .and_then(|text| RunId::parse(text.trim()))
@@ -43,7 +49,40 @@ fn main() {
     };
     let dir = Path::new(dir);
     fs::create_dir_all(dir).expect("the box's directory");
-    let mut rig = Rig::in_repo(dir, read_clock(dir), scenario_named(script));
+    if script == "tree-state" {
+        print_tree_state(dir);
+        return;
+    }
+    let clock = read_clock(dir);
+    if std::env::var_os("NXR_TREE").is_some() {
+        let rig = Rig::git_tree(dir, clock, scenario_named(script));
+        if script == "dirty_at_prepare" {
+            Rig::leave_a_dirty_directory(dir);
+        }
+        drive(rig, dir, script);
+    } else {
+        drive(
+            Rig::in_repo(dir, clock, scenario_named(script)),
+            dir,
+            script,
+        );
+    }
+}
+
+/// What the CLI process reads: the ledger file, with the pid checked, and the directory.
+fn print_tree_state(dir: &Path) {
+    let ledger = TreeLedger::new(&dir.join("agent-logs"), WORKSPACE);
+    match ledger.in_flight(&SystemProcesses) {
+        Some(in_flight) => println!("in_flight {} {}", in_flight.op, in_flight.step),
+        None => println!("in_flight none"),
+    }
+    match tree_state(&dir.join("root"), &dir.join("root-v2")) {
+        Ok(state) => println!("missing {}", state.missing),
+        Err(error) => println!("error {}", error.what),
+    }
+}
+
+fn drive<T: RigTree>(mut rig: Rig<T>, dir: &Path, script: &str) {
     rig.step_ms = STEP_MS;
     let withdraws = script == "withdraw";
     let marker = dir.join(format!("run-{script}"));
@@ -84,7 +123,7 @@ fn main() {
 }
 
 /// Once the coder has written its file, the requester withdraws.
-fn maybe_withdraw(rig: &Rig, run: &RunId) {
+fn maybe_withdraw<T: RigTree>(rig: &Rig<T>, run: &RunId) {
     if !rig.bridge.layout.v2_dir().join("stray.txt").exists() {
         return;
     }
