@@ -56,6 +56,13 @@ pub fn run_git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// `git init`, the repository's, in a directory. No workspace of ours is involved, so no home needs pinning for it.
+pub fn git_init(dir: &Path, extra: &[&str]) {
+    let mut args = vec!["init", "-q"];
+    args.extend_from_slice(extra);
+    run_git(dir, &args);
+}
+
 pub fn raw_git(dir: &Path, args: &[&str]) -> Output {
     hermetic();
     Command::new("git")
@@ -80,7 +87,7 @@ pub fn origin_with_main(path: &Path) {
     std::fs::create_dir_all(path).expect("the origin's directory");
     std::fs::write(path.join("README"), b"origin\n").expect("a file");
     std::fs::write(path.join(".gitignore"), TRACKED_GITIGNORE).expect("the tracked ignore file");
-    run_git(path, &["init", "-q"]);
+    git_init(path, &[]);
     run_git(path, &["add", "-A"]);
     run_git(path, &["commit", "-q", "-m", "first"]);
 }

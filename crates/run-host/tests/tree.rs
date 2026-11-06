@@ -305,7 +305,7 @@ fn a_directory_holding_another_repository_is_foreign_at_once_naming_the_path_and
 fn a_repository_with_no_origin_in_the_directory_is_foreign() {
     let bench = Bench::new();
     std::fs::create_dir_all(&bench.dir).unwrap();
-    run_git(&bench.dir, &["init", "-q"]);
+    git_init(&bench.dir, &[]);
     let result = bench.prepare(&bench.tree(), &fresh_run());
     assert_eq!(refusal(&result).0, &TreeRefusal::ForeignDirectory);
 }
@@ -329,7 +329,7 @@ fn a_directory_that_is_no_repository_is_refused_even_inside_another_repository()
     let bench = Bench::new();
     // The temp directory itself is a repository, as a workspace's parent can be: discovery must not find it.
     let parent = bench.dir.parent().unwrap();
-    run_git(parent, &["init", "-q"]);
+    git_init(parent, &[]);
     std::fs::create_dir_all(&bench.dir).unwrap();
     std::fs::write(bench.dir.join("somebodys"), b"file").unwrap();
     let result = bench.prepare(&bench.tree(), &fresh_run());
@@ -600,7 +600,7 @@ fn an_empty_remote_is_refused_naming_the_missing_default_and_leaves_no_directory
     let base = bench.origin.parent().unwrap();
     let empty = base.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
-    run_git(&empty, &["init", "-q", "--bare"]);
+    git_init(&empty, &["--bare"]);
     run_git(
         &bench.root,
         &["remote", "set-url", "origin", &empty.display().to_string()],
