@@ -11,6 +11,46 @@ use crate::signing::{Provenance, ReplicaKey};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How long [`enter_wal`] goes on trying: the budget every store connection has for a lock.
+const WAL_SWITCH_BUDGET: Duration = Duration::from_secs(5);
+/// The pause between two tries of [`enter_wal`].
+const WAL_SWITCH_RETRY: Duration = Duration::from_millis(10);
+
+/// Switches the file behind `conn` to WAL, which lets parallel processes serialize their short write
+/// transactions instead of failing with "database is locked". A file already in WAL is left as it is.
+///
+/// `busy_timeout` does not cover this. The switch reads the file and then upgrades that read to a
+/// write, and while another connection holds the write lock SQLite answers the upgrade
+/// `SQLITE_BUSY` at once: the busy handler is only consulted when no transaction is open
+/// (`sqlite3BtreeBeginTrans`). Every [`Store::open`] holds that lock for a moment in
+/// `schema::migrate`, so two connections opening a new file meet here (6j6v.nmn6). Hence the retry.
+pub fn enter_wal(conn: &Connection) -> rusqlite::Result<()> {
+    enter_wal_within(conn, WAL_SWITCH_BUDGET, || {
+        std::thread::sleep(WAL_SWITCH_RETRY)
+    })
+}
+
+/// [`enter_wal`] with its budget and its pause given, so a test can end the wait from inside it.
+fn enter_wal_within(
+    conn: &Connection,
+    budget: Duration,
+    mut pause: impl FnMut(),
+) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(e)
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && Instant::now() < deadline =>
+            {
+                pause()
+            }
+            other => return other,
+        }
+    }
+}
 
 /// How a single op was taken into the log by [`Store::ingest`].
 enum Ingest {
@@ -113,9 +153,9 @@ impl Store {
         let conn = Connection::open(path)?;
         // Wait-on-lock rather than fail instantly with "database is locked" when another opener
         // momentarily holds the WAL writer — e.g. the nexflow.it app, or the MCP server's own
-        // auto-init materializing the substrate on the SHARED App-Data-Home board (#76u.7). The
-        // product `open_store` sets this, but the substrate open path (`ensure_substrate_db`) goes
-        // straight through here, so set it at the root with the same 5s budget every store uses.
+        // auto-init materializing the substrate on the SHARED App-Data-Home board (#76u.7). Every
+        // open goes through here, the substrate path (`ensure_substrate_db`) and the products', so
+        // it is set at the root, for all of them. It does not cover the switch to WAL: [`enter_wal`].
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(RECURSIVE_TRIGGERS)?;
         // Skew gate (spec §4.3): classify the (possibly foreign-stamped) file BEFORE touching it.
@@ -3053,6 +3093,86 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert_eq!(ms, 5000, "Store::open sets the 5s busy_timeout");
+    }
+
+    // ---- entering WAL (6j6v.nmn6) ---------------------------------------------------------------
+
+    /// A new file in the rollback journal, and a second connection on it.
+    fn rollback_file_with_a_second_connection() -> (tempfile::TempDir, Connection, Connection) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("db.sqlite");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("CREATE TABLE t(x);").unwrap();
+        let opener = Connection::open(&path).unwrap();
+        (tmp, writer, opener)
+    }
+
+    fn journal_mode(conn: &Connection) -> String {
+        conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn entering_wal_tries_again_after_it_met_another_connections_write_lock() {
+        let (_tmp, writer, opener) = rollback_file_with_a_second_connection();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut pauses = 0;
+        enter_wal_within(&opener, Duration::from_secs(60), || {
+            pauses += 1;
+            writer.execute_batch("COMMIT").unwrap();
+        })
+        .expect("the switch goes through once the write lock is gone");
+        assert_eq!(pauses, 1, "the first try met the lock, the second did not");
+        assert_eq!(journal_mode(&opener), "wal");
+    }
+
+    #[test]
+    fn entering_wal_gives_up_with_the_lock_error_once_its_budget_is_spent() {
+        let (_tmp, writer, opener) = rollback_file_with_a_second_connection();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut pauses = 0;
+        let err = enter_wal_within(&opener, Duration::ZERO, || pauses += 1).unwrap_err();
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "the caller gets the lock error itself: {err}"
+        );
+        assert_eq!(pauses, 0, "a spent budget does not pause again");
+    }
+
+    #[test]
+    fn entering_wal_does_not_retry_an_error_that_waiting_cannot_cure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("not-a-db");
+        std::fs::write(
+            &path,
+            "this file is not a sqlite database, and never will be",
+        )
+        .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let mut pauses = 0;
+        let err = enter_wal_within(&conn, Duration::from_secs(60), || pauses += 1).unwrap_err();
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::NotADatabase),
+            "{err}"
+        );
+        assert_eq!(pauses, 0);
+    }
+
+    #[test]
+    fn entering_wal_on_a_file_already_in_wal_is_quiet_under_a_write_lock() {
+        let (_tmp, writer, opener) = rollback_file_with_a_second_connection();
+        enter_wal(&writer).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // Read the file once, as every store open has done by the time it gets here.
+        let _ = journal_mode(&opener);
+        let mut pauses = 0;
+        enter_wal_within(&opener, Duration::from_secs(60), || pauses += 1).unwrap();
+        assert_eq!(
+            pauses, 0,
+            "there is nothing to switch, so nothing to wait for"
+        );
     }
 
     // ---- images (6j6v.mxt2) ------------------------------------------------------------------

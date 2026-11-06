@@ -23,9 +23,7 @@ impl MemoryWorkspaceExt for Workspace {
         let path = self.db_path_str()?;
         let store = MemoryStore::open(&path, self.replica.site_id)
             .map_err(|e| NxfError::io(format!("opening memory store at {path}: {e}")))?;
-        store
-            .connection()
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        nxs_foundation::store::enter_wal(store.connection())
             .map_err(|e| NxfError::io(format!("failed to set sqlite pragmas: {e}")))?;
         Ok(store)
     }
