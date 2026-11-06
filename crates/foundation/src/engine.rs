@@ -220,9 +220,7 @@ mod tests {
             let path = ws.db_path_str()?;
             let store = Store::open(&path, ws.replica.site_id)
                 .map_err(|e| NxfError::io(format!("opening store at {path}: {e}")))?;
-            store
-                .connection()
-                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            crate::store::enter_wal(store.connection())
                 .map_err(|e| NxfError::io(format!("failed to set sqlite pragmas: {e}")))?;
             Ok(store)
         })

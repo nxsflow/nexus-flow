@@ -1,0 +1,97 @@
+name: Isolated test run
+
+# One named test, repeated on the system and profile of `ci.yml`'s `quality-gates` job (6j6v.jmxk).
+# It exists so that a test the owner registered as a flake can be judged where it went red: the
+# development machine is macOS and that job is Linux, so a local repeat says nothing about it.
+#
+#   gh workflow run isolated-test.yml --ref <branch> \
+#     -f package=nexus-flow-facade -f target=engine -f test=<full test name> -f profile=debug -f repeats=20
+#
+# WHAT IT PROVES, read from CI's own record: the run's head SHA and title, and the last line of the
+# log, `isolated-test-result commit=… test=… system=… profile=… repeats=… executed=… reds=… verdict=…`
+# (`.github/scripts/isolated-test.sh` says exactly what each number counts). The run is green only
+# when that one test executed in every repeat, at least three, without a red.
+#
+# WHAT IT CANNOT DO, and why it is a file of its own rather than an input on `ci.yml`:
+#
+#   - Cancel a `ci.yml` run. GitHub cancels only within a concurrency group, and `ci.yml`'s is
+#     `ci-<ref>`. This file declares no group at all, so a dispatch here never touches the run whose
+#     red it is judging. A second dispatch here does not cancel the first either.
+#   - Count toward a release. `require-green-ci.sh` asks for runs of the `ci.yml` file by name, so a
+#     run of this file is not among the runs it reads, whatever its conclusion.
+#
+# WHERE IT DOES NOT REACH: Linux only, and no service containers, no cargo features. A red in the
+# postgres or DynamoDB jobs or on a macOS lane has no isolated run here. A doctest cannot be selected
+# either. `tests/isolated-test.test.sh` pins what the run proves and what it cannot do.
+#
+# A dispatch runs this file AS THE REF HAS IT, so the ref has to contain it, and GitHub offers the
+# workflow only once it is on the default branch.
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "The cargo package holding the test (-p)"
+        type: string
+        required: true
+      target:
+        description: "`lib`, or the integration test's file name (--test)"
+        type: string
+        required: true
+      test:
+        description: "The test's full name, as libtest prints it"
+        type: string
+        required: true
+      profile:
+        description: "The profile of the job that failed"
+        type: choice
+        options: [debug, release]
+        default: debug
+      repeats:
+        description: "How many times; fewer than three does not count"
+        type: number
+        default: 20
+
+run-name: "Isolated: ${{ inputs.test }} on ${{ github.ref_name }}, ${{ inputs.profile }}, ${{ inputs.repeats }} repeats"
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-test:
+    runs-on: ubuntu-latest
+    # A cold compile plus the repeats. A test that hangs ends here, without a result line, as a red.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # As `quality-gates` builds it: the bundle is compiled into `nxs` and required there, and a
+      # test that drives the shipped binary needs that binary current in the same profile.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Sidecar bundle
+        working-directory: agent-sidecar
+        run: |
+          npm ci
+          npm run build
+          echo "NXF_EMBED_SIDECAR=require" >> "$GITHUB_ENV"
+      - name: Build the shipped nxs binary
+        env:
+          PROFILE_INPUT: ${{ inputs.profile }}
+        run: |
+          if [ "$PROFILE_INPUT" = release ]; then
+            cargo build -p nxs --release
+          else
+            cargo build -p nxs
+          fi
+
+      - name: Repeat the test
+        env:
+          ISOLATED_PACKAGE: ${{ inputs.package }}
+          ISOLATED_TARGET: ${{ inputs.target }}
+          ISOLATED_TEST: ${{ inputs.test }}
+          ISOLATED_PROFILE: ${{ inputs.profile }}
+          ISOLATED_REPEATS: ${{ inputs.repeats }}
+        run: bash .github/scripts/isolated-test.sh
