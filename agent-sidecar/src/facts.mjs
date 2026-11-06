@@ -303,7 +303,7 @@ export async function runFactsMode({ query, specPath }) {
 
   const temp = join(ledger, "child.json.tmp");
   const start = new Date(Date.now() - process.uptime() * 1000).toISOString();
-  writeFileSync(temp, JSON.stringify({ pid: process.pid, start_time: start }));
+  writeFileSync(temp, JSON.stringify({ pid: process.pid, start_time: start, handlers: true }));
   renameSync(temp, join(ledger, "child.json"));
 
   const write = factWriter(join(ledger, "facts.jsonl"));

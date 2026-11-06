@@ -19,13 +19,13 @@ use nexus_run_contracts::{
 };
 use nexus_run_host::bridge;
 use nexus_run_host::ports::Clock;
-use nexus_run_host::session_stub::{ProcessGuard, SystemProcesses};
 use nexus_run_host::test_support::scripted_backend::{Cue, SessionInfo};
 use nexus_run_host::test_support::scripted_tree::{ScriptedTree, TreeStep};
 use nexus_run_host::test_support::{replies_pass, Rig, SimClock, StoreProbe, CLOCK_START};
 use nexus_run_host::{
     InFlight, LeaseView, LedgerEntry, TreeBinding, TreeLedger, TreeOp, TreeResult, WorkTree,
 };
+use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
 use nexus_run_store_sqlite::Lease;
 use ulid::Ulid;
 

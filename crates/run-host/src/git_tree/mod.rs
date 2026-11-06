@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 
 use nexus_run_contracts::TreeRefusal;
 
-use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::tree_child::run_bounded;
 use crate::tree_ledger::TreeLedger;
 use crate::tree_worker::{
     InFlight, TreeBinding, TreeCx, TreeOp, TreeResult, TreeRunner, TreeState, TreeStateError,
     TreeWorker, WorkTree,
 };
+use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
 
 pub use runner::{normalise_origin_url, scrub};
 
@@ -33,6 +33,9 @@ pub struct GitBounds {
     pub clone: Duration,
     pub fetch: Duration,
     pub other: Duration,
+    /// A park's `add` and `commit`: a large untracked directory takes as long as it takes, and a refusal there would
+    /// repeat on the next attempt and end no withdrawal. Inside the operation's own deadline.
+    pub park: Duration,
 }
 
 impl Default for GitBounds {
@@ -41,6 +44,7 @@ impl Default for GitBounds {
             clone: Duration::from_secs(10 * 60),
             fetch: Duration::from_secs(2 * 60),
             other: Duration::from_secs(60),
+            park: Duration::from_secs(10 * 60),
         }
     }
 }

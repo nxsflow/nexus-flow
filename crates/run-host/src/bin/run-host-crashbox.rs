@@ -12,11 +12,11 @@ use std::path::Path;
 use nexus_run_contracts::RunId;
 use nexus_run_host::git_tree::tree_state;
 use nexus_run_host::ports::{Clock, SystemClock};
-use nexus_run_host::session_stub::SystemProcesses;
 use nexus_run_host::test_support::{
     scenario_named, Rig, RigTree, CLOCK_START, REQUESTER, WORKSPACE,
 };
 use nexus_run_host::TreeLedger;
+use nexus_run_session_claude::procs::SystemProcesses;
 
 const STEP_MS: i64 = 2_000;
 /// How much faster than the wall the shared clock runs: a 30 s lease expires in 1.5 s.

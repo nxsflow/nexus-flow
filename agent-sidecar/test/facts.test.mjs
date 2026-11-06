@@ -397,6 +397,7 @@ test("facts mode writes child.json first, calls no nxc, runs in the spec's cwd a
   const record = JSON.parse(readFileSync(join(box.ledger, "child.json"), "utf8"));
   assert.equal(typeof record.pid, "number");
   assert.equal(typeof record.start_time, "string");
+  assert.equal(record.handlers, true);
   assert.ok(!existsSync(join(box.dir, "nxc-calls")), "facts mode called nxc");
   const facts = box.facts();
   assert.deepEqual(facts[0], { kind: "started", backend_session_id: "real-1", pid: record.pid });

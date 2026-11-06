@@ -39,6 +39,10 @@ pub struct StartSpec {
     pub resume: Option<String>,
     pub model: Option<String>,
     pub tools: Vec<String>,
+    /// The permission mode the persona declares, as the SDK names it. Absent is the SDK's default mode. Added after the
+    /// freeze of v1, tolerated by every reader of it, and absent from the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
     /// Where the session's facts, offset and child record live.
     pub ledger_dir: String,
 }

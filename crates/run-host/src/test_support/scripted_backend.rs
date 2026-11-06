@@ -62,6 +62,9 @@ pub enum Cue {
     Silent,
     /// Stays alive saying nothing, answers no nudge, and a SIGTERM does not end it.
     Hung,
+    /// As [`Cue::Hung`], and a SIGKILL does not end it either: a process in uninterruptible sleep, or one the guard
+    /// will not signal.
+    Unkillable,
     /// Writes a file into its working directory, then stays silent.
     WriteFile {
         name: String,
@@ -228,7 +231,7 @@ impl ScriptedBackend {
             return;
         }
         let cue = self.cue_of(key);
-        if dir.join("nudged").exists() && !matches!(cue, Cue::Hung) {
+        if dir.join("nudged").exists() && !matches!(cue, Cue::Hung | Cue::Unkillable) {
             fs::remove_file(dir.join("nudged")).expect("the nudge is taken");
             self.push_fact(
                 key,
@@ -347,8 +350,10 @@ impl SessionBackend for ScriptedBackend {
 
     fn stop(&self, key: &str, force: bool) -> Result<(), BackendError> {
         self.note(key, if force { "kill" } else { "term" })?;
-        let hung = matches!(self.cue_of(key), Cue::Hung);
-        if self.is_spawned(key) && (force || !hung) {
+        let cue = self.cue_of(key);
+        let hung = matches!(cue, Cue::Hung | Cue::Unkillable);
+        let ends_on_a_kill = !matches!(cue, Cue::Unkillable);
+        if self.is_spawned(key) && ((force && ends_on_a_kill) || !hung) {
             self.end(key, EndCause::StoppedByHost);
         }
         Ok(())

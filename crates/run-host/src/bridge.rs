@@ -24,10 +24,10 @@ use crate::fold::{fold_events, pinned_def, Folded};
 use crate::git_tree::tree_state;
 use crate::host::Layout;
 use crate::ports::{DeclarationPort, MessagePort, PortError, Refs};
-use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::start::{mint_thread_id, ThreadRoute};
 use crate::tree_effects::StoredRefusal;
 use crate::tree_ledger::TreeLedger;
+use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
 
 /// The bridge's `busy_timeout`, the old store's value, so a reply posted into the chat store is not followed
 /// by a visible enqueue failure over a short stall (§7).

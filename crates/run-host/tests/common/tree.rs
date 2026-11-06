@@ -168,6 +168,17 @@ impl Bench {
         ))
     }
 
+    /// A tree whose `git` is the program at this path, on a clock the test moves.
+    pub fn tree_on_clock(&self, git: &Path, bounds: GitBounds, clock: Arc<dyn Clock>) -> GitTree {
+        let tree = GitTree::with_git(&self.root, self.ledger.clone(), bounds, git);
+        tree.bind(TreeBinding {
+            owner_id: OWNER.to_owned(),
+            leases: Arc::new(FixedLease),
+            clock,
+        });
+        tree
+    }
+
     pub fn prepare_op(&self, run: &RunId) -> TreeOp {
         TreeOp::Prepare {
             run: run.clone(),

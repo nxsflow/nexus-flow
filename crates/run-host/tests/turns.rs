@@ -22,6 +22,15 @@ fn finished_rig(dir: &std::path::Path, scenario: &str) -> (Rig, RunId) {
     (rig, run)
 }
 
+/// The declaration's permission mode reaches the session; the consolidator has no persona, and so none.
+#[test]
+fn the_personas_permission_mode_reaches_the_start_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run) = finished_rig(dir.path(), "happy");
+    let build = spec(&rig, &format!("{run}/build/v1/coder/a1"));
+    assert_eq!(build.permissions.as_deref(), Some("acceptEdits"));
+}
+
 #[test]
 fn the_back_edge_turn_carries_the_verdict_of_the_step_that_sent_it_back() {
     let dir = tempfile::tempdir().unwrap();

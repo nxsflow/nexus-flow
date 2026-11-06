@@ -324,6 +324,11 @@ impl<T: RigTree> Rig<T> {
         self.clock.now()
     }
 
+    /// Where this rig's things are.
+    pub fn host_layout(&self) -> Layout {
+        Rig::<ScriptedTree>::layout(&self.dir)
+    }
+
     /// The service restarted: a new host on the same store and clock, with a new owner id and nothing in
     /// memory. It has to wait out the old lease, as a real restart does. The tree is the caller's: a real
     /// worker dies with its process.

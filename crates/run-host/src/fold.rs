@@ -196,8 +196,9 @@ impl Host {
     }
 
     /// Every inbox entry of the run, oldest first, one `append` per input.
-    pub(crate) fn fold_run(&mut self, row: &RunRow, epoch: Epoch) {
-        while self.may_work() {
+    pub(crate) fn fold_run(&mut self, row: &RunRow, epoch: Epoch, turn_owed: bool) {
+        let mut turn_owed = turn_owed;
+        while self.may_work(turn_owed) {
             if self.loaded_state(row).is_none() {
                 return;
             }
@@ -205,7 +206,7 @@ impl Host {
                 return;
             }
             // A turn owed is one input: an inbox can be long, and the next input is another turn's.
-            self.turn_owed = false;
+            turn_owed = false;
         }
     }
 

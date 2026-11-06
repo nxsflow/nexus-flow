@@ -179,7 +179,9 @@ fn the_clone_leaves_no_local_default_branch() {
 #[test]
 fn what_a_crash_during_the_clone_left_is_deleted_and_the_clone_redone() {
     let bench = Bench::new();
-    let sibling = bench.dir.with_file_name("root-v2.cloning-01ABC");
+    let sibling = bench
+        .dir
+        .with_file_name(format!("root-v2.cloning-{}", ulid::Ulid::new()));
     std::fs::create_dir_all(sibling.join("half")).unwrap();
     bench.prepared();
     assert!(!sibling.exists(), "the sibling stayed");
