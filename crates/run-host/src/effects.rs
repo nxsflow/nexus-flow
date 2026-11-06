@@ -458,16 +458,24 @@ impl Host {
     /// that holds this run is the claim taken; an unchanged holder writes nothing.
     pub(crate) fn take_claims(&mut self, owned: &[(RunRow, Epoch)], now: Timestamp) {
         let mut tried: Vec<String> = Vec::new();
+        // The oldest queued run has its try however little is left of the budget, or a machine without any
+        // would never start a run again.
+        let mut owed = true;
         for (row, _) in owned {
-            if !self.may_work() {
-                return;
-            }
-            let Some(state) = self.cache(&row.run).state.clone() else {
+            // Loaded, not only cached: a cache the rotation has not come back to yet is no reason to pass a run
+            // over in the queue.
+            let Some(state) = self.loaded_state(row) else {
                 continue;
             };
             let Phase::Queued { behind } = &state.phase else {
                 continue;
             };
+            self.turn_owed = std::mem::take(&mut owed);
+            let may = self.may_work();
+            self.turn_owed = false;
+            if !may {
+                return;
+            }
             let run = &row.run;
             let key = format!("claim/{}", row.workspace_id);
             let holder = match self.store.get(&key) {

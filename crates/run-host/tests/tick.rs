@@ -73,8 +73,176 @@ fn a_held_write_lock_ends_the_writing_for_this_tick_within_the_budget() {
     // One timeout of 100 ms for the first write, however many runs wait; 60 of them would be 6 s.
     assert!(spent < Duration::from_secs(3), "the tick took {spent:?}");
     lock.execute_batch("ROLLBACK").unwrap();
+    // How far one tick gets is the budget's and the machine's to say. What holds on any machine: every tick gives
+    // the next run a turn, so as many ticks as there are runs commission them all.
+    let mut reports = Vec::new();
+    for _ in 0..runs.len() {
+        reports.push(rig.host.tick(rig.now()));
+        if commissioned(&rig, &runs) == runs.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        commissioned(&rig, &runs),
+        runs.len(),
+        "the ticks after the lock: {reports:?}"
+    );
+}
+
+fn commissioned(rig: &Rig, runs: &[RunId]) -> usize {
+    runs.iter()
+        .filter(|run| rig.has(run, "commissioned"))
+        .count()
+}
+
+/// A budget gone before the first run's turn is what a slow lease step leaves, every tick, on a slow enough
+/// machine. Waiting for the wall clock would not make this test about that: a budget of zero is that machine.
+#[test]
+fn with_the_budget_gone_before_the_first_turn_every_tick_still_serves_the_next_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    let runs: Vec<RunId> = (0..60)
+        .map(|n| rig.commission(&format!("run {n}")).run)
+        .collect();
+    rig.host.set_budget(Duration::ZERO);
+    for tick in 1..=runs.len() {
+        let report = rig.host.tick(rig.now());
+        assert!(report.yielded, "tick {tick} had no budget to spend");
+        assert_eq!(commissioned(&rig, &runs), tick, "one more run per tick");
+    }
+}
+
+/// A `Busy` at the first lease leaves a tick that held nothing; it has not been through the runs, so the turn that
+/// was next stays next.
+#[test]
+fn a_tick_that_met_busy_at_the_first_lease_leaves_the_rotation_where_it_stood() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    let runs: Vec<RunId> = (0..4)
+        .map(|n| rig.commission(&format!("run {n}")).run)
+        .collect();
+    rig.host.set_budget(Duration::ZERO);
     rig.host.tick(rig.now());
-    assert!(runs.iter().all(|run| rig.has(run, "commissioned")));
+    assert_eq!(commissioned(&rig, &runs), 1);
+    rig.clock.advance(16_000);
+    let lock = rusqlite::Connection::open(store_path(dir.path())).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(rig.host.tick(rig.now()).busy);
+    lock.execute_batch("ROLLBACK").unwrap();
+    rig.host.tick(rig.now());
+    assert_eq!(
+        commissioned(&rig, &runs),
+        2,
+        "the next run's turn, not the first's again"
+    );
+}
+
+/// A turn is one input: a long inbox waits for the budget, or for the next turn.
+#[test]
+fn with_the_budget_gone_a_turn_folds_one_input_of_a_long_inbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    let run = rig.commission("work").run;
+    let check = run.clone();
+    rig.run_until(100, move |rig| {
+        rig.events(&check)
+            .iter()
+            .any(|event| matches!(event.body, EventBody::SessionFact { .. }))
+    });
+    let key = format!("{run}/build/v1/coder/a1");
+    for _ in 0..5 {
+        rig.backend.push_fact(
+            &key,
+            &nexus_run_contracts::SessionFact::Heartbeat {
+                beat: nexus_run_contracts::HeartbeatKind::ModelOutput,
+            },
+        );
+    }
+    rig.host.set_budget(Duration::ZERO);
+    let report = rig.host.tick(rig.now());
+    assert!(report.yielded, "the budget ran out, whoever had the turn");
+    assert_eq!(report.folded, 1);
+    assert!(rig.store.waiting_inputs(&run).unwrap().len() >= 4);
+    // Nothing left to fold: the tick's only reports of the budget are the ones the owed turns make.
+    let check = run.clone();
+    rig.run_until(100, move |rig| {
+        rig.store.waiting_inputs(&check).unwrap().is_empty()
+    });
+    let report = rig.host.tick(rig.now());
+    assert_eq!(report.folded, 0);
+    assert!(
+        report.yielded,
+        "the budget ran out with nothing to fold too"
+    );
+}
+
+/// Everything a run needs from the tick has to move without a budget: the claim, the tree, the sessions and their
+/// three reviewers, the delivery. And the next run behind it takes the claim.
+#[test]
+fn two_runs_finish_with_the_budget_gone_before_the_first_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    let first = rig.commission("first").run;
+    rig.clock.advance(1_000);
+    let second = rig.commission("second").run;
+    rig.host.set_budget(Duration::ZERO);
+    rig.run_to_finished(&first);
+    rig.run_to_finished(&second);
+}
+
+/// The oldest run costs more than the whole budget in every tick, and never gets done: without a rotation it
+/// is the only run that ever executes anything.
+#[test]
+fn a_run_that_spends_every_tick_does_not_starve_the_run_behind_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    *rig.ports.panic_on_body.lock().unwrap() = Some("PANICS".to_owned());
+    rig.host.set_log_sink(std::sync::Arc::new(|_| {}));
+    let bad = rig.commission("PANICS").run;
+    rig.clock.advance(1_000);
+    let good = rig.commission("works").run;
+    rig.ports.post_delay_ms.store(50, Ordering::SeqCst);
+    rig.host.set_budget(Duration::from_millis(40));
+    let check = good.clone();
+    rig.run_until(30, move |rig| rig.has(&check, "root_opened"));
+    assert!(!rig.has(&bad, "root_opened"), "it never got done");
+}
+
+/// The rotation decides whose turn it is, never who is next in the queue (§6.6): a host that lost its cache to a
+/// `Busy` and stands, by the rotation, at the younger run still gives the claim to the older.
+#[test]
+fn the_oldest_queued_run_takes_the_claim_wherever_the_rotation_stands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(silent));
+    let holder = rig.commission("holder").run;
+    rig.clock.advance(1_000);
+    let older = rig.commission("older").run;
+    rig.clock.advance(1_000);
+    let younger = rig.commission("younger").run;
+    let check = younger.clone();
+    rig.run_until(100, move |rig| rig.has(&check, "claim_busy"));
+    assert!(rig.has(&older, "claim_busy"));
+    rig.host.set_budget(Duration::ZERO);
+    // Two turns on from the holder, in every part of the tick: the next turn is the younger run's.
+    rig.host.tick(rig.now());
+    rig.host.tick(rig.now());
+    // Every lease due and the store locked: the first renewal meets `Busy`, and the cache goes with it.
+    rig.clock.advance(16_000);
+    let lock = rusqlite::Connection::open(store_path(dir.path())).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(rig.host.tick(rig.now()).busy);
+    lock.execute_batch("ROLLBACK").unwrap();
+    // The holder is gone, as a release would leave it.
+    let key = format!("claim/{}", rig.store.open_runs().unwrap()[0].workspace_id);
+    rig.store
+        .compare_and_set(&key, Some(holder.as_str().as_bytes()), None)
+        .unwrap();
+    rig.host.tick(rig.now());
+    assert_eq!(
+        rig.store.get(&key).unwrap().as_deref(),
+        Some(older.as_str().as_bytes()),
+        "the claim went past the older run"
+    );
 }
 
 #[test]
@@ -168,11 +336,21 @@ fn an_idle_tick_writes_nothing_to_the_store() {
             .iter()
             .any(|event| matches!(event.body, EventBody::SessionFact { .. }))
     });
-    // What is on its way folds first.
+    // What is on its way folds first, in as many ticks as the machine leaves it.
     rig.step_ms = 0;
-    for _ in 0..5 {
-        rig.tick();
+    let mut quiet = 0;
+    for _ in 0..1_000 {
+        let report = rig.tick();
+        quiet = if report.folded == 0 && !report.yielded {
+            quiet + 1
+        } else {
+            0
+        };
+        if quiet == 5 {
+            break;
+        }
     }
+    assert_eq!(quiet, 5, "the run never came to rest");
     let probe = rusqlite::Connection::open(store_path(dir.path())).unwrap();
     let version = || -> i64 {
         probe
@@ -233,7 +411,10 @@ fn a_fact_the_store_refused_is_read_again() {
             .count()
     };
     assert_eq!(facts(&rig), 0);
-    rig.host.tick(rig.now());
+    // Every tick folds at least the next input, and this fact has at most what is already waiting before it.
+    for _ in 0..=rig.store.waiting_inputs(&run).unwrap().len() {
+        rig.host.tick(rig.now());
+    }
     assert_eq!(facts(&rig), 1, "the fact was delivered after all");
     assert_ne!(std::fs::read_to_string(&offset).unwrap(), before);
 }

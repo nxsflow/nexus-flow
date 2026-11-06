@@ -389,13 +389,21 @@ impl<T: RigTree> Rig<T> {
             .any(|row| row.run == *run)
     }
 
-    /// Ticks until `done`, or fails naming where the run stands.
+    /// Ticks until `done`, or fails naming where the run stands. `max_ticks` counts the ticks the run could use:
+    /// one the tree is working through is real time, and how much of that there is the machine's to say. Only a
+    /// hung tree ends on the ceiling, and no assertion rests on it.
     pub fn run_until(&mut self, max_ticks: u32, mut done: impl FnMut(&Self) -> bool) -> u32 {
-        for tick in 0..max_ticks {
+        let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut counted = 0;
+        while counted < max_ticks && std::time::Instant::now() < ceiling {
             if done(self) {
-                return tick;
+                return counted;
             }
+            let working = self.tree.busy();
             self.tick();
+            if !working {
+                counted += 1;
+            }
         }
         assert!(
             done(self),

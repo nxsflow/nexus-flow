@@ -135,6 +135,20 @@ fn eighty_minutes_ahead_fires_once_at_its_instant_across_a_restart() {
     assert!(!was_stopped(&rig, &run), "a healthy session was stopped");
 }
 
+/// A timer is how a stuck run gets out, so it does not wait for a tick with budget left: a budget of zero is the
+/// machine that never has any.
+#[test]
+fn a_due_timer_fires_with_the_budget_gone_before_the_first_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rig, run, key, _) = coder_running(dir.path());
+    let timer = quiet_timer(&key);
+    rig.host.set_budget(std::time::Duration::ZERO);
+    rig.clock.advance(6 * 3_600 * 1_000);
+    let (check, name) = (run.clone(), timer.clone());
+    rig.run_until(5, move |rig| !firings(rig, &check, &name).is_empty());
+    assert_eq!(firings(&rig, &run, &timer).len(), 1);
+}
+
 #[test]
 fn a_forward_jump_of_hours_fires_once_and_a_healthy_slot_survives_the_wake() {
     let dir = tempfile::tempdir().unwrap();

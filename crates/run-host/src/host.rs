@@ -71,6 +71,14 @@ pub struct TickReport {
     pub folded: u32,
 }
 
+/// The parts of a tick that give each run a turn, each with its own place in the rotation.
+#[derive(Clone, Copy)]
+enum Part {
+    Drain,
+    Fold,
+    Execute,
+}
+
 /// Why a run is read-only: not stepped, only projected (§13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadOnly {
@@ -106,6 +114,11 @@ pub struct Host {
     log: LogSink,
     pub(crate) report: TickReport,
     started_at: Instant,
+    /// Where each part of the tick goes on, by index into the open runs: an open run finishing moves it by one,
+    /// and that only changes whose turn is next. Lost on a restart, like the rest of what is in memory.
+    next_turn: [usize; 3],
+    /// The run being stepped has this tick's one turn, whatever is left of the budget.
+    pub(crate) turn_owed: bool,
 }
 
 /// An opaque host id: no person, no user name, no machine name (the tombstone rule of contract (b)). It is
@@ -142,6 +155,8 @@ impl Host {
             log: Arc::new(|line| eprintln!("{line}")),
             report: TickReport::default(),
             started_at: Instant::now(),
+            next_turn: [0; 3],
+            turn_owed: false,
         }
     }
 
@@ -164,14 +179,15 @@ impl Host {
         (self.log)(&format!("run-host {run}: {what} {code}"));
     }
 
-    /// Whether this tick may go on. The budget is real time, whatever the injected clock says.
+    /// Whether this tick may go on. The budget is real time, whatever the injected clock says. A `Busy` stops
+    /// everything; a budget that ran out stops everything but the turn a part of the tick owes (see `each_run`).
     pub(crate) fn may_work(&mut self) -> bool {
         if self.report.busy {
             return false;
         }
         if self.started_at.elapsed() >= self.budget {
             self.report.yielded = true;
-            return false;
+            return self.turn_owed;
         }
         true
     }
@@ -191,11 +207,15 @@ impl Host {
         self.runs.retain(|run, _| open.contains(run));
         let owned = self.leases(&rows, now);
         self.mark_seen(&rows, now);
-        self.each_run(&owned, |host, row, epoch| host.drain_run(row, epoch, now));
+        self.each_run(Part::Drain, &owned, |host, row, epoch| {
+            host.drain_run(row, epoch, now)
+        });
         self.poll_tree(&owned, now);
         self.fire_due_timers(&owned, now);
-        self.each_run(&owned, |host, row, epoch| host.fold_run(row, epoch));
-        self.each_run(&owned, |host, row, epoch| {
+        self.each_run(Part::Fold, &owned, |host, row, epoch| {
+            host.fold_run(row, epoch)
+        });
+        self.each_run(Part::Execute, &owned, |host, row, epoch| {
             host.withdraw_exit(row, epoch, now);
             host.execute_run(row, epoch, now);
         });
@@ -203,7 +223,8 @@ impl Host {
         self.report
     }
 
-    /// Every open run's lease, before anything that spends the budget.
+    /// Every open run's lease, whatever the budget says, because a lease not renewed loses the run. What this
+    /// costs comes out of the budget; `each_run` keeps a tick from ending with nothing else done.
     fn leases(&mut self, rows: &[RunRow], now: Timestamp) -> Vec<(RunRow, Epoch)> {
         let mut owned = Vec::new();
         for row in rows {
@@ -242,21 +263,38 @@ impl Host {
 
     /// The run boundary of §8.1: a panic in one run's step is logged once with its id, its cached state is
     /// dropped, and that run is skipped until the next tick.
+    ///
+    /// The budget decides how far a tick gets, never who is served. A part of the tick starts where it last ran
+    /// out, so a run that spends every tick cannot keep the runs behind it from their turn; and the first run
+    /// of a part has its turn however little is left, so a tick whose budget is already gone still serves one
+    /// run. As many ticks as there are runs give every run a turn at each part, on any machine.
     fn each_run(
         &mut self,
+        part: Part,
         owned: &[(RunRow, Epoch)],
         mut step: impl FnMut(&mut Self, &RunRow, Epoch),
     ) {
-        for (row, epoch) in owned {
+        // A tick that holds nothing, a `Busy` at the first lease, has not been through the runs.
+        if owned.is_empty() {
+            return;
+        }
+        let start = self.next_turn[part as usize] % owned.len();
+        for offset in 0..owned.len() {
+            let index = (start + offset) % owned.len();
+            self.turn_owed = offset == 0;
             if !self.may_work() {
+                self.turn_owed = false;
+                self.next_turn[part as usize] = index;
                 return;
             }
+            let (row, epoch) = &owned[index];
             let caught = catch_unwind(AssertUnwindSafe(|| step(self, row, *epoch)));
             if caught.is_err() {
                 self.log(&row.run, "a step panicked", "skipped until the next tick");
                 self.runs.remove(&row.run);
             }
         }
+        self.turn_owed = false;
     }
 
     pub(crate) fn note_store_error(&mut self, error: &StoreError) {
@@ -386,8 +424,10 @@ impl Host {
     /// Due timers of the runs this host owns, with the real now: the wake rule is the reducer's, by
     /// `timer_fired.at` against its `fire_at` (§6.5), so nothing is deferred here. The one thing held back is
     /// a `tree_window` that closes before its minimum attempts.
+    /// Not on the budget: a timer is how a stuck run gets out, a tick owes few of them, and a machine out of
+    /// budget is where it is needed.
     fn fire_due_timers(&mut self, owned: &[(RunRow, Epoch)], now: Timestamp) {
-        if !self.may_work() {
+        if self.report.busy {
             return;
         }
         let due = match self.store.due_timers(now) {
