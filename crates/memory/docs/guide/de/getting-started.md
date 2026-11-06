@@ -131,11 +131,13 @@ man verstanden haben sollte, bevor man etwas einordnet — siehe [Kernkonzepte](
 
 ## Wo die Erinnerungen außerdem liegen
 
-Jeder Schreibvorgang erzeugt `NEXUS_MEMORY.md` im Wurzelverzeichnis neu: das Gedächtnis des
-Projekts als **Bauprodukt**, damit der Kontext auch für eine Leserin ohne installierte Suite und für
-jeden, der das Repository auf einer Forge durchblättert, erhalten bleibt. Es ist eine Projektion,
-keine Quelle — der Speicher ist die Wahrheit, und eine Änderung in der Datei wird vom nächsten
-Schreibvorgang überschrieben. `nxm doc` gibt sie aus; `nxm doc --check` meldet Abweichungen.
+`NEXUS_MEMORY.md` im Wurzelverzeichnis ist das Gedächtnis des Projekts als **Bauprodukt**, damit der
+Kontext auch für eine Leserin ohne installierte Suite und für jeden, der das Repository auf einer
+Forge durchblättert, erhalten bleibt. Es ist eine Projektion, keine Quelle: der Speicher ist die
+Wahrheit, und eine Änderung in der Datei wird überschrieben. Ein Schreibvorgang erreicht den Speicher
+und lässt Ihren Checkout in Ruhe; die Datei kommt in einem eigenen Pull Request ins Repository,
+höchstens einmal am Tag. Ohne `origin` aktualisiert jeder Schreibvorgang die Datei direkt. `nxm doc`
+gibt sie aus; `nxm doc --check` meldet eine Änderung von Hand.
 
 ## Weiter
 

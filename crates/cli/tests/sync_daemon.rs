@@ -786,3 +786,268 @@ fn a_helper_built_invocation_resolves_a_throwaway_home_not_the_developers() {
         "and what it IS handed is the throwaway home under target/: {link}"
     );
 }
+
+// ---- the service publishes the memory document (6j6v.g0ye) -------------------------------------
+//
+// The real loop, the real job it starts and real git against a file-path origin. Two things are
+// stood in for, and they are why this says nothing about launchd: the service runs as a plain child
+// here, and `gh` is a script, because no test may reach GitHub or the real launchd.
+
+#[cfg(unix)]
+mod publishing {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    /// A registered memory workspace in a clone of a file-path origin, holding one memory the
+    /// origin's file does not know, and a `PATH` holding git and nothing else.
+    struct Setup {
+        tmp: TempDir,
+        origin: PathBuf,
+        root: PathBuf,
+        bin: PathBuf,
+    }
+
+    fn setup() -> Setup {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let seed = tmp.path().join("seed");
+        let root = tmp.path().join("root");
+        let bin = tmp.path().join("bin");
+        for dir in [&origin, &seed, &bin] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        git(&origin, &["init", "--bare", "-q", "-b", "main"]);
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("NEXUS_MEMORY.md"), "# as last published\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(
+            root.join(".git/info/exclude"),
+            ".nxs\n.claude\nAGENTS.md\nCLAUDE.md\n",
+        )
+        .unwrap();
+        let which = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        symlink(
+            String::from_utf8_lossy(&which.stdout).trim(),
+            bin.join("git"),
+        )
+        .unwrap();
+
+        let home = tmp.path().join(".fake-home");
+        let run = |args: &[&str]| {
+            let out = Command::new(nxs_bin())
+                .args(args)
+                .current_dir(&root)
+                .pin_home(&home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "nxs {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "--module", "memory"]);
+        run(&[
+            "memory",
+            "remember",
+            "a fact",
+            "--key",
+            "a",
+            "--introduction",
+            "in one line",
+        ]);
+        Setup {
+            tmp,
+            origin,
+            root,
+            bin,
+        }
+    }
+
+    fn daemon(s: &Setup) -> std::process::Child {
+        nxs(s.tmp.path())
+            .env("PATH", &s.bin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .args(["sync", "daemon", "--interval", "1", "--json"])
+            .spawn()
+            .expect("spawn nxs sync daemon")
+    }
+
+    fn record(s: &Setup) -> serde_json::Value {
+        std::fs::read(s.root.join(".nxs/memory-publish.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Wait for what the job records. The bound is a ceiling for a machine under load, not a claim
+    /// about how long a publication takes.
+    fn wait_for(
+        s: &Setup,
+        what: &str,
+        done: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(400);
+        loop {
+            let record = record(s);
+            if done(&record) {
+                return record;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what}; the record says {record}"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    #[test]
+    fn the_service_publishes_a_changed_store_once_and_leaves_the_checkout_alone() {
+        let s = setup();
+        let state = s.bin.join("open-pr");
+        let log = s.bin.join("gh.log");
+        std::fs::write(
+            s.bin.join("gh"),
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{log}\"\ncase \"$1 $2\" in\n  \
+                 \"pr list\") [ -f \"{state}\" ] && /bin/cat \"{state}\"; exit 0 ;;\n  \
+                 \"pr create\") echo https://forge.example/pr/9 > \"{state}\"; echo https://forge.example/pr/9; exit 0 ;;\n\
+                 esac\nexit 1\n",
+                log = log.display(),
+                state = state.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(s.bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::read(s.root.join("NEXUS_MEMORY.md")).unwrap();
+
+        let mut service = daemon(&s);
+        let published = wait_for(&s, "the service never published", |r| {
+            !r["pull_request"].is_null() || !r["error"].is_null()
+        });
+        // Passes come every second here, so a second job would have every chance to start.
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = service.kill();
+        let _ = service.wait();
+
+        assert_eq!(published["error"], serde_json::Value::Null, "{published}");
+        assert_eq!(published["pull_request"], "https://forge.example/pr/9");
+        let commit = published["commit"].as_str().unwrap();
+        assert!(git(&s.origin, &["show", &format!("{commit}:NEXUS_MEMORY.md")]).contains("a fact"));
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.matches("pr create").count(), 1, "{calls}");
+        assert_eq!(
+            std::fs::read(s.root.join("NEXUS_MEMORY.md")).unwrap(),
+            before
+        );
+        assert_eq!(
+            git(&s.root, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_service_that_cannot_publish_says_why_in_its_status_and_every_memory_is_safe() {
+        // The state a service meets when its frozen PATH has no `gh`: the nearest a test can come to
+        // credentials that fail unattended.
+        let s = setup();
+        let mut service = daemon(&s);
+        let failed = wait_for(&s, "the failure was never recorded", |r| {
+            !r["error"].is_null()
+        });
+
+        let remembered = Command::new(nxs_bin())
+            .args([
+                "memory",
+                "remember",
+                "still works",
+                "--key",
+                "b",
+                "--introduction",
+                "another line",
+            ])
+            .current_dir(&s.root)
+            .pin_home(s.tmp.path().join(".fake-home"))
+            .output()
+            .unwrap();
+        let status = run_status_json(s.tmp.path());
+        let text = nxs(s.tmp.path())
+            .args(["sync", "daemon", "status"])
+            .output()
+            .unwrap();
+        let _ = service.kill();
+        let _ = service.wait();
+
+        assert!(
+            failed["error"]
+                .as_str()
+                .unwrap()
+                .contains("gh was not found"),
+            "{failed}"
+        );
+        assert!(
+            remembered.status.success(),
+            "a failed publish never fails a memory write"
+        );
+        let failures = status["memory_publish_failures"]
+            .as_array()
+            .expect("an answer, not null");
+        assert_eq!(failures.len(), 1, "{status}");
+        assert!(failures[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("gh was not found"));
+        let text = String::from_utf8_lossy(&text.stdout).to_string();
+        assert!(
+            text.contains("could not be published") && text.contains("gh was not found"),
+            "{text}"
+        );
+        assert_eq!(
+            git(
+                &s.origin,
+                &["for-each-ref", "--format=%(refname)", "refs/heads"]
+            ),
+            "refs/heads/main"
+        );
+    }
+}

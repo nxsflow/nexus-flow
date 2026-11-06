@@ -296,8 +296,10 @@ and the product visions under [`docs/vision/`](docs/vision/).
 - **`CLAUDE.md`** — only if you have one, and only in 0.66.0: an `@AGENTS.md` line at the top.
   0.98.0 leaves it alone.
 - **`.nxs-personas/`** (with chat) — where you declare personas and channels.
-- **`NEXUS_MEMORY.md`** (with memory) — written by the first `nxm remember`: the memories, projected
-  into a file for any reader without the hook. Generated; change it with `nxm remember`.
+- **`NEXUS_MEMORY.md`** (with memory) — the memories, projected into a file for any reader without
+  the hook. Generated; change it with `nxm remember`. In a repository with an `origin` it arrives in
+  its own pull request, at most once a day, and no write touches your checkout; with no `origin`, the
+  first `nxm remember` writes it.
 
 To take nexus-flow out of a repository again, delete `.nxs/`, the block in `AGENTS.md`, the
 `@AGENTS.md` line in `CLAUDE.md`, the hook and the permission entries in `.claude/settings.json`,

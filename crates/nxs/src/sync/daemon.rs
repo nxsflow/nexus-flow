@@ -305,9 +305,9 @@ pub fn sweep(workspaces: &[Workspace], pass: &dyn Pass, global: Option<&str>) ->
         match pass.run(ws, &endpoint) {
             Ok(outcome) => {
                 // A pass that PULLED something may have brought memories in from another device
-                // (6j6v.8q88). Regenerate this workspace's `NEXUS_MEMORY.md` so the projection is
-                // current for whoever opens the repository next — including a reader on a forge,
-                // who never runs a session hook at all.
+                // (6j6v.8q88). Project this workspace's `NEXUS_MEMORY.md` where it is written
+                // directly; where it is published, this writes nothing and the next publication
+                // carries the memory.
                 if outcome.pulled > 0 {
                     if let Err(e) = project_memory_doc(ws) {
                         report.doc_errors.push((label.clone(), e.msg));
@@ -321,9 +321,11 @@ pub fn sweep(workspaces: &[Workspace], pass: &dyn Pass, global: Option<&str>) ->
     report
 }
 
-/// Regenerate `<root>/NEXUS_MEMORY.md` for `ws` after a pass that pulled ops (6j6v.8q88). The
-/// daemon's half of "the document is a build product": a device that pulls a memory somebody wrote
-/// elsewhere projects it here, without anyone opening the project first.
+/// Project `<root>/NEXUS_MEMORY.md` for `ws` after a pass that pulled ops (6j6v.8q88): a device that
+/// pulls a memory somebody wrote elsewhere projects it here, without anyone opening the project first.
+/// That holds where the file is written directly. In a repository with an `origin`,
+/// [`regenerate`](nexus_memory::project_doc::regenerate) writes nothing, and [`publish_memory_docs`]
+/// is how the pulled memory reaches the file (6j6v.g0ye).
 ///
 /// The whole addition is a TRIGGER, not new folding. A pass moves the op-log for every domain but
 /// folds only flow's views, so a pulled memory sits in the log with `memories` not yet
@@ -333,12 +335,7 @@ pub fn sweep(workspaces: &[Workspace], pass: &dyn Pass, global: Option<&str>) ->
 /// A workspace where memory is not an active module is left alone — opening the store there would
 /// create memory's views in a workspace that never asked for them.
 fn project_memory_doc(ws: &Workspace) -> Result<()> {
-    if !ws
-        .config
-        .active_modules
-        .iter()
-        .any(|m| m == nexus_memory::workspace::MEMORY_MODULE)
-    {
+    if !memory_is_active(ws) {
         return Ok(());
     }
     let store = ws
@@ -348,6 +345,128 @@ fn project_memory_doc(ws: &Workspace) -> Result<()> {
     nexus_memory::project_doc::regenerate(&store, root)
         .map(|_| ())
         .map_err(|e| NxfError::io(e.msg))
+}
+
+// ---- publishing the memory document (6j6v.g0ye) ------------------------------------------------
+
+/// The job that publishes a workspace's memory document, as the arguments after the program.
+///
+/// **A job, never a call from this loop.** A publication talks to the network and may meet a
+/// credential helper that waits for somebody at the screen. Its children are bounded, but even their
+/// bounds are minutes, and this loop is what every other workspace's next tick depends on.
+pub const PUBLISH_JOB: [&str; 3] = ["memory", "doc", "--publish"];
+
+/// What one look over every workspace's publication did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PublishReport {
+    /// Workspaces whose job was started on this look.
+    pub started: Vec<String>,
+    /// `(workspace label, why)` for every workspace whose last attempt failed: read back from its
+    /// record, because the attempt ran in a job this loop only started.
+    pub failures: Vec<(String, String)>,
+}
+
+/// Start the publication job of every workspace where one is due: at most once a day, and only when
+/// something changed (6j6v.g0ye).
+///
+/// Cheapest question first, since this runs on every pass over every registered workspace: the record
+/// and the clock need neither git nor the store, and on all but the rarest pass they already answer.
+///
+/// Unlike a sync pass this is NOT limited to workspaces bound to a stream: a workspace with an origin
+/// and no relay has the same file to bring to its repository.
+///
+/// **The attempt goes on record before the job starts**, so that the job still running on the next
+/// pass is not started twice, and one that died is retried after the hour instead of at once. What
+/// the job then found out is the job's to record ([`nexus_memory::publish::publish_recorded`]). A full
+/// spawner takes nothing, for the reason [`Spawn::capacity`] gives: what cannot be started is not
+/// marked as attempted, and stays due.
+pub fn publish_memory_docs(resolved: &[Workspace], now: &str, spawn: &dyn Spawn) -> PublishReport {
+    use nexus_memory::publish;
+    let mut report = PublishReport::default();
+    for ws in resolved {
+        if !memory_is_active(ws) {
+            continue;
+        }
+        let label = ws.dir.display().to_string();
+        let mut record = publish::read_record(&ws.dir);
+        if let Some(error) = &record.error {
+            report.failures.push((label.clone(), error.clone()));
+        }
+        if !publish::clock_allows(&record, now) || spawn.capacity() == 0 {
+            continue;
+        }
+        let root = ws.dir.parent().unwrap_or(&ws.dir);
+        if publish::route(root) != publish::Route::Published {
+            continue;
+        }
+        let doc = ws
+            .open_memory_store()
+            .and_then(|store| nexus_memory::project_doc::render(&store));
+        let doc = match doc {
+            Ok(doc) => doc,
+            Err(e) => {
+                report.failures.retain(|(l, _)| *l != label);
+                report.failures.push((
+                    label,
+                    format!("the memory store could not be read: {}", e.msg),
+                ));
+                continue;
+            }
+        };
+        if !publish::is_due(&record, now, &doc) {
+            continue;
+        }
+        record.attempted_at = Some(now.to_string());
+        let argv: Vec<String> = PUBLISH_JOB.iter().map(|s| s.to_string()).collect();
+        let started = publish::write_record(&ws.dir, &record)
+            .map_err(|e| NxfError::io(e.msg))
+            .and_then(|()| spawn.spawn(root, &argv));
+        match started {
+            Ok(()) => report.started.push(label),
+            Err(e) => {
+                record.error = Some(e.msg.clone());
+                // Best effort: if the record could not be written, that is the failure being
+                // reported below, and this write would only fail the same way.
+                let _ = publish::write_record(&ws.dir, &record);
+                report.failures.retain(|(l, _)| *l != label);
+                report.failures.push((label, e.msg));
+            }
+        }
+    }
+    report
+}
+
+/// The log lines for `report`'s failures. Each is said once, until its reason changes or it goes away:
+/// a publication that keeps failing is looked at on every pass, and `nxs sync status` is where it can
+/// be read at any time.
+pub fn publish_failure_lines(
+    report: &PublishReport,
+    said: &mut HashMap<String, String>,
+) -> Vec<String> {
+    said.retain(|label, _| report.failures.iter().any(|(l, _)| l == label));
+    let mut lines = Vec::new();
+    for (label, msg) in &report.failures {
+        if said.insert(label.clone(), msg.clone()).as_ref() != Some(msg) {
+            lines.push(publish_failure_line(label, msg));
+        }
+    }
+    lines
+}
+
+fn publish_failure_line(label: &str, msg: &str) -> String {
+    format!(
+        "workspace {label}: NEXUS_MEMORY.md could not be published, and the attempt is retried \
+         within the hour (every memory is safe in the store): {msg}"
+    )
+}
+
+/// Whether memory is an active module of `ws`. Opening its store elsewhere would create its views in a
+/// workspace that never asked for them.
+fn memory_is_active(ws: &Workspace) -> bool {
+    ws.config
+        .active_modules
+        .iter()
+        .any(|m| m == nexus_memory::workspace::MEMORY_MODULE)
 }
 
 // ---- the executing machine (6j6v.1c6k) ---------------------------------------------------------
@@ -997,6 +1116,25 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
             )),
         ),
     };
+    // **Why a publication failed, where a person looks** (6j6v.g0ye). The job that failed has long
+    // ended and its stderr is in a log, so this reads the record each workspace keeps. `null` when
+    // the registry could not be read: "no failure" and "nobody looked" must not render identically.
+    let memory_publish_failures = workspaces::load_registered().ok().map(|entries| {
+        let (resolved, _) = resolve_registered(&entries);
+        resolved
+            .iter()
+            .filter_map(|ws| {
+                let record = nexus_memory::publish::read_record(&ws.dir);
+                record.error.map(|error| {
+                    (
+                        ws.dir.display().to_string(),
+                        record.attempted_at.unwrap_or_default(),
+                        error,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    });
     if json {
         // `{"running": bool|null, "heartbeat": {…}|null}` — the shape the DoD names, plus the
         // `null` arm above — and since 6j6v.dcpk the `program` block beside it. Rendered ALWAYS,
@@ -1031,6 +1169,13 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
                     "path": s.path,
                     "instances": s.instances,
                 })).collect::<Vec<_>>()),
+                "memory_publish_failures": memory_publish_failures.as_ref().map(|failures| {
+                    failures.iter().map(|(workspace, attempted_at, error)| serde_json::json!({
+                        "workspace": workspace,
+                        "attempted_at": attempted_at,
+                        "error": error,
+                    })).collect::<Vec<_>>()
+                }),
             })
         );
         return Ok(());
@@ -1099,6 +1244,12 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
     }
     if let Some(note) = shared_note {
         println!("note: {note}");
+    }
+    for (workspace, attempted_at, error) in memory_publish_failures.iter().flatten() {
+        println!(
+            "note: {}, last tried {attempted_at}",
+            publish_failure_line(workspace, error)
+        );
     }
     Ok(())
 }
@@ -1549,6 +1700,9 @@ pub struct DaemonState {
     /// above: a workspace can be both doubly attended and missing an endpoint, and hearing about
     /// one must not cost the other.
     warned_shared: HashSet<String>,
+    /// The publication failures already said, by workspace (6j6v.g0ye): see
+    /// [`publish_failure_lines`].
+    said_publish_failure: HashMap<String, String>,
     /// And for a workspace whose relay records no presence (6j6v.f0b5): said once per run, because
     /// it stays true on every pass until somebody upgrades the relay, and a line every five minutes
     /// forever is a line nobody reads.
@@ -1583,6 +1737,7 @@ impl DaemonState {
             warned_unrunnable: HashSet::new(),
             warned_shared: HashSet::new(),
             warned_no_presence: HashSet::new(),
+            said_publish_failure: HashMap::new(),
             last_peek: None,
             peek_quiet_until: HashMap::new(),
         }
@@ -1956,6 +2111,21 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
                         "workspace {label}: could not pick up the chats this machine runs: {msg}"
                     ),
                 );
+            }
+        }
+
+        // The memory document, on a real PASS: it waits a day between publications, so a second more
+        // or less means nothing, and a pass comes at least every safety-net interval (6j6v.g0ye).
+        if report.ran {
+            let publishing = publish_memory_docs(&resolved, &to_rfc3339(wall), &clock);
+            for label in &publishing.started {
+                log_line(
+                    json,
+                    &format!("workspace {label}: publishing NEXUS_MEMORY.md, which is behind the memory store"),
+                );
+            }
+            for line in publish_failure_lines(&publishing, &mut state.said_publish_failure) {
+                log_line(json, &line);
             }
         }
 
@@ -2907,6 +3077,275 @@ mod tests {
             mono + Duration::from_secs(2),
             wall + Duration::from_secs(3600)
         ));
+    }
+
+    // ---- publishing the memory document (6j6v.g0ye) -------------------------------------------
+
+    mod publishing {
+        use super::*;
+        use nexus_memory::facade::{self, Classification};
+        use nexus_memory::publish::{self, Record};
+        use std::process::Command;
+
+        const NOW: &str = "2026-11-06T12:00:00Z";
+
+        fn git(dir: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        /// A memory workspace in a clone of a file-path origin, holding one memory. Bound to no
+        /// stream, because publishing has nothing to do with sync.
+        fn cloned() -> (TempDir, Workspace) {
+            let tmp = TempDir::new().unwrap();
+            let origin = tmp.path().join("origin.git");
+            let root = tmp.path().join("root");
+            std::fs::create_dir_all(&origin).unwrap();
+            git(&origin, &["init", "--bare", "-q", "-b", "main"]);
+            git(
+                tmp.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    root.to_str().unwrap(),
+                ],
+            );
+            let ws = with_memory(&root);
+            (tmp, ws)
+        }
+
+        fn with_memory(root: &Path) -> Workspace {
+            let cfg = WorkspaceConfig {
+                active_modules: vec!["memory".to_string()],
+                ..Default::default()
+            };
+            let ws = nxs_foundation::workspace::setup(root, &cfg).unwrap();
+            remember(&ws, "auth", "auth uses JWT");
+            ws
+        }
+
+        fn remember(ws: &Workspace, key: &str, body: &str) {
+            let mut store = ws.open_memory_store().unwrap();
+            facade::remember(
+                &mut store,
+                NOW,
+                "alice",
+                Some(key),
+                body,
+                &Classification {
+                    introduction: Some("in one line".into()),
+                    ..Classification::default()
+                },
+            )
+            .unwrap();
+        }
+
+        fn the_job() -> Vec<String> {
+            PUBLISH_JOB.iter().map(|s| s.to_string()).collect()
+        }
+
+        /// The record of a publication at `at`, of the content the store holds right now.
+        fn published_at(ws: &Workspace, at: &str) {
+            let store = ws.open_memory_store().unwrap();
+            let doc = nexus_memory::project_doc::render(&store).unwrap();
+            publish::write_record(
+                &ws.dir,
+                &Record {
+                    attempted_at: Some(at.into()),
+                    published_at: Some(at.into()),
+                    content_hash: Some(publish::content_hash(&doc)),
+                    ..Record::default()
+                },
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn a_changed_store_with_no_publication_starts_the_job_in_the_workspace_root() {
+            let (_tmp, ws) = cloned();
+            let spawn = SpySpawn::default();
+            let report = publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            let root = ws.dir.parent().unwrap().to_path_buf();
+            assert_eq!(*spawn.started.borrow(), vec![(root, the_job())]);
+            assert_eq!(report.started, vec![ws.dir.display().to_string()]);
+            assert_eq!(
+                publish::read_record(&ws.dir).attempted_at.as_deref(),
+                Some(NOW),
+                "the attempt is on record before the job runs, so the next pass does not start it again"
+            );
+        }
+
+        #[test]
+        fn the_next_pass_does_not_start_a_job_that_is_still_running() {
+            let (_tmp, ws) = cloned();
+            let spawn = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T12:05:00Z", &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1);
+        }
+
+        #[test]
+        fn a_second_change_waits_for_the_day_to_be_over() {
+            let (_tmp, ws) = cloned();
+            published_at(&ws, NOW);
+            remember(&ws, "race", "always with -race");
+
+            let spawn = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-07T11:59:59Z", &spawn);
+            assert!(
+                spawn.started.borrow().is_empty(),
+                "one second short of a day"
+            );
+
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-07T12:00:00Z", &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1);
+        }
+
+        #[test]
+        fn nothing_changed_starts_nothing_however_long_it_has_been() {
+            let (_tmp, ws) = cloned();
+            published_at(&ws, "2026-01-01T00:00:00Z");
+            let spawn = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            assert!(spawn.started.borrow().is_empty());
+        }
+
+        #[test]
+        fn a_workspace_with_no_origin_or_without_memory_starts_nothing() {
+            let no_origin = TempDir::new().unwrap();
+            let no_origin = with_memory(no_origin.path());
+            let (_tmp, flow_only) = workspace();
+            let spawn = SpySpawn::default();
+            let report = publish_memory_docs(&[no_origin, flow_only], NOW, &spawn);
+            assert!(spawn.started.borrow().is_empty());
+            assert_eq!(report, PublishReport::default());
+        }
+
+        #[test]
+        fn a_failed_attempt_stays_visible_and_is_retried_after_the_hour() {
+            let (_tmp, ws) = cloned();
+            publish::write_record(
+                &ws.dir,
+                &Record {
+                    attempted_at: Some(NOW.into()),
+                    error: Some("gh was not found on this PATH".into()),
+                    ..Record::default()
+                },
+            )
+            .unwrap();
+            let label = ws.dir.display().to_string();
+
+            let spawn = SpySpawn::default();
+            let report =
+                publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T12:59:59Z", &spawn);
+            assert!(
+                spawn.started.borrow().is_empty(),
+                "not before the hour is over"
+            );
+            assert_eq!(
+                report.failures,
+                vec![(label, "gh was not found on this PATH".to_string())]
+            );
+
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T13:00:00Z", &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1, "retried");
+        }
+
+        #[test]
+        fn a_job_that_could_not_start_is_a_failure_on_record_too() {
+            let (_tmp, ws) = cloned();
+            let spawn = SpySpawn {
+                fail: true,
+                ..SpySpawn::default()
+            };
+            let report = publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            assert_eq!(report.started, Vec::<String>::new());
+            assert_eq!(report.failures.len(), 1, "{report:?}");
+            assert!(publish::read_record(&ws.dir)
+                .error
+                .unwrap()
+                .contains("refused to start"));
+        }
+
+        #[test]
+        fn a_full_service_takes_nothing_and_asks_again_on_the_next_pass() {
+            let (_tmp, ws) = cloned();
+            let full = SpySpawn {
+                room: 0,
+                ..SpySpawn::default()
+            };
+            publish_memory_docs(std::slice::from_ref(&ws), NOW, &full);
+            assert_eq!(
+                publish::read_record(&ws.dir),
+                Record::default(),
+                "no attempt on record, so the hour's wait does not begin"
+            );
+            let room = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T12:05:00Z", &room);
+            assert_eq!(room.started.borrow().len(), 1);
+        }
+
+        #[test]
+        fn a_failure_is_logged_once_until_it_changes_or_goes_away() {
+            let mut said = HashMap::new();
+            let failing = |msg: &str| PublishReport {
+                failures: vec![("/w/.nxs".to_string(), msg.to_string())],
+                ..PublishReport::default()
+            };
+
+            let lines = publish_failure_lines(&failing("no credentials"), &mut said);
+            assert_eq!(lines.len(), 1);
+            assert!(
+                lines[0].contains("/w/.nxs") && lines[0].contains("no credentials"),
+                "{lines:?}"
+            );
+            assert!(lines[0].contains("NEXUS_MEMORY.md"), "{lines:?}");
+            assert_eq!(
+                publish_failure_lines(&failing("no credentials"), &mut said),
+                Vec::<String>::new(),
+                "the same reason every five minutes is a line nobody reads"
+            );
+            assert_eq!(
+                publish_failure_lines(&failing("HTTP 500"), &mut said).len(),
+                1
+            );
+
+            publish_failure_lines(&PublishReport::default(), &mut said);
+            assert_eq!(
+                publish_failure_lines(&failing("HTTP 500"), &mut said).len(),
+                1,
+                "it went away, so its coming back is news"
+            );
+        }
+
+        #[test]
+        fn a_pass_that_pulled_something_leaves_a_clone_with_an_origin_alone() {
+            let (_tmp, ws) = cloned();
+            bind_join(&ws, "stream-one").unwrap();
+            let report = sweep(
+                std::slice::from_ref(&ws),
+                &SpyPass::pulling(3),
+                Some("https://relay.example"),
+            );
+            assert!(report.doc_errors.is_empty(), "{:?}", report.doc_errors);
+            assert!(
+                !doc_path(&ws).exists(),
+                "a pulled memory reaches this checkout by a publication, never by this pass"
+            );
+        }
     }
 
     // ---- sweep / Pass / Backoff (task 11, `fa65`) ---------------------------------------------

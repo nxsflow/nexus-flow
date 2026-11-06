@@ -21,7 +21,9 @@
 //! - [`cli`]: the `nxm` command tree + verb bodies (memory verbs + the init/agent-manifest/prime
 //!   contract, parity with nxf — spec §5).
 //! - [`project_doc`]: `NEXUS_MEMORY.md` as a BUILD PRODUCT (6j6v.8q88) — the project-memory
-//!   document projected out of the store on every write, with the drift check behind `nxm doc`.
+//!   document projected out of the store, with the drift check behind `nxm doc`.
+//! - [`publish`]: how that document reaches a repository with an `origin` (6j6v.g0ye) — a commit
+//!   beside every checkout and its own pull request, because a memory write reaches only the store.
 //! - [`migration`]: the JUDGING migration (6j6v.9yaj) — the explicitly invoked command that files
 //!   the existing memories, moves the hand-written context document into them section by section,
 //!   and thereby completes the handover to the projection. The one place a model may be asked.
@@ -43,6 +45,7 @@ pub mod migration;
 pub mod model;
 pub mod onboarding;
 pub mod project_doc;
+pub mod publish;
 pub mod schema;
 pub mod store;
 pub mod watch;
