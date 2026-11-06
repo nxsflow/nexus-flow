@@ -195,6 +195,13 @@ fn sampled_moves(
     subprocess_moves(&drained.into_iter().map(|d| d.fact).collect::<Vec<_>>())
 }
 
+fn backend_work(bench: &Bench) -> Vec<u32> {
+    let record: nexus_run_session_claude::sample::SampleRecord =
+        serde_json::from_slice(&std::fs::read(bench.ledger_dir(KEY).join("sample.json")).unwrap())
+            .unwrap();
+    record.work.into_keys().collect()
+}
+
 /// Starts a shell in a session of its own, as the CLI starts a tool, and leaves what it says on stderr out of the way.
 fn tool_shell(script: &str) -> serde_json::Value {
     json!({ "spawn": format!(
@@ -214,22 +221,18 @@ fn a_real_tool_that_only_sleeps_reaches_no_movement() {
         ))
         .unwrap();
     let pid = bench.child_record(KEY).pid;
-    let tool_file = bench.ledger_dir(KEY).join("tool");
-    until("the tool started", || tool_file.exists());
-    let tool: u32 = std::fs::read_to_string(tool_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let tool = left_pid(&bench, KEY, "tool");
 
+    // It settles once it sleeps, and however long that takes on this machine it then stays settled. Only a sampler that
+    // moves by itself never gets here, and that is red at the ceiling.
     let mut offset = 0;
-    // It settles: the exec of the shell and of `sleep` are the last things it does.
-    until("the sample settled", || {
-        sampled_moves(&bench, KEY, &backend, &mut offset) == 0
+    let mut still = 0;
+    until("the tool is seen and the sample stays settled", || {
+        let moves = sampled_moves(&bench, KEY, &backend, &mut offset);
+        let seen = !backend_work(&bench).is_empty();
+        still = if moves == 0 && seen { still + 1 } else { 0 };
+        still >= 20
     });
-    for _ in 0..5 {
-        assert_eq!(sampled_moves(&bench, KEY, &backend, &mut offset), 0);
-    }
     kill_hard(tool);
     kill_hard(pid);
 }
@@ -261,11 +264,7 @@ fn a_real_tool_with_a_new_process_moves_though_no_call_is_open() {
         sampled_moves(&bench, KEY, &backend, &mut offset) > 0
     });
 
-    let tool: u32 = std::fs::read_to_string(bench.ledger_dir(KEY).join("tool"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let tool = left_pid(&bench, KEY, "tool");
     assert!(matches!(
         backend.alive(KEY),
         Ok(Liveness::Alive {
@@ -289,18 +288,12 @@ fn a_real_process_of_the_leaders_group_is_never_movement() {
         ))
         .unwrap();
     let pid = bench.child_record(KEY).pid;
-    let server = bench.ledger_dir(KEY).join("server");
-    until("the server started", || server.exists());
+    let member = left_pid(&bench, KEY, "server");
 
     let mut offset = 0;
     for _ in 0..5 {
         assert_eq!(sampled_moves(&bench, KEY, &backend, &mut offset), 0);
     }
-    let member: u32 = std::fs::read_to_string(server)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     backend.stop(KEY, true).unwrap();
     until("the group is gone", || {
         !pid_alive(member) && !pid_alive(pid)
@@ -319,8 +312,7 @@ fn the_sample_runs_on_its_own_only_when_a_minute_has_passed() {
         ))
         .unwrap();
     let pid = bench.child_record(KEY).pid;
-    let tool_file = bench.ledger_dir(KEY).join("tool");
-    until("the tool started", || tool_file.exists());
+    let tool = left_pid(&bench, KEY, "tool");
     let sample = bench.ledger_dir(KEY).join("sample.json");
 
     let (_, _) = backend.drain_facts(KEY, 0).unwrap();
@@ -334,11 +326,6 @@ fn the_sample_runs_on_its_own_only_when_a_minute_has_passed() {
         "sampled again inside the minute"
     );
 
-    let tool: u32 = std::fs::read_to_string(tool_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     kill_hard(tool);
     kill_hard(pid);
 }

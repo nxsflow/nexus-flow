@@ -4,7 +4,7 @@
 //!
 //! Ignored, because it needs `npm ci && npm run build` in `agent-sidecar/`:
 //!
-//!     NXR_REAL_SIDECAR=1 cargo test -p nexus-run-session-claude --test real_sidecar -- --ignored --test-threads=1
+//!     cargo test -p nexus-run-session-claude --test real_sidecar -- --ignored --test-threads=1
 
 mod common;
 
@@ -152,9 +152,17 @@ fn a_real_session_in_a_long_bash_call_is_seen_stopped_and_confirmed() {
     });
     let tool: Vec<u32> = sample_record(&bench).work.into_keys().collect();
     let leader = bench.child_record(KEY).pid;
-    assert!(!tool.contains(&leader), "the leader is no work");
+    // Neither the leader nor the CLI nor anything else of its group: their CPU is what hid hangs.
+    for pid in &tool {
+        let output = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let pgid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert_ne!(pgid, leader.to_string(), "{pid} is in the leader's group");
+    }
 
-    // The CLI spends CPU as it waits, and the sample does not move: this is what hid hangs.
+    // A tool that only sleeps stops moving.
     let mut still = 0;
     until("the sample settled", || {
         let before = sample_record(&bench).work;

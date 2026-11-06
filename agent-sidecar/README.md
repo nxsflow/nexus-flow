@@ -17,6 +17,12 @@ Set `NXC_SIDECAR_DEBUG=1` to dump every raw SDK message to stderr as it streams 
 inspecting the exact message shape (this repo's tracer-bullet run is recorded in
 `.superpowers/sdd/task-1-report.md`).
 
+### Facts mode (the v2 engine)
+
+`node src/main.mjs --facts --spec <ledger dir>/spec.json` runs one session from the v2 start spec, calls no `nxc` and decides
+nothing: it appends what happens to `<ledger dir>/facts.jsonl` for `crates/run-session-claude`, which owns the spawn, the
+signals and what a fact means. See `src/facts.mjs`. The spec below is the old mode's.
+
 ### Spec file shape
 
 ```json

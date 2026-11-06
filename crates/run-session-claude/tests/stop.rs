@@ -24,19 +24,6 @@ fn group_is_gone(pgid: u32) -> bool {
         .unwrap_or(true)
 }
 
-/// The pid a step of the fake sidecar left in the ledger.
-fn left_pid(bench: &Bench, name: &str) -> u32 {
-    let path = bench.ledger_dir(KEY).join(name);
-    until("the pid was left", || {
-        std::fs::read_to_string(&path).is_ok_and(|text| !text.trim().is_empty())
-    });
-    std::fs::read_to_string(path)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap()
-}
-
 /// A shell in a session of its own that leaves its pid and sleeps: the shape of a Bash tool's shell (tv58 step 0).
 fn own_session(pid_file: &str) -> serde_json::Value {
     json!({ "spawn": format!(
@@ -130,7 +117,7 @@ fn a_dead_leader_with_a_live_member_of_its_group_is_lingering_not_ended() {
             ] }),
         ))
         .unwrap();
-    let member = left_pid(&bench, "member");
+    let member = left_pid(&bench, KEY, "member");
     let leader = bench.child_record(KEY).pid;
     bench.cue(KEY, "go");
     until("the leader ended", || !pid_alive(leader));
@@ -192,7 +179,7 @@ fn a_forced_stop_also_ends_the_work_outside_the_group_and_dead_waits_for_it() {
             json!({ "steps": [own_session("tool"), { "wait": "never" }] }),
         ))
         .unwrap();
-    let tool = left_pid(&bench, "tool");
+    let tool = left_pid(&bench, KEY, "tool");
 
     backend.stop(KEY, true).unwrap();
     until_dead(&backend);
@@ -210,7 +197,7 @@ fn a_tools_process_that_outlives_its_session_holds_the_end_back() {
             json!({ "steps": [own_session("tool"), { "wait": "go" }, { "exit": 0 }] }),
         ))
         .unwrap();
-    let tool = left_pid(&bench, "tool");
+    let tool = left_pid(&bench, KEY, "tool");
     let leader = bench.child_record(KEY).pid;
     backend.sample_now(KEY).unwrap(); // while its parent lives: what lets it be followed once it has none
     bench.cue(KEY, "go");
@@ -239,7 +226,7 @@ fn a_restarted_reader_ends_the_work_the_old_one_sampled() {
             json!({ "steps": [own_session("tool"), { "wait": "go" }, { "exit": 0 }] }),
         ))
         .unwrap();
-    let tool = left_pid(&bench, "tool");
+    let tool = left_pid(&bench, KEY, "tool");
     let leader = bench.child_record(KEY).pid;
     first.sample_now(KEY).unwrap();
     drop(first);

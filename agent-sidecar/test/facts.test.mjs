@@ -533,9 +533,3 @@ test("the refusal of the last turn travels with the end, so the adapter can say 
   assert.deepEqual(facts.at(-1).raw.refused, { rule: "Bash", program: "curl" });
   assert.ok(!JSON.stringify(facts).includes(CANARY));
 });
-
-test("the old mode is untouched: without --facts the sidecar writes no facts file", async () => {
-  // `main-teardown.test.mjs` is the old mode's suite and runs the same file. Here only the door's position: the flag.
-  const source = readFileSync(MAIN, "utf8");
-  assert.match(source, /process\.argv\.includes\("--facts"\)/);
-});

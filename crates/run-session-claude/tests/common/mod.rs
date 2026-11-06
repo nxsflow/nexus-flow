@@ -113,6 +113,19 @@ impl Bench {
     }
 }
 
+/// The pid a step of the fake sidecar left in the ledger: the file is there before its bytes are.
+pub fn left_pid(bench: &Bench, key: &str, name: &str) -> u32 {
+    let path = bench.ledger_dir(key).join(name);
+    until("the pid was left", || {
+        std::fs::read_to_string(&path).is_ok_and(|text| !text.trim().is_empty())
+    });
+    std::fs::read_to_string(path)
+        .expect("the pid's file")
+        .trim()
+        .parse()
+        .expect("a pid")
+}
+
 /// Waits for what a process elsewhere does, however long a loaded machine takes.
 pub fn until(what: &str, mut done: impl FnMut() -> bool) {
     let limit = Instant::now() + HANG_CEILING;
