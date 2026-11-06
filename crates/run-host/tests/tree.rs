@@ -1712,6 +1712,46 @@ mod under_a_host {
         assert!(rig.store.get_claim_holder().is_none());
     }
 
+    /// `found` and `parked` carry commit and branch, so they are under `local` too, filled from the log.
+    #[test]
+    fn status_names_what_the_prepare_found_and_what_the_park_left_under_local() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = real_path(&temp);
+        let mut rig = git_rig(&dir);
+        Rig::leave_a_dirty_directory(&dir);
+        let receipt = rig.commission("work");
+        let run = receipt.run.clone();
+        let check = run.clone();
+        rig.run_until(3_000, move |rig| rig.has(&check, "tree_prepared"));
+        let status = bridge::status(&rig.bridge, &run, rig.now())
+            .unwrap()
+            .unwrap();
+        let wire = serde_json::to_value(&status).unwrap();
+        assert!(wire.get("found").is_none(), "{wire}");
+        let found = status.local.unwrap().tree.found.expect("found");
+        assert!(matches!(found, ParkOutcome::Committed { .. }), "{found:?}");
+
+        std::fs::write(rig.bridge.layout.v2_dir().join("more"), b"work").unwrap();
+        bridge::withdraw(
+            &rig.bridge,
+            &receipt.root_thread,
+            &Rig::requester(),
+            "stop",
+            rig.now(),
+        )
+        .unwrap();
+        let check = run.clone();
+        rig.run_until(3_000, move |rig| rig.has(&check, "tree_parked"));
+        let status = bridge::status(&rig.bridge, &run, rig.now())
+            .unwrap()
+            .unwrap();
+        let parked = status.local.unwrap().tree.parked.expect("parked");
+        assert!(
+            matches!(parked, ParkOutcome::Committed { .. }),
+            "{parked:?}"
+        );
+    }
+
     /// A happy run over the real tree, for the record of what `status` fills under `local.tree`: H2 of the manufakt
     /// review.
     #[test]

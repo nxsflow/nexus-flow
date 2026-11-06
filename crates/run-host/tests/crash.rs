@@ -385,6 +385,29 @@ fn over_git_tree_the_park_notice_goes_out_once_across_an_abort_at_a_sample_of_ev
     );
 }
 
+/// A run that left nothing owes no notice: `Clean` is not `Committed` with an empty commit.
+#[test]
+fn over_git_tree_a_run_that_left_nothing_owes_no_park_notice() {
+    let box_ = Crashbox::over_git_tree("happy");
+    box_.restart_and_run_to_completion();
+    let run = box_.run_id();
+    let parked = box_
+        .log()
+        .events()
+        .iter()
+        .find_map(|event| match &event.body {
+            EventBody::TreeParked { outcome } => Some(outcome.clone()),
+            _ => None,
+        });
+    assert_eq!(parked, Some(ParkOutcome::Clean { branch: None }));
+    assert!(
+        !box_.messages().iter().any(
+            |line| matches!(line, PortLine::Post { key, .. } if *key == format!("park/{run}"))
+        ),
+        "a notice for nothing"
+    );
+}
+
 /// The worker dies between the spawn and the byte: the child exits without git. The same box with no abort does run
 /// git, so the watch is shown to see it.
 #[test]
