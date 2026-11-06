@@ -1,6 +1,8 @@
 //! What the host's tests share: the crash box from the outside.
 #![allow(dead_code)] // Every test binary compiles this file and uses a different part of it.
 
+pub mod tree;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};

@@ -1,51 +1,82 @@
 //! The tree tests of §12.11, over the real `GitTree` against temporary repositories with a file-path origin.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
-/// The repository's tracked file, as it is in this commit.
-const TRACKED_GITIGNORE: &str = include_str!("../../../.gitignore");
-
-fn in_repo(dir: &Path, args: &[&str]) -> String {
-    let empty = std::env::temp_dir().join("zjyv-empty-gitconfig");
-    std::fs::write(&empty, b"").expect("an empty config");
-    let output = Command::new("git")
-        .current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env("GIT_CONFIG_GLOBAL", &empty)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        // The default `core.excludesFile` is under here, and this machine ignores `.claude/settings.local.json` there.
-        .env("XDG_CONFIG_HOME", dir.parent().expect("a parent"))
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-        .args(args)
-        .output()
-        .expect("git runs");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
+use common::tree::*;
+use nexus_run_contracts::{GitReason, ParkOutcome, RunId, SequenceKind, TreeRefusal};
+use nexus_run_host::git_tree::{tree_state, GitBounds};
+use nexus_run_host::{TreeResult, WorkTree};
 
 /// The finisher's clean-tree check (§6.6): a clone has no self-ignoring `.nxf/.gitignore`, so the verifier's gate log
 /// and a session's local settings have to be ignored by the file the clone carries, not by this machine's excludes.
 #[test]
 fn finisher_clean_check_passes_in_a_fresh_clone_with_a_gate_log() {
-    let temp = tempfile::tempdir().expect("a temp directory");
-    let origin = temp.path().join("origin");
-    std::fs::create_dir_all(&origin).expect("the origin");
-    std::fs::write(origin.join(".gitignore"), TRACKED_GITIGNORE).expect("the tracked file");
-    in_repo(&origin, &["-c", "init.defaultBranch=main", "init", "-q"]);
-    in_repo(&origin, &["add", "-A"]);
-    in_repo(&origin, &["commit", "-q", "-m", "first"]);
-    in_repo(temp.path(), &["clone", "-q", "origin", "clone"]);
-    let clone = temp.path().join("clone");
+    let bench = Bench::new();
+    let base = bench.origin.parent().expect("a parent");
+    run_git(base, &["clone", "-q", "origin", "clone"]);
+    let clone = base.join("clone");
     std::fs::create_dir_all(clone.join(".nxf/review")).expect("the gate log's directory");
     std::fs::write(clone.join(".nxf/review/gates-x.txt"), b"green").expect("a gate log");
     std::fs::create_dir_all(clone.join(".claude")).expect("the settings' directory");
     std::fs::write(clone.join(".claude/settings.local.json"), b"{}").expect("local settings");
 
-    assert_eq!(in_repo(&clone, &["status", "--porcelain"]), "", "the tree is clean");
+    assert_eq!(
+        run_git(&clone, &["status", "--porcelain"]),
+        "",
+        "the tree is clean"
+    );
     for ignored in [".nxf/review/gates-x.txt", ".claude/settings.local.json"] {
-        let answer = in_repo(&clone, &["check-ignore", "-v", ignored]);
-        assert!(answer.starts_with(".gitignore:"), "{ignored} by: {answer:?}");
+        let answer = run_git(&clone, &["check-ignore", "-v", ignored]);
+        assert!(
+            answer.starts_with(".gitignore:"),
+            "{ignored} by: {answer:?}"
+        );
     }
+}
+
+fn fresh_run() -> RunId {
+    RunId::new(ulid::Ulid::new())
+}
+
+fn park_outcome(result: TreeResult) -> ParkOutcome {
+    match result {
+        TreeResult::Parked(outcome) => outcome,
+        other => panic!("not parked: {other:?}"),
+    }
+}
+
+/// The acceptance case of the ticket: what the next holder finds.
+#[test]
+fn a_withdrawn_runs_uncommitted_file_is_parked_and_the_next_run_starts_clean() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    let (run_a, run_b) = (fresh_run(), fresh_run());
+    let prepared = bench.prepare(&tree, &run_a);
+    assert!(
+        matches!(&prepared, TreeResult::Prepared { base, found: None } if base.branch == "main"),
+        "{prepared:?}"
+    );
+    std::fs::write(bench.dir.join("stray.rs"), "fn x() {}").unwrap();
+
+    let ParkOutcome::Committed { branch, commit } = park_outcome(bench.park(&tree, &run_a)) else {
+        panic!("not committed");
+    };
+    assert!(
+        branch.starts_with(&format!("nxs/park/run-{run_a}/")),
+        "{branch}"
+    );
+    assert!(run_git(&bench.dir, &["show", "--stat", &commit]).contains("stray.rs"));
+
+    let next = bench.prepare(&tree, &run_b);
+    assert!(
+        matches!(next, TreeResult::Prepared { found: None, .. }),
+        "{next:?}"
+    );
+    assert_eq!(run_git(&bench.dir, &["status", "--porcelain"]), "");
+    assert!(!bench.dir.join("stray.rs").exists());
+    assert_eq!(bench.head(), bench.origin_main());
+    assert!(
+        run_git(&bench.dir, &["branch", "--list", &branch]).contains(&branch),
+        "still recoverable"
+    );
 }

@@ -86,7 +86,8 @@ fn run_script(
     steps: Vec<TreeStep>,
     cx: &mut TreeCx<'_>,
 ) -> Result<TreeResult, TreeStop> {
-    let dir = PathBuf::from(".");
+    // A child's locks are answered for in the op's directory, and never in whatever the test runs from.
+    let dir = op.dir().to_owned();
     for step in steps {
         match step {
             TreeStep::Delay(span) => cx.wait(span)?,
@@ -181,7 +182,7 @@ fn clear_stale_ref_locks(dir: &Path) {
 fn run_repo(op: &TreeOp, origin: &Path, cx: &mut TreeCx<'_>) -> Result<TreeResult, TreeStop> {
     clear_stale_ref_locks(&op.dir().join(".git"));
     let done = match op {
-        TreeOp::Prepare { run, dir, .. } => prepare(run, dir, origin, cx),
+        TreeOp::Prepare { run, dir } => prepare(run, dir, origin, cx),
         TreeOp::Park { run, dir, .. } => {
             if !dir.exists() {
                 return Ok(TreeResult::Parked(ParkOutcome::Missing));
@@ -326,6 +327,15 @@ impl ScriptedTree {
         Self::over(runner, ledger, deadline, script)
     }
 
+    /// With another way of asking about processes.
+    pub fn with_guard(ledger: TreeLedger, guard: Arc<dyn ProcessGuard>) -> Self {
+        let script = Arc::new(Mutex::new(VecDeque::new()));
+        let runner = ScriptedRunner {
+            mode: Mode::Scripted(Arc::clone(&script)),
+        };
+        Self::assembled(runner, ledger, guard, OPERATION_DEADLINE, script)
+    }
+
     /// Works in a real repository cloned from `origin`.
     pub fn in_repo(ledger: TreeLedger, origin: &Path) -> Self {
         let runner = ScriptedRunner {
@@ -342,7 +352,16 @@ impl ScriptedTree {
         deadline: Duration,
         script: Arc<Mutex<VecDeque<Vec<TreeStep>>>>,
     ) -> Self {
-        let guard: Arc<dyn ProcessGuard> = Arc::new(SystemProcesses);
+        Self::assembled(runner, ledger, Arc::new(SystemProcesses), deadline, script)
+    }
+
+    fn assembled(
+        runner: ScriptedRunner,
+        ledger: TreeLedger,
+        guard: Arc<dyn ProcessGuard>,
+        deadline: Duration,
+        script: Arc<Mutex<VecDeque<Vec<TreeStep>>>>,
+    ) -> Self {
         Self {
             worker: TreeWorker::with_guard(runner, ledger, guard, deadline),
             script,

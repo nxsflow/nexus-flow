@@ -34,6 +34,10 @@ pub struct LedgerEntry {
     pub lock_existed_before: bool,
     #[serde(default)]
     pub spawning: bool,
+    /// Every lock `.git` held before the child, by the same rule for each kind: what is not named here and is
+    /// there once the child's group is gone, the child made.
+    #[serde(default)]
+    pub locks_before: Vec<String>,
 }
 
 /// The file `<agent-logs>/v2/tree/<workspace_id>.json`.

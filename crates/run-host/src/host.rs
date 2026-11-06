@@ -32,13 +32,11 @@ pub const TICK_BUDGET: Duration = Duration::from_millis(200);
 /// Where a line of the host's log goes. A line carries ids and codes only, never a body (M8).
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Where a workspace's things are. `origin_url` is read once by whoever builds the host, off the tick,
-/// because reading it is a git call. `session_env` holds the values of the allowlist the old side knows.
+/// Where a workspace's things are. `session_env` holds the values of the allowlist the old side knows.
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub root: PathBuf,
     pub agent_logs: PathBuf,
-    pub origin_url: String,
     pub session_env: Vec<EnvVar>,
 }
 

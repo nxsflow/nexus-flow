@@ -117,7 +117,6 @@ impl Rig {
         Layout {
             root: dir.join("root"),
             agent_logs: dir.join("agent-logs"),
-            origin_url: dir.join("origin").to_string_lossy().into_owned(),
             session_env: Vec::new(),
         }
     }

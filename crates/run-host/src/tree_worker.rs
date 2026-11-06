@@ -8,13 +8,12 @@
 //! when it is this host's own, else the answer is [`InFlight`]. What a run still owes after a restart comes
 //! from `pending_effects`, never from this file.
 //!
-//! `GitTree` (ticket j6ba) is a [`TreeRunner`] over this worker; `ScriptedTree` is the other.
+//! `GitTree` is a [`TreeRunner`] over this worker; `ScriptedTree` is the other.
 
 use std::collections::VecDeque;
-use std::fs;
-use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -29,6 +28,10 @@ use nexus_run_store_sqlite::{Lease, SqliteRunStore};
 use crate::boundary::{crash_at, Boundary};
 use crate::ports::Clock;
 use crate::session_stub::{ProcessGuard, SystemProcesses};
+use crate::tree_child::{
+    clear_locks_of_a_gone_group, gated, git_locks, group_gone_soon, own_process_group, Output,
+    DRAIN_GRACE,
+};
 use crate::tree_ledger::{LedgerEntry, TreeLedger};
 
 /// The overall deadline of one operation, beside the bound on each of its calls. A clone's own bound is
@@ -42,7 +45,6 @@ pub enum TreeOp {
     Prepare {
         run: RunId,
         dir: PathBuf,
-        origin_url: String,
     },
     Park {
         run: RunId,
@@ -141,20 +143,6 @@ pub struct TreeStateError {
     pub what: String,
 }
 
-/// The one synchronous call, run by the bridge in the CLI process, never by the tick. The skeleton knows
-/// whether the directory is there; the git half is ticket j6ba's.
-pub fn tree_state(dir: &Path) -> Result<TreeState, TreeStateError> {
-    if !dir.exists() {
-        return Ok(TreeState {
-            missing: true,
-            ..TreeState::default()
-        });
-    }
-    Err(TreeStateError {
-        what: "reading a directory's git state arrives with GitTree".to_owned(),
-    })
-}
-
 /// What ended an operation early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeStop {
@@ -162,6 +150,8 @@ pub enum TreeStop {
     DeadlinePassed,
     LeaseLost,
     SpawnFailed,
+    /// The child ended and a helper of its still holds a pipe: what it said is not known.
+    OutputUncollected,
 }
 
 impl TreeStop {
@@ -171,6 +161,10 @@ impl TreeStop {
             Self::DeadlinePassed => (GitReason::BoundExceeded, "the operation's deadline passed"),
             Self::LeaseLost => (GitReason::BoundExceeded, "the owner's lease moved on"),
             Self::SpawnFailed => (GitReason::ExitNonzero, "a child could not be started"),
+            Self::OutputUncollected => (
+                GitReason::ExitNonzero,
+                "a child's output was not collected: a helper of it still holds a pipe",
+            ),
         };
         TreeResult::Refused {
             reason: TreeRefusal::Git { reason },
@@ -204,6 +198,21 @@ pub struct TreeCx<'a> {
     deadline: Timestamp,
     /// The running child, killed if the runner panics.
     child: Option<(u32, String)>,
+}
+
+/// What the ledger says of `.git` before one child.
+struct LocksBefore {
+    index: bool,
+    all: Vec<String>,
+}
+
+impl LocksBefore {
+    fn of(dir: &Path) -> Self {
+        Self {
+            index: dir.join(".git").join("index.lock").exists(),
+            all: git_locks(dir),
+        }
+    }
 }
 
 impl TreeCx<'_> {
@@ -249,7 +258,12 @@ impl TreeCx<'_> {
         }
     }
 
-    fn entry(&self, step: &str, child: Option<(u32, String)>, lock_existed: bool) -> LedgerEntry {
+    /// Now, by the clock the operation runs on.
+    pub fn now(&self) -> Timestamp {
+        self.binding.clock.now()
+    }
+
+    fn entry(&self, step: &str, child: Option<(u32, String)>, locks: &LocksBefore) -> LedgerEntry {
         let (pid, start_time) = child.unzip();
         LedgerEntry {
             spawning: step != BEGIN_STEP,
@@ -261,12 +275,14 @@ impl TreeCx<'_> {
             began_at: self.began_at,
             owner_id: self.binding.owner_id.clone(),
             epoch: self.epoch,
-            lock_existed_before: lock_existed,
+            lock_existed_before: locks.index,
+            locks_before: locks.all.clone(),
         }
     }
 
-    /// Runs one child in its own process group, recorded in the ledger before it is spawned, killed by
-    /// group when `bound`, the deadline or a cancel passes.
+    /// Runs one child in its own process group, recorded in the ledger before it is spawned and again before it
+    /// may start (the gate), killed by group when `bound`, the deadline or a cancel passes. `dir` is the repository
+    /// whose locks this child answers for.
     pub fn spawn(
         &mut self,
         step: &str,
@@ -278,29 +294,39 @@ impl TreeCx<'_> {
         if !self.lease_is_ours() {
             return Err(TreeStop::LeaseLost);
         }
-        let lock_existed = dir.join(".git").join("index.lock").exists();
+        let locks = LocksBefore::of(dir);
         crash_at(Boundary::BeforeTreeLedger);
         let ledger = &self.shared.ledger;
         // A record of the last child must not name this one.
-        let _ = fs::remove_file(ledger.child_record());
+        let _ = std::fs::remove_file(ledger.child_record());
         ledger
-            .write(&self.entry(step, None, lock_existed))
+            .write(&self.entry(step, None, &locks))
             .map_err(|_| TreeStop::SpawnFailed)?;
-        let mut command = recording_itself(command, &ledger.child_record());
+        let mut command = gated(&command, &ledger.child_record());
         command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         own_process_group(&mut command);
         let mut child = command.spawn().map_err(|_| TreeStop::SpawnFailed)?;
         crash_at(Boundary::AfterGitSpawnBeforeRecord);
+        // Dropped without a line, on any way out of here, this ends the child before it runs the program.
+        let gate = child.stdin.take();
         let pid = child.id();
-        let start_time = self.shared.guard.start_time(pid).unwrap_or_default();
+        let Some(start_time) = self.shared.guard.start_time(pid) else {
+            // Nobody could kill this group later. Its program never started, so the gate closing ends it.
+            drop(gate);
+            let _ = child.wait();
+            return Err(TreeStop::SpawnFailed);
+        };
         self.child = Some((pid, start_time.clone()));
-        ledger
-            .write(&self.entry(step, Some((pid, start_time)), lock_existed))
-            .map_err(|_| TreeStop::SpawnFailed)?;
-        let stopped = self.wait_for_child(&mut child, bound);
+        let output = Output::collect(&mut child);
+        let recorded = ledger.write(&self.entry(step, Some((pid, start_time)), &locks));
+        if recorded.is_err() || !open_gate(gate) {
+            return Err(self.end_child(&mut child, TreeStop::SpawnFailed, dir, &locks));
+        }
+        crash_at(Boundary::AfterGitReleasedBeforeResult);
+        let stopped = self.wait_for_child(&mut child, output, bound, dir, &locks);
         self.child = None;
         stopped
     }
@@ -308,91 +334,62 @@ impl TreeCx<'_> {
     fn wait_for_child(
         &mut self,
         child: &mut Child,
+        output: Output,
         bound: Duration,
+        dir: &Path,
+        locks: &LocksBefore,
     ) -> Result<StepOutput, TreeStop> {
-        let stdout = read_all(child.stdout.take());
-        let stderr = read_all(child.stderr.take());
         let until = self.instant_after(bound);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    return Ok(StepOutput {
-                        success: status.success(),
-                        stdout: stdout.join().unwrap_or_default(),
-                        stderr: stderr.join().unwrap_or_default(),
-                    });
+                    return if output.wait_for_end(DRAIN_GRACE) {
+                        Ok(output.into_step(status.success()))
+                    } else {
+                        Err(TreeStop::OutputUncollected)
+                    };
                 }
                 Ok(None) => {}
-                Err(_) => return Err(self.end_child(child, TreeStop::SpawnFailed)),
+                Err(_) => return Err(self.end_child(child, TreeStop::SpawnFailed, dir, locks)),
             }
             if let Err(stop) = self.checkpoint() {
-                return Err(self.end_child(child, stop));
+                return Err(self.end_child(child, stop, dir, locks));
             }
             if self.binding.clock.now() >= until {
-                return Err(self.end_child(child, TreeStop::DeadlinePassed));
+                return Err(self.end_child(child, TreeStop::DeadlinePassed, dir, locks));
             }
             std::thread::sleep(WAIT_STEP);
         }
     }
 
-    fn end_child(&mut self, child: &mut Child, stop: TreeStop) -> TreeStop {
-        if let Some((pid, start_time)) = &self.child {
-            self.shared.guard.kill_group(*pid, start_time);
+    /// Ends the group, and answers for its locks there and then: the ledger entry that could prove them goes with
+    /// the operation. Whatever the group said by then does not count, because the stop is the answer, and a reader
+    /// still blocked on a pipe an escaped helper holds is left to that helper.
+    fn end_child(
+        &mut self,
+        child: &mut Child,
+        stop: TreeStop,
+        dir: &Path,
+        locks: &LocksBefore,
+    ) -> TreeStop {
+        let guard = self.shared.guard.as_ref();
+        if let Some((pid, start_time)) = self.child.take() {
+            guard.kill_group(pid, &start_time);
         }
         // Our own child: reaped, or it answers alive as a zombie (§8.3).
         let _ = child.kill();
         let _ = child.wait();
+        if group_gone_soon(guard, child.id()) {
+            clear_locks_of_a_gone_group(dir, &locks.all, locks.index);
+        }
         stop
     }
 }
 
-fn read_all<R: Read + Send + 'static>(source: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut source) = source {
-            // What arrived before a read error is still what the child said.
-            let _ = source.read_to_end(&mut bytes);
-        }
-        bytes
-    })
+/// Lets the program start. `false` when the child is already gone.
+fn open_gate(gate: Option<ChildStdin>) -> bool {
+    gate.is_some_and(|mut gate| gate.write_all(b"go\n").is_ok())
 }
-
-/// The same command, writing its own pid before it becomes the program: `exec` keeps the pid, the process group
-/// and the start time, so what it wrote is the identity the ledger means.
-#[cfg(unix)]
-fn recording_itself(command: Command, record: &Path) -> Command {
-    let mut wrapped = Command::new("sh");
-    wrapped
-        .arg("-c")
-        .arg(r#"printf %s "$$" > "$0"; exec "$@""#)
-        .arg(record)
-        .arg(command.get_program())
-        .args(command.get_args());
-    if let Some(dir) = command.get_current_dir() {
-        wrapped.current_dir(dir);
-    }
-    for (name, value) in command.get_envs() {
-        match value {
-            Some(value) => wrapped.env(name, value),
-            None => wrapped.env_remove(name),
-        };
-    }
-    wrapped
-}
-
-#[cfg(not(unix))]
-fn recording_itself(command: Command, _record: &Path) -> Command {
-    command
-}
-
-#[cfg(unix)]
-fn own_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn own_process_group(_command: &mut Command) {}
 
 /// What the tick and the worker's thread share.
 pub struct Shared {
@@ -472,10 +469,11 @@ impl<R: TreeRunner> TreeWorker<R> {
         if entry.owner_id != binding.owner_id && owner_is_live(&entry, binding) {
             return Err(InFlight);
         }
-        let had_a_child = entry.pid.is_some() || self.shared.ledger.self_recorded_pid().is_some();
+        let mut child_of_the_entry = None;
         match (entry.pid, entry.start_time.as_deref()) {
             (Some(pid), Some(start_time)) => {
                 self.shared.guard.kill_group(pid, start_time);
+                child_of_the_entry = Some(pid);
             }
             _ => {
                 // The parent died before it recorded the child: the child's own record names it. Until the
@@ -488,12 +486,20 @@ impl<R: TreeRunner> TreeWorker<R> {
                     if let Some(start_time) = self.shared.guard.start_time(pid) {
                         self.shared.guard.kill_group(pid, &start_time);
                     }
+                    child_of_the_entry = Some(pid);
                 }
             }
         }
-        // A lock this call can prove it made (§5): none was there before the child, and the child is gone.
-        if had_a_child && !entry.lock_existed_before {
-            let _ = fs::remove_file(op.dir().join(".git").join("index.lock"));
+        // A lock this call can prove the child made (§5): not there before it, and its group gone. A group that is
+        // not gone keeps its locks, and whoever comes next reads `lock_held` naming them.
+        if let Some(pid) = child_of_the_entry {
+            if group_gone_soon(self.shared.guard.as_ref(), pid) {
+                clear_locks_of_a_gone_group(
+                    op.dir(),
+                    &entry.locks_before,
+                    entry.lock_existed_before,
+                );
+            }
         }
         self.shared.ledger.delete();
         Ok(())
@@ -569,9 +575,13 @@ fn run_bound<R: TreeRunner>(
         child: None,
     };
     crash_at(Boundary::BeforeTreeLedger);
+    let no_locks = LocksBefore {
+        index: false,
+        all: Vec::new(),
+    };
     if shared
         .ledger
-        .write(&cx.entry(BEGIN_STEP, None, false))
+        .write(&cx.entry(BEGIN_STEP, None, &no_locks))
         .is_err()
     {
         return TreeStop::SpawnFailed.into_result();
@@ -601,9 +611,11 @@ impl<R: TreeRunner> WorkTree for TreeWorker<R> {
         }
         self.settle_ledger(&binding, &op)?;
         let jobs = self.sender().ok_or(InFlight)?;
-        *in_flight = Some(op.clone());
         self.shared.cancel.store(false, Ordering::SeqCst);
-        jobs.send(op).map_err(|_| InFlight)
+        // Busy only once it is really handed over: the guard held here keeps the worker from finishing first.
+        jobs.send(op.clone()).map_err(|_| InFlight)?;
+        *in_flight = Some(op);
+        Ok(())
     }
 
     fn poll(&self) -> Option<(TreeOp, TreeResult)> {
@@ -620,3 +632,6 @@ impl<R: TreeRunner> WorkTree for TreeWorker<R> {
         *locked(&self.shared.binding) = Some(binding);
     }
 }
+
+#[cfg(test)]
+mod tests;
