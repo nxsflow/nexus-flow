@@ -222,6 +222,7 @@ fn status_with_no_heartbeat_reports_not_running_without_erroring() {
             "program": absent_program(tmp.path()),
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
+            "memory_publish_failures": [],
         })
     );
 }
@@ -270,6 +271,7 @@ fn status_with_a_heartbeat_reports_the_full_deterministic_shape() {
             "home": default_home(tmp.path()),
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
+            "memory_publish_failures": [],
             "heartbeat": {
                 "pid": pid,
                 "started_at": started_at,
@@ -463,6 +465,7 @@ fn status_with_a_heartbeat_naming_a_dead_pid_reports_not_running_but_still_rende
             "home": default_home(tmp.path()),
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
+            "memory_publish_failures": [],
             "heartbeat": {
                 "pid": 999_999_999,
                 "started_at": "2026-07-30T09:00:00Z",

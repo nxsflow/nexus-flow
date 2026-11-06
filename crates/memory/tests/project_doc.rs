@@ -716,3 +716,50 @@ fn check_and_publish_are_two_different_questions() {
         .assert()
         .failure();
 }
+
+#[test]
+fn a_publish_that_cannot_open_the_store_leaves_its_reason_where_the_service_and_the_check_read_it()
+{
+    // The job the service starts ends here under a store that answers "database is locked". Its
+    // stderr only reaches the service's log, so without the record the failure is invisible to
+    // `nxs sync daemon status` and to the next `--check`.
+    let c = cloned();
+    let store = c.root.path().join(".nxs/db.sqlite");
+    let healthy = std::fs::read(&store).unwrap();
+    std::fs::write(&store, b"this is not a database").unwrap();
+
+    nxm(&c.root).args(["doc", "--publish"]).assert().failure();
+
+    std::fs::write(&store, healthy).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(c.root.path().join(".nxs/memory-publish.json"))
+            .expect("the failed attempt went on record"),
+    )
+    .unwrap();
+    assert!(
+        record["error"].as_str().unwrap_or("").contains("db.sqlite"),
+        "{record}"
+    );
+    assert!(!record["attempted_at"].is_null(), "{record}");
+    let out = nxm(&c.root).args(["doc", "--check"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(stdout.contains("the last attempt failed"), "{stdout}");
+}
+
+#[test]
+fn a_publish_with_no_origin_keeps_no_record_of_a_store_it_could_not_open() {
+    // There is nothing to publish to, so no attempt was made and nothing is to be retried: a record
+    // here would stand in the service's status for ever, since no later publication clears it.
+    let root = TempDir::new().unwrap();
+    git(root.path(), &["init", "-q", "-b", "main"]);
+    nxm(&root).arg("init").assert().success();
+    std::fs::write(
+        root.path().join(".nxs/db.sqlite"),
+        b"this is not a database",
+    )
+    .unwrap();
+
+    nxm(&root).args(["doc", "--publish"]).assert().failure();
+
+    assert!(!root.path().join(".nxs/memory-publish.json").exists());
+}

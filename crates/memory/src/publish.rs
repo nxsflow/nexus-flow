@@ -21,7 +21,7 @@
 //!
 //! **A failure here is never a failed memory write.** The memory was committed long before anything
 //! in this file runs. A failed attempt is kept in the [`Record`] and tried again; `nxm doc --check`
-//! and `nxs sync status` say why it failed.
+//! and `nxs sync daemon status` say why it failed.
 //!
 //! **Every child is bounded and cannot ask anything.** The caller may be a service with nobody at the
 //! keyboard: terminal prompts are off, and a helper that hangs on a credential dialog is killed with
@@ -618,6 +618,22 @@ pub fn publish_recorded(
         };
     }
     result
+}
+
+/// Keep a failure that came before [`publish_recorded`] could run, such as a store that would not
+/// open. The job the service starts ends there under a store that answers "database is locked", and
+/// its stderr only reaches the service's log.
+///
+/// Nothing is kept for a workspace that does not publish: no attempt was made there, and no later
+/// publication would ever clear it. Best effort, because the caller is already failing with `message`.
+pub fn record_failure(ws_dir: &Path, root: &Path, now: &str, message: &str) {
+    if route(root) == Route::Direct {
+        return;
+    }
+    let mut record = read_record(ws_dir);
+    record.attempted_at = Some(now.to_string());
+    record.error = Some(scrub_credentials(message));
+    let _ = write_record(ws_dir, &record);
 }
 
 /// `https://user:token@host/…` becomes `https://***@host/…`. Git quotes the origin's address in its

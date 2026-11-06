@@ -912,13 +912,14 @@ fn memories(json: bool, db: Option<&str>, query: &MemoryQuery) -> Result<()> {
 /// `--publish` is the manual way to what the service does on its own. It fails loudly here, since a
 /// person is waiting for it; the failure is recorded for the next `--check` as well.
 fn doc(json: bool, db: Option<&str>, check: bool, publish: bool) -> Result<()> {
+    if publish {
+        // Resolved apart from the store, because a store that will not open is a failure to record.
+        return doc_publish(json, &Workspace::resolve(db, &cwd()?)?);
+    }
+
     let (ws, store) = open_ws(db)?;
     let root = ws.dir.parent().unwrap_or(&ws.dir);
     let path = root.join(project_doc::FILE_NAME).display().to_string();
-
-    if publish {
-        return doc_publish(json, &ws, &store, root);
-    }
 
     if !check {
         let rendered = project_doc::render(&store)?;
@@ -989,15 +990,14 @@ fn doc(json: bool, db: Option<&str>, check: bool, publish: bool) -> Result<()> {
 }
 
 /// `nxm doc --publish`. See [`publish`].
-fn doc_publish(
-    json: bool,
-    ws: &Workspace,
-    store: &MemoryStore,
-    root: &std::path::Path,
-) -> Result<()> {
-    let rendered = project_doc::render(store)?;
-    let outcome =
-        publish::publish_recorded(&rendered, &ws.dir, root, &resolve_now()?, &publish::Gh)?;
+fn doc_publish(json: bool, ws: &Workspace) -> Result<()> {
+    let root = ws.dir.parent().unwrap_or(&ws.dir);
+    let now = resolve_now()?;
+    let rendered = ws
+        .open_memory_store()
+        .and_then(|store| project_doc::render(&store))
+        .inspect_err(|e| publish::record_failure(&ws.dir, root, &now, &e.msg))?;
+    let outcome = publish::publish_recorded(&rendered, &ws.dir, root, &now, &publish::Gh)?;
     let (status, commit, pull_request) = match &outcome {
         publish::Outcome::NotPublished => ("not_published", None, None),
         publish::Outcome::Unchanged { pull_request } => ("unchanged", None, pull_request.as_ref()),

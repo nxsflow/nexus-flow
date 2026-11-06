@@ -352,8 +352,8 @@ pub const PRIME_CONTEXT_DOCUMENT: &str =
      SessionStart hook (`nxm prime`). The generated `NEXUS_MEMORY.md` repeats the index below and \
      adds every body beneath it, so importing that file from `CLAUDE.md` would hand you all of it \
      again. The missing import is deliberate, not an oversight: nothing needs to be added to \
-     `CLAUDE.md` for this project's memory to reach you. That file can lag the store by up to a \
-     day, so where the two disagree, this block and `nxm recall` are right.";
+     `CLAUDE.md` for this project's memory to reach you. That file can lag the store, so where \
+     the two disagree, this block and `nxm recall` are right.";
 
 /// The line the bootstrap prints when the workspace holds no memory yet — an invitation to capture
 /// one, not a bare "none".

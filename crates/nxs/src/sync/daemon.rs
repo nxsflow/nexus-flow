@@ -437,7 +437,7 @@ pub fn publish_memory_docs(resolved: &[Workspace], now: &str, spawn: &dyn Spawn)
 }
 
 /// The log lines for `report`'s failures. Each is said once, until its reason changes or it goes away:
-/// a publication that keeps failing is looked at on every pass, and `nxs sync status` is where it can
+/// a publication that keeps failing is looked at on every pass, and `nxs sync daemon status` is where it can
 /// be read at any time.
 pub fn publish_failure_lines(
     report: &PublishReport,
