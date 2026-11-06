@@ -619,7 +619,7 @@ jobs:
       # failing binary's verdict from THAT log, not the first one and a second 10x run to find the
       # rest.
       - name: Tests (debug, macOS)
-        run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service
+        run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service -p nexus-run-host
 
   # The durable Postgres backend (spec §5/§10) is verified by differential parity against
   # a REAL Postgres. The parity tests skip themselves unless DATABASE_URL is set, so this

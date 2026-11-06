@@ -7,6 +7,8 @@
 
 mod common;
 
+use common::tree::until;
+
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -91,7 +93,6 @@ impl Bench {
         TreeOp::Prepare {
             run: self.run.clone(),
             dir: self._dir.path().join("v2"),
-            origin_url: "origin".to_owned(),
         }
     }
 
@@ -108,18 +109,8 @@ impl Bench {
             epoch,
             lock_existed_before: false,
             spawning: false,
+            locks_before: Vec::new(),
         }
-    }
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !done() {
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "not observed within a minute: {what}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -634,13 +625,14 @@ fn an_operation_blocking_longer_than_the_lease_leaves_the_tick_going() {
         rig.has(&second, "claim_busy"),
         "and waits visibly behind the first"
     );
-    for _ in 0..30 {
+    // The worker is a thread: when it gets to the result past the delay is the machine's to say.
+    until("the result folded", || {
         rig.host.tick(rig.now());
         epochs.push(rig.store.lease(&first).unwrap().unwrap().epoch);
         expires.push(rig.store.lease(&first).unwrap().unwrap().expires_at);
         rig.clock.advance(1_000);
-        std::thread::sleep(Duration::from_millis(1));
-    }
+        rig.has(&first, "tree_prepared")
+    });
     assert!(
         epochs.iter().all(|epoch| *epoch == 1),
         "the lease never changed hands"
@@ -777,13 +769,10 @@ fn a_takeover_with_an_operation_in_flight_kills_the_child_and_folds_one_result()
     assert!(SystemProcesses.is_alive(pid, &start));
 
     rig.clock.advance(31_000);
-    for _ in 0..50 {
+    until("the new owner's prepare folded", || {
         second.tick(rig.now());
-        if rig.has(&run, "tree_prepared") {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+        rig.has(&run, "tree_prepared")
+    });
     assert_eq!(second_tree.begins(), 1, "the new owner began its own");
     assert!(
         !SystemProcesses.is_alive(pid, &start),
@@ -839,9 +828,12 @@ fn a_result_of_a_host_that_lost_the_lease_is_dropped_and_the_new_owners_folds() 
     second.tick(rig.now());
     assert_eq!(second_tree.begins(), 1, "the new owner began its own");
 
-    // The old owner's operation ends, and its host polls the result with the lease gone.
-    rig.clock.advance(10_000);
+    // The old owner's operation ends, and its host polls the result with the lease gone. Its delay starts when
+    // its thread gets there, which can be after the jump above, so the clock keeps moving, with the new owner
+    // renewing, or the old host would take the run back. Slowly: the new owner's own delay has to outlast this.
     until("the old host polled its worker's result", || {
+        rig.clock.advance(100);
+        second.tick(rig.now());
         rig.host.tick(rig.now());
         !rig.tree.busy()
     });
@@ -859,14 +851,11 @@ fn a_result_of_a_host_that_lost_the_lease_is_dropped_and_the_new_owners_folds() 
         "the stale result reached the inbox"
     );
 
-    for _ in 0..200 {
+    until("the new owner's prepare folded", || {
         rig.clock.advance(10_000);
         second.tick(rig.now());
-        std::thread::sleep(Duration::from_millis(1));
-        if rig.has(&run, "tree_prepared") {
-            break;
-        }
-    }
+        rig.has(&run, "tree_prepared")
+    });
     let base = rig.events(&run).iter().find_map(|event| match &event.body {
         EventBody::TreePrepared { base, .. } => Some(base.commit.clone()),
         _ => None,
@@ -1043,16 +1032,11 @@ fn a_closing_window_cancels_the_operation_in_flight() {
             .script(vec![TreeStep::Delay(Duration::from_secs(36_000))]);
     }
     let run = rig.commission("work").run;
-    let check = run.clone();
-    for _ in 0..400 {
+    until("the run is parked on the refusal", || {
         rig.host.tick(rig.now());
         rig.clock.advance(1_000);
-        std::thread::sleep(Duration::from_millis(1));
-        if rig.has(&check, "tree_refused") {
-            break;
-        }
-    }
-    assert!(rig.has(&run, "tree_refused"), "{:?}", rig.kinds());
+        rig.has(&run, "tree_refused")
+    });
     assert!(
         rig.tree.cancels() >= 1,
         "the operation in flight was cancelled"
@@ -1194,4 +1178,270 @@ fn a_run_that_never_held_the_claim_records_not_held_and_begins_nothing() {
         Some(holder.as_str()),
         "the holder keeps its claim"
     );
+}
+
+/// `ps` that cannot name a child: no identity means no group kill, so the child is not let go at all.
+struct NoStartTime;
+
+impl ProcessGuard for NoStartTime {
+    fn start_time(&self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    fn kill_group(&self, _pid: u32, _start_time: &str) -> bool {
+        false
+    }
+
+    fn group_gone(&self, _pgid: u32) -> bool {
+        true
+    }
+}
+
+fn shell(script: String) -> TreeStep {
+    TreeStep::Child {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script],
+    }
+}
+
+/// m8we's review: an empty start time disarms `kill_group`, so a deadline reaches the direct child only and an
+/// orphan can keep `index.lock`.
+#[test]
+fn a_child_whose_start_time_cannot_be_read_is_a_spawn_failure_and_never_runs() {
+    let bench = Bench::new();
+    let marker = bench._dir.path().join("ran");
+    let tree = ScriptedTree::with_guard(bench.ledger.clone(), Arc::new(NoStartTime));
+    bench.bind(&tree, bench.clock.clone());
+    tree.script(vec![shell(format!("touch {}", marker.display()))]);
+    tree.begin(bench.prepare()).unwrap();
+    let mut result = None;
+    until("the result", || {
+        result = tree.poll();
+        result.is_some()
+    });
+    let (_, result) = result.unwrap();
+    assert!(
+        matches!(&result, TreeResult::Refused { text, .. } if text.contains("could not be started")),
+        "{result:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the program ran with nobody able to kill it"
+    );
+    assert!(!tree.busy());
+}
+
+/// Slow to name a child, so a program with no gate in front of it would start well before the ledger names it.
+struct SlowToName;
+
+impl ProcessGuard for SlowToName {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        std::thread::sleep(Duration::from_millis(300));
+        SystemProcesses.start_time(pid)
+    }
+
+    fn kill_group(&self, pid: u32, start_time: &str) -> bool {
+        SystemProcesses.kill_group(pid, start_time)
+    }
+
+    fn group_gone(&self, pgid: u32) -> bool {
+        SystemProcesses.group_gone(pgid)
+    }
+}
+
+/// The gate: the program starts only once the ledger names its pid, so there is no moment a program runs with
+/// nobody able to name it. What the program reads is the ledger at the moment it starts.
+#[test]
+fn a_program_starts_only_after_the_ledger_names_it() {
+    let bench = Bench::new();
+    let tree = ScriptedTree::with_guard(bench.ledger.clone(), Arc::new(SlowToName));
+    bench.bind(&tree, bench.clock.clone());
+    let seen = bench._dir.path().join("seen");
+    tree.script(vec![shell(format!(
+        "cat {} > {}; echo $$ >> {}",
+        tree.ledger().path().display(),
+        seen.display(),
+        seen.display()
+    ))]);
+    tree.begin(bench.prepare()).unwrap();
+    until("the result", || tree.poll().is_some());
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    let (entry, pid) = seen.rsplit_once('}').unwrap();
+    let entry: LedgerEntry = serde_json::from_str(&format!("{entry}}}")).unwrap();
+    assert_eq!(
+        entry.pid.map(|pid| pid.to_string()).as_deref(),
+        Some(pid.trim())
+    );
+    assert!(entry.start_time.is_some_and(|start| !start.is_empty()));
+}
+
+/// The program gets nothing of the gate on its stdin.
+#[test]
+fn a_program_reads_an_empty_stdin_behind_the_gate() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    let seen = bench._dir.path().join("seen");
+    tree.script(vec![shell(format!("cat > {}", seen.display()))]);
+    tree.begin(bench.prepare()).unwrap();
+    until("the result", || tree.poll().is_some());
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "");
+}
+
+/// A process of its own session, inheriting stderr: the shape of a daemon a helper starts. It answers to no group
+/// kill, so the test ends it itself.
+fn escaped_helper(pid_file: &std::path::Path) -> String {
+    format!(
+        "perl -e 'use POSIX; POSIX::setsid(); open(F, \">{}\"); print F $$; close(F); exec(\"sleep\", \"600\")' &",
+        pid_file.display()
+    )
+}
+
+fn end_helper(pid_file: &std::path::Path) {
+    until("the helper wrote its pid", || {
+        pid_file.exists() && !std::fs::read_to_string(pid_file).unwrap().is_empty()
+    });
+    let pid = std::fs::read_to_string(pid_file).unwrap();
+    let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+}
+
+/// git is gone and a helper of its still holds the pipe: the answer is unknown, so it is a refusal, never an empty
+/// success, and it does not wait for the helper.
+#[test]
+fn a_helper_holding_the_pipe_after_a_clean_exit_is_a_refusal_not_an_empty_answer() {
+    let bench = Bench::new();
+    let tree = bench.tree();
+    let pid_file = bench._dir.path().join("helper");
+    tree.script(vec![shell(format!("{} exit 0", escaped_helper(&pid_file)))]);
+    tree.begin(bench.prepare()).unwrap();
+    let mut result = None;
+    until("the result", || {
+        result = tree.poll();
+        result.is_some()
+    });
+    end_helper(&pid_file);
+    let (_, result) = result.unwrap();
+    assert!(
+        matches!(&result, TreeResult::Refused { text, .. } if text.contains("output")),
+        "{result:?}"
+    );
+}
+
+/// Past the kill too: the bound passes, the group dies, the helper of another session lives on holding the pipe, and
+/// the operation still answers.
+#[test]
+fn a_helper_holding_the_pipe_past_the_kill_does_not_hold_the_operation() {
+    let bench = Bench::new();
+    let tree = ScriptedTree::with_deadline(bench.ledger.clone(), Duration::from_secs(60));
+    bench.bind(&tree, bench.clock.clone());
+    let pid_file = bench._dir.path().join("helper");
+    tree.script(vec![shell(format!(
+        "{} sleep 600",
+        escaped_helper(&pid_file)
+    ))]);
+    tree.begin(bench.prepare()).unwrap();
+    until("the helper is up", || {
+        pid_file.exists() && !std::fs::read_to_string(&pid_file).unwrap().is_empty()
+    });
+    bench.clock.advance(61_000);
+    let mut result = None;
+    until("the result", || {
+        result = tree.poll();
+        result.is_some()
+    });
+    end_helper(&pid_file);
+    assert!(matches!(result.unwrap().1, TreeResult::Refused { .. }));
+}
+
+/// Every lock a killed git leaves goes by one rule (§5 names only the index's; m8we left the others to this ticket).
+#[test]
+fn a_lock_of_any_kind_the_killed_child_created_is_cleared_and_one_there_before_is_not() {
+    for lock in [
+        "index.lock",
+        "HEAD.lock",
+        "config.lock",
+        "packed-refs.lock",
+        "refs/heads/feat/x.lock",
+    ] {
+        for there_before in [false, true] {
+            let bench = Bench::new();
+            let tree = bench.tree();
+            bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+            let git_dir = bench._dir.path().join("v2").join(".git");
+            std::fs::create_dir_all(git_dir.join("refs/heads/feat")).unwrap();
+            std::fs::write(git_dir.join(lock), b"").unwrap();
+            let (child, pid, start) = orphan();
+            let mut entry = bench.entry(OTHER, 3, Some((pid, start)));
+            if there_before {
+                entry.locks_before = vec![lock.to_owned()];
+            }
+            bench.ledger.write(&entry).unwrap();
+            tree.begin(bench.prepare()).unwrap();
+            assert_dies(child);
+            assert_eq!(
+                git_dir.join(lock).exists(),
+                there_before,
+                "{lock}, there before: {there_before}"
+            );
+            until("the operation's result", || tree.poll().is_some());
+        }
+    }
+}
+
+/// A child the bound killed in this same process leaves its lock too, and the ledger entry that could prove it is
+/// about to go with the operation.
+#[test]
+fn a_lock_of_a_child_killed_at_its_bound_is_cleared_with_the_group_gone() {
+    let bench = Bench::new();
+    let tree = ScriptedTree::with_deadline(bench.ledger.clone(), Duration::from_secs(60));
+    bench.bind(&tree, bench.clock.clone());
+    let git_dir = bench._dir.path().join("v2").join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let planted = git_dir.join("config.lock");
+    std::fs::write(&planted, b"").unwrap();
+    let made = git_dir.join("index.lock");
+    tree.script(vec![shell(format!("touch {}; sleep 600", made.display()))]);
+    tree.begin(bench.prepare()).unwrap();
+    until("the child made its lock", || made.exists());
+    bench.clock.advance(61_000);
+    until("the result", || tree.poll().is_some());
+    assert!(!made.exists(), "the killed child's lock stayed");
+    assert!(planted.exists(), "a lock from before it was removed");
+}
+
+/// Real processes, and a group that will not be confirmed gone: nothing proves the child stopped writing.
+struct GroupStays;
+
+impl ProcessGuard for GroupStays {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_time(pid)
+    }
+
+    fn kill_group(&self, pid: u32, start_time: &str) -> bool {
+        SystemProcesses.kill_group(pid, start_time)
+    }
+
+    fn group_gone(&self, _pgid: u32) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_lock_stays_while_the_group_is_not_confirmed_gone() {
+    let bench = Bench::new();
+    let tree = ScriptedTree::with_guard(bench.ledger.clone(), Arc::new(GroupStays));
+    bench.bind(&tree, bench.clock.clone());
+    bench.leases.set(OWNER, 4, CLOCK_START + 30_000);
+    let git_dir = bench._dir.path().join("v2").join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let lock = git_dir.join("index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let (child, pid, start) = orphan();
+    bench
+        .ledger
+        .write(&bench.entry(OTHER, 3, Some((pid, start))))
+        .unwrap();
+    tree.begin(bench.prepare()).unwrap();
+    assert_dies(child);
+    assert!(lock.exists(), "cleared with the group not confirmed gone");
+    until("the operation's result", || tree.poll().is_some());
 }

@@ -106,6 +106,10 @@ impl MessagePort for FilePorts {
         refs: &Refs,
         key: &str,
     ) -> PortResult<MessageId> {
+        let delay = self.post_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
         if self.refuse_posts.load(Ordering::SeqCst) {
             return Err(port_error("the chat store is locked"));
         }
@@ -116,10 +120,6 @@ impl MessagePort for FilePorts {
             .clone();
         if panic_on.is_some_and(|text| body.contains(&text)) {
             panic!("a scripted panic in the chat port");
-        }
-        let delay = self.post_delay_ms.load(Ordering::SeqCst);
-        if delay > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(delay));
         }
         let id = format!("m-{}", ulid::Ulid::new());
         self.append(&PortLine::Post {

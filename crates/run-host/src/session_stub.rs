@@ -23,6 +23,9 @@ pub trait ProcessGuard: Send + Sync {
 
     /// SIGKILL of the group, re-verifying the leader immediately before. `false` when nothing was sent.
     fn kill_group(&self, pid: u32, start_time: &str) -> bool;
+
+    /// Whether no live process is left in this group. A zombie holds nothing.
+    fn group_gone(&self, pgid: u32) -> bool;
 }
 
 /// [`ProcessGuard`] over `ps` and `kill`.
@@ -53,6 +56,24 @@ impl ProcessGuard for SystemProcesses {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    fn group_gone(&self, pgid: u32) -> bool {
+        // `ps` and not `kill -0`: a group of zombies answers EPERM on Darwin, which reads like a live one (§8.3).
+        let Ok(output) = Command::new("ps")
+            .args(["-A", "-o", "pgid=", "-o", "stat="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        let wanted = pgid.to_string();
+        !String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(wanted.as_str())
+                && fields.next().is_some_and(|stat| !stat.starts_with('Z'))
+        })
     }
 }
 

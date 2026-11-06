@@ -12,13 +12,13 @@ use nexus_run_engine::RunState;
 use serde::{Deserialize, Serialize};
 
 use crate::boundary::{crash_at, Boundary};
+use crate::git_tree::scrub;
 use crate::host::Host;
 use crate::lease::still_ours;
 use crate::tree_worker::{TreeOp, TreeResult};
 
 const BACKOFF_START_MS: i64 = 1_000;
 const BACKOFF_MAX_MS: i64 = 60_000;
-const REFUSAL_TEXT_CAP: usize = 2_000;
 
 /// A `tree_window` is not closed on fewer attempts than this, beside the elapsed time: a machine that slept
 /// through the window has not tried. An operation in flight counts as one.
@@ -57,23 +57,6 @@ fn is_permanent(reason: &TreeRefusal) -> bool {
     )
 }
 
-/// Capped, and with anything between `://` and `@` removed, so a token in a URL never reaches a row.
-fn scrub(text: &str) -> String {
-    let mut clean = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("://") {
-        let (head, tail) = rest.split_at(start + 3);
-        clean.push_str(head);
-        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
-        rest = match tail[..end].rfind('@') {
-            Some(at) => &tail[at + 1..],
-            None => tail,
-        };
-    }
-    clean.push_str(rest);
-    clean.chars().take(REFUSAL_TEXT_CAP).collect()
-}
-
 impl Host {
     fn may_begin(&mut self, run: &RunId, now: Timestamp) -> bool {
         if self.track.running.is_some() {
@@ -92,11 +75,9 @@ impl Host {
 
     pub(crate) fn prepare_tree(&mut self, run: &RunId, now: Timestamp) {
         if self.may_begin(run, now) {
-            let layout = &self.ports.layout;
             let op = TreeOp::Prepare {
                 run: run.clone(),
-                dir: layout.v2_dir(),
-                origin_url: layout.origin_url.clone(),
+                dir: self.ports.layout.v2_dir(),
             };
             self.begin(op);
         }

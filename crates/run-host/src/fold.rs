@@ -204,6 +204,8 @@ impl Host {
             if !self.step_input(row, epoch) {
                 return;
             }
+            // A turn owed is one input: an inbox can be long, and the next input is another turn's.
+            self.turn_owed = false;
         }
     }
 

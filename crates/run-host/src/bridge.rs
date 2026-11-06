@@ -21,13 +21,13 @@ use ulid::Ulid;
 
 use crate::effects::{PendingCommission, CHAT_REFUSED};
 use crate::fold::{fold_events, pinned_def, Folded};
+use crate::git_tree::tree_state;
 use crate::host::Layout;
 use crate::ports::{DeclarationPort, MessagePort, PortError, Refs};
 use crate::session_stub::{ProcessGuard, SystemProcesses};
 use crate::start::{mint_thread_id, ThreadRoute};
 use crate::tree_effects::StoredRefusal;
 use crate::tree_ledger::TreeLedger;
-use crate::tree_worker::tree_state;
 
 /// The bridge's `busy_timeout`, the old store's value, so a reply posted into the chat store is not followed
 /// by a visible enqueue failure over a short stall (§7).
@@ -578,7 +578,9 @@ fn local(
     let window = 2 * LEASE_EXPIRY.0 as i64 * 1000;
     let attended = last_seen.is_some_and(|at| now.unix_millis() - at.unix_millis() <= window);
     let dir = ctx.layout.v2_dir();
-    let live = tree_state(&dir).ok().filter(|tree| !tree.missing);
+    let live = tree_state(&ctx.layout.root, &dir)
+        .ok()
+        .filter(|tree| !tree.missing);
     let refusal: Option<StoredRefusal> = ctx
         .store
         .get(&format!("tree_refusal/{run}"))?

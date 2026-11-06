@@ -43,6 +43,8 @@ boundaries! {
     AfterClaimCasBeforeClaimTaken = "after_claim_cas_before_claim_taken",
     BeforeTreeLedger = "before_tree_ledger",
     AfterGitSpawnBeforeRecord = "after_git_spawn_before_record",
+    /// The gate is open: the program runs, with its record in the ledger, and the host is about to wait on it.
+    AfterGitReleasedBeforeResult = "after_git_released_before_result",
     DuringClone = "during_clone",
     AfterParkCommitBeforeTreeParked = "after_park_commit_before_tree_parked",
     AfterTreeResultBeforeInput = "after_tree_result_before_input",

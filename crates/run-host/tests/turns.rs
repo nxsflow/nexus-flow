@@ -227,16 +227,16 @@ fn start_deadline_is_armed_by_tree_prepared_and_persona_session_when_started_fol
     // Host ticks only from here: the session reports nothing until the rig moves it.
     let handle_key = format!("persona_session/{run}/coder");
     rig.clock.advance(6_000);
-    for _ in 0..500 {
+    common::tree::until("the session spawned", || {
         let now = rig.now();
         rig.host.tick(now);
         if rig.spawned().contains(&key) {
-            break;
+            return true;
         }
         // The worker's delay starts when its thread gets there, so the clock has to keep moving.
         rig.clock.advance(1_000);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+        false
+    });
     assert!(rig.has(&run, "tree_prepared"));
     assert!(
         rig.state(&run).timers.contains_key(&timer),

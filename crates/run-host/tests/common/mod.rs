@@ -1,6 +1,8 @@
 //! What the host's tests share: the crash box from the outside.
 #![allow(dead_code)] // Every test binary compiles this file and uses a different part of it.
 
+pub mod tree;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -17,6 +19,95 @@ pub struct Crashbox {
     _temp: tempfile::TempDir,
     dir: PathBuf,
     script: String,
+    /// The real `GitTree`, with a `git` on the PATH that writes down every process.
+    over_git: Option<GitWatch>,
+    generation: std::sync::atomic::AtomicU32,
+}
+
+/// A `git` first on the box's PATH that becomes the real one, keeping its pid. At the first call of each box process
+/// it asks whether a git of an earlier process is still alive: the assertion "no git process of this run alive when
+/// recovery begins its re-run" has its evidence from the moment it is about, and no timing in it.
+struct GitWatch {
+    bin: PathBuf,
+    calls: PathBuf,
+    overlaps: PathBuf,
+}
+
+impl GitWatch {
+    fn new(base: &Path) -> Self {
+        let bin = base.join("watch-bin");
+        std::fs::create_dir_all(&bin).expect("the watch's directory");
+        let processes = base.join("git-processes");
+        let calls = base.join("git-calls");
+        let overlaps = base.join("git-overlaps");
+        let real = tree::which_git();
+        let blocked = base.join("git-blocked");
+        let script = format!(
+            r#"#!/bin/sh
+generation="${{NXR_HOST_GENERATION:-0}}"
+if [ ! -f "{processes}.$generation" ]; then
+  : > "{processes}.$generation"
+  if [ -f "{processes}" ]; then
+    earlier=$(awk -v g="$generation" '$2 != g {{ print $1 }}' "{processes}" | tr '
+' ',' | sed 's/,$//')
+    if [ -n "$earlier" ]; then
+      ps -o pid=,stat=,command= -p "$earlier" | awk '$2 !~ /^Z/' >> "{overlaps}"
+    fi
+  fi
+fi
+echo "$$ $generation" >> "{processes}"
+echo "$*" >> "{calls}"
+if [ -n "$NXR_BLOCK_GIT" ] && [ ! -f "{blocked}" ]; then
+  case "$*" in
+    *"$NXR_BLOCK_GIT"*)
+      : > .git/index.lock
+      echo "$$" > "{blocked}.tmp"
+      mv "{blocked}.tmp" "{blocked}"
+      exec sleep 600
+      ;;
+  esac
+fi
+exec {real} "$@"
+"#,
+            processes = processes.display(),
+            calls = calls.display(),
+            overlaps = overlaps.display(),
+            blocked = blocked.display(),
+        );
+        let git = bin.join("git");
+        std::fs::write(&git, script).expect("the watch");
+        tree::make_executable(&git);
+        Self {
+            bin,
+            calls,
+            overlaps,
+        }
+    }
+}
+
+/// A box process and what it may have blocked: a failing test leaves neither behind.
+pub struct RunningBox(std::process::Child);
+
+impl RunningBox {
+    pub fn kill(&mut self) {
+        self.0.kill().expect("the kill");
+        self.0.wait().expect("the reap");
+    }
+}
+
+impl Drop for RunningBox {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Drop for Crashbox {
+    fn drop(&mut self) {
+        if self.over_git.is_some() {
+            self.end_blocked_git();
+        }
+    }
 }
 
 impl Crashbox {
@@ -27,7 +118,65 @@ impl Crashbox {
             _temp: temp,
             dir,
             script: script.to_owned(),
+            over_git: None,
+            generation: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// The same box on the real `GitTree`, with a file-path origin in its own temporary directory.
+    pub fn over_git_tree(script: &str) -> Self {
+        let mut box_ = Self::new(script);
+        let base = box_._temp.path().canonicalize().expect("a real path");
+        box_.dir = base.join("box");
+        box_.over_git = Some(GitWatch::new(&base));
+        box_
+    }
+
+    /// Every git call the box made, as its arguments.
+    pub fn git_calls(&self) -> Vec<String> {
+        let watch = self.over_git.as_ref().expect("a box over GitTree");
+        std::fs::read_to_string(&watch.calls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The gits of an earlier process that were alive when a later process made its first call.
+    pub fn git_overlaps(&self) -> String {
+        let watch = self.over_git.as_ref().expect("a box over GitTree");
+        std::fs::read_to_string(&watch.overlaps).unwrap_or_default()
+    }
+
+    /// Ends a child the watch blocked, whatever the test did: nothing of a test outlives it.
+    pub fn end_blocked_git(&self) {
+        if let Some(pid) = self.blocked_git() {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+    }
+
+    /// The pid of the child the fake git blocked, if it did.
+    pub fn blocked_git(&self) -> Option<u32> {
+        let path = self._temp.path().canonicalize().ok()?.join("git-blocked");
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
+    /// The box as a process of its own, for a kill from outside while a git child runs.
+    pub fn spawn_blocking_on(&self, git_args: &str) -> RunningBox {
+        let mut command = self.command(&self.script);
+        command.env("NXR_BLOCK_GIT", git_args);
+        RunningBox(command.spawn().expect("the box runs"))
+    }
+
+    fn stderr_log(&self) -> PathBuf {
+        self.dir.with_extension("stderr")
+    }
+
+    /// What the box said on its way out, because a failure has to carry its message (7mht).
+    pub fn stderr(&self) -> String {
+        std::fs::read_to_string(self.stderr_log()).unwrap_or_default()
     }
 
     pub fn dir(&self) -> &Path {
@@ -36,12 +185,31 @@ impl Crashbox {
 
     fn command(&self, script: &str) -> Command {
         let mut command = Command::new(BOX);
+        std::fs::create_dir_all(self.dir.parent().expect("a parent")).expect("the box's parent");
+        let stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.stderr_log())
+            .expect("the stderr log");
         command
             .arg(&self.dir)
             .arg(script)
             .env_remove("NXR_CRASH_AT")
             .env_remove("NXR_BOUNDARY_COUNTS")
-            .stderr(std::process::Stdio::null());
+            .stderr(stderr);
+        if let Some(watch) = &self.over_git {
+            tree::hermetic();
+            let generation = self
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![watch.bin.clone()];
+            paths.extend(std::env::split_paths(&path));
+            command
+                .env("NXR_TREE", "git")
+                .env("NXR_HOST_GENERATION", generation.to_string())
+                .env("PATH", std::env::join_paths(paths).expect("a PATH"));
+        }
         command
     }
 
@@ -61,8 +229,9 @@ impl Crashbox {
         }
         assert!(
             status.code().is_none(),
-            "the box failed, it did not abort at {}:{nth}: {status:?}",
-            boundary.name()
+            "the box failed, it did not abort at {}:{nth}: {status:?}: {}",
+            boundary.name(),
+            self.stderr()
         );
         true
     }
@@ -105,7 +274,8 @@ impl Crashbox {
         let status = self.run(None);
         assert!(
             status.success(),
-            "the restarted box did not finish: {status:?}"
+            "the restarted box did not finish: {status:?}: {}",
+            self.stderr()
         );
         self.log()
     }
@@ -155,7 +325,11 @@ impl Crashbox {
     /// Runs the next commission on the same directory, to its `tree_prepared`.
     pub fn run_next_to_prepared(&self) -> Log {
         let status = self.command("next").status().expect("the box runs");
-        assert!(status.success(), "the next run did not prepare: {status:?}");
+        assert!(
+            status.success(),
+            "the next run did not prepare: {status:?}: {}",
+            self.stderr()
+        );
         let text = std::fs::read_to_string(self.dir.join("run-next")).expect("the next run");
         let run = RunId::parse(text.trim()).expect("a run id");
         Log {

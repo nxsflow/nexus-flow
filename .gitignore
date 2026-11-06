@@ -28,3 +28,8 @@ agent-sidecar/dist/
 # Browser-automation scratch output (Playwright MCP page dumps, ad-hoc screenshots). Tool
 # artifacts, never sources — they were swept into a commit once by a `git add -A`.
 .playwright-mcp/
+
+# The verifier's gate log and a session's local settings: a fresh clone has neither this machine's excludes nor an
+# untracked self-ignoring `.nxf/.gitignore`, and the finisher's clean-tree check would fail on them.
+.nxf/
+.claude/settings.local.json

@@ -18,9 +18,11 @@ use nexus_run_contracts::{Event, LivenessPolicy, RunId, RunStore, Secs, Timestam
 use nexus_run_store_sqlite::SqliteRunStore;
 
 use crate::bridge::{self, BridgeCtx, Caller, CommissionReceipt, ReplyFlags, HOST_BUSY_TIMEOUT};
+use crate::git_tree::{GitBounds, GitTree};
 use crate::host::{Host, Layout, Ports, TickReport};
 use crate::ports::{Clock, Refs};
 use crate::tree_ledger::TreeLedger;
+use crate::tree_worker::WorkTree;
 pub use file_ports::{coding_decl, read_port_lines, review_decl, FilePorts, PortLine};
 use scripted_backend::{pass, Cue, Scenario, ScriptedBackend, SessionInfo};
 use scripted_tree::ScriptedTree;
@@ -96,15 +98,45 @@ pub fn make_origin(path: &Path) {
     }
 }
 
+/// What a rig needs of its tree beside the port: whether it is working, because that is real time.
+pub trait RigTree: WorkTree + 'static {
+    fn busy(&self) -> bool;
+}
+
+impl RigTree for ScriptedTree {
+    fn busy(&self) -> bool {
+        ScriptedTree::busy(self)
+    }
+}
+
+impl RigTree for GitTree {
+    fn busy(&self) -> bool {
+        GitTree::busy(self)
+    }
+}
+
+/// `git` for what a rig sets up. It has to work.
+fn setup_git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?} in {}", dir.display());
+}
+
 /// A host and everything around it, on one directory, which may already hold a run: opening the rig again IS
 /// the restart.
-pub struct Rig {
+pub struct Rig<T: RigTree = ScriptedTree> {
     pub dir: PathBuf,
     pub store: Arc<SqliteRunStore>,
     pub clock: Arc<SimClock>,
     pub ports: Arc<FilePorts>,
     pub backend: Arc<ScriptedBackend>,
-    pub tree: Arc<ScriptedTree>,
+    pub tree: Arc<T>,
     pub host: Host,
     pub bridge: BridgeCtx,
     pub policy: LivenessPolicy,
@@ -112,12 +144,69 @@ pub struct Rig {
     pub step_ms: i64,
 }
 
+impl Rig<GitTree> {
+    /// A rig on the real `GitTree`: an origin, a registered root with its `.nxs` link, and `root-v2` beside it.
+    pub fn git_tree(dir: &Path, clock_ms: i64, scenario: Scenario) -> Self {
+        Self::git_tree_bounded(dir, clock_ms, scenario, GitBounds::default())
+    }
+
+    pub fn git_tree_bounded(
+        dir: &Path,
+        clock_ms: i64,
+        scenario: Scenario,
+        bounds: GitBounds,
+    ) -> Self {
+        Self::git_tree_using(dir, clock_ms, scenario, bounds, Path::new("git"))
+    }
+
+    /// With another program for `git`.
+    pub fn git_tree_using(
+        dir: &Path,
+        clock_ms: i64,
+        scenario: Scenario,
+        bounds: GitBounds,
+        git: &Path,
+    ) -> Self {
+        fs::create_dir_all(dir).expect("the rig's directory");
+        let origin = dir.join("origin");
+        if !origin.exists() {
+            make_origin(&origin);
+        }
+        let root = dir.join("root");
+        if !root.exists() {
+            setup_git(dir, &["clone", "-q", "origin", "root"]);
+            let target = dir.join("nxs-target");
+            fs::create_dir_all(&target).expect("the link's target");
+            let target = target.canonicalize().expect("a real path");
+            std::os::unix::fs::symlink(target, root.join(".nxs")).expect("the root's link");
+        }
+        let tree = GitTree::with_git(&root, Rig::<ScriptedTree>::ledger(dir), bounds, git);
+        Self::open(dir, clock_ms, scenario, tree)
+    }
+
+    /// The directory as a predecessor left it: a clone of the origin, linked, with an uncommitted file.
+    pub fn leave_a_dirty_directory(dir: &Path) {
+        let v2 = dir.join("root-v2");
+        if v2.exists() {
+            return;
+        }
+        setup_git(dir, &["clone", "-q", "origin", "root-v2"]);
+        let target = dir
+            .join("root")
+            .join(".nxs")
+            .canonicalize()
+            .expect("the root's link");
+        std::os::unix::fs::symlink(target, v2.join(".nxs")).expect("the link");
+        fs::write(v2.join(".git/info/exclude"), ".nxs\n").expect("the exclude");
+        fs::write(v2.join("stray.txt"), b"a predecessor's work").expect("the file");
+    }
+}
+
 impl Rig {
     pub fn layout(dir: &Path) -> Layout {
         Layout {
             root: dir.join("root"),
             agent_logs: dir.join("agent-logs"),
-            origin_url: dir.join("origin").to_string_lossy().into_owned(),
             session_env: Vec::new(),
         }
     }
@@ -142,7 +231,43 @@ impl Rig {
         Self::open(dir, clock_ms, scenario, tree)
     }
 
-    pub fn open(dir: &Path, clock_ms: i64, scenario: Scenario, tree: ScriptedTree) -> Self {
+    /// A second host on the same store and the same world, as another service would be.
+    pub fn second_host(&self) -> (Host, Arc<ScriptedTree>) {
+        let store = Arc::new(
+            SqliteRunStore::open(&self.dir.join("run.sqlite"), HOST_BUSY_TIMEOUT)
+                .expect("a second connection"),
+        );
+        let tree = Arc::new(ScriptedTree::new(Self::ledger(&self.dir)));
+        let ports = Ports {
+            messages: self.ports.clone(),
+            declarations: self.ports.clone(),
+            sidecar: self.ports.clone(),
+            layout: Self::layout(&self.dir),
+        };
+        let host = Host::new(
+            store,
+            ports,
+            self.backend.clone(),
+            tree.clone(),
+            self.clock.clone(),
+        );
+        (host, tree)
+    }
+
+    pub fn restart(&mut self) {
+        self.restart_with(ScriptedTree::new(Self::ledger(&self.dir)));
+    }
+
+    pub fn requester() -> Caller {
+        Caller {
+            actor: REQUESTER.to_owned(),
+            session: None,
+        }
+    }
+}
+
+impl<T: RigTree> Rig<T> {
+    pub fn open(dir: &Path, clock_ms: i64, scenario: Scenario, tree: T) -> Self {
         fs::create_dir_all(dir).expect("the rig's directory");
         let store = Arc::new(
             SqliteRunStore::open(&dir.join("run.sqlite"), HOST_BUSY_TIMEOUT).expect("the store"),
@@ -153,7 +278,7 @@ impl Rig {
         );
         let clock = Arc::new(SimClock::at(clock_ms));
         let ports = Arc::new(FilePorts::new(&dir.join("messages.jsonl")));
-        let layout = Self::layout(dir);
+        let layout = Rig::<ScriptedTree>::layout(dir);
         let backend = Arc::new(ScriptedBackend::new(
             &layout.agent_logs,
             &dir.join("timeline.jsonl"),
@@ -195,29 +320,6 @@ impl Rig {
         }
     }
 
-    /// A second host on the same store and the same world, as another service would be.
-    pub fn second_host(&self) -> (Host, Arc<ScriptedTree>) {
-        let store = Arc::new(
-            SqliteRunStore::open(&self.dir.join("run.sqlite"), HOST_BUSY_TIMEOUT)
-                .expect("a second connection"),
-        );
-        let tree = Arc::new(ScriptedTree::new(Self::ledger(&self.dir)));
-        let ports = Ports {
-            messages: self.ports.clone(),
-            declarations: self.ports.clone(),
-            sidecar: self.ports.clone(),
-            layout: Self::layout(&self.dir),
-        };
-        let host = Host::new(
-            store,
-            ports,
-            self.backend.clone(),
-            tree.clone(),
-            self.clock.clone(),
-        );
-        (host, tree)
-    }
-
     pub fn now(&self) -> Timestamp {
         self.clock.now()
     }
@@ -225,7 +327,7 @@ impl Rig {
     /// The service restarted: a new host on the same store and clock, with a new owner id and nothing in
     /// memory. It has to wait out the old lease, as a real restart does. The tree is the caller's: a real
     /// worker dies with its process.
-    pub fn restart_with(&mut self, tree: ScriptedTree) {
+    pub fn restart_with(&mut self, tree: T) {
         let store = Arc::new(
             SqliteRunStore::open(&self.dir.join("run.sqlite"), HOST_BUSY_TIMEOUT)
                 .expect("the store reopens"),
@@ -235,7 +337,7 @@ impl Rig {
             messages: self.ports.clone(),
             declarations: self.ports.clone(),
             sidecar: self.ports.clone(),
-            layout: Self::layout(&self.dir),
+            layout: Rig::<ScriptedTree>::layout(&self.dir),
         };
         self.host = Host::new(
             store.clone(),
@@ -246,10 +348,6 @@ impl Rig {
         );
         self.store = store;
         self.tree = tree;
-    }
-
-    pub fn restart(&mut self) {
-        self.restart_with(ScriptedTree::new(Self::ledger(&self.dir)));
     }
 
     pub fn commission(&self, body: &str) -> CommissionReceipt {
@@ -267,13 +365,6 @@ impl Rig {
             self.now(),
         )
         .expect("the commission is accepted")
-    }
-
-    pub fn requester() -> Caller {
-        Caller {
-            actor: REQUESTER.to_owned(),
-            session: None,
-        }
     }
 
     /// One tick, then the sessions, then the clock: unless the tree is working, because that is real time and
@@ -298,13 +389,21 @@ impl Rig {
             .any(|row| row.run == *run)
     }
 
-    /// Ticks until `done`, or fails naming where the run stands.
+    /// Ticks until `done`, or fails naming where the run stands. `max_ticks` counts the ticks the run could use:
+    /// one the tree is working through is real time, and how much of that there is the machine's to say. Only a
+    /// hung tree ends on the ceiling, and no assertion rests on it.
     pub fn run_until(&mut self, max_ticks: u32, mut done: impl FnMut(&Self) -> bool) -> u32 {
-        for tick in 0..max_ticks {
+        let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut counted = 0;
+        while counted < max_ticks && std::time::Instant::now() < ceiling {
             if done(self) {
-                return tick;
+                return counted;
             }
+            let working = self.tree.busy();
             self.tick();
+            if !working {
+                counted += 1;
+            }
         }
         assert!(
             done(self),
@@ -380,6 +479,16 @@ pub fn scenario_named(name: &str) -> Scenario {
                 pass()
             }
         }),
+        // The coder leaves an uncommitted file and replies: the run delivers, and a park notice is owed.
+        "leaves_work" => Box::new(|info| {
+            if info.step == "build" {
+                Cue::WriteFileThenPass {
+                    name: "stray.txt".to_owned(),
+                }
+            } else {
+                pass()
+            }
+        }),
         // The coder writes a file and works on, until it is withdrawn.
         "withdraw" => Box::new(|info| {
             if info.step == "build" {
@@ -394,7 +503,7 @@ pub fn scenario_named(name: &str) -> Scenario {
     }
 }
 
-impl Rig {
+impl<T: RigTree> Rig<T> {
     pub fn clock_millis(&self) -> i64 {
         self.now().unix_millis()
     }
