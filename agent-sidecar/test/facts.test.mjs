@@ -286,9 +286,24 @@ export function query({ prompt, options }) {
   writeFileSync(DIR + "/resolved-cwd", process.cwd());
   return (async function* () {
     if (HOLD) await untilFile(HOLD);
+    // The real SDK reads its input while a turn runs, so this does too: an ask yielded into a running turn is seen.
+    const queue = [];
+    let inputOver = false;
+    (async () => {
+      for await (const user of prompt) {
+        appendFileSync(DIR + "/turns.jsonl", JSON.stringify(user.message.content) + "\\n");
+        queue.push(user);
+      }
+      inputOver = true;
+    })();
     let round = 0;
-    for await (const user of prompt) {
-      appendFileSync(DIR + "/turns.jsonl", JSON.stringify(user.message.content) + "\\n");
+    for (;;) {
+      if (queue.length === 0) {
+        if (inputOver) return;
+        await new Promise((r) => setTimeout(r, 2));
+        continue;
+      }
+      queue.shift();
       const script = ROUNDS[round] ?? [];
       for (let i = 0; i < script.length; i += 1) {
         if (i === HANG_AT) {
@@ -465,6 +480,8 @@ test("a nudge waits for the result: nothing reaches a running turn", async (t) =
   writeFileSync(join(box.dir, "release"), "");
   // The stub has gone on to its second wait, inside the same turn, with the ask known.
   await until("the second wait", () => readFileSync(join(box.dir, "waiting"), "utf8") === "release2");
+  // Time for an ask to reach the stream if it were going to: a correct sidecar is never early, whatever this waits.
+  await new Promise((resolve) => setTimeout(resolve, 200));
   const during = readFileSync(join(box.dir, "turns.jsonl"), "utf8").trim().split("\n");
   assert.equal(during.length, 1, "an ask reached a running turn");
   assert.ok(existsSync(join(box.ledger, "ask.0001.json")));
