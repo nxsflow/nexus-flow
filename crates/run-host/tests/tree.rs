@@ -1017,15 +1017,27 @@ fn a_transport_outside_the_allowed_protocols_never_runs() {
     assert!(!marker.exists());
 }
 
+/// Git refuses a URL that starts with a dash by itself these days, so what is tested is the `--` the runner owes it.
 #[test]
 fn an_origin_that_reads_like_an_option_is_a_url_and_nothing_else() {
     let bench = Bench::new();
     let marker = bench.dir.with_file_name("the-option-ran");
+    let seen = bench.dir.with_file_name("clone-arguments");
+    let git = bench.fake_git(&format!(
+        r#"case "$*" in *"clone -q"*) echo "$*" > {};; esac"#,
+        seen.display()
+    ));
     let url = format!("--upload-pack=touch {}", marker.display());
     run_git(&bench.root, &["config", "remote.origin.url", &url]);
-    let result = bench.prepare(&bench.tree(), &fresh_run());
+    let tree = bench.tree_with_git(&git, GitBounds::default());
+    let result = bench.prepare(&tree, &fresh_run());
     assert!(matches!(result, TreeResult::Refused { .. }), "{result:?}");
     assert!(!marker.exists());
+    let arguments = std::fs::read_to_string(&seen).expect("the clone ran");
+    assert!(
+        arguments.contains(&format!("clone -q -- {url} ")),
+        "{arguments}"
+    );
 }
 
 /// A token in the URL stays out of the refusal's text, and out of the ledger while the clone runs.
@@ -1459,11 +1471,10 @@ mod under_a_host {
         assert_eq!(stored["reason"]["reason"], "bound_exceeded", "{stored}");
         until("the group is empty", || group_members(pid).is_empty());
         assert!(!v2.join(".git/index.lock").exists());
-        assert_eq!(
-            nexus_run_host::git_tree::tree_state(&dir.join("root"), &v2)
+        assert!(
+            !nexus_run_host::git_tree::tree_state(&dir.join("root"), &v2)
                 .unwrap()
-                .dirty,
-            false
+                .dirty
         );
 
         // Against a machine with other work: a tick that waited on the fetch would take its whole span.

@@ -105,14 +105,15 @@ impl Output {
 /// The same command behind the gate, writing its own pid first. `exec` keeps the pid, the process group and the
 /// start time, so what it wrote is the identity the ledger means. It then waits on stdin for the line the worker
 /// writes once the ledger names it, and on an end of file with no line it exits without ever running the program:
-/// a worker that dies in that window leaves nothing that can touch the tree (§6.6, decided at the cut). The program
-/// gets `/dev/null` for stdin, so it never sees the gate. No `pre_exec`: this works on a threaded process.
+/// a worker that dies in that window leaves nothing that can touch the tree (§6.6, decided at the cut). The worker
+/// closes the pipe after that line, so the program reads an empty stdin. No `pre_exec`: this works on a threaded
+/// process.
 #[cfg(unix)]
-pub(crate) fn gated(command: &Command, record: &Path) -> Command {
+pub(crate) fn gated(command: Command, record: &Path) -> Command {
     let mut wrapped = Command::new("sh");
     wrapped
         .arg("-c")
-        .arg(r#"printf %s "$$" > "$0"; IFS= read -r go || exit 97; exec "$@" < /dev/null"#)
+        .arg(r#"printf %s "$$" > "$0"; IFS= read -r go || exit 97; exec "$@""#)
         .arg(record)
         .arg(command.get_program())
         .args(command.get_args());
@@ -129,8 +130,8 @@ pub(crate) fn gated(command: &Command, record: &Path) -> Command {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn gated(_command: &Command, _record: &Path) -> Command {
-    unimplemented!("the v2 working directory runs on unix only")
+pub(crate) fn gated(command: Command, _record: &Path) -> Command {
+    command
 }
 
 #[cfg(unix)]

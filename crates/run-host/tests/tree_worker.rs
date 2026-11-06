@@ -1247,12 +1247,31 @@ fn a_child_whose_start_time_cannot_be_read_is_a_spawn_failure_and_never_runs() {
     assert!(!tree.busy());
 }
 
+/// Slow to name a child, so a program with no gate in front of it would start well before the ledger names it.
+struct SlowToName;
+
+impl ProcessGuard for SlowToName {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        std::thread::sleep(Duration::from_millis(300));
+        SystemProcesses.start_time(pid)
+    }
+
+    fn kill_group(&self, pid: u32, start_time: &str) -> bool {
+        SystemProcesses.kill_group(pid, start_time)
+    }
+
+    fn group_gone(&self, pgid: u32) -> bool {
+        SystemProcesses.group_gone(pgid)
+    }
+}
+
 /// The gate: the program starts only once the ledger names its pid, so there is no moment a program runs with
 /// nobody able to name it. What the program reads is the ledger at the moment it starts.
 #[test]
 fn a_program_starts_only_after_the_ledger_names_it() {
     let bench = Bench::new();
-    let tree = bench.tree();
+    let tree = ScriptedTree::with_guard(bench.ledger.clone(), Arc::new(SlowToName));
+    bench.bind(&tree, bench.clock.clone());
     let seen = bench._dir.path().join("seen");
     tree.script(vec![shell(format!(
         "cat {} > {}; echo $$ >> {}",

@@ -302,7 +302,7 @@ impl TreeCx<'_> {
         ledger
             .write(&self.entry(step, None, &locks))
             .map_err(|_| TreeStop::SpawnFailed)?;
-        let mut command = gated(&command, &ledger.child_record());
+        let mut command = gated(command, &ledger.child_record());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
