@@ -861,3 +861,295 @@ fn the_handle_refuses_a_second_migration_on_a_marked_stream() {
         )
         .expect("`again` is the explicit answer here too");
 }
+
+// ---- a write reaches the store, and a publication reaches the repository (6j6v.g0ye) -----------
+
+#[cfg(unix)]
+mod published_separately {
+    use super::*;
+    use nexus_memory::error::{NxfError, Result};
+    use nexus_memory::project_doc::FILE_NAME;
+    use nexus_memory::publish::{Forge, Outcome};
+    use std::cell::Cell;
+    use std::process::Command as Process;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Process::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    /// A file-path origin carrying the document, a clone that is the workspace root, and a second
+    /// clone whose `.nxs` links the same store: the shape of the v2 working directory.
+    struct Setup {
+        _tmp: TempDir,
+        origin: std::path::PathBuf,
+        root: std::path::PathBuf,
+        second: std::path::PathBuf,
+    }
+
+    fn setup() -> Setup {
+        setup_seeded_with(FILE_NAME)
+    }
+
+    fn setup_seeded_with(seeded: &str) -> Setup {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&origin, &["init", "--bare", "-q", "-b", "main"]);
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join(seeded), "# as last published\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let root = tmp.path().join("root");
+        let second = tmp.path().join("second");
+        for dir in [&root, &second] {
+            git(
+                tmp.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    dir.to_str().unwrap(),
+                ],
+            );
+            std::fs::write(dir.join(".git/info/exclude"), ".nxs\n").unwrap();
+        }
+        nexus_memory::workspace::setup(&root, &nexus_memory::workspace::memory_config()).unwrap();
+        std::os::unix::fs::symlink(root.join(".nxs"), second.join(".nxs")).unwrap();
+        Setup {
+            _tmp: tmp,
+            origin,
+            root,
+            second,
+        }
+    }
+
+    fn status(dir: &Path) -> String {
+        git(dir, &["status", "--porcelain", "--untracked-files=all"])
+    }
+
+    /// A forge that counts, and can be told to refuse.
+    #[derive(Default)]
+    struct CountingForge {
+        created: Cell<u32>,
+        refuse: Cell<bool>,
+    }
+
+    impl Forge for CountingForge {
+        fn open_pull_request(&self, _: &Path, _: &str) -> Result<Option<String>> {
+            Ok((self.created.get() > 0).then(|| "https://forge.example/pr/1".to_string()))
+        }
+        fn create_pull_request(&self, _: &Path, _: &str, _: &str) -> Result<String> {
+            if self.refuse.get() {
+                return Err(NxfError::io("HTTP 401: bad credentials"));
+            }
+            self.created.set(self.created.get() + 1);
+            Ok("https://forge.example/pr/1".to_string())
+        }
+        fn close_pull_request(&self, _: &Path, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_write_through_the_handle_leaves_every_checkout_of_the_workspace_clean() {
+        let s = setup();
+        let before = std::fs::read_to_string(s.root.join(FILE_NAME)).unwrap();
+        let first = Engine::open(None, &s.root).unwrap();
+        let second = Engine::open(None, &s.second).unwrap();
+
+        first
+            .remember(NOW, ACTOR, Some("a"), "from the root", &intro("line a"))
+            .unwrap();
+        second
+            .remember(NOW, ACTOR, Some("b"), "from the second", &intro("line b"))
+            .unwrap();
+        first
+            .classify(
+                NOW,
+                ACTOR,
+                "a",
+                &Classification {
+                    category: Some("architecture".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        first
+            .reorder(NOW, ACTOR, &["b".to_string(), "a".to_string()])
+            .unwrap();
+        first.forget(NOW, ACTOR, "b").unwrap();
+
+        assert_eq!(status(&s.root), "", "the root's tree stayed clean");
+        assert_eq!(status(&s.second), "", "and so did the second clone's");
+        assert_eq!(
+            std::fs::read_to_string(s.root.join(FILE_NAME)).unwrap(),
+            before
+        );
+        assert!(
+            second.recall("a").is_ok(),
+            "and the memory is in the store both of them read"
+        );
+    }
+
+    #[test]
+    fn a_publish_through_the_handle_opens_a_pull_request_and_keeps_the_record() {
+        let s = setup();
+        let engine = Engine::open(None, &s.root).unwrap();
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+        let forge = CountingForge::default();
+
+        let outcome = engine.doc_publish_with(NOW, &forge).unwrap();
+
+        let Outcome::Opened { commit, .. } = outcome else {
+            panic!("expected a new pull request, got {outcome:?}");
+        };
+        assert_eq!(
+            git(&s.origin, &["show", &format!("{commit}:{FILE_NAME}")]),
+            engine.doc().unwrap().trim_end(),
+            "the commit carries exactly what the handle projects"
+        );
+        let record = engine.doc_publish_record().unwrap();
+        assert_eq!(record.published_at.as_deref(), Some(NOW));
+        assert_eq!(record.commit.as_deref(), Some(commit.as_str()));
+        assert_eq!(record.error, None);
+
+        assert_eq!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Unchanged {
+                pull_request: Some("https://forge.example/pr/1".into())
+            },
+            "and publishing again creates nothing"
+        );
+        assert_eq!(forge.created.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_publish_is_kept_in_the_record_and_never_touches_the_memory() {
+        let s = setup();
+        let engine = Engine::open(None, &s.root).unwrap();
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+        let forge = CountingForge::default();
+        forge.refuse.set(true);
+
+        let err = engine.doc_publish_with(NOW, &forge).unwrap_err();
+
+        assert!(err.msg.contains("HTTP 401"), "{}", err.msg);
+        assert!(engine.recall("a").is_ok());
+        let record = engine.doc_publish_record().unwrap();
+        assert!(
+            record.error.as_deref().unwrap_or("").contains("HTTP 401"),
+            "{record:?}"
+        );
+        assert_eq!(record.published_at, None);
+
+        // A write after the failure is as good as any other.
+        engine
+            .remember(NOW, ACTOR, Some("b"), "another", &intro("line b"))
+            .unwrap();
+
+        forge.refuse.set(false);
+        assert!(matches!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Opened { .. }
+        ));
+        assert_eq!(
+            engine.doc_publish_record().unwrap().error,
+            None,
+            "retried and cleared"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_publishes_nothing_through_the_handle_until_it_holds_a_memory() {
+        let s = setup_seeded_with("code.txt");
+        let engine = Engine::open(None, &s.root).unwrap();
+        let forge = CountingForge::default();
+
+        assert_eq!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Unchanged { pull_request: None }
+        );
+        assert_eq!(forge.created.get(), 0);
+        assert_eq!(
+            git(
+                &s.origin,
+                &["for-each-ref", "--format=%(refname)", "refs/heads"]
+            ),
+            "refs/heads/main",
+            "no branch on the origin"
+        );
+
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+        assert!(matches!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Opened { .. }
+        ));
+    }
+
+    #[test]
+    fn the_check_at_the_handle_tells_waiting_from_a_hand_edit() {
+        let s = setup();
+        let engine = Engine::open(None, &s.root).unwrap();
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+
+        assert_eq!(
+            engine.doc_check().unwrap(),
+            Drift::Pending,
+            "the checkout holds what the default branch holds, and the store has moved on"
+        );
+        assert!(!Drift::Pending.is_drift());
+
+        std::fs::write(s.root.join(FILE_NAME), "# somebody typed this\n").unwrap();
+        assert_eq!(engine.doc_check().unwrap(), Drift::Drifted);
+    }
+
+    #[test]
+    fn a_workspace_with_no_origin_keeps_writing_the_file_at_the_handle() {
+        let tmp = TempDir::new().unwrap();
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
+        nexus_memory::workspace::setup(tmp.path(), &nexus_memory::workspace::memory_config())
+            .unwrap();
+        let engine = Engine::open(None, tmp.path()).unwrap();
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+        assert!(doc_on_disk(tmp.path()).contains("the fact"));
+        assert_eq!(engine.doc_check().unwrap(), Drift::InSync);
+        assert_eq!(
+            engine
+                .doc_publish_with(NOW, &CountingForge::default())
+                .unwrap(),
+            Outcome::NotPublished
+        );
+    }
+}

@@ -344,12 +344,16 @@ pub const PRIME_INTRO: &str =
 /// sentence's whole job is to tell a reader HOW the block reached them — a wrong answer there is
 /// worse than a changed byte, and `NEXUS_MEMORY.md`/`CLAUDE.md`, the two things the rest of the
 /// paragraph is about, are untouched.
+///
+/// **Extended by 6j6v.g0ye.** Since a write stopped touching the file, `AGENTS.md`'s import can put a
+/// copy from yesterday beside this block, and a session needs to know which of the two to believe.
 pub const PRIME_CONTEXT_DOCUMENT: &str =
     "**This block IS how the project's memory reaches you.** It arrived through this project's \
      SessionStart hook (`nxm prime`). The generated `NEXUS_MEMORY.md` repeats the index below and \
      adds every body beneath it, so importing that file from `CLAUDE.md` would hand you all of it \
      again. The missing import is deliberate, not an oversight: nothing needs to be added to \
-     `CLAUDE.md` for this project's memory to reach you.";
+     `CLAUDE.md` for this project's memory to reach you. That file can lag the store, so where \
+     the two disagree, this block and `nxm recall` are right.";
 
 /// The line the bootstrap prints when the workspace holds no memory yet — an invitation to capture
 /// one, not a bare "none".

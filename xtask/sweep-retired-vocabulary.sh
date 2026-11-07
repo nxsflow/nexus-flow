@@ -61,6 +61,11 @@ BASE="${1:-origin/main}"
 # fixing it, there are twelve such terms, not the four a first draft of this paragraph named. So
 # it states the rule instead, and the rule is enforceable where it matters: at each term.
 VOCABULARY=(
+  # 6j6v.g0ye: a memory write no longer regenerates NEXUS_MEMORY.md where there is an origin.
+  '[Ee]very write regenerates'
+  'Jeder Schreibvorgang erzeugt'
+  'overwritten by the next write'
+  'next `nxm` write regenerates'
   # The declaration folder before 6j6v.dvyq step 4; now `.nxs-personas/`. PATH-ANCHORED rather than
   # the bare substring `roles/`, which also matched "roles" as an ordinary word in front of a slash
   # — `nxf-* roles/buckets/SSM` (AWS IAM, docs/specs/release-management.md), and eleven more

@@ -12,6 +12,7 @@ use crate::migration;
 use crate::model::Scope;
 use crate::onboarding;
 use crate::project_doc;
+use crate::publish;
 use crate::store::{MemoryQuery, MemoryStore};
 use crate::workspace::{self, MemoryWorkspaceExt, Workspace};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -130,13 +131,18 @@ enum Command {
         ordered: bool,
     },
     /// Print the generated project-memory document — the `NEXUS_MEMORY.md` projection of this
-    /// workspace's memories, which every write regenerates. Nothing here writes; `--check` compares
-    /// the file on disk with the store and exits non-zero when they have drifted apart.
+    /// workspace's memories. Printing writes nothing; `--check` compares the file on disk with the
+    /// store, and `--publish` brings it to the repository in its own pull request.
     Doc {
-        /// Compare `NEXUS_MEMORY.md` with the store instead of printing it, and fail if it was
-        /// hand-edited or never regenerated.
-        #[arg(long)]
+        /// Compare `NEXUS_MEMORY.md` with the store instead of printing it. Fails on a hand edit;
+        /// a copy that is only waiting to be published is a note, and exit 0.
+        #[arg(long, conflicts_with = "publish")]
         check: bool,
+        /// Publish the document: a commit on the origin's default branch and a pull request through
+        /// `gh`, with no checkout touched. Nothing changed means no branch and no pull request; an
+        /// open publication is updated. The background service does this at most once a day.
+        #[arg(long)]
+        publish: bool,
     },
     /// The judging migration: file this workspace's memories and move its hand-written context
     /// document into them, section by section. Explicitly invoked, run once, and the one command
@@ -374,7 +380,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 ordered: *ordered,
             },
         ),
-        Command::Doc { check } => doc(cli.json, db, *check),
+        Command::Doc { check, publish } => doc(cli.json, db, *check, *publish),
         Command::Migrate { command } => match command {
             MigrateCommand::Plan {
                 with_judge,
@@ -468,23 +474,24 @@ fn open(db: Option<&str>) -> Result<MemoryStore> {
 }
 
 /// [`open`], keeping the resolved workspace too — for every caller that needs the workspace ROOT
-/// and not just the store. That is every WRITE path (each one regenerates the project-memory
-/// document, [`project_doc`]) plus [`doc`] itself, which compares the file at that root.
+/// and not just the store. That is every WRITE path (each one projects the project-memory document
+/// where it is written directly, [`project_doc`]) plus [`doc`] itself, which compares the file at
+/// that root.
 fn open_ws(db: Option<&str>) -> Result<(Workspace, MemoryStore)> {
     let ws = Workspace::resolve(db, &cwd()?)?;
     let store = ws.open_memory_store()?;
     Ok((ws, store))
 }
 
-/// Regenerate `<root>/NEXUS_MEMORY.md` after a successful write (6j6v.8q88). Called by every write
-/// verb, which is what makes the document a build product rather than something a person has to
-/// remember to refresh.
+/// Project `<root>/NEXUS_MEMORY.md` after a successful write (6j6v.8q88), which does nothing in a
+/// repository with an `origin`: there the file is published separately (6j6v.g0ye). Called by every
+/// write verb, so that the choice between the two lives in [`project_doc::regenerate`] and no verb
+/// can be the one that gets it wrong.
 ///
 /// Silent on success, on purpose: the record the verb prints is its contract (byte-stable under
-/// `--json`), and the regenerated file announces itself perfectly well in `git status`. A FAILURE
-/// prints a `note:` to stderr and still exits 0 — the memory itself is already committed, so
-/// failing the command here would report a write that actually happened as a write that did not.
-/// The document is a projection; `nxm doc --check` is where its staleness becomes loud.
+/// `--json`). A FAILURE prints a `note:` to stderr and still exits 0 — the memory itself is already
+/// committed, so failing the command here would report a write that actually happened as a write
+/// that did not. The document is a projection; `nxm doc --check` is where its staleness becomes loud.
 fn project_after_write(ws: &Workspace, store: &MemoryStore) {
     let root = ws.dir.parent().unwrap_or(&ws.dir);
     if let Err(e) = project_doc::regenerate(store, root) {
@@ -892,18 +899,24 @@ fn memories(json: bool, db: Option<&str>, query: &MemoryQuery) -> Result<()> {
     Ok(())
 }
 
-/// `nxm doc [--check]`: the project-memory document (6j6v.8q88).
+/// `nxm doc [--check | --publish]`: the project-memory document (6j6v.8q88, 6j6v.g0ye).
 ///
-/// Bare, it PRINTS the projection — byte for byte what `NEXUS_MEMORY.md` holds, so a caller can
-/// diff, pipe or inspect it without trusting the file. It deliberately does not write: the document
-/// is regenerated by writes and by a sync pass that pulled something, never by somebody
-/// remembering to run a command.
+/// Bare, it PRINTS the projection, what the next publication will carry, without trusting the file.
+/// It deliberately does not write.
 ///
-/// `--check` is the guard rule (a) asks for. A file that no longer matches the store was either
-/// edited by hand — source and projection forked — or never regenerated here, which is what a sync
-/// daemon that was not running in this checkout looks like. Both are reported as a non-zero exit
-/// naming the file, because a guard nobody's tooling can see go red is not a guard.
-fn doc(json: bool, db: Option<&str>, check: bool) -> Result<()> {
+/// `--check` is the guard. A file that is not something the store published was edited by hand, so
+/// source and projection forked, and that is a non-zero exit naming the file, because a guard nobody's
+/// tooling can see go red is not a guard. A file that is only behind the store is the normal state
+/// between two publications, and that is a note with exit 0, naming a failed attempt if there is one.
+///
+/// `--publish` is the manual way to what the service does on its own. It fails loudly here, since a
+/// person is waiting for it; the failure is recorded for the next `--check` as well.
+fn doc(json: bool, db: Option<&str>, check: bool, publish: bool) -> Result<()> {
+    if publish {
+        // Resolved apart from the store, because a store that will not open is a failure to record.
+        return doc_publish(json, &Workspace::resolve(db, &cwd()?)?);
+    }
+
     let (ws, store) = open_ws(db)?;
     let root = ws.dir.parent().unwrap_or(&ws.dir);
     let path = root.join(project_doc::FILE_NAME).display().to_string();
@@ -917,7 +930,7 @@ fn doc(json: bool, db: Option<&str>, check: bool) -> Result<()> {
             );
         } else {
             // `print!`, not `println!`: the rendering already ends in the newline the file ends
-            // with, so stdout is byte-identical to the document itself.
+            // with, so stdout is byte-identical to what a publication would commit.
             print!("{rendered}");
         }
         return Ok(());
@@ -926,15 +939,51 @@ fn doc(json: bool, db: Option<&str>, check: bool) -> Result<()> {
     let drift = project_doc::check(&store, root)?;
     match drift {
         project_doc::Drift::Drifted => Err(NxfError::validation(format!(
-            "{path} no longer matches the memory store — it was edited by hand, or a write that \
-             should have regenerated it never ran here. The file is a PROJECTION: change it with \
-             `nxm remember` / `nxm forget` (the next write rewrites it), and run `nxm doc` to see \
-             what it should hold."
+            "{path} no longer matches the memory store, and it is not a copy that was published — \
+             it was edited by hand, or an older `nxm` regenerated it here and never committed it. \
+             The file is a PROJECTION: change it with `nxm remember` / `nxm forget`, and put the \
+             file back with `git restore` where git knows it. `nxm doc` prints what it should hold."
         ))),
         project_doc::Drift::Missing => Err(NxfError::validation(format!(
-            "{path} is missing, but this workspace has memories to project into it. The next `nxm` \
-             write regenerates it; `nxm doc` prints what it should hold."
+            "{path} is missing, but it should be here. `git restore` brings back a copy the \
+             repository carries, a workspace that writes the file directly writes it again on its \
+             next `nxm` write, and `nxm doc` prints what it should hold."
         ))),
+        project_doc::Drift::Pending => {
+            let record = publish::read_record(&ws.dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "path": path,
+                        "status": drift.as_str(),
+                        "pull_request": record.pull_request,
+                        "published_at": record.published_at,
+                        "attempted_at": record.attempted_at,
+                        "last_error": record.error,
+                    })
+                );
+            } else {
+                println!("note: {path} is behind the memory store and waiting to be published");
+                match &record.published_at {
+                    Some(at) => println!("  last published {at}"),
+                    None => println!("  nothing was published from here yet"),
+                }
+                if let Some(url) = &record.pull_request {
+                    println!("  the last pull request: {url}");
+                }
+                if let Some(error) = &record.error {
+                    println!(
+                        "  the last attempt failed ({}): {error}",
+                        record
+                            .attempted_at
+                            .as_deref()
+                            .unwrap_or("at an unknown time")
+                    );
+                }
+            }
+            Ok(())
+        }
         project_doc::Drift::InSync | project_doc::Drift::NotApplicable => {
             if json {
                 println!(
@@ -947,6 +996,58 @@ fn doc(json: bool, db: Option<&str>, check: bool) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `nxm doc --publish`. See [`publish`].
+fn doc_publish(json: bool, ws: &Workspace) -> Result<()> {
+    let root = ws.dir.parent().unwrap_or(&ws.dir);
+    let now = resolve_now()?;
+    let rendered = ws
+        .open_memory_store()
+        .and_then(|store| project_doc::render(&store))
+        .inspect_err(|e| publish::record_failure(&ws.dir, root, &now, &e.msg))?;
+    let outcome = publish::publish_recorded(&rendered, &ws.dir, root, &now, &publish::Gh)?;
+    let (status, commit, pull_request) = match &outcome {
+        publish::Outcome::NotPublished => ("not_published", None, None),
+        publish::Outcome::Unchanged { pull_request } => ("unchanged", None, pull_request.as_ref()),
+        publish::Outcome::Opened {
+            commit,
+            pull_request,
+        } => ("opened", Some(commit), Some(pull_request)),
+        publish::Outcome::Updated {
+            commit,
+            pull_request,
+        } => ("updated", Some(commit), Some(pull_request)),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": status,
+                "branch": publish::BRANCH,
+                "commit": commit,
+                "pull_request": pull_request,
+            })
+        );
+        return Ok(());
+    }
+    match (&outcome, pull_request) {
+        (publish::Outcome::NotPublished, _) => println!(
+            "nothing to publish to: this workspace has no origin, or its repository ignores {}, \
+             so the file is written directly",
+            project_doc::FILE_NAME
+        ),
+        (publish::Outcome::Unchanged { .. }, Some(url)) => {
+            println!("nothing new to publish; the pull request stands: {url}")
+        }
+        (publish::Outcome::Unchanged { .. }, None) => {
+            println!("nothing new to publish; the default branch says what the store says")
+        }
+        (publish::Outcome::Opened { .. }, Some(url)) => println!("opened {url}"),
+        (publish::Outcome::Updated { .. }, Some(url)) => println!("updated {url}"),
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---- the judging migration (6j6v.9yaj) -------------------------------------

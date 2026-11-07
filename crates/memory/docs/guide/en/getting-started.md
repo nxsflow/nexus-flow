@@ -119,10 +119,12 @@ anything — see [core concepts](nxm-core-concepts).
 
 ## Where the memories also live
 
-Every write regenerates `NEXUS_MEMORY.md` at the workspace root: the project's memory as a **build
-product**, so the context survives for a reader with no suite installed and for anyone browsing the
-repository on a forge. It is a projection, not a source — the store is the truth, and an edit made
-in the file is overwritten by the next write. `nxm doc` prints it; `nxm doc --check` reports drift.
+`NEXUS_MEMORY.md` at the workspace root is the project's memory as a **build product**, so the
+context survives for a reader with no suite installed and for anyone browsing the repository on a
+forge. It is a projection, not a source: the store is the truth, and an edit made in the file is
+overwritten. A write reaches the store and leaves your checkout alone; the file reaches the repository
+in its own pull request, at most once a day. With no `origin`, each write updates the file directly.
+`nxm doc` prints it; `nxm doc --check` reports a hand edit.
 
 ## Next
 
