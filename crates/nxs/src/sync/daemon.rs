@@ -370,7 +370,9 @@ pub struct PublishReport {
 /// something changed (6j6v.g0ye).
 ///
 /// Cheapest question first, since this runs on every pass over every registered workspace: the record
-/// and the clock need neither git nor the store, and on all but the rarest pass they already answer.
+/// and the clock need neither git nor the store. A look that finds no reason to start a job goes on
+/// record as well, so that they answer for the next hour too. A change therefore waits for at most
+/// that hour, on top of the day between publications.
 ///
 /// Unlike a sync pass this is NOT limited to workspaces bound to a stream: a workspace with an origin
 /// and no relay has the same file to bring to its repository.
@@ -396,7 +398,13 @@ pub fn publish_memory_docs(resolved: &[Workspace], now: &str, spawn: &dyn Spawn)
             continue;
         }
         let root = ws.dir.parent().unwrap_or(&ws.dir);
+        // Best effort: if the stamp cannot be written, the next pass only looks again.
+        let looked = |record: &mut publish::Record| {
+            record.looked_at = Some(now.to_string());
+            let _ = publish::write_record(&ws.dir, record);
+        };
         if publish::route(root) != publish::Route::Published {
+            looked(&mut record);
             continue;
         }
         let doc = ws
@@ -413,7 +421,12 @@ pub fn publish_memory_docs(resolved: &[Workspace], now: &str, spawn: &dyn Spawn)
                 continue;
             }
         };
-        if !publish::is_due(&record, now, &doc) {
+        // An empty store is no reason to plant a file. If the default's state cannot be read here,
+        // the job finds out.
+        let nothing_to_plant = nexus_memory::project_doc::says_nothing(&doc)
+            && !publish::default_carries_the_file(root).unwrap_or(true);
+        if nothing_to_plant || !publish::is_due(&record, now, &doc) {
+            looked(&mut record);
             continue;
         }
         record.attempted_at = Some(now.to_string());
@@ -3127,6 +3140,14 @@ mod tests {
             (tmp, ws)
         }
 
+        /// [`cloned`], before anybody remembered anything. The origin's default carries no file.
+        fn cloned_and_empty() -> (TempDir, Workspace) {
+            let (tmp, ws) = cloned();
+            let mut store = ws.open_memory_store().unwrap();
+            facade::forget(&mut store, NOW, "alice", "auth").unwrap();
+            (tmp, ws)
+        }
+
         fn with_memory(root: &Path) -> Workspace {
             let cfg = WorkspaceConfig {
                 active_modules: vec!["memory".to_string()],
@@ -3221,6 +3242,53 @@ mod tests {
             let spawn = SpySpawn::default();
             publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
             assert!(spawn.started.borrow().is_empty());
+        }
+
+        #[test]
+        fn an_empty_store_starts_no_job_where_the_default_never_carried_the_file() {
+            let (_tmp, ws) = cloned_and_empty();
+            let spawn = SpySpawn::default();
+            let report = publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            assert!(spawn.started.borrow().is_empty());
+            assert_eq!(report, PublishReport::default());
+
+            remember(&ws, "race", "always with -race");
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T13:00:00Z", &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1, "a memory is a reason");
+        }
+
+        #[test]
+        fn an_empty_store_starts_the_job_where_the_default_carries_the_file() {
+            // Every memory forgotten: the file on the default is what has to change.
+            let (_tmp, ws) = cloned_and_empty();
+            let root = ws.dir.parent().unwrap();
+            std::fs::write(doc_path(&ws), "# memories nobody holds any more\n").unwrap();
+            git(root, &["add", "NEXUS_MEMORY.md"]);
+            git(root, &["commit", "-q", "-m", "the file"]);
+            git(root, &["push", "-q", "origin", "HEAD:main"]);
+
+            let spawn = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1);
+        }
+
+        #[test]
+        fn a_look_that_found_nothing_changed_spares_the_next_hour_of_passes() {
+            // Every pass over every workspace would otherwise pay for git and a store read.
+            let (_tmp, ws) = cloned();
+            published_at(&ws, "2026-01-01T00:00:00Z");
+            let spawn = SpySpawn::default();
+            publish_memory_docs(std::slice::from_ref(&ws), NOW, &spawn);
+            remember(&ws, "race", "always with -race");
+
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T12:59:59Z", &spawn);
+            assert!(
+                spawn.started.borrow().is_empty(),
+                "within the hour of the look"
+            );
+
+            publish_memory_docs(std::slice::from_ref(&ws), "2026-11-06T13:00:00Z", &spawn);
+            assert_eq!(spawn.started.borrow().len(), 1);
         }
 
         #[test]

@@ -411,7 +411,7 @@ fn fake_gh(bin: &TempDir) -> std::path::PathBuf {
         r#"#!/bin/sh
 echo "$@" >> "{log}"
 case "$1 $2" in
-  "pr list") [ -f "{state}" ] && /bin/cat "{state}"; exit 0 ;;
+  "pr list") if [ -f "{state}" ]; then printf '[{{"url":"%s","isCrossRepository":false}}]' "$(/bin/cat "{state}")"; else echo '[]'; fi; exit 0 ;;
   "pr create") echo "https://forge.example/pr/7" > "{state}"; echo "https://forge.example/pr/7"; exit 0 ;;
   "pr close") /bin/rm -f "{state}"; exit 0 ;;
 esac
@@ -762,4 +762,157 @@ fn a_publish_with_no_origin_keeps_no_record_of_a_store_it_could_not_open() {
     nxm(&root).args(["doc", "--publish"]).assert().failure();
 
     assert!(!root.path().join(".nxs/memory-publish.json").exists());
+}
+
+/// A stand-in `gh` whose `pr list` always shows a stranger's pull request from a fork, under the
+/// branch name a publication uses, and whose `pr create` answers `created`.
+#[cfg(unix)]
+fn gh_with_a_strangers_pull_request(bin: &TempDir, created: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let log = bin.path().join("gh.log");
+    let script = format!(
+        r#"#!/bin/sh
+echo "$@" >> "{log}"
+case "$1 $2" in
+  "pr list") echo '[{{"url":"https://forge.example/pr/666","isCrossRepository":true}}]'; exit 0 ;;
+  "pr create") echo "{created}"; exit 0 ;;
+  "pr close") exit 0 ;;
+esac
+exit 1
+"#,
+        log = log.display(),
+    );
+    let path = bin.path().join("gh");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    log
+}
+
+#[cfg(unix)]
+#[test]
+fn a_strangers_pull_request_from_a_fork_is_neither_updated_nor_closed() {
+    let c = cloned();
+    let bin = bin_dir_with_only_git();
+    let log = gh_with_a_strangers_pull_request(&bin, "https://forge.example/pr/7");
+
+    let out = nxm(&c.root)
+        .env("PATH", bin.path())
+        .args(["--json", "doc", "--publish"])
+        .assert()
+        .success();
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json["status"], "opened", "{json}");
+    assert_eq!(json["pull_request"], "https://forge.example/pr/7");
+
+    // The store comes back to what the default says: only a pull request of ours may be closed.
+    let doc = nxm(&c.root).arg("doc").assert().success();
+    seed_advance(&c, &String::from_utf8_lossy(&doc.get_output().stdout));
+    nxm(&c.root)
+        .env("PATH", bin.path())
+        .args(["doc", "--publish"])
+        .assert()
+        .success();
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("pr close"), "{calls}");
+    assert!(calls.contains("isCrossRepository"), "{calls}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_forge_that_answers_a_create_with_nothing_is_a_failure_on_record() {
+    let c = cloned();
+    let bin = bin_dir_with_only_git();
+    gh_with_a_strangers_pull_request(&bin, "");
+
+    let out = nxm(&c.root)
+        .env("PATH", bin.path())
+        .args(["doc", "--publish"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(stderr.contains("gh pr create"), "{stderr}");
+
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(c.root.path().join(".nxs/memory-publish.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(record["published_at"].is_null(), "{record}");
+    assert!(!record["error"].is_null(), "{record}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_push_names_the_remote_so_no_credential_in_its_address_reaches_the_process_list() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let c = cloned();
+    let bin = bin_dir_with_only_git();
+    fake_gh(&bin);
+    // A git that writes down what it was asked, as `ps` would show it.
+    let real = std::fs::read_link(bin.path().join("git")).unwrap();
+    std::fs::remove_file(bin.path().join("git")).unwrap();
+    let argv = bin.path().join("argv.log");
+    std::fs::write(
+        bin.path().join("git"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> \"{}\"\nexec \"{}\" \"$@\"\n",
+            argv.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.path().join("git"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    nxm(&c.root)
+        .env("PATH", bin.path())
+        .args(["doc", "--publish"])
+        .assert()
+        .success();
+
+    let calls = std::fs::read_to_string(&argv).unwrap();
+    let address = c.origin.to_str().unwrap();
+    assert!(
+        !calls.contains(address),
+        "the origin's address stands in a git call:\n{calls}"
+    );
+    assert!(calls.contains(" push "), "{calls}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_check_says_how_long_a_copy_has_been_waiting() {
+    // With no service and no `gh` the note is all there is, so it must not read the same for ever.
+    let c = cloned();
+    let out = nxm(&c.root).args(["doc", "--check"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("nothing was published from here yet"),
+        "{stdout}"
+    );
+
+    let bin = bin_dir_with_only_git();
+    fake_gh(&bin);
+    nxm(&c.root)
+        .env("PATH", bin.path())
+        .args(["doc", "--publish"])
+        .assert()
+        .success();
+
+    let out = nxm(&c.root).args(["doc", "--check"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("last published 2026-06-20T10:00:00Z"),
+        "{stdout}"
+    );
+    let json = nxm(&c.root)
+        .args(["--json", "doc", "--check"])
+        .assert()
+        .success();
+    let json: serde_json::Value = serde_json::from_slice(&json.get_output().stdout).unwrap();
+    assert_eq!(json["published_at"], "2026-06-20T10:00:00Z", "{json}");
+    assert_eq!(json["attempted_at"], "2026-06-20T10:00:00Z", "{json}");
 }

@@ -902,6 +902,10 @@ mod published_separately {
     }
 
     fn setup() -> Setup {
+        setup_seeded_with(FILE_NAME)
+    }
+
+    fn setup_seeded_with(seeded: &str) -> Setup {
         let tmp = TempDir::new().unwrap();
         let origin = tmp.path().join("origin.git");
         let seed = tmp.path().join("seed");
@@ -909,7 +913,7 @@ mod published_separately {
         std::fs::create_dir_all(&seed).unwrap();
         git(&origin, &["init", "--bare", "-q", "-b", "main"]);
         git(&seed, &["init", "-q", "-b", "main"]);
-        std::fs::write(seed.join(FILE_NAME), "# as last published\n").unwrap();
+        std::fs::write(seed.join(seeded), "# as last published\n").unwrap();
         git(&seed, &["add", "."]);
         git(&seed, &["commit", "-q", "-m", "seed"]);
         git(
@@ -1079,6 +1083,35 @@ mod published_separately {
             None,
             "retried and cleared"
         );
+    }
+
+    #[test]
+    fn an_empty_store_publishes_nothing_through_the_handle_until_it_holds_a_memory() {
+        let s = setup_seeded_with("code.txt");
+        let engine = Engine::open(None, &s.root).unwrap();
+        let forge = CountingForge::default();
+
+        assert_eq!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Unchanged { pull_request: None }
+        );
+        assert_eq!(forge.created.get(), 0);
+        assert_eq!(
+            git(
+                &s.origin,
+                &["for-each-ref", "--format=%(refname)", "refs/heads"]
+            ),
+            "refs/heads/main",
+            "no branch on the origin"
+        );
+
+        engine
+            .remember(NOW, ACTOR, Some("a"), "the fact", &intro("line a"))
+            .unwrap();
+        assert!(matches!(
+            engine.doc_publish_with(NOW, &forge).unwrap(),
+            Outcome::Opened { .. }
+        ));
     }
 
     #[test]

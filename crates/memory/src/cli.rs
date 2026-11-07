@@ -946,8 +946,8 @@ fn doc(json: bool, db: Option<&str>, check: bool, publish: bool) -> Result<()> {
         ))),
         project_doc::Drift::Missing => Err(NxfError::validation(format!(
             "{path} is missing, but it should be here. `git restore` brings back a copy the \
-             repository carries, the next `nxm` write regenerates one that is written directly, and \
-             `nxm doc` prints what it should hold."
+             repository carries, a workspace that writes the file directly writes it again on its \
+             next `nxm` write, and `nxm doc` prints what it should hold."
         ))),
         project_doc::Drift::Pending => {
             let record = publish::read_record(&ws.dir);
@@ -958,18 +958,27 @@ fn doc(json: bool, db: Option<&str>, check: bool, publish: bool) -> Result<()> {
                         "path": path,
                         "status": drift.as_str(),
                         "pull_request": record.pull_request,
+                        "published_at": record.published_at,
+                        "attempted_at": record.attempted_at,
                         "last_error": record.error,
                     })
                 );
             } else {
                 println!("note: {path} is behind the memory store and waiting to be published");
+                match &record.published_at {
+                    Some(at) => println!("  last published {at}"),
+                    None => println!("  nothing was published from here yet"),
+                }
                 if let Some(url) = &record.pull_request {
                     println!("  the last pull request: {url}");
                 }
                 if let Some(error) = &record.error {
                     println!(
                         "  the last attempt failed ({}): {error}",
-                        record.attempted_at.as_deref().unwrap_or("at an unknown time")
+                        record
+                            .attempted_at
+                            .as_deref()
+                            .unwrap_or("at an unknown time")
                     );
                 }
             }

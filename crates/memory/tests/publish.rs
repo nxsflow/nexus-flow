@@ -14,6 +14,8 @@ use tempfile::TempDir;
 
 const DOC: &str = "NEXUS_MEMORY.md";
 
+use nexus_memory::project_doc::empty_document;
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
@@ -112,6 +114,23 @@ fn advance_main(repo: &Repo, file: &str, content: &str) -> String {
     git(&scratch, &["commit", "-q", "-m", "advance"]);
     git(&scratch, &["push", "-q", "origin", "main"]);
     git(&scratch, &["rev-parse", "HEAD"])
+}
+
+/// Take the file off the origin's `main`, as in a repository that never carried it.
+fn without_the_file_on_main(repo: &Repo) {
+    let scratch = repo.origin.parent().unwrap().join("scratch-removal");
+    git(
+        repo.origin.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            repo.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    git(&scratch, &["rm", "-q", DOC]);
+    git(&scratch, &["commit", "-q", "-m", "no document"]);
+    git(&scratch, &["push", "-q", "origin", "main"]);
 }
 
 /// A recording forge: one open pull request at most, and it can be told to fail.
@@ -273,8 +292,8 @@ fn a_checkout_behind_the_origin_still_publishes_on_the_origins_tip() {
 
 #[test]
 fn a_remote_tracking_ref_somebody_fetched_stays_where_they_left_it() {
-    // Whether git records a push in `origin/*` depends on its version: 2.56.0 does here, 2.50.1 does
-    // not. Either way a publish may not move a ref that says what somebody last fetched.
+    // A push to `origin` records itself in `origin/*`, and a publish may not move a ref that says
+    // what somebody last fetched.
     let repo = repo();
     let forge = FakeForge::default();
     publish::publish("# one\n", &repo.clone, &forge).unwrap();
@@ -437,4 +456,38 @@ fn a_repository_that_ignores_the_file_is_not_published() {
         Outcome::NotPublished
     );
     assert_eq!(origin_ref(&repo, &branch_ref()), None);
+}
+
+#[test]
+fn an_empty_store_plants_no_file_on_a_default_that_never_carried_one() {
+    let repo = repo();
+    without_the_file_on_main(&repo);
+    let forge = FakeForge::default();
+
+    let outcome = publish::publish(&empty_document(), &repo.clone, &forge).unwrap();
+
+    assert_eq!(outcome, Outcome::Unchanged { pull_request: None });
+    assert_eq!(origin_ref(&repo, &branch_ref()), None);
+    assert!(forge.created.borrow().is_empty());
+}
+
+#[test]
+fn an_open_pull_request_is_closed_when_the_store_empties_and_the_default_never_carried_the_file() {
+    let repo = repo();
+    without_the_file_on_main(&repo);
+    let forge = FakeForge::default();
+    publish::publish("# one\n", &repo.clone, &forge).unwrap();
+
+    let outcome = publish::publish(&empty_document(), &repo.clone, &forge).unwrap();
+
+    assert_eq!(outcome, Outcome::Unchanged { pull_request: None });
+    assert_eq!(forge.closed.borrow().len(), 1);
+}
+
+#[test]
+fn an_empty_store_still_publishes_where_the_default_carries_memories_it_no_longer_has() {
+    // Every memory forgotten: the file on the default is what has to change.
+    let repo = repo();
+    let outcome = publish::publish(&empty_document(), &repo.clone, &FakeForge::default()).unwrap();
+    assert!(matches!(outcome, Outcome::Opened { .. }), "{outcome:?}");
 }

@@ -363,8 +363,8 @@ nur dieses Repository. Es **endet mit einem Exit-Code ungleich null** bei einer 
 bei einer Datei, die da sein sollte und fehlt. Eine Kopie, die nur hinter dem Speicher liegt, weil sie
 in der Historie der Datei auf dem Standardbranch steht oder weil die erste Veröffentlichung noch
 aussteht, ist ein `note:` mit Exit-Code 0, und der Hinweis nennt einen fehlgeschlagenen Versuch, falls
-es einen gab. Unter `--json` meldet es `{"path":…,"status":"in_sync"}`, für den Hinweis
-`pending_publication` mit `pull_request` und `last_error` daneben, und passt damit direkt in einen
+es einen gab, und wann zuletzt veröffentlicht wurde, weil ohne Dienst und ohne `gh` sonst nichts das sagt. Unter `--json` meldet es `{"path":…,"status":"in_sync"}`, für den Hinweis
+`pending_publication` mit `pull_request`, `published_at`, `attempted_at` und `last_error` daneben, und passt damit direkt in einen
 Pre-Commit-Hook oder in CI. Wo die Datei direkt geschrieben wird, schlägt jede Abweichung fehl.
 
 `--publish` baut die Datei als einen Commit auf dem Standardbranch von `origin`, schiebt ihn auf den

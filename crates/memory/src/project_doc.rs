@@ -155,6 +155,16 @@ pub fn render_report(report: &facade::PrimeReport) -> String {
     format!("{HEADER}\n\n{}\n", body_of(report))
 }
 
+/// The document of a store with no memories: what [`render`] gives when there is nothing to project.
+pub fn empty_document() -> String {
+    format!("{HEADER}\n\n{}\n", facade::PRIME_NO_MEMORIES)
+}
+
+/// Whether `doc` is that document, which alone is no reason to plant a file in a repository.
+pub fn says_nothing(doc: &str) -> bool {
+    doc == empty_document()
+}
+
 /// The part of the document that comes from the store: the index, the notice, and the full bodies
 /// beneath — or `prime`'s own empty-state sentence when there is nothing to project (6j6v.xbnh).
 ///

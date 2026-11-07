@@ -352,8 +352,8 @@ the export endpoint pages at 500 rows, so --since must page too
 repository. It **exits non-zero** on a hand edit, and on a file that should be there and is not. A copy
 that is only behind the store, because it stands in the file's history on the default branch or
 because the first publication has not happened yet, is a `note:` and exit 0, and the note names a
-failed attempt if there was one. Under `--json` it reports `{"path":…,"status":"in_sync"}`, with
-`pending_publication` for the note and `pull_request` and `last_error` beside it, so it drops
+failed attempt if there was one and when the last publication was, since with no service and no `gh` nothing else will say so. Under `--json` it reports `{"path":…,"status":"in_sync"}`, with
+`pending_publication` for the note and `pull_request`, `published_at`, `attempted_at` and `last_error` beside it, so it drops
 straight into a pre-commit hook or CI. Where the file is written directly, every difference fails.
 
 `--publish` builds the file as one commit on top of the origin's default branch, pushes it to the

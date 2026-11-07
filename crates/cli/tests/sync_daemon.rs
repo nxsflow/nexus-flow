@@ -951,7 +951,7 @@ mod publishing {
             s.bin.join("gh"),
             format!(
                 "#!/bin/sh\necho \"$@\" >> \"{log}\"\ncase \"$1 $2\" in\n  \
-                 \"pr list\") [ -f \"{state}\" ] && /bin/cat \"{state}\"; exit 0 ;;\n  \
+                 \"pr list\") if [ -f \"{state}\" ]; then printf '[{{\"url\":\"%s\",\"isCrossRepository\":false}}]' \"$(/bin/cat \"{state}\")\"; else echo '[]'; fi; exit 0 ;;\n  \
                  \"pr create\") echo https://forge.example/pr/9 > \"{state}\"; echo https://forge.example/pr/9; exit 0 ;;\n\
                  esac\nexit 1\n",
                 log = log.display(),

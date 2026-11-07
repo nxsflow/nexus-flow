@@ -29,12 +29,11 @@
 //! outlives git would hold a pipe open and a reader would wait for it.
 
 use crate::error::{NxfError, Result};
-use crate::project_doc::{write_atomic, FILE_NAME};
+use crate::project_doc::{says_nothing, write_atomic, FILE_NAME};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -136,7 +135,7 @@ impl Gh {
 
 impl Forge for Gh {
     fn open_pull_request(&self, root: &Path, branch: &str) -> Result<Option<String>> {
-        let url = self.run(
+        let listed = self.run(
             root,
             &[
                 "pr",
@@ -146,12 +145,10 @@ impl Forge for Gh {
                 "--state",
                 "open",
                 "--json",
-                "url",
-                "--jq",
-                ".[0].url // \"\"",
+                "url,isCrossRepository",
             ],
         )?;
-        Ok((!url.is_empty()).then_some(url))
+        own_pull_request(&listed)
     }
 
     fn create_pull_request(&self, root: &Path, branch: &str, base: &str) -> Result<String> {
@@ -161,7 +158,13 @@ impl Forge for Gh {
                 "pr", "create", "--head", branch, "--base", base, "--title", TITLE, "--body", BODY,
             ],
         )?;
-        Ok(out.lines().last().unwrap_or_default().trim().to_string())
+        let url = out.lines().last().unwrap_or_default().trim();
+        if !url.contains("://") {
+            return Err(NxfError::io(format!(
+                "gh pr create named no pull request; it answered: {out:?}"
+            )));
+        }
+        Ok(url.to_string())
     }
 
     fn close_pull_request(&self, root: &Path, pull_request: &str) -> Result<()> {
@@ -171,6 +174,24 @@ impl Forge for Gh {
         )
         .map(|_| ())
     }
+}
+
+/// The pull request of THIS repository in what `gh pr list --head` answered. That flag matches the
+/// branch name across forks, so a stranger's pull request from a fork with the same branch name is
+/// listed too, and it must be neither updated, reported as ours nor closed.
+fn own_pull_request(listed: &str) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listed {
+        url: String,
+        is_cross_repository: bool,
+    }
+    let listed: Vec<Listed> = serde_json::from_str(listed)
+        .map_err(|e| NxfError::io(format!("gh pr list answered something unreadable: {e}")))?;
+    Ok(listed
+        .into_iter()
+        .find(|pull_request| !pull_request.is_cross_repository)
+        .map(|pull_request| pull_request.url))
 }
 
 /// How the file reaches this workspace's repository.
@@ -220,23 +241,7 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
     let branch_ref = format!("refs/heads/{BRANCH}");
     let open_tip = remote_tip(root, &branch_ref)?;
 
-    let mut refspecs = vec![format!("+refs/heads/{default}:{BASE_REF}")];
-    if open_tip.is_some() {
-        refspecs.push(format!("+{branch_ref}:{OPEN_REF}"));
-    }
-    let mut fetch = vec![
-        "fetch",
-        "--quiet",
-        "--no-tags",
-        "--no-write-fetch-head",
-        "--no-auto-gc",
-        "--no-recurse-submodules",
-        // Without this, git also moves `origin/<default>` whenever it fetches that branch.
-        "--refmap=",
-        "origin",
-    ];
-    fetch.extend(refspecs.iter().map(String::as_str));
-    git_ok(root, &fetch, NETWORK_BOUND)?;
+    fetch_private_refs(root, &default, &branch_ref, open_tip.is_some())?;
 
     let path = repository_path(root)?;
     let blob = write_blob(root, doc)?;
@@ -246,9 +251,15 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
         None => None,
     };
 
-    if on_default.as_deref() == Some(blob.as_str()) {
-        // Nothing to say that the default does not say. No branch is left over, so no forge is
-        // needed either: a workspace with no `gh` is not told about a tool it does not need.
+    // A store with no memories is no reason to plant a file on a default that never carried one.
+    // Where the default does carry one, the file is what has to change.
+    let nothing_to_say = match &on_default {
+        Some(on_default) => *on_default == blob,
+        None => says_nothing(doc),
+    };
+    if nothing_to_say {
+        // No branch is created, and the forge is only asked when one stands from an earlier
+        // publication: a workspace with no `gh` is not told about a tool it does not need.
         if open_tip.is_some() {
             if let Some(pull_request) = forge.open_pull_request(root, BRANCH)? {
                 forge.close_pull_request(root, &pull_request)?;
@@ -266,34 +277,7 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
     }
 
     let commit = build_commit(root, &path, &blob)?;
-    let lease = format!(
-        "--force-with-lease={branch_ref}:{}",
-        open_tip.as_deref().unwrap_or("")
-    );
-    // To the address, not to the name, and with the tracking ref put back afterwards: a push to
-    // `origin` creates `origin/nxm/publish-memory` in the checkout's remote-tracking refs, and git
-    // 2.56.0 does so for the address too, where 2.50.1 does not. No hook runs either, since a
-    // repository's pre-push hook is about its code and may well start its tests.
-    let tracking = format!("refs/remotes/origin/{BRANCH}");
-    let tracked = ref_value(root, &tracking);
-    let url = git_ok(
-        root,
-        &["remote", "get-url", "--push", "origin"],
-        LOCAL_BOUND,
-    )?;
-    git_ok(
-        root,
-        &[
-            "push",
-            "--quiet",
-            "--no-verify",
-            &lease,
-            url.trim(),
-            &format!("{commit}:{branch_ref}"),
-        ],
-        NETWORK_BOUND,
-    )?;
-    restore_ref(root, &tracking, tracked.as_deref());
+    push_commit(root, &commit, &branch_ref, open_tip.as_deref())?;
     git_ok(root, &["update-ref", OPEN_REF, &commit], LOCAL_BOUND)?;
 
     Ok(match open_pull_request {
@@ -306,6 +290,55 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
             commit,
         },
     })
+}
+
+/// Fetch the origin's default branch, and the open publication if there is one, into the refs of this
+/// module and nowhere else.
+fn fetch_private_refs(root: &Path, default: &str, branch_ref: &str, open: bool) -> Result<()> {
+    let mut refspecs = vec![format!("+refs/heads/{default}:{BASE_REF}")];
+    if open {
+        refspecs.push(format!("+{branch_ref}:{OPEN_REF}"));
+    }
+    let mut fetch = vec![
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--no-auto-gc",
+        "--no-recurse-submodules",
+        // Without this, git also moves `origin/<default>` whenever it fetches that branch.
+        "--refmap=",
+        "origin",
+    ];
+    fetch.extend(refspecs.iter().map(String::as_str));
+    git_ok(root, &fetch, NETWORK_BOUND).map(|_| ())
+}
+
+/// Push `commit` to `branch_ref`, expecting the origin to hold `expected` there.
+///
+/// To the remote's name and not to its address: the address can carry a credential, and an argument
+/// stands in the process list for anybody on the machine to read. A push records itself in
+/// `origin/nxm/publish-memory`, so that ref is put back afterwards: it says what somebody last
+/// fetched. No hook runs either, since a repository's pre-push hook is about its code and may well
+/// start its tests.
+fn push_commit(root: &Path, commit: &str, branch_ref: &str, expected: Option<&str>) -> Result<()> {
+    let tracking = format!("refs/remotes/origin/{BRANCH}");
+    let tracked = ref_value(root, &tracking);
+    let lease = format!("--force-with-lease={branch_ref}:{}", expected.unwrap_or(""));
+    git_ok(
+        root,
+        &[
+            "push",
+            "--quiet",
+            "--no-verify",
+            &lease,
+            "origin",
+            &format!("{commit}:{branch_ref}"),
+        ],
+        NETWORK_BOUND,
+    )?;
+    restore_ref(root, &tracking, tracked.as_deref());
+    Ok(())
 }
 
 /// The value of `reference`, if it exists.
@@ -334,10 +367,13 @@ fn restore_ref(root: &Path, reference: &str, value: Option<&str>) {
 
 /// The commit carrying `blob` at `path`, on [`BASE_REF`], built through a temporary index.
 fn build_commit(root: &Path, path: &str, blob: &str) -> Result<String> {
-    let index = TempPath::new("index");
+    let scratch = PrivateDir::new()
+        .map_err(|e| NxfError::io(format!("creating a temporary directory: {e}")))?;
+    // Git wants an index path with no file behind it, and takes a lock next to it.
+    let index = scratch.path("index");
     let with_index = |args: &[&str]| -> Result<String> {
         let mut command = git(root, args);
-        command.env("GIT_INDEX_FILE", &index.0);
+        command.env("GIT_INDEX_FILE", &index);
         checked(command, args, LOCAL_BOUND)
     };
     with_index(&["read-tree", BASE_REF])?;
@@ -398,10 +434,12 @@ fn repository_path(root: &Path) -> Result<String> {
 }
 
 fn write_blob(root: &Path, doc: &str) -> Result<String> {
-    let file = TempPath::new("doc");
-    std::fs::write(&file.0, doc)
-        .map_err(|e| NxfError::io(format!("writing {}: {e}", file.0.display())))?;
-    let path = file.0.display().to_string();
+    let scratch = PrivateDir::new()
+        .map_err(|e| NxfError::io(format!("creating a temporary directory: {e}")))?;
+    let file = scratch.path("doc");
+    std::fs::write(&file, doc)
+        .map_err(|e| NxfError::io(format!("writing {}: {e}", file.display())))?;
+    let path = file.display().to_string();
     git_ok(
         root,
         &["hash-object", "-w", "--no-filters", &path],
@@ -539,6 +577,9 @@ pub struct Record {
     pub pull_request: Option<String>,
     /// Why the last attempt failed, or `None` when it did not.
     pub error: Option<String>,
+    /// When the service last looked and found no reason to start a job, which spares the passes of
+    /// the next hour a look at git and the store.
+    pub looked_at: Option<String>,
 }
 
 /// The record in the workspace directory `ws_dir`, or an empty one. An unreadable record reads as
@@ -564,20 +605,22 @@ pub fn content_hash(doc: &str) -> String {
 }
 
 /// Whether the clock allows an attempt: a day since the last publication, and an hour since the last
-/// attempt. Asked first by the service, because it needs no store and no git. A stamp that cannot be
-/// read does not hold anything back.
+/// attempt or look. Asked first by the service, because it needs no store and no git. A stamp that
+/// cannot be read, or one from the future (a skewed clock, a restored machine), holds nothing back.
 pub fn clock_allows(record: &Record, now: &str) -> bool {
+    let Ok(now) = OffsetDateTime::parse(now, &Rfc3339) else {
+        return true;
+    };
     let waited = |stamp: &Option<String>, interval: Duration| match stamp
         .as_deref()
         .map(|s| OffsetDateTime::parse(s, &Rfc3339))
     {
-        Some(Ok(then)) => match OffsetDateTime::parse(now, &Rfc3339) {
-            Ok(now) => now - then >= interval,
-            Err(_) => true,
-        },
+        Some(Ok(then)) => then > now || now - then >= interval,
         _ => true,
     };
-    waited(&record.published_at, PUBLISH_INTERVAL) && waited(&record.attempted_at, RETRY_INTERVAL)
+    waited(&record.published_at, PUBLISH_INTERVAL)
+        && waited(&record.attempted_at, RETRY_INTERVAL)
+        && waited(&record.looked_at, RETRY_INTERVAL)
 }
 
 /// Whether the service should publish: the clock allows it, and something changed.
@@ -757,33 +800,34 @@ fn checked(command: Command, args: &[&str], bound: Duration) -> Result<String> {
     }
 }
 
-/// A path in the temporary directory that does not exist yet, removed when dropped. Git wants an
-/// index path with no file behind it, and takes a lock next to it.
-struct TempPath(PathBuf);
+/// A directory only its owner can enter, with an unguessable name, removed when dropped. In a shared
+/// temporary directory a predictable file name can be a symlink somebody planted.
+struct PrivateDir(tempfile::TempDir);
 
-impl TempPath {
-    fn new(name: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        Self(std::env::temp_dir().join(format!("nxm-publish-{}-{n}-{name}", std::process::id())))
+impl PrivateDir {
+    fn new() -> std::io::Result<Self> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("nxm-publish-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        builder.tempdir().map(Self)
     }
-}
 
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        let mut lock = self.0.clone().into_os_string();
-        lock.push(".lock");
-        let _ = std::fs::remove_file(lock);
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.path().join(name)
     }
 }
 
 /// Run `command` to its end or to `bound`, whichever comes first; at the bound its whole process
 /// group is killed. Output goes to files: see the module documentation for why not pipes.
 fn run_bounded(mut command: Command, bound: Duration) -> std::result::Result<Output, Failure> {
-    let stdout = TempPath::new("stdout");
-    let stderr = TempPath::new("stderr");
-    let open = |path: &TempPath| std::fs::File::create(&path.0).map_err(Failure::Io);
+    let scratch = PrivateDir::new().map_err(Failure::Io)?;
+    let stdout = scratch.path("stdout");
+    let stderr = scratch.path("stderr");
+    let open = |path: &PathBuf| std::fs::File::create(path).map_err(Failure::Io);
     command
         .stdin(Stdio::null())
         .stdout(open(&stdout)?)
@@ -811,8 +855,8 @@ fn run_bounded(mut command: Command, bound: Duration) -> std::result::Result<Out
             }
         }
     };
-    let read = |path: &TempPath| {
-        std::fs::read(&path.0)
+    let read = |path: &PathBuf| {
+        std::fs::read(path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default()
     };
@@ -903,6 +947,54 @@ mod tests {
             "https://github.com/a/b.git and ssh://***@host/x"
         );
         assert_eq!(scrub_credentials("no address at all"), "no address at all");
+    }
+
+    #[test]
+    fn a_stamp_from_the_future_holds_nothing_back() {
+        // A skewed clock or a restored machine must not silence publication until time catches up.
+        let ahead = record(Some("2027-01-01T00:00:00Z"), Some("2027-01-01T00:00:00Z"));
+        assert!(is_due(&ahead, NOW, "changed"));
+    }
+
+    #[test]
+    fn a_look_that_found_nothing_holds_the_next_one_for_an_hour() {
+        let mut looked = Record {
+            looked_at: Some("2026-11-06T11:00:01Z".into()),
+            ..Record::default()
+        };
+        assert!(!clock_allows(&looked, NOW), "one second short of an hour");
+        looked.looked_at = Some("2026-11-06T11:00:00Z".into());
+        assert!(clock_allows(&looked, NOW), "an hour to the second");
+    }
+
+    #[test]
+    fn a_pull_request_from_a_fork_with_the_same_branch_name_is_not_ours() {
+        let listed = r#"[{"url":"https://forge.example/pr/666","isCrossRepository":true},
+                         {"url":"https://forge.example/pr/7","isCrossRepository":false}]"#;
+        assert_eq!(
+            own_pull_request(listed).unwrap().as_deref(),
+            Some("https://forge.example/pr/7")
+        );
+        let only_a_stranger =
+            r#"[{"url":"https://forge.example/pr/666","isCrossRepository":true}]"#;
+        assert_eq!(own_pull_request(only_a_stranger).unwrap(), None);
+        assert_eq!(own_pull_request("[]").unwrap(), None);
+    }
+
+    #[test]
+    fn an_answer_from_the_forge_nobody_can_read_is_a_failure_not_an_absent_pull_request() {
+        // Read as "none open", it would open a second pull request on every attempt.
+        assert!(own_pull_request("not json").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_files_live_in_a_directory_only_the_owner_can_enter() {
+        // In a shared temporary directory a predictable name can be a planted symlink.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = PrivateDir::new().unwrap();
+        let mode = std::fs::metadata(&dir.0).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]
