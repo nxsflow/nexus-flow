@@ -270,9 +270,12 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
         "--force-with-lease={branch_ref}:{}",
         open_tip.as_deref().unwrap_or("")
     );
-    // To the address, not to the name: a push to `origin` would also create
-    // `origin/nxm/publish-memory` in the checkout's remote-tracking refs. No hook runs either, since
-    // a repository's pre-push hook is about its code and may well start its tests.
+    // To the address, not to the name, and with the tracking ref put back afterwards: a push to
+    // `origin` creates `origin/nxm/publish-memory` in the checkout's remote-tracking refs, and git
+    // 2.56.0 does so for the address too, where 2.50.1 does not. No hook runs either, since a
+    // repository's pre-push hook is about its code and may well start its tests.
+    let tracking = format!("refs/remotes/origin/{BRANCH}");
+    let tracked = ref_value(root, &tracking);
     let url = git_ok(
         root,
         &["remote", "get-url", "--push", "origin"],
@@ -290,6 +293,7 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
         ],
         NETWORK_BOUND,
     )?;
+    restore_ref(root, &tracking, tracked.as_deref());
     git_ok(root, &["update-ref", OPEN_REF, &commit], LOCAL_BOUND)?;
 
     Ok(match open_pull_request {
@@ -302,6 +306,30 @@ pub fn publish(doc: &str, root: &Path, forge: &dyn Forge) -> Result<Outcome> {
             commit,
         },
     })
+}
+
+/// The value of `reference`, if it exists.
+fn ref_value(root: &Path, reference: &str) -> Option<String> {
+    run_bounded(
+        git(root, &["rev-parse", "--verify", "--quiet", reference]),
+        LOCAL_BOUND,
+    )
+    .ok()
+    .filter(|out| out.success)
+    .map(|out| out.stdout.trim().to_string())
+}
+
+/// Put `reference` back to `value`, or remove it when it held nothing. Best effort: the publication
+/// it follows has already gone through, and this ref comes back with the next fetch anyway.
+fn restore_ref(root: &Path, reference: &str, value: Option<&str>) {
+    if ref_value(root, reference).as_deref() == value {
+        return;
+    }
+    let args: Vec<&str> = match value {
+        Some(value) => vec!["update-ref", reference, value],
+        None => vec!["update-ref", "-d", reference],
+    };
+    let _ = run_bounded(git(root, &args), LOCAL_BOUND);
 }
 
 /// The commit carrying `blob` at `path`, on [`BASE_REF`], built through a temporary index.
@@ -875,6 +903,34 @@ mod tests {
             "https://github.com/a/b.git and ssh://***@host/x"
         );
         assert_eq!(scrub_credentials("no address at all"), "no address at all");
+    }
+
+    #[test]
+    fn a_ref_a_push_moved_goes_back_to_what_it_held_and_one_it_created_goes_away() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        let first = run(&["rev-parse", "HEAD"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "second"]);
+        let second = run(&["rev-parse", "HEAD"]);
+        let tracking = "refs/remotes/origin/nxm/publish-memory";
+
+        run(&["update-ref", tracking, &second]);
+        restore_ref(tmp.path(), tracking, Some(&first));
+        assert_eq!(ref_value(tmp.path(), tracking).as_deref(), Some(&*first));
+
+        restore_ref(tmp.path(), tracking, None);
+        assert_eq!(ref_value(tmp.path(), tracking), None);
     }
 
     #[cfg(unix)]

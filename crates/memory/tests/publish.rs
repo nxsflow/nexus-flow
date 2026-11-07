@@ -6,6 +6,7 @@
 
 use nexus_memory::error::{NxfError, Result};
 use nexus_memory::publish::{self, Forge, Outcome, BRANCH};
+use nxs_test_support::PinHome as _;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +18,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .pin_home(nxs_test_support::pinned_home())
         // `status` must not refresh the index it is about to be compared by.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_AUTHOR_NAME", "t")
@@ -267,6 +269,27 @@ fn a_checkout_behind_the_origin_still_publishes_on_the_origins_tip() {
         tip_of_main
     );
     assert_eq!(before, checkout_state(&repo.clone));
+}
+
+#[test]
+fn a_remote_tracking_ref_somebody_fetched_stays_where_they_left_it() {
+    // Whether git records a push in `origin/*` depends on its version: 2.56.0 does here, 2.50.1 does
+    // not. Either way a publish may not move a ref that says what somebody last fetched.
+    let repo = repo();
+    let forge = FakeForge::default();
+    publish::publish("# one\n", &repo.clone, &forge).unwrap();
+    git(&repo.second, &["fetch", "-q", "origin"]);
+    let before = checkout_state(&repo.second);
+    let fetched = origin_ref(&repo, &branch_ref()).unwrap();
+
+    publish::publish("# two\n", &repo.second, &forge).unwrap();
+
+    assert_ne!(
+        origin_ref(&repo, &branch_ref()).unwrap(),
+        fetched,
+        "the origin's branch did move"
+    );
+    assert_eq!(before, checkout_state(&repo.second));
 }
 
 #[test]
