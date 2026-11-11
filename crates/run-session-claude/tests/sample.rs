@@ -329,3 +329,96 @@ fn the_sample_runs_on_its_own_only_when_a_minute_has_passed() {
     kill_hard(tool);
     kill_hard(pid);
 }
+
+/// PROBE (6j6v.nap3), removed before hand-over: how often the scenario of
+/// `a_real_tool_with_a_new_process_moves_though_no_call_is_open` sees no movement after its cue within a short wait,
+/// what the first sample and the last one held, and whether a tool that execs in place without a new process moves.
+#[test]
+fn probe_lineup_after_the_cue() {
+    fn stat_of(pid: u32) -> String {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_else(|_| "gone".to_owned())
+    }
+    let rounds = 150;
+    let mut never = Vec::new();
+    for round in 0..rounds {
+        let bench = Bench::new();
+        let backend = bench.backend();
+        let cue = bench.ledger_dir(KEY).join("next");
+        let script = format!(
+            "while [ ! -e {0} ]; do sleep 0.05; done; exec sleep 600",
+            cue.display()
+        );
+        backend
+            .start(&bench.spec(
+                KEY,
+                json!({ "steps": [tool_shell(&script), { "wait": "never" }] }),
+            ))
+            .unwrap();
+        let pid = bench.child_record(KEY).pid;
+        let mut offset = 0;
+        until("the tool is seen", || {
+            sampled_moves(&bench, KEY, &backend, &mut offset) > 0
+        });
+        let first = backend_work(&bench);
+        std::fs::write(&cue, b"").unwrap();
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut moved = false;
+        while std::time::Instant::now() < limit {
+            if sampled_moves(&bench, KEY, &backend, &mut offset) > 0 {
+                moved = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let tool = left_pid(&bench, KEY, "tool");
+        if !moved {
+            let record: nexus_run_session_claude::sample::SampleRecord = serde_json::from_slice(
+                &std::fs::read(bench.ledger_dir(KEY).join("sample.json")).unwrap(),
+            )
+            .unwrap();
+            never.push(format!(
+                "round={round} tool={tool} first={first:?} last={:?} tool_stat=[{}]",
+                record.work,
+                stat_of(tool).trim()
+            ));
+        }
+        kill_hard(tool);
+        kill_hard(pid);
+    }
+
+    // The same exec in place with the cue there before the tool starts: no new process ever appears.
+    let mut forced_moves = 0;
+    let forced_rounds = 30;
+    for _ in 0..forced_rounds {
+        let bench = Bench::new();
+        let backend = bench.backend();
+        let cue = bench.logs.join("ready");
+        std::fs::write(&cue, b"").unwrap();
+        let script = format!(
+            "while [ ! -e {0} ]; do sleep 0.05; done; exec sleep 600",
+            cue.display()
+        );
+        backend
+            .start(&bench.spec(
+                KEY,
+                json!({ "steps": [tool_shell(&script), { "wait": "never" }] }),
+            ))
+            .unwrap();
+        let pid = bench.child_record(KEY).pid;
+        let mut offset = 0;
+        until("the tool is seen", || {
+            sampled_moves(&bench, KEY, &backend, &mut offset) > 0
+        });
+        for _ in 0..40 {
+            forced_moves += sampled_moves(&bench, KEY, &backend, &mut offset);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let tool = left_pid(&bench, KEY, "tool");
+        kill_hard(tool);
+        kill_hard(pid);
+    }
+    panic!(
+        "probe-result no_movement_after_cue={}/{rounds} forced_exec_in_place_moves={forced_moves} over {forced_rounds} rounds of 40 samples; cases: {never:#?}",
+        never.len()
+    );
+}
