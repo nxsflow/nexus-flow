@@ -795,6 +795,12 @@ impl ChatStore {
     pub fn connection(&self) -> &Connection {
         self.inner.connection()
     }
+    /// The store's own connection, mutably — for a test that installs a SQLite hook on it (see
+    /// [`nxs_foundation::store::Store::connection_mut`]). Not part of the contract.
+    #[doc(hidden)]
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        self.inner.connection_mut()
+    }
     /// This replica's site id (see [`nxs_foundation::store::Store::site`]).
     pub fn site(&self) -> i64 {
         self.inner.site()

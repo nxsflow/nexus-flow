@@ -3230,16 +3230,22 @@ mod tests {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let writes = Arc::clone(&log);
-            store.connection().update_hook(Some(
-                move |_action, _db: &str, table: &str, _row_id: i64| {
-                    writes.lock().unwrap().push(format!("write {table}"));
-                },
-            ));
+            store
+                .connection_mut()
+                .update_hook(Some(
+                    move |_action, _db: &str, table: &str, _row_id: i64| {
+                        writes.lock().unwrap().push(format!("write {table}"));
+                    },
+                ))
+                .unwrap();
             let commits = Arc::clone(&log);
-            store.connection().commit_hook(Some(move || {
-                commits.lock().unwrap().push("commit".to_string());
-                false // do not veto the commit
-            }));
+            store
+                .connection_mut()
+                .commit_hook(Some(move || {
+                    commits.lock().unwrap().push("commit".to_string());
+                    false // do not veto the commit
+                }))
+                .unwrap();
         }
 
         let promoted = store
@@ -3247,9 +3253,13 @@ mod tests {
             .unwrap();
 
         store
-            .connection()
-            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
-        store.connection().commit_hook(None::<fn() -> bool>);
+            .connection_mut()
+            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
+            .unwrap();
+        store
+            .connection_mut()
+            .commit_hook(None::<fn() -> bool>)
+            .unwrap();
 
         assert_eq!(promoted.len(), 1, "the hand-off promoted its one entry");
         let log = log.lock().unwrap().clone();
