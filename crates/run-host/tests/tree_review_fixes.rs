@@ -277,3 +277,58 @@ fn the_remedy_of_a_bisect_says_how_a_bisect_ends() {
         }
     );
 }
+
+/// PROBE (6j6v.zame), removed before hand-over: how often a program written in this process, or by `cp`, cannot be
+/// run while other threads fork; and what the status read answers through such a program.
+#[test]
+fn probe_text_file_busy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let bench = Bench::new();
+    bench.prepared();
+    let stop = Arc::new(AtomicBool::new(false));
+    let forkers: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        })
+        .collect();
+    let body = "#!/bin/sh\nexit 0\n";
+    let (mut in_process, mut by_cp, mut reads_not_started) = (0, 0, Vec::new());
+    for i in 0..300 {
+        let here = bench.dir.with_file_name(format!("probe-here-{i}"));
+        std::fs::write(&here, body).unwrap();
+        make_executable(&here);
+        if let Err(error) = std::process::Command::new(&here).status() {
+            if error.raw_os_error() == Some(26) {
+                in_process += 1;
+            }
+        }
+        let copied = bench.dir.with_file_name(format!("probe-cp-{i}"));
+        write_program(&copied, body);
+        if let Err(error) = std::process::Command::new(&copied).status() {
+            if error.raw_os_error() == Some(26) {
+                by_cp += 1;
+            }
+        }
+        let git = bench.dir.with_file_name(format!("probe-git-{i}"));
+        std::fs::write(&git, body).unwrap();
+        make_executable(&git);
+        if let Err(error) =
+            nexus_run_host::git_tree::tree_state_with_git(&git, &bench.root, &bench.dir)
+        {
+            reads_not_started.push(error.what);
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    for forker in forkers {
+        forker.join().unwrap();
+    }
+    reads_not_started.dedup();
+    panic!(
+        "probe-result in_process_busy={in_process}/300 cp_busy={by_cp}/300 status_read_errors={reads_not_started:?}"
+    );
+}
