@@ -240,9 +240,7 @@ impl Bench {
     pub fn fake_git(&self, body: &str) -> PathBuf {
         let real = which_git();
         let path = self.temp.path().join("fake-git");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\nexec {real} \"$@\"\n"))
-            .expect("the program");
-        make_executable(&path);
+        write_program(&path, &format!("#!/bin/sh\n{body}\nexec {real} \"$@\"\n"));
         path
     }
 }

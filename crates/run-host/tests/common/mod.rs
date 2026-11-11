@@ -75,8 +75,7 @@ exec {real} "$@"
             blocked = blocked.display(),
         );
         let git = bin.join("git");
-        std::fs::write(&git, script).expect("the watch");
-        tree::make_executable(&git);
+        tree::write_program(&git, &script);
         Self {
             bin,
             calls,
