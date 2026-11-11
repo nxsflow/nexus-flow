@@ -333,7 +333,12 @@ async fn server_initializes_and_lists_tools_over_stdio() {
         .peer_info()
         .expect("server info is available after the initialize handshake");
     assert!(
-        !info.server_info.name.is_empty(),
+        !info
+            .server_info
+            .as_ref()
+            .expect("the initialize result carries serverInfo")
+            .name
+            .is_empty(),
         "server announces an implementation name"
     );
 
@@ -2068,7 +2073,11 @@ async fn acceptance_read_only_vertical_end_to_end() {
 
     // initialize advertises the server + pushes the static usage instructions (prime-as-guidance).
     let info = client.peer_info().expect("server info");
-    assert_eq!(info.server_info.name, "nxs");
+    let server = info
+        .server_info
+        .as_ref()
+        .expect("the initialize result carries serverInfo");
+    assert_eq!(server.name, "nxs");
     assert!(
         info.instructions.is_some(),
         "connect-time usage instructions"

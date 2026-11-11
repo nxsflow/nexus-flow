@@ -24,7 +24,7 @@ test-support = []
 # the file behind the store's back, holding the write lock and damaging a row.
 [dev-dependencies]
 nexus-run-host = { path = ".", features = ["test-support"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 tempfile = "3"
 
 [[bin]]

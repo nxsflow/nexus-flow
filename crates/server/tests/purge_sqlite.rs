@@ -247,8 +247,7 @@ impl Fixture {
                 .unwrap();
             for table in tables {
                 let mut stmt = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
-                let names: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
                 let sid_col = names.iter().position(|n| n == "stream_id");
                 let n = names.len();
                 let mut q = stmt.query([]).unwrap();

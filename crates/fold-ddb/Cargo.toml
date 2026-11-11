@@ -42,7 +42,7 @@ nexus-flow-facade = { path = "../facade" }
 # `records::active_board` reads its tickets' joins a bounded number at a time (`StreamExt::buffered`)
 # instead of one request after the other. Already in the build through the AWS SDK.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The purge's plan and identity digests and its log-id v1 copy (6j6v.dbmd; the same three crates

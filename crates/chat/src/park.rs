@@ -1795,7 +1795,7 @@ mod tests {
             );
             std::thread::spawn(move || {
                 let mut store = ChatStore::open(&path, device).unwrap();
-                store.connection().busy_handler(Some(waiting)).unwrap();
+                store.connection_mut().busy_handler(Some(waiting)).unwrap();
                 opened.wait();
                 ready.wait();
                 store.record_parked_work(KEY, &parked, NOW).unwrap()

@@ -57,7 +57,7 @@ include_dir = { version = "0.7", optional = true }
 # lookup, the frozen `--json` contract, the terminal renderer and the TOPICS<->directory parity
 # rule. Shared so `nxf guide`, `nxm guide` and `nxc guide` cannot drift apart. CLI-surface only.
 nxs-guide = { path = "../guide", optional = true }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 # Global, time-sortable message/thread ids (`m-`+ULID). Collision-free across workspaces (spec §2.2).
 ulid = "1"
 serde = { version = "1", features = ["derive"] }
@@ -110,7 +110,7 @@ nexus-run-host = { path = "../run-host" }
 # one transaction in two is a deterministic failure instead of a race nobody can reproduce. Note
 # that this one lives in a `#[cfg(test)]` module inside `src/`, not under `tests/` — dev-dependency
 # features unify into the lib's own test build, which is what makes that work.
-rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint", "hooks"] }
 # Black-box `nxc` verb tests over the built binary (the multicall symlink the nxs build produces).
 # `sha2` (a normal dep) is reused by the byte-stable golden test to mirror the DM-id derivation.
 assert_cmd = "2"

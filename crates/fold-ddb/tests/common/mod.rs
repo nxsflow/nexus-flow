@@ -248,7 +248,7 @@ pub fn head(ops: &[(i64, Op)]) -> i64 {
 pub fn sqlite_rows(s: &Store, table: &str) -> Vec<Vec<(String, String)>> {
     let conn = s.connection();
     let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
-    let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
     let mut rows: Vec<Vec<(String, String)>> = stmt
         .query_map([], |r| {
             Ok(columns

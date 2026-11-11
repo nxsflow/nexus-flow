@@ -9,7 +9,7 @@ publish = false
 # The shared op-log CRDT substrate. flow's Store wraps it and registers the task reducer; the
 # substrate types (Op, Reducer, schema-version spine) are re-exported under `nexus_flow_core::*`.
 nxs-foundation = { path = "../foundation" }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 ulid = "1"
 
 [dev-dependencies]
