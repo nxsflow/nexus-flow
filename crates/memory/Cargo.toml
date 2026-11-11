@@ -28,7 +28,7 @@ inventory = "0.3"
 # The shared presentation layer: the manufakt-Forge Theme (TTY-gated so non-terminal/golden output
 # stays byte-stable plain).
 nxs-ui = { path = "../nxs-ui" }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 ulid = "1"
 # Deterministic content-hash auto-keys (`f-`+sha256(body)): byte-identical bodies dedup to one
 # key, reworded bodies get a new key (bd parity). Pure-Rust, already in the workspace tree.

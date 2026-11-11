@@ -28,7 +28,7 @@ flate2 = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 # Same version as core's so `Store::connection()` hands back a unifiable Connection;
 # the engine reads the stable `ops` substrate table (rowid-scoped) read-only.
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"], optional = true }
 
 [features]
 default = []

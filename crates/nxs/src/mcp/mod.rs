@@ -44,7 +44,9 @@ use params::{
 };
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo, Tool};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig, Tool,
+};
 use rmcp::{tool, ServerHandler, ServiceExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -897,14 +899,15 @@ impl NxsMcp {
         match outcome {
             Ok(value) => {
                 let value = as_structured_object(value);
-                let mut result = CallToolResult::success(vec![Content::text(value.to_string())]);
+                let mut result =
+                    CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
                 result.structured_content = Some(value);
                 result
             }
             Err(e) => {
                 let envelope =
                     json!({ "error": { "kind": e.kind.as_str(), "msg": e.msg.clone() } });
-                let mut result = CallToolResult::error(vec![Content::text(e.msg)]);
+                let mut result = CallToolResult::error(vec![ContentBlock::text(e.msg)]);
                 result.structured_content = Some(envelope);
                 result
             }
@@ -937,8 +940,8 @@ fn as_structured_object(value: Value) -> Value {
 
 #[rmcp::tool_handler(router = self.tool_router)]
 impl ServerHandler for NxsMcp {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
         let mut imp = Implementation::from_build_env();
         imp.name = "nxs".to_string();
         imp.version = env!("CARGO_PKG_VERSION").to_string();
