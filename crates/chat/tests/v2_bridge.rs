@@ -507,3 +507,36 @@ fn nxc_send_refuses_a_persona_to_a_v2_channel_and_a_v2_session_to_anything() {
     assert!(v2_says.contains("`nxc reply --escalate`"), "{v2_says}");
     assert_eq!(chat_ops(ws.path()), before, "nothing written");
 }
+
+/// A v2 session is a SESSION to the old engine's own gate too: withdrawing a v1 operation belongs to the
+/// person who started it (owner decision s8gf), and a session's `NXC_SESSION` the old map does not know must
+/// not make it that person (§10).
+#[test]
+fn a_v2_session_cannot_withdraw_a_v1_operation() {
+    let ws = workspace();
+    let session = v2_session(ws.path());
+    let eng = engine(ws.path());
+    let v1 = send(&eng, the_owner(), "review").expect("a v1 round");
+    let before = chat_ops(ws.path());
+    let refused = eng
+        .withdraw(
+            Caller {
+                session: Some(&session),
+                actor: Some("coder"),
+                now: Some(NOW),
+            },
+            &v1.thread_id,
+        )
+        .expect_err("not the owner");
+    assert_eq!(refused.kind, ErrorKind::Forbidden, "{refused}");
+    assert!(
+        refused.msg.contains("withdraw is not a verb for a session")
+            && refused.msg.contains("--escalate"),
+        "{refused}"
+    );
+    assert_eq!(
+        chat_ops(ws.path()),
+        before,
+        "nothing withdrawn, nothing written"
+    );
+}

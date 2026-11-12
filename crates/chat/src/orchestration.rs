@@ -18523,15 +18523,30 @@ fn refuse_a_session_this_workspace_started(ctx: &Ctx, store: &ChatStore) -> Resu
     let Some(session) = ctx.session else {
         return Ok(());
     };
-    let Some(role) = store.session_role(session)? else {
-        return Ok(());
-    };
-    // Where to escalate: the thread this session stands in, which is the one its commissioner is
-    // waiting on. A session that was never put in motion on a thread has none to name.
-    let escalate = match store.session_thread(session)? {
-        Some(thread) => format!("`nxc reply --thread {thread} --escalate -`"),
-        None => "`nxc reply --thread <the thread you were commissioned in> --escalate -`".into(),
-    };
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a session of a run on the NEW engine is one this
+    // workspace started too, though the old map does not know it (6j6v.zjyv §10, owner decision s8gf).
+    let (role, escalate) =
+        match crate::v2_bridge::session_of(ctx.db_path, ctx.origin, ctx.defs, Some(session))? {
+            Some(v2) => (
+                v2.handle,
+                "`nxc reply --thread <the thread your turn names> --escalate -`".to_owned(),
+            ),
+            None => {
+                let Some(role) = store.session_role(session)? else {
+                    return Ok(());
+                };
+                // Where to escalate: the thread this session stands in, which is the one its
+                // commissioner is waiting on. A session never put in motion on a thread has none.
+                let escalate = match store.session_thread(session)? {
+                    Some(thread) => format!("`nxc reply --thread {thread} --escalate -`"),
+                    None => {
+                        "`nxc reply --thread <the thread you were commissioned in> --escalate -`"
+                            .into()
+                    }
+                };
+                (role, escalate)
+            }
+        };
     Err(NxfError::forbidden(format!(
         "withdraw is not a verb for a session this workspace started, and this call names one — \
          session {session}, started for {role}; nothing was withdrawn. Taking an operation back \
