@@ -107,6 +107,12 @@ fn a_helper_is_ended_though_git_was_gone_before_its_start_was_read() {
         .trim()
         .parse()
         .unwrap();
+    // A SIGKILL sent is not yet a process gone: on Linux a look at once finds the helper running in nearly every round
+    // (measured, 6j6v.zame). A helper nobody signalled sleeps 600 s, far past this wait.
+    let gone_by = std::time::Instant::now() + Duration::from_secs(5);
+    while procs::alive(helper) && std::time::Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let alive = procs::alive(helper);
     let _ = Command::new("kill")
         .args(["-KILL", &helper.to_string()])
