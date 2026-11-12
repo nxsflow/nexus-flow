@@ -5,7 +5,7 @@
 
 > **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
 
-## Index (62)
+## Index (66)
 
 - **architecture-overview**: nexus-flow is an agent-native, offline-first suite — the board, the memory and the channel your agents work from — and nothing else.
 - **priority-storage-canonical-ordinal**: Priority is a plugin-named label at the SURFACE but stored as the canonical ORDINAL — never store the label, or --json stops being plugin-independent.
@@ -44,10 +44,12 @@
 - **nxc-nicht-quittieren**: Nie per nxc reply in einen fertig zugestellten Kanal-Lauf 'danke/uebernommen' schreiben - ein reply auf die Wurzel oeffnet eine NEUE Runde mit dem Text als Auftrag.
 - **planning-kanal-escalate**: Im planning-Kanal fragt der PM den Auftraggeber NUR mit 'nxc reply --escalate' - ein plain reply gilt als fertiges Design und laeuft in die Pruefrunde.
 - **ein-lauf-mit-arbeitskopie**: Commission one working-copy run at a time and wait for its release; the causing bugs are fixed since v0.207.0, but keep the rule until observed.
-- **no-self-update-during-chain-runs**: Never self-update nxs while a chain run works: the service restart kills service-started agent sessions with no resume (8n9a).
+- **no-self-update-during-chain-runs**: A self-update does not stop chain runs since wxz0: it only restarts the service watching them, so it may run during a run; report any damage as a regression.
 - **report-to-the-commissioner**: Never write a pm_report after a delivery; report the result to whoever commissioned the work (nexflowit-revamp, orchestrator, or the owner).
 - **art9-deletion-correctness-over-date**: Never trade correctness of the Art. 9 deletion mechanism for its date: January is fine, data loss or a half-baked design is not.
 - **design-review-until-no-high**: Design reviews: re-round only while a High finding remains; then accept with a 'Must fix in the build' section for the Mediums and Lows.
+- **owner-priorities-nov-2026**: Owner's order of work: 1 nxc stable (new engine), 2 what nexflow.it needs to go live and win 20 paying users, 3 Kiro CLI, 4 manufakt.io for remote coding runs.
+- **merge-commission-for-v2-branch**: A merge commission for a branch coding-v2 built always says: read it as origin/<branch> after git fetch origin - the merger's git log otherwise reads the root's checkout.
 - **claude-agent-sdk-scoping-airgap**: To air-gap a claude-agent-sdk subagent set setting_sources=[], strict_mcp_config=True and mcp_servers={} — else it inherits your MCP and the web.
 - **parallel-worktree-agents-race**: Never launch two worktree-isolated agents in ONE message — a subagent checkout -b can flip the shared checkout; stagger and forbid checkout.
 - **golden-harness-runs-in-crate-dir**: The trycmd golden harness runs in crates/cli with a pinned $HOME — a command that persists state outside the workspace cannot be a golden case.
@@ -69,6 +71,8 @@
 - **release-ring-policy**: Several consecutive BETA releases are explicitly fine and NOT a backlog — an idea proves itself in the apps before the chain goes stable.
 - **release-cut-runbook**: The release runbook: set skip-changelog BEFORE the check finishes — adding it afterwards needs a toggle, a re-run replays the old state.
 - **persona-session-is-shared-across-threads**: A persona runs ONE real SDK session across all its threads, and the transcript records no user prompts - name the thread when you continue it.
+- **run-host-tests-under-load**: Test an exhausted tick with set_budget(ZERO); never stand the injected clock still while waiting on a tree worker, whose Delay starts when its thread gets there.
+- **claude-cli-tool-process-tree**: A Bash tool runs outside the session's process group, in its own session: a group signal never reaches it, and the group is what separates the CLI and MCP servers from a tool's work.
 
 ## Full text
 
@@ -1033,6 +1037,10 @@ WHAT THAT DISPATCH RUNS (since 6j6v.ee3e, 2026-11-03): on a feature branch it is
 
 Check that the run's `headSha` is `git rev-parse HEAD` before you trust it: a run proves only the commit it ran on ([[gate-evidence-is-per-commit]]). If you hand over a gate result, give that commit and the run URL. If a job is red, the failing job's log (`gh run view "$run" --log-failed`) is the evidence.
 
+In the coding channel "you" is the coder: it pushes and dispatches, and the verifier reads that run on HEAD, dispatches nothing, and does not repeat the local commands, which the run covers.
+
+TO JUDGE A REGISTERED FLAKE WHERE IT WENT RED (6j6v.jmxk): the workflow `isolated-test.yml` repeats one named test on Linux in a chosen profile, `gh workflow run isolated-test.yml --ref <branch> -f package=<package> -f target=<lib or test file> -f test=<full test name> -f profile=<debug|release> -f repeats=20`. The evidence is the last log line, `isolated-test-result commit=... test=... system=... profile=... repeats=... executed=... reds=... verdict=...`. It cannot cancel a ci.yml run and cannot count toward a release. It reaches a red in `quality-gates` only: no service containers, no cargo features, no doctests, so a red in postgres, DynamoDB or a macOS lane has no isolated run (6j6v.wf8p). First real run: 42258414565.
+
 MEASURED 2026-09-03 against a real pull request and the transcript of the session that built it.
 Not a feeling — numbers.
 
@@ -1472,7 +1480,7 @@ every time what a fork reproduces 165 times in 100 000.
 Owner-Entscheidung 12.10.2026: Seit 12.10. sieht jeder Arbeitsbereich der Maschine das Coding-Team aus dem Nutzerordner ~/.nexusflow/personas (Link auf das Repo nexusflow-personas): pm, coder, verifier, finisher, merger, die drei Reviewer und die Kanaele planning, coding, review, merging, process. 'nxc list' zeigt sie mit 'from the user-level folder'.
 
 SO WIRD GEARBEITET:
-- Ein Ticket umsetzen: nxc send --to coding --ref nxf_ids=<id> - (Brief per Heredoc: was, warum, Abnahme, Fallstricke). Coder baut test-first, Verifier faehrt die Tore, Review-Runde urteilt, Finisher stellt den PR. Die Sitzung schreibt den Auftrag, beobachtet den Lauf und meldet das Ergebnis - sie baut NICHT selbst.
+- Ein Ticket umsetzen: nxc send --to coding --ref nxf_ids=<id> - (Brief per Heredoc: was, warum, Abnahme, Fallstricke). Coder baut test-first, Verifier misst die Tore, Review-Runde urteilt, Finisher stellt den PR. Die Sitzung schreibt den Auftrag, beobachtet den Lauf und meldet das Ergebnis - sie baut NICHT selbst.
 - Ein Vorhaben in Tickets schneiden: nxc send --to planning (Design wird geprueft) oder fuer Kleines/eine Meinung direkt --to pm.
 - Mergen: Kanal merging, mit fertigem Ticket, naechstem Ticket und Zweig.
 - NICHT mehr fuer Ticket-Arbeit: superpowers:subagent-driven-development, eigene Implementierer-/Reviewer-Subagenten. Das Superpowers-Plugin fordert seine Skills bei jedem Start an - fuer Ticket-Arbeit hat diese Regel Vorrang.
@@ -1482,7 +1490,7 @@ SO WIRD GEARBEITET:
 
 Vorbild: agents arbeitet seit 20.09.2026 so, nexflowit-app seit 12.10.2026.
 
-FUER DIESES REPO: Der Verifier faehrt die Tore dieses Repos - in den Brief an coding immer die Regel gates-run-in-ci-not-locally schreiben (kein lokales cargo clippy, nur die geaenderte Testdatei plus cargo fmt; CI ist das Tor). Laeufe, die nxc selbst testen (Fixture-Personas wie coder/review/test in Temp-Arbeitsbereichen), sind davon unberuehrt.
+FUER DIESES REPO: Der Coder pusht und startet den CI-Lauf, der Verifier liest ihn auf dem Commit und startet keinen; das Verfahren steht in gates-run-in-ci-not-locally und muss nicht in den Brief an coding. Laeufe, die nxc selbst testen (Fixture-Personas wie coder/review/test in Temp-Arbeitsbereichen), sind davon unberuehrt.
 
 REVIEW (Owner-Entscheidung 12.10.2026, 'Kette ersetzt Review'): Die Review-Runde der Coding-Kette (code-quality, test-quality, integrity in getrennten Sitzungen) IST das unabhaengige Review. Danach KEIN zusaetzlicher review-pr-Lauf, kein Anhalten fuer ein Owner-Review, keine Mitigationsrunde: nach dem PR des Finishers den Kanal merging beauftragen (fertiges Ticket, naechstes Ticket, Zweig), dann Beta-Release wenn sinnvoll, dann pm_report. Owner-gated bleibt die Befoerderung auf stabil - und wo das Repo eine eigene Merge-Regel hat, gilt sie weiter.
 
@@ -1514,7 +1522,7 @@ Adopted from agents (as of 2026-10-10, nxs 0.206.1): two runs holding the workin
 
 ### `no-self-update-during-chain-runs`
 
-Never run nxs self-update (or nxs sync daemon install) while an nxc chain run is working on this machine: the service restart SIGTERMs agent sessions the service started, with no resume armed and no park, so the operation is stranded and its uncommitted work unsaved (bug 6j6v.8n9a, seen 2026-10-15 on the 0cfa coding run). Check 'nxc status --json' across workspaces first; update when no session is running.
+CORRECTED 2026-11-05, owner: an nxs self-update does not stop chain runs. It restarts the background service that watches them; the runs carry on. The fear this entry used to state came from bug 8n9a (seen 2026-10-15 on the 0cfa coding run, the restart SIGTERMed service-started sessions with no resume). That bug is closed through wxz0: a planned service restart secures every running agent session first, and the sidecar never turns that stop into a silent clean end. So a self-update during a run is allowed, and the rule no longer holds a release back. Tell the owner if a run is damaged by an update: that would be a regression, and it should be observed on the next release, not assumed either way. What still stands: `nxs init --service` reinstalling the shared service without asking is its own bug, xkvn.
 
 ---
 
@@ -1533,6 +1541,18 @@ Owner direction (2026-10-19) for the Art. 9 deletion work (Direction 9, 6j6v.5vx
 ### `design-review-until-no-high`
 
 Owner rule (2026-10-20) for design reviews of the deletion chain: run rounds until no High finding remains. Then the design is accepted, and the remaining Medium and Low findings go into a 'Must fix in the build' section on the ticket, which the coding chain's own review round checks (the same as 1w3m). Do not keep re-rounding a design that has only Mediums left.
+
+---
+
+### `owner-priorities-nov-2026`
+
+Owner decision, 2026-11-05, in this order: (1) make nxc stable: the new engine. (2) Deliver what nexflow.it needs to go live and to win its first 20 paying users. (3) Kiro CLI support. (4) Support manufakt.io, so that coding runs can be coordinated through it, wherever the coding machine and the user are. manufakt.io is not the focus: do not reorder work for a date or request of manufakt.io alone. Reports from it that affect the engine are still taken up. The epic of (1) is 6j6v.2vtw.
+
+---
+
+### `merge-commission-for-v2-branch`
+
+A merge commission to the merging channel for a branch that coding-v2 built (the new run engine, nxc rebuild slice 1, epic 6j6v.zjyv) ALWAYS carries this sentence, because the merger's only read of the local checkout (merger SKILL.md: git log --oneline -20) runs in the registered root, which never has a v2 branch checked out - the v2 run works in its own clone <root>-v2: 'This branch was built on the new engine in a separate clone, so your working copy never has it checked out. Read it from the remote: run git fetch origin, then git log --oneline -20 origin/<branch> in place of git log --oneline -20, and wherever you would read the branch locally, read origin/<branch>.' Without it the merger judges ride-along-or-merge on whatever branch the root stands on, and nothing reports it. Chosen over a change to the user-level merger (6j6v.131c), which every workspace on the machine reads. Obsolete once the merging channel itself moves to the new engine (6j6v.2vtw); forget it then.
 
 ---
 
@@ -2173,3 +2193,15 @@ more lines of the session-start index than the facts needed.)
 ### `persona-session-is-shared-across-threads`
 
 A persona's internal session (session_map) is ONE real Claude Agent SDK session continued across every thread that persona serves - e.g. the pm session m-01M5MSS6F6CNT77BZW5DZ6TGEB took turns for a0y8, m-01M5456J..., m-01M57STW... and m-01M5MSPF... within 20 minutes on 2026-10-23. Consequences: 'continue the same session' must NAME the thread and quote the task; 'no transcript activity' is a fact about the session, not one slot; a queued commission fired into that session arrives as a continuation (resume_real set) and must carry the body. The agent_transcript records assistant, tool and subagent entries with an 'at' timestamp, but NO user prompts - you cannot read from a transcript what a session was asked.
+
+---
+
+### `run-host-tests-under-load`
+
+To test what a Host::tick does when its budget is exhausted, use host.set_budget(Duration::ZERO), not a slow machine or sleeps: it is deterministic and is the machine whose lease step ate the budget. And the scripted tree's Delay starts when the worker thread gets there, reading the injected clock then: a test that jumps the clock past a delay and then stands still can hang forever under load. Keep the clock moving while waiting on a worker, and find this shape with a loop of the test binary under eight busy loops on Linux release: idle loops passed it 25 of 25 while load hung it 9 of 25.
+
+---
+
+### `claude-cli-tool-process-tree`
+
+The Claude CLI (SDK 0.3.215, measured on macOS and Linux with the real binary, 6j6v.tv58 step 0) starts each Bash tool's shell in a session AND group of its own; the leader's group holds only the leader, the CLI and stdio MCP servers. So a signal to the session's group does not reach a tool (SIGKILL of the group leaves the tool alive), and the group is the exact way to leave CLI and MCP CPU out of a sample: a waiting CLI spends CPU at every look. nexus-run-session-claude's sampler and stop rest on this. After an SDK bump re-measure: cargo test -p nexus-run-session-claude --test real_sidecar -- --ignored --test-threads=1 (needs npm ci && npm run build in agent-sidecar, no credentials). Also measured: Darwin's proc_pidinfo answers nothing about a zombie, so a start time cannot be compared there before a waitpid.
