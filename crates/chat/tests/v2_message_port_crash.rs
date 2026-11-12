@@ -145,3 +145,31 @@ fn a_message_reads_back_with_its_board_pointers() {
     assert_eq!(read.sender, "local/owner");
     assert_eq!(port.read("m-01JNOSUCHMESSAGE000000000").unwrap(), None);
 }
+
+/// A row whose `refs` do not decode is an error, never "not posted": find-or-post on that answer would post a
+/// second copy (6j6v.b8tj review, IR #2). A read says so too, rather than handing the message on without
+/// its pointers.
+#[test]
+fn a_row_whose_refs_do_not_decode_is_an_error_for_find_and_read() {
+    let (dir, db) = workspace();
+    let thread = chat(&db).mint_thread_id();
+    let port = port(&db);
+    port.open_thread(&thread, None, CHANNEL, OPENER).unwrap();
+    let posted = port
+        .post(&thread, OPENER, "the result", &ports::Refs::default(), KEY)
+        .unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join(".nxs").join("db.sqlite")).unwrap();
+    let damaged = conn
+        .execute(
+            "UPDATE messages SET refs = '{not json' WHERE message_id = ?1",
+            [&posted],
+        )
+        .unwrap();
+    assert_eq!(damaged, 1, "the row was damaged");
+    let port = self::port(&db);
+    assert!(
+        port.find(&thread, KEY).is_err(),
+        "find must not answer 'not posted'"
+    );
+    assert!(port.read(&posted).is_err());
+}

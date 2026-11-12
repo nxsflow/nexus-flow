@@ -112,6 +112,18 @@ impl V1Ports {
     }
 }
 
+/// A message's refs: none stored is none; stored and not decoding is an error naming the message.
+fn decode_refs(message: &str, refs: Option<&str>) -> PortResult<Refs> {
+    match refs {
+        None => Ok(Refs::default()),
+        Some(refs) => serde_json::from_str(refs).map_err(|error| {
+            refused(format!(
+                "the refs of message {message} do not decode: {error}"
+            ))
+        }),
+    }
+}
+
 impl MessagePort for V1Ports {
     fn post(
         &self,
@@ -145,10 +157,18 @@ impl MessagePort for V1Ports {
 
     fn find(&self, thread: &str, key: &str) -> PortResult<Option<MessageId>> {
         let rows = self.store()?.messages_in_thread(thread).map_err(refused)?;
-        Ok(rows.into_iter().find_map(|row| {
-            let refs: Refs = serde_json::from_str(row.refs.as_deref()?).ok()?;
-            (refs.run_key.as_deref() == Some(key)).then_some(row.message_id)
-        }))
+        // A row whose refs do not decode is an error, never "not posted": the host's find-or-post would post
+        // a second copy on that answer.
+        for row in rows {
+            if decode_refs(&row.message_id, row.refs.as_deref())?
+                .run_key
+                .as_deref()
+                == Some(key)
+            {
+                return Ok(Some(row.message_id));
+            }
+        }
+        Ok(None)
     }
 
     fn read(&self, message: &str) -> PortResult<Option<Message>> {
@@ -157,21 +177,16 @@ impl MessagePort for V1Ports {
             return Ok(None);
         };
         let rows = store.messages_in_thread(&thread).map_err(refused)?;
-        Ok(rows.into_iter().find_map(|row| {
-            (row.message_id == message).then(|| {
-                let refs: Refs = row
-                    .refs
-                    .as_deref()
-                    .and_then(|refs| serde_json::from_str(refs).ok())
-                    .unwrap_or_default();
-                Message {
-                    sender: row.sender,
-                    body: row.body,
-                    refs: ports::Refs {
-                        nxf_ids: refs.nxf_ids,
-                    },
-                }
-            })
+        let Some(row) = rows.into_iter().find(|row| row.message_id == message) else {
+            return Ok(None);
+        };
+        let refs = decode_refs(&row.message_id, row.refs.as_deref())?;
+        Ok(Some(Message {
+            sender: row.sender,
+            body: row.body,
+            refs: ports::Refs {
+                nxf_ids: refs.nxf_ids,
+            },
         }))
     }
 
@@ -269,6 +284,8 @@ impl DeclarationPort for V1Ports {
         let mut sections = Vec::new();
         let mut replies: Vec<CollectedReply> = Vec::new();
         for part in parts {
+            // A part with no message is the host's own text (task, obligation, reminder): `start.rs` writes
+            // those itself and hands this port only runs of message-bearing parts, so none is lost here.
             let Some(id) = part.message.as_deref() else {
                 continue;
             };

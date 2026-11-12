@@ -86,6 +86,27 @@ fn a_store_that_does_not_open_refuses_and_never_reads_as_not_v2() {
     assert!(open_store(&path).is_err());
 }
 
+/// A file whose existence cannot be told — its directory not searchable — is not "not v2" either: only
+/// `NotFound` is (6j6v.b8tj review, IR #1). `Path::exists` answered `false` here, and a v2 session fell through
+/// to the old lookup.
+#[cfg(unix)]
+#[test]
+fn a_store_whose_directory_cannot_be_searched_refuses_and_never_reads_as_not_v2() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let nxs = dir.path().join(".nxs");
+    std::fs::create_dir(&nxs).unwrap();
+    std::fs::write(nxs.join("run.sqlite"), b"").unwrap();
+    std::fs::set_permissions(&nxs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let answer = open_store(&nxs.join("run.sqlite"));
+    std::fs::set_permissions(&nxs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        answer.is_err(),
+        "unknown is not absent: {:?}",
+        answer.map(|s| s.is_some())
+    );
+}
+
 /// The one transaction of §6.4 item 1, and H4: `tenant: local`.
 #[test]
 fn a_commission_writes_one_transaction_and_posts_nothing() {
