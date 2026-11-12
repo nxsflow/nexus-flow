@@ -705,3 +705,336 @@ fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once
         Some("coding-v2")
     );
 }
+
+// ---- identity: qualified callers, bare declarations, and the precedence -----------------------
+
+/// Who a caller is comes from PROVENANCE — the session it presents, looked up — and never from the handle it
+/// states (memory declared-members-bare-caller-qualified). A caller presenting its handle QUALIFIED
+/// (`<origin>/reviewer`) against a BARE declaration (`reviewer`) is therefore still the persona: the refusal
+/// fires and nothing is written. Were the persona line keyed on the stated handle compared with `==`, this
+/// caller would read as the terminal and its send would be commissioned.
+#[test]
+fn a_persona_presenting_a_qualified_handle_is_still_refused_a_v2_channel_before_any_write() {
+    let ws = workspace();
+    let session = persona_session(ws.path(), "reviewer");
+    let eng = engine(ws.path());
+    let qualified = format!("{}/reviewer", eng.origin());
+    let before = chat_ops(ws.path());
+    let refused = send(
+        &eng,
+        Caller {
+            session: Some(&session),
+            actor: Some(&qualified),
+            now: Some(NOW),
+        },
+        "coding-v2",
+    )
+    .expect_err("still the persona");
+    assert!(refused.msg.contains("runs on the new engine"), "{refused}");
+    assert_eq!(chat_ops(ws.path()), before);
+    assert!(!run_sqlite(ws.path()).exists());
+}
+
+#[test]
+fn a_v2_session_presenting_a_qualified_handle_is_still_refused_before_any_write() {
+    let ws = workspace();
+    let session = v2_session(ws.path());
+    let eng = engine(ws.path());
+    let qualified = format!("{}/coder", eng.origin());
+    let before = chat_ops(ws.path());
+    for to in ["reviewer", "coding-v2"] {
+        let refused = send(
+            &eng,
+            Caller {
+                session: Some(&session),
+                actor: Some(&qualified),
+                now: Some(NOW),
+            },
+            to,
+        )
+        .expect_err("still a v2 session");
+        assert!(
+            refused.msg.contains("cannot commission in this slice"),
+            "{to}: {refused}"
+        );
+    }
+    assert_eq!(chat_ops(ws.path()), before);
+}
+
+/// `resolve_caller` answers the BARE handle the declarations use, from the slot the session runs — so every
+/// later comparison against a declaration (`for_persona`, `addressable`) is between two bare handles.
+#[test]
+fn resolve_caller_answers_the_bare_declared_handle_for_a_v2_session() {
+    use nexus_chat::persona::Identity;
+    use nexus_chat::v2_bridge::resolve_caller;
+    let ws = workspace();
+    let session = real_v2_session(ws.path());
+    let (store, defs, db) = resolver_inputs(ws.path());
+    let (identity, v2) = resolve_caller(&store, &defs, None, Some(&session), &db, "local").unwrap();
+    assert_eq!(identity, Identity::Persona("coder".to_owned()));
+    assert_eq!(v2.expect("a v2 session").handle, "coder");
+}
+
+/// The precedence, pinned: an explicit `--persona` is the host's claim and stands; else the run store's
+/// `session/<key>`; else the old session map. A key BOTH stores know is the new engine's, because that is the
+/// session that is actually running.
+#[test]
+fn the_precedence_is_explicit_persona_then_the_run_store_then_the_old_session_map() {
+    use nexus_chat::persona::Identity;
+    use nexus_chat::v2_bridge::resolve_caller;
+    let ws = workspace();
+    let session = real_v2_session(ws.path());
+    chat_store(ws.path())
+        .create_pending_session(&session, "reviewer")
+        .unwrap();
+    let old_only = persona_session(ws.path(), "reviewer");
+    let (store, defs, db) = resolver_inputs(ws.path());
+    let resolve = |declared: Option<&str>, session: Option<&str>| {
+        resolve_caller(&store, &defs, declared, session, &db, "local").unwrap()
+    };
+
+    let (explicit, v2) = resolve(Some("reviewer"), Some(&session));
+    assert_eq!(
+        explicit,
+        Identity::Persona("reviewer".to_owned()),
+        "--persona stands"
+    );
+    assert_eq!(v2, None);
+    let (run_store, v2) = resolve(None, Some(&session));
+    assert_eq!(
+        run_store,
+        Identity::Persona("coder".to_owned()),
+        "the run store before the old map"
+    );
+    assert!(v2.is_some());
+    let (old_map, v2) = resolve(None, Some(&old_only));
+    assert_eq!(old_map, Identity::Persona("reviewer".to_owned()));
+    assert_eq!(v2, None);
+    let (nobody, _) = resolve(None, None);
+    assert_eq!(nobody, Identity::Human);
+}
+
+fn resolver_inputs(dir: &Path) -> (ChatStore, nexus_chat::definitions::Definitions, String) {
+    let db = dir.join(".nxs").join("db.sqlite");
+    (
+        chat_store(dir),
+        nexus_chat::definitions::Definitions::resolve(dir).unwrap(),
+        db.to_str().unwrap().to_owned(),
+    )
+}
+
+/// A v2 session whose slot the run's log places: the owner commissions, and a real `Host` (scripted
+/// backend and tree) steps the run until the build slot's session is recorded.
+fn real_v2_session(dir: &Path) -> String {
+    use nexus_run_host::test_support::scripted_backend::{pass, ScriptedBackend};
+    use nexus_run_host::test_support::scripted_tree::ScriptedTree;
+    use nexus_run_host::test_support::SimClock;
+    use nexus_run_host::{Host, Layout, Ports, TreeLedger};
+
+    let eng = engine(dir);
+    send(&eng, the_owner(), "coding-v2").expect("the owner commissions");
+    let db = dir.join(".nxs").join("db.sqlite");
+    let ports = std::sync::Arc::new(
+        nexus_chat::ports_v1::V1Ports::for_root(dir, db.to_str().unwrap(), &eng.origin()).unwrap(),
+    );
+    let layout = Layout {
+        root: dir.to_owned(),
+        agent_logs: dir.join(".nxs").join("agent-logs"),
+        session_env: Vec::new(),
+    };
+    let store = std::sync::Arc::new(
+        nexus_run_host::bridge::SqliteRunStore::open(
+            &run_sqlite(dir),
+            nexus_run_host::bridge::HOST_BUSY_TIMEOUT,
+        )
+        .unwrap(),
+    );
+    let mut now = nexus_run_contracts::Timestamp::parse(NOW).unwrap();
+    let clock = std::sync::Arc::new(SimClock::at(now.unix_millis()));
+    let mut host = Host::new(
+        store.clone(),
+        Ports {
+            messages: ports.clone(),
+            declarations: ports.clone(),
+            sidecar: ports,
+            layout: layout.clone(),
+        },
+        std::sync::Arc::new(ScriptedBackend::new(
+            &layout.agent_logs,
+            &dir.join("timeline.jsonl"),
+            &layout.v2_dir(),
+            Box::new(|_| pass()),
+        )),
+        std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
+            &layout.agent_logs,
+            &eng.origin(),
+        ))),
+        clock.clone(),
+    );
+    let run = store.open_runs().unwrap()[0].run.clone();
+    let key = format!("{run}/build/v1/coder/a1");
+    for _ in 0..40 {
+        host.tick(now);
+        if store.get(&format!("session/{key}")).unwrap().is_some() {
+            return key;
+        }
+        clock.advance(1_000);
+        now = nexus_run_contracts::Timestamp::from_unix_millis(now.unix_millis() + 1_000);
+    }
+    panic!("the host never started the build slot");
+}
+
+/// A host may hand its acting user's handle qualified (`<origin>/owner`) or bare (`owner`): it is one
+/// requester either way, recorded in the one qualified form every v1 sender has — never `<origin>/<origin>/owner`.
+/// The requester checks of the root (6j6v.y6v7) compare against this value.
+#[test]
+fn a_requester_handed_qualified_or_bare_is_recorded_as_the_same_qualified_handle() {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let qualified = format!("{}/owner", eng.origin());
+    send(&eng, the_owner(), "coding-v2").unwrap();
+    send(
+        &eng,
+        Caller {
+            session: None,
+            actor: Some(&qualified),
+            now: Some(NOW),
+        },
+        "coding-v2",
+    )
+    .unwrap();
+    let store = nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+        .unwrap()
+        .unwrap();
+    let requesters: Vec<String> = store
+        .open_runs()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            nexus_run_host::bridge::view(&store, &row.run)
+                .unwrap()
+                .unwrap()
+                .state
+                .requester
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        requesters,
+        [qualified.clone(), qualified],
+        "one requester, one form"
+    );
+}
+
+/// A persona's own declared route (`addressable: [<channels>]`) is filtered the same way the derived one is:
+/// a refusal never offers a persona a channel whose send it would refuse (6j6v.b8tj review, CQ #3).
+#[test]
+fn a_declared_route_through_a_v2_channel_is_not_offered_to_a_persona() {
+    let ws = workspace();
+    std::fs::write(
+        ws.path().join(".nxs-personas").join("lister.yaml"),
+        "handle: lister\naddressable: [coding-v2, review]\nsystem_prompt: p\n",
+    )
+    .unwrap();
+    let session = persona_session(ws.path(), "reviewer");
+    let eng = engine(ws.path());
+    let to_persona = send(
+        &eng,
+        Caller {
+            session: Some(&session),
+            actor: Some("reviewer"),
+            now: Some(NOW),
+        },
+        "lister",
+    )
+    .expect_err("lister admits no direct message");
+    assert!(
+        to_persona.msg.contains("review") && !to_persona.msg.contains("coding-v2"),
+        "{to_persona}"
+    );
+    let to_owner = send(&eng, the_owner(), "lister").expect_err("nor from the terminal");
+    assert!(
+        to_owner.msg.contains("coding-v2"),
+        "the terminal keeps it: {to_owner}"
+    );
+}
+
+/// A session key the run store routes but whose slot its log cannot place is still a session, never the
+/// owner — under a placeholder handle no declaration has, not the key itself posing as a handle
+/// (6j6v.b8tj review, CQ #1). The key stays on the `V2Session`.
+#[test]
+fn an_unplaced_v2_session_is_a_persona_under_the_placeholder_and_keeps_its_key() {
+    use nexus_chat::persona::Identity;
+    use nexus_chat::v2_bridge::{resolve_caller, UNPLACED_V2_SESSION};
+    let ws = workspace();
+    let key = v2_session(ws.path());
+    let (store, defs, db) = resolver_inputs(ws.path());
+    let (identity, v2) = resolve_caller(&store, &defs, None, Some(&key), &db, "local").unwrap();
+    assert_eq!(identity, Identity::Persona(UNPLACED_V2_SESSION.to_owned()));
+    let v2 = v2.unwrap();
+    assert_eq!(v2.handle, UNPLACED_V2_SESSION);
+    assert_eq!(v2.session_key, key);
+}
+
+// ---- the `engine:` key ------------------------------------------------------------------------
+
+fn load(engine: &str) -> nexus_chat::error::Result<nexus_chat::definitions::Definitions> {
+    let ws = workspace();
+    std::fs::write(
+        ws.path().join(".nxs-personas").join("channels.yaml"),
+        format!("- name: coding-v2\n  engine: {engine}\n  members: [coder]\n"),
+    )
+    .unwrap();
+    nexus_chat::definitions::Definitions::resolve(ws.path())
+}
+
+/// An engine nobody built is refused at load, naming the value — never read as v1, which would run the
+/// channel on the old engine in the root while its author meant the new one.
+#[test]
+fn an_unknown_engine_value_is_refused_at_load_rather_than_read_as_v1() {
+    for bad in ["v3", "V2", "\"\""] {
+        let refused = load(bad).expect_err(bad);
+        assert!(
+            refused.msg.contains("engine")
+                || refused.msg.contains("v3")
+                || refused.msg.contains("variant"),
+            "{bad}: {refused}"
+        );
+    }
+    assert!(load("v1").is_ok());
+    assert!(load("v2").is_ok());
+}
+
+/// A v1 declaration serializes exactly as before the key existed; a v2 one carries it.
+#[test]
+fn a_v1_declaration_serializes_without_an_engine_key() {
+    let v1 = load("v1").unwrap();
+    let v1 = serde_json::to_value(v1.channel("coding-v2").unwrap()).unwrap();
+    assert!(v1.get("engine").is_none(), "{v1}");
+    let v2 = load("v2").unwrap();
+    let v2 = serde_json::to_value(v2.channel("coding-v2").unwrap()).unwrap();
+    assert_eq!(v2["engine"], "v2");
+}
+
+/// A v2 channel the new engine cannot run in this slice — `working_tree: shared` is refused at compile time
+/// (6j6v.zjyv §6.1) — is refused by the send before anything is written, as a validation error naming why.
+/// (Declaration-time validation of v2 shapes is not part of the switch; the compile is the one judge.)
+#[test]
+fn a_v2_channel_the_new_engine_cannot_run_is_refused_before_anything_is_written() {
+    let ws = workspace();
+    std::fs::write(
+        ws.path().join(".nxs-personas").join("channels.yaml"),
+        "- name: coding-v2\n  engine: v2\n  members: []\n  steps:\n    - id: build\n      target: coder\n",
+    )
+    .unwrap();
+    let before = chat_ops(ws.path());
+    let refused = send(&engine(ws.path()), the_owner(), "coding-v2").expect_err("shared tree");
+    assert_eq!(refused.kind, ErrorKind::Validation, "{refused}");
+    assert!(refused.msg.contains("does not compile"), "{refused}");
+    assert_eq!(chat_ops(ws.path()), before);
+    let runs = nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+        .unwrap()
+        .map(|store| store.open_runs().unwrap().len())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "no run was opened");
+}

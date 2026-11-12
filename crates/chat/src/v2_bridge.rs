@@ -84,6 +84,10 @@ fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     }
 }
 
+/// The persona handle of a v2 session whose slot the run's log cannot place: a session all the same, never
+/// the owner, and a handle no declaration can have (a declared handle never starts with `__`).
+pub const UNPLACED_V2_SESSION: &str = "__unplaced_v2_session__";
+
 /// A session of a run on the new engine, as the old gates must see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2Session {
@@ -121,7 +125,7 @@ pub fn session_of(
             Some(view.state.slots[index].slot.member.to_string())
         })
         // A key the run store routes and its log cannot place is still a session — never the owner.
-        .unwrap_or_else(|| session.to_owned());
+        .unwrap_or_else(|| UNPLACED_V2_SESSION.to_owned());
     Ok(Some(V2Session {
         handle,
         session_key: session.to_owned(),
@@ -184,7 +188,13 @@ pub fn commission(
     let bridge = bridge_ctx(store, ctx.db_path, ctx.origin, ctx.defs);
     let now = Timestamp::parse(ctx.now)
         .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", ctx.now)))?;
-    let sender = format!("{}/{}", ctx.origin, ctx.actor);
+    // One requester, one form: a host may hand its user qualified or bare, and the record is the qualified
+    // handle every v1 sender has — what the root's requester checks compare against.
+    let sender = format!(
+        "{}/{}",
+        ctx.origin,
+        crate::orchestration::bare_handle_of(ctx.actor)
+    );
     let attended = attended(&bridge, now).map_err(|r| refusal_of(&path, r))?;
     let receipt = bridge::commission(
         &bridge,

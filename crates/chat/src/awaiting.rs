@@ -432,7 +432,7 @@ impl Await {
         };
         // v2-bridge: deleted with the old engine (6j6v.2vtw) — a run of the new engine is read through
         // `nxc status`, and `--stream` does not follow one yet.
-        if self.answer_in.is_some() {
+        if matches!(self.done_when, DoneWhen::Run { .. }) {
             return format!(
                 "\n  The answer lands in this thread once the run has finished.\n    \
                  nxc status --thread {thread_id}    — where the run stands\n    \

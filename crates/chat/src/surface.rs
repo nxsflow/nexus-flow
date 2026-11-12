@@ -379,7 +379,19 @@ fn refusal(decl: &crate::role::RoleDecl, caller: &crate::persona::Identity, ctx:
     };
     let via = match decl.addressable.channels() {
         [] => crate::channel::channels_casting(&reachable, &decl.handle),
-        declared => declared.to_vec(),
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — the persona's own declared route is
+        // filtered as the derived one is.
+        declared => declared
+            .iter()
+            .filter(|name| {
+                caller.persona().is_none()
+                    || !ctx
+                        .defs
+                        .channel(name)
+                        .is_some_and(|c| c.engine == crate::channel::RunEngine::V2)
+            })
+            .cloned()
+            .collect(),
     };
     let through = |lead: &str| match via.first() {
         None => String::new(),
