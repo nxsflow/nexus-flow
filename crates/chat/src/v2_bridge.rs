@@ -71,6 +71,59 @@ fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     }
 }
 
+/// A session of a run on the new engine, as the old gates must see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2Session {
+    /// The persona its slot runs, which is what it is to every old gate.
+    pub handle: String,
+    pub session_key: String,
+}
+
+/// **Whether `session` is a session of a run on the new engine** — the one lookup, made before every
+/// caller check on both engines (§10). `None` for no session, for no `run.sqlite`, and for a key the run
+/// store does not know.
+pub fn session_of(
+    db_path: &str,
+    origin: &str,
+    defs: &Definitions,
+    session: Option<&str>,
+) -> Result<Option<V2Session>> {
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let path = run_sqlite(db_path);
+    let store = match bridge::open_store(&path) {
+        Ok(None) => return Ok(None),
+        Ok(Some(store)) => store,
+        Err(error) => return Err(store_refusal(&path, &error.to_string())),
+    };
+    let ctx = bridge_ctx(store, db_path, origin, defs);
+    let Some(route) = bridge::session_of(&ctx, session).map_err(|r| refusal_of(&path, r))? else {
+        return Ok(None);
+    };
+    let handle = bridge::view(&ctx.store, &route.run)
+        .map_err(|r| refusal_of(&path, r))?
+        .and_then(|view| {
+            let index = view.state.find(session)?;
+            Some(view.state.slots[index].slot.member.to_string())
+        })
+        // A key the run store routes and its log cannot place is still a session — never the owner.
+        .unwrap_or_else(|| session.to_owned());
+    Ok(Some(V2Session {
+        handle,
+        session_key: session.to_owned(),
+    }))
+}
+
+/// No v2 session commissions in this slice (§10).
+pub fn session_cannot_send(session: &V2Session) -> NxfError {
+    NxfError::forbidden(format!(
+        "a session of a run on the new engine cannot commission in this slice — ask for what you \
+         need with `nxc reply --escalate` (you are `{}`, session {}); nothing was sent",
+        session.handle, session.session_key
+    ))
+}
+
 /// No persona commissions a v2 run in this slice (owner decision of 2026-11-04, §10).
 pub fn persona_cannot_send(channel: &str) -> NxfError {
     NxfError::forbidden(format!(

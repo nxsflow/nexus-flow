@@ -85,6 +85,27 @@ fn persona_session(dir: &Path, handle: &str) -> String {
     session
 }
 
+/// A session of a run on the new engine: the owner commissions `coding-v2`, and the run's build slot is
+/// recorded the way the host's `StartSession` records it — `thread/<id>` routing a step thread to the session
+/// key, and `session/<key>` naming that thread (6j6v.zjyv §6.4 item 3).
+fn v2_session(dir: &Path) -> String {
+    send(&engine(dir), the_owner(), "coding-v2").expect("the owner commissions");
+    let store = nexus_run_host::bridge::open_store(&run_sqlite(dir))
+        .unwrap()
+        .unwrap();
+    let run = store.open_runs().unwrap()[0].run.clone();
+    let key = format!("{run}/build/v1/coder/a1");
+    let thread = "m-01JSTEPTHREAD0000000000000";
+    let route = serde_json::json!({ "run": run, "session_key": key }).to_string();
+    store
+        .compare_and_set(&format!("thread/{thread}"), None, Some(route.as_bytes()))
+        .unwrap();
+    store
+        .compare_and_set(&format!("session/{key}"), None, Some(thread.as_bytes()))
+        .unwrap();
+    key
+}
+
 fn run_sqlite(dir: &Path) -> PathBuf {
     dir.join(".nxs").join("run.sqlite")
 }
@@ -252,4 +273,48 @@ fn a_persona_sessions_send_to_a_v2_channel_is_refused_before_anything_is_written
         !run_sqlite(ws.path()).exists(),
         "and nothing to the run store"
     );
+}
+
+/// A v2 session sends to nobody in this slice — persona or channel, either engine: no slot state says
+/// "waiting on my own commission", and the old engine's answer would wake a second session beside the slot
+/// (§10). Its `NXC_SESSION` is unknown to the old session map, so without the lookup it would pass as the
+/// owner at the terminal.
+#[test]
+fn a_v2_sessions_send_to_anything_is_refused_before_anything_is_written() {
+    let ws = workspace();
+    let session = v2_session(ws.path());
+    let eng = engine(ws.path());
+    let runs = || {
+        nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+            .unwrap()
+            .unwrap()
+            .open_runs()
+            .unwrap()
+            .len()
+    };
+    let (ops, open) = (chat_ops(ws.path()), runs());
+    for to in ["reviewer", "review", "coding-v2"] {
+        let refused = send(
+            &eng,
+            Caller {
+                session: Some(&session),
+                actor: Some("coder"),
+                now: Some(NOW),
+            },
+            to,
+        )
+        .expect_err("a v2 session does not commission");
+        assert_eq!(refused.kind, ErrorKind::Forbidden, "{to}: {refused}");
+        assert!(
+            refused.msg.contains("cannot commission in this slice")
+                && refused.msg.contains("`nxc reply --escalate`"),
+            "{to}: says why and what to do instead: {refused}"
+        );
+    }
+    assert_eq!(
+        chat_ops(ws.path()),
+        ops,
+        "nothing written to the chat store"
+    );
+    assert_eq!(runs(), open, "and no run commissioned");
 }

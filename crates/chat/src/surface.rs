@@ -341,7 +341,26 @@ pub struct SendToReceipt {
 /// away. A process that simply never registers is "a human" to this check, exactly as it is there —
 /// and lands on the advice that works for anybody, which is the benign direction.
 pub(crate) fn caller_identity(ctx: &Ctx, store: &ChatStore) -> Result<crate::persona::Identity> {
-    crate::persona::resolve_identity(store, ctx.defs.roles(), None, ctx.session)
+    resolve_caller(ctx, store).map(|(identity, _)| identity)
+}
+
+/// [`caller_identity`] and whether the caller is a session of a run on the NEW engine — which it then is
+/// to every gate here: a persona, never "the human at the terminal" (6j6v.zjyv §10). The lookup is
+/// [`crate::v2_bridge::session_of`], made first and in this one place for every caller check.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub(crate) fn resolve_caller(
+    ctx: &Ctx,
+    store: &ChatStore,
+) -> Result<(
+    crate::persona::Identity,
+    Option<crate::v2_bridge::V2Session>,
+)> {
+    let v2 = crate::v2_bridge::session_of(ctx.db_path, ctx.origin, ctx.defs, ctx.session)?;
+    let identity = match &v2 {
+        Some(session) => crate::persona::Identity::Persona(session.handle.clone()),
+        None => crate::persona::resolve_identity(store, ctx.defs.roles(), None, ctx.session)?,
+    };
+    Ok((identity, v2))
 }
 
 /// What to tell a caller the target does not admit (nxf 6j6v.st83) — **who may, and where this
@@ -467,7 +486,12 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     // …and it is the WHOLE identity since nxf 6j6v.st83, not the bool this used to keep: the same
     // answer decides which [`Await`] shape the receipt carries AND whether the target admits this
     // caller at all. One resolution, so the two can never disagree about who is calling.
-    let identity = caller_identity(ctx, store)?;
+    let (identity, v2_session) = resolve_caller(ctx, store)?;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a session of a run on the new engine sends to
+    // nobody, persona or channel, either engine, before anything is written (6j6v.zjyv §10).
+    if let Some(session) = &v2_session {
+        return Err(crate::v2_bridge::session_cannot_send(session));
+    }
     let persona = identity.persona().is_some();
 
     // (0) An address in ANOTHER workspace on this machine (nxf 6j6v.4gp2): `<owner>/<repo>/<persona>`.
