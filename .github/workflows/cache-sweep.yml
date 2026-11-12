@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
 
       # Deliberately NO Swatinem/rust-cache here: a sweeper that writes its own cache entry — one
       # more scope competing for the 10 GB it exists to defend — would be part of the problem it
