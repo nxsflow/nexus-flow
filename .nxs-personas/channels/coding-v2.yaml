@@ -1,0 +1,178 @@
+# The coding chain on the NEW run engine — slice 1 of the nxc rebuild (epic 6j6v.zjyv, ticket
+# 6j6v.131c). Declared in THIS repository on purpose: the user-level folder is read by every
+# workspace on the machine, and no other workspace may see or reach this channel.
+#
+# Its steps are those of the user-level `coding.yaml` as it stood at sha1 b925d9a1 (`shasum` of the
+# file) on 2026-11-12. That channel keeps `engine: v1` through the slice; this copy does NOT follow
+# later edits there. Where this file differs, it differs for the new engine and says so in the step:
+#   - build: the ride-along check in both directions, and who builds the sidecar in a fresh clone;
+#   - judge: the diff base is always a remote-tracking ref, never a bare local branch.
+# This file goes when `coding` itself switches to the new engine (the first act of the persona
+# move, 6j6v.2vtw); its v2 lines move into `coding.yaml` then, not before.
+#
+# `engine:` is read by the bridge (6j6v.b7ck). Until that ships, the parser ignores the key (no
+# `deny_unknown_fields` on ChannelDecl) and a send here runs on the old engine in the root — every
+# task below is written to stay true there as well.
+name: coding-v2
+engine: v2
+members: []   # every participant is a step target below; this seats nobody extra
+steps:
+  - id: build
+    target: coder
+    next: verify
+    resume: true    # a rework returns to the session that handed the branch over
+    # Its first paragraph is the gate-kind test, word for word the `verify` task below: the two
+    # steps that decide the gate's kind must decide alike, so change both together. YAML cannot
+    # append to an anchor, and the lines after it are for the coder alone — the verifier must not
+    # read instructions about building.
+    task: |
+      The test for what kind of gate this project has. The gate is CI only where the project's own
+      procedure — in a memory, `AGENTS.md` or `CLAUDE.md` — says BOTH of these: that a local run
+      does not stand in for the CI run, and how to start that run on a branch that has no pull
+      request. Anything less is a local gate: a workflow file in the repository; CI that runs only
+      on pull requests; a procedure that merely says a CI run is sufficient proof. A project with
+      local gates and some gates only in CI is local as well: its local gates are run here, and the
+      CI-only ones reach the merging step through the pull request's checks.
+
+      Local branches can outlive a run in the working copy you start in: a branch an earlier run
+      worked on there may still carry a commit that never reached the remote. So when you ride
+      along in a held pull request, check BOTH directions once you are on its branch, before you
+      build anything:
+
+          git rev-list --count HEAD..origin/<its branch>   # 0, or you are behind it
+          git rev-list --count origin/<its branch>..HEAD   # 0, or the local branch holds commits the remote does not
+
+      A non-zero second count is a commit you did not make. Escalate with it — the output of
+      `git log --oneline origin/<its branch>..HEAD` and the branch it is on — rather than building
+      on it, resetting it or pushing it: whose work it is, and whether it ships, is not yours to
+      settle. The same holds for any branch you are about to build on or create — a
+      `git switch -c` refused because that branch already exists locally is the same finding.
+
+      The agent sidecar: `agent-sidecar/node_modules/` and `agent-sidecar/dist/` are not tracked,
+      so a fresh clone has neither. If your work touches `agent-sidecar/` and `node_modules/` is
+      missing there, you are the one who runs `npm ci && npm run build` in `agent-sidecar/` — once,
+      before its tests; later sessions find it present. If your work does not touch the sidecar,
+      nobody runs it: a plain `cargo build` builds without the bundle.
+  # Its own step because it WRITES (build artefacts) while the reviewers after it only read —
+  # and a red suite goes back before three reviewer sessions are spent on it.
+  - id: verify
+    target: verifier
+    next: judge
+    on_needs_rework: build
+    max_passes: 3
+    # NOTHING from the run. The default would hand it the coder's own account of the work, and a
+    # verifier that reads "all green" before it measures is no longer a verifier. It judges the
+    # TREE from the ticket commission. It opens the coder's report on the ticket only after deciding
+    # the gate's kind on its own, and only for the source and any re-run named there.
+    input: []
+    # Word for word the first paragraph of the `build` task above; change both together.
+    task: |
+      The test for what kind of gate this project has. The gate is CI only where the project's own
+      procedure — in a memory, `AGENTS.md` or `CLAUDE.md` — says BOTH of these: that a local run
+      does not stand in for the CI run, and how to start that run on a branch that has no pull
+      request. Anything less is a local gate: a workflow file in the repository; CI that runs only
+      on pull requests; a procedure that merely says a CI run is sufficient proof. A project with
+      local gates and some gates only in CI is local as well: its local gates are run here, and the
+      CI-only ones reach the merging step through the pull request's checks.
+  # `target` is the `review` CHANNEL: three members judge independently, any ONE of them can
+  # pull the back edge, and the consolidator's summary carries no verdict.
+  - id: judge
+    target: review
+    next: finish
+    on_needs_rework: build
+    max_passes: 3
+    # CONTRACT: the marking "must-fix (design review)" below is written into a ticket's definition
+    # of done by the cut step of the planning channel (planning.yaml). Change the wording in both
+    # places at once, or the Mediums review let through are no longer found here.
+    task: |
+      You are judging a CHANGE on a branch — the "at a CHANGE" list in your role is the one that
+      applies this round.
+
+      What you were handed names the branch and the base. Read, in this order:
+
+      1. The quality-gates log. You were HANDED the verifier's own reply — it names the log's
+         path and the commit the gates ran on. Use what it names; do not go looking for the
+         newest file in `.nxf/review/`, and do not run the gates again. If two runs overlap, the
+         newest file is somebody else's. A red gate in that log — a lint warning, a format diff,
+         a type error, a failing test — is grade-impacting unless the change explicitly
+         addresses it.
+
+         One exception is a reply whose first line is "green except for registered flakes"; the
+         other, for an older commit's failed job, stands further down. CHECK that reply, do not take it. Every gate the project declares has a result in the
+         log — a gate that never ran is a High finding, not a pass — and every red gate is a
+         test gate in which tests ran and failed. Then, for each red test it names: the
+         registration is a note beginning `flake:` on an open item labelled `flake`, and that
+         note names the test or its file and how it fails (no other text on the item counts);
+         the note is older than this run's start; the quoted failure is the kind it registers;
+         and the three isolated green runs are in the log on the reported commit. Where the red
+         came from a CI run, those are the isolated run the project's procedure names, which the
+         coder started, and the verifier read: the log gives its commit, the test that failed in the
+         job, named in full and the only test the run executed, the operating system and profile of the job that failed, at least three repeats
+         and no red in any attempt. The change does not touch that run's workflow, and the red left
+         nothing else in the gate unmeasured. Work the
+         run's start out YOURSELF, do not take the verifier's: it is the time inside the ULID of
+         the root thread of your own operation (first ten characters, Crockford base32,
+         milliseconds since the Unix epoch), and the note's time is on the board. Where all of
+         that holds, the test is not a finding against this change. Where any of it does not —
+         or the change touches that test or the code it exercises — the red test is a High
+         finding, exactly as if the verifier had called it red.
+
+         Where the gates were measured by a CI run, the log lists every job of every attempt of
+         every run on the branch. A failed job on the reported commit that no registration covers
+         is a High finding, under a green or a cancelled conclusion as well; so is a log that does
+         not list them, and so is, on an older commit and followed by commits that do not address
+         it, a failed job or any red in an isolated run.
+
+         An older failed job that no later commit addresses is no finding only where the
+         registered-flake exit was fully met on that older commit. Check it from the log, whatever the reply's first line says, since
+         after a rework that line can be plain green. All of this must hold: that commit's isolated
+         run, meeting everything asked above of a red from a CI run, with no red in any attempt; a
+         registration older than this run's start; a failure of the registered kind; no commit on
+         the branch up to and including that older commit touching that run's workflow, that test
+         or the code it exercises, read commit by commit, merges included, from the base the log
+         names (`git log -p --diff-merges=first-parent <base>..<that commit>`), since the net diff
+         hides a change that was reverted; a diff of the whole branch that does not touch them
+         either; and the later commits named in the log. The registration is read from the board,
+         the commit-by-commit reading and the diff of the whole branch from the history, everything
+         else from the log; a report on the ticket is no evidence, and what those do not show
+         counts as not met.
+
+         If the log says the change touches the workflow the gate names, read that diff as what
+         decides what the run measured.
+      2. The diff and the changed-file list: `git diff origin/<default branch>...HEAD`, the default
+         branch being the remote's (`git symbolic-ref --short refs/remotes/origin/HEAD` names it as
+         `origin/<name>`); same command with `--name-only` for the file list. If what you were
+         handed names a different base — the branch of a pull request this ticket rides along in —
+         use that branch's REMOTE form, `origin/<that branch>...HEAD`, and read a base named
+         without `origin/` as its remote form. Never diff against a bare local branch: the working
+         copy may have no local default branch at all, and `git diff main` then fails. Your role
+         names no base of its own; any other base you were given — an older wording of this list
+         included — is replaced by this one for the round. Only uncommitted changes and no branch
+         commits: `git diff HEAD`.
+      3. The ticket this run was addressed with (the id on `--ref nxf_ids=`), with its definition
+         of done: `nxf show <id>`.
+
+         A ticket cut from a judged design carries Mediums that review let through to be fixed
+         HERE: every line of its definition of done marked "must-fix (design review)" that this
+         change does not deliver is at least Medium. Beyond that, the threshold and the rubric of
+         your role at a change apply unchanged.
+  # No `next:` — this ends the run. The back edge is real: the finisher proves the tree is still
+  # the one the verifier measured, and a tree that moved goes back.
+  - id: finish
+    target: finisher
+    on_needs_rework: build
+    max_passes: 3
+    # BOTH, and neither is optional. The verdict is what it must weigh before putting the branch
+    # up; the verifier's reply carries the commit hash its whole first rung rests on — "prove the
+    # tree is the one that was verified". The default would give it only the verdict, because the
+    # judge step is the one immediately before it.
+    input: [verify, judge]
+description: >-
+  The `coding` chain — one ticket from nothing to a pull request: build, verify, a review round of
+  three, finish — run on the NEW run engine (nxc rebuild, slice 1) in the workspace's own `-v2`
+  clone instead of the registered root. Commissioned from the terminal only, while the new engine
+  is being proved; not for personas, who keep commissioning `coding`. Address it with the ticket's
+  id on `--ref nxf_ids=`. Holds that clone for the whole run.
+timeout: 6h
+working_tree: exclusive
+visibility: all_members
