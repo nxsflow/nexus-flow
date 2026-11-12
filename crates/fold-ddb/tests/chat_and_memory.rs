@@ -30,7 +30,7 @@ impl Lcg {
 
 fn rows_of(conn: &Connection, table: &str) -> Vec<Vec<(String, String)>> {
     let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
-    let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
     let mut rows: Vec<Vec<(String, String)>> = stmt
         .query_map([], |r| {
             Ok(columns

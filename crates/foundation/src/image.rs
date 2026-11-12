@@ -516,7 +516,7 @@ impl From<rusqlite::Error> for ImageError {
 pub(crate) fn dump(conn: &Connection, table: &str, with_rowid: bool) -> rusqlite::Result<Table> {
     let select = if with_rowid { "rowid, *" } else { "*" };
     let mut stmt = conn.prepare(&format!("SELECT {select} FROM {table} ORDER BY rowid"))?;
-    let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
     let width = columns.len();
     let rows = stmt
         .query_map([], |r| {

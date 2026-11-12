@@ -254,6 +254,15 @@ impl Store {
         &self.conn
     }
 
+    /// The store's own connection, mutably — for a test that installs a SQLite hook on it
+    /// (authorizer, update/commit hook, busy handler). rusqlite takes `&mut Connection` for every
+    /// hook since 0.38, because a hook may only be registered on the connection that owns the
+    /// handle. Not part of any contract.
+    #[doc(hidden)]
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// This replica's site id — the second half of every `(lamport, site)` coordinate it writes,
     /// so a reader can tell which of a register's winning ops THIS replica wrote.
     pub fn site(&self) -> i64 {
@@ -2204,7 +2213,7 @@ mod tests {
         tx.commit().unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
-        s.connection()
+        s.connection_mut()
             .authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
                 if matches!(
                     ctx.action,
@@ -2213,7 +2222,8 @@ mod tests {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }
                 rusqlite::hooks::Authorization::Allow
-            }));
+            }))
+            .unwrap();
         s.emit(
             "tally",
             "tally",
@@ -2223,9 +2233,11 @@ mod tests {
             Some("mine".into()),
             "u",
         );
-        s.connection().authorizer(
-            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        );
+        s.connection_mut()
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .unwrap();
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             2,

@@ -6,7 +6,7 @@ description = "nxs platform foundation: the domain-agnostic op-log CRDT substrat
 publish = false
 
 [dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 ulid = "1"
 # Replica identity + workspace config are persisted as TOML in the `.nxs/` directory.
 serde = { version = "1", features = ["derive"] }
@@ -26,7 +26,7 @@ tempfile = "3"
 # `hooks` exposes `Connection::authorizer`, which the squatted-run test counts insert attempts
 # through (review of PR #489, Integrity #1) — DEV-ONLY, like the chat crate's identical line: the
 # library installs no callback and its own build of `rusqlite` is unchanged.
-rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint", "hooks"] }
 # The manifest contract is serialized to JSON by each module CLI; the foundation owns only the
 # typed shape, but its field-order contract test asserts the `--json` form here.
 serde_json = "1"

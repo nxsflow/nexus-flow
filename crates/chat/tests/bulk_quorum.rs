@@ -137,21 +137,23 @@ fn seed(dir: &Path) -> Vec<String> {
 ///
 /// The authorizer is removed again afterwards: it is installed on the connection, not on the call,
 /// and a counter left behind would silently keep counting somebody else's read.
-fn selects_prepared<T>(store: &ChatStore, read: impl FnOnce(&ChatStore) -> T) -> (T, usize) {
+fn selects_prepared<T>(store: &mut ChatStore, read: impl FnOnce(&ChatStore) -> T) -> (T, usize) {
     let counter = Arc::new(AtomicUsize::new(0));
     let ticker = Arc::clone(&counter);
     store
-        .connection()
+        .connection_mut()
         .authorizer(Some(move |ctx: AuthContext<'_>| {
             if matches!(ctx.action, AuthAction::Select) {
                 ticker.fetch_add(1, Ordering::SeqCst);
             }
             Authorization::Allow
-        }));
+        }))
+        .unwrap();
     let out = read(store);
     store
-        .connection()
-        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        .connection_mut()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
     (out, counter.load(Ordering::SeqCst))
 }
 
@@ -165,7 +167,7 @@ const _: fn() = || {
 fn a_set_of_threads_costs_the_same_number_of_queries_however_many_are_in_it() {
     let tmp = workspace();
     let ids = seed(tmp.path());
-    let store = Workspace::resolve(None, tmp.path())
+    let mut store = Workspace::resolve(None, tmp.path())
         .unwrap()
         .open_chat_store()
         .unwrap();
@@ -173,11 +175,11 @@ fn a_set_of_threads_costs_the_same_number_of_queries_however_many_are_in_it() {
     let two: Vec<&str> = ids[..2].iter().map(String::as_str).collect();
     let forty: Vec<&str> = ids[..40].iter().map(String::as_str).collect();
 
-    let (small, small_queries) = selects_prepared(&store, |s| {
+    let (small, small_queries) = selects_prepared(&mut store, |s| {
         facade::status(s, &DryWorker { log: None }, NOW, StatusScope::Threads(&two))
             .expect("status reads two threads")
     });
-    let (large, large_queries) = selects_prepared(&store, |s| {
+    let (large, large_queries) = selects_prepared(&mut store, |s| {
         facade::status(
             s,
             &DryWorker { log: None },
@@ -267,7 +269,7 @@ fn the_process_question_is_asked_once_per_session_however_many_threads_name_it()
     // two boards do.
     let tmp = workspace();
     let ids = seed(tmp.path());
-    let store = Workspace::resolve(None, tmp.path())
+    let mut store = Workspace::resolve(None, tmp.path())
         .unwrap()
         .open_chat_store()
         .unwrap();
@@ -276,12 +278,12 @@ fn the_process_question_is_asked_once_per_session_however_many_threads_name_it()
     let forty: Vec<&str> = ids[..40].iter().map(String::as_str).collect();
 
     let small_worker = CountingWorker::default();
-    let (_small, small_queries) = selects_prepared(&store, |s| {
+    let (_small, small_queries) = selects_prepared(&mut store, |s| {
         facade::status(s, &small_worker, NOW, StatusScope::Threads(&two))
             .expect("status reads two threads")
     });
     let large_worker = CountingWorker::default();
-    let (large, large_queries) = selects_prepared(&store, |s| {
+    let (large, large_queries) = selects_prepared(&mut store, |s| {
         facade::status(s, &large_worker, NOW, StatusScope::Threads(&forty))
             .expect("status reads forty threads")
     });
