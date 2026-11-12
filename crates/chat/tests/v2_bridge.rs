@@ -389,3 +389,121 @@ fn a_refusal_never_suggests_a_v2_channel_to_a_persona_and_does_to_the_terminal()
     let to_owner = send(&eng, the_owner(), "coder").expect_err("nor from the terminal");
     assert!(to_owner.msg.contains("coding-v2"), "{to_owner}");
 }
+
+// ---- once through the CLI --------------------------------------------------------------------
+
+/// The person at the terminal: no session stamps.
+fn nxc(dir: &Path) -> assert_cmd::Command {
+    let mut cmd = nxs_test_support::cargo_bin("nxc");
+    cmd.current_dir(dir)
+        .env_remove("NXC_SESSION")
+        .env_remove("NXC_DB")
+        .env("NXC_ACTOR", "owner")
+        .env("NXC_NOW", NOW)
+        .env("NXC_WORKER", "dry")
+        .env("NXC_DRY_LOG", dir.join("dry.log"));
+    cmd
+}
+
+/// A session, by the stamps a spawned session runs under.
+fn nxc_as(dir: &Path, handle: &str, session: &str) -> assert_cmd::Command {
+    let mut cmd = nxc(dir);
+    cmd.env("NXC_ACTOR", handle).env("NXC_SESSION", session);
+    cmd
+}
+
+fn json_out(cmd: &mut assert_cmd::Command) -> serde_json::Value {
+    let out = cmd.assert().success().get_output().stdout.clone();
+    serde_json::from_slice(&out).expect("one JSON record")
+}
+
+fn channel_names(listing: &serde_json::Value) -> Vec<String> {
+    listing["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn nxc_send_to_a_v2_channel_prints_the_root_id_at_once_and_the_status_read() {
+    let ws = workspace();
+    let receipt = json_out(nxc(ws.path()).args([
+        "--json",
+        "send",
+        "--to",
+        "coding-v2",
+        "--ref",
+        "nxf_ids=6j6v.b8tj",
+        "build it",
+    ]));
+    let root = receipt["thread_id"].as_str().unwrap().to_owned();
+    assert!(root.starts_with("m-"), "{receipt}");
+    assert_eq!(receipt["message_id"], serde_json::Value::Null);
+    assert_eq!(receipt["await"]["poll"][1], "status");
+    let store = nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+        .unwrap()
+        .unwrap();
+    assert!(store.get(&format!("thread/{root}")).unwrap().is_some());
+
+    let out = nxc(ws.path())
+        .args(["send", "--to", "coding-v2", "--no-ref", "and again"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human = String::from_utf8_lossy(&out);
+    assert!(human.contains("nxc status --thread m-"), "{human}");
+    assert!(
+        !human.contains("--stream"),
+        "a run is not followed by --stream yet: {human}"
+    );
+}
+
+#[test]
+fn nxc_list_hides_v2_channels_from_a_persona_and_a_v2_session_and_shows_them_at_the_terminal() {
+    let ws = workspace();
+    let persona = persona_session(ws.path(), "reviewer");
+    let v2 = v2_session(ws.path());
+    assert!(
+        channel_names(&json_out(nxc(ws.path()).args(["--json", "list"])))
+            .contains(&"coding-v2".to_owned())
+    );
+    for (handle, session) in [("reviewer", persona.as_str()), ("coder", v2.as_str())] {
+        let listing = json_out(nxc_as(ws.path(), handle, session).args(["--json", "list"]));
+        assert!(
+            !channel_names(&listing).contains(&"coding-v2".to_owned()),
+            "{handle}: {listing}"
+        );
+    }
+}
+
+#[test]
+fn nxc_send_refuses_a_persona_to_a_v2_channel_and_a_v2_session_to_anything() {
+    let ws = workspace();
+    let persona = persona_session(ws.path(), "reviewer");
+    let v2 = v2_session(ws.path());
+    let before = chat_ops(ws.path());
+    let refused = |cmd: &mut assert_cmd::Command| {
+        let out = cmd.assert().failure().get_output().stderr.clone();
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let persona_says = refused(nxc_as(ws.path(), "reviewer", &persona).args([
+        "send",
+        "--to",
+        "coding-v2",
+        "--no-ref",
+        "build it",
+    ]));
+    assert!(
+        persona_says.contains("runs on the new engine"),
+        "{persona_says}"
+    );
+    let v2_says = refused(
+        nxc_as(ws.path(), "coder", &v2).args(["send", "--to", "reviewer", "--no-ref", "look"]),
+    );
+    assert!(v2_says.contains("`nxc reply --escalate`"), "{v2_says}");
+    assert_eq!(chat_ops(ws.path()), before, "nothing written");
+}

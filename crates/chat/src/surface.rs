@@ -355,12 +355,7 @@ pub(crate) fn resolve_caller(
     crate::persona::Identity,
     Option<crate::v2_bridge::V2Session>,
 )> {
-    let v2 = crate::v2_bridge::session_of(ctx.db_path, ctx.origin, ctx.defs, ctx.session)?;
-    let identity = match &v2 {
-        Some(session) => crate::persona::Identity::Persona(session.handle.clone()),
-        None => crate::persona::resolve_identity(store, ctx.defs.roles(), None, ctx.session)?,
-    };
-    Ok((identity, v2))
+    crate::v2_bridge::resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)
 }
 
 /// What to tell a caller the target does not admit (nxf 6j6v.st83) — **who may, and where this

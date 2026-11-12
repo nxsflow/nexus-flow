@@ -115,6 +115,29 @@ pub fn session_of(
     }))
 }
 
+/// **Who is calling, with the v2 lookup first** — the one resolution every caller check of both engines
+/// goes through (§10): an explicit `--persona` is the claim a host made and stands; otherwise a session of a
+/// run on the new engine is the persona its slot runs, and only then does the old session map answer.
+pub fn resolve_caller(
+    store: &crate::store::ChatStore,
+    defs: &Definitions,
+    declared: Option<&str>,
+    session: Option<&str>,
+    db_path: &str,
+    origin: &str,
+) -> Result<(crate::persona::Identity, Option<V2Session>)> {
+    if declared.is_some() {
+        let identity = crate::persona::resolve_identity(store, defs.roles(), declared, session)?;
+        return Ok((identity, None));
+    }
+    let v2 = session_of(db_path, origin, defs, session)?;
+    let identity = match &v2 {
+        Some(v2) => crate::persona::Identity::Persona(v2.handle.clone()),
+        None => crate::persona::resolve_identity(store, defs.roles(), None, session)?,
+    };
+    Ok((identity, v2))
+}
+
 /// No v2 session commissions in this slice (§10).
 pub fn session_cannot_send(session: &V2Session) -> NxfError {
     NxfError::forbidden(format!(
