@@ -409,3 +409,56 @@ fn reply_gets_the_same_treatment_because_whoever_hands_a_turn_back_is_in_the_sam
     assert!(out.starts_with("replied m-"), "{out}");
     assert!(out.contains("The answer lands in this thread."), "{out}");
 }
+
+/// **The v2 root** (6j6v.b8tj; epic 6j6v.zjyv §10): a channel on the new engine is answered through
+/// `nxc status`, whose `open` reaches 0 when the run finishes — `threads show`'s `complete` is never reached by
+/// a v2 root thread, so naming it would be a promise the payload cannot keep. The human line names the status
+/// read; the record names it as argv, with the predicates of THAT payload, and the conversation as the read the
+/// answer sits in.
+///
+/// What this cannot hold yet: that the predicates are true of `nxc status --json` on a v2 thread, as
+/// `the_done_predicate_holds_against_the_payload_it_names` does for v1 — the status mapping of a v2 thread is
+/// 6j6v.y6v7's, and that test belongs there.
+#[test]
+fn a_v2_channel_names_the_status_read_and_the_run_finished_predicate() {
+    let tmp = workspace();
+    let channels = tmp.path().join(".nxs-personas").join("channels.yaml");
+    let mut declared = std::fs::read_to_string(&channels).unwrap();
+    declared.push_str(
+        "- name: coding-v2\n  engine: v2\n  members: []\n  working_tree: exclusive\n  steps:\n    - id: build\n      target: coder\n",
+    );
+    std::fs::write(&channels, declared).unwrap();
+
+    let line = stdout_of(human(&tmp).args(["send", "--to", "coding-v2", "--no-ref", "build it"]));
+    assert!(line.contains("nxc status --thread m-"), "{line}");
+    assert!(!line.contains("dm:"), "{line}");
+    assert!(
+        !line.contains("--stream"),
+        "nothing follows a v2 run yet: {line}"
+    );
+
+    let receipt =
+        json_of(human(&tmp).args(["--json", "send", "--to", "coding-v2", "--no-ref", "again"]));
+    let root = receipt["thread_id"].as_str().unwrap();
+    assert_eq!(
+        receipt["message_id"],
+        Value::Null,
+        "the host posts the root message"
+    );
+    let guidance = &receipt["await"];
+    assert_eq!(guidance["how"], "poll");
+    assert_eq!(
+        guidance["poll"],
+        serde_json::json!(["nxc", "status", "--thread", root, "--json"])
+    );
+    assert_eq!(guidance["done_when"], serde_json::json!({ "open": 0 }));
+    assert_eq!(
+        guidance["stopped_when"],
+        serde_json::json!({ "needs_decision": true, "awaiting_human": true })
+    );
+    assert_eq!(guidance["answer_at"], "messages[-1]");
+    assert_eq!(
+        guidance["answer_in"],
+        serde_json::json!(["nxc", "threads", "show", root, "--json"])
+    );
+}
