@@ -36,17 +36,20 @@ steps:
 
       Local branches can outlive a run in the working copy you start in: a branch an earlier run
       worked on there may still carry a commit that never reached the remote. So when you ride
-      along in a held pull request, check BOTH directions once you are on its branch, before you
-      build anything:
+      along in a held pull request, check BOTH directions the first time you take a branch in this
+      run, before you commit anything — "its branch" being the held pull request's branch, also
+      when you go on to build on `<its branch>--<ticket id>` off its tip:
 
           git rev-list --count HEAD..origin/<its branch>   # 0, or you are behind it
           git rev-list --count origin/<its branch>..HEAD   # 0, or the local branch holds commits the remote does not
 
-      A non-zero second count is a commit you did not make. Escalate with it — the output of
-      `git log --oneline origin/<its branch>..HEAD` and the branch it is on — rather than building
-      on it, resetting it or pushing it: whose work it is, and whether it ships, is not yours to
-      settle. The same holds for any branch you are about to build on or create — a
-      `git switch -c` refused because that branch already exists locally is the same finding.
+      A non-zero second count at that moment is a commit you did not make. Escalate with it — the
+      output of `git log --oneline origin/<its branch>..HEAD` and the branch it is on — rather than
+      building on it, resetting it or pushing it: whose work it is, and whether it ships, is not
+      yours to settle. The same holds when a `git switch -c` you are about to build on is refused
+      because that branch already exists locally. Once you have committed in this run, commits of
+      your own — from this pass or an earlier one handed back to you — are not this finding; only
+      a commit you did not make is.
 
       The agent sidecar: `agent-sidecar/node_modules/` and `agent-sidecar/dist/` are not tracked,
       so a fresh clone has neither. If your work touches `agent-sidecar/` and `node_modules/` is
@@ -146,9 +149,9 @@ steps:
          use that branch's REMOTE form, `origin/<that branch>...HEAD`, and read a base named
          without `origin/` as its remote form. Never diff against a bare local branch: the working
          copy may have no local default branch at all, and `git diff main` then fails. Your role
-         names no base of its own; any other base you were given — an older wording of this list
-         included — is replaced by this one for the round. Only uncommitted changes and no branch
-         commits: `git diff HEAD`.
+         names no base of its own; any base a role or an older wording of this list names is
+         replaced by this rule, while a base named by what you were handed is used in its remote
+         form, as above. Only uncommitted changes and no branch commits: `git diff HEAD`.
       3. The ticket this run was addressed with (the id on `--ref nxf_ids=`), with its definition
          of done: `nxf show <id>`.
 
@@ -168,11 +171,12 @@ steps:
     # judge step is the one immediately before it.
     input: [verify, judge]
 description: >-
-  The `coding` chain — one ticket from nothing to a pull request: build, verify, a review round of
-  three, finish — run on the NEW run engine (nxc rebuild, slice 1) in the workspace's own `-v2`
-  clone instead of the registered root. Commissioned from the terminal only, while the new engine
-  is being proved; not for personas, who keep commissioning `coding`. Address it with the ticket's
-  id on `--ref nxf_ids=`. Holds that clone for the whole run.
+  The `coding` chain — one ticket from nothing to a pull request: build, verify, the review round,
+  finish — run on the NEW run engine (nxc rebuild, slice 1) in the workspace's own `-v2` clone,
+  from the bridge (6j6v.b7ck) on; until then it runs as `coding` does, in the root. Commissioned
+  from the terminal only, while the new engine is being proved; not for personas, who keep
+  commissioning `coding`. Address it with the ticket's id on `--ref nxf_ids=`. Holds its working
+  copy for the whole run.
 timeout: 6h
 working_tree: exclusive
 visibility: all_members
