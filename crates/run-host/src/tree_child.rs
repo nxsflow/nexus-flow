@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::tree_worker::StepOutput;
-use nexus_run_session_claude::procs::ProcessGuard;
+use nexus_run_session_claude::procs::{self, ProcessGuard};
 
 /// What one stream of one child may hold in memory. What is past it is read and dropped, so the child never
 /// blocks on a full pipe. Every call the tree parses is far below this, and a dirty status is dirty at any length.
@@ -194,6 +194,13 @@ pub(crate) fn group_gone_soon(guard: &dyn ProcessGuard, pgid: u32) -> bool {
     true
 }
 
+fn now_ms() -> Option<i64> {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    i64::try_from(since_epoch.as_millis()).ok()
+}
+
 /// One child with nobody's ledger behind it: the status read of the CLI process. In its own group, killed by group
 /// at the bound, with the same collection rule.
 pub(crate) fn run_bounded(
@@ -206,10 +213,16 @@ pub(crate) fn run_bounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     own_process_group(&mut command);
+    let before_spawn = now_ms();
     let mut child = command
         .spawn()
         .map_err(|error| format!("git did not start: {error}"))?;
-    let start_time = guard.start_time(child.id());
+    // git can be gone before its start is read: a `sleep & exit` takes milliseconds, a preempted reader longer, and a
+    // zombie has no start to read. Then the instant before the spawn stands for it, which is what a member's start is
+    // compared against: whatever started with git or after it (6j6v.zame).
+    let start_time = guard
+        .start_time(child.id())
+        .or_else(|| before_spawn.map(procs::start_text));
     let output = Output::collect(&mut child);
     let until = Instant::now() + bound;
     loop {

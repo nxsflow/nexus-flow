@@ -256,6 +256,12 @@ fn a_helper_holding_the_pipe_of_a_status_read_is_ended() {
         .trim()
         .parse()
         .unwrap();
+    // A SIGKILL sent is not yet a process gone: the read returns right after sending it, so a look at once can still
+    // find the helper running (measured on Linux, 6j6v.zame). A helper nobody signalled sleeps 600 s, far past this.
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    while pid_alive(helper) && Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let alive = pid_alive(helper);
     let _ = std::process::Command::new("kill")
         .args(["-KILL", &helper.to_string()])

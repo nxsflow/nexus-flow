@@ -66,12 +66,12 @@ fn locks_are_named_in_git_and_in_the_ref_tree_and_nowhere_else() {
 #[cfg(target_os = "linux")]
 #[test]
 fn probe_why_a_helper_outlives_the_status_read() {
+    use super::run_bounded;
     use nexus_run_session_claude::procs::{self, ProcessGuard, SystemProcesses};
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::process::Command;
     use std::sync::Mutex;
-    use super::run_bounded;
 
     struct Recording {
         start_none: AtomicUsize,
@@ -155,5 +155,60 @@ fn probe_why_a_helper_outlives_the_status_read() {
     eprintln!(
         "PROBE rounds={rounds} refused={refused} start_none={start_none} kill_sent={sent} alive_at_once={at_once} alive_after_300ms={later}"
     );
-    assert_eq!((at_once, later), (0, 0), "a helper outlived the status read");
+    let _ = at_once;
+    assert_eq!(later, 0, "a helper outlived the status read");
+}
+
+/// git can be gone before its start is read - a reader preempted for the few milliseconds a `sleep & exit` takes.
+/// The helper it left holding the pipe is still ended: the refusal never leaves a helper behind (6j6v.zame).
+#[cfg(unix)]
+#[test]
+fn a_helper_is_ended_though_git_was_gone_before_its_start_was_read() {
+    use super::run_bounded;
+    use nexus_run_session_claude::procs::{self, ProcessGuard, SystemProcesses};
+    use std::process::Command;
+
+    /// The system, read late: the reader comes back only after git has ended.
+    struct Late;
+    impl ProcessGuard for Late {
+        fn start_time(&self, pid: u32) -> Option<String> {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while procs::alive(pid) && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            SystemProcesses.start_time(pid)
+        }
+        fn kill_group(&self, pid: u32, start_time: &str) -> bool {
+            SystemProcesses.kill_group(pid, start_time)
+        }
+        fn group_gone(&self, pgid: u32) -> bool {
+            SystemProcesses.group_gone(pgid)
+        }
+        fn kill_members(&self, pgid: u32, leader_start: &str) -> bool {
+            SystemProcesses.kill_members(pgid, leader_start)
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let pid_file = temp.path().join("helper-pid");
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(r#"sleep 600 & echo $! > "$0"; exit 0"#)
+        .arg(&pid_file);
+
+    let read = run_bounded(command, Duration::from_secs(10), &Late);
+
+    let refused = read.expect_err("a read through a helper holding its pipe answered");
+    assert_eq!(refused, "a helper still holds git's output");
+    let helper: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the shell wrote its helper's pid")
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = procs::alive(helper);
+    let _ = Command::new("kill")
+        .args(["-KILL", &helper.to_string()])
+        .status();
+    assert!(!alive, "the helper stayed behind the read");
 }
