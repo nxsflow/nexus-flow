@@ -21,7 +21,9 @@ inspecting the exact message shape (this repo's tracer-bullet run is recorded in
 
 `node src/main.mjs --facts --spec <ledger dir>/spec.json` runs one session from the v2 start spec, calls no `nxc` and decides
 nothing: it appends what happens to `<ledger dir>/facts.jsonl` for `crates/run-session-claude`, which owns the spawn, the
-signals and what a fact means. See `src/facts.mjs`. The spec below is the old mode's.
+signals and what a fact means. See `src/facts.mjs`. The spec below is the old mode's. In the v2 start spec, `tools` is
+the old mode's `grantedTools` and `declared_tools` its `tools`, read under the same two rules below: absent leaves the base
+toolset unset, an array (even `[]`) restricts it.
 
 ### Spec file shape
 

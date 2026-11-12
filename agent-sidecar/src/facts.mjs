@@ -7,7 +7,13 @@
 
 import { appendFileSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveAllowedTools, resolveModelOption, resolveSettingsSourcesOption, STOPPED_EXIT_CODE } from "./spec-helpers.mjs";
+import {
+  resolveAllowedTools,
+  resolveModelOption,
+  resolveSettingsSourcesOption,
+  resolveToolsOption,
+  STOPPED_EXIT_CODE,
+} from "./spec-helpers.mjs";
 import { createNormalizer } from "./transcript.mjs";
 
 const MINUTE_MS = 60_000;
@@ -250,7 +256,9 @@ function sessionOptions(spec, stop) {
   const options = {
     systemPrompt,
     abortController: stop,
-    allowedTools: resolveAllowedTools(spec.tools, []),
+    // `declared_tools` is what the persona declares and `tools` what the engine grants (6j6v.547w): the old mode's
+    // `tools` and `grantedTools`, under the same two rules.
+    allowedTools: resolveAllowedTools(spec.declared_tools, spec.tools),
     permissionMode: spec.permissions ?? "default",
     cwd: spec.cwd,
     env,
@@ -260,6 +268,8 @@ function sessionOptions(spec, stop) {
     forwardSubagentText: true,
   };
   if (spec.resume) options.resume = spec.resume;
+  const tools = resolveToolsOption(spec.declared_tools, spec.tools);
+  if (tools !== undefined) options.tools = tools;
   const model = resolveModelOption(spec.model);
   if (model !== undefined) options.model = model;
   if (typeof spec.claude_path === "string" && spec.claude_path !== "") {
