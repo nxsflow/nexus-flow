@@ -164,3 +164,35 @@ fn the_receipt_of_a_v2_commission_says_to_poll_status_until_the_run_is_finished(
         "the answer is the newest message of the root thread"
     );
 }
+
+/// The inbox exists for inputs that arrive while no owner is alive, so the send goes through either way;
+/// what differs is that the receipt says nobody attends (§8.1).
+#[test]
+fn a_v2_commission_with_no_service_attending_says_so_and_one_attended_says_nothing() {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let unattended = send(&eng, the_owner(), "coding-v2").expect("commissioned all the same");
+    let record = serde_json::to_value(&unattended).unwrap();
+    let warnings = record["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{record}");
+    assert_eq!(warnings[0]["class"], "service_not_running");
+    assert!(
+        warnings[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no service attends this workspace — `nxs service status`"),
+        "{record}"
+    );
+
+    let store = nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+        .unwrap()
+        .unwrap();
+    store
+        .mark_host_seen(
+            &eng.origin(),
+            nexus_run_contracts::Timestamp::parse(NOW).unwrap(),
+        )
+        .unwrap();
+    let attended = send(&eng, the_owner(), "coding-v2").expect("commissioned");
+    assert!(attended.warnings.is_empty(), "{:?}", attended.warnings);
+}

@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nexus_run_contracts::{LivenessPolicy, Timestamp};
-use nexus_run_host::bridge::{self, BridgeCtx, Refused, SqliteRunStore};
+use nexus_run_host::bridge::{self, BridgeCtx, Refused, SqliteRunStore, LEASE_EXPIRY};
 use nexus_run_host::Layout;
 
 use crate::awaiting::Await;
 use crate::definitions::Definitions;
 use crate::error::{NxfError, Result};
 use crate::model::Refs;
-use crate::orchestration::Ctx;
+use crate::orchestration::{Ctx, FailedConsequence};
 use crate::ports_v1::V1Ports;
 use crate::surface::{SendToReceipt, TargetKind};
 
@@ -32,6 +32,9 @@ use crate::surface::{SendToReceipt, TargetKind};
 pub fn run_sqlite(db_path: &str) -> PathBuf {
     Path::new(db_path).with_file_name("run.sqlite")
 }
+
+/// What `nxs service status` is for, said where a send to a v2 channel finds nobody attending (§8.1).
+pub const NOT_ATTENDED: &str = "no service attends this workspace — `nxs service status`";
 
 /// The workspace root the `.nxs` directory of `db_path` sits in, and where the agent logs are kept.
 fn layout(db_path: &str) -> Layout {
@@ -85,7 +88,14 @@ pub fn commission(
     let now = Timestamp::parse(ctx.now)
         .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", ctx.now)))?;
     let sender = format!("{}/{}", ctx.origin, ctx.actor);
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
+    if !attended(&bridge, now).map_err(|r| refusal_of(&path, r))? {
+        eprintln!("warning: {NOT_ATTENDED}");
+        warnings.push(FailedConsequence::service_not_running(
+            channel,
+            NOT_ATTENDED.to_owned(),
+        ));
+    }
     let receipt = bridge::commission(
         &bridge,
         channel,
@@ -123,4 +133,13 @@ pub fn commission(
         refs_warning,
         await_: Await::run(&root),
     })
+}
+
+/// Whether a service has stepped this workspace's runs within two lease expiries (§8.1).
+fn attended(ctx: &BridgeCtx, now: Timestamp) -> std::result::Result<bool, Refused> {
+    let window = 2 * LEASE_EXPIRY.0 as i64 * 1000;
+    Ok(ctx
+        .store
+        .host_seen(&ctx.workspace_id)?
+        .is_some_and(|at| now.unix_millis() - at.unix_millis() <= window))
 }
