@@ -240,11 +240,32 @@ impl Bench {
     pub fn fake_git(&self, body: &str) -> PathBuf {
         let real = which_git();
         let path = self.temp.path().join("fake-git");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\nexec {real} \"$@\"\n"))
-            .expect("the program");
-        make_executable(&path);
+        write_program(&path, &format!("#!/bin/sh\n{body}\nexec {real} \"$@\"\n"));
         path
     }
+}
+
+/// A program a test runs, written by a process of its own. Written here, its file would be open for writing in
+/// this process for a moment, and a child another test thread forks in that moment holds that descriptor until it
+/// execs: on Linux, running the program then fails with ETXTBSY ("Text file busy"), and the call under test fails
+/// before the program ran (6j6v.zame). `cp` holds the only descriptor that ever writes it, and has exited when this
+/// returns.
+pub fn write_program(path: &Path, content: &str) {
+    let source = path.with_extension("source");
+    std::fs::write(&source, content).expect("the program's text");
+    let copied = Command::new("cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .expect("cp runs");
+    assert!(
+        copied.success(),
+        "cp {} {}",
+        source.display(),
+        path.display()
+    );
+    let _ = std::fs::remove_file(&source);
+    make_executable(path);
 }
 
 pub fn make_executable(path: &Path) {

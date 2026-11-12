@@ -238,14 +238,21 @@ fn a_real_tool_that_only_sleeps_reaches_no_movement() {
 }
 
 /// The same tool, and a new process appears because the test says so: no CPU counter is involved.
+///
+/// The new process is started with `&`, never as the shell's last command: a shell may run that one in its own pid,
+/// as the old `exec sleep 600` did, and the first sample may have caught the shell before its loop, so the cue can be there
+/// before any `sleep 0.05` ran. Then nothing new ever appears, the pid and its start stay, and Linux counts CPU in
+/// ticks of 10 ms that an exec does not reach: measured on Linux, 1 round in 450 never moved (6j6v.nap3).
 #[test]
 fn a_real_tool_with_a_new_process_moves_though_no_call_is_open() {
     let bench = Bench::new();
     let backend = bench.backend();
     let cue = bench.ledger_dir(KEY).join("next");
+    let after = bench.ledger_dir(KEY).join("after");
     let script = format!(
-        "while [ ! -e {0} ]; do sleep 0.05; done; exec sleep 600",
-        cue.display()
+        "while [ ! -e {0} ]; do sleep 0.05; done; sleep 600 & echo $! > {1}; wait",
+        cue.display(),
+        after.display()
     );
     backend
         .start(&bench.spec(
@@ -259,10 +266,11 @@ fn a_real_tool_with_a_new_process_moves_though_no_call_is_open() {
         sampled_moves(&bench, KEY, &backend, &mut offset) > 0
     });
     std::fs::write(&cue, b"").unwrap();
+    let new = left_pid(&bench, KEY, "after");
 
-    until("the lineup moved", || {
-        sampled_moves(&bench, KEY, &backend, &mut offset) > 0
-    });
+    // Nothing was sampled since the cue, and the new process lives: the very next sample has to see it, and move.
+    assert_eq!(sampled_moves(&bench, KEY, &backend, &mut offset), 1);
+    assert!(backend_work(&bench).contains(&new));
 
     let tool = left_pid(&bench, KEY, "tool");
     assert!(matches!(
@@ -273,6 +281,7 @@ fn a_real_tool_with_a_new_process_moves_though_no_call_is_open() {
         })
     ));
     kill_hard(tool);
+    kill_hard(new);
     kill_hard(pid);
 }
 

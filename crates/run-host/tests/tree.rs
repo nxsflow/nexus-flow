@@ -943,12 +943,10 @@ fn a_failing_post_commit_hook_does_not_run_and_does_not_fail_the_park() {
     for hook in ["pre-commit", "post-commit", "commit-msg"] {
         let path = bench.dir.join(".git/hooks").join(hook);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
+        write_program(
             &path,
-            format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display()),
-        )
-        .unwrap();
-        make_executable(&path);
+            &format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display()),
+        );
     }
     std::fs::write(bench.dir.join("stray.rs"), b"work").unwrap();
     assert!(matches!(
@@ -1279,7 +1277,7 @@ mod under_a_host {
     };
     use nexus_run_host::{LeaseView, TreeLedger, WorkTree};
 
-    use super::{hermetic, make_executable, run_git, snapshot, until, which_git};
+    use super::{hermetic, run_git, snapshot, until, which_git, write_program};
     use crate::common::tree::group_members;
 
     fn silent(_: &SessionInfo) -> Cue {
@@ -1368,16 +1366,14 @@ mod under_a_host {
         hermetic();
         let count = dir.join("fetches");
         let git = dir.join("fake-git");
-        std::fs::write(
+        write_program(
             &git,
-            format!(
+            &format!(
                 "#!/bin/sh\ncase \"$*\" in *\"fetch -q\"*)\n  echo x >> {count}\n  if [ \"$(wc -l < {count})\" -le 3 ]; then echo 'the network is down' >&2; exit 1; fi;;\nesac\nexec {real} \"$@\"\n",
                 count = count.display(),
                 real = which_git(),
             ),
-        )
-        .unwrap();
-        make_executable(&git);
+        );
         let mut rig = Rig::git_tree_using(
             &dir,
             CLOCK_START,

@@ -246,12 +246,22 @@ fn a_helper_holding_the_pipe_of_a_status_read_is_ended() {
 
     let read = nexus_run_host::git_tree::tree_state_with_git(&git, &bench.root, &bench.dir);
 
-    assert!(read.is_err(), "{read:?}");
+    // The one refusal this test builds. Any other — git not starting, the bound — ends the read before the helper
+    // exists, and says nothing about whether a helper is ended (6j6v.zame).
+    let refused = read.expect_err("a status read through a helper holding its pipe answered");
+    assert_eq!(refused.what, "a helper still holds git's output");
+    // Written before the fake git exited, and the refusal above comes only after that exit.
     let helper: u32 = std::fs::read_to_string(&pid_file)
-        .unwrap()
+        .expect("the fake git wrote its helper's pid")
         .trim()
         .parse()
         .unwrap();
+    // A SIGKILL sent is not yet a process gone: the read returns right after sending it, so a look at once can still
+    // find the helper running (measured on Linux, 6j6v.zame). A helper nobody signalled sleeps 600 s, far past this.
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    while pid_alive(helper) && Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let alive = pid_alive(helper);
     let _ = std::process::Command::new("kill")
         .args(["-KILL", &helper.to_string()])
@@ -276,4 +286,39 @@ fn the_remedy_of_a_bisect_says_how_a_bisect_ends() {
             what: nexus_run_contracts::SequenceKind::Bisect
         }
     );
+}
+
+/// What made `a_helper_holding_the_pipe_of_a_status_read_is_ended` red on main (6j6v.zame): a program written in this
+/// process can be busy when it is run while other threads fork, and the call fails before it ran. On Linux an
+/// in-process write was busy in 10 to 24 of 300 tries (isolated run 43030614686); macOS never refuses, so there
+/// this passes either way.
+#[test]
+fn a_program_a_test_writes_runs_while_other_threads_fork() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let temp = tempfile::tempdir().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let forkers: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        })
+        .collect();
+    let busy = (0..300)
+        .filter(|i| {
+            let program = temp.path().join(format!("program-{i}"));
+            write_program(&program, "#!/bin/sh\nexit 0\n");
+            std::process::Command::new(&program)
+                .status()
+                .is_err_and(|error| error.raw_os_error() == Some(26))
+        })
+        .count();
+    stop.store(true, Ordering::SeqCst);
+    for forker in forkers {
+        forker.join().unwrap();
+    }
+    assert_eq!(busy, 0, "programs busy when run");
 }
