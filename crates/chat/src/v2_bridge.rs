@@ -71,6 +71,14 @@ fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     }
 }
 
+/// No persona commissions a v2 run in this slice (owner decision of 2026-11-04, §10).
+pub fn persona_cannot_send(channel: &str) -> NxfError {
+    NxfError::forbidden(format!(
+        "{channel} runs on the new engine, which cannot yet answer a persona; commission it from the \
+         terminal until the personas move (6j6v.2vtw) — nothing was sent"
+    ))
+}
+
 /// **A terminal's send to a v2 channel**: one transaction in `run.sqlite` opens the run, and the receipt
 /// carries the root thread it minted at once. Nothing is posted here — the host posts the root message once
 /// the run's log can answer for it (§6.4 item 1), which is why `message_id` is `None`.
@@ -88,14 +96,7 @@ pub fn commission(
     let now = Timestamp::parse(ctx.now)
         .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", ctx.now)))?;
     let sender = format!("{}/{}", ctx.origin, ctx.actor);
-    let mut warnings = Vec::new();
-    if !attended(&bridge, now).map_err(|r| refusal_of(&path, r))? {
-        eprintln!("warning: {NOT_ATTENDED}");
-        warnings.push(FailedConsequence::service_not_running(
-            channel,
-            NOT_ATTENDED.to_owned(),
-        ));
-    }
+    let attended = attended(&bridge, now).map_err(|r| refusal_of(&path, r))?;
     let receipt = bridge::commission(
         &bridge,
         channel,
@@ -114,6 +115,14 @@ pub fn commission(
         );
     }
     let root = receipt.root_thread;
+    let mut warnings = Vec::new();
+    if !attended {
+        eprintln!("warning: {NOT_ATTENDED}");
+        warnings.push(FailedConsequence::service_not_running(
+            &root,
+            NOT_ATTENDED.to_owned(),
+        ));
+    }
     Ok(SendToReceipt {
         thread_id: root.clone(),
         message_id: None,

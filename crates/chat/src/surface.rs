@@ -531,8 +531,11 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
         }
         // v2-bridge: deleted with the old engine (6j6v.2vtw) — THE SWITCH (6j6v.zjyv §10): a channel on
         // the new engine is commissioned through `run_host::commission`, and `channel_open` is never
-        // entered for it.
+        // entered for it. No persona commissions one in this slice.
         if engine == crate::channel::RunEngine::V2 {
+            if persona {
+                return Err(crate::v2_bridge::persona_cannot_send(req.to));
+            }
             return crate::v2_bridge::commission(ctx, req.to, req.body, refs, refs_warning);
         }
         let receipt = orchestration::channel_open(

@@ -10,6 +10,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use nexus_chat::engine::{Engine, EngineConfig};
+use nexus_chat::error::ErrorKind;
 use nexus_chat::model::Refs;
 use nexus_chat::orchestration::Caller;
 use nexus_chat::store::ChatStore;
@@ -65,6 +66,23 @@ fn chat_store(dir: &Path) -> ChatStore {
         .expect("resolve workspace")
         .open_chat_store()
         .expect("open chat store")
+}
+
+/// Every write to the chat store is an op: the count is what "before anything is written" is measured by.
+fn chat_ops(dir: &Path) -> i64 {
+    rusqlite::Connection::open(dir.join(".nxs").join("db.sqlite"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM ops", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// A session the old engine started for `handle`, as its session map records it.
+fn persona_session(dir: &Path, handle: &str) -> String {
+    let session = format!("s-{handle}");
+    chat_store(dir)
+        .create_pending_session(&session, handle)
+        .unwrap();
+    session
 }
 
 fn run_sqlite(dir: &Path) -> PathBuf {
@@ -176,6 +194,10 @@ fn a_v2_commission_with_no_service_attending_says_so_and_one_attended_says_nothi
     let warnings = record["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{record}");
     assert_eq!(warnings[0]["class"], "service_not_running");
+    assert_eq!(
+        warnings[0]["thread"], record["thread_id"],
+        "about the run's root"
+    );
     assert!(
         warnings[0]["detail"]
             .as_str()
@@ -195,4 +217,39 @@ fn a_v2_commission_with_no_service_attending_says_so_and_one_attended_says_nothi
         .unwrap();
     let attended = send(&eng, the_owner(), "coding-v2").expect("commissioned");
     assert!(attended.warnings.is_empty(), "{:?}", attended.warnings);
+}
+
+/// No persona commissions a v2 run in slice 1 (owner, 2026-11-04): the list hides the channel, and the send
+/// refuses it, because `coding` keeps its name when it switches and a prompt names it in prose (§10).
+#[test]
+fn a_persona_sessions_send_to_a_v2_channel_is_refused_before_anything_is_written() {
+    let ws = workspace();
+    let session = persona_session(ws.path(), "reviewer");
+    let before = chat_ops(ws.path());
+    let refused = send(
+        &engine(ws.path()),
+        Caller {
+            session: Some(&session),
+            actor: Some("reviewer"),
+            now: Some(NOW),
+        },
+        "coding-v2",
+    )
+    .expect_err("a persona does not commission the new engine");
+
+    assert_eq!(refused.kind, ErrorKind::Forbidden, "{refused}");
+    assert!(
+        refused.msg.contains("coding-v2 runs on the new engine")
+            && refused.msg.contains("commission it from the terminal"),
+        "says why and what to do: {refused}"
+    );
+    assert_eq!(
+        chat_ops(ws.path()),
+        before,
+        "nothing written to the chat store"
+    );
+    assert!(
+        !run_sqlite(ws.path()).exists(),
+        "and nothing to the run store"
+    );
 }
