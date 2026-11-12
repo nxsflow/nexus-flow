@@ -77,6 +77,7 @@ impl Bench {
             resume: None,
             model: None,
             tools: Vec::new(),
+            declared_tools: None,
             permissions: None,
             ledger_dir: self.ledger_dir(key).to_string_lossy().into_owned(),
         }

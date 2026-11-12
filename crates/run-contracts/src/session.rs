@@ -38,7 +38,14 @@ pub struct StartSpec {
     /// The backend session id to resume, per run.
     pub resume: Option<String>,
     pub model: Option<String>,
+    /// The tools the engine GRANTS: auto-approved inside the base toolset, never widening it.
     pub tools: Vec<String>,
+    /// The tools the persona DECLARES, which restrict the backend's base toolset (6j6v.547w). Absent is no
+    /// declaration and leaves the base toolset whole; `[]` is a declaration of nothing, narrowing the base toolset
+    /// to what the grant needs. Added after the freeze of v1, tolerated by every reader of it, and absent from the
+    /// wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_tools: Option<Vec<String>>,
     /// The permission mode the persona declares, as the SDK names it. Absent is the SDK's default mode. Added after the
     /// freeze of v1, tolerated by every reader of it, and absent from the wire when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -74,7 +74,9 @@ pub struct PersonaDecl {
     pub handle: Handle,
     pub model: Option<String>,
     pub permissions: Option<String>,
-    pub tools: Vec<String>,
+    /// The `tools:` the persona declares. `None` is no declaration, which leaves the base toolset whole; `Some([])`
+    /// declares nothing, which narrows it to what the grant needs (the old sidecar's `resolveToolsOption`).
+    pub tools: Option<Vec<String>>,
     pub resume_session: bool,
 }
 

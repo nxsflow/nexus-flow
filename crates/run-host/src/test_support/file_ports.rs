@@ -231,6 +231,16 @@ impl DeclarationPort for FilePorts {
             handle: handle.to_owned(),
             model: Some("a-model".to_owned()),
             permissions: Some("acceptEdits".to_owned()),
+            // A reviewer declared read-only, a verifier that declares nothing, and the rest undeclared.
+            tools: match handle {
+                "integrity" => Some(vec![
+                    "Read".to_owned(),
+                    "Grep".to_owned(),
+                    "Glob".to_owned(),
+                ]),
+                "verifier" => Some(Vec::new()),
+                _ => None,
+            },
             ..PersonaDecl::default()
         })
     }

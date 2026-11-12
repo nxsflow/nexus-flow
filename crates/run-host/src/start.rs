@@ -231,7 +231,7 @@ impl Host {
     ) -> Result<Option<StartSpec>, StoreError> {
         let handle = slot.member.as_str();
         let declarations = &self.ports.declarations;
-        let (prompt, tools, model, permissions) = if handle == SYNTH {
+        let (prompt, tools, declared_tools, model, permissions) = if handle == SYNTH {
             let model = match &step.kind {
                 StepKind::FanOut {
                     synthesis: Some(synthesis),
@@ -246,6 +246,8 @@ impl Host {
                     declaration_hash: state.flow_hash.clone(),
                 },
                 vec!["Bash(nxc reply:*)".to_owned()],
+                // No persona and so nothing declared of its own: the grant is all the base toolset holds.
+                Some(Vec::new()),
                 model,
                 None,
             )
@@ -263,6 +265,7 @@ impl Host {
                     declaration_hash: bundle.declaration_hash,
                 },
                 bundle.granted_tools,
+                persona.tools,
                 persona.model,
                 persona.permissions,
             )
@@ -289,6 +292,7 @@ impl Host {
             resume,
             model,
             tools,
+            declared_tools,
             permissions,
             ledger_dir: layout
                 .ledger_dir(session_key)
