@@ -646,7 +646,31 @@ pub const PERSONA_INSTRUCTIONS: &[&str] = &[
     "`nxc list` shows who you can address and what for.",
 ];
 
+/// **How a session of a run on the NEW engine uses `nxc`** (6j6v.zjyv §5, §10) — [`PERSONA_INSTRUCTIONS`]
+/// without every sentence that commissions: such a session cannot `nxc send` in slice 1, because no slot
+/// state says "waiting on my own commission" and the old engine's answer would wake a second session beside
+/// the slot. The thread to answer in and how to end the turn are the HOST's obligation block, written into the
+/// turn itself, so neither is repeated here.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub const PERSONA_INSTRUCTIONS_V2: &[&str] = &[
+    "Answer in the thread your turn names, with the command it gives: `nxc reply --thread <id> - \
+     <<'EOF'`, your text, then `EOF` on its own line. The `-` reads the message from STDIN, where \
+     the shell evaluates nothing in it — a one-line answer may be an argument instead, longer text \
+     must not, because backticks, `$(…)` and quotes in it are rewritten before nxc sees them.",
+    "A session of a run on the new engine cannot commission in this slice — ask for what you need \
+     with `nxc reply --escalate`, and whoever commissioned the run answers you in the same thread. \
+     Never ask in a plain reply: that ends your turn and the run moves on.",
+];
+
 impl PersonaBrief {
+    /// The same brief, for a session of a run on the new engine: [`PERSONA_INSTRUCTIONS_V2`] in place of
+    /// the old engine's instructions, and nothing else changed.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    pub fn for_v2(mut self) -> PersonaBrief {
+        self.instructions = PERSONA_INSTRUCTIONS_V2;
+        self
+    }
+
     /// Build the brief from a persona's own declaration, and from the channels that cast it —
     /// which is where "how am I reached" now comes from (nxf 6j6v.g0yn), rather than from a list
     /// the persona repeats about itself.

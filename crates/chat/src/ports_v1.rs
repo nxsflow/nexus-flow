@@ -14,16 +14,19 @@
 // v2-bridge: deleted with the old engine (6j6v.2vtw)
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use nexus_run_contracts::MessageId;
 use nexus_run_host::ports::{
     self, DeclarationPort, Message, MessagePort, PersonaDecl, PortError, PortResult, PromptBundle,
-    PromptFor, SidecarPort, TurnPart,
+    PromptFor, SidecarPort, TurnKind, TurnPart,
 };
 
+use crate::channel::CollectedReply;
 use crate::definitions::Definitions;
+use crate::facade::{ModulePrimes, PrimeFor};
 use crate::model::{Disposition, MessageEnvelope, MessageKind, Priority, Refs, ThreadRoot};
+use crate::role::{ClaudeMd, SessionPolicy};
 use crate::store::ChatStore;
 use crate::workspace::{ChatWorkspaceExt, Workspace};
 
@@ -38,6 +41,9 @@ pub struct V1Ports {
     db_path: String,
     origin: String,
     defs: Definitions,
+    project_claude_md: Option<String>,
+    module_primes: Option<Arc<dyn ModulePrimes>>,
+    sidecar: Option<PathBuf>,
     /// Opened on first use: a commission reads no message, and a store it never touches is not opened.
     store: OnceLock<Mutex<ChatStore>>,
 }
@@ -59,8 +65,31 @@ impl V1Ports {
             db_path: db_path.to_owned(),
             origin: origin.to_owned(),
             defs,
+            project_claude_md: None,
+            module_primes: None,
+            sidecar: None,
             store: OnceLock::new(),
         }
+    }
+
+    /// Composed from the REGISTERED root: its `.nxs-personas` and the user-level folder, and its own
+    /// `CLAUDE.md` — what the service's host passes, whichever directory a session runs in.
+    pub fn for_root(root: &Path, db_path: &str, origin: &str) -> crate::error::Result<V1Ports> {
+        let mut ports = V1Ports::with_definitions(db_path, origin, Definitions::resolve(root)?);
+        ports.project_claude_md = std::fs::read_to_string(root.join("CLAUDE.md")).ok();
+        Ok(ports)
+    }
+
+    /// The sibling modules' blocks (`nxf prime`, `nxm prime`), which only the umbrella can compose.
+    pub fn with_module_primes(mut self, primes: Arc<dyn ModulePrimes>) -> V1Ports {
+        self.module_primes = Some(primes);
+        self
+    }
+
+    /// The sidecar bundle a session starts from, in place of the one this binary carries.
+    pub fn with_sidecar(mut self, bundle: PathBuf) -> V1Ports {
+        self.sidecar = Some(bundle);
+        self
     }
 
     fn store(&self) -> PortResult<MutexGuard<'_, ChatStore>> {
@@ -178,19 +207,118 @@ impl DeclarationPort for V1Ports {
         serde_json::from_value(wire).map_err(refused)
     }
 
-    fn persona(&self, _: &str) -> PortResult<PersonaDecl> {
-        Err(refused("not built yet"))
+    fn persona(&self, handle: &str) -> PortResult<PersonaDecl> {
+        let decl = self.defs.role(handle).map_err(refused)?;
+        Ok(PersonaDecl {
+            handle: decl.handle.clone(),
+            model: decl
+                .effective_model()
+                .and_then(|model| serde_json::to_value(model).ok())
+                .and_then(|model| model.as_str().map(str::to_owned)),
+            permissions: decl.permissions.clone(),
+            tools: decl.tools.clone(),
+            resume_session: matches!(decl.session, SessionPolicy::Continue),
+        })
     }
-    fn prompt(&self, _: &str, _: PromptFor) -> PortResult<PromptBundle> {
-        Err(refused("not built yet"))
+
+    /// The old prime, composed as a spawned persona's is, for a session of a run on the new engine: no reply
+    /// obligation (the host writes its own into the turn) and no sentence that commissions (§5, §10).
+    fn prompt(&self, handle: &str, purpose: PromptFor) -> PortResult<PromptBundle> {
+        let PromptFor::V2 = purpose;
+        let decl = self.defs.role(handle).map_err(refused)?;
+        let prime_block = if decl.prime.is_primed() {
+            let services = decl.prime.services();
+            let siblings = match &self.module_primes {
+                Some(primes) => primes
+                    .module_primes(services, &self.db_path)
+                    .map_err(refused)?,
+                None => Vec::new(),
+            };
+            crate::facade::compose_persona_prime_as(
+                &*self.store()?,
+                &format!("{}/{}", self.origin, decl.handle),
+                &decl.handle,
+                services,
+                &siblings,
+                &V1Ports::now(),
+                self.defs.source(),
+                PrimeFor::V2,
+            )
+            .map_err(refused)?
+        } else {
+            String::new()
+        };
+        let claude_md = match decl.claude_md {
+            ClaudeMd::Inherit => self.project_claude_md.as_deref(),
+            _ => None,
+        };
+        let composed =
+            crate::role::compose_system_prompt(decl, claude_md, None, &prime_block, None);
+        Ok(PromptBundle {
+            system_prompt: composed.system_prompt,
+            use_claude_code_preset: composed.use_claude_code_preset,
+            granted_tools: vec![crate::role::REPLY_OBLIGATION_TOOL.to_owned()],
+            declaration_hash: crate::declaration_version::role_declaration_hash(decl),
+        })
     }
-    fn turn(&self, _: &str, _: &[TurnPart]) -> PortResult<String> {
-        Err(refused("not built yet"))
+
+    /// The parts that carry a message, read by id. Another agent's reply is framed exactly as a
+    /// consolidator's input is — untrusted data under a boundary no answer contains — and the
+    /// commissioner's own text (the commission, an answer) is handed as written.
+    fn turn(&self, _handle: &str, parts: &[TurnPart]) -> PortResult<String> {
+        let mut sections = Vec::new();
+        let mut replies: Vec<CollectedReply> = Vec::new();
+        for part in parts {
+            let Some(id) = part.message.as_deref() else {
+                continue;
+            };
+            let message = self
+                .read(id)?
+                .ok_or_else(|| refused(format!("message {id} is not in the chat store")))?;
+            match &part.kind {
+                // No step mark: the frame renders one only with its pass, which a turn part does not
+                // carry, and a mark the engine cannot vouch for is worse than none.
+                TurnKind::Reply { .. } => replies.push(CollectedReply {
+                    sender: message.sender,
+                    body: message.body,
+                    substituted: false,
+                    step: None,
+                    pass: None,
+                    needs_rework: false,
+                    thread: None,
+                }),
+                _ => {
+                    flush_replies(&mut replies, &mut sections);
+                    sections.push(message.body);
+                }
+            }
+        }
+        flush_replies(&mut replies, &mut sections);
+        Ok(sections.join("\n\n"))
     }
+}
+
+fn flush_replies(replies: &mut Vec<CollectedReply>, sections: &mut Vec<String>) {
+    if replies.is_empty() {
+        return;
+    }
+    let boundary = crate::channel::block_boundary(replies);
+    sections.push(format!(
+        "{}\n\n{}\n\n{}",
+        crate::channel::framing(&boundary),
+        crate::channel::attribution_notice(&boundary),
+        crate::channel::untrusted_block(replies, &boundary),
+    ));
+    replies.clear();
 }
 
 impl SidecarPort for V1Ports {
     fn bundle_path(&self) -> PortResult<PathBuf> {
-        Err(refused("not built yet"))
+        if let Some(bundle) = &self.sidecar {
+            return Ok(bundle.clone());
+        }
+        crate::worker::installed_sidecar()
+            .map_err(refused)?
+            .ok_or_else(|| refused("this nxs carries no sidecar bundle"))
     }
 }

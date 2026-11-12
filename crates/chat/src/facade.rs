@@ -3018,6 +3018,29 @@ make — one you could act on either way, but may not settle. It goes UP, to who
 you. Put that question in an ordinary reply instead and it travels DOWN to the next step, which
 may not settle it either, and the work runs on around it."#;
 
+/// [`PRIME_INTRO`] for a session of a run on the new engine, which answers and does not commission
+/// (6j6v.zjyv §10).
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub const PRIME_INTRO_V2: &str =
+    "`nxc` is how the agents in this workspace coordinate: `reply --thread` answers the turn you \
+     were handed, and every message is durable and replayable. **Never coordinate through scratch \
+     files or ad-hoc notes** — they are not delivered, not synced, and never replayed here. `nxc \
+     --help` lists the commands, `nxc guide` the topics behind them.";
+
+/// [`PRIME_HOW_A_CONVERSATION_MOVES`] for a session of a run on the new engine: the two ways to end a turn,
+/// and no way to start one (6j6v.zjyv §10).
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub const PRIME_HOW_A_CONVERSATION_MOVES_V2: &str = r#"    nxc reply --thread <id> -                           # answer — you are finished
+    nxc reply --thread <id> --escalate -                # you need help or a DECISION first
+
+`-` reads the message from STDIN — `… - <<'EOF'`, your text, then `EOF` on its own line — so the
+shell evaluates nothing in it. A one-line message may be an argument instead.
+
+`--escalate` is not only "I cannot": it is also how you ask for a DECISION that is not yours to
+make — one you could act on either way, but may not settle. It goes UP, to whoever commissioned
+the run. Put that question in an ordinary reply instead and it travels DOWN to the next step, which
+may not settle it either, and the work runs on around it."#;
+
 /// The chat verbs the bootstrap names, in the order it lists them.
 ///
 /// **This list IS the agent surface** (nxf 6j6v.dvyq §4): not "the verbs the binary has", but the
@@ -3405,6 +3428,33 @@ impl PrimeReport {
                 md.push_str("\n\n");
                 md.push_str(&section);
             }
+        }
+        md
+    }
+}
+
+impl PrimeReport {
+    /// **The block a session of a run on the NEW engine starts with** (6j6v.zjyv §5, §10): the same intro,
+    /// identity and declaration source as [`render_markdown`](PrimeReport::render_markdown) for a spawned
+    /// persona, without a sentence that commissions — no `nxc send`, and no "Who you can address", which
+    /// lists exactly the targets such a session may not reach.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    pub fn render_markdown_v2(&self) -> String {
+        let identity = match &self.persona {
+            Some(persona) => format!("{}\n\n", persona.clone().for_v2().render_markdown()),
+            None => String::new(),
+        };
+        let mut md = format!(
+            "# nexus-chat — the channel between agents\n\n\
+             {PRIME_INTRO_V2}\n\n\
+             {identity}\
+             ## How a conversation moves\n\n\
+             {PRIME_HOW_A_CONVERSATION_MOVES_V2}",
+        );
+        let source = render_declaration_source(&self.declarations);
+        if !source.is_empty() {
+            md.push_str("\n\n");
+            md.push_str(&source);
         }
         md
     }
@@ -3855,6 +3905,40 @@ pub fn compose_persona_prime(
     now: &str,
     declarations: Option<&DeclarationSource>,
 ) -> Result<String> {
+    compose_persona_prime_as(
+        store,
+        consumer,
+        persona,
+        services,
+        siblings,
+        now,
+        declarations,
+        PrimeFor::V1,
+    )
+}
+
+/// Which engine's session a persona's block is composed for: the old engine's, which may commission, or
+/// one of a run on the new engine, which may not (6j6v.zjyv §5).
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimeFor {
+    V1,
+    V2,
+}
+
+/// [`compose_persona_prime`] for either engine's session: the sibling blocks and their order are the same,
+/// and only chat's own block differs ([`PrimeReport::render_markdown_v2`]).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_persona_prime_as(
+    store: &ChatStore,
+    consumer: &str,
+    persona: &str,
+    services: PrimeServices,
+    siblings: &[ModulePrime],
+    now: &str,
+    declarations: Option<&DeclarationSource>,
+    purpose: PrimeFor,
+) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     for module in PRIME_MODULE_ORDER {
         let admitted = match *module {
@@ -3876,7 +3960,10 @@ pub fn compose_persona_prime(
             // sniffing: the persona's block is composed IN PROCESS here, never by shelling out.
             if let Some(declarations) = declarations {
                 let report = prime_for(store, consumer, Some(persona), now, declarations)?;
-                parts.push(report.render_markdown(false));
+                parts.push(match purpose {
+                    PrimeFor::V1 => report.render_markdown(false),
+                    PrimeFor::V2 => report.render_markdown_v2(),
+                });
             }
         } else if let Some(sibling) = siblings.iter().find(|s| s.module == *module) {
             let text = sibling.text.trim();
