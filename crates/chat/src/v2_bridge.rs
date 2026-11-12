@@ -121,6 +121,6 @@ pub fn commission(
         border: None,
         warnings,
         refs_warning,
-        await_: Await::for_caller(false, &root, None),
+        await_: Await::run(&root),
     })
 }

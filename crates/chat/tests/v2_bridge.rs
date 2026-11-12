@@ -132,3 +132,35 @@ fn a_send_from_the_terminal_to_a_v2_channel_commissions_a_run_and_answers_with_i
         "channel_open was never entered"
     );
 }
+
+/// The requester learns the result through `nxc status`, whose `open` reaches 0 when the run finishes —
+/// never through `threads show`'s `complete`, which a v2 root thread does not reach (§10).
+#[test]
+fn the_receipt_of_a_v2_commission_says_to_poll_status_until_the_run_is_finished() {
+    let ws = workspace();
+    let receipt =
+        send(&engine(ws.path()), the_owner(), "coding-v2").expect("the owner commissions");
+    let root = receipt.thread_id.clone();
+    let record = serde_json::to_value(&receipt).unwrap();
+
+    assert_eq!(record["message_id"], serde_json::Value::Null);
+    let guidance = &record["await"];
+    assert_eq!(
+        guidance["how"], "poll",
+        "nobody wakes the person at the terminal"
+    );
+    assert_eq!(
+        guidance["poll"],
+        serde_json::json!(["nxc", "status", "--thread", root, "--json"])
+    );
+    assert_eq!(guidance["done_when"], serde_json::json!({ "open": 0 }));
+    assert_eq!(
+        guidance["stopped_when"],
+        serde_json::json!({ "needs_decision": true, "awaiting_human": true })
+    );
+    assert_eq!(
+        guidance["answer_in"],
+        serde_json::json!(["nxc", "threads", "show", root, "--json"]),
+        "the answer is the newest message of the root thread"
+    );
+}
