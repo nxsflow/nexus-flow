@@ -355,6 +355,9 @@ impl Directory {
             crate::channel::cast(channel).iter().any(|m| m == handle)
         }
         let audience = Identity::Persona(handle.to_string());
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — no persona commissions a run on the
+        // new engine in slice 1 (6j6v.zjyv §10), so neither its list nor a route in it is offered one.
+        let channels = &crate::channel::persona_reachable(channels);
         let personas = roles
             .iter()
             .filter(|r| r.handle != handle)

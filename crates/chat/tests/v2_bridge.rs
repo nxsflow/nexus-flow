@@ -22,7 +22,9 @@ use nexus_run_contracts::RunStore;
 use tempfile::TempDir;
 
 const NOW: &str = "2026-11-12T10:00:00Z";
-const CODER: &str = "handle: coder\njob_title: Implementer\nsystem_prompt: You are the coder.\n";
+/// Reached only through the channels that cast it, so a directory offers those channels as its route in.
+const CODER: &str =
+    "handle: coder\njob_title: Implementer\naddressable: none\nsystem_prompt: You are the coder.\n";
 const REVIEWER: &str = "handle: reviewer\njob_title: Reviewer\nsystem_prompt: You review.\n";
 /// One channel on each engine: `coding-v2` as the repository declares it in miniature, and a v1 `review`.
 const CHANNELS: &str = "\
@@ -317,4 +319,73 @@ fn a_v2_sessions_send_to_anything_is_refused_before_anything_is_written() {
         "nothing written to the chat store"
     );
     assert_eq!(runs(), open, "and no run commissioned");
+}
+
+/// The one view behind a persona's `nxc list` and its prompt's "Who you can address" omits channels on the new
+/// engine, and the casting it offers as a route in never names one; the person at the terminal keeps the full
+/// directory and commissions them (§10).
+#[test]
+fn a_personas_directory_omits_v2_channels_and_the_terminals_keeps_them() {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let names = |directory: nexus_chat::persona::Directory| -> Vec<String> {
+        directory.channels.into_iter().map(|c| c.name).collect()
+    };
+    let full = eng
+        .directory(nexus_chat::facade::Reader::Owner, None)
+        .unwrap();
+    let route = |directory: &nexus_chat::persona::Directory| -> Vec<String> {
+        directory
+            .personas
+            .iter()
+            .find(|p| p.handle == "coder")
+            .map(|p| p.channels.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        route(&full),
+        ["coding-v2", "review"],
+        "the terminal's route in"
+    );
+    assert!(
+        names(full).contains(&"coding-v2".to_owned()),
+        "the terminal sees it"
+    );
+
+    let reviewer = eng
+        .directory(nexus_chat::facade::Reader::Owner, Some("reviewer"))
+        .unwrap();
+    assert_eq!(
+        route(&reviewer),
+        ["review"],
+        "no route in through a v2 channel"
+    );
+    assert!(
+        !names(reviewer).contains(&"coding-v2".to_owned()),
+        "a persona's list does not offer it"
+    );
+}
+
+/// A refusal that names a route in must not send a persona to a channel whose own send would refuse it.
+#[test]
+fn a_refusal_never_suggests_a_v2_channel_to_a_persona_and_does_to_the_terminal() {
+    let ws = workspace();
+    let session = persona_session(ws.path(), "reviewer");
+    let eng = engine(ws.path());
+    let to_persona = send(
+        &eng,
+        Caller {
+            session: Some(&session),
+            actor: Some("reviewer"),
+            now: Some(NOW),
+        },
+        "coder",
+    )
+    .expect_err("coder admits no direct message");
+    assert!(
+        to_persona.msg.contains("review") && !to_persona.msg.contains("coding-v2"),
+        "{to_persona}"
+    );
+    let to_owner = send(&eng, the_owner(), "coder").expect_err("nor from the terminal");
+    assert!(to_owner.msg.contains("coding-v2"), "{to_owner}");
 }

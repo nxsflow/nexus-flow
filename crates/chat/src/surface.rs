@@ -376,8 +376,14 @@ fn refusal(decl: &crate::role::RoleDecl, caller: &crate::persona::Identity, ctx:
     use crate::role::Addressable;
     // The channels this persona is actually reached through: its own declared list where it has
     // one (a workspace mid-migration reads as it did), else the channels whose cast names it.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a persona is never sent to a channel on the
+    // new engine, whose own send would refuse it (6j6v.zjyv §10).
+    let reachable = match caller.persona() {
+        Some(_) => crate::channel::persona_reachable(ctx.defs.channels()),
+        None => ctx.defs.channels().to_vec(),
+    };
     let via = match decl.addressable.channels() {
-        [] => crate::channel::channels_casting(ctx.defs.channels(), &decl.handle),
+        [] => crate::channel::channels_casting(&reachable, &decl.handle),
         declared => declared.to_vec(),
     };
     let through = |lead: &str| match via.first() {

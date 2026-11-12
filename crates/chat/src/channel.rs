@@ -1458,6 +1458,17 @@ pub fn cast(channel: &ChannelDecl) -> Vec<String> {
     out
 }
 
+/// **The channels a persona session may commission** (6j6v.zjyv §10): every declared channel except
+/// those on the new engine, which cannot yet answer a persona. The terminal keeps them all.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub fn persona_reachable(channels: &[ChannelDecl]) -> Vec<ChannelDecl> {
+    channels
+        .iter()
+        .filter(|c| c.engine.is_v1())
+        .cloned()
+        .collect()
+}
+
 /// The names of every channel whose [`cast`] includes `handle`, in declaration order — **the route
 /// in for a persona that admits no direct message**, derived instead of declared.
 ///
