@@ -437,6 +437,28 @@ test("the spec's fields reach the session: resume, model, the permission mode an
   assert.equal(options.pathToClaudeCodeExecutable, "/opt/claude");
 });
 
+test("a persona's declared tools restrict the base toolset, and the grant stays the approval inside it", async (t) => {
+  // 6j6v.547w: as the old mode's resolveToolsOption/resolveAllowedTools, with `tools` the grant.
+  const declared = sandbox(t, { rounds: [[init, result()]], spec: { tools: ["Bash(nxc reply:*)"], declared_tools: ["Read", "Grep"] } });
+  await declared.ended;
+  const options = JSON.parse(readFileSync(join(declared.dir, "options.json"), "utf8"));
+  assert.deepEqual(options.tools, ["Read", "Grep", "Bash"]);
+  assert.deepEqual(options.allowedTools, ["Read", "Grep", "Bash(nxc reply:*)"]);
+});
+
+test("an empty declaration narrows the base toolset to the grant's tool; no declaration leaves it whole", async (t) => {
+  const empty = sandbox(t, { rounds: [[init, result()]], spec: { tools: ["Bash(nxc reply:*)"], declared_tools: [] } });
+  await empty.ended;
+  const narrowed = JSON.parse(readFileSync(join(empty.dir, "options.json"), "utf8"));
+  assert.deepEqual(narrowed.tools, ["Bash"]);
+  assert.deepEqual(narrowed.allowedTools, ["Bash(nxc reply:*)"]);
+  const none = sandbox(t, { rounds: [[init, result()]], spec: { tools: ["Bash(nxc reply:*)"] } });
+  await none.ended;
+  const whole = JSON.parse(readFileSync(join(none.dir, "options.json"), "utf8"));
+  assert.equal("tools" in whole, false, "no declaration sets no base toolset");
+  assert.deepEqual(whole.allowedTools, ["Bash(nxc reply:*)"]);
+});
+
 test("SIGUSR2 is survived by a child that has written child.json", async (t) => {
   const box = sandbox(t, { rounds: [[init, { __wait: "release" }, result()]] });
   await until("the record and the wait", () => existsSync(join(box.ledger, "child.json")) && existsSync(join(box.dir, "waiting")));

@@ -943,3 +943,25 @@ fn the_frozen_v1_storage_and_session_shapes_read_under_these_types() {
     let spec: StartSpec = serde_json::from_value(session["start_spec"].clone()).unwrap();
     assert_eq!(spec.v, 1);
 }
+
+/// The tools a persona DECLARES ride beside the ones the engine grants (6j6v.547w). Absent and empty are two
+/// declarations, as in the old sidecar: absent leaves the backend's base toolset alone, `[]` narrows it to what the
+/// grant needs. A v1 spec has no such key and reads as absent, and an absent one stays off the wire.
+#[test]
+fn a_start_spec_tells_no_declared_tools_from_an_empty_declaration() {
+    let session: Value = serde_json::from_str(&frozen_v1("session.json")).unwrap();
+    let frozen = session["start_spec"].clone();
+    let read: StartSpec = serde_json::from_value(frozen.clone()).unwrap();
+    assert_eq!(read.declared_tools, None);
+    assert_eq!(serde_json::to_value(&read).unwrap(), frozen);
+
+    for declared in [json!([]), json!(["Read", "Grep"])] {
+        let mut raw = frozen.clone();
+        raw["declared_tools"] = declared.clone();
+        let read: StartSpec = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["declared_tools"],
+            declared
+        );
+    }
+}

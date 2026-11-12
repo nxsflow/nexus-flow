@@ -31,6 +31,28 @@ fn the_personas_permission_mode_reaches_the_start_spec() {
     assert_eq!(build.permissions.as_deref(), Some("acceptEdits"));
 }
 
+/// What a persona DECLARES reaches the session beside what the engine grants (6j6v.547w), so the backend can
+/// restrict the base toolset to it. No declaration stays no declaration, and an empty one stays empty: the two mean
+/// different things to the backend. The consolidator declares nothing of its own, so the grant is all it holds.
+#[test]
+fn the_personas_declared_tools_reach_the_start_spec_beside_the_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run) = finished_rig(dir.path(), "happy");
+    let integrity = spec(&rig, &format!("{run}/judge/v1/integrity/a1"));
+    assert_eq!(
+        integrity.declared_tools.as_deref(),
+        Some(&["Read".to_owned(), "Grep".to_owned(), "Glob".to_owned()][..])
+    );
+    assert_eq!(integrity.tools, ["Bash"], "the grant stays where it was");
+    let verifier = spec(&rig, &format!("{run}/verify/v1/verifier/a1"));
+    assert_eq!(verifier.declared_tools.as_deref(), Some(&[][..]));
+    let coder = spec(&rig, &format!("{run}/build/v1/coder/a1"));
+    assert_eq!(coder.declared_tools, None);
+    let synth = spec(&rig, &format!("{run}/judge/v1/{SYNTH}/a1"));
+    assert_eq!(synth.declared_tools.as_deref(), Some(&[][..]));
+    assert_eq!(synth.tools, ["Bash(nxc reply:*)"]);
+}
+
 #[test]
 fn the_back_edge_turn_carries_the_verdict_of_the_step_that_sent_it_back() {
     let dir = tempfile::tempdir().unwrap();
