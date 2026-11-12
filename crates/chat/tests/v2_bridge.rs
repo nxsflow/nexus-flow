@@ -540,3 +540,89 @@ fn a_v2_session_cannot_withdraw_a_v1_operation() {
         "nothing withdrawn, nothing written"
     );
 }
+
+// ---- a run.sqlite that does not answer -------------------------------------------------------
+
+/// What every refusal of an unreadable `run.sqlite` must carry: where it is, why, and the way out.
+fn assert_names_the_recovery(refused: &nexus_chat::error::NxfError, dir: &Path, why: &str) {
+    let msg = &refused.msg;
+    assert_eq!(refused.kind, ErrorKind::Conflict, "{refused}");
+    assert!(
+        msg.contains(&run_sqlite(dir).display().to_string()),
+        "the file: {msg}"
+    );
+    assert!(msg.contains(why), "the reason ({why}): {msg}");
+    assert!(msg.contains("Nothing was written"), "{msg}");
+    assert!(
+        msg.contains("move it aside") && msg.contains("abandons every run on the new engine"),
+        "the recovery, and what it costs: {msg}"
+    );
+}
+
+/// Only a MISSING file means "not v2": a damaged one never lets a session pass as the terminal, and never
+/// lets the terminal's commission fall through to the old engine (§10; round 3 IR #2, round 4 IR #10).
+#[test]
+fn a_damaged_run_sqlite_refuses_a_session_and_a_commission_with_the_way_out() {
+    let ws = workspace();
+    let session = persona_session(ws.path(), "reviewer");
+    std::fs::write(
+        run_sqlite(ws.path()),
+        b"this is not a database, and it is long enough",
+    )
+    .unwrap();
+    let eng = engine(ws.path());
+    let before = chat_ops(ws.path());
+    let as_session = send(
+        &eng,
+        Caller {
+            session: Some(&session),
+            actor: Some("reviewer"),
+            now: Some(NOW),
+        },
+        "review",
+    )
+    .expect_err("the lookup cannot answer");
+    assert_names_the_recovery(&as_session, ws.path(), "not a database");
+    let commission = send(&eng, the_owner(), "coding-v2").expect_err("nor can the commission");
+    assert_names_the_recovery(&commission, ws.path(), "not a database");
+    assert_eq!(chat_ops(ws.path()), before, "nothing written");
+}
+
+#[test]
+fn a_run_sqlite_from_a_newer_nxs_refuses_and_says_so() {
+    let ws = workspace();
+    send(&engine(ws.path()), the_owner(), "coding-v2").expect("a first run creates the file");
+    rusqlite::Connection::open(run_sqlite(ws.path()))
+        .unwrap()
+        .execute("UPDATE schema SET version = 99", [])
+        .unwrap();
+    let refused = send(&engine(ws.path()), the_owner(), "coding-v2").expect_err("newer");
+    assert_names_the_recovery(&refused, ws.path(), "schema 99");
+    assert!(refused.msg.contains("nxs self-update"), "{refused}");
+}
+
+/// `run.sqlite` is in WAL mode, so a held write lock does not stop the session lookup — reads go on beside
+/// it. What a lock stops is the commission's write: the bridge waits its 5 s, then refuses with the reason,
+/// and nothing falls through to the old engine.
+#[test]
+fn a_locked_run_sqlite_refuses_the_commission_after_the_bridges_timeout() {
+    let ws = workspace();
+    send(&engine(ws.path()), the_owner(), "coding-v2").expect("a first run creates the file");
+    let before = chat_ops(ws.path());
+    let holder = rusqlite::Connection::open(run_sqlite(ws.path())).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let refused = send(&engine(ws.path()), the_owner(), "coding-v2").expect_err("locked");
+    let waited = started.elapsed();
+    holder.execute_batch("ROLLBACK").unwrap();
+    assert_names_the_recovery(&refused, ws.path(), "locked");
+    assert!(
+        waited >= std::time::Duration::from_secs(4),
+        "it waited for the writer first: {waited:?}"
+    );
+    assert_eq!(
+        chat_ops(ws.path()),
+        before,
+        "channel_open was not entered instead"
+    );
+}

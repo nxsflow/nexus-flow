@@ -60,14 +60,27 @@ fn bridge_ctx(store: SqliteRunStore, db_path: &str, origin: &str, defs: &Definit
     }
 }
 
-fn store_refusal(path: &Path, reason: &str) -> NxfError {
-    NxfError::io(format!("{}: {reason}", path.display()))
+/// **The refusal for a `run.sqlite` that does not answer**, with what to do about it: a verb is never run
+/// against the old tables because the new engine's file could not be read.
+pub fn store_refusal(path: &Path, reason: &str) -> NxfError {
+    NxfError::new(crate::error::ErrorKind::Conflict, format!(
+        "{} did not answer: {reason}. Nothing was written. A locked file answers again once its \
+         writer lets go — run the command again; `nxs service status` names the service. A file written \
+         by a newer nxs needs that nxs (`nxs self-update`). A damaged one: move it aside (`mv {} {}.damaged`), \
+         which abandons every run on the new engine recorded in it — their threads stay readable in \
+         `nxc threads show` — and leaves the old engine's runs untouched.",
+        path.display(),
+        path.display(),
+        path.display(),
+    ))
 }
 
 fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     match refused {
         Refused::Store(error) => store_refusal(path, &error.to_string()),
-        other => NxfError::io(other.to_string()),
+        Refused::Compile(_) => NxfError::validation(refused.to_string()),
+        Refused::Port(_) => NxfError::io(refused.to_string()),
+        other => NxfError::new(crate::error::ErrorKind::Conflict, other.to_string()),
     }
 }
 
