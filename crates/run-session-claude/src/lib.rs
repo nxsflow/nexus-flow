@@ -261,7 +261,8 @@ impl SessionBackend for ClaudeBackend {
     /// Idempotent by session key, and answered from the ledger (§8.3).
     fn start(&self, spec: &StartSpec) -> Result<StartOutcome, BackendError> {
         // Before the ledger: a session that cannot run here leaves nothing that reads as one that did (6j6v.6bcb).
-        if !self.spawns {
+        // `SPAWNS_HERE` as well: `with_spawning(true)` cannot switch the spawn on where the platform has no guard.
+        if !(self.spawns && SPAWNS_HERE) {
             return Err(backend_error(CANNOT_SPAWN_HERE));
         }
         let ledger = self.ledger(&spec.session_key);

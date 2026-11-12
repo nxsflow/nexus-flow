@@ -302,3 +302,41 @@ fn the_adapters_record_never_replaces_the_childs_own() {
         .unwrap();
     assert_eq!(ledger.child(), Some(own));
 }
+
+/// The ledger holds the session's spec and everything it said: each of the four ways it writes a file leaves that file
+/// readable by its owner alone, whatever the process's umask lets through.
+#[test]
+fn every_file_the_ledger_writes_is_the_owners_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bench = Bench::new();
+    let ledger = SessionLedger::new(bench.ledger_dir(KEY));
+    ledger.create().unwrap();
+    assert!(ledger.claim_spawn(&SpawnRecord::default()).unwrap());
+    ledger
+        .write_child(&ChildRecord {
+            pid: 2,
+            start_time: procs::start_text(0),
+            handlers: false,
+        })
+        .unwrap();
+    ledger
+        .append_fact(&json!({ "kind": "heartbeat", "beat": "alive" }))
+        .unwrap();
+    drop(ledger.sidecar_log().unwrap());
+    ledger.add_finding("a finding");
+
+    for file in [
+        "spawn.json",
+        "child.json",
+        "facts.jsonl",
+        "sidecar.log",
+        "findings.log",
+    ] {
+        let mode = std::fs::metadata(bench.ledger_dir(KEY).join(file))
+            .unwrap_or_else(|error| panic!("{file}: {error}"))
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{file} is {:o}", mode & 0o777);
+    }
+}

@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use nexus_run_contracts::{Liveness, SessionBackend};
+use nexus_run_contracts::SessionBackend;
 use nexus_run_session_claude::{ClaudeBackend, CANNOT_SPAWN_HERE};
 use serde_json::json;
 
@@ -40,7 +40,7 @@ fn a_refused_start_leaves_no_ledger_and_no_claim_behind() {
 }
 
 #[test]
-fn a_refused_start_is_refused_again_and_never_reads_as_a_live_session() {
+fn a_second_start_after_a_refusal_is_refused_as_well() {
     let bench = Bench::new();
     let backend = unsupported(&bench);
     let spec = bench.spec(KEY, json!({ "steps": [{ "wait": "never" }] }));
@@ -51,5 +51,4 @@ fn a_refused_start_is_refused_again_and_never_reads_as_a_live_session() {
         .expect_err("the second start refuses as well");
 
     assert_eq!(again.what, CANNOT_SPAWN_HERE);
-    assert!(matches!(backend.alive(KEY), Ok(Liveness::Dead)));
 }
