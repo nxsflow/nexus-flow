@@ -578,7 +578,10 @@ fn engine_persona_send_reports_the_working_tree_queue_instead_of_a_phantom_sessi
     );
     assert_eq!(second.queue_position, Some(1));
     assert!(
-        !second.message_id.is_empty(),
+        second
+            .message_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()),
         "the MESSAGE is persisted either way — what did not happen is the spawn"
     );
 }
@@ -1101,7 +1104,13 @@ fn a_commission_on_a_disabled_worker_still_returns_the_receipt_with_a_warning() 
     let receipt = eng
         .send_to(caller("alice"), send_req("coder", "go"))
         .expect("the message is persisted even though the worker refused — this is Ok, not Err");
-    assert!(receipt.message_id.starts_with("m-"), "{receipt:?}");
+    assert!(
+        receipt
+            .message_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("m-")),
+        "{receipt:?}"
+    );
     assert!(
         !receipt.spawned,
         "the typed discriminator, not just non-empty warnings: {receipt:?}"
@@ -1253,7 +1262,13 @@ fn a_commission_returns_the_receipt_with_a_warning_when_a_real_worker_refuses_th
         .send_to(caller("alice"), send_req("coder", "ship the thing"))
         .expect("the message is persisted even though the spawn failed — this is Ok, not Err");
 
-    assert!(receipt.message_id.starts_with("m-"), "{receipt:?}");
+    assert!(
+        receipt
+            .message_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("m-")),
+        "{receipt:?}"
+    );
     assert!(
         receipt.session.as_deref().is_some_and(|s| !s.is_empty()),
         "a session was minted: {receipt:?}"

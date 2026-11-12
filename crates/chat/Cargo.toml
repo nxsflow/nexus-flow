@@ -82,6 +82,14 @@ sha2 = "0.10"
 # (`ask --deadline` -> `send --deadline` -> nothing): the window is declared now, not passed.
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
+# The bridge to the new run engine (6j6v.zjyv §10, 6j6v.b8tj): a channel declared `engine: v2` is commissioned
+# through `nexus_run_host::bridge`, and `ports_v1` implements the host's ports over this crate's store and
+# declarations. The host and the contracts are the only new crates this one may name (`cargo xtask layering
+# check`); the engine's and the store's types reach it through the host's re-exports.
+# v2-bridge: deleted with the old engine (6j6v.2vtw)
+nexus-run-host = { path = "../run-host" }
+nexus-run-contracts = { path = "../run-contracts" }
+
 [target.'cfg(unix)'.dependencies]
 # `kill(pid, 0)` — the POSIX "is this process alive?" question, and the whole of the single-process
 # guard for one internal session (nxf 6j6v.7qtf, `worker.rs`'s `SessionLock`). `std` has no
@@ -93,10 +101,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-# The crash test over the real chat store (tests/v2_message_port_crash.rs, 6j6v.m8we) implements the host's
-# `MessagePort` in the test. The library does not import the host yet: that is ticket b7ck's.
-nexus-run-contracts = { path = "../run-contracts" }
-nexus-run-host = { path = "../run-host" }
+# `test-support`: the scripted backend and tree a bridge test steps a real `Host` with (§11: dev edges only).
+nexus-run-host = { path = "../run-host", features = ["test-support"] }
 # The BULK-READ gate (nxf 6j6v.yr59, `tests/bulk_quorum.rs`) counts the SQL statements one read
 # prepares, through `Connection::authorizer` — SQLite calls it once per statement being PREPARED,
 # so a read that grows a statement per thread is visible as a count that grows with N. `hooks` is

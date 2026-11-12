@@ -818,6 +818,7 @@ mod tests {
             preconditions: Vec::new(),
             steps: Vec::new(),
             rework_notice: None,
+            engine: Default::default(),
         }
     }
 

@@ -194,7 +194,10 @@ pub struct SendToReceipt {
     /// The workspace-unique thread this conversation is now addressed by — what `reply --thread`
     /// takes, and the one value a caller must keep.
     pub thread_id: String,
-    pub message_id: String,
+    /// The first message's id — `None` exactly for a channel on the new engine, whose root message
+    /// the host posts after the run's log can answer for it (6j6v.zjyv §6.4 item 1), so there is none
+    /// yet when this receipt is written. Every v1 send fills it, as it always did.
+    pub message_id: Option<String>,
     /// The target as the caller wrote it.
     pub to: String,
     /// What that target turned out to be, so a caller can tell "a persona is now working on it"
@@ -497,7 +500,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
         let c = crate::border::commission(ctx, store, address, req.body, refs)?;
         return Ok(SendToReceipt {
             thread_id: c.thread_id.clone(),
-            message_id: c.message_id,
+            message_id: Some(c.message_id),
             to: req.to.to_string(),
             target: TargetKind::Persona,
             channel: c.channel,
@@ -516,7 +519,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     }
 
     // (1) A declared channel: hand the whole thing to the existing verb.
-    if ctx.defs.declared_channel(req.to)?.is_some() {
+    if let Some(engine) = ctx.defs.declared_channel(req.to)?.map(|c| c.engine) {
         // A channel runs where it is started (nxf 6j6v.1c6k, spec §2.1): its supervisor's state is
         // this machine's own, so a member elsewhere would answer into a supervisor that is not there.
         if req.machine.is_some() {
@@ -525,6 +528,12 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
                  names the machine of a persona chat",
                 req.to
             )));
+        }
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — THE SWITCH (6j6v.zjyv §10): a channel on
+        // the new engine is commissioned through `run_host::commission`, and `channel_open` is never
+        // entered for it.
+        if engine == crate::channel::RunEngine::V2 {
+            return crate::v2_bridge::commission(ctx, req.to, req.body, refs, refs_warning);
         }
         let receipt = orchestration::channel_open(
             ctx,
@@ -551,7 +560,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             handed_to: None,
             border: None,
             thread_id: thread_id.clone(),
-            message_id: receipt.board.message_id,
+            message_id: Some(receipt.board.message_id),
             to: req.to.to_string(),
             target: TargetKind::Channel,
             channel,
@@ -692,7 +701,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             handed_to: receipt.handed_to,
             border: None,
             thread_id: thread_id.clone(),
-            message_id: receipt.message_id,
+            message_id: Some(receipt.message_id),
             to: req.to.to_string(),
             target: TargetKind::Persona,
             channel: receipt.channel,

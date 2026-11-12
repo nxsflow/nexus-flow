@@ -16,7 +16,9 @@ use nexus_run_contracts::{
     LOCAL_TENANT,
 };
 use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, RunState, SlotState};
-use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
+/// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
+/// but the contracts (`cargo xtask layering check`).
+pub use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
 use ulid::Ulid;
 
 use crate::effects::{PendingCommission, CHAT_REFUSED};

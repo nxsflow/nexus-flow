@@ -165,7 +165,7 @@ fn a_chat_started_here_runs_here_and_names_this_machine() {
     let chat = store.thread_machine(&r.thread_id).unwrap().unwrap();
     assert_eq!((chat.machine_id.as_str(), chat.acts), ("01jlaptop", true));
     assert!(
-        m.claimed(&r.message_id),
+        m.claimed(r.message_id.as_deref().unwrap()),
         "the order is claimed on this machine, so the service's pickup does not start it again"
     );
 }
@@ -323,7 +323,7 @@ fn an_order_from_an_origin_nobody_here_trusts_is_not_picked_up() {
     let report = orchestration::pick_up(&sctx, &mut stu).unwrap();
     assert!(report.served.is_empty(), "{report:?}");
     assert_eq!(sw.count(), 0);
-    assert!(!sm.claimed(&r.message_id));
+    assert!(!sm.claimed(r.message_id.as_deref().unwrap()));
 
     // Trusting the key is what lets the same order act — nothing else changed.
     stu.trust_key(lap.key_id(), "laptop", NOW).unwrap();
@@ -603,7 +603,7 @@ fn the_orders_owed_are_the_messages_after_the_personas_last_answer() {
     pull_trusting(&lap, &mut stu);
     assert_eq!(
         stu.orders_owed("01jstudio").unwrap(),
-        vec![r.message_id.clone()]
+        vec![r.message_id.clone().unwrap()]
     );
     assert!(stu.orders_owed("01jlaptop").unwrap().is_empty());
     orchestration::pick_up(&ctx(&d, &sw, Some(&sm), "s", None, "/studio.db"), &mut stu).unwrap();
