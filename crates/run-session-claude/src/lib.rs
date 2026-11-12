@@ -31,10 +31,20 @@ pub const SAMPLE_EVERY: Duration = Duration::from_secs(60);
 /// before this does; this is what lets a stop of that slot end.
 const NO_CHILD_GRACE_MS: i64 = 60_000;
 
+/// Whether this build can run a session at all: the spawn needs a process group of its own, and the identity guard a
+/// process table it can read. Neither is there outside unix, where the adapter compiles to a backend that refuses.
+pub const SPAWNS_HERE: bool = cfg!(unix);
+
+/// The reason a start is refused on a platform that cannot run a session, word for word.
+pub const CANNOT_SPAWN_HERE: &str =
+    "this platform cannot run a v2 session: the Claude adapter needs process groups \
+     and a readable process table, which only unix has";
+
 pub struct ClaudeBackend {
     logs: PathBuf,
     bundle: PathBuf,
     sample_every: Duration,
+    spawns: bool,
 }
 
 /// What is left of a session whose leader is not running, or that it is.
@@ -87,6 +97,7 @@ impl ClaudeBackend {
             logs: agent_logs,
             bundle,
             sample_every: SAMPLE_EVERY,
+            spawns: SPAWNS_HERE,
         }
     }
 
@@ -94,6 +105,13 @@ impl ClaudeBackend {
     #[must_use]
     pub fn with_sample_every(mut self, every: Duration) -> Self {
         self.sample_every = every;
+        self
+    }
+
+    /// Whether a start may spawn, for a test that stages the platform without process groups on one that has them.
+    #[must_use]
+    pub fn with_spawning(mut self, spawns: bool) -> Self {
+        self.spawns = spawns;
         self
     }
 
@@ -242,6 +260,10 @@ impl SessionBackend for ClaudeBackend {
 
     /// Idempotent by session key, and answered from the ledger (§8.3).
     fn start(&self, spec: &StartSpec) -> Result<StartOutcome, BackendError> {
+        // Before the ledger: a session that cannot run here leaves nothing that reads as one that did (6j6v.6bcb).
+        if !self.spawns {
+            return Err(backend_error(CANNOT_SPAWN_HERE));
+        }
         let ledger = self.ledger(&spec.session_key);
         ledger.create().map_err(backend_error)?;
         if spawn::claim(&ledger, spec, now_ms()).map_err(backend_error)? {
