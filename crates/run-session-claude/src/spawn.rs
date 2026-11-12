@@ -2,7 +2,6 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -40,11 +39,28 @@ fn on_path(spec: &StartSpec, program: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
+
+/// No execute bit to read: a file is all a platform without one can say. Never reached by a start, which refuses
+/// there first (`SPAWNS_HERE`); it exists so the adapter compiles everywhere.
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_command: &mut Command) {}
 
 /// What the sidecar reads: the start spec as it is, and the `claude` this adapter found for it, because the shipped
 /// bundle has no `node_modules` for the SDK to find its own.
@@ -91,8 +107,8 @@ fn try_spawn(ledger: &SessionLedger, spec: &StartSpec, bundle: &Path) -> std::io
         .envs(spec.env.iter().map(|var| (&var.name, &var.value)))
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0);
+        .stderr(log);
+    own_process_group(&mut command);
     let child = command.spawn()?;
     let pid = child.id();
     if let Some(info) = procs::info(pid) {

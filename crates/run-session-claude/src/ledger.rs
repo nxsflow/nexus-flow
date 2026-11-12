@@ -5,7 +5,6 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -56,14 +55,28 @@ pub struct SessionLedger {
     dir: PathBuf,
 }
 
+/// Every file of the ledger is the owner's alone: it holds the session's spec and what it said.
+#[cfg(unix)]
+fn owner_only() -> OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.mode(0o600);
+    options
+}
+
+/// No mode bits to set. Never reached by a start, which refuses there first (`SPAWNS_HERE`).
+#[cfg(not(unix))]
+fn owner_only() -> OpenOptions {
+    OpenOptions::new()
+}
+
 /// Writes through a temp file beside it, so a reader sees the old file or the new one, whole.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temp = path.with_extension("tmp");
-    let mut file = OpenOptions::new()
+    let mut file = owner_only()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
         .open(&temp)?;
     file.write_all(bytes)?;
     fs::rename(&temp, path)
@@ -88,10 +101,9 @@ impl SessionLedger {
 
     /// Whether this call created `spawn.json`. Only the one that did may spawn.
     pub fn claim_spawn(&self, record: &SpawnRecord) -> std::io::Result<bool> {
-        let opened = OpenOptions::new()
+        let opened = owner_only()
             .write(true)
             .create_new(true)
-            .mode(0o600)
             .open(self.dir.join(SPAWN));
         match opened {
             Ok(mut file) => {
@@ -154,10 +166,9 @@ impl SessionLedger {
 
     /// Where the sidecar's stdout and stderr go: no pipe, so nothing here can block it or die with this process.
     pub fn sidecar_log(&self) -> std::io::Result<File> {
-        OpenOptions::new()
+        owner_only()
             .append(true)
             .create(true)
-            .mode(0o600)
             .open(self.dir.join(SIDECAR_LOG))
     }
 
@@ -185,10 +196,9 @@ impl SessionLedger {
         };
         line.extend(serde_json::to_vec(fact).map_err(json_error)?);
         line.push(b'\n');
-        let mut file = OpenOptions::new()
+        let mut file = owner_only()
             .append(true)
             .create(true)
-            .mode(0o600)
             .open(self.dir.join(FACTS))?;
         file.write_all(&line)
     }
@@ -246,10 +256,9 @@ impl SessionLedger {
     /// the text may be anything the SDK said.
     pub fn add_finding(&self, finding: &str) {
         eprintln!("session ledger {}: {finding}", self.dir.display());
-        let opened = OpenOptions::new()
+        let opened = owner_only()
             .append(true)
             .create(true)
-            .mode(0o600)
             .open(self.dir.join(FINDINGS));
         if let Ok(mut file) = opened {
             // A finding that cannot be written still went to the log line above.

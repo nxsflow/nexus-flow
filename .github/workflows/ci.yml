@@ -459,8 +459,12 @@ jobs:
       # that no unix build ever compiles. `-p nxs` pulls the crate in as a LIBRARY dependency, which
       # compiles that half — but not its `#[cfg(test)]` module, so naming the crate itself is what
       # keeps its tests under the same lint gate they had before the move.
+      # `-p nexus-run-host` (6j6v.6bcb): the v2 run host and, as its dependencies, the four other
+      # `nexus-run-*` crates. On Windows the Claude adapter compiles to a backend that refuses every
+      # start; nothing else compiles that half until `nxs` depends on the host (6j6v.b7ck), and after
+      # that this names it so a later change of `nxs`'s dependencies cannot drop it unseen.
       - name: Clippy (nxs, warnings are errors)
-        run: cargo clippy -p nxs -p nxs-service -- -D warnings
+        run: cargo clippy -p nxs -p nxs-service -p nexus-run-host -- -D warnings
 
   # The macOS half runs on the ORG'S OWN Mac (6j6v.31rs, owner directive: "auf GitHub sollte niemals
   # der macOS-Runner laufen") — same repo variable and JSON label array `release.yml` already routes
