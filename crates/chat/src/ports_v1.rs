@@ -13,7 +13,8 @@
 //! Every line here goes when the old engine does.
 // v2-bridge: deleted with the old engine (6j6v.2vtw)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nexus_run_contracts::MessageId;
 use nexus_run_host::ports::{
@@ -22,6 +23,9 @@ use nexus_run_host::ports::{
 };
 
 use crate::definitions::Definitions;
+use crate::model::{Disposition, MessageEnvelope, MessageKind, Priority, Refs, ThreadRoot};
+use crate::store::ChatStore;
+use crate::workspace::{ChatWorkspaceExt, Workspace};
 
 fn refused(error: impl std::fmt::Display) -> PortError {
     PortError {
@@ -30,31 +34,135 @@ fn refused(error: impl std::fmt::Display) -> PortError {
 }
 
 /// The host's ports over this workspace's chat store and declarations.
-#[derive(Debug)]
 pub struct V1Ports {
+    db_path: String,
+    origin: String,
     defs: Definitions,
+    /// Opened on first use: a commission reads no message, and a store it never touches is not opened.
+    store: OnceLock<Mutex<ChatStore>>,
+}
+
+impl std::fmt::Debug for V1Ports {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V1Ports")
+            .field("db_path", &self.db_path)
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
+    }
 }
 
 impl V1Ports {
     /// Over declarations a caller already resolved — the CLI's and an `Engine`'s, for a bridge verb run in
     /// the caller's own process.
-    pub fn with_definitions(_db_path: &str, _origin: &str, defs: Definitions) -> V1Ports {
-        V1Ports { defs }
+    pub fn with_definitions(db_path: &str, origin: &str, defs: Definitions) -> V1Ports {
+        V1Ports {
+            db_path: db_path.to_owned(),
+            origin: origin.to_owned(),
+            defs,
+            store: OnceLock::new(),
+        }
+    }
+
+    fn store(&self) -> PortResult<MutexGuard<'_, ChatStore>> {
+        if self.store.get().is_none() {
+            let store = Workspace::resolve(Some(&self.db_path), Path::new("."))
+                .and_then(|ws| ws.open_chat_store())
+                .map_err(refused)?;
+            // A racing first use opened its own: either one is the same file.
+            let _ = self.store.set(Mutex::new(store));
+        }
+        let cell = self.store.get().expect("set above");
+        cell.lock()
+            .map_err(|_| refused("the chat store's lock is poisoned"))
+    }
+
+    fn now() -> String {
+        time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
     }
 }
 
 impl MessagePort for V1Ports {
-    fn post(&self, _: &str, _: &str, _: &str, _: &ports::Refs, _: &str) -> PortResult<MessageId> {
-        Err(refused("not built yet"))
+    fn post(
+        &self,
+        thread: &str,
+        sender: &str,
+        body: &str,
+        refs: &ports::Refs,
+        key: &str,
+    ) -> PortResult<MessageId> {
+        let mut store = self.store()?;
+        let channel_id = store
+            .thread_channel(thread)
+            .ok_or_else(|| refused(format!("thread {thread} is not open")))?;
+        let envelope = MessageEnvelope {
+            origin: self.origin.clone(),
+            channel_id,
+            sender: sender.to_owned(),
+            kind: MessageKind::Task,
+            priority: Priority::Normal,
+            disposition: Disposition::InTurn,
+            thread_id: Some(thread.to_owned()),
+            refs: Refs {
+                nxf_ids: refs.nxf_ids.clone(),
+                run_key: Some(key.to_owned()),
+                ..Refs::default()
+            },
+            body: body.to_owned(),
+        };
+        store.try_post_message(&envelope).map_err(refused)
     }
-    fn find(&self, _: &str, _: &str) -> PortResult<Option<MessageId>> {
-        Err(refused("not built yet"))
+
+    fn find(&self, thread: &str, key: &str) -> PortResult<Option<MessageId>> {
+        let rows = self.store()?.messages_in_thread(thread).map_err(refused)?;
+        Ok(rows.into_iter().find_map(|row| {
+            let refs: Refs = serde_json::from_str(row.refs.as_deref()?).ok()?;
+            (refs.run_key.as_deref() == Some(key)).then_some(row.message_id)
+        }))
     }
-    fn read(&self, _: &str) -> PortResult<Option<Message>> {
-        Err(refused("not built yet"))
+
+    fn read(&self, message: &str) -> PortResult<Option<Message>> {
+        let store = self.store()?;
+        let Some((_, Some(thread))) = store.message_channel(message) else {
+            return Ok(None);
+        };
+        let rows = store.messages_in_thread(&thread).map_err(refused)?;
+        Ok(rows.into_iter().find_map(|row| {
+            (row.message_id == message).then(|| {
+                let refs: Refs = row
+                    .refs
+                    .as_deref()
+                    .and_then(|refs| serde_json::from_str(refs).ok())
+                    .unwrap_or_default();
+                Message {
+                    sender: row.sender,
+                    body: row.body,
+                    refs: ports::Refs {
+                        nxf_ids: refs.nxf_ids,
+                    },
+                }
+            })
+        }))
     }
-    fn open_thread(&self, _: &str, _: Option<&str>, _: &str, _: &str) -> PortResult<()> {
-        Err(refused("not built yet"))
+
+    fn open_thread(
+        &self,
+        thread_id: &str,
+        parent: Option<&str>,
+        channel: &str,
+        opener: &str,
+    ) -> PortResult<()> {
+        let root = ThreadRoot {
+            origin: self.origin.clone(),
+            channel_id: channel.to_owned(),
+            opener: opener.to_owned(),
+            created: V1Ports::now(),
+            parent: parent.map(str::to_owned),
+        };
+        self.store()?
+            .try_open_thread(thread_id, &root, opener)
+            .map_err(refused)
     }
 }
 

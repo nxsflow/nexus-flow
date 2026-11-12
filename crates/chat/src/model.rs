@@ -456,6 +456,12 @@ pub struct Refs {
     /// reads it as the caller's coordinator wrote it. See [`crate::border`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<crate::border::BorderRef>,
+    /// **The key a post of the NEW engine's host carries** (6j6v.zjyv §8.3) — `root/<run>`, `turn/<session>`,
+    /// `input/<run>/<ulid>` and the like: what makes its find-or-post find the message a crash left posted
+    /// instead of posting it twice. Written only by [`crate::ports_v1`]; absent from every v1 message.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_key: Option<String>,
 }
 
 /// The immutable message payload carried in one op's `value` (spec §2.1). `message_id`/`created`
