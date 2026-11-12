@@ -626,3 +626,82 @@ fn a_locked_run_sqlite_refuses_the_commission_after_the_bridges_timeout() {
         "channel_open was not entered instead"
     );
 }
+
+/// What the send hands over, the host can open (§6.4 item 1): a real `Host` over `ports_v1` opens the minted
+/// root thread in the chat store and posts the commission into it as the requester's, once — the post the
+/// send itself never makes. Its sessions are scripted; the claim and the tree play no part before the root.
+#[test]
+fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once() {
+    use nexus_run_host::test_support::scripted_backend::{pass, ScriptedBackend};
+    use nexus_run_host::test_support::scripted_tree::ScriptedTree;
+    use nexus_run_host::test_support::SimClock;
+    use nexus_run_host::{Host, Layout, Ports, TreeLedger};
+
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let receipt = send(&eng, the_owner(), "coding-v2").expect("the owner commissions");
+    let root = receipt.thread_id;
+    let db = ws.path().join(".nxs").join("db.sqlite");
+    let db = db.to_str().unwrap();
+    let ports = std::sync::Arc::new(
+        nexus_chat::ports_v1::V1Ports::for_root(ws.path(), db, &eng.origin()).unwrap(),
+    );
+    let layout = Layout {
+        root: ws.path().to_owned(),
+        agent_logs: ws.path().join(".nxs").join("agent-logs"),
+        session_env: Vec::new(),
+    };
+    let store = std::sync::Arc::new(
+        nexus_run_host::bridge::SqliteRunStore::open(
+            &run_sqlite(ws.path()),
+            nexus_run_host::bridge::HOST_BUSY_TIMEOUT,
+        )
+        .unwrap(),
+    );
+    let now = nexus_run_contracts::Timestamp::parse(NOW).unwrap();
+    let mut host = Host::new(
+        store,
+        Ports {
+            messages: ports.clone(),
+            declarations: ports.clone(),
+            sidecar: ports,
+            layout: layout.clone(),
+        },
+        std::sync::Arc::new(ScriptedBackend::new(
+            &layout.agent_logs,
+            &ws.path().join("timeline.jsonl"),
+            &layout.v2_dir(),
+            Box::new(|_| pass()),
+        )),
+        std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
+            &layout.agent_logs,
+            &eng.origin(),
+        ))),
+        std::sync::Arc::new(SimClock::at(now.unix_millis())),
+    );
+    let chat = || chat_store(ws.path()).messages_in_thread(&root).unwrap();
+    for _ in 0..5 {
+        host.tick(now);
+        if !chat().is_empty() {
+            break;
+        }
+    }
+    host.tick(now);
+
+    let posted = chat();
+    assert_eq!(posted.len(), 1, "the root message, once: {posted:?}");
+    assert_eq!(posted[0].body, "build it");
+    assert_eq!(posted[0].sender, format!("{}/owner", eng.origin()));
+    let refs: Refs = serde_json::from_str(posted[0].refs.as_deref().unwrap()).unwrap();
+    assert_eq!(refs.nxf_ids, ["6j6v.b8tj"], "the --ref the send named");
+    assert!(
+        refs.run_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("root/")),
+        "the host's key, which its find-or-post finds it by: {refs:?}"
+    );
+    assert_eq!(
+        chat_store(ws.path()).thread_channel(&root).as_deref(),
+        Some("coding-v2")
+    );
+}
