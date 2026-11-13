@@ -1077,6 +1077,13 @@ pub fn reply_in_thread(
     store: &mut ChatStore,
     req: ReplyThreadRequest,
 ) -> Result<ReplyReceipt> {
+    refuse_two_verdicts(&req)?;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — the v2 lookup FIRST (6j6v.zjyv §10): a thread a
+    // run on the new engine routes never reaches the old tables, and its refusals are checked before any
+    // write.
+    if let Some(receipt) = crate::v2_bridge::reply_in_a_run(ctx, store, &req)? {
+        return Ok(receipt);
+    }
     refuse_a_thread_this_session_does_not_serve(ctx, store, req.thread)?;
     refuse_a_reply_the_supervisor_is_finished_with(ctx, store, req.thread)?;
     refuse_a_finished_claim_while_your_own_round_runs(ctx, store, &req)?;
@@ -1695,7 +1702,156 @@ pub fn settle_if_unanswered(
     store: &mut ChatStore,
     req: ReplyThreadRequest,
 ) -> Result<ReplyReceipt> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — the old sidecar's teardown settle has no place in
+    // a run on the new engine, whose host settles its own sessions; refused rather than posted into a thread
+    // the old tables do not know.
+    if crate::v2_bridge::is_a_run_thread(ctx, req.thread)? {
+        return Err(NxfError::validation(format!(
+            "thread {} belongs to a run on the new engine, whose host settles its own sessions;              `--if-unanswered` is the old sidecar's — answer with a plain `nxc reply`. Nothing was              written",
+            req.thread
+        )));
+    }
     reply_in_thread_inner(ctx, store, req, true)
+}
+
+// ---- the verbs a run on the new engine shares with the old one (6j6v.y6v7) ------------------------
+
+/// **`withdraw`, below both callers** (6j6v.zjyv §10): the CLI's `nxc withdraw` and [`crate::engine::Engine::withdraw`]
+/// both call this. A thread a run on the new engine routes is withdrawn there and never reaches the old
+/// tables; every other thread is [`orchestration::withdraw`], unchanged.
+pub fn withdraw(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    thread: &str,
+) -> Result<orchestration::WithdrawReceipt> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    if let Some(receipt) = crate::v2_bridge::withdraw_a_run(ctx, store, thread)? {
+        return Ok(receipt);
+    }
+    orchestration::withdraw(ctx, store, thread)
+}
+
+/// **`resume`, below both callers** (IN3): `nxc resume` and [`crate::engine::Engine::resume_interrupted`]. A
+/// run on the new engine's root is resumed there — the requester's, from the terminal — and every other
+/// scope is [`orchestration::resume_interrupted`], unchanged.
+pub fn resume(
+    ctx: &Ctx,
+    store: &mut ChatStore,
+    req: orchestration::ResumeRequest,
+) -> Result<orchestration::ResumeReceipt> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    if let orchestration::ResumeScope::Thread(thread) = req.scope {
+        if let Some(receipt) = crate::v2_bridge::resume_a_run(ctx, store, thread, req.force)? {
+            return Ok(receipt);
+        }
+    }
+    orchestration::resume_interrupted(ctx, store, req)
+}
+
+/// **The thread an id-free `nxc reply` answers**, below the CLI (6j6v.zjyv §10): a session of a run on the new
+/// engine answers in its own step thread, found through `session/<key>` BEFORE the old engine's
+/// [`crate::addressees::sole_open_thread_for_session`], so its short form never falls through to the old
+/// tables.
+pub fn thread_to_answer(ctx: &Ctx, store: &ChatStore) -> Result<String> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    if let Some(thread) = crate::v2_bridge::thread_of_session(ctx)? {
+        return Ok(thread);
+    }
+    crate::addressees::sole_open_thread_for_session(
+        store,
+        &ctx.caller_handle(),
+        ctx.session,
+        crate::facade::parent_thread_of(store, ctx.session).as_deref(),
+        ctx.now,
+    )
+}
+
+/// Where a status read stands: the chat store, the workspace it belongs to, and the reader's clock.
+#[derive(Clone, Copy)]
+pub struct StatusIn<'a> {
+    pub store: &'a ChatStore,
+    pub worker: &'a dyn crate::worker::Worker,
+    pub db_path: &'a str,
+    pub origin: &'a str,
+    pub now: &'a str,
+}
+
+/// **`status`, below both callers** (6j6v.zjyv §10): `nxc status` and [`crate::engine::Engine::status`]. The
+/// old engine's report, with every run on the new engine mapped into its shape and listed once, after it;
+/// a thread of such a run asked for by id is answered from the run.
+pub fn status(
+    at: StatusIn<'_>,
+    scope: crate::facade::StatusScope<'_>,
+) -> Result<crate::facade::StatusReport> {
+    use crate::facade::StatusScope;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    let Some(runs) = crate::v2_bridge::RunReader::at_workspace(at.db_path, at.origin)? else {
+        return crate::facade::status(at.store, at.worker, at.now, scope);
+    };
+    let now = nexus_run_contracts::Timestamp::parse(at.now)
+        .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", at.now)))?;
+    let (old, wanted, channel): (Vec<&str>, Vec<nexus_run_contracts::RunId>, Option<&str>) =
+        match scope {
+            StatusScope::Threads(ids) => {
+                let mut old = Vec::new();
+                let mut wanted = Vec::new();
+                for id in ids {
+                    match runs.run_of_thread(id)? {
+                        Some(run) if !wanted.contains(&run) => wanted.push(run),
+                        Some(_) => {}
+                        None => old.push(*id),
+                    }
+                }
+                (old, wanted, None)
+            }
+            StatusScope::Workspace => (Vec::new(), runs.runs_listed(false)?, None),
+            StatusScope::Channel(name) => (Vec::new(), runs.runs_listed(false)?, Some(name)),
+            StatusScope::All(name) => (Vec::new(), runs.runs_listed(true)?, name),
+        };
+    let report = match scope {
+        StatusScope::Threads(_) => {
+            crate::facade::status(at.store, at.worker, at.now, StatusScope::Threads(&old))?
+        }
+        other => crate::facade::status(at.store, at.worker, at.now, other)?,
+    };
+    let mut operations = Vec::new();
+    for run in &wanted {
+        let Some(op) = runs.run_as_operation(run, now)? else {
+            continue;
+        };
+        let in_channel = |name: &str| {
+            op.channel_id
+                .as_deref()
+                .is_some_and(|id| id == name || id.strip_prefix("decl:") == Some(name))
+        };
+        if channel.is_none_or(in_channel) {
+            operations.push(op);
+        }
+    }
+    let mut of_a_run = BTreeSet::new();
+    for op in &report.operations {
+        if runs.run_of_thread(&op.root)?.is_some() {
+            of_a_run.insert(op.root.clone());
+        }
+    }
+    Ok(report.with_runs(|root| of_a_run.contains(root), operations))
+}
+
+/// **`nxc status --run <id>`** (ST2): contract (d) of the run `id` names — a run id or any thread of the run —
+/// with `local`.
+pub fn run_status(
+    db_path: &str,
+    origin: &str,
+    now: &str,
+    id: &str,
+) -> Result<nexus_run_contracts::RunStatus> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    let none = || NxfError::not_found(format!("no run on the new engine is named {id}"));
+    let runs = crate::v2_bridge::RunReader::at_workspace(db_path, origin)?.ok_or_else(none)?;
+    let now = nexus_run_contracts::Timestamp::parse(now)
+        .ok_or_else(|| NxfError::validation(format!("`{now}` is not an RFC 3339 instant")))?;
+    let run = runs.run_named(id)?.ok_or_else(none)?;
+    runs.run_contract(&run, now)?.ok_or_else(none)
 }
 
 /// **The runtime speaks for a session that owes an answer** (nxf 6j6v.ccvy) — the engine's own

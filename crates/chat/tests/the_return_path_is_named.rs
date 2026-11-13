@@ -416,9 +416,9 @@ fn reply_gets_the_same_treatment_because_whoever_hands_a_turn_back_is_in_the_sam
 /// read; the record names it as argv, with the predicates of THAT payload, and the conversation as the read the
 /// answer sits in.
 ///
-/// What this cannot hold yet: that the predicates are true of `nxc status --json` on a v2 thread, as
-/// `the_done_predicate_holds_against_the_payload_it_names` does for v1 — the status mapping of a v2 thread is
-/// 6j6v.y6v7's, and that test belongs there.
+/// That the predicates are true of `nxc status --json` on a v2 thread, as
+/// `the_done_predicate_holds_against_the_payload_it_names` holds for v1, needs a host to step the run:
+/// `v2_bridge_after_the_send.rs::the_v2_receipts_predicates_hold_against_the_status_payload` (6j6v.y6v7).
 #[test]
 fn a_v2_channel_names_the_status_read_and_the_run_finished_predicate() {
     let tmp = workspace();

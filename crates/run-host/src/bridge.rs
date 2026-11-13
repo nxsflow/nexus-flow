@@ -9,15 +9,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use crate::bridge_resume::{resume, ResumeOutcome};
+pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
     Cas, Decision, Disposition, Event, EventBody, Handle, LivenessPolicy, LocalStatus, MessageId,
     Origin, Refusal, RunId, RunStatus, RunStore, SessionKey, StoreError, Timestamp, WithdrawnBy,
     LOCAL_TENANT,
 };
-use nexus_run_engine::{
-    compile, status as project, Asked, ChannelDecl, RunState, RunView, SlotState,
-};
+use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, SlotState};
+/// The fold and its projection, for the same callers: which verb a root thread takes depends on it (§10).
+pub use nexus_run_engine::{RunState, RunView};
 /// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
 /// but the contracts (`cargo xtask layering check`).
 pub use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
@@ -28,7 +30,7 @@ use crate::fold::{fold_events, pinned_def, Folded};
 use crate::git_tree::tree_state;
 use crate::host::Layout;
 use crate::ports::{DeclarationPort, MessagePort, PortError, Refs};
-use crate::start::{mint_thread_id, ThreadRoute};
+use crate::start::mint_thread_id;
 use crate::tree_effects::StoredRefusal;
 use crate::tree_ledger::TreeLedger;
 use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
@@ -341,12 +343,12 @@ fn route_of(ctx: &BridgeCtx, thread: &str) -> Result<ThreadRoute, Refused> {
     })
 }
 
-fn state_of(ctx: &BridgeCtx, run: &RunId) -> Result<RunState, Refused> {
+pub(crate) fn state_of(ctx: &BridgeCtx, run: &RunId) -> Result<RunState, Refused> {
     let view = view(&ctx.store, run)?.ok_or(Refused::RunFinished)?;
     Ok(view.state)
 }
 
-fn input_key(run: &RunId) -> String {
+pub(crate) fn input_key(run: &RunId) -> String {
     format!("input/{run}/{}", Ulid::new())
 }
 
@@ -437,7 +439,7 @@ pub fn reply(
 }
 
 /// The caller is the person who commissioned the run, at the terminal: no session.
-fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
+pub(crate) fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
     if caller.session.is_none() && caller.actor == state.requester {
         Ok(())
     } else {
@@ -445,7 +447,7 @@ fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
     }
 }
 
-fn root_route(ctx: &BridgeCtx, thread: &str) -> Result<RunId, Refused> {
+pub(crate) fn root_route(ctx: &BridgeCtx, thread: &str) -> Result<RunId, Refused> {
     let route = route_of(ctx, thread)?;
     if route.session_key.is_some() {
         return Err(Refused::NotARunThread {
@@ -544,58 +546,6 @@ pub fn withdraw(
     );
     ctx.store.enqueue(&run, &event, &[])?;
     Ok(None)
-}
-
-/// What a `resume` did.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResumeOutcome {
-    /// Enqueued: `resume` for a held or parked slot, `resume_run` (`run_level`) for a run parked on its own
-    /// condition (`root_failed`, `tree_refused`, `poison_input`).
-    Resumed { run_level: bool },
-    /// A hold whose window has not passed, and no `--force`: nothing was written, and the hold lifts by
-    /// itself at `until`.
-    NotYet { until: Timestamp },
-}
-
-/// **`nxc resume --thread <root>`** (IN3, p71m note 01M6N98GQ2F9K4D3A23X730PN1): the requester's explicit
-/// action, the one way a held or parked run restarts by hand. A plain root reply never does (§6.3). By
-/// r426's mapping: a run whose only condition is its own takes `resume_run`; a held or parked slot takes
-/// `resume { slot: None }`, the oldest condition. Before a hold's `until` it answers not yet, unless `force`.
-pub fn resume(
-    ctx: &BridgeCtx,
-    root: &str,
-    caller: &Caller,
-    force: bool,
-    now: Timestamp,
-) -> Result<ResumeOutcome, Refused> {
-    let run = root_route(ctx, root)?;
-    let state = state_of(ctx, &run)?;
-    if state.is_finished() {
-        return Err(Refused::RunFinished);
-    }
-    check_requester(&state, caller)?;
-    let body = match state.view() {
-        RunView::NeedsDecision { .. } => return Err(Refused::AskedAQuestion),
-        RunView::Held { until, .. } if !force && now < until => {
-            return Ok(ResumeOutcome::NotYet { until });
-        }
-        RunView::Held { .. } => EventBody::Resume { slot: None },
-        RunView::Parked { .. } => {
-            let a_slot_is_parked = state
-                .slots
-                .iter()
-                .any(|record| record.condition.is_some() && !state.is_superseded(record));
-            match a_slot_is_parked || state.condition.is_none() {
-                true => EventBody::Resume { slot: None },
-                false => EventBody::ResumeRun,
-            }
-        }
-        _ => return Err(Refused::NothingOnHold),
-    };
-    let run_level = matches!(body, EventBody::ResumeRun);
-    let event = Event::new(run.clone(), 0, now, input_key(&run), Origin::Cli, body);
-    ctx.store.enqueue(&run, &event, &[])?;
-    Ok(ResumeOutcome::Resumed { run_level })
 }
 
 /// Contract (d): the pure projection, with what only this machine can say around it. A reader without the

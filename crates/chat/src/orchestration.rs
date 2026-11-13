@@ -16680,6 +16680,12 @@ pub struct ResumeReceipt {
     pub armed_for: Option<String>,
     /// Everything this call should have caused and did not.
     pub warnings: Vec<FailedConsequence>,
+    /// **The run on the new engine this resume restarted, or would have** (6j6v.y6v7) — `None` for every
+    /// operation of this engine. Where it is set, the host restarts the run on its next tick, and
+    /// [`session`](Self::session) is `None`: the run starts a NEW session for the held slot.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// **Take up an operation that stopped at an availability boundary** (`nxc resume`, nxf 6j6v.npy3).
@@ -16739,6 +16745,7 @@ pub fn resume_interrupted(
         outcome,
         armed_for: None,
         warnings: Vec::new(),
+        run: None,
     };
     let Some(hold) = standing_hold(store, req.scope)? else {
         return Ok(nothing(ResumeOutcome::NothingOnHold));
@@ -16751,6 +16758,7 @@ pub fn resume_interrupted(
         outcome,
         armed_for,
         warnings,
+        run: None,
     };
 
     // **ALREADY RUNNING — asked first, because everything below costs something.** It is the same
@@ -17864,6 +17872,12 @@ pub struct WithdrawReceipt {
     /// arrived with.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<FailedConsequence>,
+    /// **The run on the new engine this withdrew** (6j6v.y6v7) — `None` for every operation of this engine.
+    /// Where it is set, every other field is empty: the run's host stops its sessions and parks its work on
+    /// its next tick, and `nxc status --thread <thread_id>` follows it there.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// **Take back a commission — one still waiting for the working copy, or a round that is RUNNING**
@@ -18496,7 +18510,26 @@ pub fn withdraw(ctx: &Ctx, store: &mut ChatStore, thread_id: &str) -> Result<Wit
         will_park,
         cannot_park,
         warnings,
+        run: None,
     })
+}
+
+impl WithdrawReceipt {
+    /// The receipt of a run on the new engine withdrawn on its root `thread_id`.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    pub(crate) fn of_a_run(thread_id: &str, run: &str) -> WithdrawReceipt {
+        WithdrawReceipt {
+            thread_id: thread_id.to_owned(),
+            withdrawn: Vec::new(),
+            started_meanwhile: Vec::new(),
+            stopped: Vec::new(),
+            held_idle: false,
+            will_park: false,
+            cannot_park: None,
+            warnings: Vec::new(),
+            run: Some(run.to_owned()),
+        }
+    }
 }
 
 /// **`withdraw` is not a verb for a session this workspace started** (nxf 6j6v.ezbr — the owner's

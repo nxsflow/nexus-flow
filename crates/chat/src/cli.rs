@@ -357,16 +357,20 @@ enum Command {
     Status {
         /// Any thread of the operation — the tree is shown from ITS root, whether it is still
         /// running or already finished.
-        #[arg(long, conflicts_with_all = ["channel", "all"])]
+        #[arg(long, conflicts_with_all = ["channel", "all", "run"])]
         thread: Option<String>,
         /// A declared channel name (or a raw channel id): the live operations whose ROOT sits
         /// there. An entry point, not an anchor — an operation crosses channels.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "run")]
         channel: Option<String>,
         /// Finished operations too, not just what is still going on — with `--channel`, the
         /// finished ones of that channel.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "run")]
         all: bool,
+        /// A run on the new engine — its id, or any thread of it: its status as the run reports
+        /// it, whole.
+        #[arg(long)]
+        run: Option<String>,
     },
     /// The owner's liveness report: how the ladder's recovery episodes went per policy (A, B, C)
     /// over a window — counts, episodes, and per policy the times to recovery and escalation and
@@ -1036,7 +1040,12 @@ fn dispatch(cli: &Cli) -> Result<()> {
             thread,
             channel,
             all,
-        } => status(cli.json, db, thread.as_deref(), channel.as_deref(), *all),
+            run,
+        } => match run {
+            // v2-bridge: deleted with the old engine (6j6v.2vtw)
+            Some(run) => run_status_verb(cli.json, db, run),
+            None => status(cli.json, db, thread.as_deref(), channel.as_deref(), *all),
+        },
         Command::Liveness {
             from,
             to,
@@ -2563,16 +2572,27 @@ fn resume(
     };
     let cli_ctx = CliCtx::resolve(db, hop())?;
     let mut store = open(db)?;
-    let r = crate::orchestration::resume_interrupted(
-        &cli_ctx.ctx(),
-        &mut store,
-        ResumeRequest { scope, force },
-    )?;
+    let r = crate::surface::resume(&cli_ctx.ctx(), &mut store, ResumeRequest { scope, force })?;
     if json {
         println!(
             "{}",
             serde_json::to_string(&r).expect("resume receipt serializes")
         );
+        return Ok(());
+    }
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a run on the new engine has no session to name
+    // and no working copy handed on: its host restarts the held slot on its next tick.
+    if let Some(run) = &r.run {
+        let named = r.thread.as_deref().unwrap_or("-");
+        match &r.outcome {
+            ResumeOutcome::NotYet { until } => println!(
+                "not yet: run {run} is held until {} and restarts on its own then. `--force`                  restarts it now",
+                until.as_deref().unwrap_or("-")
+            ),
+            _ => println!(
+                "resumed run {run}: its host restarts it on its next tick — follow it with `nxc                  status --thread {named}`"
+            ),
+        }
         return Ok(());
     }
     let named = r.thread.as_deref().unwrap_or("-");
@@ -2684,11 +2704,17 @@ fn withdraw(json: bool, db: Option<&str>, thread: &str) -> Result<()> {
     let cli_ctx = CliCtx::resolve(db, hop())?;
     let ctx = cli_ctx.ctx();
     let mut store = open(db)?;
-    let receipt = crate::orchestration::withdraw(&ctx, &mut store, thread)?;
+    let receipt = crate::surface::withdraw(&ctx, &mut store, thread)?;
     if json {
         println!(
             "{}",
             serde_json::to_string(&receipt).expect("withdraw receipt serializes")
+        );
+    } else if let Some(run) = &receipt.run {
+        // v2-bridge: deleted with the old engine (6j6v.2vtw)
+        println!(
+            "withdrew run {run} on thread {0}: its host stops its sessions and parks any work on              its next tick — follow it with `nxc status --thread {0}`",
+            receipt.thread_id
         );
     } else {
         for w in &receipt.withdrawn {
@@ -3211,13 +3237,8 @@ fn reply_thread(json: bool, db: Option<&str>, args: ReplyArgs<'_>) -> Result<()>
     let thread = match thread {
         Some(named) => named,
         None => {
-            resolved = crate::addressees::sole_open_thread_for_session(
-                &store,
-                &ctx.caller_handle(),
-                ctx.session,
-                crate::facade::parent_thread_of(&store, ctx.session).as_deref(),
-                ctx.now,
-            )?;
+            // A session of a run on the new engine answers in its own step thread, found first.
+            resolved = crate::surface::thread_to_answer(&ctx, &store)?;
             resolved.as_str()
         }
     };
@@ -3604,7 +3625,21 @@ fn status(
     let worker = LazyWorker {
         cwd: workspace_root(db)?,
     };
-    let report = crate::facade::status(&store, &worker, &resolve_now()?, scope)?;
+    let now = resolve_now()?;
+    let ws = Workspace::resolve(db, &cwd()?)?;
+    let db_path = ws.db_path_str()?;
+    let origin = origin_in(&ws);
+    // The shared function below this verb and `Engine::status`: a run on the new engine is mapped there.
+    let report = crate::surface::status(
+        crate::surface::StatusIn {
+            store: &store,
+            worker: &worker,
+            db_path: &db_path,
+            origin: &origin,
+            now: &now,
+        },
+        scope,
+    )?;
     // **A LISTING trims the rows the same way it trims the operations** (nxf 6j6v.1vxs). The two
     // forms that filter by liveness print only the threads that carry the REASON their operation is
     // still listed; `--thread` and `--all` were asked for a tree and get the whole of it.
@@ -3632,6 +3667,14 @@ fn status(
         }
     } else {
         for op in &report.operations {
+            // v2-bridge: deleted with the old engine (6j6v.2vtw) — a run on the new engine reads as the run
+            // reports itself, with what only this machine can say (`local`).
+            if let Some(run) = &op.run {
+                for line in run_status_lines(op, run, &now) {
+                    println!("{line}");
+                }
+                continue;
+            }
             // The operation-level facts, on the operation's OWN line, because that is the line an
             // operator reads before deciding whether to look further (nxf 6j6v.gk9j/6j6v.fabb).
             // `needs decision` is what separates a finished operation waiting to be read from one
@@ -3895,6 +3938,126 @@ fn start_failed_line(f: &crate::working_tree::FailedStart, root: &str) -> String
 /// One `nxc status` line for a round taken back on purpose, still waiting for its park: who
 /// withdrew it, when, and the sessions still pinning the claim — or, once they have all left, that
 /// nothing is pinning it any more and the next tick is what moves it on.
+/// `nxc status --run <id>` (ST2): contract (d) of a run on the new engine as it reads, with `local` — one JSON
+/// record with `--json`, the same record indented without it.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+fn run_status_verb(json: bool, db: Option<&str>, id: &str) -> Result<()> {
+    let ws = Workspace::resolve(db, &cwd()?)?;
+    let status =
+        crate::surface::run_status(&ws.db_path_str()?, &origin_in(&ws), &resolve_now()?, id)?;
+    let text = match json {
+        true => serde_json::to_string(&status),
+        false => serde_json::to_string_pretty(&status),
+    }
+    .expect("a run's status serializes");
+    println!("{text}");
+    Ok(())
+}
+
+/// **A run on the new engine, for a person** (6j6v.y6v7, external review H2): the operation's line with its
+/// marks, then where each step and member stands — a member's quiet time derived from its last fact and
+/// THIS reader's clock — then who attends the run, and its working directory as `local` reads it now.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+fn run_status_lines(
+    op: &crate::facade::StatusOperation,
+    run: &nexus_run_contracts::RunStatus,
+    now: &str,
+) -> Vec<String> {
+    use nexus_run_contracts::RunState as State;
+    let now = nexus_run_contracts::Timestamp::parse(now);
+    let ago = |at: nexus_run_contracts::Timestamp| -> String {
+        now.map_or_else(String::new, |now| {
+            let secs = (now.unix_millis() - at.unix_millis()).max(0) / 1000;
+            format!(" for {}", crate::machine::seen_ago(secs.unsigned_abs()))
+        })
+    };
+    let state = match &run.state {
+        State::Created => "created".to_owned(),
+        State::Queued { behind } => match behind {
+            Some(run) => format!("queued behind run {run}"),
+            None => "queued".to_owned(),
+        },
+        State::Running => "running".to_owned(),
+        State::NeedsDecision => "NEEDS DECISION".to_owned(),
+        State::Held { until } => format!("HELD until {until}"),
+        State::Parked => "PARKED".to_owned(),
+        State::Finishing => "finishing".to_owned(),
+        State::Finished => "finished".to_owned(),
+        other => format!("{other:?}"),
+    };
+    let mut lines = vec![format!(
+        "{}  {}  run {} on the new engine  {state}",
+        op.root, run.flow.name, run.run
+    )];
+    if let Some(reason) = &run.reason {
+        lines.push(format!("  · why: {}", reason.as_str()));
+    }
+    if let Some(waiting) = &run.waiting_for {
+        lines.push(format!("  · waiting for {waiting}"));
+    }
+    if let Some(next) = &run.next_action {
+        lines.push(format!("  · next: {next}"));
+    }
+    for step in &run.steps {
+        lines.push(format!(
+            "  {} (visit {}, pass {}): {}",
+            step.id, step.visit, step.pass, step.state
+        ));
+        for member in &step.members {
+            let quiet = member.liveness.last_fact.map_or_else(
+                || " — no fact yet".to_owned(),
+                |at| format!(", last fact{}", ago(at)),
+            );
+            lines.push(format!(
+                "    {} {} ({}){quiet}",
+                member.handle,
+                member.state,
+                member.liveness.verdict.as_str()
+            ));
+        }
+    }
+    match &run.local {
+        // A reader without the host's view sees `local` absent as a whole, and says so.
+        None => lines.push("  · this machine's view of the run is not available".to_owned()),
+        Some(local) => {
+            lines.push(match (local.owner.attended, local.owner.last_seen) {
+                (true, _) => "  · a service attends this workspace".to_owned(),
+                (false, Some(at)) => format!(
+                    "  · no service attends this workspace — last seen{}; `nxs service status`",
+                    ago(at)
+                ),
+                (false, None) => {
+                    "  · no service attends this workspace — `nxs service status`".to_owned()
+                }
+            });
+            let tree = &local.tree;
+            let at = match (&tree.commit, &tree.branch, tree.dirty) {
+                (Some(commit), branch, dirty) => format!(
+                    " at {}{}{}",
+                    commit.get(..12).unwrap_or(commit),
+                    branch
+                        .as_deref()
+                        .map_or_else(|| " (detached)".to_owned(), |b| format!(" on {b}")),
+                    if dirty == Some(true) {
+                        ", uncommitted work"
+                    } else {
+                        ""
+                    }
+                ),
+                (None, ..) => " (not prepared yet)".to_owned(),
+            };
+            lines.push(format!("  · tree {}{at}", tree.path));
+            if local.pending_inputs > 0 {
+                lines.push(format!(
+                    "  · {} input(s) not yet taken up by the run",
+                    local.pending_inputs
+                ));
+            }
+        }
+    }
+    lines
+}
+
 fn withdrawn_line(w: &crate::facade::WithdrawnHolderStatus) -> String {
     if w.pinned_by.is_empty() {
         format!(
@@ -4281,7 +4444,7 @@ fn interruption_suffix(hold: Option<&crate::interruption::Interruption>) -> Stri
 /// **`dirty` is spelled out rather than implied.** A commit with uncommitted work beside it does NOT
 /// describe that tree, and the whole honesty of this record is in saying so where it is read
 /// (`crate::anchor` has the argument, and nxf 6j6v.8bv9 owns the securing of that work).
-fn anchor_suffix(anchor: Option<&crate::anchor::Anchor>) -> String {
+fn anchor_suffix(anchor: Option<&crate::facade::StatusWorkingCopy>) -> String {
     match anchor {
         None => String::new(),
         Some(a) => {

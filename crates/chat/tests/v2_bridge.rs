@@ -773,9 +773,11 @@ fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once
             .is_some_and(|key| key.starts_with("root/")),
         "the host's key, which its find-or-post finds it by: {refs:?}"
     );
+    // The substrate channel of a declared channel, as the old engine opens it: the read filters resolve
+    // visibility and membership from `decl:<name>` (6j6v.y6v7), and a bare name is a channel nobody reads.
     assert_eq!(
         chat_store(ws.path()).thread_channel(&root).as_deref(),
-        Some("coding-v2")
+        Some("decl:coding-v2")
     );
 }
 
