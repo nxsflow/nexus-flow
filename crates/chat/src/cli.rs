@@ -5539,7 +5539,10 @@ mod tests {
         // all. This test is what stands in for "example = test" there, which is why it pins the
         // bytes rather than a substring.
         assert_eq!(
-            anchor_suffix(Some(&anchored("feat/parser", true))),
+            anchor_suffix(Some(&crate::facade::StatusWorkingCopy::from(anchored(
+                "feat/parser",
+                true
+            )))),
             "  · tree 9f2c1ab4e7d0 on feat/parser, uncommitted work NOT saved"
         );
         assert_eq!(
@@ -5550,7 +5553,9 @@ mod tests {
         // `show` says `clean`, because a line that exists to describe the tree must not leave the
         // most important half of it to be inferred from an absence.
         assert_eq!(
-            anchor_suffix(Some(&anchored("main", false))),
+            anchor_suffix(Some(&crate::facade::StatusWorkingCopy::from(anchored(
+                "main", false
+            )))),
             "  · tree 9f2c1ab4e7d0 on main"
         );
         assert_eq!(
@@ -5572,7 +5577,9 @@ mod tests {
         // `Anchor::branch` is empty for a detached HEAD, and an empty branch name printed after
         // "on " would read as a rendering bug — or worse, as a branch.
         assert_eq!(
-            anchor_suffix(Some(&anchored("", false))),
+            anchor_suffix(Some(&crate::facade::StatusWorkingCopy::from(anchored(
+                "", false
+            )))),
             "  · tree 9f2c1ab4e7d0 (detached)"
         );
         assert_eq!(
