@@ -217,6 +217,44 @@ pub(crate) fn stored_run_id(text: &str) -> StoreResult<RunId> {
 }
 
 impl SqliteRunStore {
+    /// Every run this store holds, finished ones included, oldest first: what `nxc status --all` lists.
+    pub fn every_run(&self) -> StoreResult<Vec<RunRow>> {
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare(
+                "SELECT run, workspace_id, tenant, finished, last_seq, max_v, commissioned_at FROM runs
+                 ORDER BY commissioned_at, run",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Seq>(4)?,
+                    row.get::<_, u32>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(db)?;
+        rows.map(|row| {
+            let (run, workspace_id, tenant, finished, last_seq, max_v, commissioned_at) =
+                row.map_err(db)?;
+            Ok(RunRow {
+                run: stored_run_id(&run)?,
+                workspace_id,
+                tenant,
+                finished,
+                last_seq,
+                max_v,
+                commissioned_at: Timestamp::from_unix_millis(commissioned_at),
+            })
+        })
+        .collect()
+    }
+
     /// Every inbox row of a run, oldest first, each read on its own, so a damaged row hides nothing behind
     /// it. It is how status counts what the owner has not folded, how the bridge counts pending answers, and
     /// how the host finds a withdrawal on a run it cannot fold (§13).

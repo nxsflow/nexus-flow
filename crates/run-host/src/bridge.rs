@@ -15,7 +15,9 @@ use nexus_run_contracts::{
     Origin, Refusal, RunId, RunStatus, RunStore, SessionKey, StoreError, Timestamp, WithdrawnBy,
     LOCAL_TENANT,
 };
-use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, RunState, SlotState};
+use nexus_run_engine::{
+    compile, status as project, Asked, ChannelDecl, RunState, RunView, SlotState,
+};
 /// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
 /// but the contracts (`cargo xtask layering check`).
 pub use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
@@ -87,6 +89,10 @@ pub enum Refused {
     NoOpenQuestion,
     /// `--accept` on an escalation (§6.4 item 6).
     AcceptAtACeilingOnly,
+    /// `resume` on a run nothing holds or parks: it is working, or waiting for the tree.
+    NothingOnHold,
+    /// `resume` on a run that asks a question: the question is answered, not resumed (IN3).
+    AskedAQuestion,
     /// The message is posted and the run will not hear of it: the one visible retry (§6.4 item 5).
     PostedNotEnqueued {
         message: MessageId,
@@ -112,6 +118,12 @@ impl std::fmt::Display for Refused {
             Self::AcceptAtACeilingOnly => {
                 f.write_str("--accept is valid at a ceiling only; answer an escalation plainly")
             }
+            Self::NothingOnHold => f.write_str(
+                "nothing in this run is held or parked: see `nxc status`, or `nxc withdraw`",
+            ),
+            Self::AskedAQuestion => f.write_str(
+                "the run asks a question: answer it with `nxc reply` on its root thread",
+            ),
             Self::PostedNotEnqueued { message } => write!(
                 f,
                 "message {message} is posted but the run has not heard of it: run the command again"
@@ -301,6 +313,16 @@ fn with_commission(state: RunState, first: &Event, events: &[Event]) -> RunState
         }
     }
     state
+}
+
+/// The run and, for a step thread, the session a thread belongs to — `None` for a thread this store does not
+/// know, which is the one way a thread is "not v2". A row that does not decode refuses.
+pub fn thread_route(ctx: &BridgeCtx, thread: &str) -> Result<Option<ThreadRoute>, Refused> {
+    match route_of(ctx, thread) {
+        Ok(route) => Ok(Some(route)),
+        Err(Refused::NotARunThread { .. }) => Ok(None),
+        Err(other) => Err(other),
+    }
 }
 
 fn route_of(ctx: &BridgeCtx, thread: &str) -> Result<ThreadRoute, Refused> {
@@ -522,6 +544,58 @@ pub fn withdraw(
     );
     ctx.store.enqueue(&run, &event, &[])?;
     Ok(None)
+}
+
+/// What a `resume` did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeOutcome {
+    /// Enqueued: `resume` for a held or parked slot, `resume_run` (`run_level`) for a run parked on its own
+    /// condition (`root_failed`, `tree_refused`, `poison_input`).
+    Resumed { run_level: bool },
+    /// A hold whose window has not passed, and no `--force`: nothing was written, and the hold lifts by
+    /// itself at `until`.
+    NotYet { until: Timestamp },
+}
+
+/// **`nxc resume --thread <root>`** (IN3, p71m note 01M6N98GQ2F9K4D3A23X730PN1): the requester's explicit
+/// action, the one way a held or parked run restarts by hand. A plain root reply never does (§6.3). By
+/// r426's mapping: a run whose only condition is its own takes `resume_run`; a held or parked slot takes
+/// `resume { slot: None }`, the oldest condition. Before a hold's `until` it answers not yet, unless `force`.
+pub fn resume(
+    ctx: &BridgeCtx,
+    root: &str,
+    caller: &Caller,
+    force: bool,
+    now: Timestamp,
+) -> Result<ResumeOutcome, Refused> {
+    let run = root_route(ctx, root)?;
+    let state = state_of(ctx, &run)?;
+    if state.is_finished() {
+        return Err(Refused::RunFinished);
+    }
+    check_requester(&state, caller)?;
+    let body = match state.view() {
+        RunView::NeedsDecision { .. } => return Err(Refused::AskedAQuestion),
+        RunView::Held { until, .. } if !force && now < until => {
+            return Ok(ResumeOutcome::NotYet { until });
+        }
+        RunView::Held { .. } => EventBody::Resume { slot: None },
+        RunView::Parked { .. } => {
+            let a_slot_is_parked = state
+                .slots
+                .iter()
+                .any(|record| record.condition.is_some() && !state.is_superseded(record));
+            match a_slot_is_parked || state.condition.is_none() {
+                true => EventBody::Resume { slot: None },
+                false => EventBody::ResumeRun,
+            }
+        }
+        _ => return Err(Refused::NothingOnHold),
+    };
+    let run_level = matches!(body, EventBody::ResumeRun);
+    let event = Event::new(run.clone(), 0, now, input_key(&run), Origin::Cli, body);
+    ctx.store.enqueue(&run, &event, &[])?;
+    Ok(ResumeOutcome::Resumed { run_level })
 }
 
 /// Contract (d): the pure projection, with what only this machine can say around it. A reader without the
