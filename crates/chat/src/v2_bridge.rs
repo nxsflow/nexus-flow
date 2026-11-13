@@ -800,3 +800,51 @@ pub fn refuse_the_old_engine_here(db_path: &str) -> Result<()> {
         ))),
     }
 }
+
+// ---- the service's host (6j6v.pn9c) -------------------------------------------------------------------------
+
+/// **The host the background service ticks for one registered workspace** (§8.1; b8tj note 1-3), or `None`
+/// where the workspace has no `run.sqlite` — one `stat`, which is all a workspace that never ran on the new
+/// engine costs a tick.
+///
+/// Its ports are the REGISTERED root's ([`V1Ports::for_root`]): the prompt is composed from the root's
+/// `.nxs-personas` and `CLAUDE.md`, never the clone's. `workspace_id` is the chat origin, the id the bridge
+/// commissions with and reads `host-seen` under. A session's identity is its environment (§6.6): beside the
+/// allowlist the host takes from the service process, `NXC_DB` names this workspace's database and
+/// `NXC_ORIGIN` its origin.
+pub fn service_host(
+    ws: &crate::workspace::Workspace,
+    primes: Arc<dyn crate::facade::ModulePrimes>,
+) -> Result<Option<nexus_run_host::Host>> {
+    let db_path = ws.db_path_str()?;
+    let path = run_sqlite(&db_path);
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(store_refusal(&path, &error.to_string())),
+    }
+    let origin = crate::workspace::origin_of(ws).to_owned();
+    let root = ws.dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    let ports = Arc::new(V1Ports::for_root(&root, &db_path, &origin)?.with_module_primes(primes));
+    let var = |name: &str, value: &str| nexus_run_contracts::EnvVar {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    };
+    let layout = Layout {
+        root,
+        agent_logs: ws.dir.join("agent-logs"),
+        session_env: vec![var("NXC_DB", &db_path), var("NXC_ORIGIN", &origin)],
+    };
+    let host = nexus_run_host::service::service_host(
+        &path,
+        nexus_run_host::Ports {
+            messages: ports.clone(),
+            declarations: ports.clone(),
+            sidecar: ports,
+            layout,
+        },
+        &origin,
+    )
+    .map_err(|error| store_refusal(&path, &error.to_string()))?;
+    Ok(Some(host))
+}

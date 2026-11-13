@@ -1,0 +1,82 @@
+//! **The host the background service runs** (6j6v.pn9c; §8.1): one per registered workspace that has a
+//! `run.sqlite`, over the workspace's own ports, with the Claude adapter as its backend, the real `GitTree` as
+//! its directory and the machine's clock. The service builds it here, because the adapter is a crate only the
+//! new engine's crates may import (§5, `cargo xtask layering check`).
+//!
+//! And the one question the service asks besides `tick`: whether a session of an open run may still have a
+//! process, so the machine is held awake while it does (§10, `a_run_is_alive`).
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use nexus_run_contracts::{RunStore, SessionBackend, StoreError};
+use nexus_run_session_claude::ClaudeBackend;
+use nexus_run_store_sqlite::SqliteRunStore;
+
+use crate::bridge::{view, LiveSession, Refused, HOST_BUSY_TIMEOUT};
+use crate::git_tree::{GitBounds, GitTree};
+use crate::ports::SystemClock;
+use crate::tree_ledger::TreeLedger;
+use crate::{Host, Ports};
+
+/// The service's connection waits no longer than the host's: a held lock must not outlast a tick (§7).
+pub const SERVICE_BUSY_TIMEOUT: Duration = HOST_BUSY_TIMEOUT;
+
+/// The service's host over `run_sqlite`. `workspace_id` is the chat origin the bridge commissions with, so the
+/// host's `host-seen` record is the one a send reads (§8.1). The adapter starts from the bundle the sidecar port
+/// names; where it names none, the port refuses the start before the adapter is asked.
+pub fn service_host(
+    run_sqlite: &Path,
+    ports: Ports,
+    workspace_id: &str,
+) -> Result<Host, StoreError> {
+    let store = Arc::new(SqliteRunStore::open(run_sqlite, SERVICE_BUSY_TIMEOUT)?);
+    let bundle = ports.sidecar.bundle_path().unwrap_or_default();
+    let backend = Arc::new(ClaudeBackend::new(ports.layout.agent_logs.clone(), bundle));
+    let tree = Arc::new(GitTree::new(
+        &ports.layout.root,
+        TreeLedger::new(&ports.layout.agent_logs, workspace_id),
+        GitBounds::default(),
+    ));
+    Ok(Host::new(
+        store,
+        ports,
+        backend,
+        tree,
+        Arc::new(SystemClock),
+    ))
+}
+
+/// Every session of an open run in `store` that may have a process: a replied slot still winding down counts
+/// (§10).
+pub(crate) fn live_in(store: &SqliteRunStore) -> Result<Vec<LiveSession>, Refused> {
+    let mut live = Vec::new();
+    for row in store.open_runs()? {
+        let Some(view) = view(store, &row.run)? else {
+            continue;
+        };
+        for record in &view.state.slots {
+            if record.state.is_live() {
+                live.push(LiveSession {
+                    run: row.run.clone(),
+                    session_key: view.state.session_key(&record.slot),
+                    handle: record.slot.member.clone(),
+                });
+            }
+        }
+    }
+    Ok(live)
+}
+
+impl Host {
+    /// What `a_run_is_alive` asks of this host's workspace, over the host's own connection.
+    pub fn live_sessions(&self) -> Result<Vec<LiveSession>, Refused> {
+        live_in(&self.store)
+    }
+
+    /// The backend's name, as its capabilities state it.
+    pub fn backend_name(&self) -> String {
+        SessionBackend::capabilities(&*self.backend).backend
+    }
+}

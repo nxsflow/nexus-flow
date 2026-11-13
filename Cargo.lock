@@ -2384,6 +2384,8 @@ dependencies = [
  "nexus-flow-core",
  "nexus-flow-facade",
  "nexus-memory",
+ "nexus-run-contracts",
+ "nexus-run-host",
  "nxs-foundation",
  "nxs-guide",
  "nxs-init",

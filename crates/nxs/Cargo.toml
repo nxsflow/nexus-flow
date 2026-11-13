@@ -42,6 +42,9 @@ nexus-memory = { path = "../memory" }
 # The chat product (nexus-chat-M1 T2): `nxs` routes the `nxc`/`chat` persona to it. The ModuleInit
 # self-registration + the `use nexus_chat as _;` link line are T3 (this dep only enables routing).
 nexus-chat = { path = "../chat" }
+# The new engine's host (6j6v.pn9c, epic 6j6v.zjyv §8.1): the service ticks it per registered workspace that
+# has a `run.sqlite`. The one new crate `nxs` may import (`cargo xtask layering check`).
+nexus-run-host = { path = "../run-host" }
 # The ONE embedded-guide mechanism (6j6v.9e3r). `nxs guide` embeds no guides of its own — the
 # umbrella owns no domain — but it renders the markdown it fans back in with the SAME renderer the
 # blocks use, so `nxs guide <topic>` is byte-identical to `<binary> guide <topic>`.
@@ -115,6 +118,10 @@ nxs-test-support = { path = "../test-support" }
 # (mcp/flow.rs) can drive a custom-field-declaring plugin the shipped `nxs` never bundles.
 plugin-probe = { path = "../plugin-probe" }
 tempfile = "3"
+# The host's scripted harness, to step a run to a live session for `a_run_is_alive` (6j6v.pn9c); the gate
+# allows `test-support` on a dev edge only. The contracts for the store's trait methods.
+nexus-run-host = { path = "../run-host", features = ["test-support"] }
+nexus-run-contracts = { path = "../run-contracts" }
 assert_cmd = "2"
 predicates = "3"
 trycmd = "1.2.0"

@@ -26,6 +26,7 @@ pub mod endpoint;
 pub mod launchd;
 pub mod slug;
 pub mod trust;
+pub mod v2_hosts;
 
 use crate::error::{ErrorKind, NxfError, Result};
 use nexus_flow_core::store::Store;
