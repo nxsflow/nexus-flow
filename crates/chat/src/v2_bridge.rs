@@ -215,8 +215,8 @@ pub fn commission(
     }
     let root = receipt.root_thread;
     let mut warnings = Vec::new();
+    // On the receipt only: the CLI prints a receipt's warnings, and an embedder reads them from it.
     if !attended {
-        eprintln!("warning: {NOT_ATTENDED}");
         warnings.push(FailedConsequence::service_not_running(
             &root,
             NOT_ATTENDED.to_owned(),
@@ -243,11 +243,12 @@ pub fn commission(
     })
 }
 
-/// Whether a service has stepped this workspace's runs within two lease expiries (§8.1).
+/// Whether a service has stepped this workspace's runs within two lease expiries of now (§8.1). Either
+/// side: after clock skew a record from beyond the window in the future proves nothing about now.
 fn attended(ctx: &BridgeCtx, now: Timestamp) -> std::result::Result<bool, Refused> {
-    let window = 2 * LEASE_EXPIRY.0 as i64 * 1000;
+    let window = 2 * LEASE_EXPIRY.0 * 1000;
     Ok(ctx
         .store
         .host_seen(&ctx.workspace_id)?
-        .is_some_and(|at| now.unix_millis() - at.unix_millis() <= window))
+        .is_some_and(|at| now.unix_millis().abs_diff(at.unix_millis()) <= window))
 }

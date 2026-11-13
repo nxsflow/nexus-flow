@@ -242,6 +242,59 @@ fn a_v2_commission_with_no_service_attending_says_so_and_one_attended_says_nothi
     assert!(attended.warnings.is_empty(), "{:?}", attended.warnings);
 }
 
+/// A service last seen `at_millis_from_now` away from NOW: the window is two lease expiries, so a host that stopped stepping
+/// just inside it still attends, and one a millisecond past it does not (§8.1).
+fn send_with_host_seen(at_millis_from_now: i64) -> SendToReceipt {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    // A first send creates run.sqlite; the attendance record is then written into it.
+    send(&eng, the_owner(), "coding-v2").expect("commissioned");
+    let store = nexus_run_host::bridge::open_store(&run_sqlite(ws.path()))
+        .unwrap()
+        .unwrap();
+    let now = nexus_run_contracts::Timestamp::parse(NOW).unwrap();
+    store
+        .mark_host_seen(
+            &eng.origin(),
+            nexus_run_contracts::Timestamp::from_unix_millis(
+                now.unix_millis() + at_millis_from_now,
+            ),
+        )
+        .unwrap();
+    send(&eng, the_owner(), "coding-v2").expect("commissioned")
+}
+
+const WINDOW_MILLIS: i64 = 2 * nexus_run_host::bridge::LEASE_EXPIRY.0 as i64 * 1000;
+
+fn says_nobody_attends(receipt: &SendToReceipt) -> bool {
+    let record = serde_json::to_value(receipt).unwrap();
+    record["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["class"] == "service_not_running")
+}
+
+#[test]
+fn a_service_last_seen_exactly_two_lease_expiries_ago_still_attends() {
+    let receipt = send_with_host_seen(-WINDOW_MILLIS);
+    assert!(!says_nobody_attends(&receipt), "{:?}", receipt.warnings);
+}
+
+#[test]
+fn a_service_last_seen_a_millisecond_beyond_two_lease_expiries_no_longer_attends() {
+    let receipt = send_with_host_seen(-WINDOW_MILLIS - 1);
+    assert!(says_nobody_attends(&receipt), "{:?}", receipt.warnings);
+}
+
+/// After clock skew a record from the future proves nothing about now: past the window either way, the
+/// receipt says nobody attends rather than staying silent.
+#[test]
+fn a_service_seen_further_in_the_future_than_the_window_does_not_count_as_attending() {
+    assert!(!says_nobody_attends(&send_with_host_seen(WINDOW_MILLIS)));
+    assert!(says_nobody_attends(&send_with_host_seen(WINDOW_MILLIS + 1)));
+}
+
 /// No persona commissions a v2 run in slice 1 (owner, 2026-11-04): the list hides the channel, and the send
 /// refuses it, because `coding` keeps its name when it switches and a prompt names it in prose (§10).
 #[test]
@@ -459,6 +512,26 @@ fn nxc_send_to_a_v2_channel_prints_the_root_id_at_once_and_the_status_read() {
     assert!(
         !human.contains("--stream"),
         "a run is not followed by --stream yet: {human}"
+    );
+}
+
+/// The receipt carries the warning and the CLI prints the receipt's warnings, so the library prints none
+/// itself: one line on stderr, not two, and an embedder of `Engine::send` gets no stderr write at all.
+#[test]
+fn nxc_send_to_an_unattended_v2_channel_warns_exactly_once_on_stderr() {
+    let ws = workspace();
+    let out = nxc(ws.path())
+        .args(["send", "--to", "coding-v2", "--no-ref", "build it"])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&out);
+    assert_eq!(
+        stderr.matches("no service attends this workspace").count(),
+        1,
+        "{stderr}"
     );
 }
 
