@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nexus_run_contracts::{RunStore, SessionBackend, StoreError};
+use nexus_run_contracts::{SessionBackend, StoreError};
 use nexus_run_session_claude::ClaudeBackend;
 use nexus_run_store_sqlite::SqliteRunStore;
 
-use crate::bridge::{view, LiveSession, Refused, HOST_BUSY_TIMEOUT};
+use crate::bridge::{live_in, LiveSession, Refused, HOST_BUSY_TIMEOUT};
 use crate::git_tree::{GitBounds, GitTree};
 use crate::ports::SystemClock;
 use crate::tree_ledger::TreeLedger;
@@ -48,34 +48,14 @@ pub fn service_host(
     ))
 }
 
-/// Every session of an open run in `store` that may have a process: a replied slot still winding down counts
-/// (§10).
-pub(crate) fn live_in(store: &SqliteRunStore) -> Result<Vec<LiveSession>, Refused> {
-    let mut live = Vec::new();
-    for row in store.open_runs()? {
-        let Some(view) = view(store, &row.run)? else {
-            continue;
-        };
-        for record in &view.state.slots {
-            if record.state.is_live() {
-                live.push(LiveSession {
-                    run: row.run.clone(),
-                    session_key: view.state.session_key(&record.slot),
-                    handle: record.slot.member.clone(),
-                });
-            }
-        }
-    }
-    Ok(live)
-}
-
 impl Host {
     /// What `a_run_is_alive` asks of this host's workspace, over the host's own connection.
     pub fn live_sessions(&self) -> Result<Vec<LiveSession>, Refused> {
         live_in(&self.store)
     }
 
-    /// The backend's name, as its capabilities state it.
+    /// The backend's name, as its capabilities state it. Public for the service's tests and this crate's
+    /// integration test, which prove the service's host runs the Claude adapter.
     pub fn backend_name(&self) -> String {
         SessionBackend::capabilities(&*self.backend).backend
     }

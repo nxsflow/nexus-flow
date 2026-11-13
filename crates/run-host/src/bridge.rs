@@ -653,7 +653,28 @@ pub struct LiveSession {
 
 /// What `a_run_is_alive` asks: a replied slot still winding down counts (§10).
 pub fn live_sessions(ctx: &BridgeCtx) -> Result<Vec<LiveSession>, Refused> {
-    crate::service::live_in(&ctx.store)
+    live_in(&ctx.store)
+}
+
+/// Every session of an open run in `store` that may have a process: a replied slot still winding down counts
+/// (§10).
+pub(crate) fn live_in(store: &SqliteRunStore) -> Result<Vec<LiveSession>, Refused> {
+    let mut live = Vec::new();
+    for row in store.open_runs()? {
+        let Some(view) = view(store, &row.run)? else {
+            continue;
+        };
+        for record in &view.state.slots {
+            if record.state.is_live() {
+                live.push(LiveSession {
+                    run: row.run.clone(),
+                    session_key: view.state.session_key(&record.slot),
+                    handle: record.slot.member.clone(),
+                });
+            }
+        }
+    }
+    Ok(live)
 }
 
 /// The run and the thread of a session key, or `None` when this store does not know it: how every caller

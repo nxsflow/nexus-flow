@@ -26,18 +26,24 @@ pub struct V2Hosts {
     /// How many ticks one measures line covers: the smoke run reads the bounds it observed from it (§12.10).
     pub(crate) stats_every: usize,
     window: Window,
+    /// The root whose next tick panics, for the test of the isolation.
+    #[cfg(test)]
+    pub(crate) panic_in: Option<PathBuf>,
 }
 
 /// What the ticks of one window measured, across every host.
 #[derive(Default)]
 struct Window {
+    /// Service ticks in the window: the cadence, whatever the number of hosts.
+    service_ticks: usize,
+    /// One duration per host tick.
     ticks: Vec<std::time::Duration>,
     busy: u32,
     yielded: u32,
     folded: u64,
 }
 
-/// Ten minutes of one-second ticks.
+/// Ten minutes of the service's one-second ticks, counted once per service tick however many hosts it steps.
 const STATS_EVERY: usize = 600;
 
 impl V2Hosts {
@@ -49,6 +55,8 @@ impl V2Hosts {
             log,
             stats_every: STATS_EVERY,
             window: Window::default(),
+            #[cfg(test)]
+            panic_in: None,
         }
     }
 
@@ -74,6 +82,9 @@ impl V2Hosts {
                         host.set_log_sink(self.log.clone());
                         self.hosts.insert(root.clone(), host);
                     }
+                    // Retried every tick, deliberately: the cost is a stat, a declarations read and an open,
+                    // once a second, and the fix a person makes (a store moved back, a declaration repaired)
+                    // is picked up at the next tick without a restart. Logged once until it changes.
                     Err(error) => {
                         if self.refused.insert(root.clone()) {
                             (self.log)(&format!(
@@ -85,17 +96,47 @@ impl V2Hosts {
                     }
                 }
             }
+            #[cfg(test)]
+            let panics = self.panic_in.as_ref() == Some(&root);
+            #[cfg(not(test))]
+            let panics = false;
             if let Some(host) = self.hosts.get_mut(&root) {
                 let now = nexus_run_host::ports::Clock::now(&nexus_run_host::ports::SystemClock);
                 let started = std::time::Instant::now();
-                let report = host.tick(now);
-                self.window.ticks.push(started.elapsed());
-                self.window.busy += u32::from(report.busy);
-                self.window.yielded += u32::from(report.yielded);
-                self.window.folded += u64::from(report.folded);
+                // A panic outside a run's own boundary (the host catches those) must not take the service down
+                // with the old engine's deadlines and handovers: the host is dropped and named once, and the next
+                // tick builds a fresh one, which recovers from the store as a restart does.
+                let ticked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if panics {
+                        panic!("a test's host panics");
+                    }
+                    host.tick(now)
+                }));
+                match ticked {
+                    Ok(report) => {
+                        self.window.ticks.push(started.elapsed());
+                        self.window.busy += u32::from(report.busy);
+                        self.window.yielded += u32::from(report.yielded);
+                        self.window.folded += u64::from(report.folded);
+                    }
+                    Err(_) => {
+                        self.hosts.remove(&root);
+                        #[cfg(test)]
+                        {
+                            self.panic_in = None;
+                        }
+                        (self.log)(&format!(
+                            "workspace {}: the new engine's host panicked; it is built afresh on the next tick",
+                            root.display()
+                        ));
+                    }
+                }
             }
         }
-        if self.window.ticks.len() >= self.stats_every {
+        if !self.hosts.is_empty() {
+            self.window.service_ticks += 1;
+        }
+        if self.window.service_ticks >= self.stats_every && !self.window.ticks.is_empty() {
             let window = std::mem::take(&mut self.window);
             (self.log)(&window.line());
         }
@@ -110,12 +151,14 @@ impl V2Hosts {
     }
 
     /// The workspaces that have a host, by root.
-    pub fn roots(&self) -> Vec<PathBuf> {
+    #[cfg(test)]
+    pub(crate) fn roots(&self) -> Vec<PathBuf> {
         self.hosts.keys().cloned().collect()
     }
 
     /// The backend a workspace's host runs its sessions through.
-    pub fn backend_of(&self, root: &std::path::Path) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn backend_of(&self, root: &std::path::Path) -> Option<String> {
         self.hosts.get(root).map(Host::backend_name)
     }
 
@@ -134,7 +177,8 @@ impl Window {
         let n = self.ticks.len();
         let p99 = self.ticks[(n * 99).div_ceil(100).saturating_sub(1)];
         format!(
-            "run-host stats: ticks={n} p99_ms={:.1} max_ms={:.1} busy={} yielded={} folded={}",
+            "run-host stats: ticks={} host_ticks={n} p99_ms={:.1} max_ms={:.1} busy={} yielded={} folded={}",
+            self.service_ticks,
             ms(p99),
             ms(self.ticks[n - 1]),
             self.busy,
@@ -336,6 +380,64 @@ mod tests {
         ] {
             assert!(stats[0].contains(field), "{field} in {}", stats[0]);
         }
+    }
+
+    #[test]
+    fn a_window_counts_service_ticks_whatever_the_number_of_hosts() {
+        let (_a, alpha) = workspace();
+        let (_b, beta) = workspace();
+        commission(&alpha);
+        commission(&beta);
+        let (mut v2, seen) = hosts();
+        v2.stats_every = 4;
+        for _ in 0..4 {
+            v2.tick(&[alpha.clone(), beta.clone()]);
+        }
+        let stats: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("run-host stats:"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            stats.len(),
+            1,
+            "one line per 4 service ticks, with two hosts: {stats:?}"
+        );
+        assert!(
+            stats[0].contains("ticks=4 ") && stats[0].contains("host_ticks=8"),
+            "{}",
+            stats[0]
+        );
+    }
+
+    #[test]
+    fn a_host_whose_tick_panics_is_dropped_and_named_once_and_the_others_go_on() {
+        let (_a, alpha) = workspace();
+        let (_b, beta) = workspace();
+        commission(&alpha);
+        commission(&beta);
+        let (mut v2, seen) = hosts();
+        v2.tick(&[alpha.clone(), beta.clone()]);
+        assert_eq!(v2.roots().len(), 2);
+        v2.panic_in = Some(root_of(&alpha));
+        v2.tick(&[alpha.clone(), beta.clone()]);
+        assert_eq!(
+            v2.roots(),
+            [root_of(&beta)],
+            "the panicking host is dropped, the other kept"
+        );
+        v2.tick(&[alpha.clone(), beta.clone()]);
+        let named: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("panicked"))
+            .cloned()
+            .collect();
+        assert_eq!(named.len(), 1, "named once: {named:?}");
+        assert!(named[0].contains(&root_of(&alpha).display().to_string()));
     }
 
     #[test]
