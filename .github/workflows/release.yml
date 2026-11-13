@@ -200,7 +200,7 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: The board-fold purge as consumers build it carries no purge test seam
         run: |
@@ -259,7 +259,7 @@ jobs:
       NXF_MINISIGN_PUBKEY: ${{ vars.NXF_MINISIGN_PUBKEY }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
       # Cache only on the ephemeral GitHub-hosted Linux legs (builder: zigbuild). The self-hosted
@@ -849,7 +849,7 @@ jobs:
 
       # PROD only: GitHub Pre-Release (beta ring) with the changelog body + all assets attached.
       # GitHub is the showcase; AWS is the delivery. Unreachable today (prod lock above).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         if: needs.meta.outputs.is_prod == 'true'
       - name: Create GitHub Pre-Release (beta ring)
         if: needs.meta.outputs.is_prod == 'true'

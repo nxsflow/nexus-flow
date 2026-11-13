@@ -58,7 +58,7 @@ jobs:
           # locally (no crates.io — the facade is `publish = false`, §14 TB-8; no network at
           # check time).
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # Prebuilt binary (no compile) — cargo-semver-checks generates the rustdoc JSON it needs
       # itself, so the stable toolchain above suffices.

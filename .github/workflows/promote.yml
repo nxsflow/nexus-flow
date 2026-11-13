@@ -108,7 +108,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
 
       # Fail-fast pre-flight (tnce): assert the released version HAS a beta feed entry before any
       # mutation — the aggregate/promote step below, the S3 server-side copy, or the feed commit.
