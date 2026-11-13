@@ -607,8 +607,10 @@ fn the_new_engines_send_and_every_read_work_from_the_v2_directory_with_the_roots
 
 // ---- the sink is the only door -------------------------------------------------------------------------------
 
-/// Every session the old engine starts is handed to its worker in ONE place, and the guard stands there: a
-/// second call of `Worker::trigger` would be a door the guard does not watch.
+/// A TRIPWIRE, not the proof: it reads the source for a second literal `worker.trigger(` call, which a
+/// second door through another binding, a trait object or a macro would not show. The proof is behavioural,
+/// verb by verb, with a mutation of the sink reddening each: here (resume, tick, session ended, and the
+/// refusals before any write) and in `v2_directory_guard_verbs.rs` (pick_up, handover, confirm).
 #[test]
 fn the_old_engine_hands_a_session_to_its_worker_in_one_place_and_the_guard_stands_there() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
