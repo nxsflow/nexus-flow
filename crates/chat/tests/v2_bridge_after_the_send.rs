@@ -859,6 +859,22 @@ fn a_v2_run_is_listed_once_beside_the_v1_operations() {
     assert!(ours[0].run.is_some(), "and as the run");
 }
 
+/// A write lock on `path`, held from before this returns until the returned sender is dropped or sent to —
+/// released by the test when it has what it waited for, never by a clock.
+fn hold_a_write_lock(path: PathBuf) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (taken, taken_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        taken.send(()).unwrap();
+        let _ = release_rx.recv();
+        conn.execute_batch("ROLLBACK").unwrap();
+    });
+    taken_rx.recv().unwrap();
+    (release, holder)
+}
+
 // ---- a held run.sqlite lock ------------------------------------------------------------------
 
 /// The bridge waits out a short stall on `run.sqlite` (5 s), so a reply is posted and enqueued once; a lock
@@ -891,6 +907,8 @@ fn a_reply_against_a_held_run_sqlite_lock_is_posted_once_and_enqueued_or_named()
         holder
     };
 
+    // The one stall that has to END while the reply still waits, so it is timed: 0.8 s inside the bridge's
+    // fixed 5 s, a margin of six times the stall. The long holds below are released by the test instead.
     let short = lock(std::time::Duration::from_millis(800));
     run.reply(as_session("coder", &key), &step, "first", false)
         .expect("the stall is waited out");
@@ -908,16 +926,7 @@ fn a_reply_against_a_held_run_sqlite_lock_is_posted_once_and_enqueued_or_named()
             .len()
     };
     let before = posts();
-    let path = run_sqlite(held.dir());
-    let (taken, taken_rx) = std::sync::mpsc::channel();
-    let holder = std::thread::spawn(move || {
-        let conn = rusqlite::Connection::open(path).unwrap();
-        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-        taken.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(7));
-        conn.execute_batch("COMMIT").unwrap();
-    });
-    taken_rx.recv().unwrap();
+    let (release, holder) = hold_a_write_lock(run_sqlite(held.dir()));
     let started = std::time::Instant::now();
     let refused = held
         .reply(as_session("coder", &key), &step, "second", false)
@@ -927,6 +936,7 @@ fn a_reply_against_a_held_run_sqlite_lock_is_posted_once_and_enqueued_or_named()
         "waited the bridge's 5 s first: {:?}",
         started.elapsed()
     );
+    release.send(()).unwrap();
     holder.join().unwrap();
     assert_refused_naming(
         &refused,
@@ -1143,19 +1153,11 @@ fn a_held_chat_store_lock_refuses_the_reply_with_the_reason_and_enqueues_nothing
     let mut run = V2Run::commissioned("coding-v2", Box::new(silent));
     let key = run.build_key();
     let step = run.thread_of(&key);
-    let db = run.dir().join(".nxs").join("db.sqlite");
-    let (taken, taken_rx) = std::sync::mpsc::channel();
-    let holder = std::thread::spawn(move || {
-        let conn = rusqlite::Connection::open(db).unwrap();
-        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-        taken.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(8));
-        conn.execute_batch("ROLLBACK").unwrap();
-    });
-    taken_rx.recv().unwrap();
+    let (release, holder) = hold_a_write_lock(run.dir().join(".nxs").join("db.sqlite"));
     let refused = run
         .reply(as_session("coder", &key), &step, "built", false)
         .expect_err("the chat store does not take the post");
+    release.send(()).unwrap();
     holder.join().unwrap();
     assert!(
         refused.msg.contains("locked") || refused.msg.contains("busy"),
@@ -1372,5 +1374,35 @@ fn nxc_resume_and_withdraw_print_their_lines_whole() {
             "withdrew run {run} on thread {root}: its host stops its sessions and parks any work \
              on its next tick — follow it with `nxc status --thread {root}`\n"
         )
+    );
+}
+
+/// A session key whose recorded thread no run routes is refused with the reason, never handed on as a thread
+/// id an id-free reply would then post into (review pass 2, Code Quality #3 / Integrity #1).
+#[test]
+fn a_session_whose_thread_routes_nowhere_is_refused_rather_than_given_an_empty_thread() {
+    let mut run = V2Run::commissioned("coding-v2", Box::new(silent));
+    let key = run.build_key();
+    let stray = format!("{}/build/v1/coder/a9", run.run);
+    run.store
+        .compare_and_set(
+            &format!("session/{stray}"),
+            None,
+            Some(b"m-ROUTESNOWHERE".as_slice()),
+        )
+        .unwrap();
+    let defs = nexus_chat::definitions::Definitions::resolve(run.dir()).unwrap();
+    let db = db_path(run.dir());
+    let refused = nexus_chat::v2_bridge::session_of(&db, &run.eng.origin(), &defs, Some(&stray))
+        .expect_err("a thread that routes nowhere");
+    assert!(refused.msg.contains("m-ROUTESNOWHERE"), "{refused}");
+    let found = nexus_chat::v2_bridge::session_of(&db, &run.eng.origin(), &defs, Some(&key))
+        .unwrap()
+        .expect("the build session");
+    assert_eq!(found.thread, run.thread_of(&key));
+    assert_eq!(
+        nexus_chat::v2_bridge::session_of(&db, &run.eng.origin(), &defs, Some("no-such-key"))
+            .unwrap(),
+        None
     );
 }

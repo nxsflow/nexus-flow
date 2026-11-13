@@ -117,15 +117,27 @@ pub fn session_of(
         Err(error) => return Err(store_refusal(&path, &error.to_string())),
     };
     let ctx = bridge_ctx(store, db_path, origin, defs);
-    let Some(route) = bridge::session_of(&ctx, session).map_err(|r| refusal_of(&path, r))? else {
-        return Ok(None);
-    };
-    let thread = ctx
+    // One read of `session/<key>`: the thread it names is the session's, and the route of that thread is its
+    // run. A key the store does not hold is no v2 session; a thread it names that routes nowhere refuses, as
+    // `bridge::session_of` does — never an empty thread id handed on.
+    let Some(thread) = ctx
         .store
         .get(&format!("session/{session}"))
         .map_err(|error| store_refusal(&path, &error.to_string()))?
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
+    else {
+        return Ok(None);
+    };
+    let thread = String::from_utf8_lossy(&thread).into_owned();
+    let route = bridge::thread_route(&ctx, &thread)
+        .map_err(|r| refusal_of(&path, r))?
+        .ok_or_else(|| {
+            refusal_of(
+                &path,
+                Refused::NotARunThread {
+                    thread: thread.clone(),
+                },
+            )
+        })?;
     let handle = bridge::view(&ctx.store, &route.run)
         .map_err(|r| refusal_of(&path, r))?
         .and_then(|view| {
@@ -685,14 +697,16 @@ impl RunReader {
                 })
         });
         let mut threads = vec![crate::facade::StatusThread::of_a_run(
-            root.clone(),
-            channel.clone(),
-            None,
-            !status.finished,
-            awaiting,
-            Some(view.state.requester.to_string()),
-            None,
-            working_copy,
+            crate::facade::RunThreadRow {
+                thread_id: root.clone(),
+                channel_id: channel.clone(),
+                parent: None,
+                open: !status.finished,
+                awaiting_human: awaiting,
+                opener: Some(view.state.requester.to_string()),
+                session: None,
+                working_copy,
+            },
         )];
         for step in &status.steps {
             for member in &step.members {
@@ -706,14 +720,16 @@ impl RunReader {
                 };
                 let answered = matches!(member.state.as_str(), "replied" | "ended");
                 threads.push(crate::facade::StatusThread::of_a_run(
-                    String::from_utf8_lossy(&thread).into_owned(),
-                    None,
-                    Some(root.clone()),
-                    step.state == "open" && !answered,
-                    false,
-                    None,
-                    Some(member.session_key.to_string()),
-                    None,
+                    crate::facade::RunThreadRow {
+                        thread_id: String::from_utf8_lossy(&thread).into_owned(),
+                        channel_id: None,
+                        parent: Some(root.clone()),
+                        open: step.state == "open" && !answered,
+                        awaiting_human: false,
+                        opener: None,
+                        session: Some(member.session_key.to_string()),
+                        working_copy: None,
+                    },
                 ));
             }
         }

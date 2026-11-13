@@ -974,17 +974,17 @@ impl BorderStatus {
 impl StatusThread {
     /// A thread of a run on the new engine, mapped from its contract (d) (6j6v.y6v7): what the old watcher
     /// reads — `state`, `awaiting_human` — and nothing the run does not know.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn of_a_run(
-        thread_id: String,
-        channel_id: Option<String>,
-        parent: Option<String>,
-        open: bool,
-        awaiting_human: bool,
-        opener: Option<String>,
-        session: Option<String>,
-        working_copy: Option<StatusWorkingCopy>,
-    ) -> StatusThread {
+    pub(crate) fn of_a_run(row: RunThreadRow) -> StatusThread {
+        let RunThreadRow {
+            thread_id,
+            channel_id,
+            parent,
+            open,
+            awaiting_human,
+            opener,
+            session,
+            working_copy,
+        } = row;
         StatusThread {
             thread_id,
             name: None,
@@ -1016,6 +1016,22 @@ impl StatusThread {
             recovery: None,
         }
     }
+}
+
+/// One thread of a run on the new engine, as [`StatusThread::of_a_run`] maps it: named fields, because four of
+/// them are optional strings a transposition would survive.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub(crate) struct RunThreadRow {
+    pub thread_id: String,
+    pub channel_id: Option<String>,
+    /// The root, for a step's thread; `None` for the root itself.
+    pub parent: Option<String>,
+    /// Somebody still owes a reply here.
+    pub open: bool,
+    pub awaiting_human: bool,
+    pub opener: Option<String>,
+    pub session: Option<String>,
+    pub working_copy: Option<StatusWorkingCopy>,
 }
 
 impl StatusOperation {
@@ -1080,9 +1096,9 @@ pub struct StatusWorkingCopy {
 }
 
 impl StatusWorkingCopy {
-    /// The first seven hex digits of [`commit`](Self::commit), as a terminal line shows it.
+    /// [`crate::anchor::short_commit`] of [`commit`](Self::commit).
     pub fn short(&self) -> &str {
-        self.commit.get(..12).unwrap_or(&self.commit)
+        crate::anchor::short_commit(&self.commit)
     }
 }
 
@@ -1280,6 +1296,9 @@ pub struct StatusOperation {
     /// **The run on the new engine this operation is, as contract (d) has it** (6j6v.zjyv §10; 6j6v.y6v7)
     /// — the pure projection with `local` around it, beside the old fields mapped from it. `None` for
     /// every operation of the old engine, and omitted from `--json` then.
+    ///
+    /// `run.local` is MACHINE-LOCAL — the working directory's absolute path, when a service on this host was
+    /// last seen, the tree as this host reads it — so a reader relaying the report off this machine strips it.
     // v2-bridge: deleted with the old engine (6j6v.2vtw)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<Box<nexus_run_contracts::RunStatus>>,

@@ -1792,44 +1792,19 @@ pub fn status(
     };
     let now = nexus_run_contracts::Timestamp::parse(at.now)
         .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", at.now)))?;
-    let (old, wanted, channel): (Vec<&str>, Vec<nexus_run_contracts::RunId>, Option<&str>) =
-        match scope {
-            StatusScope::Threads(ids) => {
-                let mut old = Vec::new();
-                let mut wanted = Vec::new();
-                for id in ids {
-                    match runs.run_of_thread(id)? {
-                        Some(run) if !wanted.contains(&run) => wanted.push(run),
-                        Some(_) => {}
-                        None => old.push(*id),
-                    }
-                }
-                (old, wanted, None)
-            }
-            StatusScope::Workspace => (Vec::new(), runs.runs_listed(false)?, None),
-            StatusScope::Channel(name) => (Vec::new(), runs.runs_listed(false)?, Some(name)),
-            StatusScope::All(name) => (Vec::new(), runs.runs_listed(true)?, name),
-        };
+    let wanted = runs_a_status_scope_wants(&runs, scope)?;
+    // The old engine's own selection, which filters its operations by the scope itself: by liveness, by
+    // channel, and — for `Threads` — over the ids no run claimed.
     let report = match scope {
-        StatusScope::Threads(_) => {
-            crate::facade::status(at.store, at.worker, at.now, StatusScope::Threads(&old))?
-        }
+        StatusScope::Threads(_) => crate::facade::status(
+            at.store,
+            at.worker,
+            at.now,
+            StatusScope::Threads(&wanted.old_threads),
+        )?,
         other => crate::facade::status(at.store, at.worker, at.now, other)?,
     };
-    let mut operations = Vec::new();
-    for run in &wanted {
-        let Some(op) = runs.run_as_operation(run, now)? else {
-            continue;
-        };
-        let in_channel = |name: &str| {
-            op.channel_id
-                .as_deref()
-                .is_some_and(|id| id == name || id.strip_prefix("decl:") == Some(name))
-        };
-        if channel.is_none_or(in_channel) {
-            operations.push(op);
-        }
-    }
+    let operations = runs_as_operations(&runs, &wanted, now)?;
     let mut of_a_run = BTreeSet::new();
     for op in &report.operations {
         if runs.run_of_thread(&op.root)?.is_some() {
@@ -1837,6 +1812,76 @@ pub fn status(
         }
     }
     Ok(report.with_runs(|root| of_a_run.contains(root), operations))
+}
+
+/// What a status scope asks of the two engines: the thread ids the old one answers, and the runs of the new
+/// one with the channel they must sit in.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+struct RunsAScopeWants<'s> {
+    old_threads: Vec<&'s str>,
+    runs: Vec<nexus_run_contracts::RunId>,
+    channel: Option<&'s str>,
+}
+
+/// `Threads` splits its ids between the engines — a run asked for by two of its threads once; the listing
+/// scopes take the open runs, or every run for `--all`.
+fn runs_a_status_scope_wants<'s>(
+    runs: &crate::v2_bridge::RunReader,
+    scope: crate::facade::StatusScope<'s>,
+) -> Result<RunsAScopeWants<'s>> {
+    use crate::facade::StatusScope;
+    let listed = |all: bool, channel: Option<&'s str>| -> Result<RunsAScopeWants<'s>> {
+        Ok(RunsAScopeWants {
+            old_threads: Vec::new(),
+            runs: runs.runs_listed(all)?,
+            channel,
+        })
+    };
+    match scope {
+        StatusScope::Threads(ids) => {
+            let mut wanted = RunsAScopeWants {
+                old_threads: Vec::new(),
+                runs: Vec::new(),
+                channel: None,
+            };
+            for id in ids {
+                match runs.run_of_thread(id)? {
+                    Some(run) if !wanted.runs.contains(&run) => wanted.runs.push(run),
+                    Some(_) => {}
+                    None => wanted.old_threads.push(*id),
+                }
+            }
+            Ok(wanted)
+        }
+        StatusScope::Workspace => listed(false, None),
+        StatusScope::Channel(name) => listed(false, Some(name)),
+        StatusScope::All(name) => listed(true, name),
+    }
+}
+
+/// The wanted runs as operations of the old shape, those outside the scope's channel left out — matched as
+/// the old engine matches its own roots, by the declared name or its `decl:` substrate id.
+fn runs_as_operations(
+    runs: &crate::v2_bridge::RunReader,
+    wanted: &RunsAScopeWants<'_>,
+    now: nexus_run_contracts::Timestamp,
+) -> Result<Vec<crate::facade::StatusOperation>> {
+    let mut operations = Vec::new();
+    for run in &wanted.runs {
+        let Some(op) = runs.run_as_operation(run, now)? else {
+            continue;
+        };
+        let in_channel = |name: &str| {
+            op.channel_id.as_deref().is_some_and(|id| {
+                id == name
+                    || id.strip_prefix(crate::orchestration::DECLARED_CHANNEL_PREFIX) == Some(name)
+            })
+        };
+        if wanted.channel.is_none_or(in_channel) {
+            operations.push(op);
+        }
+    }
+    Ok(operations)
 }
 
 /// **`nxc status --run <id>`** (ST2): contract (d) of the run `id` names — a run id or any thread of the run —

@@ -123,15 +123,23 @@ pub struct Anchor {
     pub fingerprint: String,
 }
 
+/// How many digits of a commit a human line prints: [`short_commit`].
+pub const SHORT_COMMIT_DIGITS: usize = 12;
+
+/// The first [`SHORT_COMMIT_DIGITS`] digits of `commit` — what a human line prints, for an anchor and for the
+/// tree a run on the new engine reports alike.
+///
+/// Twelve rather than seven: git's own default abbreviation grows with the repository, and a terminal line
+/// that says one thing today and another in a year is not a thing a reader can learn. It is a DISPLAY form
+/// only; nothing compares or looks anything up by it.
+pub fn short_commit(commit: &str) -> &str {
+    commit.get(..SHORT_COMMIT_DIGITS).unwrap_or(commit)
+}
+
 impl Anchor {
-    /// The first twelve digits of [`commit`](Anchor::commit) — what a human line prints.
-    ///
-    /// Twelve rather than seven: git's own default abbreviation grows with the repository, and a
-    /// terminal line that says one thing today and another in a year is not a thing a reader can
-    /// learn. It is a DISPLAY form only; nothing compares or looks anything up by it.
+    /// [`short_commit`] of [`commit`](Anchor::commit).
     pub fn short(&self) -> &str {
-        let n = self.commit.len().min(12);
-        &self.commit[..n]
+        short_commit(&self.commit)
     }
 
     /// **Has the working copy moved since this anchor was taken?** — the comparison the owner's

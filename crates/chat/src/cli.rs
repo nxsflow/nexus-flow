@@ -3938,9 +3938,6 @@ fn start_failed_line(f: &crate::working_tree::FailedStart, root: &str) -> String
     )
 }
 
-/// One `nxc status` line for a round taken back on purpose, still waiting for its park: who
-/// withdrew it, when, and the sessions still pinning the claim — or, once they have all left, that
-/// nothing is pinning it any more and the next tick is what moves it on.
 /// `nxc status --run <id>` (ST2): contract (d) of a run on the new engine as it reads, with `local` — one JSON
 /// record with `--json`, the same record indented without it.
 // v2-bridge: deleted with the old engine (6j6v.2vtw)
@@ -4037,7 +4034,7 @@ fn run_status_lines(
             let at = match (&tree.commit, &tree.branch, tree.dirty) {
                 (Some(commit), branch, dirty) => format!(
                     " at {}{}{}",
-                    commit.get(..12).unwrap_or(commit),
+                    crate::anchor::short_commit(commit),
                     branch
                         .as_deref()
                         .map_or_else(|| " (detached)".to_owned(), |b| format!(" on {b}")),
@@ -4058,9 +4055,27 @@ fn run_status_lines(
             }
         }
     }
-    lines
+    // Every field above comes from the run's log or the tree, so none is let near a terminal raw: each line
+    // is one line, and a control character in any of its fields is printed escaped (review pass 2,
+    // Integrity #3).
+    lines.iter().map(|line| printable_run_line(line)).collect()
 }
 
+/// `line` with every control character escaped (`\u{1b}` for ESC), so a value from a run's log cannot drive the
+/// terminal it is printed on; a line without one comes back as it is.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+fn printable_run_line(line: &str) -> String {
+    line.chars()
+        .map(|c| match c.is_control() {
+            true => c.escape_default().to_string(),
+            false => c.to_string(),
+        })
+        .collect()
+}
+
+/// One `nxc status` line for a round taken back on purpose, still waiting for its park: who
+/// withdrew it, when, and the sessions still pinning the claim — or, once they have all left, that
+/// nothing is pinning it any more and the next tick is what moves it on.
 fn withdrawn_line(w: &crate::facade::WithdrawnHolderStatus) -> String {
     if w.pinned_by.is_empty() {
         format!(
@@ -5849,5 +5864,17 @@ mod tests {
         );
         assert!(question.contains("asks that thread again"), "{question}");
         assert!(!question.contains("above"), "{question}");
+    }
+
+    #[test]
+    fn a_run_line_prints_a_control_character_escaped_and_leaves_every_other_character_alone() {
+        assert_eq!(
+            printable_run_line("  · next: \u{1b}[31mred\u{7}—ü"),
+            "  · next: \\u{1b}[31mred\\u{7}—ü"
+        );
+        assert_eq!(
+            printable_run_line("  build (visit 1, pass 1): open"),
+            "  build (visit 1, pass 1): open"
+        );
     }
 }
