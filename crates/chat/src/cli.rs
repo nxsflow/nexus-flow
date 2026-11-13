@@ -2586,11 +2586,13 @@ fn resume(
         let named = r.thread.as_deref().unwrap_or("-");
         match &r.outcome {
             ResumeOutcome::NotYet { until } => println!(
-                "not yet: run {run} is held until {} and restarts on its own then. `--force`                  restarts it now",
+                "not yet: run {run} is held until {} and restarts on its own then. `--force` \
+                 restarts it now",
                 until.as_deref().unwrap_or("-")
             ),
             _ => println!(
-                "resumed run {run}: its host restarts it on its next tick — follow it with `nxc                  status --thread {named}`"
+                "resumed run {run}: its host restarts it on its next tick — follow it with `nxc \
+                 status --thread {named}`"
             ),
         }
         return Ok(());
@@ -2713,7 +2715,8 @@ fn withdraw(json: bool, db: Option<&str>, thread: &str) -> Result<()> {
     } else if let Some(run) = &receipt.run {
         // v2-bridge: deleted with the old engine (6j6v.2vtw)
         println!(
-            "withdrew run {run} on thread {0}: its host stops its sessions and parks any work on              its next tick — follow it with `nxc status --thread {0}`",
+            "withdrew run {run} on thread {0}: its host stops its sessions and parks any work on \
+             its next tick — follow it with `nxc status --thread {0}`",
             receipt.thread_id
         );
     } else {

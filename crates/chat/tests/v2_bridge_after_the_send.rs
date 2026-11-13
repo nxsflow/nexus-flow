@@ -362,12 +362,8 @@ impl V2Run {
         body: &str,
         accept: bool,
     ) -> nexus_chat::error::Result<nexus_chat::orchestration::ReplyReceipt> {
-        let now = self.now_text();
-        self.eng.reply_thread(
-            Caller {
-                now: Some(&now),
-                ..caller
-            },
+        self.reply_with(
+            caller,
             ReplyThreadRequest {
                 thread,
                 body,
@@ -376,6 +372,22 @@ impl V2Run {
                 accept,
                 machine: None,
             },
+        )
+    }
+
+    /// A reply with every field of the request the caller's to set.
+    fn reply_with(
+        &self,
+        caller: Caller<'_>,
+        req: ReplyThreadRequest<'_>,
+    ) -> nexus_chat::error::Result<nexus_chat::orchestration::ReplyReceipt> {
+        let now = self.now_text();
+        self.eng.reply_thread(
+            Caller {
+                now: Some(&now),
+                ..caller
+            },
+            req,
         )
     }
 
@@ -1222,4 +1234,143 @@ fn the_v2_receipts_predicates_hold_against_the_status_payload() {
     });
     let finished = read(&run);
     assert!(done(&finished) && !stopped(&finished), "{finished}");
+}
+
+// ---- the flags a run's threads do not take (review pass 2) -------------------------------------
+
+/// A run's root is answered plainly, or with `--accept` at a ceiling: `--escalate` and `--needs-rework` are
+/// a step's words, refused on the root before anything is written — even from the requester, with a
+/// question open.
+#[test]
+fn escalate_and_needs_rework_on_a_v2_root_are_refused_before_anything_is_written() {
+    let mut run = V2Run::commissioned("coding-v2", Box::new(escalating));
+    run.until_view("the escalation", |view| {
+        matches!(view, RunView::NeedsDecision { .. })
+    });
+    let root = run.root.clone();
+    let before = run.ops();
+    for (escalate, needs_rework) in [(true, false), (false, true)] {
+        let refused = run
+            .reply_with(
+                run.owner(),
+                ReplyThreadRequest {
+                    thread: &root,
+                    body: "this is not a step",
+                    escalate,
+                    needs_rework,
+                    accept: false,
+                    machine: None,
+                },
+            )
+            .expect_err("not a root's words");
+        assert_eq!(refused.kind, ErrorKind::Validation, "{refused}");
+        assert_eq!(
+            refused.msg,
+            "a run's root thread is answered plainly, or with `--accept` at a ceiling; \
+             `--escalate` and `--needs-rework` are said in a step's thread — nothing was written"
+        );
+    }
+    assert_eq!(run.ops(), before);
+    assert!(run.inputs().is_empty(), "{:?}", run.inputs());
+}
+
+/// A run on the new engine runs on this machine: `--machine` names nothing on its threads, on a step's as on
+/// the root, and is refused before anything is written.
+#[test]
+fn machine_on_a_v2_step_thread_or_root_is_refused_before_anything_is_written() {
+    let mut run = V2Run::commissioned("coding-v2", Box::new(silent));
+    let key = run.build_key();
+    let step = run.thread_of(&key);
+    let root = run.root.clone();
+    let before = run.ops();
+    for (caller, thread) in [
+        (as_session("coder", key.as_str()), step.as_str()),
+        (run.owner(), root.as_str()),
+    ] {
+        let refused = run
+            .reply_with(
+                caller,
+                ReplyThreadRequest {
+                    thread,
+                    body: "over there",
+                    escalate: false,
+                    needs_rework: false,
+                    accept: false,
+                    machine: Some("the-other-laptop"),
+                },
+            )
+            .expect_err("no machine on a run's thread");
+        assert_eq!(refused.kind, ErrorKind::Validation, "{thread}: {refused}");
+        assert_eq!(
+            refused.msg,
+            "a run on the new engine runs on this machine; `--machine` names nothing here — \
+             nothing was written"
+        );
+    }
+    assert_eq!(run.ops(), before);
+    assert!(run.inputs().is_empty(), "{:?}", run.inputs());
+}
+
+/// The old sidecar's teardown settle (`--if-unanswered`) has no place in a run on the new engine: refused on
+/// a v2 step thread, with nothing written to the chat store and nothing handed to the run.
+#[test]
+fn if_unanswered_on_a_v2_step_thread_is_refused_and_writes_nothing() {
+    let mut run = V2Run::commissioned("coding-v2", Box::new(silent));
+    let key = run.build_key();
+    let step = run.thread_of(&key);
+    let now = run.now_text();
+    let before = run.ops();
+    let said = stderr_of_a_refusal(nxc_as(run.dir(), &now, "coder", &key).args([
+        "reply",
+        "--thread",
+        &step,
+        "--if-unanswered",
+        "the session ended",
+    ]));
+    assert_eq!(
+        said,
+        format!(
+            "error: thread {step} belongs to a run on the new engine, whose host settles its own \
+             sessions; `--if-unanswered` is the old sidecar's — answer with a plain `nxc reply`. \
+             Nothing was written\n"
+        )
+    );
+    assert_eq!(run.ops(), before);
+    assert!(run.inputs().is_empty(), "{:?}", run.inputs());
+}
+
+/// The three lines the CLI prints for a run's resume and withdrawal, pinned whole: a substring test cannot
+/// see a run of blanks inside a line (review pass 2, Code Quality #1).
+#[test]
+fn nxc_resume_and_withdraw_print_their_lines_whole() {
+    let mut held = V2Run::commissioned("coding-v2", Box::new(on_the_usage_limit));
+    held.until_view("the hold", |view| matches!(view, RunView::Held { .. }));
+    let now = held.now_text();
+    let root = held.root.clone();
+    let run = held.run.to_string();
+    let until = json(nxc(held.dir(), &now).args(["--json", "resume", "--thread", &root]))["until"]
+        .as_str()
+        .expect("not yet names its instant")
+        .to_owned();
+    assert_eq!(
+        stdout(nxc(held.dir(), &now).args(["resume", "--thread", &root])),
+        format!(
+            "not yet: run {run} is held until {until} and restarts on its own then. `--force` \
+             restarts it now\n"
+        )
+    );
+    assert_eq!(
+        stdout(nxc(held.dir(), &now).args(["resume", "--thread", &root, "--force"])),
+        format!(
+            "resumed run {run}: its host restarts it on its next tick — follow it with `nxc \
+             status --thread {root}`\n"
+        )
+    );
+    assert_eq!(
+        stdout(nxc(held.dir(), &now).args(["withdraw", "--thread", &root])),
+        format!(
+            "withdrew run {run} on thread {root}: its host stops its sessions and parks any work \
+             on its next tick — follow it with `nxc status --thread {root}`\n"
+        )
+    );
 }

@@ -1707,7 +1707,9 @@ pub fn settle_if_unanswered(
     // the old tables do not know.
     if crate::v2_bridge::is_a_run_thread(ctx, req.thread)? {
         return Err(NxfError::validation(format!(
-            "thread {} belongs to a run on the new engine, whose host settles its own sessions;              `--if-unanswered` is the old sidecar's — answer with a plain `nxc reply`. Nothing was              written",
+            "thread {} belongs to a run on the new engine, whose host settles its own sessions; \
+             `--if-unanswered` is the old sidecar's — answer with a plain `nxc reply`. Nothing was \
+             written",
             req.thread
         )));
     }
