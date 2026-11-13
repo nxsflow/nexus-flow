@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nexus_run_contracts::{LivenessPolicy, Timestamp};
+use nexus_run_contracts::{LivenessPolicy, RunStore, Timestamp};
 use nexus_run_host::bridge::{self, BridgeCtx, Refused, SqliteRunStore, LEASE_EXPIRY};
 use nexus_run_host::Layout;
 
@@ -94,6 +94,8 @@ pub struct V2Session {
     /// The persona its slot runs, which is what it is to every old gate.
     pub handle: String,
     pub session_key: String,
+    /// The step thread the session answers in: what its id-free `nxc reply` resolves to (§10).
+    pub thread: String,
 }
 
 /// **Whether `session` is a session of a run on the new engine** — the one lookup, made before every
@@ -115,9 +117,27 @@ pub fn session_of(
         Err(error) => return Err(store_refusal(&path, &error.to_string())),
     };
     let ctx = bridge_ctx(store, db_path, origin, defs);
-    let Some(route) = bridge::session_of(&ctx, session).map_err(|r| refusal_of(&path, r))? else {
+    // One read of `session/<key>`: the thread it names is the session's, and the route of that thread is its
+    // run. A key the store does not hold is no v2 session; a thread it names that routes nowhere refuses, as
+    // `bridge::session_of` does — never an empty thread id handed on.
+    let Some(thread) = ctx
+        .store
+        .get(&format!("session/{session}"))
+        .map_err(|error| store_refusal(&path, &error.to_string()))?
+    else {
         return Ok(None);
     };
+    let thread = String::from_utf8_lossy(&thread).into_owned();
+    let route = bridge::thread_route(&ctx, &thread)
+        .map_err(|r| refusal_of(&path, r))?
+        .ok_or_else(|| {
+            refusal_of(
+                &path,
+                Refused::NotARunThread {
+                    thread: thread.clone(),
+                },
+            )
+        })?;
     let handle = bridge::view(&ctx.store, &route.run)
         .map_err(|r| refusal_of(&path, r))?
         .and_then(|view| {
@@ -129,6 +149,7 @@ pub fn session_of(
     Ok(Some(V2Session {
         handle,
         session_key: session.to_owned(),
+        thread,
     }))
 }
 
@@ -251,4 +272,474 @@ fn attended(ctx: &BridgeCtx, now: Timestamp) -> std::result::Result<bool, Refuse
         .store
         .host_seen(&ctx.workspace_id)?
         .is_some_and(|at| now.unix_millis().abs_diff(at.unix_millis()) <= window))
+}
+
+// ---- after the send: reply, withdraw, resume and status on a run (6j6v.y6v7) -------------------------
+
+/// The bridge's connection over `ctx`'s workspace, or `None` where there is no `run.sqlite`.
+fn open_bridge(
+    db_path: &str,
+    origin: &str,
+    defs: &Definitions,
+) -> Result<Option<(BridgeCtx, PathBuf)>> {
+    let path = run_sqlite(db_path);
+    match bridge::open_store(&path) {
+        Ok(None) => Ok(None),
+        Ok(Some(store)) => Ok(Some((bridge_ctx(store, db_path, origin, defs), path))),
+        Err(error) => Err(store_refusal(&path, &error.to_string())),
+    }
+}
+
+/// A thread of a run on the new engine, with the connection that found it.
+struct RunThread {
+    bridge: BridgeCtx,
+    path: PathBuf,
+    route: bridge::ThreadRoute,
+}
+
+/// **Whether `thread` belongs to a run on the new engine** — the lookup every verb below makes FIRST, so a
+/// v2 thread never falls through to the old tables. `None` only for no `run.sqlite`, or a thread it does not
+/// route; a file that does not answer refuses (§10).
+fn run_thread(ctx: &Ctx, thread: &str) -> Result<Option<RunThread>> {
+    let Some((bridge, path)) = open_bridge(ctx.db_path, ctx.origin, ctx.defs)? else {
+        return Ok(None);
+    };
+    let route = bridge::thread_route(&bridge, thread).map_err(|r| refusal_of(&path, r))?;
+    Ok(route.map(|route| RunThread {
+        bridge,
+        path,
+        route,
+    }))
+}
+
+fn now_of(ctx: &Ctx) -> Result<Timestamp> {
+    Timestamp::parse(ctx.now)
+        .ok_or_else(|| NxfError::validation(format!("`{}` is not an RFC 3339 instant", ctx.now)))
+}
+
+/// The run's fold, as the bridge reads it; a run it cannot read at all is refused as finished, which is what
+/// every bridge verb answers for it.
+fn view_of(thread: &RunThread) -> Result<bridge::RunState> {
+    bridge::view(&thread.bridge.store, &thread.route.run)
+        .map_err(|r| refusal_of(&thread.path, r))?
+        .map(|view| view.state)
+        .ok_or_else(|| refusal_of(&thread.path, Refused::RunFinished))
+}
+
+/// **The requester at the terminal, or the refusal that says who may** (§10): a session of a run on the new
+/// engine is never the requester, nor is a persona session or any caller presenting a session; and the
+/// caller's handle is compared with the recorded requester through `same_identity`, so a host handing its
+/// user bare or qualified is one person (memory declared-members-bare-caller-qualified). What the bridge is
+/// handed is the recorded requester itself, so its own check compares a value with itself.
+fn the_requester(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    state: &bridge::RunState,
+    verb: &str,
+) -> Result<bridge::Caller> {
+    let (identity, v2) =
+        resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)?;
+    if let Some(v2) = v2 {
+        return Err(NxfError::forbidden(format!(
+            "a session of a run on the new engine cannot {verb} on a run's root thread — that is the \
+             requester's, at the terminal. Say what you need in your own thread with `nxc reply \
+             --escalate` (you are `{}`, session {}); nothing was written",
+            v2.handle, v2.session_key
+        )));
+    }
+    if let crate::persona::Identity::Persona(handle) = &identity {
+        return Err(not_the_requester(verb, &state.requester, Some(handle)));
+    }
+    if ctx.session.is_some()
+        || !crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor)
+    {
+        return Err(not_the_requester(verb, &state.requester, None));
+    }
+    Ok(bridge::Caller {
+        actor: state.requester.clone(),
+        session: None,
+    })
+}
+
+fn not_the_requester(verb: &str, requester: &str, persona: Option<&str>) -> NxfError {
+    let you = persona.map_or_else(String::new, |handle| format!(" (you are `{handle}`)"));
+    NxfError::forbidden(format!(
+        "only {requester}, who commissioned this run, can {verb} on its root thread, from the \
+         terminal{you}; nothing was written"
+    ))
+}
+
+/// A bridge refusal as the old surface words it, naming the thread where that helps.
+fn refused_on(thread: &RunThread, refused: Refused) -> NxfError {
+    match refused {
+        Refused::NotTheSlot { owed_by } => NxfError::forbidden(format!(
+            "this thread is answered by {owed_by}'s own session only — the session the run started \
+             for that step; nothing was written"
+        )),
+        Refused::RunFinished => NxfError::validation(
+            "the run has finished; start a new commission with `nxc send` — nothing was written",
+        ),
+        other => refusal_of(&thread.path, other),
+    }
+}
+
+/// **A reply into a thread of a run on the new engine** — `None` when `req.thread` is not one, so the old
+/// engine answers. Checked before anything is written (IN1): a STEP thread is answered by its slot's own
+/// session only, while the slot waits for a reply; the ROOT by the requester only, and only while the run
+/// asks a question — a held or parked run is resumed with `nxc resume` and never by a reply (IN3), a working
+/// one has nothing to answer, a finished one takes a new commission. `--accept` is valid on the root at a
+/// ceiling only.
+pub fn reply_in_a_run(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    req: &crate::surface::ReplyThreadRequest,
+) -> Result<Option<crate::orchestration::ReplyReceipt>> {
+    let Some(thread) = run_thread(ctx, req.thread)? else {
+        return Ok(None);
+    };
+    if req.machine.is_some() {
+        return Err(NxfError::validation(
+            "a run on the new engine runs on this machine; `--machine` names nothing here — \
+             nothing was written",
+        ));
+    }
+    let now = now_of(ctx)?;
+    let state = view_of(&thread)?;
+    let root = state
+        .root_thread
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| req.thread.to_owned());
+    let message = match &thread.route.session_key {
+        Some(key) => reply_in_a_step(ctx, store, &thread, key, req, now)?,
+        None => answer_on_the_root(ctx, store, &thread, &state, req, now)?,
+    };
+    let at_root = thread.route.session_key.is_none();
+    Ok(Some(crate::orchestration::ReplyReceipt {
+        posted: true,
+        message_id: Some(message.to_string()),
+        thread_id: Some(req.thread.to_owned()),
+        resumed: false,
+        woke: None,
+        wake_skipped: None,
+        completed: None,
+        warnings: Vec::new(),
+        held: None,
+        handed_to: None,
+        border: None,
+        // The requester follows the run as the send's receipt told them to; a session's turn ends here.
+        await_: at_root.then(|| Await::run(&root)),
+    }))
+}
+
+fn reply_in_a_step(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    thread: &RunThread,
+    key: &str,
+    req: &crate::surface::ReplyThreadRequest,
+    now: Timestamp,
+) -> Result<nexus_run_contracts::MessageId> {
+    if req.accept {
+        return Err(NxfError::validation(
+            "`--accept` overrules a verdict on the ROOT of a run you commissioned, at its ceiling; a \
+             step's thread is answered plainly, with `--escalate` or `--needs-rework` — nothing was \
+             written",
+        ));
+    }
+    let (_, v2) = resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)?;
+    // The slot's own session presents its key; its handle is the slot's, read from the run's log — the
+    // bridge then compares the slot with itself. Anyone else is handed on as they are, and refused there.
+    let caller = match v2 {
+        Some(v2) if v2.session_key == key => bridge::Caller {
+            actor: v2.handle,
+            session: Some(v2.session_key),
+        },
+        _ => bridge::Caller {
+            actor: crate::orchestration::bare_handle_of(ctx.actor).to_owned(),
+            session: ctx.session.map(str::to_owned),
+        },
+    };
+    bridge::reply(
+        &thread.bridge,
+        req.thread,
+        &caller,
+        req.body,
+        bridge::ReplyFlags {
+            escalate: req.escalate,
+            needs_rework: req.needs_rework,
+        },
+        now,
+    )
+    .map_err(|r| refused_on(thread, r))
+}
+
+fn answer_on_the_root(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    thread: &RunThread,
+    state: &bridge::RunState,
+    req: &crate::surface::ReplyThreadRequest,
+    now: Timestamp,
+) -> Result<nexus_run_contracts::MessageId> {
+    use bridge::RunView;
+    if state.is_finished() {
+        return Err(refused_on(thread, Refused::RunFinished));
+    }
+    if req.escalate || req.needs_rework {
+        return Err(NxfError::validation(
+            "a run's root thread is answered plainly, or with `--accept` at a ceiling; \
+             `--escalate` and `--needs-rework` are said in a step's thread — nothing was written",
+        ));
+    }
+    let caller = the_requester(ctx, store, state, "answer")?;
+    let root = req.thread;
+    match state.view() {
+        RunView::NeedsDecision { .. } => {}
+        RunView::Held { .. } | RunView::Parked { .. } => {
+            return Err(NxfError::validation(format!(
+                "the run on thread {root} is on hold or parked and asks no question, so a reply does \
+                 not restart it: read why with `nxc status --thread {root}`, restart it with `nxc \
+                 resume --thread {root}`, or take it back with `nxc withdraw --thread {root}` — \
+                 nothing was written"
+            )));
+        }
+        RunView::Finishing { .. } | RunView::Finished { .. } => {
+            return Err(refused_on(thread, Refused::RunFinished));
+        }
+        _ => {
+            return Err(NxfError::validation(format!(
+                "the run on thread {root} is working and asks no question: follow it with `nxc \
+                 status --thread {root}`; adding to a running run arrives in a later slice \
+                 (6j6v.3rrv), or take it back with `nxc withdraw --thread {root}` — nothing was \
+                 written"
+            )));
+        }
+    }
+    bridge::answer(&thread.bridge, root, &caller, req.body, req.accept, now)
+        .map_err(|r| refused_on(thread, r))
+}
+
+/// The refusal of a verb that takes a run's ROOT, typed on one of its step threads.
+fn takes_the_root(verb: &str, state: &bridge::RunState) -> NxfError {
+    let root = state.root_thread.as_ref().map_or_else(
+        || "its root thread".to_owned(),
+        |root| format!("thread {root}"),
+    );
+    NxfError::validation(format!(
+        "`nxc {verb}` takes the run's root, {root}, not a step's thread; nothing was written"
+    ))
+}
+
+/// **`nxc withdraw` on a run on the new engine** — `None` when `thread` is not one. The requester's, from the
+/// terminal, on the root; valid in every state but finished (§6.4 item 10).
+pub fn withdraw_a_run(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    thread: &str,
+) -> Result<Option<crate::orchestration::WithdrawReceipt>> {
+    let Some(run_thread) = run_thread(ctx, thread)? else {
+        return Ok(None);
+    };
+    let now = now_of(ctx)?;
+    let state = view_of(&run_thread)?;
+    if run_thread.route.session_key.is_some() {
+        return Err(takes_the_root("withdraw", &state));
+    }
+    if state.is_finished() {
+        return Err(refused_on(&run_thread, Refused::RunFinished));
+    }
+    let caller = the_requester(ctx, store, &state, "withdraw")?;
+    let body = format!("withdrawn by {}", caller.actor);
+    bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
+        .map_err(|r| refused_on(&run_thread, r))?;
+    Ok(Some(crate::orchestration::WithdrawReceipt::of_a_run(
+        thread,
+        run_thread.route.run.as_str(),
+    )))
+}
+
+/// **`nxc resume --thread <root>` on a run on the new engine** (IN3) — `None` when `thread` is not one. The
+/// requester's, from the terminal: before a hold's `until` it says not yet, and `force` restarts now.
+pub fn resume_a_run(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    thread: &str,
+    force: bool,
+) -> Result<Option<crate::orchestration::ResumeReceipt>> {
+    use crate::orchestration::{ResumeOutcome, ResumeReceipt};
+    let Some(run_thread) = run_thread(ctx, thread)? else {
+        return Ok(None);
+    };
+    let now = now_of(ctx)?;
+    let state = view_of(&run_thread)?;
+    if run_thread.route.session_key.is_some() {
+        return Err(takes_the_root("resume", &state));
+    }
+    if state.is_finished() {
+        return Err(refused_on(&run_thread, Refused::RunFinished));
+    }
+    let caller = the_requester(ctx, store, &state, "resume")?;
+    let outcome = bridge::resume(&run_thread.bridge, thread, &caller, force, now)
+        .map_err(|r| refused_on(&run_thread, r))?;
+    Ok(Some(ResumeReceipt {
+        session: None,
+        thread: Some(thread.to_owned()),
+        outcome: match outcome {
+            bridge::ResumeOutcome::Resumed { .. } => ResumeOutcome::Resumed,
+            bridge::ResumeOutcome::NotYet { until } => ResumeOutcome::NotYet {
+                until: Some(until.to_string()),
+            },
+        },
+        armed_for: None,
+        warnings: Vec::new(),
+        run: Some(run_thread.route.run.to_string()),
+    }))
+}
+
+/// **The thread a session of a run on the new engine answers in** — what its id-free `nxc reply` means, asked
+/// before the old engine's `sole_open_thread_for_session` (§10). `None` for any other caller.
+pub fn thread_of_session(ctx: &Ctx) -> Result<Option<String>> {
+    Ok(session_of(ctx.db_path, ctx.origin, ctx.defs, ctx.session)?.map(|v2| v2.thread))
+}
+
+/// **The runs on the new engine as `nxc status` reads them** (6j6v.zjyv §10) — over `run.sqlite` alone, with no
+/// declarations parsed, because status is the verb that must work against a workspace in any state.
+pub struct RunReader {
+    bridge: BridgeCtx,
+    path: PathBuf,
+}
+
+impl RunReader {
+    /// `None` where there is no `run.sqlite`; a file that does not answer refuses with the way out.
+    pub fn at_workspace(db_path: &str, origin: &str) -> Result<Option<RunReader>> {
+        Ok(open_bridge(db_path, origin, &Definitions::default())?
+            .map(|(bridge, path)| RunReader { bridge, path }))
+    }
+
+    fn refusal_here(&self, refused: Refused) -> NxfError {
+        refusal_of(&self.path, refused)
+    }
+
+    /// The run a thread belongs to, root or step; `None` for a thread of the old engine.
+    pub fn run_of_thread(&self, thread: &str) -> Result<Option<nexus_run_contracts::RunId>> {
+        Ok(bridge::thread_route(&self.bridge, thread)
+            .map_err(|r| self.refusal_here(r))?
+            .map(|route| route.run))
+    }
+
+    /// What `nxc status --run <id>` names: a run id, or any thread of the run.
+    pub fn run_named(&self, id: &str) -> Result<Option<nexus_run_contracts::RunId>> {
+        if let Some(run) = self.run_of_thread(id)? {
+            return Ok(Some(run));
+        }
+        let Some(run) = nexus_run_contracts::RunId::parse(id) else {
+            return Ok(None);
+        };
+        Ok(bridge::view(&self.bridge.store, &run)
+            .map_err(|r| self.refusal_here(r))?
+            .map(|_| run))
+    }
+
+    /// Contract (d) of `run`, with `local` (§10, ST2).
+    pub fn run_contract(
+        &self,
+        run: &nexus_run_contracts::RunId,
+        now: Timestamp,
+    ) -> Result<Option<nexus_run_contracts::RunStatus>> {
+        bridge::status(&self.bridge, run, now).map_err(|r| self.refusal_here(r))
+    }
+
+    /// The runs a listing shows: the open ones, or every one with `all`.
+    pub fn runs_listed(&self, all: bool) -> Result<Vec<nexus_run_contracts::RunId>> {
+        let rows = match all {
+            true => self.bridge.store.every_run(),
+            false => self.bridge.store.open_runs(),
+        }
+        .map_err(|error| store_refusal(&self.path, &error.to_string()))?;
+        Ok(rows.into_iter().map(|row| row.run).collect())
+    }
+
+    /// **A run as one operation of the old shape**: the root thread, then one thread per member session the
+    /// run started, each mapped from contract (d) (`open` until finished; `awaiting_human` while it needs
+    /// a decision, holds or parks; the root's `working_copy` from (d)'s live tree, with no fingerprint).
+    pub fn run_as_operation(
+        &self,
+        run: &nexus_run_contracts::RunId,
+        now: Timestamp,
+    ) -> Result<Option<crate::facade::StatusOperation>> {
+        use nexus_run_contracts::RunState as Contract;
+        let Some(status) = self.run_contract(run, now)? else {
+            return Ok(None);
+        };
+        let Some(view) = bridge::view(&self.bridge.store, run).map_err(|r| self.refusal_here(r))?
+        else {
+            return Ok(None);
+        };
+        let Some(root) = view.state.root_thread.as_ref().map(ToString::to_string) else {
+            return Ok(None);
+        };
+        // The substrate channel the root lives in, as every operation of the old engine names its own.
+        let channel = Some(format!("decl:{}", status.flow.name));
+        let awaiting = matches!(
+            status.state,
+            Contract::NeedsDecision | Contract::Held { .. } | Contract::Parked
+        );
+        let working_copy = status.local.as_ref().and_then(|local| {
+            let tree = &local.tree;
+            tree.commit
+                .clone()
+                .map(|commit| crate::facade::StatusWorkingCopy {
+                    commit,
+                    branch: tree.branch.clone().unwrap_or_default(),
+                    dirty: tree.dirty.unwrap_or(false),
+                    fingerprint: None,
+                })
+        });
+        let mut threads = vec![crate::facade::StatusThread::of_a_run(
+            crate::facade::RunThreadRow {
+                thread_id: root.clone(),
+                channel_id: channel.clone(),
+                parent: None,
+                open: !status.finished,
+                awaiting_human: awaiting,
+                opener: Some(view.state.requester.to_string()),
+                session: None,
+                working_copy,
+            },
+        )];
+        for step in &status.steps {
+            for member in &step.members {
+                let Some(thread) = self
+                    .bridge
+                    .store
+                    .get(&format!("session/{}", member.session_key))
+                    .map_err(|error| store_refusal(&self.path, &error.to_string()))?
+                else {
+                    continue;
+                };
+                let answered = matches!(member.state.as_str(), "replied" | "ended");
+                threads.push(crate::facade::StatusThread::of_a_run(
+                    crate::facade::RunThreadRow {
+                        thread_id: String::from_utf8_lossy(&thread).into_owned(),
+                        channel_id: None,
+                        parent: Some(root.clone()),
+                        open: step.state == "open" && !answered,
+                        awaiting_human: false,
+                        opener: None,
+                        session: Some(member.session_key.to_string()),
+                        working_copy: None,
+                    },
+                ));
+            }
+        }
+        Ok(Some(crate::facade::StatusOperation::of_a_run(
+            root, channel, threads, status,
+        )))
+    }
+}
+
+/// Whether `thread` belongs to a run on the new engine; a `run.sqlite` that does not answer refuses.
+pub fn is_a_run_thread(ctx: &Ctx, thread: &str) -> Result<bool> {
+    Ok(run_thread(ctx, thread)?.is_some())
 }

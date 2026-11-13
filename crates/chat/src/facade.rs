@@ -721,7 +721,7 @@ pub struct StatusThread {
     /// comparison against the present is [`crate::anchor::Anchor::drift_from`], and it needs a git
     /// read — which is why no read verb makes it. A resume does.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub working_copy: Option<crate::anchor::Anchor>,
+    pub working_copy: Option<StatusWorkingCopy>,
     /// **The session working here stopped because the model went away, and is coming back** (nxf
     /// 6j6v.npy3) — the hold standing over [`session`](Self::session), or `None`, which is the
     /// ordinary case.
@@ -970,12 +970,155 @@ impl BorderStatus {
     }
 }
 
+// v2-bridge: deleted with the old engine (6j6v.2vtw) — the rows a run on the new engine is listed with.
+impl StatusThread {
+    /// A thread of a run on the new engine, mapped from its contract (d) (6j6v.y6v7): what the old watcher
+    /// reads — `state`, `awaiting_human` — and nothing the run does not know.
+    pub(crate) fn of_a_run(row: RunThreadRow) -> StatusThread {
+        let RunThreadRow {
+            thread_id,
+            channel_id,
+            parent,
+            open,
+            awaiting_human,
+            opener,
+            session,
+            working_copy,
+        } = row;
+        StatusThread {
+            thread_id,
+            name: None,
+            channel_id,
+            depth: usize::from(parent.is_some()),
+            parent,
+            state: match open {
+                true => ThreadState::Open,
+                false => ThreadState::Answered,
+            },
+            awaiting_human,
+            escalated: false,
+            substituted: false,
+            opener,
+            session,
+            session_state: None,
+            expects: Vec::new(),
+            outstanding: Vec::new(),
+            stale: false,
+            deadline: None,
+            working_tree: None,
+            working_tree_queue_position: None,
+            waiting_on_sub_round: Vec::new(),
+            working_copy,
+            interrupted: None,
+            border: None,
+            stranded: None,
+            abandoned: None,
+            recovery: None,
+        }
+    }
+}
+
+/// One thread of a run on the new engine, as [`StatusThread::of_a_run`] maps it: named fields, because four of
+/// them are optional strings a transposition would survive.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub(crate) struct RunThreadRow {
+    pub thread_id: String,
+    pub channel_id: Option<String>,
+    /// The root, for a step's thread; `None` for the root itself.
+    pub parent: Option<String>,
+    /// Somebody still owes a reply here.
+    pub open: bool,
+    pub awaiting_human: bool,
+    pub opener: Option<String>,
+    pub session: Option<String>,
+    pub working_copy: Option<StatusWorkingCopy>,
+}
+
+impl StatusOperation {
+    /// A run on the new engine as one operation (6j6v.zjyv §10): `open` is 1 until it finished,
+    /// `needs_decision` is `NeedsDecision`, and contract (d) rides beside the mapped fields under `run`.
+    pub(crate) fn of_a_run(
+        root: String,
+        channel_id: Option<String>,
+        threads: Vec<StatusThread>,
+        run: nexus_run_contracts::RunStatus,
+    ) -> StatusOperation {
+        use nexus_run_contracts::RunState as Contract;
+        StatusOperation {
+            root,
+            channel_id,
+            live: !run.finished,
+            open: usize::from(!run.finished),
+            needs_decision: matches!(run.state, Contract::NeedsDecision),
+            holds_working_tree: run.claim.held,
+            held_by_hand_back: None,
+            interrupted: false,
+            hangs_at: None,
+            threads,
+            parked: Vec::new(),
+            park_refused: None,
+            withdrawn: None,
+            start_failed: Vec::new(),
+            pinned_by_restart_hold: None,
+            run: Some(Box::new(run)),
+        }
+    }
+}
+
+impl StatusReport {
+    /// The old engine's report with the runs of the new engine taken out of it and listed after it, once
+    /// each: a run's root thread lives in the chat store too, and must not read as a second operation.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    pub(crate) fn with_runs(
+        mut self,
+        is_a_run: impl Fn(&str) -> bool,
+        runs: Vec<StatusOperation>,
+    ) -> StatusReport {
+        self.operations.retain(|op| !is_a_run(&op.root));
+        self.operations.extend(runs);
+        self
+    }
+}
+
+/// **Where a thread's working copy stood**, as [`StatusThread::working_copy`] reports it — an
+/// [`Anchor`](crate::anchor::Anchor) recorded at a handover, or, for a run on the new engine, the tree its
+/// status reads now (6j6v.y6v7, external review H2), which has no fingerprint: `fingerprint` is `null` there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StatusWorkingCopy {
+    /// The commit `HEAD` pointed at, in full.
+    pub commit: String,
+    /// The branch `HEAD` was on, or empty for a detached HEAD.
+    pub branch: String,
+    /// Something was uncommitted.
+    pub dirty: bool,
+    /// [`Anchor::fingerprint`](crate::anchor::Anchor::fingerprint); `None` where nothing recorded one.
+    pub fingerprint: Option<String>,
+}
+
+impl StatusWorkingCopy {
+    /// [`crate::anchor::short_commit`] of [`commit`](Self::commit).
+    pub fn short(&self) -> &str {
+        crate::anchor::short_commit(&self.commit)
+    }
+}
+
+impl From<crate::anchor::Anchor> for StatusWorkingCopy {
+    fn from(anchor: crate::anchor::Anchor) -> Self {
+        StatusWorkingCopy {
+            commit: anchor.commit,
+            branch: anchor.branch,
+            dirty: anchor.dirty,
+            fingerprint: Some(anchor.fingerprint),
+        }
+    }
+}
+
 /// One operation: a root thread and everything that was opened out of it, across channel borders.
 ///
 /// There is no operation RECORD anywhere — this is assembled per read from the parent edges and the
 /// quorum registers (§3.3), and nothing in the store stands beside it.
 /// `#[non_exhaustive]` for [`StatusThread`]'s reason — see it; the two grow together.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct StatusOperation {
     /// The root thread's id, which is the operation's identity.
@@ -1150,6 +1293,15 @@ pub struct StatusOperation {
     /// kept. `None` for every other operation, and omitted from `--json` then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned_by_restart_hold: Option<String>,
+    /// **The run on the new engine this operation is, as contract (d) has it** (6j6v.zjyv §10; 6j6v.y6v7)
+    /// — the pure projection with `local` around it, beside the old fields mapped from it. `None` for
+    /// every operation of the old engine, and omitted from `--json` then.
+    ///
+    /// `run.local` is MACHINE-LOCAL — the working directory's absolute path, when a service on this host was
+    /// last seen, the tree as this host reads it — so a reader relaying the report off this machine strips it.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<Box<nexus_run_contracts::RunStatus>>,
 }
 
 /// **An unanswered hand-back that holds the working copy, as `nxc status` shows it** (nxf
@@ -1188,7 +1340,7 @@ pub struct WithdrawnHolderStatus {
 /// `#[non_exhaustive]` like the two records inside it: leaving the ENVELOPE exhaustive while its
 /// leaves are not would half-fix the problem — the next field here would still break every literal,
 /// which is the whole of what the marker is for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct StatusReport {
     pub operations: Vec<StatusOperation>,
@@ -4526,6 +4678,7 @@ pub fn status(
                         .any(|id| claim.iter().any(|t| t == id))
                         .then(|| until.clone())
                 }),
+                run: None,
             });
         }
     }
@@ -5412,7 +5565,7 @@ impl<'a> Forest<'a> {
                 kids.iter().filter_map(|kid| by_id.get(kid).copied()),
                 held_answers,
             ),
-            working_copy: anchors.get(id).cloned(),
+            working_copy: anchors.get(id).cloned().map(StatusWorkingCopy::from),
             // Keyed by SESSION for `session_state`'s reason, and beside it: the hold reported is a
             // hold on the id printed on this row, so the two facts about one session cannot
             // disagree.

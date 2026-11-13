@@ -9,13 +9,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use crate::bridge_resume::{resume, ResumeOutcome};
+pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
     Cas, Decision, Disposition, Event, EventBody, Handle, LivenessPolicy, LocalStatus, MessageId,
     Origin, Refusal, RunId, RunStatus, RunStore, SessionKey, StoreError, Timestamp, WithdrawnBy,
     LOCAL_TENANT,
 };
-use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, RunState, SlotState};
+use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, SlotState};
+/// The fold and its projection, for the same callers: which verb a root thread takes depends on it (§10).
+pub use nexus_run_engine::{RunState, RunView};
 /// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
 /// but the contracts (`cargo xtask layering check`).
 pub use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
@@ -26,7 +30,7 @@ use crate::fold::{fold_events, pinned_def, Folded};
 use crate::git_tree::tree_state;
 use crate::host::Layout;
 use crate::ports::{DeclarationPort, MessagePort, PortError, Refs};
-use crate::start::{mint_thread_id, ThreadRoute};
+use crate::start::mint_thread_id;
 use crate::tree_effects::StoredRefusal;
 use crate::tree_ledger::TreeLedger;
 use nexus_run_session_claude::procs::{ProcessGuard, SystemProcesses};
@@ -87,6 +91,10 @@ pub enum Refused {
     NoOpenQuestion,
     /// `--accept` on an escalation (§6.4 item 6).
     AcceptAtACeilingOnly,
+    /// `resume` on a run nothing holds or parks: it is working, or waiting for the tree.
+    NothingOnHold,
+    /// `resume` on a run that asks a question: the question is answered, not resumed (IN3).
+    AskedAQuestion,
     /// The message is posted and the run will not hear of it: the one visible retry (§6.4 item 5).
     PostedNotEnqueued {
         message: MessageId,
@@ -112,6 +120,12 @@ impl std::fmt::Display for Refused {
             Self::AcceptAtACeilingOnly => {
                 f.write_str("--accept is valid at a ceiling only; answer an escalation plainly")
             }
+            Self::NothingOnHold => f.write_str(
+                "nothing in this run is held or parked: see `nxc status`, or `nxc withdraw`",
+            ),
+            Self::AskedAQuestion => f.write_str(
+                "the run asks a question: answer it with `nxc reply` on its root thread",
+            ),
             Self::PostedNotEnqueued { message } => write!(
                 f,
                 "message {message} is posted but the run has not heard of it: run the command again"
@@ -303,6 +317,16 @@ fn with_commission(state: RunState, first: &Event, events: &[Event]) -> RunState
     state
 }
 
+/// The run and, for a step thread, the session a thread belongs to — `None` for a thread this store does not
+/// know, which is the one way a thread is "not v2". A row that does not decode refuses.
+pub fn thread_route(ctx: &BridgeCtx, thread: &str) -> Result<Option<ThreadRoute>, Refused> {
+    match route_of(ctx, thread) {
+        Ok(route) => Ok(Some(route)),
+        Err(Refused::NotARunThread { .. }) => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
 fn route_of(ctx: &BridgeCtx, thread: &str) -> Result<ThreadRoute, Refused> {
     let not_ours = || Refused::NotARunThread {
         thread: thread.to_owned(),
@@ -319,12 +343,12 @@ fn route_of(ctx: &BridgeCtx, thread: &str) -> Result<ThreadRoute, Refused> {
     })
 }
 
-fn state_of(ctx: &BridgeCtx, run: &RunId) -> Result<RunState, Refused> {
+pub(crate) fn state_of(ctx: &BridgeCtx, run: &RunId) -> Result<RunState, Refused> {
     let view = view(&ctx.store, run)?.ok_or(Refused::RunFinished)?;
     Ok(view.state)
 }
 
-fn input_key(run: &RunId) -> String {
+pub(crate) fn input_key(run: &RunId) -> String {
     format!("input/{run}/{}", Ulid::new())
 }
 
@@ -415,7 +439,7 @@ pub fn reply(
 }
 
 /// The caller is the person who commissioned the run, at the terminal: no session.
-fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
+pub(crate) fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
     if caller.session.is_none() && caller.actor == state.requester {
         Ok(())
     } else {
@@ -423,7 +447,7 @@ fn check_requester(state: &RunState, caller: &Caller) -> Result<(), Refused> {
     }
 }
 
-fn root_route(ctx: &BridgeCtx, thread: &str) -> Result<RunId, Refused> {
+pub(crate) fn root_route(ctx: &BridgeCtx, thread: &str) -> Result<RunId, Refused> {
     let route = route_of(ctx, thread)?;
     if route.session_key.is_some() {
         return Err(Refused::NotARunThread {

@@ -773,9 +773,11 @@ fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once
             .is_some_and(|key| key.starts_with("root/")),
         "the host's key, which its find-or-post finds it by: {refs:?}"
     );
+    // The substrate channel of a declared channel, as the old engine opens it: the read filters resolve
+    // visibility and membership from `decl:<name>` (6j6v.y6v7), and a bare name is a channel nobody reads.
     assert_eq!(
         chat_store(ws.path()).thread_channel(&root).as_deref(),
-        Some("coding-v2")
+        Some("decl:coding-v2")
     );
 }
 
@@ -908,7 +910,10 @@ fn real_v2_session(dir: &Path) -> String {
     send(&eng, the_owner(), "coding-v2").expect("the owner commissions");
     let db = dir.join(".nxs").join("db.sqlite");
     let ports = std::sync::Arc::new(
-        nexus_chat::ports_v1::V1Ports::for_root(dir, db.to_str().unwrap(), &eng.origin()).unwrap(),
+        nexus_chat::ports_v1::V1Ports::for_root(dir, db.to_str().unwrap(), &eng.origin())
+            .unwrap()
+            // Named, so the start does not depend on a bundle this test binary may not carry.
+            .with_sidecar(dir.join("sidecar.mjs")),
     );
     let layout = Layout {
         root: dir.to_owned(),
@@ -924,6 +929,10 @@ fn real_v2_session(dir: &Path) -> String {
     );
     let mut now = nexus_run_contracts::Timestamp::parse(NOW).unwrap();
     let clock = std::sync::Arc::new(SimClock::at(now.unix_millis()));
+    let tree = std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
+        &layout.agent_logs,
+        &eng.origin(),
+    )));
     let mut host = Host::new(
         store.clone(),
         Ports {
@@ -938,21 +947,27 @@ fn real_v2_session(dir: &Path) -> String {
             &layout.v2_dir(),
             Box::new(|_| pass()),
         )),
-        std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
-            &layout.agent_logs,
-            &eng.origin(),
-        ))),
+        tree.clone(),
         clock.clone(),
     );
     let run = store.open_runs().unwrap()[0].run.clone();
     let key = format!("{run}/build/v1/coder/a1");
-    for _ in 0..40 {
+    // Only ticks the run could use count: one the tree's worker thread is working through is real
+    // time, and a loaded runner decides how much (the clock stands still meanwhile, as `Rig::tick`).
+    let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut counted = 0;
+    while counted < 40 && std::time::Instant::now() < ceiling {
         host.tick(now);
         if store.get(&format!("session/{key}")).unwrap().is_some() {
             return key;
         }
-        clock.advance(1_000);
-        now = nexus_run_contracts::Timestamp::from_unix_millis(now.unix_millis() + 1_000);
+        if tree.busy() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        } else {
+            clock.advance(1_000);
+            now = nexus_run_contracts::Timestamp::from_unix_millis(now.unix_millis() + 1_000);
+            counted += 1;
+        }
     }
     panic!("the host never started the build slot");
 }

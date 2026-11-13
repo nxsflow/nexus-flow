@@ -197,17 +197,61 @@ impl MessagePort for V1Ports {
         channel: &str,
         opener: &str,
     ) -> PortResult<()> {
+        let mut store = self.store()?;
+        // A declared channel is the substrate channel `decl:<name>`, materialised as the old engine does it
+        // (6j6v.y6v7): the read filters resolve visibility and membership from that id, and a thread in a
+        // channel the store does not know reads as `no such channel` to every reader.
+        let channel_id = match self.defs.channel(channel) {
+            Some(decl) => materialise_declared_channel(&mut store, decl, &self.origin, opener)?,
+            None => channel.to_owned(),
+        };
         let root = ThreadRoot {
             origin: self.origin.clone(),
-            channel_id: channel.to_owned(),
+            channel_id,
             opener: opener.to_owned(),
             created: V1Ports::now(),
             parent: parent.map(str::to_owned),
         };
-        self.store()?
+        store
             .try_open_thread(thread_id, &root, opener)
             .map_err(refused)
     }
+}
+
+/// The substrate channel behind a declared one, `decl:<name>`, made to exist with its declared kind and its
+/// cast as members, plus `opener` — idempotent, and through the store's `try_` writes, so a locked store is
+/// an error the host retries and never a panic. The old engine's `ensure_declared_channel`, for the host.
+fn materialise_declared_channel(
+    store: &mut ChatStore,
+    decl: &crate::channel::ChannelDecl,
+    origin: &str,
+    opener: &str,
+) -> PortResult<String> {
+    let channel_id = format!("decl:{}", decl.name);
+    // Its fields once: a thread the host opens again after a crash writes nothing it already wrote.
+    if !store.channel_exists(&channel_id).map_err(refused)? {
+        for (field, value) in [
+            ("kind", decl.kind.as_str()),
+            ("origin", origin),
+            ("name", decl.name.as_str()),
+        ] {
+            store
+                .try_set_channel_field(&channel_id, field, value, opener)
+                .map_err(refused)?;
+        }
+    }
+    for handle in crate::channel::cast(decl)
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(opener))
+    {
+        if !store.is_member(&channel_id, handle).map_err(refused)? {
+            store
+                .try_add_member(&channel_id, handle, opener)
+                .map_err(refused)?;
+        }
+    }
+    Ok(channel_id)
 }
 
 impl DeclarationPort for V1Ports {

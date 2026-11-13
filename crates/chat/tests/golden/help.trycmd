@@ -277,6 +277,7 @@ Options:
       --channel <CHANNEL>  A declared channel name (or a raw channel id): the live operations whose ROOT sits there. An entry point, not an anchor — an operation crosses channels
       --db <DB>            Use this sqlite db file directly instead of discovering `.nxs/` [env: NXC_DB=]
       --all                Finished operations too, not just what is still going on — with `--channel`, the finished ones of that channel
+      --run <RUN>          A run on the new engine — its id, or any thread of it: its status as the run reports it, whole
   -h, --help               Print help
 
 ```

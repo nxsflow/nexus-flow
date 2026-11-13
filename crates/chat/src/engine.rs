@@ -550,6 +550,12 @@ impl Engine {
     /// the caller-free read `nxc status` runs, which takes no reader at all and is unchanged
     /// (`thread_tree.rs::status_reads_the_same_for_every_caller_because_there_is_no_caller`). A
     /// gate is not a projection: nothing in the report depends on who asked.
+    ///
+    /// **A run on the new engine carries THIS machine's view** (6j6v.y6v7): its operation's
+    /// [`run`](facade::StatusOperation::run) holds contract (d) with `local` — the working directory's
+    /// absolute path, the service's last-seen instant, the tree's commit and branch. Those are facts about
+    /// the host this handle runs on, which the old engine's operations never carried. An embedder that
+    /// relays this report beyond that host strips `run.local` (or the whole `run`) first.
     pub fn status(
         &self,
         reader: Reader<'_>,
@@ -557,8 +563,21 @@ impl Engine {
         scope: StatusScope<'_>,
     ) -> Result<StatusReport> {
         reader.standing()?;
-        self.handle
-            .try_with_state(|s| facade::status(&s.store, &*self.worker, now, scope))
+        let db_path = self.workspace().db_path_str()?;
+        let origin = self.origin();
+        // The shared function below the CLI and this seam: a run on the new engine is mapped there, once.
+        self.handle.try_with_state(|s| {
+            surface::status(
+                surface::StatusIn {
+                    store: &s.store,
+                    worker: &*self.worker,
+                    db_path: &db_path,
+                    origin: &origin,
+                    now,
+                },
+                scope,
+            )
+        })
     }
 
     /// The `prime` session-bootstrap record for a caller that may be a declared PERSONA (nxf
@@ -1340,9 +1359,7 @@ impl Engine {
         caller: Caller<'_>,
         thread: &str,
     ) -> Result<orchestration::WithdrawReceipt> {
-        self.with_orchestration(caller, |ctx, store| {
-            orchestration::withdraw(ctx, store, thread)
-        })
+        self.with_orchestration(caller, |ctx, store| surface::withdraw(ctx, store, thread))
     }
 
     // `release_working_tree` was here — "give this workspace's working copy back when nothing is
@@ -1467,7 +1484,7 @@ impl Engine {
         req: orchestration::ResumeRequest<'_>,
     ) -> Result<orchestration::ResumeReceipt> {
         self.with_orchestration(caller, |ctx, store| {
-            orchestration::resume_interrupted(ctx, store, req.clone())
+            surface::resume(ctx, store, req.clone())
         })
     }
 

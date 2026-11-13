@@ -7,6 +7,7 @@
 
 pub mod boundary;
 pub mod bridge;
+mod bridge_resume;
 mod compose;
 mod effects;
 mod fold;

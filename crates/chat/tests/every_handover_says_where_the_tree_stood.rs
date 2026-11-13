@@ -477,7 +477,7 @@ fn the_status_view_shows_the_anchor_of_the_newest_handover() {
     let at_commission = anchor_of(&b.messages(&thread)[0]).clone();
     assert_eq!(
         b.status_thread(&thread).working_copy.as_ref(),
-        Some(&at_commission),
+        Some(&at_commission.clone().into()),
         "a thread nobody has answered shows the commission's anchor"
     );
 
@@ -487,7 +487,7 @@ fn the_status_view_shows_the_anchor_of_the_newest_handover() {
     assert_ne!(at_reply, at_commission, "the tree moved between the two");
     assert_eq!(
         b.status_thread(&thread).working_copy.as_ref(),
-        Some(&at_reply),
+        Some(&at_reply.clone().into()),
         "and afterwards the NEWEST handover's"
     );
     assert!(
@@ -658,7 +658,7 @@ fn a_member_gets_a_fresh_anchor_on_its_second_turn() {
     // one's tree as though it were the state it had just been handed.
     let b = Bench::new();
     let board = b.commission(T0, "coding", "review this");
-    let turn_one: Vec<Anchor> = b
+    let turn_one: Vec<nexus_chat::facade::StatusWorkingCopy> = b
         .children_of(&board)
         .into_iter()
         .map(|t| t.working_copy.expect("turn one is anchored"))

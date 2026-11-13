@@ -7,8 +7,8 @@ use nexus_run_contracts::{
     Decision, EventBody, Origin, ReasonCode, RunId, RunStore, SessionFact, LOCAL_TENANT,
 };
 use nexus_run_host::bridge::{
-    answer, commission, live_sessions, open_store, reply, session_of, status, withdraw, Caller,
-    Refused, ReplyFlags,
+    answer, commission, live_sessions, open_store, reply, resume, session_of, status, thread_route,
+    withdraw, Caller, Refused, ReplyFlags, ResumeOutcome,
 };
 use nexus_run_host::mint_owner_id;
 use nexus_run_host::ports::Refs;
@@ -690,4 +690,217 @@ fn owner_id_is_opaque_and_names_nobody() {
         3,
         "owner_id, epoch, expires_at: {stored}"
     );
+}
+
+// ---- resume, the thread lookup and the finished runs (6j6v.y6v7) ------------------------------------
+
+/// A session that ends on the usage limit, which resets an hour on: the slot is held until then.
+fn on_the_usage_limit(info: &SessionInfo) -> Cue {
+    if info.step == "build" {
+        Cue::End(nexus_run_contracts::EndCause::UsageLimit {
+            resets_at: Some(nexus_run_contracts::Timestamp::from_unix_millis(
+                CLOCK_START + 3_600_000,
+            )),
+        })
+    } else {
+        pass()
+    }
+}
+
+fn held(dir: &std::path::Path) -> (Rig, RunId, String) {
+    let mut rig = Rig::scripted(dir, CLOCK_START, Box::new(on_the_usage_limit));
+    let receipt = rig.commission("work");
+    let run = receipt.run;
+    let check = run.clone();
+    rig.run_until(300, move |rig| {
+        matches!(
+            rig.state(&check).view(),
+            nexus_run_engine::RunView::Held { .. }
+        )
+    });
+    (rig, run, receipt.root_thread)
+}
+
+fn waiting_kinds(rig: &Rig, run: &RunId) -> Vec<String> {
+    rig.store
+        .waiting_inputs(run)
+        .unwrap()
+        .into_iter()
+        .map(|input| input.unwrap().body.kind())
+        .collect()
+}
+
+#[test]
+fn a_resume_before_the_hold_lifts_is_not_yet_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run, root) = held(dir.path());
+    let outcome = resume(&rig.bridge, &root, &Rig::requester(), false, rig.now()).unwrap();
+    assert_eq!(
+        outcome,
+        ResumeOutcome::NotYet {
+            until: nexus_run_contracts::Timestamp::from_unix_millis(CLOCK_START + 3_600_000)
+        }
+    );
+    assert!(waiting_kinds(&rig, &run).is_empty());
+}
+
+#[test]
+fn a_forced_resume_of_a_held_slot_enqueues_resume_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rig, run, root) = held(dir.path());
+    rig.backend.set_scenario(Box::new(silent));
+    let outcome = resume(&rig.bridge, &root, &Rig::requester(), true, rig.now()).unwrap();
+    assert_eq!(outcome, ResumeOutcome::Resumed { run_level: false });
+    assert_eq!(waiting_kinds(&rig, &run), ["resume"]);
+    let check = run.clone();
+    rig.run_until(300, move |rig| {
+        matches!(
+            rig.state(&check).view(),
+            nexus_run_engine::RunView::Running { .. }
+        )
+    });
+}
+
+#[test]
+fn a_resume_after_the_hold_lifts_needs_no_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run, root) = held(dir.path());
+    let later = nexus_run_contracts::Timestamp::from_unix_millis(CLOCK_START + 3_600_001);
+    let outcome = resume(&rig.bridge, &root, &Rig::requester(), false, later).unwrap();
+    assert_eq!(outcome, ResumeOutcome::Resumed { run_level: false });
+    assert_eq!(waiting_kinds(&rig, &run), ["resume"]);
+}
+
+#[test]
+fn a_run_parked_on_its_own_condition_is_resumed_with_resume_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    rig.policy.tree_window = nexus_run_contracts::Secs(60);
+    for _ in 0..200 {
+        rig.tree.script(vec![
+            nexus_run_host::test_support::scripted_tree::TreeStep::Answer(
+                nexus_run_host::TreeResult::Refused {
+                    reason: nexus_run_contracts::TreeRefusal::Git {
+                        reason: nexus_run_contracts::GitReason::FetchFailed,
+                    },
+                    text: "the network is down".to_owned(),
+                },
+            ),
+        ]);
+    }
+    let receipt = rig.commission("work");
+    let run = receipt.run;
+    let check = run.clone();
+    rig.run_until(400, move |rig| rig.has(&check, "tree_refused"));
+    let outcome = resume(
+        &rig.bridge,
+        &receipt.root_thread,
+        &Rig::requester(),
+        false,
+        rig.now(),
+    )
+    .unwrap();
+    assert_eq!(outcome, ResumeOutcome::Resumed { run_level: true });
+    assert_eq!(waiting_kinds(&rig, &run), ["resume_run"]);
+}
+
+#[test]
+fn a_resume_with_nothing_on_hold_or_a_question_open_or_from_anyone_else_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run, root, key) = running(dir.path());
+    let now = rig.now();
+    assert_eq!(
+        resume(&rig.bridge, &root, &Rig::requester(), true, now),
+        Err(Refused::NothingOnHold)
+    );
+    assert_eq!(
+        resume(&rig.bridge, &root, &coder(&key), true, now),
+        Err(Refused::NotTheRequester)
+    );
+    let step = thread_of(&rig, &key);
+    assert_eq!(
+        resume(&rig.bridge, &step, &Rig::requester(), true, now),
+        Err(Refused::NotARunThread { thread: step })
+    );
+    assert!(waiting_kinds(&rig, &run).is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(
+        dir.path(),
+        CLOCK_START,
+        Box::new(|info: &SessionInfo| Cue::Reply {
+            text: format!("{} cannot", info.member),
+            flags: ReplyFlags {
+                escalate: true,
+                needs_rework: false,
+            },
+        }),
+    );
+    let receipt = rig.commission("work");
+    let check = receipt.run.clone();
+    rig.run_until(300, move |rig| {
+        matches!(
+            rig.state(&check).view(),
+            nexus_run_engine::RunView::NeedsDecision { .. }
+        )
+    });
+    assert_eq!(
+        resume(
+            &rig.bridge,
+            &receipt.root_thread,
+            &Rig::requester(),
+            true,
+            rig.now()
+        ),
+        Err(Refused::AskedAQuestion)
+    );
+}
+
+#[test]
+fn a_finished_run_is_refused_a_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    let receipt = rig.commission("work");
+    rig.run_to_finished(&receipt.run);
+    assert_eq!(
+        resume(
+            &rig.bridge,
+            &receipt.root_thread,
+            &Rig::requester(),
+            true,
+            rig.now()
+        ),
+        Err(Refused::RunFinished)
+    );
+}
+
+#[test]
+fn thread_route_names_a_root_and_a_step_and_answers_none_for_a_stranger() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, run, root, key) = running(dir.path());
+    let at_root = thread_route(&rig.bridge, &root).unwrap().unwrap();
+    assert_eq!(
+        (at_root.run.clone(), at_root.session_key),
+        (run.clone(), None)
+    );
+    let step = thread_of(&rig, &key);
+    let at_step = thread_route(&rig.bridge, &step).unwrap().unwrap();
+    assert_eq!(at_step.run, run);
+    assert_eq!(at_step.session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(thread_route(&rig.bridge, "m-NOBODY").unwrap(), None);
+}
+
+#[test]
+fn every_run_lists_the_finished_ones_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    let first = rig.commission("first").run;
+    rig.run_to_finished(&first);
+    let second = rig.commission("second").run;
+    let rows = rig.bridge.store.every_run().unwrap();
+    let listed: Vec<(RunId, bool)> = rows
+        .into_iter()
+        .map(|row| (row.run, row.finished))
+        .collect();
+    assert_eq!(listed, [(first, true), (second, false)]);
 }

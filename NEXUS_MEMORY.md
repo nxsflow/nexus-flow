@@ -5,7 +5,7 @@
 
 > **You have already been given the index below** — all of it, or as much of it as a session start could carry. It is the same index `nxm prime` replays, which stops at the byte budget the host delivers and says so when it does (`nxm index` prints the whole of it), so there is nothing to gain by reading it again here. Underneath it stands the FULL TEXT of each memory — that is what `nxm recall <key>` serves, and it is meant to be read one memory at a time, when the index tells you a particular one matters. Reading this file end to end is the expensive way to obtain what you already have.
 
-## Index (66)
+## Index (67)
 
 - **architecture-overview**: nexus-flow is an agent-native, offline-first suite — the board, the memory and the channel your agents work from — and nothing else.
 - **priority-storage-canonical-ordinal**: Priority is a plugin-named label at the SURFACE but stored as the canonical ORDINAL — never store the label, or --json stops being plugin-independent.
@@ -73,6 +73,7 @@
 - **persona-session-is-shared-across-threads**: A persona runs ONE real SDK session across all its threads, and the transcript records no user prompts - name the thread when you continue it.
 - **run-host-tests-under-load**: Test an exhausted tick with set_budget(ZERO); never stand the injected clock still while waiting on a tree worker, whose Delay starts when its thread gets there.
 - **claude-cli-tool-process-tree**: A Bash tool runs outside the session's process group, in its own session: a group signal never reaches it, and the group is what separates the CLI and MCP servers from a tool's work.
+- **v2-host-tests-name-a-sidecar**: Always give V1Ports in a v2 host test .with_sidecar(..) - the hosted macOS lane embeds no bundle and every session start is refused there.
 
 ## Full text
 
@@ -2205,3 +2206,9 @@ To test what a Host::tick does when its budget is exhausted, use host.set_budget
 ### `claude-cli-tool-process-tree`
 
 The Claude CLI (SDK 0.3.215, measured on macOS and Linux with the real binary, 6j6v.tv58 step 0) starts each Bash tool's shell in a session AND group of its own; the leader's group holds only the leader, the CLI and stdio MCP servers. So a signal to the session's group does not reach a tool (SIGKILL of the group leaves the tool alive), and the group is the exact way to leave CLI and MCP CPU out of a sample: a waiting CLI spends CPU at every look. nexus-run-session-claude's sampler and stop rest on this. After an SDK bump re-measure: cargo test -p nexus-run-session-claude --test real_sidecar -- --ignored --test-threads=1 (needs npm ci && npm run build in agent-sidecar, no credentials). Also measured: Darwin's proc_pidinfo answers nothing about a zombie, so a start time cannot be compared there before a waitpid.
+
+---
+
+### `v2-host-tests-name-a-sidecar`
+
+A test that steps a v2 run through a real Host over V1Ports must name a sidecar: V1Ports::for_root(..).with_sidecar(<any path>). Without it bundle_path falls back to the bundle build.rs embedded, and the hosted macOS CI lane builds none, so every session start is refused (start_deadline -> StartFailed, the scripted backend never spawns, the view sticks at Running { tree: Prepared }). Linux quality-gates and a developer tree with agent-sidecar/dist built stay green, so it shows only on the full macOS lane. Reproduce locally by moving agent-sidecar/dist/nxc-agent-sidecar.mjs aside and rebuilding. Found on 6j6v.y6v7, run 43417833631.
