@@ -115,18 +115,34 @@ impl ClaudeBackend {
         self
     }
 
-    fn ledger(&self, key: &str) -> SessionLedger {
-        SessionLedger::new(self.logs.join("v2").join(key))
+    /// The ledger of `key`, which must stay under `<agent-logs>/v2/`: `join` with an absolute key replaces the root,
+    /// and a `..` climbs out of it (tv58 review, raised for 6j6v.pn9c). The host mints keys of plain segments
+    /// (`<run>/<step>/v<pass>/<member>/a<attempt>`), so anything else is refused, never repaired.
+    fn ledger(&self, key: &str) -> Result<SessionLedger, BackendError> {
+        let plain = !key.is_empty()
+            && key.split('/').all(|part| {
+                !part.is_empty() && part != "." && part != ".." && !part.contains('\\')
+            });
+        if !plain {
+            return Err(backend_error(format!(
+                "the session key {key:?} is not a relative path of plain segments, so it names no ledger \
+                 under {}",
+                self.logs.join("v2").display()
+            )));
+        }
+        Ok(SessionLedger::new(self.logs.join("v2").join(key)))
     }
 
-    /// The lines a reader could not use, for status.
+    /// The lines a reader could not use, for status. A key that names no ledger has none.
     pub fn findings(&self, key: &str) -> Vec<String> {
-        self.ledger(key).findings()
+        self.ledger(key)
+            .map(|ledger| ledger.findings())
+            .unwrap_or_default()
     }
 
     /// One sample now, whatever the clock says.
     pub fn sample_now(&self, key: &str) -> Result<(), BackendError> {
-        let ledger = self.ledger(key);
+        let ledger = self.ledger(key)?;
         match ledger.child().as_ref().and_then(identity_of) {
             Some(leader) => self.sample(&ledger, &leader),
             None => Ok(()),
@@ -265,7 +281,7 @@ impl SessionBackend for ClaudeBackend {
         if !(self.spawns && SPAWNS_HERE) {
             return Err(backend_error(CANNOT_SPAWN_HERE));
         }
-        let ledger = self.ledger(&spec.session_key);
+        let ledger = self.ledger(&spec.session_key)?;
         ledger.create().map_err(backend_error)?;
         if spawn::claim(&ledger, spec, now_ms()).map_err(backend_error)? {
             spawn::spawn(&ledger, spec, &self.bundle).map_err(backend_error)?;
@@ -283,7 +299,7 @@ impl SessionBackend for ClaudeBackend {
     }
 
     fn nudge(&self, key: &str, text: &str) -> Result<(), BackendError> {
-        let ledger = self.ledger(key);
+        let ledger = self.ledger(key)?;
         let child = ledger
             .child()
             .ok_or_else(|| backend_error("no child record to nudge"))?;
@@ -306,7 +322,7 @@ impl SessionBackend for ClaudeBackend {
     /// never reaches it (measured, tv58 step 0). Everything under the guard. A process the guard will not signal stays,
     /// and `alive` goes on saying so.
     fn stop(&self, key: &str, force: bool) -> Result<(), BackendError> {
-        let ledger = self.ledger(key);
+        let ledger = self.ledger(key)?;
         let Some(leader) = ledger.child().as_ref().and_then(identity_of) else {
             return Ok(());
         };
@@ -332,7 +348,7 @@ impl SessionBackend for ClaudeBackend {
     }
 
     fn alive(&self, key: &str) -> Result<Liveness, BackendError> {
-        let ledger = self.ledger(key);
+        let ledger = self.ledger(key)?;
         let Some(child) = ledger.child() else {
             let starting = ledger
                 .spawn_record()
@@ -369,7 +385,7 @@ impl SessionBackend for ClaudeBackend {
         key: &str,
         from_offset: u64,
     ) -> Result<(Vec<DrainedFact>, u64), BackendError> {
-        let ledger = self.ledger(key);
+        let ledger = self.ledger(key)?;
         let state = match ledger.child().as_ref().and_then(identity_of) {
             Some(leader) => self.observe(&ledger, &leader)?,
             // No child record yet: nothing of its can have ended, and a stop of the slot is `alive`'s to answer.

@@ -123,11 +123,18 @@ fn try_spawn(ledger: &SessionLedger, spec: &StartSpec, bundle: &Path) -> std::io
     Ok(())
 }
 
+/// Counts the asks this process writes, so two in one millisecond get two names (tv58 review, raised for 6j6v.pn9c).
+static ASKS_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// One nudge: an ask file the sidecar drains at the turn's yield, named so they sort in the order they were written.
+/// The instant, the process and this process's count: a second ask in the same millisecond sorts after the first
+/// instead of replacing it.
 pub(crate) fn write_ask(ledger: &SessionLedger, text: &str, now_ms: i64) -> std::io::Result<()> {
-    let path = ledger
-        .dir()
-        .join(format!("ask.{now_ms:016}.{}.json", std::process::id()));
+    let seq = ASKS_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = ledger.dir().join(format!(
+        "ask.{now_ms:016}.{}.{seq:020}.json",
+        std::process::id()
+    ));
     let temp = path.with_extension("tmp");
     let body = serde_json::json!({ "text": text });
     std::fs::write(
@@ -135,4 +142,37 @@ pub(crate) fn write_ask(ledger: &SessionLedger, text: &str, now_ms: i64) -> std:
         serde_json::to_vec(&body).map_err(std::io::Error::other)?,
     )?;
     std::fs::rename(&temp, &path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tv58 review, Low, raised for 6j6v.pn9c: two nudges in one millisecond named the same file, and the second
+    /// rename replaced the first ask before the sidecar drained it.
+    #[test]
+    fn two_asks_written_in_one_millisecond_are_both_kept_in_the_order_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = SessionLedger::new(temp.path().join("key"));
+        ledger.create().unwrap();
+        write_ask(&ledger, "first", 1_700_000_000_000).unwrap();
+        write_ask(&ledger, "second", 1_700_000_000_000).unwrap();
+        // The sidecar's own reader: names starting `ask.` and ending `.json`, sorted (agent-sidecar facts.mjs).
+        let mut names: Vec<String> = std::fs::read_dir(ledger.dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("ask.") && name.ends_with(".json"))
+            .collect();
+        names.sort();
+        let texts: Vec<String> = names
+            .iter()
+            .map(|name| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(ledger.dir().join(name)).unwrap())
+                        .unwrap();
+                body["text"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+    }
 }
