@@ -910,7 +910,10 @@ fn real_v2_session(dir: &Path) -> String {
     send(&eng, the_owner(), "coding-v2").expect("the owner commissions");
     let db = dir.join(".nxs").join("db.sqlite");
     let ports = std::sync::Arc::new(
-        nexus_chat::ports_v1::V1Ports::for_root(dir, db.to_str().unwrap(), &eng.origin()).unwrap(),
+        nexus_chat::ports_v1::V1Ports::for_root(dir, db.to_str().unwrap(), &eng.origin())
+            .unwrap()
+            // Named, so the start does not depend on a bundle this test binary may not carry.
+            .with_sidecar(dir.join("sidecar.mjs")),
     );
     let layout = Layout {
         root: dir.to_owned(),

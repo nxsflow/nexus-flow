@@ -220,8 +220,13 @@ impl V2Run {
             )
             .expect("the owner commissions");
         let db = db_path(&dir);
-        let ports =
-            Arc::new(nexus_chat::ports_v1::V1Ports::for_root(&dir, &db, &eng.origin()).unwrap());
+        // A named sidecar: the scripted backend never runs it, and a test binary built without the
+        // bundle (the hosted macOS lane builds none) would otherwise refuse every session start.
+        let ports = Arc::new(
+            nexus_chat::ports_v1::V1Ports::for_root(&dir, &db, &eng.origin())
+                .unwrap()
+                .with_sidecar(dir.join("sidecar.mjs")),
+        );
         let layout = Layout {
             root: dir.clone(),
             agent_logs: dir.join(".nxs").join("agent-logs"),
