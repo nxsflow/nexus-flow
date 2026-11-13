@@ -40,7 +40,7 @@ jobs:
         with:
           # Full history so the three-dot diff against the base branch has a merge base.
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
       # The `skip-changelog` label makes the gate green by skipping the enforcing step (the

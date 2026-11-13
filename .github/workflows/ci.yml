@@ -120,7 +120,7 @@ jobs:
         || (startsWith(github.ref_name, 'release/') && !startsWith(github.ref_name, 'release/v')))) }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -172,7 +172,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL
           df -h /
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -446,7 +446,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -527,7 +527,7 @@ jobs:
       # influence this one. What legitimately persists is `target/` + `~/.cargo` — a build cache,
       # which is the point.
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       # Skipped when this really is the self-hosted runner, for the reason `release.yml` gives for
@@ -620,7 +620,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
       # `nxf`/`nxm`/`nxc` are argv[0] symlinks to the single `nxs` binary, and `nxs` is its own
@@ -664,7 +664,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -725,7 +725,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Mint a throwaway CA and a server certificate for localhost
@@ -905,7 +905,7 @@ jobs:
       NXF_RELAY_PG_CA_FILE: ${{ github.workspace }}/.github/certs/supabase-root-2021-ca.pem
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
       # Built as its own step so a COMPILE failure cannot be mistaken for the endpoint being down.
@@ -1028,7 +1028,7 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -1085,7 +1085,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: cargo install nxf-relay --features dynamodb, as a consumer does
         run: cargo install --locked --path crates/server --features dynamodb --bin nxf-relay --root "$RUNNER_TEMP/relay"
@@ -1107,7 +1107,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
