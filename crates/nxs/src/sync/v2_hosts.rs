@@ -257,7 +257,7 @@ mod tests {
             v2.tick(std::slice::from_ref(&ws));
         }
         let root = root_of(&ws);
-        assert_eq!(v2.roots(), [root.clone()]);
+        assert_eq!(v2.roots(), std::slice::from_ref(&root));
         assert_eq!(v2.backend_of(&root).as_deref(), Some("claude"));
         // The host marked itself seen under the id the bridge commissioned with and reads (§8.1).
         let store = nexus_run_host::bridge::open_store(&run_sqlite(&ws))

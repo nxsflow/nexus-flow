@@ -1520,7 +1520,11 @@ fn a_v2_run_is_not_queued_behind_a_v1_run_holding_the_roots_working_copy() {
         run.view()
     );
     let v2_dir = run.bridge.layout.v2_dir();
-    assert_eq!(session_cwds(&run), [v2_dir.clone()], "in its own directory");
+    assert_eq!(
+        session_cwds(&run),
+        std::slice::from_ref(&v2_dir),
+        "in its own directory"
+    );
     assert_ne!(v2_dir, run.dir(), "never the root the v1 run works in");
 }
 
