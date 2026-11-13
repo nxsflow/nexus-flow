@@ -192,6 +192,7 @@ struct V2Run {
     bridge: BridgeCtx,
     store: Arc<SqliteRunStore>,
     clock: Arc<SimClock>,
+    tree: Arc<ScriptedTree>,
     run: RunId,
     root: String,
 }
@@ -237,6 +238,10 @@ impl V2Run {
             &layout.v2_dir(),
             scenario,
         ));
+        let tree = Arc::new(ScriptedTree::new(TreeLedger::new(
+            &layout.agent_logs,
+            &eng.origin(),
+        )));
         let host = Host::new(
             store.clone(),
             Ports {
@@ -246,10 +251,7 @@ impl V2Run {
                 layout: layout.clone(),
             },
             backend.clone(),
-            Arc::new(ScriptedTree::new(TreeLedger::new(
-                &layout.agent_logs,
-                &eng.origin(),
-            ))),
+            tree.clone(),
             clock.clone(),
         );
         let bridge = BridgeCtx {
@@ -274,6 +276,7 @@ impl V2Run {
             bridge,
             store,
             clock,
+            tree,
             run,
             root: receipt.thread_id,
         }
@@ -292,11 +295,17 @@ impl V2Run {
         self.now().to_string()
     }
 
+    /// One tick, then the sessions, then the clock: unless the tree is working, because that is real
+    /// time on a worker thread and a simulated window must not close around it.
     fn tick(&mut self) {
         let now = self.now();
         self.host.tick(now);
         self.backend.advance(&self.bridge, now);
-        self.clock.advance(1_000);
+        if self.tree.busy() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        } else {
+            self.clock.advance(1_000);
+        }
     }
 
     fn view(&self) -> RunView {
@@ -307,14 +316,53 @@ impl V2Run {
             .view()
     }
 
+    /// Ticks until `done`. The 400 ticks count only those the run could use: a tick the tree's worker
+    /// thread is still working through is real time, and how much of it there is the machine's to say
+    /// (a loaded 3-core runner left the run `Prepared` through 400 uncounted ticks). Only a hung tree
+    /// ends on the wall-clock ceiling.
     fn until(&mut self, what: &str, done: impl Fn(&V2Run) -> bool) {
-        for _ in 0..400 {
+        let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut counted = 0;
+        while counted < 400 && std::time::Instant::now() < ceiling {
             if done(self) {
                 return;
             }
+            let working = self.tree.busy();
             self.tick();
+            if !working {
+                counted += 1;
+            }
         }
-        panic!("never reached {what}: {:?}", self.view());
+        assert!(
+            done(self),
+            "never reached {what}: {:?}\n{}",
+            self.view(),
+            self.where_it_stands()
+        );
+    }
+
+    /// For a failure message: the run's log and the sessions' timeline, so a red names where the run
+    /// stopped and not only the view it stopped in.
+    fn where_it_stands(&self) -> String {
+        let events: Vec<String> = self
+            .store
+            .load(&self.run, 0)
+            .unwrap()
+            .iter()
+            .map(|event| format!("{:?}", event.body))
+            .collect();
+        let timeline: Vec<String> = self
+            .backend
+            .timeline()
+            .iter()
+            .map(|entry| format!("{} {}", entry.what, entry.session_key))
+            .collect();
+        format!(
+            "tree busy: {}\nevents:\n  {}\ntimeline:\n  {}",
+            self.tree.busy(),
+            events.join("\n  "),
+            timeline.join("\n  ")
+        )
     }
 
     fn until_view(&mut self, what: &str, matches: impl Fn(&RunView) -> bool) {

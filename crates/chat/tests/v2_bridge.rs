@@ -926,6 +926,10 @@ fn real_v2_session(dir: &Path) -> String {
     );
     let mut now = nexus_run_contracts::Timestamp::parse(NOW).unwrap();
     let clock = std::sync::Arc::new(SimClock::at(now.unix_millis()));
+    let tree = std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
+        &layout.agent_logs,
+        &eng.origin(),
+    )));
     let mut host = Host::new(
         store.clone(),
         Ports {
@@ -940,21 +944,27 @@ fn real_v2_session(dir: &Path) -> String {
             &layout.v2_dir(),
             Box::new(|_| pass()),
         )),
-        std::sync::Arc::new(ScriptedTree::new(TreeLedger::new(
-            &layout.agent_logs,
-            &eng.origin(),
-        ))),
+        tree.clone(),
         clock.clone(),
     );
     let run = store.open_runs().unwrap()[0].run.clone();
     let key = format!("{run}/build/v1/coder/a1");
-    for _ in 0..40 {
+    // Only ticks the run could use count: one the tree's worker thread is working through is real
+    // time, and a loaded runner decides how much (the clock stands still meanwhile, as `Rig::tick`).
+    let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut counted = 0;
+    while counted < 40 && std::time::Instant::now() < ceiling {
         host.tick(now);
         if store.get(&format!("session/{key}")).unwrap().is_some() {
             return key;
         }
-        clock.advance(1_000);
-        now = nexus_run_contracts::Timestamp::from_unix_millis(now.unix_millis() + 1_000);
+        if tree.busy() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        } else {
+            clock.advance(1_000);
+            now = nexus_run_contracts::Timestamp::from_unix_millis(now.unix_millis() + 1_000);
+            counted += 1;
+        }
     }
     panic!("the host never started the build slot");
 }
