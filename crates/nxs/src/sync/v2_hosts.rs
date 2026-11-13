@@ -23,7 +23,22 @@ pub struct V2Hosts {
     primes: Arc<dyn ModulePrimes>,
     /// The service's log, which every host writes its lines to as well.
     log: LogSink,
+    /// How many ticks one measures line covers: the smoke run reads the bounds it observed from it (§12.10).
+    pub(crate) stats_every: usize,
+    window: Window,
 }
+
+/// What the ticks of one window measured, across every host.
+#[derive(Default)]
+struct Window {
+    ticks: Vec<std::time::Duration>,
+    busy: u32,
+    yielded: u32,
+    folded: u64,
+}
+
+/// Ten minutes of one-second ticks.
+const STATS_EVERY: usize = 600;
 
 impl V2Hosts {
     pub fn new(primes: Arc<dyn ModulePrimes>, log: LogSink) -> Self {
@@ -32,6 +47,8 @@ impl V2Hosts {
             refused: BTreeSet::new(),
             primes,
             log,
+            stats_every: STATS_EVERY,
+            window: Window::default(),
         }
     }
 
@@ -70,8 +87,17 @@ impl V2Hosts {
             }
             if let Some(host) = self.hosts.get_mut(&root) {
                 let now = nexus_run_host::ports::Clock::now(&nexus_run_host::ports::SystemClock);
-                host.tick(now);
+                let started = std::time::Instant::now();
+                let report = host.tick(now);
+                self.window.ticks.push(started.elapsed());
+                self.window.busy += u32::from(report.busy);
+                self.window.yielded += u32::from(report.yielded);
+                self.window.folded += u64::from(report.folded);
             }
+        }
+        if self.window.ticks.len() >= self.stats_every {
+            let window = std::mem::take(&mut self.window);
+            (self.log)(&window.line());
         }
     }
 
@@ -97,6 +123,24 @@ impl V2Hosts {
     #[cfg(test)]
     pub(crate) fn insert(&mut self, root: PathBuf, host: Host) {
         self.hosts.insert(root, host);
+    }
+}
+
+impl Window {
+    /// Ids and numbers only, like every host line (M8).
+    fn line(mut self) -> String {
+        self.ticks.sort();
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        let n = self.ticks.len();
+        let p99 = self.ticks[(n * 99).div_ceil(100).saturating_sub(1)];
+        format!(
+            "run-host stats: ticks={n} p99_ms={:.1} max_ms={:.1} busy={} yielded={} folded={}",
+            ms(p99),
+            ms(self.ticks[n - 1]),
+            self.busy,
+            self.yielded,
+            self.folded
+        )
     }
 }
 
@@ -268,6 +312,30 @@ mod tests {
             seen[0].contains(&root_of(&ws).display().to_string()),
             "{seen:?}"
         );
+    }
+
+    #[test]
+    fn the_hosts_measures_are_logged_once_per_window_of_ticks() {
+        let (_tmp, ws) = workspace();
+        commission(&ws);
+        let (mut v2, seen) = hosts();
+        v2.stats_every = 4;
+        for _ in 0..9 {
+            v2.tick(std::slice::from_ref(&ws));
+        }
+        let stats: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("run-host stats:"))
+            .cloned()
+            .collect();
+        assert_eq!(stats.len(), 2, "one line per 4 ticks: {stats:?}");
+        for field in [
+            "ticks=4", "p99_ms=", "max_ms=", "busy=", "yielded=", "folded=",
+        ] {
+            assert!(stats[0].contains(field), "{field} in {}", stats[0]);
+        }
     }
 
     #[test]
