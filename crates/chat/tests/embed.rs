@@ -122,7 +122,7 @@ fn write_then_read_back_through_the_handle() {
             },
         )
         .unwrap();
-    assert!(r.message_id.starts_with("m-"));
+    assert!(r.message_id.as_deref().unwrap().starts_with("m-"));
     let handle = format!("{}/a", eng.origin());
     // Read off the store: `Engine::messages` went with nxf 6j6v.yr59 and the seam's one message
     // reader is keyed by THREAD. What this line is checking is what the WRITE left in the channel,

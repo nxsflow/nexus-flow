@@ -194,7 +194,10 @@ pub struct SendToReceipt {
     /// The workspace-unique thread this conversation is now addressed by — what `reply --thread`
     /// takes, and the one value a caller must keep.
     pub thread_id: String,
-    pub message_id: String,
+    /// The first message's id — `None` exactly for a channel on the new engine, whose root message
+    /// the host posts after the run's log can answer for it (6j6v.zjyv §6.4 item 1), so there is none
+    /// yet when this receipt is written. Every v1 send fills it, as it always did.
+    pub message_id: Option<String>,
     /// The target as the caller wrote it.
     pub to: String,
     /// What that target turned out to be, so a caller can tell "a persona is now working on it"
@@ -338,7 +341,21 @@ pub struct SendToReceipt {
 /// away. A process that simply never registers is "a human" to this check, exactly as it is there —
 /// and lands on the advice that works for anybody, which is the benign direction.
 pub(crate) fn caller_identity(ctx: &Ctx, store: &ChatStore) -> Result<crate::persona::Identity> {
-    crate::persona::resolve_identity(store, ctx.defs.roles(), None, ctx.session)
+    resolve_caller(ctx, store).map(|(identity, _)| identity)
+}
+
+/// [`caller_identity`] and whether the caller is a session of a run on the NEW engine — which it then is
+/// to every gate here: a persona, never "the human at the terminal" (6j6v.zjyv §10). The lookup is
+/// [`crate::v2_bridge::session_of`], made first and in this one place for every caller check.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub(crate) fn resolve_caller(
+    ctx: &Ctx,
+    store: &ChatStore,
+) -> Result<(
+    crate::persona::Identity,
+    Option<crate::v2_bridge::V2Session>,
+)> {
+    crate::v2_bridge::resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)
 }
 
 /// What to tell a caller the target does not admit (nxf 6j6v.st83) — **who may, and where this
@@ -354,9 +371,27 @@ fn refusal(decl: &crate::role::RoleDecl, caller: &crate::persona::Identity, ctx:
     use crate::role::Addressable;
     // The channels this persona is actually reached through: its own declared list where it has
     // one (a workspace mid-migration reads as it did), else the channels whose cast names it.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a persona is never sent to a channel on the
+    // new engine, whose own send would refuse it (6j6v.zjyv §10).
+    let reachable = match caller.persona() {
+        Some(_) => crate::channel::persona_reachable(ctx.defs.channels()),
+        None => ctx.defs.channels().to_vec(),
+    };
     let via = match decl.addressable.channels() {
-        [] => crate::channel::channels_casting(ctx.defs.channels(), &decl.handle),
-        declared => declared.to_vec(),
+        [] => crate::channel::channels_casting(&reachable, &decl.handle),
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — the persona's own declared route is
+        // filtered as the derived one is.
+        declared => declared
+            .iter()
+            .filter(|name| {
+                caller.persona().is_none()
+                    || !ctx
+                        .defs
+                        .channel(name)
+                        .is_some_and(|c| c.engine == crate::channel::RunEngine::V2)
+            })
+            .cloned()
+            .collect(),
     };
     let through = |lead: &str| match via.first() {
         None => String::new(),
@@ -464,7 +499,12 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     // …and it is the WHOLE identity since nxf 6j6v.st83, not the bool this used to keep: the same
     // answer decides which [`Await`] shape the receipt carries AND whether the target admits this
     // caller at all. One resolution, so the two can never disagree about who is calling.
-    let identity = caller_identity(ctx, store)?;
+    let (identity, v2_session) = resolve_caller(ctx, store)?;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a session of a run on the new engine sends to
+    // nobody, persona or channel, either engine, before anything is written (6j6v.zjyv §10).
+    if let Some(session) = &v2_session {
+        return Err(crate::v2_bridge::session_cannot_send(session));
+    }
     let persona = identity.persona().is_some();
 
     // (0) An address in ANOTHER workspace on this machine (nxf 6j6v.4gp2): `<owner>/<repo>/<persona>`.
@@ -497,7 +537,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
         let c = crate::border::commission(ctx, store, address, req.body, refs)?;
         return Ok(SendToReceipt {
             thread_id: c.thread_id.clone(),
-            message_id: c.message_id,
+            message_id: Some(c.message_id),
             to: req.to.to_string(),
             target: TargetKind::Persona,
             channel: c.channel,
@@ -516,7 +556,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     }
 
     // (1) A declared channel: hand the whole thing to the existing verb.
-    if ctx.defs.declared_channel(req.to)?.is_some() {
+    if let Some(engine) = ctx.defs.declared_channel(req.to)?.map(|c| c.engine) {
         // A channel runs where it is started (nxf 6j6v.1c6k, spec §2.1): its supervisor's state is
         // this machine's own, so a member elsewhere would answer into a supervisor that is not there.
         if req.machine.is_some() {
@@ -525,6 +565,15 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
                  names the machine of a persona chat",
                 req.to
             )));
+        }
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — THE SWITCH (6j6v.zjyv §10): a channel on
+        // the new engine is commissioned through `run_host::commission`, and `channel_open` is never
+        // entered for it. No persona commissions one in this slice.
+        if engine == crate::channel::RunEngine::V2 {
+            if persona {
+                return Err(crate::v2_bridge::persona_cannot_send(req.to));
+            }
+            return crate::v2_bridge::commission(ctx, req.to, req.body, refs, refs_warning);
         }
         let receipt = orchestration::channel_open(
             ctx,
@@ -551,7 +600,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             handed_to: None,
             border: None,
             thread_id: thread_id.clone(),
-            message_id: receipt.board.message_id,
+            message_id: Some(receipt.board.message_id),
             to: req.to.to_string(),
             target: TargetKind::Channel,
             channel,
@@ -692,7 +741,7 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
             handed_to: receipt.handed_to,
             border: None,
             thread_id: thread_id.clone(),
-            message_id: receipt.message_id,
+            message_id: Some(receipt.message_id),
             to: req.to.to_string(),
             target: TargetKind::Persona,
             channel: receipt.channel,

@@ -376,6 +376,7 @@ fn pass_through_channel(members: &[&str]) -> ChannelDecl {
         preconditions: Vec::new(),
         steps: Vec::new(),
         rework_notice: None,
+        engine: Default::default(),
     }
 }
 
@@ -396,6 +397,7 @@ fn summarize_channel(members: &[&str]) -> ChannelDecl {
         preconditions: Vec::new(),
         steps: Vec::new(),
         rework_notice: None,
+        engine: Default::default(),
     }
 }
 

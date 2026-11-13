@@ -263,12 +263,22 @@ pub enum AwaitHow {
 /// redundant: `complete` is `E ≠ ∅ ∧ outstanding = ∅` ([`crate::store::ThreadQuorum::complete`]),
 /// so it already implies the empty list. A caller that checks only `outstanding == []` would read a
 /// thread that expects NOBODY as finished, which is why the flag is named first and named at all.
+///
+/// **Two shapes, one per payload** (6j6v.b8tj): a thread of the old engine is read with `nxc threads
+/// show`, a run of the new engine with `nxc status --thread`, and each predicate names fields of the
+/// payload its [`Await::poll`] produces. Untagged, so the old shape's JSON is byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DoneWhen {
-    /// `complete` on the polled payload must be `true`.
-    pub complete: bool,
-    /// `outstanding` on the polled payload must be empty.
-    pub outstanding: Vec<String>,
+#[serde(untagged)]
+pub enum DoneWhen {
+    Thread {
+        /// `complete` on the polled payload must be `true`.
+        complete: bool,
+        /// `outstanding` on the polled payload must be empty.
+        outstanding: Vec<String>,
+    },
+    /// `operations[].open` of `nxc status --thread <root> --json` must be this — 0: the run is finished.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    Run { open: usize },
 }
 
 /// **The round has STOPPED — ANY of these means no answer is coming.** An OR, unlike its
@@ -279,13 +289,23 @@ pub struct DoneWhen {
 /// ([`crate::store::ThreadQuorum::stale`]); `escalated` is the agent side handing the task back
 /// rather than answering it ([`crate::facade::ThreadBoardView::escalated`]). Neither releases
 /// anything by itself — a human or a supervisor decides what happens next — which is exactly what
-/// separates "wait" from "it is stuck".
+/// separates "wait" from "it is stuck". The run's shape is [`DoneWhen`]'s second one, for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StoppedWhen {
-    /// `stale` on the polled payload being `true` is enough.
-    pub stale: bool,
-    /// `escalated` on the polled payload being `true` is enough.
-    pub escalated: bool,
+#[serde(untagged)]
+pub enum StoppedWhen {
+    Thread {
+        /// `stale` on the polled payload being `true` is enough.
+        stale: bool,
+        /// `escalated` on the polled payload being `true` is enough.
+        escalated: bool,
+    },
+    /// `operations[].needs_decision` or `operations[].threads[].awaiting_human` being `true` is enough: the
+    /// run asks its requester, or holds for a person.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    Run {
+        needs_decision: bool,
+        awaiting_human: bool,
+    },
 }
 
 /// **How to learn the answer to what was just sent** — the same content the human line carries,
@@ -306,12 +326,19 @@ pub struct Await {
     pub done_when: DoneWhen,
     /// The markers that mean stopped — see [`StoppedWhen`] for the connective.
     pub stopped_when: StoppedWhen,
-    /// Where the answer sits in the polled payload: [`ANSWER_AT`].
+    /// Where the answer sits in the polled payload: [`ANSWER_AT`] — or, where
+    /// [`answer_in`](Await::answer_in) names a second read, in THAT read's payload.
     ///
     /// Present for [`AwaitHow::Resume`] too, and not as an oversight: a resumed persona is handed
     /// the answer, but the thread it lands in is the same one, and a caller that does look reads it
     /// in the same place.
     pub answer_at: &'static str,
+    /// **The read that holds the answer, when it is not the polled one** (6j6v.b8tj): a run of the new
+    /// engine is polled through `nxc status`, and its answer is the newest message of its root thread.
+    /// Absent for every thread of the old engine, whose poll payload carries the messages itself.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_in: Option<Vec<String>>,
     /// **How patient to be** — the absolute instant the answer is due at, when a window was
     /// declared for it, and `null` when none was.
     ///
@@ -347,16 +374,37 @@ impl Await {
         Await {
             how: AwaitHow::Poll,
             poll: None,
-            done_when: DoneWhen {
+            done_when: DoneWhen::Thread {
                 complete: true,
                 outstanding: Vec::new(),
             },
-            stopped_when: StoppedWhen {
+            stopped_when: StoppedWhen::Thread {
                 stale: true,
                 escalated: true,
             },
             answer_at: ANSWER_AT,
+            answer_in: None,
             deadline,
+        }
+    }
+
+    /// **The block for the requester of a run on the new engine** (6j6v.zjyv §10): nobody wakes the person
+    /// at the terminal, the read is `nxc status --thread <root>`, and done is the run `Finished` — never
+    /// `threads show`'s `complete`, which a v2 root thread does not reach.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    pub fn run(root: &str) -> Await {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        Await {
+            how: AwaitHow::Poll,
+            poll: Some(argv(&["nxc", "status", "--thread", root, "--json"])),
+            done_when: DoneWhen::Run { open: 0 },
+            stopped_when: StoppedWhen::Run {
+                needs_decision: true,
+                awaiting_human: true,
+            },
+            answer_at: ANSWER_AT,
+            answer_in: Some(argv(&["nxc", "threads", "show", root, "--json"])),
+            deadline: None,
         }
     }
 
@@ -382,6 +430,15 @@ impl Await {
             Some(d) => format!("\n  The answer is due by {d}."),
             None => String::new(),
         };
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — a run of the new engine is read through
+        // `nxc status`, and `--stream` does not follow one yet.
+        if matches!(self.done_when, DoneWhen::Run { .. }) {
+            return format!(
+                "\n  The answer lands in this thread once the run has finished.\n    \
+                 nxc status --thread {thread_id}    — where the run stands\n    \
+                 nxc threads show    {thread_id}    — the conversation{due}"
+            );
+        }
         match self.how {
             // The two reads a requester actually takes next, padded to one column so the ids line
             // up, and printed IN FULL: these lines are meant to be run, and an abbreviated id is

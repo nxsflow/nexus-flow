@@ -661,6 +661,32 @@ pub struct ChannelDecl {
     /// whether another attempt exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_notice: Option<String>,
+    /// **Which engine runs this channel's commissions** (6j6v.zjyv §10) — [`RunEngine::V1`], the
+    /// default and what every declaration written before this field means, or [`RunEngine::V2`],
+    /// which `surface::send_to` hands to `run_host::commission` instead of `channel_open`.
+    // v2-bridge: deleted with the old engine (6j6v.2vtw)
+    #[serde(default, skip_serializing_if = "RunEngine::is_v1")]
+    pub engine: RunEngine,
+}
+
+/// **The engine a channel declares** (6j6v.zjyv §10): `engine: v1 | v2`. A run never changes engine —
+/// the bridge decides by where its thread is recorded — so this decides only where a NEW commission
+/// of the channel goes.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunEngine {
+    #[default]
+    V1,
+    V2,
+}
+
+impl RunEngine {
+    /// What `skip_serializing_if` asks, so a v1 declaration serializes exactly as it did before the
+    /// field existed.
+    pub fn is_v1(&self) -> bool {
+        matches!(self, RunEngine::V1)
+    }
 }
 
 /// The seniority band a channel's consolidator FOLDS at when its declaration names no
@@ -1430,6 +1456,17 @@ pub fn cast(channel: &ChannelDecl) -> Vec<String> {
         }
     }
     out
+}
+
+/// **The channels a persona session may commission** (6j6v.zjyv §10): every declared channel except
+/// those on the new engine, which cannot yet answer a persona. The terminal keeps them all.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+pub fn persona_reachable(channels: &[ChannelDecl]) -> Vec<ChannelDecl> {
+    channels
+        .iter()
+        .filter(|c| c.engine.is_v1())
+        .cloned()
+        .collect()
 }
 
 /// The names of every channel whose [`cast`] includes `handle`, in declaration order — **the route
@@ -2891,6 +2928,7 @@ mod tests {
             preconditions: Vec::new(),
             steps: Vec::new(),
             rework_notice: None,
+            engine: Default::default(),
         }
     }
 

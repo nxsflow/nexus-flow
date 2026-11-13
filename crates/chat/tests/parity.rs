@@ -900,7 +900,7 @@ fn write_parity_engine_and_nxc_emit_identical_ops_and_reads() {
             },
         )
         .unwrap();
-        (r.channel, r.thread_id, r.message_id)
+        (r.channel, r.thread_id, r.message_id.unwrap())
     };
 
     // CLI seam: the identical script via `nxc` subprocesses, on the SAME dry worker the app side

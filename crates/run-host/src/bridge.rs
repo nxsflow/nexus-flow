@@ -16,7 +16,9 @@ use nexus_run_contracts::{
     LOCAL_TENANT,
 };
 use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, RunState, SlotState};
-use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
+/// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
+/// but the contracts (`cargo xtask layering check`).
+pub use nexus_run_store_sqlite::{SqliteRunStore, LEASE_EXPIRY};
 use ulid::Ulid;
 
 use crate::effects::{PendingCommission, CHAT_REFUSED};
@@ -35,12 +37,17 @@ pub const BRIDGE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The host's, below its 200 ms budget, so a blocked call cannot outlast the tick (§7).
 pub const HOST_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// The bridge's connection. `Ok(None)` is the one way to say "not v2": no `run.sqlite` here.
+/// The bridge's connection. `Ok(None)` is the one way to say "not v2": no `run.sqlite` here — `NotFound`, and
+/// nothing else. A file whose existence cannot be told (its directory not searchable) is an error, never an
+/// absence.
 pub fn open_store(path: &Path) -> Result<Option<SqliteRunStore>, StoreError> {
-    if !path.exists() {
-        return Ok(None);
+    match std::fs::metadata(path) {
+        Ok(_) => SqliteRunStore::open(path, BRIDGE_BUSY_TIMEOUT).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StoreError::Backend {
+            what: format!("{}: {error}", path.display()),
+        }),
     }
-    SqliteRunStore::open(path, BRIDGE_BUSY_TIMEOUT).map(Some)
 }
 
 /// What every entry point needs.

@@ -60,6 +60,7 @@ fn load_all_channels_parses_a_single_well_formed_channel() {
             preconditions: Vec::new(),
             steps: Vec::new(),
             rework_notice: None,
+            engine: Default::default(),
         }]
     );
 }
@@ -216,6 +217,7 @@ fn channel_decl_defaults_when_only_required_fields_are_present() {
             preconditions: Vec::new(),
             steps: Vec::new(),
             rework_notice: None,
+            engine: Default::default(),
         }
     );
 }

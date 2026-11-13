@@ -265,7 +265,7 @@ fn the_senders_session_is_stamped_as_the_return_address_and_the_reply_wakes_it()
     let coder_session = commissioned.session.clone().expect("the coder was started");
 
     let stamped = open_store(tmp.path())
-        .message_return_address(&commissioned.message_id)
+        .message_return_address(commissioned.message_id.as_deref().unwrap())
         .expect("read the return address");
     assert_eq!(
         stamped.as_deref(),

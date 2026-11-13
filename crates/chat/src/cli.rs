@@ -1231,6 +1231,12 @@ fn open(db: Option<&str>) -> Result<ChatStore> {
     ws.open_chat_store()
 }
 
+/// The workspace's `db.sqlite` this invocation resolves, as the path every store beside it is found by.
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+fn db_path_of(db: Option<&str>) -> Result<String> {
+    Workspace::resolve(db, &cwd()?)?.db_path_str()
+}
+
 /// The workspace ROOT this invocation acts in — the parent of `.nxs/`, which is where
 /// `.nxs-personas/` (and any legacy `roles/`) sits.
 fn workspace_root(db: Option<&str>) -> Result<PathBuf> {
@@ -2011,8 +2017,15 @@ fn prime(
     // human. See `crate::persona` for why it is deliberately not the process id, and for what the
     // answer may and may not be used for.
     let defs = crate::definitions::Definitions::resolve(&workspace_root(db)?)?;
-    let identity =
-        crate::persona::resolve_identity(&store, defs.roles(), persona, session().as_deref())?;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — the v2 lookup first (6j6v.zjyv §10).
+    let (identity, _) = crate::v2_bridge::resolve_caller(
+        &store,
+        &defs,
+        persona,
+        session().as_deref(),
+        &db_path_of(db)?,
+        &origin(db)?,
+    )?;
     let report = facade::prime_with(
         &store,
         &consumer,
@@ -2048,7 +2061,15 @@ fn list(json: bool, db: Option<&str>, persona: Option<&str>) -> Result<()> {
         .cloned()
         .expect("Definitions::resolve always records its source");
     let (roles, channels) = (defs.roles(), defs.channels());
-    let identity = crate::persona::resolve_identity(&store, roles, persona, session().as_deref())?;
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — the v2 lookup first (6j6v.zjyv §10).
+    let (identity, _) = crate::v2_bridge::resolve_caller(
+        &store,
+        &defs,
+        persona,
+        session().as_deref(),
+        &db_path_of(db)?,
+        &origin(db)?,
+    )?;
     let directory = match identity.persona() {
         Some(handle) => crate::persona::Directory::for_persona(roles, channels, handle),
         None => crate::persona::Directory::full(roles, channels),
@@ -2202,12 +2223,18 @@ fn send(
     // follow's TIMINGS are resolved here for the same reason — a rejected `NXC_STREAM_IDLE` after
     // the post is that same bad outcome, arrived at by a different route (PR #295 review).
     let follow_opts = if stream {
-        refuse_stream_for_a_persona(&crate::persona::resolve_identity(
-            &store,
-            ctx.defs.roles(),
-            None,
-            ctx.session,
-        )?)?;
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — the v2 lookup first (6j6v.zjyv §10).
+        refuse_stream_for_a_persona(
+            &crate::v2_bridge::resolve_caller(
+                &store,
+                ctx.defs,
+                None,
+                ctx.session,
+                ctx.db_path,
+                ctx.origin,
+            )?
+            .0,
+        )?;
         Some(stream_options()?)
     } else {
         None
@@ -3197,12 +3224,18 @@ fn reply_thread(json: bool, db: Option<&str>, args: ReplyArgs<'_>) -> Result<()>
     // Both `--stream` refusals — who may follow, and whether the follow's timings parse — happen
     // before the reply is written, for the reason `send --to` states at its own call site.
     let follow_opts = if stream {
-        refuse_stream_for_a_persona(&crate::persona::resolve_identity(
-            &store,
-            ctx.defs.roles(),
-            None,
-            ctx.session,
-        )?)?;
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — the v2 lookup first (6j6v.zjyv §10).
+        refuse_stream_for_a_persona(
+            &crate::v2_bridge::resolve_caller(
+                &store,
+                ctx.defs,
+                None,
+                ctx.session,
+                ctx.db_path,
+                ctx.origin,
+            )?
+            .0,
+        )?;
         Some(stream_options()?)
     } else {
         None

@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nexus_run_contracts::{Handle, MessageId, Timestamp};
-use nexus_run_engine::{ChannelDecl, TurnPart};
+/// Re-exported for the ports' implementers on the old side, which may import this crate and no other new
+/// one but the contracts (`cargo xtask layering check`).
+pub use nexus_run_engine::{ChannelDecl, TurnKind, TurnPart};
 use serde::{Deserialize, Serialize};
 
 pub type PortResult<T> = Result<T, PortError>;
