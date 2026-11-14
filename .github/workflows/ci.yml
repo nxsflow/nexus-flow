@@ -24,7 +24,11 @@ on:
     # The same set of refs is spelled twice more for dispatches (6j6v.ee3e): in the `concurrency`
     # expression (never cancel there) and in the `lint` job's `full` output (always full there,
     # with `run-name` repeating it for the title). Change one, look at the others.
-    branches: [main, "release/[0-9]+.[0-9]+"]
+    #
+    # `v2` is the software factory's base branch until it merges into main (factory/CONFIG.md), so a
+    # merge into it gets the same full push run main gets. Only the push trigger names it: a dispatch
+    # on `v2` stays a debug run unless `-f full=true`, like any other branch.
+    branches: [main, v2, "release/[0-9]+.[0-9]+"]
   pull_request:
   # Dispatching this workflow on a branch is how an agent gets CI as its gate (the memory
   # `gates-run-in-ci-not-locally`). Since 6j6v.ee3e such a dispatch is a DEBUG-ONLY run by default —
