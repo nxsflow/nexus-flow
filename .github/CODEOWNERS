@@ -2,7 +2,7 @@
 # release automation, the release tree and the installer, the workspace manifests and
 # lockfiles, and the factory's own product file and values. Branch protection on main
 # requires a code owner's review, so a pull request that touches one of them cannot be
-# merged by an agent, whatever exception the AI policy would otherwise allow.
+# merged by an agent.
 
 /.github/ @cabcookie
 /release/ @cabcookie

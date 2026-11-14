@@ -82,7 +82,7 @@ enum Command {
         /// Leave out superseded decisions.
         #[arg(long)]
         current: bool,
-        /// Only decisions about this ticket, e.g. `NXF-22`.
+        /// Only decisions about this ticket, e.g. `NEX-22`.
         #[arg(long)]
         ticket: Option<String>,
         /// Only decisions with this topic, e.g. `tracker`.

@@ -8,19 +8,19 @@ The decision log is the folder [`factory/decisions/`](decisions/), one file per 
 cargo xtask decisions                      # every decision in full, in date order
 cargo xtask decisions --index              # one line each: date, ticket, title, superseded by …
 cargo xtask decisions --current            # leave out superseded decisions
-cargo xtask decisions --ticket NXF-22      # only this ticket's decisions
+cargo xtask decisions --ticket NEX-22      # only this ticket's decisions
 cargo xtask decisions --topic tracker      # only this topic's decisions
 cargo xtask decisions --since 2026-11-01   # only decisions made on or after this date
 ```
 
-The filters combine with each other and with `--index` and `--current`. `ls factory/decisions/` lists them by date too. (The ticket ids in these examples are placeholders until CONFIG.md names the Linear team key.)
+The filters combine with each other and with `--index` and `--current`. `ls factory/decisions/` lists them by date too.
 
 ## Writing one
 
 Add a new file, `factory/decisions/YYYY-MM-DD-<ticket>-<slug>.md`, or `YYYY-MM-DD-no-ticket-<slug>.md` when there is no ticket. When the heading names several tickets, the file name takes the first. The slug is the title in lowercase words joined by `-`.
 
 ```markdown
-# 2026-11-14 · NXF-22 · Tickets live in Linear
+# 2026-11-14 · NEX-22 · Tickets live in Linear
 
 - Decided by: Carsten
 - Why: one line

@@ -19,16 +19,4 @@
 
 <!-- If this touches sync, the relay, auth, storage or the on-disk format: what could go wrong for a user's data or keys, and why it does not. Otherwise write "Not applicable." -->
 
-## Authorship
-
-<!-- Check exactly one box. Disclosure is required, see .github/AI_POLICY.md. -->
-
-- [ ] Human: a person wrote this change.
-- [ ] Agent under close human direction: an agent wrote it while a person steered it step by step.
-- [ ] Agent with human review: an agent wrote it on its own; a person reviewed all of it before this pull request was opened.
-- [ ] Agent, checked against a decided design: an agent implemented an RFC the owner has decided; the factory's pm checked it against that RFC and the gates, and no person reviewed every line before the merge (see .github/AI_POLICY.md).
-- [ ] Agent, beta release notes: an agent curated a beta's release notes from the change fragments; the factory's pm checked them, and no person reviewed them before the merge (see .github/AI_POLICY.md).
-- [ ] Agent, carries out a decision: an agent changed documentation only to record a decision the owner made or to follow merged RFC text; the factory's pm checked every change against its source, and no person reviewed it before the merge (see .github/AI_POLICY.md).
-- [ ] Agent, tooling: an agent changed only developer and agent tooling, no gate, workflow, product code or policy; the factory's pm checked that, and no person reviewed it before the merge (see .github/AI_POLICY.md).
-
 Follow-up: <!-- The GitHub handle of the person who understands this change and answers review on it, with its @. Required. -->

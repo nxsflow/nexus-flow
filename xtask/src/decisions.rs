@@ -377,7 +377,7 @@ pub fn run(dir: &Path, filter: &Filter, check: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "# 2026-11-14 · NXF-3 · Tickets live in Linear\n\n\
+    const GOOD: &str = "# 2026-11-14 · NEX-3 · Tickets live in Linear\n\n\
         - Decided by: Carsten\n- Why: one line\n- Instead of: the board\n- Topics: tracker, factory\n";
 
     fn folder(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -390,10 +390,10 @@ mod tests {
 
     #[test]
     fn a_well_formed_file_has_no_problems() {
-        let dir = folder(&[("2026-11-14-NXF-3-tickets-live-in-linear.md", GOOD)]);
+        let dir = folder(&[("2026-11-14-NEX-3-tickets-live-in-linear.md", GOOD)]);
         let (entries, problems) = read_decisions(dir.path()).unwrap();
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(entries[0].tickets, vec!["NXF-3"]);
+        assert_eq!(entries[0].tickets, vec!["NEX-3"]);
         assert_eq!(entries[0].topics, vec!["tracker", "factory"]);
     }
 
@@ -416,12 +416,12 @@ mod tests {
 
     #[test]
     fn the_heading_must_agree_with_the_file_name() {
-        let dir = folder(&[("2026-11-13-NXF-4-tickets-live-in-linear.md", GOOD)]);
+        let dir = folder(&[("2026-11-13-NEX-4-tickets-live-in-linear.md", GOOD)]);
         let (_, problems) = read_decisions(dir.path()).unwrap();
         assert!(problems
             .iter()
             .any(|p| p.contains("heading's date 2026-11-14")));
-        assert!(problems.iter().any(|p| p.contains("first ticket NXF-3")));
+        assert!(problems.iter().any(|p| p.contains("first ticket NEX-3")));
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn topics_must_be_lowercase_tags() {
         let text = GOOD.replace("tracker, factory", "Tracker");
-        let dir = folder(&[("2026-11-14-NXF-3-tickets-live-in-linear.md", &text)]);
+        let dir = folder(&[("2026-11-14-NEX-3-tickets-live-in-linear.md", &text)]);
         let (_, problems) = read_decisions(dir.path()).unwrap();
         assert!(problems
             .iter()
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn a_superseded_file_must_exist() {
         let text = format!("{GOOD}- Supersedes: 2026-11-01-no-ticket-gone.md\n");
-        let dir = folder(&[("2026-11-14-NXF-3-tickets-live-in-linear.md", &text)]);
+        let dir = folder(&[("2026-11-14-NEX-3-tickets-live-in-linear.md", &text)]);
         let (_, problems) = read_decisions(dir.path()).unwrap();
         assert!(problems
             .iter()
@@ -461,14 +461,14 @@ mod tests {
     fn ticket_parts_name_lists_and_ranges() {
         assert_eq!(tickets_of("no ticket"), Some(vec![]));
         assert_eq!(
-            tickets_of("NXF-9, NXF-10").unwrap(),
-            vec!["NXF-9", "NXF-10"]
+            tickets_of("NEX-9, NEX-10").unwrap(),
+            vec!["NEX-9", "NEX-10"]
         );
         assert_eq!(
-            tickets_of("NXF-6 to NXF-8").unwrap(),
-            vec!["NXF-6", "NXF-7", "NXF-8"]
+            tickets_of("NEX-6 to NEX-8").unwrap(),
+            vec!["NEX-6", "NEX-7", "NEX-8"]
         );
-        assert_eq!(tickets_of("NXF-8 to NXF-6"), None);
+        assert_eq!(tickets_of("NEX-8 to NEX-6"), None);
         assert_eq!(tickets_of("nxf-1"), None);
     }
 
@@ -482,12 +482,12 @@ mod tests {
 
     #[test]
     fn render_filters_and_marks_superseded_decisions() {
-        let newer = "# 2026-11-15 · NXF-5 · Tickets live in Linear, team NXF\n\n\
+        let newer = "# 2026-11-15 · NEX-5 · Tickets live in Linear, team NEX\n\n\
             - Decided by: Carsten\n- Why: w\n- Instead of: i\n- Topics: tracker\n\
-            - Supersedes: 2026-11-14-NXF-3-tickets-live-in-linear.md\n";
+            - Supersedes: 2026-11-14-NEX-3-tickets-live-in-linear.md\n";
         let dir = folder(&[
-            ("2026-11-14-NXF-3-tickets-live-in-linear.md", GOOD),
-            ("2026-11-15-NXF-5-tickets-live-in-linear-team-nxf.md", newer),
+            ("2026-11-14-NEX-3-tickets-live-in-linear.md", GOOD),
+            ("2026-11-15-NEX-5-tickets-live-in-linear-team-nxf.md", newer),
         ]);
         let (entries, problems) = read_decisions(dir.path()).unwrap();
         assert!(problems.is_empty(), "{problems:?}");
@@ -500,9 +500,9 @@ mod tests {
         );
         assert_eq!(
             index,
-            "2026-11-14 · NXF-3 · Tickets live in Linear · superseded by \
-             2026-11-15-NXF-5-tickets-live-in-linear-team-nxf.md\n\
-             2026-11-15 · NXF-5 · Tickets live in Linear, team NXF"
+            "2026-11-14 · NEX-3 · Tickets live in Linear · superseded by \
+             2026-11-15-NEX-5-tickets-live-in-linear-team-nxf.md\n\
+             2026-11-15 · NEX-5 · Tickets live in Linear, team NEX"
         );
         let current = Filter {
             index: true,
@@ -511,20 +511,20 @@ mod tests {
         };
         assert_eq!(
             render(&entries, &current),
-            "2026-11-15 · NXF-5 · Tickets live in Linear, team NXF"
+            "2026-11-15 · NEX-5 · Tickets live in Linear, team NEX"
         );
         let ticket = Filter {
-            ticket: Some("nxf-3".into()),
+            ticket: Some("nex-3".into()),
             ..Filter::default()
         };
         assert!(render(&entries, &ticket)
-            .ends_with("> Superseded by 2026-11-15-NXF-5-tickets-live-in-linear-team-nxf.md"));
+            .ends_with("> Superseded by 2026-11-15-NEX-5-tickets-live-in-linear-team-nxf.md"));
         let topic = Filter {
             index: true,
             topic: Some("factory".into()),
             ..Filter::default()
         };
-        assert!(render(&entries, &topic).starts_with("2026-11-14 · NXF-3"));
+        assert!(render(&entries, &topic).starts_with("2026-11-14 · NEX-3"));
         let since = Filter {
             index: true,
             since: Some("2026-11-15".into()),
