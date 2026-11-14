@@ -123,11 +123,18 @@ fn try_spawn(ledger: &SessionLedger, spec: &StartSpec, bundle: &Path) -> std::io
     Ok(())
 }
 
+/// Counts the asks this process writes, so two in one millisecond get two names (tv58 review, raised for 6j6v.pn9c).
+static ASKS_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// One nudge: an ask file the sidecar drains at the turn's yield, named so they sort in the order they were written.
+/// The instant, the process and this process's count: a second ask in the same millisecond sorts after the first
+/// instead of replacing it.
 pub(crate) fn write_ask(ledger: &SessionLedger, text: &str, now_ms: i64) -> std::io::Result<()> {
-    let path = ledger
-        .dir()
-        .join(format!("ask.{now_ms:016}.{}.json", std::process::id()));
+    let seq = ASKS_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = ledger.dir().join(format!(
+        "ask.{now_ms:016}.{}.{seq:020}.json",
+        std::process::id()
+    ));
     let temp = path.with_extension("tmp");
     let body = serde_json::json!({ "text": text });
     std::fs::write(
@@ -136,3 +143,6 @@ pub(crate) fn write_ask(ledger: &SessionLedger, text: &str, now_ms: i64) -> std:
     )?;
     std::fs::rename(&temp, &path)
 }
+
+#[cfg(test)]
+mod tests;

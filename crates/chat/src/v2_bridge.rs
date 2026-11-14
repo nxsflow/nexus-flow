@@ -42,8 +42,11 @@ fn layout(db_path: &str) -> Layout {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
+    let root = nxs.parent().map(Path::to_path_buf).unwrap_or_default();
     Layout {
-        root: nxs.parent().map(Path::to_path_buf).unwrap_or_default(),
+        // Typed in the v2 directory, the layout is still the registered root's: its `v2_dir` is where the
+        // caller stands, never `<v2>-v2` (6j6v.pn9c).
+        root: declarations_root(&root),
         agent_logs: nxs.join("agent-logs"),
         session_env: Vec::new(),
     }
@@ -742,4 +745,137 @@ impl RunReader {
 /// Whether `thread` belongs to a run on the new engine; a `run.sqlite` that does not answer refuses.
 pub fn is_a_run_thread(ctx: &Ctx, thread: &str) -> Result<bool> {
     Ok(run_thread(ctx, thread)?.is_some())
+}
+
+// ---- the v2 directory: the old engine starts nothing there (6j6v.pn9c) ------------------------------------
+
+/// **The registered root `dir` is the v2 working directory of**, or `None` (§6.6): `dir` is exactly
+/// `<root>-v2`, and its `.nxs` resolves to what `<root>/.nxs` resolves to. Nothing else is: not the root, not
+/// another checkout linked to the same workspace, not `<root>-v2x` or `<root>-v3`, and not a `-v2` sibling
+/// with a workspace of its own.
+///
+/// The root is recognised by the directory beside it rather than by a read of the service registry: the
+/// registry is per service instance, and a terminal's `nxc` cannot know which instance attends the
+/// workspace. `<root>` holding the same `.nxs` is the workspace's root by construction, whoever registered it.
+///
+/// **It fails open**, deliberately: a `.nxs` that cannot be canonicalised (gone, unreadable) says nothing about
+/// being the v2 directory, and refusing every verb of a broken workspace would hide the real fault.
+pub fn root_of_v2_dir(dir: &Path) -> Option<PathBuf> {
+    let root = PathBuf::from(dir.to_str()?.strip_suffix("-v2")?);
+    root.file_name()?;
+    // A v2 directory is nobody's root: `<root>-v2-v2` is no directory of the engine's.
+    if root_of_v2_dir(&root).is_some() {
+        return None;
+    }
+    let here = std::fs::canonicalize(dir.join(".nxs")).ok()?;
+    let there = std::fs::canonicalize(root.join(".nxs")).ok()?;
+    (here == there).then_some(root)
+}
+
+/// The directory whose declarations and `CLAUDE.md` a caller standing in `workspace_root` is composed from:
+/// the registered root when it stands in the v2 directory — the clone's tracked copies are what a session
+/// reads as files, never the team the commission compiles (b8tj note 5) — and its own root otherwise.
+pub fn declarations_root(workspace_root: &Path) -> PathBuf {
+    root_of_v2_dir(workspace_root).unwrap_or_else(|| workspace_root.to_path_buf())
+}
+
+/// The directory a caller resolved its workspace in: the one holding the `.nxs` its `db_path` sits in.
+fn caller_dir(db_path: &str) -> Option<&Path> {
+    Path::new(db_path).parent()?.parent()
+}
+
+/// **The old engine starts nothing in the v2 directory** (§6.6, §10; round 6 CQ #13, TQ #12, IR #1): a session
+/// it started there would work in the new engine's tree, beside the run that holds it. Called at the sink —
+/// the one place the old engine hands a session to its worker, below the CLI and `Engine::*` — and before
+/// any write by `send`, `reply` and `withdraw` on the old engine. Names the root to run the verb from.
+///
+/// It reads the caller's directory off `db_path` in the standard layout, `<dir>/.nxs/db.sqlite`. An explicit
+/// `--db` or `NXC_DB` naming a database elsewhere decides the workspace by that path instead, and the guard
+/// judges that path's directory: it covers a caller standing in the v2 directory, not one who names a
+/// database by hand.
+pub fn refuse_the_old_engine_here(db_path: &str) -> Result<()> {
+    let Some(dir) = caller_dir(db_path) else {
+        return Ok(());
+    };
+    match root_of_v2_dir(dir) {
+        None => Ok(()),
+        Some(root) => Err(NxfError::validation(format!(
+            "{} is the working directory of the new engine's runs, and the old engine starts nothing \
+             there: run this from {}, the workspace's root. Reads, `nxc status` and the new engine's own \
+             verbs work from here.",
+            dir.display(),
+            root.display()
+        ))),
+    }
+}
+
+// ---- the service's host (6j6v.pn9c) -------------------------------------------------------------------------
+
+/// The root of the workspace whose `.nxs` is `ws.dir` — the registered root, also when `ws` was resolved from
+/// its v2 directory. The one derivation the service and the bridge share.
+pub fn workspace_root_of(ws: &crate::workspace::Workspace) -> PathBuf {
+    declarations_root(ws.dir.parent().unwrap_or(&ws.dir))
+}
+
+/// **Where the service's host for `ws` works, and what its sessions are given** (§6.6): the registered root,
+/// its agent logs, and the identity a session's `nxc` resolves — `NXC_DB`, the root's database, and
+/// `NXC_ORIGIN`, the chat origin — beside the allowlist the host takes from the service process.
+pub fn service_layout(ws: &crate::workspace::Workspace) -> Result<Layout> {
+    let root = workspace_root_of(ws);
+    let nxs = root.join(".nxs");
+    let db = nxs
+        .join("db.sqlite")
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| NxfError::io("the workspace db path is not valid UTF-8"))?;
+    let var = |name: &str, value: &str| nexus_run_contracts::EnvVar {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    };
+    Ok(Layout {
+        agent_logs: nxs.join("agent-logs"),
+        session_env: vec![
+            var("NXC_DB", &db),
+            var("NXC_ORIGIN", crate::workspace::origin_of(ws)),
+        ],
+        root,
+    })
+}
+
+/// **The host the background service ticks for one registered workspace** (§8.1; b8tj note 1-3), or `None`
+/// where the workspace has no `run.sqlite` — one `stat`, which is all a workspace that never ran on the new
+/// engine costs a tick.
+///
+/// Its ports are the REGISTERED root's ([`V1Ports::for_root`]): the prompt is composed from the root's
+/// `.nxs-personas` and `CLAUDE.md`, never the clone's. `workspace_id` is the chat origin, the id the bridge
+/// commissions with and reads `host-seen` under. A session's identity is its environment (§6.6): beside the
+/// allowlist the host takes from the service process, `NXC_DB` names this workspace's database and
+/// `NXC_ORIGIN` its origin.
+pub fn service_host(
+    ws: &crate::workspace::Workspace,
+    primes: Arc<dyn crate::facade::ModulePrimes>,
+) -> Result<Option<nexus_run_host::Host>> {
+    let db_path = ws.db_path_str()?;
+    let path = run_sqlite(&db_path);
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(store_refusal(&path, &error.to_string())),
+    }
+    let origin = crate::workspace::origin_of(ws).to_owned();
+    let layout = service_layout(ws)?;
+    let ports =
+        Arc::new(V1Ports::for_root(&layout.root, &db_path, &origin)?.with_module_primes(primes));
+    let host = nexus_run_host::service::service_host(
+        &path,
+        nexus_run_host::Ports {
+            messages: ports.clone(),
+            declarations: ports.clone(),
+            sidecar: ports,
+            layout,
+        },
+        &origin,
+    )
+    .map_err(|error| store_refusal(&path, &error.to_string()))?;
+    Ok(Some(host))
 }

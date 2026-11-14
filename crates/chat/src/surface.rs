@@ -505,6 +505,15 @@ pub fn send_to(ctx: &Ctx, store: &mut ChatStore, req: SendToRequest) -> Result<S
     if let Some(session) = &v2_session {
         return Err(crate::v2_bridge::session_cannot_send(session));
     }
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a send the old engine would carry is refused in the
+    // v2 directory before anything is written; a send to a channel on the new engine goes on (§10, §12.9).
+    let to_the_new_engine = ctx
+        .defs
+        .declared_channel(req.to)?
+        .is_some_and(|c| c.engine == crate::channel::RunEngine::V2);
+    if !to_the_new_engine {
+        crate::v2_bridge::refuse_the_old_engine_here(ctx.db_path)?;
+    }
     let persona = identity.persona().is_some();
 
     // (0) An address in ANOTHER workspace on this machine (nxf 6j6v.4gp2): `<owner>/<repo>/<persona>`.
@@ -1084,6 +1093,9 @@ pub fn reply_in_thread(
     if let Some(receipt) = crate::v2_bridge::reply_in_a_run(ctx, store, &req)? {
         return Ok(receipt);
     }
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — a reply on the old engine, refused in the v2
+    // directory before anything is written.
+    crate::v2_bridge::refuse_the_old_engine_here(ctx.db_path)?;
     refuse_a_thread_this_session_does_not_serve(ctx, store, req.thread)?;
     refuse_a_reply_the_supervisor_is_finished_with(ctx, store, req.thread)?;
     refuse_a_finished_claim_while_your_own_round_runs(ctx, store, &req)?;
@@ -1730,6 +1742,8 @@ pub fn withdraw(
     if let Some(receipt) = crate::v2_bridge::withdraw_a_run(ctx, store, thread)? {
         return Ok(receipt);
     }
+    // A withdraw on the old engine, refused in the v2 directory before anything is written.
+    crate::v2_bridge::refuse_the_old_engine_here(ctx.db_path)?;
     orchestration::withdraw(ctx, store, thread)
 }
 
