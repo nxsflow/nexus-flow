@@ -134,6 +134,12 @@ jobs:
       - name: Layering gate
         run: cargo xtask layering check
 
+      # The software factory's decision log (factory/FACTORY.md): every file in factory/decisions/
+      # has the name pattern, a heading that agrees with it, the four required fields, lowercase
+      # topics, and a `Supersedes:` that names a file that exists. Reads text only.
+      - name: Decision log check
+        run: cargo xtask decisions --check
+
       # `decide` over the scripted cases in two separate processes, under a different clock and
       # environment (6j6v.zjyv §11). It says so and passes until nexus-run-engine exists, and requires
       # the test from then on.

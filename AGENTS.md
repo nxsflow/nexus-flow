@@ -9,3 +9,7 @@ The project's durable memory is projected into `NEXUS_MEMORY.md`, which is gener
 
 @NEXUS_MEMORY.md
 <!-- END NEXUS -->
+
+## The software factory
+
+Work in this repository follows the software factory. Before any work, read `factory/FACTORY.md`, `factory/CONFIG.md` and `factory/GENESIS.md`, and the decision log's index (`cargo xtask decisions --index`). A pm session reads `factory/roles/pm.md`, a coding session `factory/roles/coder.md`.
