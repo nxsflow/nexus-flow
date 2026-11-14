@@ -8,7 +8,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use nexus_run_contracts::{SessionBackend, StoreError};
 use nexus_run_session_claude::ClaudeBackend;
@@ -20,9 +19,6 @@ use crate::ports::SystemClock;
 use crate::tree_ledger::TreeLedger;
 use crate::{Host, Ports};
 
-/// The service's connection waits no longer than the host's: a held lock must not outlast a tick (§7).
-pub const SERVICE_BUSY_TIMEOUT: Duration = HOST_BUSY_TIMEOUT;
-
 /// The service's host over `run_sqlite`. `workspace_id` is the chat origin the bridge commissions with, so the
 /// host's `host-seen` record is the one a send reads (§8.1). The adapter starts from the bundle the sidecar port
 /// names; where it names none, the port refuses the start before the adapter is asked.
@@ -31,7 +27,7 @@ pub fn service_host(
     ports: Ports,
     workspace_id: &str,
 ) -> Result<Host, StoreError> {
-    let store = Arc::new(SqliteRunStore::open(run_sqlite, SERVICE_BUSY_TIMEOUT)?);
+    let store = Arc::new(SqliteRunStore::open(run_sqlite, HOST_BUSY_TIMEOUT)?);
     let bundle = ports.sidecar.bundle_path().unwrap_or_default();
     let backend = Arc::new(ClaudeBackend::new(ports.layout.agent_logs.clone(), bundle));
     let tree = Arc::new(GitTree::new(

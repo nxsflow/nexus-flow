@@ -9,12 +9,14 @@ use nexus_run_contracts::SessionBackend;
 use serde_json::json;
 
 /// Keys that would leave `<agent-logs>/v2/` if they were joined as they are.
-const ESCAPING: [&str; 5] = [
+const ESCAPING: [&str; 7] = [
     "/tmp/elsewhere",
     "../escaped",
     "run1/../../escaped",
     "run1/./a1",
     "",
+    "C:",
+    "C:/elsewhere",
 ];
 
 #[test]

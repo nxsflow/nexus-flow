@@ -121,7 +121,11 @@ impl ClaudeBackend {
     fn ledger(&self, key: &str) -> Result<SessionLedger, BackendError> {
         let plain = !key.is_empty()
             && key.split('/').all(|part| {
-                !part.is_empty() && part != "." && part != ".." && !part.contains('\\')
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && !part.contains('\\')
+                    && !part.contains(':')
             });
         if !plain {
             return Err(backend_error(format!(

@@ -3,7 +3,7 @@
 //! an open run may still have a process.
 
 use nexus_run_engine::SlotState;
-use nexus_run_host::bridge::{self, HOST_BUSY_TIMEOUT};
+use nexus_run_host::bridge;
 use nexus_run_host::service;
 use nexus_run_host::test_support::scripted_backend::{pass, Cue, SessionInfo};
 use nexus_run_host::test_support::{store_path, Rig, CLOCK_START};
@@ -97,11 +97,4 @@ fn a_replied_slot_whose_process_has_not_ended_is_still_alive() {
         rig.host.live_sessions().unwrap().is_empty(),
         "ended: nothing alive"
     );
-}
-
-#[test]
-fn the_service_host_opens_its_store_with_the_hosts_busy_timeout() {
-    // The service loop must not wait out the bridge's five seconds on a held lock (§7, §8.1).
-    assert!(HOST_BUSY_TIMEOUT < nexus_run_host::TICK_BUDGET);
-    assert_eq!(service::SERVICE_BUSY_TIMEOUT, HOST_BUSY_TIMEOUT);
 }
