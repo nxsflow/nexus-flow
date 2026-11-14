@@ -1,0 +1,14 @@
+# The owner approves every change to these paths (factory/CONFIG.md, merge rule): CI and
+# release automation, the release tree and the installer, the workspace manifests and
+# lockfiles, and the factory's own product file and values. Branch protection on main
+# requires a code owner's review, so a pull request that touches one of them cannot be
+# merged by an agent.
+
+/.github/ @cabcookie
+/release/ @cabcookie
+/install.sh @cabcookie
+/Cargo.toml @cabcookie
+/Cargo.lock @cabcookie
+/agent-sidecar/package-lock.json @cabcookie
+/factory/GENESIS.md @cabcookie
+/factory/CONFIG.md @cabcookie
