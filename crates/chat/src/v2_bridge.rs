@@ -757,6 +757,9 @@ pub fn is_a_run_thread(ctx: &Ctx, thread: &str) -> Result<bool> {
 /// The root is recognised by the directory beside it rather than by a read of the service registry: the
 /// registry is per service instance, and a terminal's `nxc` cannot know which instance attends the
 /// workspace. `<root>` holding the same `.nxs` is the workspace's root by construction, whoever registered it.
+///
+/// **It fails open**, deliberately: a `.nxs` that cannot be canonicalised (gone, unreadable) says nothing about
+/// being the v2 directory, and refusing every verb of a broken workspace would hide the real fault.
 pub fn root_of_v2_dir(dir: &Path) -> Option<PathBuf> {
     let root = PathBuf::from(dir.to_str()?.strip_suffix("-v2")?);
     root.file_name()?;
@@ -785,6 +788,11 @@ fn caller_dir(db_path: &str) -> Option<&Path> {
 /// it started there would work in the new engine's tree, beside the run that holds it. Called at the sink —
 /// the one place the old engine hands a session to its worker, below the CLI and `Engine::*` — and before
 /// any write by `send`, `reply` and `withdraw` on the old engine. Names the root to run the verb from.
+///
+/// It reads the caller's directory off `db_path` in the standard layout, `<dir>/.nxs/db.sqlite`. An explicit
+/// `--db` or `NXC_DB` naming a database elsewhere decides the workspace by that path instead, and the guard
+/// judges that path's directory: it covers a caller standing in the v2 directory, not one who names a
+/// database by hand.
 pub fn refuse_the_old_engine_here(db_path: &str) -> Result<()> {
     let Some(dir) = caller_dir(db_path) else {
         return Ok(());
@@ -802,6 +810,37 @@ pub fn refuse_the_old_engine_here(db_path: &str) -> Result<()> {
 }
 
 // ---- the service's host (6j6v.pn9c) -------------------------------------------------------------------------
+
+/// The root of the workspace whose `.nxs` is `ws.dir` — the registered root, also when `ws` was resolved from
+/// its v2 directory. The one derivation the service and the bridge share.
+pub fn workspace_root_of(ws: &crate::workspace::Workspace) -> PathBuf {
+    declarations_root(ws.dir.parent().unwrap_or(&ws.dir))
+}
+
+/// **Where the service's host for `ws` works, and what its sessions are given** (§6.6): the registered root,
+/// its agent logs, and the identity a session's `nxc` resolves — `NXC_DB`, the root's database, and
+/// `NXC_ORIGIN`, the chat origin — beside the allowlist the host takes from the service process.
+pub fn service_layout(ws: &crate::workspace::Workspace) -> Result<Layout> {
+    let root = workspace_root_of(ws);
+    let nxs = root.join(".nxs");
+    let db = nxs
+        .join("db.sqlite")
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| NxfError::io("the workspace db path is not valid UTF-8"))?;
+    let var = |name: &str, value: &str| nexus_run_contracts::EnvVar {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    };
+    Ok(Layout {
+        agent_logs: nxs.join("agent-logs"),
+        session_env: vec![
+            var("NXC_DB", &db),
+            var("NXC_ORIGIN", crate::workspace::origin_of(ws)),
+        ],
+        root,
+    })
+}
 
 /// **The host the background service ticks for one registered workspace** (§8.1; b8tj note 1-3), or `None`
 /// where the workspace has no `run.sqlite` — one `stat`, which is all a workspace that never ran on the new
@@ -824,17 +863,9 @@ pub fn service_host(
         Err(error) => return Err(store_refusal(&path, &error.to_string())),
     }
     let origin = crate::workspace::origin_of(ws).to_owned();
-    let root = ws.dir.parent().map(Path::to_path_buf).unwrap_or_default();
-    let ports = Arc::new(V1Ports::for_root(&root, &db_path, &origin)?.with_module_primes(primes));
-    let var = |name: &str, value: &str| nexus_run_contracts::EnvVar {
-        name: name.to_owned(),
-        value: value.to_owned(),
-    };
-    let layout = Layout {
-        root,
-        agent_logs: ws.dir.join("agent-logs"),
-        session_env: vec![var("NXC_DB", &db_path), var("NXC_ORIGIN", &origin)],
-    };
+    let layout = service_layout(ws)?;
+    let ports =
+        Arc::new(V1Ports::for_root(&layout.root, &db_path, &origin)?.with_module_primes(primes));
     let host = nexus_run_host::service::service_host(
         &path,
         nexus_run_host::Ports {
