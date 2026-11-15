@@ -21,6 +21,9 @@ name: install-sh-ci
 # a stubbed `gh`, no network), because a gate nobody tests is a gate nobody can trust.
 #
 # And `.github/scripts/isolated-test.sh` (6j6v.jmxk), whose green is evidence for a registered flake.
+#
+# And `.github/scripts/docs-only.sh` (NEX-36), which decides whether a CI job may skip its builds and
+# tests: a wrong "yes" is a gate that silently did not run, so it gets the same treatment.
 on:
   push:
     branches: [main]
@@ -33,6 +36,8 @@ on:
       - "tests/isolated-test.test.sh"
       - ".github/scripts/isolated-test.sh"
       - ".github/workflows/isolated-test.yml"
+      - "tests/docs-only.test.sh"
+      - ".github/scripts/docs-only.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/install-sh-ci.yml"
   pull_request:
@@ -45,6 +50,8 @@ on:
       - "tests/isolated-test.test.sh"
       - ".github/scripts/isolated-test.sh"
       - ".github/workflows/isolated-test.yml"
+      - "tests/docs-only.test.sh"
+      - ".github/scripts/docs-only.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/install-sh-ci.yml"
 
@@ -78,6 +85,7 @@ jobs:
           shellcheck install.sh tests/install.sh.test.sh tests/smoke-install-update.sh
           shellcheck .github/scripts/require-green-ci.sh tests/require-green-ci.test.sh
           shellcheck .github/scripts/isolated-test.sh tests/isolated-test.test.sh
+          shellcheck .github/scripts/docs-only.sh tests/docs-only.test.sh
 
       # The embedded minisign pubkey IS the authenticity anchor — a typo or a missed rotation
       # would ship an installer whose signature gate can never pass (silent downgrade to
@@ -110,3 +118,7 @@ jobs:
       # The isolated test run and the `--no-fail-fast` pin on ci.yml (6j6v.jmxk), a stubbed `cargo`.
       - name: Test the isolated test run (hermetic harness)
         run: tests/isolated-test.test.sh
+
+      # The docs-only rule (NEX-36), against a bare repository on disk. Seconds, no network.
+      - name: Test the docs-only rule (hermetic harness)
+        run: tests/docs-only.test.sh

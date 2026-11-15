@@ -58,13 +58,29 @@ jobs:
           # locally (no crates.io — the facade is `publish = false`, §14 TB-8; no network at
           # check time).
           fetch-depth: 0
+      # Docs-only? (NEX-36) A change that touches only RFCs, research notes, factory files or change
+      # fragments cannot move a public API, so the job ends green under its own name with a notice
+      # instead of building rustdoc for three crates. The rule is `.github/scripts/docs-only.sh`;
+      # `ci.yml`'s `quality-gates` says why it is a step output and not a job-level `if:`. A push of
+      # a `v*` tag, to `main` or to a maintenance line always runs in full.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "the facade SemVer check (cargo-semver-checks)"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
       # Prebuilt binary (no compile) — cargo-semver-checks generates the rustdoc JSON it needs
       # itself, so the stable toolchain above suffices.
       - uses: taiki-e/install-action@v2
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           tool: cargo-semver-checks
 
       - name: Consumed-surface public-API SemVer gate (patch never breaks)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask facade semver-check
