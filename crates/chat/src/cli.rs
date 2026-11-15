@@ -1311,8 +1311,11 @@ impl CliCtx {
     fn resolve(db: Option<&str>, hop: u32) -> Result<CliCtx> {
         let ws = Workspace::resolve(db, &cwd()?)?;
         let root = ws.workspace_root()?.to_path_buf();
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — typed in the v2 directory, the team and the
+        // standing text are the registered root's, never the clone's tracked copies (6j6v.pn9c, b8tj note 5).
+        let declared = crate::v2_bridge::declarations_root(&root);
         Ok(CliCtx {
-            defs: crate::definitions::Definitions::resolve(&root)?,
+            defs: crate::definitions::Definitions::resolve(&declared)?,
             // **THE WORKSPACE ROOT, not the process cwd** (nxf 6j6v.npn0). `Workspace::resolve`
             // above walked UPWARDS to find the `.nxs/`, so an invocation from a subdirectory is
             // ordinary — and this one path decides three things at once in `SidecarWorker`: where
@@ -1332,7 +1335,7 @@ impl CliCtx {
             session: session(),
             db_path: ws.db_path_str()?,
             // The project CLAUDE.md is optional — a workspace without one still composes cleanly.
-            project_claude_md: std::fs::read_to_string(root.join("CLAUDE.md")).ok(),
+            project_claude_md: std::fs::read_to_string(declared.join("CLAUDE.md")).ok(),
             module_primes: MODULE_PRIMES.get().copied(),
             hop,
             liveness: crate::workspace::liveness_policy(&ws.config),

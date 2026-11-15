@@ -970,7 +970,9 @@ impl Engine {
     /// The read happens BEFORE the store lock is taken (see [`Engine::with_orchestration`]), so a
     /// verb never holds the store while touching the filesystem.
     fn resolve_definitions(&self, ws: &Workspace) -> Result<Definitions> {
-        Definitions::resolve(ws.workspace_root()?)
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — opened in the v2 directory, the registered
+        // root's team (6j6v.pn9c).
+        Definitions::resolve(&crate::v2_bridge::declarations_root(ws.workspace_root()?))
     }
 
     // ---- the orchestration verbs (spec §4) ---------------------------------
@@ -1010,7 +1012,8 @@ impl Engine {
     ///   arriving on every call. See [`Engine::origin`] for the value and the argument.
     fn ctx_inputs(&self) -> Result<CtxInputs> {
         let ws = self.workspace();
-        let root = ws.workspace_root()?.to_path_buf();
+        // v2-bridge: deleted with the old engine (6j6v.2vtw) — the registered root's standing text (6j6v.pn9c).
+        let root = crate::v2_bridge::declarations_root(ws.workspace_root()?);
         Ok(CtxInputs {
             defs: self.resolve_definitions(&ws)?,
             origin: self.origin(),

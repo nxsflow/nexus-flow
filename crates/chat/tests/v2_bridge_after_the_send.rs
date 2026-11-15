@@ -72,6 +72,9 @@ const CHANNELS: &str = "\
   summary_prompt: Consolidate the verdicts.
 - name: review
   members: [coder, reviewer]
+- name: solo
+  members: [reviewer]
+  working_tree: exclusive
 ";
 
 fn workspace() -> TempDir {
@@ -1458,4 +1461,88 @@ fn a_session_whose_thread_routes_nowhere_is_refused_rather_than_given_an_empty_t
             .unwrap(),
         None
     );
+}
+
+// ---- a v1 and a v2 run of one workspace at once (6j6v.pn9c; §6.6, §12.9) ---------------------------------------
+
+/// The working directories the run's sessions were started in, as each start spec named it.
+fn session_cwds(run: &V2Run) -> Vec<PathBuf> {
+    let mut cwds = Vec::new();
+    let mut stack = vec![run.dir().join(".nxs").join("agent-logs").join("v2")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == "cwd") {
+                cwds.push(PathBuf::from(std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    cwds
+}
+
+/// The old engine's exclusive channel, commissioned by the owner at the terminal.
+fn send_solo(eng: &Engine) -> nexus_chat::surface::SendToReceipt {
+    eng.send_to(
+        the_owner(),
+        SendToRequest {
+            to: "solo",
+            body: "review it",
+            refs: SendToRefs::declared(nexus_chat::model::Refs {
+                nxf_ids: vec!["6j6v.pn9c".to_owned()],
+                ..nexus_chat::model::Refs::default()
+            }),
+            machine: None,
+        },
+    )
+    .expect("the owner commissions the old engine's channel")
+}
+
+#[test]
+fn a_v2_run_is_not_queued_behind_a_v1_run_holding_the_roots_working_copy() {
+    let ws = workspace();
+    let v1 = send_solo(&engine(ws.path()));
+    assert!(
+        v1.spawned && v1.queued_behind.is_none(),
+        "the v1 run holds the root's copy: {v1:?}"
+    );
+    let mut run = V2Run::commissioned_in(ws, "coding-v2", Box::new(silent));
+    run.until("the v2 build starts beside the v1 run", |r| {
+        !session_cwds(r).is_empty()
+    });
+    assert!(
+        !matches!(run.view(), RunView::Queued { .. }),
+        "the v2 run took its own claim: {:?}",
+        run.view()
+    );
+    let v2_dir = run.bridge.layout.v2_dir();
+    assert_eq!(
+        session_cwds(&run),
+        std::slice::from_ref(&v2_dir),
+        "in its own directory"
+    );
+    assert_ne!(v2_dir, run.dir(), "never the root the v1 run works in");
+}
+
+#[test]
+fn a_v1_run_is_not_queued_behind_a_running_v2_run() {
+    let mut run = V2Run::commissioned("coding-v2", Box::new(silent));
+    run.until("the v2 build runs", |r| !session_cwds(r).is_empty());
+    let v1 = send_solo(&run.eng);
+    assert!(v1.spawned, "the v1 run starts: {v1:?}");
+    assert_eq!(v1.queued_behind, None, "and is queued behind nothing");
+    // The v2 run goes on beside it.
+    for _ in 0..20 {
+        run.tick();
+    }
+    assert!(
+        matches!(run.view(), RunView::Running { .. }),
+        "{:?}",
+        run.view()
+    );
+    assert_eq!(session_cwds(&run), [run.bridge.layout.v2_dir()]);
 }

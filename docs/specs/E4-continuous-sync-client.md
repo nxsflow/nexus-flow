@@ -440,6 +440,11 @@ through `nexus_chat::worker::live_sessions_in` — the same pid-file answer `Wor
 gives for one session, asked of a whole workspace. The service does not learn that directory's
 layout; it asks the module that owns it.
 
+A run on the new engine (6j6v.pn9c) writes no pid file there: the service also asks each of its v2
+hosts (`V2Hosts::any_live`, through `Host::live_sessions`) whether a session of an open run may still
+have a process — a slot that replied and whose process has not ended counts. A run store that does not
+answer counts as nothing alive, so a held lock ends the hold early, never late.
+
 **The failure direction that matters is the release**, because an assertion never given back is a
 machine that never sleeps again, met days later as a battery problem. Three guarantees, and the
 tests are written in that order: the ordinary release when the last run ends, `Drop` on the keeper

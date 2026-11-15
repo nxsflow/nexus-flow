@@ -945,11 +945,14 @@ pub struct ClockReport {
 ///
 /// It stops at the FIRST live session: the answer is a yes/no, a machine mid-run usually has one in
 /// the first workspace looked at, and this is asked on every tick.
-pub fn a_run_is_alive(resolved: &[Workspace]) -> bool {
+///
+/// **And a run on the new engine** (6j6v.pn9c, epic 6j6v.zjyv §10): its sessions write no pid file here — the
+/// host asks its own store, where a slot that replied and whose process has not ended yet still counts.
+pub fn a_run_is_alive(resolved: &[Workspace], v2: &super::v2_hosts::V2Hosts) -> bool {
     resolved.iter().any(|ws| {
         let root = ws.dir.parent().unwrap_or(&ws.dir);
         !nexus_chat::worker::live_sessions_in(root).is_empty()
-    })
+    }) || v2.any_live() // v2-bridge: deleted with the old engine (6j6v.2vtw)
 }
 
 /// Fire every deadline that has fallen due, in every resolved workspace (6j6v.8see).
@@ -1988,6 +1991,11 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
     }
 
     let mut border_passes: BorderPasses = BorderPasses::default();
+    // The new engine's hosts, one per registered workspace with a `run.sqlite`, kept across ticks (6j6v.pn9c).
+    let mut v2 = super::v2_hosts::V2Hosts::new(
+        std::sync::Arc::new(crate::prime::RegistrySiblingPrimes),
+        std::sync::Arc::new(move |line: &str| log_line(json, line)),
+    );
     loop {
         let now = Instant::now();
         let wall = SystemTime::now();
@@ -2033,6 +2041,9 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
         // `reap` first, so a finished job's handle is released before another is started.
         clock.reap();
         let clock_report = fire_deadlines(&resolved, &to_rfc3339(wall), &clock);
+        // The new engine, beside the clock (§8.1): a workspace with no `run.sqlite` costs one `stat`, and a host's
+        // tick is bounded by its budget — no git and no session is waited on here.
+        v2.tick(&resolved);
         for (label, msg) in hand_over_borders(&resolved, &clock, &mut border_passes, now) {
             log_line(
                 json,
@@ -2085,7 +2096,7 @@ pub fn serve(json: bool, interval: Option<u64>) -> Result<()> {
         // Every tick, not only on a pass: a run can end at any second, and an assertion held on
         // after the last one is the failure direction that costs somebody their battery. Taking one
         // late costs a sleep; giving one back late costs days of never sleeping at all.
-        match awake.want(a_run_is_alive(&resolved)) {
+        match awake.want(a_run_is_alive(&resolved, &v2)) {
             nxs_service::WakeChange::Held => log_line(
                 json,
                 "a run is working — holding this machine awake until the last one ends",
@@ -3428,6 +3439,14 @@ mod tests {
         (tmp, ws)
     }
 
+    /// A service attending no run on the new engine.
+    fn no_v2() -> super::super::v2_hosts::V2Hosts {
+        super::super::v2_hosts::V2Hosts::new(
+            std::sync::Arc::new(crate::prime::RegistrySiblingPrimes),
+            std::sync::Arc::new(|_: &str| {}),
+        )
+    }
+
     /// Plant a session claim in `ws`'s agent-log directory — through chat's own path helper, so a
     /// test cannot pin a layout the writer does not use.
     fn claim_session(ws: &Workspace, session: &str, pid: u32) {
@@ -3447,7 +3466,7 @@ mod tests {
         let both = [alpha.clone(), beta.clone()];
 
         assert!(
-            !a_run_is_alive(&both),
+            !a_run_is_alive(&both, &no_v2()),
             "two fresh workspaces have started nothing"
         );
 
@@ -3458,26 +3477,26 @@ mod tests {
         }
         claim_session(&beta, "m-finished", dead);
         assert!(
-            !a_run_is_alive(&both),
+            !a_run_is_alive(&both, &no_v2()),
             "a pid file a finished session left behind must not hold a machine awake forever"
         );
 
         // …and the first direction: something really running is enough, in ANY attended workspace.
         claim_session(&beta, "m-working", std::process::id());
-        assert!(a_run_is_alive(&both));
+        assert!(a_run_is_alive(&both, &no_v2()));
         assert!(
-            a_run_is_alive(std::slice::from_ref(&beta)),
+            a_run_is_alive(std::slice::from_ref(&beta), &no_v2()),
             "and it is beta's session that did it"
         );
         assert!(
-            !a_run_is_alive(std::slice::from_ref(&alpha)),
+            !a_run_is_alive(std::slice::from_ref(&alpha), &no_v2()),
             "not alpha's, which has none"
         );
     }
 
     #[test]
     fn a_service_attending_nothing_holds_nothing_awake() {
-        assert!(!a_run_is_alive(&[]));
+        assert!(!a_run_is_alive(&[], &no_v2()));
     }
 
     /// Records which workspaces a pass was attempted for, and can be told to fail.

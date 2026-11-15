@@ -15,6 +15,7 @@ pub mod git_tree;
 mod host;
 mod lease;
 pub mod ports;
+pub mod service;
 pub mod start;
 #[cfg(feature = "test-support")]
 pub mod test_support;

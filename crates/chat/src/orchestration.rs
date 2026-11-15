@@ -6191,6 +6191,10 @@ fn trigger_and_bind(
     store: &mut ChatStore,
     mut req: TriggerRequest,
 ) -> std::result::Result<(), TriggerError> {
+    // v2-bridge: deleted with the old engine (6j6v.2vtw) — THE SINK (6j6v.zjyv §6.6, round 6 CQ #13, TQ #12,
+    // IR #1): every session this engine starts, from every verb and from both callers, passes here, so a verb
+    // typed in the new engine's working directory starts nothing there.
+    crate::v2_bridge::refuse_the_old_engine_here(ctx.db_path)?;
     grant_the_means_for_the_obligation(&mut req);
     let internal_session = req.internal_session.clone();
     if let TriggerOutcome::Started { runtime_session } = ctx.worker.trigger(req)? {
