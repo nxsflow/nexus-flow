@@ -283,4 +283,4 @@ Each of these is a public surface or a stored format, which GENESIS.md reserves 
 
 ## History
 
-- 2026-11-15: published as a draft in #<pull request>.
+- 2026-11-15: published as a draft in #142.
