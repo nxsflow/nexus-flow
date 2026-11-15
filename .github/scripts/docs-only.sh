@@ -34,8 +34,9 @@ set -uo pipefail
 # The prefixes, with their trailing slash so a near-miss (`docs/rfcs/`, `factoryx/`) never matches.
 ALLOWLIST="docs/rfc/ docs/research/ factory/ changes/"
 
-# The base branch a dispatch is compared with (factory/CONFIG.md).
-DISPATCH_BASE="v2"
+# The base branch (factory/CONFIG.md): the one branch whose pushes may be docs-only, and what a
+# dispatch is compared with. Judged by the FULL ref, so a pushed tag of the same name never counts.
+BASE_BRANCH="v2"
 
 ZERO_SHA="0000000000000000000000000000000000000000"
 
@@ -72,7 +73,7 @@ classify() {
 # Prints the commit to compare HEAD with, fetching it first; returns 1 (with the reason on stdout)
 # when this run may not take the docs-only path or the base cannot be had.
 base_commit() {
-  local event="${GITHUB_EVENT_NAME:-}" ref="${GITHUB_REF_NAME:-}" sha="${GITHUB_SHA:-}"
+  local event="${GITHUB_EVENT_NAME:-}" ref="${GITHUB_REF:-}" sha="${GITHUB_SHA:-}"
   if [ "${NXF_FULL:-}" = "true" ]; then
     echo "full run: full=true was asked for"; return 1
   fi
@@ -86,7 +87,7 @@ base_commit() {
       git rev-parse -q --verify "$sha^1^{commit}" || { echo "full run: $sha has no first parent"; return 1; }
       ;;
     push)
-      if [ "$ref" != "$DISPATCH_BASE" ]; then
+      if [ "$ref" != "refs/heads/$BASE_BRANCH" ]; then
         echo "full run: a push to $ref always runs in full"; return 1
       fi
       local before="${NXF_PUSH_BEFORE:-}"
@@ -98,10 +99,10 @@ base_commit() {
       ;;
     workflow_dispatch)
       case "$ref" in
-        main|release/*) echo "full run: a dispatch on $ref always runs in full"; return 1 ;;
+        refs/heads/main|refs/heads/release/*) echo "full run: a dispatch on $ref always runs in full"; return 1 ;;
       esac
-      git fetch -q --no-tags --depth=1 origin "refs/heads/$DISPATCH_BASE" >&2 || { echo "full run: could not fetch $DISPATCH_BASE"; return 1; }
-      git rev-parse -q --verify "FETCH_HEAD^{commit}" || { echo "full run: $DISPATCH_BASE did not resolve"; return 1; }
+      git fetch -q --no-tags --depth=1 origin "refs/heads/$BASE_BRANCH" >&2 || { echo "full run: could not fetch $BASE_BRANCH"; return 1; }
+      git rev-parse -q --verify "FETCH_HEAD^{commit}" || { echo "full run: $BASE_BRANCH did not resolve"; return 1; }
       ;;
     *)
       echo "full run: the event '$event' never takes the docs-only path"; return 1
