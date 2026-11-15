@@ -18,8 +18,16 @@ const RECORD: char = '\u{1e}';
 /// The commits in `log` (the output of `git log` with [`LOG_FORMAT`]) that carry no `Role:`
 /// trailer with a value, as `<short sha> <subject>`, in the order git listed them.
 pub fn missing_role(log: &str) -> Vec<String> {
-    let _ = log;
-    Vec::new()
+    log.split(RECORD)
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(3, FIELD);
+            let sha = fields.next().filter(|sha| !sha.is_empty())?;
+            let subject = fields.next().unwrap_or_default();
+            let roles = fields.next().unwrap_or_default();
+            let named = roles.lines().any(|role| !role.trim().is_empty());
+            (!named).then(|| format!("{sha} {subject}"))
+        })
+        .collect()
 }
 
 /// The `git log` format [`missing_role`] reads: sha, subject, and the values of the `Role`
