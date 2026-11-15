@@ -347,7 +347,7 @@ fn main() -> Result<()> {
             };
             decisions::run(&root.join(dir), &filter, check)?;
         }
-        Command::CommitRoles { base, head } => commit_roles::run(&root, &base, &head)?,
+        Command::CommitRoles { base, head } => commit_roles::run(&root, &base, &head, &[])?,
         Command::Layering(LayeringCmd::Check) => {
             layering::run(&root)?;
             println!("layering check: the nexus-run-* crates keep their edges and their budget");
@@ -479,14 +479,28 @@ mod tests {
         assert_eq!(env_release_tag(), None);
     }
 
-    /// `commit-roles.yml` calls `cargo xtask commit-roles <base> --head <sha>` (NEX-37).
+    /// `commit-roles.yml` calls `cargo xtask commit-roles <base> --head <sha> --exclude <ref>`
+    /// (NEX-37).
     #[test]
     fn commit_roles_takes_a_base_and_a_head() {
-        let cli =
-            Cli::try_parse_from(["xtask", "commit-roles", "origin/v2", "--head", "abc"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "xtask",
+            "commit-roles",
+            "origin/v2",
+            "--head",
+            "abc",
+            "--exclude",
+            "origin/main",
+        ])
+        .unwrap();
         match cli.command {
-            Command::CommitRoles { base, head } => {
+            Command::CommitRoles {
+                base,
+                head,
+                exclude,
+            } => {
                 assert_eq!((base.as_str(), head.as_str()), ("origin/v2", "abc"));
+                assert_eq!(exclude, vec!["origin/main"]);
             }
             other => panic!("parsed as {other:?}"),
         }
