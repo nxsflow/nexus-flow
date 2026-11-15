@@ -28,3 +28,5 @@ A decided RFC changes by rewriting its text, never by adding to it. A pull reque
 3. A dated line in "History" names the pull request.
 
 "History" starts at publication with one line, and each later change adds one. The git log keeps how the drafts got there. A change to a decided RFC waits for the owner, as every RFC decision does. A withdrawn decision stays under "Decisions", marked as withdrawn.
+
+<!-- NEX-36 proof: docs plus one path outside the allowlist. Do not merge. -->

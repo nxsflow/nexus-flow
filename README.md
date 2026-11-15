@@ -428,3 +428,5 @@ it's due — beads charted this territory; nxs builds a different engine for it.
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+<!-- NEX-36 proof: one path outside the docs-only allowlist. Do not merge. -->
