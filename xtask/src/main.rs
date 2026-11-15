@@ -4,6 +4,7 @@
 
 mod cache;
 mod changelog;
+mod commit_roles;
 mod channels;
 mod decisions;
 mod deps;
