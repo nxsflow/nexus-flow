@@ -5,6 +5,7 @@
 mod cache;
 mod changelog;
 mod channels;
+mod commit_roles;
 mod decisions;
 mod deps;
 mod docs;
@@ -73,6 +74,19 @@ enum Command {
     /// (nexus-flow-6j6v.k8cw).
     #[command(subcommand)]
     Layering(LayeringCmd),
+    /// The commit-role gate (NEX-37): fail when a commit in `<base>..<head>` carries no
+    /// `Role: <role>` trailer naming the session role that made it. Merge commits, commits an
+    /// excluded ref reaches, and commits authored before the rule landed on the base are left out.
+    CommitRoles {
+        /// The base branch, e.g. `origin/v2`. Its commits are not checked.
+        base: String,
+        /// The tip of the pull request.
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        /// Leave out the commits this ref reaches, e.g. `origin/main`. Repeatable.
+        #[arg(long)]
+        exclude: Vec<String>,
+    },
     /// The software factory's decision log in `factory/decisions/` (`factory/FACTORY.md`): print it
     /// in full, as an index or filtered, or check every file (`--check`, CI gate, fail-closed).
     Decisions {
@@ -337,6 +351,11 @@ fn main() -> Result<()> {
             };
             decisions::run(&root.join(dir), &filter, check)?;
         }
+        Command::CommitRoles {
+            base,
+            head,
+            exclude,
+        } => commit_roles::run(&root, &base, &head, &exclude)?,
         Command::Layering(LayeringCmd::Check) => {
             layering::run(&root)?;
             println!("layering check: the nexus-run-* crates keep their edges and their budget");
@@ -466,5 +485,32 @@ mod tests {
         std::env::remove_var("GITHUB_REF_TYPE");
         std::env::remove_var("GITHUB_REF_NAME");
         assert_eq!(env_release_tag(), None);
+    }
+
+    /// `commit-roles.yml` calls `cargo xtask commit-roles <base> --head <sha> --exclude <ref>`
+    /// (NEX-37).
+    #[test]
+    fn commit_roles_takes_a_base_and_a_head() {
+        let cli = Cli::try_parse_from([
+            "xtask",
+            "commit-roles",
+            "origin/v2",
+            "--head",
+            "abc",
+            "--exclude",
+            "origin/main",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::CommitRoles {
+                base,
+                head,
+                exclude,
+            } => {
+                assert_eq!((base.as_str(), head.as_str()), ("origin/v2", "abc"));
+                assert_eq!(exclude, vec!["origin/main"]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
     }
 }
