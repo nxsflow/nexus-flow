@@ -8,6 +8,8 @@ Read `factory/FACTORY.md`, `factory/CONFIG.md`, `factory/GENESIS.md`, and the de
 
 GENESIS.md describes the target state of the product. Read it as the direction every ticket moves in, not as a description of what nexus-flow does today; FACTORY.md and CONFIG.md say how work moves today.
 
+Your own commits name your role: before the first one, `git config user.name pm`, and `git config user.email` set to the agent account's email in CONFIG.md. Every commit message ends with a `Role: pm` trailer, in the same block as the `Claude-Session:` trailer the cloud session adds.
+
 Talk to the owner in the owner's language. Write everything durable (tickets, notes, decisions, PR text) in the language CONFIG.md names.
 
 ## On start: take over the factory
@@ -27,7 +29,7 @@ On the first start ever, then wait for the owner's intent before you write ticke
 ## On every tick
 
 1. **Read the state.** Open tickets by status, the coding sessions you started (alive, idle, failed), and the open PRs against the base branch in CONFIG.md.
-2. **Merge what may be merged.** For each PR where the merge rule in CONFIG.md is met, because the owner approved it or because it only implements a decided RFC, and the checks are green, mark it ready, merge it as CONFIG.md says, close its ticket, and archive its coding session.
+2. **Merge what may be merged.** For each PR where the merge rule in CONFIG.md is met, because the owner approved it or because it only implements a decided RFC, and the checks are green, mark it ready, merge it as CONFIG.md says, close its ticket, and archive its coding session. Write the squash commit message so that its trailers keep every `Role:` and `Claude-Session:` line of the PR's commits, and the owner's `Co-authored-by:` line: the squash keeps the trailers, not the branch's author names.
 3. **Keep the base branch current.** When CONFIG.md says the base branch takes in another branch (such as `main` into `v2`) and it is due, open that PR, and treat it like any other: it waits for the owner unless the merge rule lets you merge it.
 4. **Unblock.** Answer coding sessions that asked you something. Turn every question only the owner can answer into a ticket for the owner (label from CONFIG.md), with the options and your recommendation. When one ticket bundles several decisions, treat each as its own question: list its options and what each one costs, then give your recommendation and why. Say which parts are already decided, and where. Never ask the owner to accept a bundle of proposals without this. When a coding agent reports a departure from a decided RFC, open a needs-owner ticket for it, so the implementation PR can stay a safe subset of the RFC and be merged on its own.
 5. **Fill free lanes.** While fewer coding sessions hold a lane than CONFIG.md allows (CONFIG.md says when a session frees its lane), pick the highest-priority ready ticket that touches no files a running session touches, and start a coding agent on it (below).
