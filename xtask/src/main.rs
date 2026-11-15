@@ -4,8 +4,8 @@
 
 mod cache;
 mod changelog;
-mod commit_roles;
 mod channels;
+mod commit_roles;
 mod decisions;
 mod deps;
 mod docs;
@@ -482,8 +482,8 @@ mod tests {
     /// `commit-roles.yml` calls `cargo xtask commit-roles <base> --head <sha>` (NEX-37).
     #[test]
     fn commit_roles_takes_a_base_and_a_head() {
-        let cli = Cli::try_parse_from(["xtask", "commit-roles", "origin/v2", "--head", "abc"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["xtask", "commit-roles", "origin/v2", "--head", "abc"]).unwrap();
         match cli.command {
             Command::CommitRoles { base, head } => {
                 assert_eq!((base.as_str(), head.as_str()), ("origin/v2", "abc"));

@@ -83,7 +83,10 @@ mod tests {
         let log = record("abc1234", "NEX-37: check roles", "coder on NEX-37")
             + "\n"
             + &record("def5678", "NEX-37: forgot the trailer", "");
-        assert_eq!(missing_role(&log), vec!["def5678 NEX-37: forgot the trailer"]);
+        assert_eq!(
+            missing_role(&log),
+            vec!["def5678 NEX-37: forgot the trailer"]
+        );
     }
 
     #[test]
@@ -95,7 +98,12 @@ mod tests {
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .current_dir(dir)
-            .args(["-c", "user.name=coder on NEX-37", "-c", "user.email=a@example.com"])
+            .args([
+                "-c",
+                "user.name=coder on NEX-37",
+                "-c",
+                "user.email=a@example.com",
+            ])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .status()
@@ -106,10 +114,16 @@ mod tests {
     fn repo_with(messages: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q", "-b", "base"]);
-        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "before the rule"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "before the rule"],
+        );
         git(dir.path(), &["checkout", "-q", "-b", "work"]);
         for message in messages {
-            git(dir.path(), &["commit", "-q", "--allow-empty", "-m", message]);
+            git(
+                dir.path(),
+                &["commit", "-q", "--allow-empty", "-m", message],
+            );
         }
         dir
     }
