@@ -12,16 +12,18 @@ In this file, **the owner** always means the person who uses nexus-flow to direc
 
 Agents do most of the work in a repository. They are fast and reliable when the rules and the state of the work are close to them, in files and a local database, not behind a web UI or an MCP. A team that lets agents work for days without watching needs six things written down: what the product is, which goals are in focus, what work is planned, what was decided, how work moves, and what happened today.
 
-nexus-flow ships each of these as a module that stores its data in NoCentralDB. The way of working is the one the NoCentralDB factory runs on (`factory/` in nocentraldb), made into a product. In v2, `decisions` replaces `memory` and `factory` replaces `chat`.
+nexus-flow ships each of these as a module of its own. Where a module's data lives follows who must review it. What the owner reviews in a PR stays in files in git: GENESIS, and the factory's roles, merge rules, FACTORY and CONFIG. Tickets, decisions, goals and status notes live in NoCentralDB. The way of working is the one the NoCentralDB factory runs on (`factory/` in nocentraldb), made into a product. In v2, `decisions` replaces `memory` and `factory` replaces `chat`.
 
-| Module | In v1 | What it holds | Ships with |
-| --- | --- | --- | --- |
-| `genesis` | new | The product: what we build, for whom, principles, no-gos, trade-offs, what goes back to the owner | A GENESIS template and a guide for filling it in |
-| `goals` | new | The goals in focus, across repositories, and which work serves them | A goal format and the focus rule |
-| `tickets` | `flow` | Projects and tickets with dependencies, readiness derived from the graph, references to other repositories and to the goals a ticket serves | The ticket states and fields the factory needs, nothing more |
-| `decisions` | `memory` | One record per decision, rules in force included | The decision format, an index, filters by ticket, topic and date |
-| `factory` | `chat` | How work moves: roles, lanes, the merge gate, the gate command | FACTORY.md, the pm and coder roles, a merge gate and a CONFIG a repository fills in |
-| `status` | new | The daily note: what changed, what works now, what waits for the owner, what was decided | A daily-note template and a schedule |
+| Module | In v1 | What it holds | Stored in | Ships with |
+| --- | --- | --- | --- | --- |
+| `genesis` | new | The product: what we build, for whom, principles, no-gos, trade-offs, what goes back to the owner | Git | A GENESIS template, a guide for filling it in, and `nxs genesis create`, which starts a GENESIS from the template |
+| `goals` | new | The goals in focus, across repositories, and which work serves them | NoCentralDB | A goal format and the focus rule |
+| `tickets` | `flow` | Projects and tickets with dependencies, readiness derived from the graph, references to other repositories and to the goals a ticket serves | NoCentralDB | The ticket states and fields the factory needs, nothing more |
+| `decisions` | `memory` | One record per decision, rules in force included | NoCentralDB | The decision format, an index, filters by ticket, topic and date |
+| `factory` | `chat` | How work moves: roles, lanes, the merge gate, the gate command | Git | FACTORY.md, the pm and coder roles, a merge gate and a CONFIG a repository fills in |
+| `status` | new | The daily note: what changed, what works now, what waits for the owner, what was decided | NoCentralDB | A daily-note template and a schedule |
+
+`genesis` is mostly its template and guide; its module starts small, with `nxs genesis create`, and may grow later. `goals` and `tickets` are full modules of nexus-flow, which keeps their data itself.
 
 **Strong opinions on what, open on how.** nexus-flow is openly opinionated: a factory needs a product description (genesis), goals, tickets, decisions, coordination across repositories, and guardrails such as the merge gate. A team that runs agents without one of them loses control or speed. How each is shaped is the team's call: how its GENESIS is structured, what a decision record looks like, which ticket states it uses and which rules its merge gate checks.
 
@@ -43,19 +45,20 @@ The factory is a combination of prompts and scripts: prompts where judgement is 
 The goal is to get the owner's decisions before the work starts, so the work can then merge without the owner.
 
 1. An agent that needs an owner decision asks for it in a ticket, by default; a team can change that. Work on it starts only after the decision.
-2. The question stands in the ticket, in one place, not hours up a chat. `tickets` offers subscriptions to ticket comments, so a session learns at once when the owner decided, without polling.
+2. The question stands in the ticket, in one place, not hours up a chat. `tickets` offers subscriptions to ticket comments, so a session learns when the owner decided as soon as its copy syncs, without polling (see Limits).
 3. Watching a running session is the framework's job, not nexus-flow's.
 
 ### The merge gate
 
 Whether the owner reviews a PR is decided in a semi-deterministic step:
 
-1. Repository rules decide what they can, such as CODEOWNERS and the branch rules on `main`.
+1. Repository rules decide what they can, such as CODEOWNERS and the branch rules on the base branch.
 2. For what they cannot catch, the team writes merge rules together with an agent.
-3. A sub-agent reads the PR's changes and reports as JSON, per rule, whether and how the PR meets it, and whether the PR carries out the owner's decision or departs from it.
-4. A script reads that JSON and decides: pm merges, or the owner reviews first.
+3. A sub-agent reads the PR's changes and reports as JSON, per rule, whether and how the PR meets it, and whether the PR carries out the owner's decision or departs from it. This verdict per rule is a model's judgement.
+4. A script reads that JSON and decides: pm merges, or the owner reviews first. Only this decision, on top of the verdicts, is deterministic.
+5. The gate reports its decision as a required status check, and repository rules enforce it: a PR the gate reserves for the owner cannot merge without the owner's approving review, whatever an agent's prompt says.
 
-The rules in a team's GENESIS on what comes back to the owner are checked the same way. Agents may change the merge rules, preferably after an owner decision in a ticket. The rules, the JSON schema and the script belong to the team; nexus-flow ships a minimal set.
+The rules in a team's GENESIS on what comes back to the owner are checked the same way. The merge rules, and the role files that define exceptions to them, are under CODEOWNERS. Agents may propose a change to them, preferably after an owner decision in a ticket, and it merges only with the owner's approval. The rules, the JSON schema and the script belong to the team; nexus-flow ships a minimal set.
 
 **Later option, not in v2's scope:** a fast decision model, such as Jev or Strands Decider, could take the sub-agent's place in step 3. Such models are fast, highly deterministic and cheap.
 
@@ -75,8 +78,8 @@ The decision record follows the nocentraldb format: date and triggering ticket i
 
 Tickets and decisions live outside git; the code they lead to lives on branches. When agents work side by side, a ticket can be done while its branch is not merged: other sessions see it closed but not its code. A working session needs to know both.
 
-- **Two states.** "Done" means the work is finished and a PR is linked. "On main" means it is merged. Closing a ticket requires a linked PR or branch.
-- **"On main" is derived, never set.** `nxs` checks whether a commit on main names the ticket, squash merges included. Like readiness in v1, a derived state cannot go stale.
+- **Two states.** "Done" means the work is finished and its result is linked. "On main" means it is merged into the team's base branch: `main` unless the team configures another one. Closing a ticket requires a linked PR or branch, or, for a role that works outside the repository, such as legal or marketing, a linked artifact. A ticket closed with an artifact has no code to merge, so it is on main once it is done.
+- **"On main" is derived, never set.** `nxs` checks whether a commit on the base branch names the ticket, squash merges included. A commit may name tickets as a range: `NEX-13..NEX-23` names every ticket from NEX-13 to NEX-23. Like readiness in v1, a derived state is never stored, so it cannot drift from git; it is as fresh as the last fetch of the base branch (see Limits).
 - **A PR closed without merge reopens its ticket,** and the ticket is flagged.
 - **Dependent tickets may stack on a done ticket,** building on its branch, but count as unblocked only once it is on main.
 - **Decisions follow the same line.** A rule is in force when it is made. A decision that describes code links its PR and is marked "not yet on main" until the PR is merged.
@@ -98,9 +101,9 @@ Several repositories may have to coordinate their work. They do it through reque
 - **A coordination space joins a group of repositories.** It holds the group's goals and the requests between them. Every role that coordinates, the pm above all, is a member there and may write.
 - **A request is shaped like a ticket.** It is addressed to a member, such as the pm of another repository, carries a status (open, accepted, declined, done) and has a thread below it for questions.
 - **The receiving pm turns a request into tickets** in its own repository's space, where only its own roles write, and links them to the request.
-- **A pm subscribes to requests addressed to it,** so it learns at once when a neighbouring repository needs something. A wake-up through the agent framework is optional, behind a small adapter.
+- **A pm subscribes to requests addressed to it,** so it learns that a neighbouring repository needs something as soon as its copy of the coordination space syncs. A wake-up through the agent framework is optional, behind a small adapter.
 
-Why: a request is durable, auditable and the same for every framework, while the frameworks' own session-to-session messaging differs and changes fast (see Background).
+Why: a request is durable, auditable and the same for every framework, while the frameworks' own session-to-session messaging differs and changes fast ([how sessions reach each other](../docs/research/2026-11-14-how-sessions-reach-each-other.md)).
 
 ### The daily status
 
@@ -140,7 +143,7 @@ Each no-go says why, so you can judge cases this list does not name. When a tick
 - Never lose or silently rewrite a decision. A decision is superseded by a new one, never edited away.
 - Never break an existing workspace or its stored data. Format changes are additive or come with a migration, including the move from v1 to NoCentralDB.
 - Never put the network on the read path of the CLI. Agents are fast because their state is local.
-- Never write secrets, tokens or personal data into tickets, decisions, logs or the status note. Those records are copied and kept.
+- Never write secrets, tokens or personal data into tickets, decisions, logs or the status note. Those records are copied and kept. Referring to people is not personal data in this sense: tickets and decisions name members and the owner by their identity, so the record shows who asked, who decided and who did the work. Personal data means anything about a person beyond that identity, such as contact details, private matters, or data about customers and other third parties.
 - Never weaken a gate to get green: no skipped test, no unpinned dependency, no `--no-verify`.
 
 ## What we trade for what
@@ -150,8 +153,18 @@ Each no-go says why, so you can judge cases this list does not name. When a tick
 | A web UI or an MCP as the primary surface | Agents that read and write at CLI speed | JSON output by default, `--md` on request; a UI may read the same data |
 | Our own agent orchestration | Frameworks that improve faster than we could | Roles, lanes and hand-offs stay ours; sub-agents are theirs |
 | Every option a team might want | A factory that runs on day one | Templates and rules the team owns and changes |
-| Owner-free merges by default | Control over what ships | Decisions asked for first, a deterministic merge gate, one daily note |
+| Owner-free merges by default | Control over what ships | Decisions asked for first, a merge gate whose decision is deterministic, one daily note |
 | A priority field per ticket | Priorities that move with the team's goals | Goals in `goals` that pm ranks every ticket against |
+
+## Limits
+
+Principle 7 asks every guarantee to name its limits. These are the ones this file relies on:
+
+- **Every local read is as fresh as the last sync.** Reads never wait for the network, so a read can miss what another member wrote since: a ticket another session closed, the owner's decision, a new goal, a request from another repository. Subscriptions report a change once it has reached the local copy, not when it was written.
+- **"On main" is as fresh as the last fetch.** `nxs` derives it from the local copy of the base branch and does not fetch on a read.
+- **Island mode keeps work going, not the team together.** Without a relay, every copy keeps working and the copies converge when they reconnect. Until then, a session sees none of the others' changes: the owner's decisions, requests between repositories, goals in the coordination space and a member's removal reach it only after the islands rejoin, and the daily note covers only what has arrived. How two members on one network find each other without a relay is NoCentralDB's open question.
+- **The merge gate's verdict is a model's judgement.** Only the decision on top of the verdicts is deterministic, and repository rules enforce only what the gate reports as its status check.
+- **A wake-up needs an adapter.** A session learns of a change when it next reads or is subscribed; it is woken only where an adapter exists for its agent framework.
 
 ## Architecture and stack
 
@@ -180,13 +193,6 @@ pm decides everything else. Because I and each agent act under identities of our
 - Money: a new paid service.
 - Any change to `.github/CODEOWNERS`, the workflows that release or sign, or the branch rules on `main`.
 
-## Background: how sessions reach each other today
+## Background
 
-No framework reaches a session of another framework, and none reliably reaches across repositories or teams. That is why the ticket carries the message. Web research of 2026-11-14, from docs and issue trackers, not tried out:
-
-| Framework | Same machine | Other machine or cloud | Across teams or repositories |
-| --- | --- | --- | --- |
-| Claude Code | `ListAgents` and `SendMessage` over local sockets ([docs](https://code.claude.com/docs/en/cross-session-messaging)) | Through Remote Control; a cloud session receives messages but cannot yet send them back | The owner's own sessions, one account only |
-| Kiro Crew | `session_send` delivers a message as another session's next turn ([docs](https://kiro.dev/docs/crew/features/workflows/)) | Only sessions on the same crew gateway | Not yet; cross-crew delegation is an open request ([#13476](https://github.com/kirodotdev/KiroCrew/issues/13476)) |
-| Kiro CLI | No messaging to a running session; an open request ([#5848](https://github.com/kirodotdev/Kiro/issues/5848)) | – | – |
-| Codex | `codex app-server` (JSON-RPC, experimental) and `codex agents` on a shared server ([docs](https://developers.openai.com/codex/app-server)) | `codex --remote` to a server; messaging between cloud tasks is not documented | – |
+How the agent frameworks' sessions reach each other today, and why the ticket carries the message: [docs/research/2026-11-14-how-sessions-reach-each-other.md](../docs/research/2026-11-14-how-sessions-reach-each-other.md).
