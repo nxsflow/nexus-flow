@@ -270,7 +270,7 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 - **R2. Join by invitation.** A new member creates its own keys and hands over an invitation (`ncdb-invite-1:`: member id, two public keys, certificate, account fingerprint; NoCentralDB RFC 0009, RFC 0003), which an admin adds, so no secret travels. A role name is not part of it, and nexus-flow keeps the role in its own `spaceMember` record.
 - **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`.
 - **R4. An additive check.** `ncdb model check` says whether one `model.lock.json` is an additive change of another (NoCentralDB RFC 0005); it needs Node 24.
-- **R9. A first sync for a new member.** A new member with an empty database (a cloud container) pulls a whole space from the relay.
+- **R9. A first sync for a new member.** A member that joins a space pulls the whole log from the relay (NoCentralDB RFC 0007, "Pull: read from a cursor"), so a new member with an empty database, such as a cloud container, gets the whole space.
 - **R10. A git-pinnable SDK.** The Rust SDK opens a database from the committed lock, `Db::open(OpenOptions::new(include_str!(…)))`, with no build script, so it builds from a git revision without `ncdb` (NoCentralDB RFC 0009, "The Rust SDK"). The crate is not published (`publish = false`), so a git pin is the only way to depend on it.
 - Past changes of a removed member stay valid, up to the removal's cutoff (NoCentralDB RFC 0008, "The cutoff").
 
