@@ -4,8 +4,8 @@
 # Every heavy job in `ci.yml` and `facade-semver.yml` calls this as its first step after checkout.
 # On a docs-only change the job's later steps are skipped and the job ends GREEN UNDER ITS OWN NAME,
 # with a `::notice::` and a job-summary line that name what was not run and why. A job-level `if:`
-# is not used: GitHub reports a skipped required check as green with no reason attached, the trap
-# `ci.yml`'s `managed-postgres` header describes.
+# is not used: GitHub reports a skipped required check as green with no reason attached, a silent
+# pass nobody can tell from a real one.
 #
 #   docs-only.sh classify              NUL-separated paths on stdin; exit 0 docs-only, 1 not
 #   docs-only.sh decide "<what>"       the CI step: writes docs_only=true|false to $GITHUB_OUTPUT
