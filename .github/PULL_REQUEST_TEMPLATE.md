@@ -1,7 +1,7 @@
 ## Summary
 
 <!-- Short and to the point: the goal of this change, and how it reaches it. Write for a reader who knows nothing about it yet; link documents where they help, but do not assume the reader has read them. -->
-<!-- Then the issue or RFC section it answers, e.g. "Closes #123" or "RFC 0001, Where we want your advice, point 2". A pull request without one is closed unless it is a typo fix. -->
+<!-- Then the ticket and, where it implements one, the RFC sections it answers, e.g. "NEX-123" and "RFC 0002, Done and on main". A pull request without one is closed unless it is a typo fix. -->
 
 ## How it is implemented
 

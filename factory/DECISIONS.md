@@ -13,7 +13,7 @@ cargo xtask decisions --topic tracker      # only this topic's decisions
 cargo xtask decisions --since 2026-11-01   # only decisions made on or after this date
 ```
 
-The filters combine with each other and with `--index` and `--current`. `ls factory/decisions/` lists them by date too.
+The filters combine with each other and with `--index` and `--current`. A decision nobody has superseded is in force, so `--current --index` lists the rules in force: the project's durable rules, such as its language, are decisions too. The memories that NEXUS_MEMORY.md held until 2026-11-15 are decision files of that date, each with its full text under "The record". `ls factory/decisions/` lists them by date too.
 
 ## Writing one
 

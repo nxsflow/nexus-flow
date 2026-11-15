@@ -2,7 +2,7 @@
 
 This file says how work moves from the owner's intent to merged code, with agents doing the work in between. It holds nothing about the product: that is `factory/GENESIS.md`. Every value that differs between repositories (the owner, the tracker, the number of agents, the gate command) lives in `factory/CONFIG.md`.
 
-To use the factory in another repository, copy `FACTORY.md` and `roles/` unchanged, fill in `CONFIG.md`, and write that repository's `GENESIS.md`. `roles/pm.md` and `roles/coder.md` are the working instructions for the two kinds of agent sessions. Every agent reads all three before it starts; where they disagree, GENESIS.md wins on what to build, CONFIG.md on the values, and this file on the process.
+This factory follows the one nocentraldb/nocentraldb runs on, and this file and `roles/` describe how work moves in this repository today. `factory/GENESIS.md` describes the product's target state, which the work moves towards; where nexus-flow cannot do something yet, CONFIG.md names the tool that stands in for it, such as the tracker. `roles/pm.md` and `roles/coder.md` are the working instructions for the two kinds of agent sessions. Every agent reads all three before it starts; where they disagree, GENESIS.md wins on what to build, CONFIG.md on the values, and this file on the process.
 
 ## The four parts
 
@@ -90,21 +90,21 @@ Each question to the owner becomes its own ticket, assigned to the owner, with t
 
 The decision log records every call that shapes the product or the code and is not obvious from the diff. It is a folder (path in CONFIG.md) with one file per decision, so two PRs never edit the same file and never conflict over it. Agents add files; nobody edits an old one. A decision that is reversed gets a new file that names the old one in `Supersedes:`; the old one is then superseded, without being touched.
 
-Each file is named `YYYY-MM-DD-<ticket>-<slug>.md`, with `no-ticket` when there is none (for example `2026-11-07-NOC-12-relay-writes-one-table-per-space.md`), and holds one entry:
+Each file is named `YYYY-MM-DD-<ticket>-<slug>.md`, with `no-ticket` when there is none (for example `2026-11-16-NEX-12-tickets-carry-a-derived-on-main-state.md`), and holds one entry:
 
 ```markdown
-# 2026-11-07 · NOC-12 · Relay writes go through one DynamoDB table per space
+# 2026-11-16 · NEX-12 · Tickets carry a derived on-main state
 
 - Decided by: pm (or the owner's name, when the owner decided)
 - Why: one line
 - Instead of: the option not taken, one line
-- Topics: relay, aws
-- Supersedes: 2026-11-06-NOC-9-an-older-decision.md   (optional)
+- Topics: tickets, git
+- Supersedes: 2026-11-15-no-ticket-an-older-decision.md   (optional)
 ```
 
 `Topics:` is required: lowercase tags, so a reader finds every decision on a subject. The gate checks every file's name, heading and fields. No generated overview is committed, since it would change in every PR; the reading command in CONFIG.md prints the whole log in date order, an index, only the current decisions, or the decisions of one ticket, topic or period.
 
-A decision the owner made carries the owner's name and the date. Agents read the log's index before they start (`pnpm decisions --index`), and in full the decisions of their ticket, the tickets it depends on and the topics it touches (`--ticket`, `--topic`), so they do not reopen settled questions without reading the whole log every time.
+A decision the owner made carries the owner's name and the date. A decision that is not superseded is in force; durable rules, such as the project's language, are decisions in force too. Agents read the index of the decisions in force before they start (`cargo xtask decisions --current --index`), and in full the decisions of their ticket, the tickets it depends on and the topics it touches (`--ticket`, `--topic`), so they do not reopen settled questions without reading the whole log every time.
 
 ## How the owner hears back
 
@@ -128,12 +128,4 @@ The factory runs in Claude Code cloud sessions, in the environment named in CONF
 | Messages      | pm and the coding sessions talk through session messages. The owner talks only to pm.                                                                                                                                                                                                   |
 | Expedite lane | pm starts one more session for an urgent ticket and archives it once the ticket is merged.                                                                                                                                                                                              |
 
-To set up the factory in a new repository:
-
-- [ ] Copy `FACTORY.md` and `roles/` into `factory/`.
-- [ ] Write `factory/CONFIG.md` and `factory/GENESIS.md`.
-- [ ] Create an empty decisions folder, with the reading command and its check in the gate, and name both in CONFIG.md.
-- [ ] Point `AGENTS.md` (or `CLAUDE.md`) at the three files, to be read before any work.
-- [ ] Connect the tracker to the cloud sessions.
-- [ ] Set up the cloud environment and test its setup script in a fresh session.
-- [ ] Start a cloud session with the message "Read factory/roles/pm.md and act as pm." Its first run creates the initiative, the label and its scheduled tasks. To replace pm later, for example after a settings change, start a new session the same way: it takes over from the old one.
+To start pm, start a cloud session in that environment with the message "Read factory/roles/pm.md and act as pm." Its first run creates the initiative, the label and its scheduled tasks. To replace pm later, for example after a settings change, start a new session the same way: it takes over from the old one.
