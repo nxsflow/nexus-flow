@@ -9,7 +9,7 @@
 
 A review session started in the SAME checkout as the coding session can mistake itself for the
 author of the code under review and refuse the review, citing
-[never-review-your-own-work-order](2026-11-15-no-ticket-never-review-your-own-work-order.md).
+the v1 memory `never-review-your-own-work-order` (dropped with the rules for using nxs).
 
 MEASURED 2026-09-05 on the pull request for the escalation-parking feature: a freshly started
 review session declined the assignment with "this is my own work from today". Its evidence: the

@@ -32,4 +32,4 @@ to the agent's worktree at launch time.
 Verified working for a two-task parallel diamond in the nexus-chat milestone work. A shared
 checkout has a second, independent failure mode worth reading alongside this one:
 [review-session-in-a-shared-checkout-mistakes-the-work-for-its-own](2026-11-15-no-ticket-review-session-in-a-shared-checkout-mistakes-the-work-for-its-own.md). See also
-[the-board-is-local-and-not-in-git](2026-11-15-no-ticket-the-board-is-local-and-not-in-git.md).
+the v1 memory `the-board-is-local-and-not-in-git` (dropped with the rules for using nxs).
