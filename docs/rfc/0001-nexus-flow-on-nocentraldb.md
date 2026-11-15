@@ -26,7 +26,7 @@ NoCentralDB's own design is in nocentraldb/nocentraldb, `docs/rfc/`, all decided
 
 ### The dependency on NoCentralDB
 
-nexus-flow depends on NoCentralDB's Rust SDK (`crates/nocentraldb` in nocentraldb/nocentraldb, NoCentralDB RFC 0009) through a pinned git revision in the workspace `Cargo.toml`: `rev = "<full commit hash>"`, never a branch or a tag. The pin moves deliberately, one pull request per move, and that pull request carries nothing else. Because `Cargo.toml` and `Cargo.lock` are code-owned, every move waits for the owner (decided in NEX-13).
+nexus-flow depends on NoCentralDB's Rust SDK (`crates/nocentraldb` in nocentraldb/nocentraldb, NoCentralDB RFC 0009) through a pinned git revision in the workspace `Cargo.toml`, the only way in, since the crate is not published (requirement R10): `rev = "<full commit hash>"`, never a branch or a tag. The pin moves deliberately, one pull request per move, and that pull request carries nothing else. Because `Cargo.toml` and `Cargo.lock` are code-owned, every move waits for the owner (decided in NEX-13).
 
 Only one crate of nexus-flow depends on the SDK: the storage crate under the seam (see "The library seam"). Every other crate reaches NoCentralDB through it, so that a change in NoCentralDB's API at a pin move touches one crate.
 
@@ -127,7 +127,7 @@ In a cloud container this works the same: the keys are created in the container 
 
 `nxs session end` removes the session's own member, syncs (see "Sync"), and deletes its member database. A session that dies without ending leaves a member behind; its commissioner removes it with `nxs member remove <member>` when it archives the session, and pm does so for every session it archives. Until NoCentralDB offers members that lapse on their own (requirement R5), a dead session's member stays a member until someone removes it. Its keys are gone with the container, so nobody can sign as it.
 
-A removed member's past changes stay valid: NoCentralDB checks a change against the member's rights at the time it was made, up to the removal's cutoff (NoCentralDB RFC 0008).
+A removed member's past changes stay valid: NoCentralDB checks a change against the member's rights at the time it was made, up to the removal's cutoff (NoCentralDB RFC 0008, "The cutoff").
 
 #### Who decided
 
@@ -266,13 +266,13 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 
 **Met:**
 
-- **R1. A space id grants nothing.** Knowing a space's id, without a member key, reads nothing, so the id can be committed.
+- **R1. A space id grants nothing.** A relay connection proves only that a member key is held, and whether that member may read or write a space is checked per request (NoCentralDB RFC 0007, "Opening a connection"); content is encrypted, and the relay cannot read it (NoCentralDB RFC 0001, "The design in one page"). Knowing a space's id therefore reads nothing, and the id can be committed.
 - **R2. Join by invitation.** A new member creates its own keys and hands over an invitation (`ncdb-invite-1:`: member id, two public keys, certificate, account fingerprint; NoCentralDB RFC 0009, RFC 0003), which an admin adds, so no secret travels. A role name is not part of it, and nexus-flow keeps the role in its own `spaceMember` record.
-- **R3. Change notification.** An open database tells its handle when it changed, from a local write or a sync, for `Engine::subscribe`.
+- **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`.
 - **R4. An additive check.** `ncdb model check` says whether one `model.lock.json` is an additive change of another (NoCentralDB RFC 0005); it needs Node 24.
 - **R9. A first sync for a new member.** A new member with an empty database (a cloud container) pulls a whole space from the relay.
-- **R10. A git-pinnable SDK.** The Rust SDK builds from a git revision and a committed `model.lock.json`, without `ncdb`.
-- Past changes of a removed member stay valid, up to the removal's cutoff (NoCentralDB RFC 0008).
+- **R10. A git-pinnable SDK.** The Rust SDK opens a database from the committed lock, `Db::open(OpenOptions::new(include_str!(…)))`, with no build script, so it builds from a git revision without `ncdb` (NoCentralDB RFC 0009, "The Rust SDK"). The crate is not published (`publish = false`), so a git pin is the only way to depend on it.
+- Past changes of a removed member stay valid, up to the removal's cutoff (NoCentralDB RFC 0008, "The cutoff").
 
 **Requests:**
 
