@@ -144,8 +144,8 @@ checkout_shallow() { # <sha> → sets $REPO
 }
 
 # Runs `decide` in $REPO. Sets $RC, $OUT, $DOCS_ONLY (the value written to $GITHUB_OUTPUT) and
-# $SUMMARY. Pre-set knobs, read and reset here so no case leaks into the next: $EVENT, $REF, $SHA,
-# $FULL, $BEFORE.
+# $SUMMARY. Pre-set knobs, read and reset here so no case leaks into the next: $EVENT, $REF (the
+# full ref, as $GITHUB_REF spells it), $SHA, $FULL, $BEFORE.
 EVENT="" REF="" SHA="" FULL="" BEFORE=""
 DOCS_ONLY=""
 SUMMARY=""
@@ -153,7 +153,7 @@ decide() {
   RC=0
   : > "$WORK/output"
   : > "$WORK/summary"
-  OUT="$(cd "$REPO" && env GITHUB_EVENT_NAME="$EVENT" GITHUB_REF_NAME="$REF" GITHUB_SHA="$SHA" \
+  OUT="$(cd "$REPO" && env GITHUB_EVENT_NAME="$EVENT" GITHUB_REF="$REF" GITHUB_SHA="$SHA" \
     NXF_FULL="$FULL" NXF_PUSH_BEFORE="$BEFORE" \
     GITHUB_OUTPUT="$WORK/output" GITHUB_STEP_SUMMARY="$WORK/summary" \
     bash "$SCRIPT" decide "the test suites" 2>&1)" || RC=$?
@@ -174,7 +174,7 @@ expect_decision() { # <case> <true|false>
 echo "decide: pull_request"
 M="$(pr_merge pr-docs docs/rfc/0002-b.md docs/research/r.md factory/decisions/d.md changes/c.md)"
 checkout_shallow "$M"
-EVENT=pull_request REF=7/merge SHA="$M" decide
+EVENT=pull_request REF=refs/pull/7/merge SHA="$M" decide
 expect_decision "a pull request that changes only allowlisted paths is docs-only" true
 if grep -q '^::notice' <<<"$OUT" && grep -q "the test suites" <<<"$OUT"; then
   ok "a docs-only job says so in a ::notice:: that names what it did not run"
@@ -189,7 +189,7 @@ fi
 
 M="$(pr_merge pr-mixed docs/rfc/0003-c.md crates/core/src/lib.rs)"
 checkout_shallow "$M"
-EVENT=pull_request REF=8/merge SHA="$M" decide
+EVENT=pull_request REF=refs/pull/8/merge SHA="$M" decide
 expect_decision "a pull request that also changes one code file runs in full" false
 if ! grep -q '^::notice' <<<"$OUT" && [ -z "$SUMMARY" ]; then
   ok "a full run carries no docs-only notice and no summary line"
@@ -205,12 +205,12 @@ git -C "$SEED" merge -q --no-ff --no-edit pr-rename >/dev/null
 M="$(git -C "$SEED" rev-parse HEAD)"
 git -C "$SEED" push -q origin "$M:refs/pull/rename/merge"
 checkout_shallow "$M"
-EVENT=pull_request REF=9/merge SHA="$M" decide
+EVENT=pull_request REF=refs/pull/9/merge SHA="$M" decide
 expect_decision "moving a code file into docs/rfc/ runs in full (the code file is gone)" false
 
 M="$(pr_merge pr-full docs/rfc/0004-d.md)"
 checkout_shallow "$M"
-EVENT=pull_request REF=10/merge SHA="$M" FULL=true decide
+EVENT=pull_request REF=refs/pull/10/merge SHA="$M" FULL=true decide
 expect_decision "full=true runs in full even on a docs-only change" false
 
 echo "decide: push"
@@ -218,33 +218,37 @@ git -C "$SEED" checkout -q v2
 V2_DOCS="$(commit_files v2-docs docs/rfc/0005-e.md factory/CONFIG.md)"
 git -C "$SEED" push -q origin v2
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=v2 SHA="$V2_DOCS" BEFORE="$BASE" decide
+EVENT=push REF=refs/heads/v2 SHA="$V2_DOCS" BEFORE="$BASE" decide
 expect_decision "a docs-only push to v2 is docs-only" true
 
 V2_CODE="$(commit_files v2-code crates/core/src/lib.rs)"
 git -C "$SEED" push -q origin v2
 checkout_shallow "$V2_CODE"
-EVENT=push REF=v2 SHA="$V2_CODE" BEFORE="$V2_DOCS" decide
+EVENT=push REF=refs/heads/v2 SHA="$V2_CODE" BEFORE="$V2_DOCS" decide
 expect_decision "a push to v2 that changes code runs in full" false
 
 git -C "$SEED" push -q origin "$V2_DOCS:refs/heads/main" "$V2_DOCS:refs/heads/release/0.52"
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=main SHA="$V2_DOCS" BEFORE="$BASE" decide
+EVENT=push REF=refs/heads/main SHA="$V2_DOCS" BEFORE="$BASE" decide
 expect_decision "a docs-only push to main runs in full" false
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=release/0.52 SHA="$V2_DOCS" BEFORE="$BASE" decide
+EVENT=push REF=refs/heads/release/0.52 SHA="$V2_DOCS" BEFORE="$BASE" decide
 expect_decision "a docs-only push to a maintenance line runs in full" false
 
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=v2 SHA="$V2_DOCS" BEFORE=0000000000000000000000000000000000000000 decide
+EVENT=push REF=refs/tags/v2 SHA="$V2_DOCS" BEFORE="$BASE" decide
+expect_decision "a pushed TAG named v2 runs in full (the ref, not its short name, decides)" false
+
+checkout_shallow "$V2_DOCS"
+EVENT=push REF=refs/heads/v2 SHA="$V2_DOCS" BEFORE=0000000000000000000000000000000000000000 decide
 expect_decision "a push with no previous commit (a new branch) runs in full" false
 
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=v2 SHA="$V2_DOCS" BEFORE=1234567890123456789012345678901234567890 decide
+EVENT=push REF=refs/heads/v2 SHA="$V2_DOCS" BEFORE=1234567890123456789012345678901234567890 decide
 expect_decision "a push whose previous commit cannot be fetched runs in full" false
 
 checkout_shallow "$V2_DOCS"
-EVENT=push REF=v2 SHA="$V2_DOCS" BEFORE="" decide
+EVENT=push REF=refs/heads/v2 SHA="$V2_DOCS" BEFORE="" decide
 expect_decision "a push with no 'before' at all runs in full" false
 
 echo "decide: workflow_dispatch"
@@ -252,41 +256,41 @@ git -C "$SEED" checkout -q -b dispatch-docs "$V2_CODE"
 D_DOCS="$(commit_files dispatch docs/rfc/0006-f.md)"
 git -C "$SEED" push -q origin dispatch-docs
 checkout_shallow "$D_DOCS"
-EVENT=workflow_dispatch REF=dispatch-docs SHA="$D_DOCS" decide
+EVENT=workflow_dispatch REF=refs/heads/dispatch-docs SHA="$D_DOCS" decide
 expect_decision "a dispatch on a branch that differs from v2 only in docs is docs-only" true
 
 checkout_shallow "$D_DOCS"
-EVENT=workflow_dispatch REF=dispatch-docs SHA="$D_DOCS" FULL=true decide
+EVENT=workflow_dispatch REF=refs/heads/dispatch-docs SHA="$D_DOCS" FULL=true decide
 expect_decision "a dispatch with full=true runs in full" false
 
 git -C "$SEED" checkout -q -b dispatch-code "$V2_CODE"
 D="$(commit_files dispatch crates/core/src/lib.rs)"
 git -C "$SEED" push -q origin dispatch-code
 checkout_shallow "$D"
-EVENT=workflow_dispatch REF=dispatch-code SHA="$D" decide
+EVENT=workflow_dispatch REF=refs/heads/dispatch-code SHA="$D" decide
 expect_decision "a dispatch on a branch that changes code runs in full" false
 
 # `main` and a maintenance line pointed at the docs-only commit, so only the ref can say "full".
 git -C "$SEED" push -q -f origin "$D_DOCS:refs/heads/main" "$D_DOCS:refs/heads/release/0.52"
 checkout_shallow "$D_DOCS"
-EVENT=workflow_dispatch REF=main SHA="$D_DOCS" decide
+EVENT=workflow_dispatch REF=refs/heads/main SHA="$D_DOCS" decide
 expect_decision "a dispatch on main runs in full" false
 checkout_shallow "$D_DOCS"
-EVENT=workflow_dispatch REF=release/0.52 SHA="$D_DOCS" decide
+EVENT=workflow_dispatch REF=refs/heads/release/0.52 SHA="$D_DOCS" decide
 expect_decision "a dispatch on a maintenance line runs in full" false
 
 checkout_shallow "$V2_CODE"
-EVENT=workflow_dispatch REF=v2 SHA="$V2_CODE" decide
+EVENT=workflow_dispatch REF=refs/heads/v2 SHA="$V2_CODE" decide
 expect_decision "a dispatch on v2 itself (nothing changed) runs in full" false
 
 echo "decide: anything else"
 checkout_shallow "$V2_DOCS"
-EVENT=schedule REF=v2 SHA="$V2_DOCS" BEFORE="$BASE" decide
+EVENT=schedule REF=refs/heads/v2 SHA="$V2_DOCS" BEFORE="$BASE" decide
 expect_decision "an event the rule does not know runs in full" false
 
 checkout_shallow "$V2_DOCS"
 RC=0
-OUT="$(cd "$REPO" && env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push GITHUB_REF_NAME=v2 \
+OUT="$(cd "$REPO" && env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/v2 \
   GITHUB_SHA="$V2_DOCS" NXF_PUSH_BEFORE="$BASE" bash "$SCRIPT" decide "the test suites" 2>&1)" || RC=$?
 if [ "$RC" != 0 ]; then
   ok "with nowhere to write its verdict the step fails rather than let the job run unguarded"
