@@ -1,0 +1,42 @@
+name: commit-roles
+
+# Every commit a pull request brings names the session role that made it, in a `Role:` trailer
+# such as `Role: coder on NEX-37` (NEX-37; factory/FACTORY.md, "Rules for every coding agent").
+# Trailers survive the squash merge, the branch's author names do not. Commits already on the base
+# branch are not checked, nor are merge commits. Its own file, not a job in ci.yml.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-roles-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commit-roles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history, so the range from the base branch to the PR's head exists.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+
+      # Event data flows through env, never interpolated into shell.
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "$BASE_REF"
+
+      - name: Every commit carries a Role trailer
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: cargo xtask commit-roles "origin/$BASE_REF" --head "$HEAD_SHA"
