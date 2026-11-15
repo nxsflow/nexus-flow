@@ -40,3 +40,5 @@ GENESIS.md describes the target state of the product, not what nexus-flow does t
 - Write production code that no failing test asked for.
 - Work on another ticket, or change files outside your ticket's scope.
 - Keep a promise only in this session: put it on the ticket or the PR.
+
+<!-- NEX-36 proof: a docs-only change. Do not merge. -->
