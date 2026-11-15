@@ -2,13 +2,21 @@
 //! naming the session role that made it, such as `Role: coder on NEX-37` or `Role: pm`.
 //! `factory/FACTORY.md` states the rule; `.github/workflows/commit-roles.yml` runs this check.
 //!
-//! Merge commits are left out: a branch brought up to date with its base gets a merge commit
-//! that no session wrote, and the squash merge drops it anyway.
+//! Three kinds of commit are left out, because no session can give them the trailer:
+//! - merge commits: bringing a branch up to date makes one that no session wrote, and the squash
+//!   merge drops it anyway;
+//! - commits reachable from an excluded ref, such as `origin/main`, which keeps shipping v1
+//!   without the factory's rules and merges into v2 every week;
+//! - commits authored before the rule landed on the base branch, the moment the commit that
+//!   added [`RULE_FILE`] was committed there, so that a PR started earlier is not rewritten.
 
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+
+/// The file whose arrival on the base branch puts the rule in force.
+pub const RULE_FILE: &str = ".github/workflows/commit-roles.yml";
 
 /// Separates the fields of one commit in the `git log` output this module reads.
 const FIELD: char = '\u{1f}';
@@ -16,14 +24,19 @@ const FIELD: char = '\u{1f}';
 const RECORD: char = '\u{1e}';
 
 /// The commits in `log` (the output of `git log` with [`LOG_FORMAT`]) that carry no `Role:`
-/// trailer with a value, as `<short sha> <subject>`, in the order git listed them.
+/// trailer with a value, as `<short sha> <subject>`, in the order git listed them. A commit
+/// authored before `landed` (Unix seconds), the moment the rule landed, is left out.
 pub fn missing_role(log: &str, landed: Option<i64>) -> Vec<String> {
-    let _ = landed;
     log.split(RECORD)
         .filter_map(|record| {
             let mut fields = record.trim_start_matches('\n').splitn(4, FIELD);
             let sha = fields.next().filter(|sha| !sha.is_empty())?;
-            let _authored = fields.next().unwrap_or_default();
+            let authored = fields.next().and_then(|time| time.parse::<i64>().ok());
+            if let (Some(authored), Some(landed)) = (authored, landed) {
+                if authored < landed {
+                    return None;
+                }
+            }
             let subject = fields.next().unwrap_or_default();
             let roles = fields.next().unwrap_or_default();
             let named = roles.lines().any(|role| !role.trim().is_empty());
@@ -36,23 +49,42 @@ pub fn missing_role(log: &str, landed: Option<i64>) -> Vec<String> {
 /// the values of the `Role` trailers, one per line.
 pub const LOG_FORMAT: &str = "%h%x1f%at%x1f%s%x1f%(trailers:key=Role,valueonly,separator=%x0a)%x1e";
 
-/// Check every non-merge commit in `<base>..<head>` of the repository at `root`.
-pub fn run(root: &Path, base: &str, head: &str, exclude: &[String]) -> Result<()> {
-    let _ = exclude;
+fn git_log(root: &Path, args: &[String]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(root)
-        .args(["log", "--no-merges", &format!("--format={LOG_FORMAT}")])
-        .arg(format!("{base}..{head}"))
+        .arg("log")
+        .args(args)
         .output()
         .context("running git log")?;
     if !output.status.success() {
         bail!(
-            "git log {base}..{head} failed: {}",
+            "git log {} failed: {}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let log = String::from_utf8(output.stdout).context("git log printed non-UTF-8")?;
-    let missing = missing_role(&log, None);
+    String::from_utf8(output.stdout).context("git log printed non-UTF-8")
+}
+
+/// When the rule landed on `base`: the commit time of the earliest commit there that added
+/// [`RULE_FILE`], or `None` while it has not landed (then every commit is checked).
+fn landed_on(root: &Path, base: &str) -> Result<Option<i64>> {
+    let args = ["--diff-filter=A", "--format=%ct", base, "--", RULE_FILE].map(String::from);
+    let times = git_log(root, &args)?;
+    Ok(times.lines().filter_map(|time| time.parse().ok()).min())
+}
+
+/// Check every non-merge commit in `<base>..<head>` of the repository at `root` that no ref in
+/// `exclude` reaches and that was authored after the rule landed on `base`.
+pub fn run(root: &Path, base: &str, head: &str, exclude: &[String]) -> Result<()> {
+    let mut args = vec![
+        "--no-merges".to_string(),
+        format!("--format={LOG_FORMAT}"),
+        format!("{base}..{head}"),
+    ];
+    args.extend(exclude.iter().map(|excluded| format!("^{excluded}")));
+    let log = git_log(root, &args)?;
+    let missing = missing_role(&log, landed_on(root, base)?);
     if missing.is_empty() {
         println!("commit roles: every commit in {base}..{head} names its role");
         return Ok(());
