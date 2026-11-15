@@ -74,6 +74,15 @@ enum Command {
     /// (nexus-flow-6j6v.k8cw).
     #[command(subcommand)]
     Layering(LayeringCmd),
+    /// The commit-role gate (NEX-37): fail when a commit in `<base>..<head>` carries no
+    /// `Role: <role>` trailer naming the session role that made it. Merge commits are left out.
+    CommitRoles {
+        /// The base branch, e.g. `origin/v2`. Its commits are not checked.
+        base: String,
+        /// The tip of the pull request.
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+    },
     /// The software factory's decision log in `factory/decisions/` (`factory/FACTORY.md`): print it
     /// in full, as an index or filtered, or check every file (`--check`, CI gate, fail-closed).
     Decisions {
@@ -338,6 +347,7 @@ fn main() -> Result<()> {
             };
             decisions::run(&root.join(dir), &filter, check)?;
         }
+        Command::CommitRoles { base, head } => commit_roles::run(&root, &base, &head)?,
         Command::Layering(LayeringCmd::Check) => {
             layering::run(&root)?;
             println!("layering check: the nexus-run-* crates keep their edges and their budget");
