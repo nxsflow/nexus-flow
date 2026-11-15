@@ -10,6 +10,20 @@
 # Hermetic: the "GitHub remote" is a bare repository on disk, reached over `file://` so that the
 # shallow fetches the script makes behave as they do against github.com. No network, no token.
 #
+# MUTATION-CHECKED, recorded rather than asserted (the bar `tests/require-green-ci.test.sh` sets).
+# Each perturbation below was planted in the script, seen RED here, and reverted:
+#
+#   M1  the allowlist without trailing slashes          → the near-miss prefixes passed     2 red
+#   M2  `git diff` without --no-renames                 → the rename into docs/rfc/ passed  1 red
+#   M3  a push to any ref may be docs-only              → main and the maintenance line     2 red
+#   M4  full=true ignored                               → both full=true cases              2 red
+#   M5  an empty change counted as docs-only            → the empty list, the v2 dispatch   2 red
+#   M6  a dispatch on main/release/ may be docs-only    → both dispatch cases               2 red
+#   M8  a pull request compared with itself, not ^1     → every pull-request case           3 red
+#
+# One perturbation that did NOT go red, and why that is fine: dropping `pipefail` (M7). A `git diff`
+# that fails prints no path, and no path is already a full run; pipefail is defence in depth.
+#
 # Run: tests/docs-only.test.sh   (needs bash and git)
 set -euo pipefail
 
@@ -235,14 +249,14 @@ expect_decision "a push with no 'before' at all runs in full" false
 
 echo "decide: workflow_dispatch"
 git -C "$SEED" checkout -q -b dispatch-docs "$V2_CODE"
-D="$(commit_files dispatch docs/rfc/0006-f.md)"
+D_DOCS="$(commit_files dispatch docs/rfc/0006-f.md)"
 git -C "$SEED" push -q origin dispatch-docs
-checkout_shallow "$D"
-EVENT=workflow_dispatch REF=dispatch-docs SHA="$D" decide
+checkout_shallow "$D_DOCS"
+EVENT=workflow_dispatch REF=dispatch-docs SHA="$D_DOCS" decide
 expect_decision "a dispatch on a branch that differs from v2 only in docs is docs-only" true
 
-checkout_shallow "$D"
-EVENT=workflow_dispatch REF=dispatch-docs SHA="$D" FULL=true decide
+checkout_shallow "$D_DOCS"
+EVENT=workflow_dispatch REF=dispatch-docs SHA="$D_DOCS" FULL=true decide
 expect_decision "a dispatch with full=true runs in full" false
 
 git -C "$SEED" checkout -q -b dispatch-code "$V2_CODE"
@@ -252,9 +266,14 @@ checkout_shallow "$D"
 EVENT=workflow_dispatch REF=dispatch-code SHA="$D" decide
 expect_decision "a dispatch on a branch that changes code runs in full" false
 
-checkout_shallow "$V2_DOCS"
-EVENT=workflow_dispatch REF=main SHA="$V2_DOCS" decide
+# `main` and a maintenance line pointed at the docs-only commit, so only the ref can say "full".
+git -C "$SEED" push -q -f origin "$D_DOCS:refs/heads/main" "$D_DOCS:refs/heads/release/0.52"
+checkout_shallow "$D_DOCS"
+EVENT=workflow_dispatch REF=main SHA="$D_DOCS" decide
 expect_decision "a dispatch on main runs in full" false
+checkout_shallow "$D_DOCS"
+EVENT=workflow_dispatch REF=release/0.52 SHA="$D_DOCS" decide
+expect_decision "a dispatch on a maintenance line runs in full" false
 
 checkout_shallow "$V2_CODE"
 EVENT=workflow_dispatch REF=v2 SHA="$V2_CODE" decide
