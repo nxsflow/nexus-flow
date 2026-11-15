@@ -5,6 +5,7 @@
 mod cache;
 mod changelog;
 mod channels;
+mod decisions;
 mod deps;
 mod docs;
 mod facade;
@@ -72,6 +73,31 @@ enum Command {
     /// (nexus-flow-6j6v.k8cw).
     #[command(subcommand)]
     Layering(LayeringCmd),
+    /// The software factory's decision log in `factory/decisions/` (`factory/FACTORY.md`): print it
+    /// in full, as an index or filtered, or check every file (`--check`, CI gate, fail-closed).
+    Decisions {
+        /// One line per decision: date, ticket, title, and what superseded it.
+        #[arg(long)]
+        index: bool,
+        /// Leave out superseded decisions.
+        #[arg(long)]
+        current: bool,
+        /// Only decisions about this ticket, e.g. `NEX-22`.
+        #[arg(long)]
+        ticket: Option<String>,
+        /// Only decisions with this topic, e.g. `tracker`.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Only decisions made on or after this date (`YYYY-MM-DD`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Check every file in the folder (the gate) and print nothing else.
+        #[arg(long)]
+        check: bool,
+        /// Read another folder (for tests).
+        #[arg(long, default_value = "factory/decisions")]
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -292,6 +318,24 @@ fn main() -> Result<()> {
         Command::MacosTests(MacosTestsCmd::Check) => {
             let inventory = macos_tests::check(&root)?;
             println!("macos-tests check ok — {inventory}");
+        }
+        Command::Decisions {
+            index,
+            current,
+            ticket,
+            topic,
+            since,
+            check,
+            dir,
+        } => {
+            let filter = decisions::Filter {
+                index,
+                current,
+                ticket,
+                topic,
+                since,
+            };
+            decisions::run(&root.join(dir), &filter, check)?;
         }
         Command::Layering(LayeringCmd::Check) => {
             layering::run(&root)?;
