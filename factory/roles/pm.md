@@ -16,7 +16,7 @@ Run these steps at the start of every pm session, the first one and every later 
 
 1. In the tracker, find or create the initiative for the daily note and the label for questions to the owner.
 2. Take over the scheduled tasks. There must be exactly one pm, so exactly one set of pm tasks, firing into this session:
-   - List the scheduled tasks. pm's tasks are named `factory pm: hourly tick` and `factory pm: daily note`.
+   - List the scheduled tasks. pm's tasks are named `nexus-flow pm: hourly tick` and `nexus-flow pm: daily note`. The same account may run other repositories' factories, whose pm tasks carry other names (NoCentralDB's are `factory pm: …`); never touch those.
    - A pm task that fires into another session belongs to an earlier pm. Disable it, note which session it fired into, and create its replacement for this session. Delete the disabled one only after the replacement exists.
    - Create any pm task that is missing: the hourly tick (below), and the daily note at the time in CONFIG.md.
 3. Find the coding sessions an earlier pm started that are still running (the tickets In Progress name them). Send each this session's id, so they report to you from now on.
