@@ -640,6 +640,11 @@ fn local(
                 at: stored.at,
             }),
         },
+        start_refusals: ctx
+            .store
+            .get(&crate::start::start_refusal_key(run))?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default(),
     })
 }
 
