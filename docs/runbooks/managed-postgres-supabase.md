@@ -5,8 +5,10 @@
 
 The shipped `nxf-relay` binary carries the Postgres backend. That is what makes *"sync to a
 Postgres, e.g. Supabase"* true of the artifact people download — and until now it was a claim no
-automated run ever answered. The `managed-postgres` job in `.github/workflows/ci.yml` answers it
-on every change, against a real Supabase project that outlives the run.
+automated run ever answered. The `managed-postgres` job in `main`'s `.github/workflows/ci.yml`
+answers it on every change there, against a real Supabase project that outlives the run. The `v2`
+branch has no such job: its storage moves to NoCentralDB, and the owner turned the proof off there
+on 2026-11-15 (NEX-39).
 
 ---
 
@@ -16,7 +18,7 @@ on every change, against a real Supabase project that outlives the run.
 |---|---|---|---|
 | `postgres-parity` | a `postgres:16` service container | storage parity, and the **relay E2E** (`tests/relay_e2e.rs`) | every change, no foreign dependency |
 | `postgres-tls` | a container with a throwaway CA | the TLS handshake and the CA-rejection path | every change |
-| `managed-postgres` | a real Supabase project | the same parity suites **and** the same E2E, over the internet, over TLS, against a database that remembers | every change |
+| `managed-postgres` | a real Supabase project | the same parity suites **and** the same E2E, over the internet, over TLS, against a database that remembers | every change on `main`; not on `v2` |
 
 The E2E test is the same file in both places on purpose. The container run makes it
 deterministic; the Supabase run makes it true of the thing we ship.
