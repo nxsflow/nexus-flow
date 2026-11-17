@@ -174,4 +174,4 @@ To have the merge gate check its rules, such a repository adds the mark before i
 
 ## History
 
-- 2026-11-17: published as a draft in #<pull request>.
+- 2026-11-17: published as a draft in #163.
