@@ -277,4 +277,4 @@ Nothing to migrate. v1 has no requests and no coordination space: its board hold
 
 ## History
 
-- 2026-11-17: published as a draft in #<pull request>.
+- 2026-11-17: published as a draft in #158.
