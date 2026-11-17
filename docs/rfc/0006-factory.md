@@ -211,4 +211,4 @@ Both are reports, not moves: the team decides what to do with the work. Before t
 
 ## History
 
-- 2026-11-17: published as a draft in #<pull request>.
+- 2026-11-17: published as a draft in #157.
