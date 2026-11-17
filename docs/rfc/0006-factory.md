@@ -204,7 +204,7 @@ Both are reports, not moves: the team decides what to do with the work. Before t
 
 ## Open questions
 
-1. **Where pm keeps the agent framework's handle on a session.** pm needs it to message, wake or archive a running session, and a new pm needs it to take over. The options:
+1. **Where pm keeps the agent framework's handle on a session** (asked in NEX-44). pm needs it to message, wake or archive a running session, and a new pm needs it to take over. The options:
    - **(a) A comment on the session's ticket, written by pm when it starts the session.** No new field; it is how this repository's factory works today, and it outlives the session. A reader must find it among the comments, and its shape is the framework's. Recommended.
    - **(b) A `framework` field on the `spaceMember` record**, holding the framework's name and its session id. A command can read it, but it changes RFC 0001's collection (an additive field), and nexus-flow then stores a framework detail it otherwise leaves to the framework (principle 6).
    - **(c) Not stored by nexus-flow**: the framework keeps its own list of sub-agents. Nothing to build, but a new pm cannot take over the running sessions unless the framework hands them over.
