@@ -1,6 +1,6 @@
 # RFC 0001: nexus-flow on NoCentralDB
 
-Status: Draft
+Status: Decided (2026-11-17)
 
 This RFC sets the frame every NoCentralDB-backed module of v2 stores its data in: the NoCentralDB spaces nexus-flow uses, who is a member of them and with which role, how nexus-flow's NoCentralDB model is written and grown, where each member's local database lives and how `nxs` reads and writes it, how it syncs, how derived state such as readiness is computed, and which library seam manufakt.io calls. It follows `factory/GENESIS.md`, "Architecture and stack": tickets, decisions, goals and status notes live in NoCentralDB, "a ticket space per repository, and a coordination space per group of repositories", every read is local, and `nxs` is the only entry point. Once it is decided, the module RFCs (0002 to 0007) design their collections inside this frame, RFC 0008 designs the move from v1 into it, and a coding ticket can build the shared layer: the pin, the model build, opening a member's database, members, sync and the seam.
 
@@ -16,7 +16,7 @@ The owner and the agents need from this frame:
 - **Nothing lost on a branch switch or when a session ends** (principle 4): the local data outlives both.
 - **One rule per derived state**, computed the same way by `nxs` and by manufakt.io (GENESIS.md, "Done is not yet on main").
 
-The owner decided the frame's main choices before this RFC was written, and the text below carries them: the dependency and stop-gaps (NEX-13), the space layout (NEX-15), who a member is (NEX-16), the sync (NEX-17), the library seam (NEX-18), the ticket model (NEX-23), and "on main" against a configurable base branch (NEX-33).
+The owner decided the frame's main choices before this RFC was written, and the text below carries them: the dependency and stop-gaps (NEX-13), the space layout (NEX-15), who a member is (NEX-16), the sync (NEX-17), the library seam (NEX-18), the ticket model (NEX-23), and "on main" against a configurable base branch (NEX-33). The owner decided the choices this RFC left open on 2026-11-17 (NEX-38): where the space id is committed, where the member databases live, the command names, how a session's invitation reaches its commissioner, that role sessions stay out of the coordination space, the seam's crate name, and the stop-gap that ties a session to the person who commissioned it.
 
 Out of scope, each in its own RFC: the collections and fields of each module (tickets 0002, decisions 0003, goals 0005, status 0007), human-readable ticket ids and what the ticket model is generated from (0002, from NEX-16, NEX-23 and NEX-24), and the move of v1 workspaces and their data (0008). GENESIS and the factory's files stay in git (NEX-14, NEX-33), so this RFC gives them no space; RFC 0004 and RFC 0006 design those modules.
 
@@ -69,7 +69,7 @@ A relay creates a space only for an allowlisted creator (NoCentralDB RFC 0007). 
 
 `nxs space join-coordination <space id>` records a coordination space in the file once an admin of that space has added the repository's pm (see "Members"). `nxs init` never overwrites a `nexus-flow.toml` that already names a space (GENESIS.md: never overwrite a team's configuration).
 
-*Not taken:* keeping the space id only in the local data directory (every clone and every cloud container would have to be told it by hand), and deriving the id from the git remote URL (a renamed or forked repository would silently get a new space).
+*Not taken* (decided by the owner, NEX-38): a committed file inside `.nxs/`, next to where v1 kept its workspace (it mixes a committed file into a directory v1 ignores in git, which RFC 0008 would have to untangle); keeping the space id only in the local data directory (every clone and every cloud container would have to be told it by hand); and deriving the id from the git remote URL (a renamed or forked repository would silently get a new space).
 
 ### Members
 
@@ -109,19 +109,19 @@ NoCentralDB's roles are reader, writer and admin, per space (NoCentralDB RFC 000
 | Every other role session (coder, legal, …) | writer | not a member |
 | manufakt.io | reader by default; writer when the owner lets it write | reader |
 
-pm is admin of its repository space because it starts sessions, and starting one means adding its member. Other role sessions are writers: they change tickets and decisions but cannot add members. A role session is not a member of the coordination space: pm ranks the work against the goals and turns requests into tickets (GENESIS.md, "Goals set the focus", "Work across repositories"), so a coder never needs it. Whether a coder should read the goals is an open question below.
+pm is admin of its repository space because it starts sessions, and starting one means adding its member. Other role sessions are writers: they change tickets and decisions but cannot add members. A role session is not a member of the coordination space: pm ranks the work against the goals and turns requests into tickets (GENESIS.md, "Goals set the focus", "Work across repositories"), so a coder never needs it; it sees a goal only as the unresolved `nc.ref` its ticket holds (decided by the owner, NEX-38). Making role sessions readers would add a second membership to add and remove per session. A later version may start a coder as an ad-hoc sub-agent of pm, with the access to the coordination space that pm names (NEX-40); RFC 0005 can revisit this.
 
 #### Starting a session's member
 
 No secret travels between sessions. A starting session creates its own keys and hands its commissioner an invitation; the commissioner adds it.
 
-1. The new session runs `nxs session start`. It creates its member database and keys (see "The local data on disk") and prints the member's NoCentralDB invitation (`ncdb-invite-1:…`; NoCentralDB RFC 0009): the member id, its two public keys, its certificate and an account fingerprint. The invitation holds nothing secret and may travel through any channel: a session message, a ticket comment, a terminal.
+1. The new session runs `nxs session start`. It creates its member database and keys (see "The local data on disk") and prints the member's NoCentralDB invitation (`ncdb-invite-1:…`; NoCentralDB RFC 0009): the member id, its two public keys, its certificate and an account fingerprint. The invitation holds nothing secret. It reaches the commissioner as a session message through the agent framework, and where the framework cannot send one, as a comment on the session's ticket (decided by the owner, NEX-38). The fallback is needed today: a Claude Code cloud session cannot reliably message back ([how sessions reach each other](../research/2026-11-14-how-sessions-reach-each-other.md)), and the session cannot write to the repository space before it is a member, so the comment goes through the tracker in use until v2's own tickets carry it.
 2. The commissioner (pm, or a developer's device) runs `nxs member add <invitation> --role <role> [--ticket <ref>]`. It adds the member to the repository space with the role from the table above, writes its `spaceMember` record, and syncs.
 3. The new session's next sync finds itself a member and pulls the space.
 
 In a cloud container this works the same: the keys are created in the container and die with it. A cloud environment holds secrets only as proxy-injected headers, which cannot carry a signing key, and a key stored in the environment would be shared by every session started there, which defeats one member per session.
 
-**A session belongs to no account yet.** An agent holds no account key, so pm, being an agent, cannot pair anything into an account (NoCentralDB RFC 0010), and a session started by pm cannot be tied to the developer's account by NoCentralDB. NoCentralDB's sub-agent certificates would let a member vouch for the members it starts (NoCentralDB RFC 0003); they are designed but not built. Until they are, v2 adds every session as an `agent` member whose invitation names no account the space has confirmed: NoCentralDB shows it as `unknownAccount` with the fingerprint the invitation carries (NoCentralDB RFC 0009). What ties the session to the person who commissioned it is the `spaceMember` record, signed by the commissioner, and, through pm's own record, the developer who started pm. Once sub-agent certificates are built (requirement R8), a session becomes a `subAgent` of its commissioner and the tie is NoCentralDB's own.
+**A session belongs to no account yet** (the stop-gap the owner accepted in NEX-38, rather than waiting for NoCentralDB's sub-agent certificates, which would stall priority 1). An agent holds no account key, so pm, being an agent, cannot pair anything into an account (NoCentralDB RFC 0010), and a session started by pm cannot be tied to the developer's account by NoCentralDB. NoCentralDB's sub-agent certificates would let a member vouch for the members it starts (NoCentralDB RFC 0003); they are designed but not built. Until they are, v2 adds every session as an `agent` member whose invitation names no account the space has confirmed: NoCentralDB shows it as `unknownAccount` with the fingerprint the invitation carries (NoCentralDB RFC 0009). What ties the session to the person who commissioned it is the `spaceMember` record, signed by the commissioner, and, through pm's own record, the developer who started pm. Once sub-agent certificates are built (requirement R8), a session becomes a `subAgent` of its commissioner and the tie is NoCentralDB's own.
 
 #### Ending a session's member
 
@@ -180,7 +180,7 @@ The data lives outside the working tree so that a branch switch, a second worktr
 
 Each session on a machine has a database of its own, which syncs like any other member's. Several sessions on one device therefore hold several copies of the same space and each pulls it once; that is the cost of one member per session.
 
-*Not taken:* the data inside the repository's `.nxs/` (lost on a fresh clone, duplicated per worktree, and easy to commit by mistake), and one shared database for every member on a device (NoCentralDB opens a database with one member's keys).
+*Not taken* (decided by the owner, NEX-38): the data inside the repository's `.nxs/`, as in v1 (lost on a fresh clone, duplicated per worktree, and easy to commit by mistake). The cost of the data directory is that a workspace is no longer visible in the repository, and deleting the repository leaves the databases behind. Also not taken: one shared database for every member on a device (NoCentralDB opens a database with one member's keys).
 
 ### Reading and writing
 
@@ -224,7 +224,7 @@ This is a **stop-gap** under NEX-13: it is temporary, it lives only behind the s
 
 v2 keeps one library seam, designed for manufakt.io, the owner's view onto nexus-flow (NEX-18). nexflow.it is not a v2 consumer: it stays on v1 from `main` until it decides its own move, and nothing in v2 serves its proprietary plugin.
 
-The seam is the crate `nexus-flow-facade` in a new major version, with `Engine` as its entry point, as in v1. It is the only crate an embedder links. `nxs` is built on the same seam, and every `nxs` verb has a counterpart on it (the decision on CLI and library parity stays in force). The seam this RFC brings:
+The seam is the crate `nexus-flow-facade` in a new major version, with `Engine` as its entry point, as in v1 (decided by the owner, NEX-38). The same name then carries two incompatible lines, v1's on `main` for nexflow.it and v2's here; nexflow.it pins v1, and the major version says the rest. A new crate name was not taken: manufakt.io would rename its dependency for nothing. It is the only crate an embedder links. `nxs` is built on the same seam, and every `nxs` verb has a counterpart on it (the decision on CLI and library parity stays in force). The seam this RFC brings:
 
 | Symbol | What it does |
 | --- | --- |
@@ -254,7 +254,7 @@ What becomes of v1's crates on `v2`:
 
 GENESIS.md reserves these for the owner:
 
-- **Commands:** `nxs init` (creates the repository space and `nexus-flow.toml`), `nxs device join`, `nxs space join-coordination <space id>`, `nxs session start`, `nxs session end`, `nxs member add <invitation> --role <role> [--ticket <ref>]`, `nxs member remove <member>`, `nxs member list`, `nxs sync [--watch] [--status] [--timeout <seconds>] [--relay <url>]`.
+- **Commands**, flat rather than nested under one noun such as `nxs space member add`, which is longer to type and to read in a prompt (decided by the owner, NEX-38): `nxs init` (creates the repository space and `nexus-flow.toml`), `nxs device join`, `nxs space join-coordination <space id>`, `nxs session start`, `nxs session end`, `nxs member add <invitation> --role <role> [--ticket <ref>]`, `nxs member remove <member>`, `nxs member list`, `nxs sync [--watch] [--status] [--timeout <seconds>] [--relay <url>]`.
 - **JSON output:** `nxs session start` (`session`, `member`, `invitation`), `nxs member list` (`member`, `kind`: `device`, `agent` or `subAgent`, `role`, `ticket`, `commissionedBy`, `account`, which is `null` for an unconfirmed account), `nxs sync --status` (`member`, `relay`, `unconfirmed`, `synced_at`).
 - **Environment variables:** `NXS_SESSION`, `NXS_DATA_DIR`.
 - **Library seam:** the `Engine` symbols in the table above, and `SpaceId`, `SessionId`, `Member` as the types they take and return.
@@ -306,15 +306,9 @@ This RFC moves no data. A v1 workspace (`.nxs/`) is left as it is: v2 neither op
 
 ## Open questions
 
-Each of these is a public surface or a stored format, which GENESIS.md reserves for the owner.
-
-1. **Where the space id is committed.** Options: (a) a file `nexus-flow.toml` at the repository's root, as designed above; (b) a file inside a committed directory, such as `.nxs/space.toml`, next to where v1 kept its workspace; (c) not committed, told to every session. Costs: (a) adds a file at the root; (b) mixes a committed file into a directory v1 ignores in git, which RFC 0008 would have to untangle; (c) every clone and every cloud container needs the id by hand. Recommendation: (a).
-2. **Where the member databases live.** Options: (a) the platform's data directory, outside the repository, one database per member, as designed above; (b) inside the repository's `.nxs/`, as in v1. Costs: (a) a workspace is no longer visible in the repository, and deleting the repository leaves the databases behind; (b) a fresh clone or a second worktree starts empty and syncs again, and the branch-switch guarantee depends on `.nxs/` being ignored by git. Recommendation: (a).
-3. **The new commands' names.** `nxs session start|end`, `nxs member add|remove|list`, `nxs device join`, `nxs space join-coordination`, `nxs sync [--watch|--status|--timeout|--relay]`. Options: these names; or the same verbs under one noun (`nxs space member add`, `nxs space session start`). Costs: the nested form is longer to type and to read in a prompt; the flat form adds three top-level nouns. Recommendation: the flat names above.
-4. **How a session's invitation reaches its commissioner.** The invitation holds no secret, so the question is only the channel. Options: (a) the framework's session messages, with the ticket as the fallback; (b) always the ticket, as a comment the commissioner reads. Costs: (a) a Claude Code cloud session cannot reliably message back today ([how sessions reach each other](../research/2026-11-14-how-sessions-reach-each-other.md)), so the fallback is needed anyway; (b) the session cannot write to the repository space before it is a member, so the comment must go through the tracker in use until v2's own tickets carry it. Recommendation: (a), with (b) as the fallback.
-5. **Whether role sessions read the coordination space.** Options: (a) not members, as designed above; (b) readers, so a coder sees the goals its ticket serves. Costs: (a) a coder sees a goal only as an unresolved `nc.ref`; (b) a member to add and remove per session in a second space. Recommendation: (a), revisited by RFC 0005 if a goal's text turns out to matter to the work.
-6. **The seam's crate name.** Options: (a) keep `nexus-flow-facade` with `Engine`, in a new major version; (b) a new crate name for v2. Costs: (a) the same name means two incompatible lines, v1's on `main` for nexflow.it and v2's here; (b) manufakt.io changes its dependency's name once. Recommendation: (a), since nexflow.it pins v1 and the major version says the rest.
+None. The owner answered them on 2026-11-17 (NEX-38), and the answers are written into the text above.
 
 ## History
 
 - 2026-11-15: published as a draft in #142.
+- 2026-11-17: decided by the owner (NEX-38), in #142.
