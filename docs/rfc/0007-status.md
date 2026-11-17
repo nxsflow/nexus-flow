@@ -365,4 +365,4 @@ These need the owner's answer before the RFC is decided.
 
 ## History
 
-- 2026-11-17: published as a draft in #<pull request>.
+- 2026-11-17: published as a draft in #162.
