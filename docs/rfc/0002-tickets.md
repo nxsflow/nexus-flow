@@ -116,7 +116,9 @@ Every query runs through a declared index (NoCentralDB RFC 0006, "Declared index
 
 A fixed key equals NoCentralDB's "unset" too (NoCentralDB RFC 0006, "Declared indexes": the equality prefix is written `k IS ?`), so `archivedAt` unset in an equality prefix selects the unarchived tickets.
 
-**What no index can answer yet.** NoCentralDB cannot index a set or a field of many links (NoCentralDB RFC 0005, "Indexes"). Three reads need one: tickets carrying a label (`list --label`), the tickets that depend on, contribute to or mention a ticket (the reverse edges), and full-text search. The first two are answered from the graph the derived-state computation already loads (see "Derived state"): it reads the open and in-progress tickets through `byStatus`, and the label filter and the reverse edges are walks over what it read, closed tickets included through `byClosedAtAll` when a read asks for them. Search is answered from a full-text cache under `derived/<member id>/` (RFC 0001, "The local data on disk"), rebuilt when the database's version moves and deletable at any time. Both are stop-gaps in RFC 0001's sense (NEX-13): they live behind the storage crate's functions, and go once NoCentralDB indexes sets and many links (R12) and offers full-text search (R13). Until then a filter by label costs the tickets of the statuses it reads, not only its result.
+**What no index can answer yet.** NoCentralDB cannot index a set or a field of many links (NoCentralDB RFC 0005, "Indexes"). Three reads need one: tickets carrying a label (`list --label`), the tickets that depend on, contribute to or mention a ticket (the reverse edges), and full-text search. The first two are answered from the graph the derived-state computation already loads (see "Derived state"): it reads the open and in-progress tickets through `byStatus`, and the label filter and the reverse edges are walks over what it read, closed tickets included through `byClosedAtAll` when a read asks for them. Search is answered from a full-text cache under `derived/<member id>/` (RFC 0001, "The local data on disk"), rebuilt when the database's version moves and deletable at any time. Both are stop-gaps in RFC 0001's sense (NEX-13): they live behind the storage crate's functions, and go once NoCentralDB indexes sets and many links (R14) and offers full-text search (R15). Until then a filter by label costs the tickets of the statuses it reads, not only its result.
+
+RFC 0003 meets the same gap with join collections, one object per decision and topic, which it keeps even after R14 (RFC 0003, "The collections"). Tickets walk instead because readiness already loads every open ticket and its dependencies on each read, so the label filter and the reverse edges cost no extra read until R14, and because `dependsOn` must stay a field of links for NoCentralDB's computed reach (R7) to replace that walk without a migration.
 
 ### Ticket ids
 
@@ -306,8 +308,8 @@ GENESIS.md reserves these for the owner:
 
 **Requests**, besides RFC 0001's R6 (who signed a change, for `history` and to retire the author fields) and R7 (computed reach, for readiness):
 
-- **R12. Indexes over sets and many links.** An index whose rows are a set's elements or a field's links, so that "the tickets with label X" and "the tickets that depend on Y" are one equality lookup each. Until then they are walks over the tickets the derived state reads.
-- **R13. Full-text search.** A declared full-text index over string fields. Until then `search` reads a rebuildable cache of nexus-flow's own.
+- **R14. Indexes over sets and many links.** An index whose rows are a set's elements or a field's links, so that "the tickets with label X" and "the tickets that depend on Y" are one equality lookup each. Until then they are walks over the tickets the derived state reads.
+- **R15. Full-text search.** A declared full-text index over string fields. Until then `search` reads a rebuildable cache of nexus-flow's own.
 
 ## What it does not do
 
@@ -318,7 +320,7 @@ GENESIS.md reserves these for the owner:
 - **A PR's state is as fresh as the last time someone recorded it.** `nxs` does not ask GitHub; a PR merged or closed without anyone recording it is still `open` in the ticket.
 - **"On main" is as fresh as the last `git fetch`** of the base branch, and `null` for a caller without a checkout, and so is the readiness of a ticket whose only open blocker is done but not yet known to be on main.
 - **Waiting for another repository does not block readiness.** A ticket that waits for a request reads as ready once its own dependencies are; pm, who sees the request's status, holds it back until the request is done (RFC 0009).
-- **Filters by label, reverse edges and search cost more than their result** until R12 and R13: they walk the tickets read for the derived state, or a local cache.
+- **Filters by label, reverse edges and search cost more than their result** until R14 and R15: they walk the tickets read for the derived state, or a local cache.
 - **The history of a ticket cannot be read** until R6. Its changes are all in the space's log and signed; only reading them back with their authors waits.
 - **Who wrote a ticket, note, work link or reference is a field,** not a checked signature, until R6 (RFC 0001, "Who decided").
 - **Every read is as fresh as the last sync** (GENESIS.md, "Limits"): a ticket another session claimed or closed since then reads as it was.
@@ -348,9 +350,9 @@ This RFC moves no data; RFC 0008 designs the move, replaying every v1 op so hist
 
 ## Open questions
 
-The owner decides each on its own. pm files a needs-owner ticket for each, linked here.
+The owner decides each on its own, in the needs-owner ticket named with it.
 
-1. **How is a ticket's code formed?** (NEX-16 asked for this question; needs-owner ticket to come.) Every option keeps the prefix and stores the code once, at creation.
+1. **How is a ticket's code formed?** (NEX-54; NEX-16 asked for this question.) Every option keeps the prefix and stores the code once, at creation.
    - **(a) A short random code**, `NEX-7x3k`, from the object id. Final at creation, needs no coordination. Cost: not ordered, harder to say aloud, and collisions are normal at NOC's rate of about 40 tickets a day unless the code has six or seven characters (NEX-29: 10% by 15,000 tickets at six characters, 0.3% at seven).
    - **(b) A running number assigned at sync**, `NEX-42`, by the relay or a sequencer. The most readable, in creation order. Cost: NoCentralDB has no such authority, so it is a new request on NoCentralDB; and a ticket carries a provisional id until then, which branches and commits may already carry, so "on main" has to know both.
    - **(c) A number range per member**, reserved while online, `NEX-42`, or with a member tag, `NEX-42.c7`. Numeric and final. Cost: reserving is itself a write that can collide unless one member allocates; ranges leave gaps, more so with one member per session (NEX-16); the tag variant is longer.
@@ -359,20 +361,20 @@ The owner decides each on its own. pm files a needs-owner ticket for each, linke
 
    **Recommendation: (d).** It gives `NEX-42` for nearly every ticket without an authority NoCentralDB lacks, and its random codes are few enough that four characters keep their collisions rare.
 
-2. **What puts a ticket in the owner's queue?** (needs-owner ticket to come.)
+2. **What puts a ticket in the owner's queue?** (NEX-55.)
    - **(a) The label `needs-owner`,** as today. Cost: agents forget it; NOC lost about fourteen questions from the queue that way (NEX-29).
    - **(b) Facts the model already has:** an open ticket of type `question`, or one assigned to the owner's account. Cost: a new type, `question`, in the fixed model; a team that wants another rule has to wait for team fields (NEX-23).
    - **(c) Both,** the label as an extra way in. Cost: two rules to explain, and the label can still be forgotten.
 
    **Recommendation: (b).** It cannot be forgotten, and the type also tells a question, which carries options, from an owner task, which does not.
 
-3. **What are a closed ticket's resolutions?** (needs-owner ticket to come.)
+3. **What are a closed ticket's resolutions?** (NEX-56.)
    - **(a) `done`, `canceled`, `replaced`,** where `replaced` covers both a duplicate and a ticket folded into another, and names that ticket. Cost: Linear's "duplicate" is not a word of its own.
    - **(b) `done`, `canceled`, `duplicate`, `merged_into`,** as NOC used them (NEX-29). Cost: two resolutions that both name another ticket and differ only in why.
 
    **Recommendation: (a).** Both cases mean "this work continues in that ticket", and the closing comment says which.
 
-4. **Is the command surface `nxs ticket <verb>`, with relations as flags of `update`?** (needs-owner ticket to come.)
+4. **Is the command surface `nxs ticket <verb>`, with relations as flags of `update`?** (NEX-57.)
    - **(a) `nxs ticket <verb>`,** as in the table above. Cost: v1's `nxf dep add`, `nxf label add` and `nxf note add` become flags or verbs of `nxs ticket`, so prompts and habits written for v1 change.
    - **(b) Nouns of their own:** `nxs dep add`, `nxs label add`, `nxs note add`. Cost: more top-level nouns, and `note` would be ambiguous once decisions and status notes come.
    - **(c) Three words:** `nxs ticket dep add`. Cost: deeper than the flat commands the owner chose for RFC 0001 (NEX-38).
