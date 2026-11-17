@@ -84,7 +84,7 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 
 **One member per agent session** (NEX-16). Its role is the role on its trigger, for example `coder on NEX-42` or `pm`, and the chain of certificates says which person commissioned it: a coder is pm's sub-agent, and pm is an agent of the developer's account, so every change shows the chain person, pm, coder (decided by the owner on 2026-11-17). The person acts once per pm, when pm is paired, and never per session. The design names no particular person: nexus-flow is an open-source tool for any developer or team. How a ticket is written in that role (`NEX-42` or otherwise) follows RFC 0002.
 
-**manufakt.io** joins as a device of the person's account, not as an agent: it is the person's own view onto their work and acts for them. It links its own sign-in accounts (Cognito) to the person's NoCentralDB account itself, so the person sees one account; that needs nothing from NoCentralDB or nexus-flow beyond the library seam.
+**manufakt.io** joins as a device of the person's account, not as an agent: it is the person's own view onto their work and acts for them. How the person's account and their manufakt.io sign-in become one account is described under "Sync", with manufakt.io's relay.
 
 #### The role record
 
@@ -205,7 +205,15 @@ Each session on a machine has a database of its own, which syncs like any other 
 
 ### Sync
 
-v2 retires v1's own sync for NoCentralDB's relay (NEX-17). The relay cannot read content (NoCentralDB RFC 0007). manufakt.io hosts a relay; a team may run its own; a member with no relay works in island mode.
+v2 retires v1's own sync for NoCentralDB's relay (NEX-17). The relay cannot read content (NoCentralDB RFC 0007). A team chooses its relay:
+
+- **One of NoCentralDB's example relays**, as NoCentralDB ships them.
+- **A relay the team runs itself.** nexus-flow ships no relay software of its own, since `nxf-relay` retires; its documentation says how to run NoCentralDB's relay for a team.
+- **manufakt.io's hosted relay.**
+
+A member with no relay works in island mode.
+
+**Using manufakt.io's relay.** The person signs in to manufakt.io, and their local NoCentralDB account and their manufakt.io account become one: in NoCentralDB terms the two accounts are linked (NoCentralDB RFC 0010, "Linking accounts drawn per database"). The local database pairs with a device of the manufakt.io account, both account keys sign the link, and the memberships already written keep their certificates. To the person it is one account, and nexus-flow asks nothing of them beyond signing in. NoCentralDB cannot link an agent that holds an account of its own (NoCentralDB RFC 0010), but no session here does: pm is paired into the person's account, and every other session is pm's sub-agent. How manufakt.io hosts the relay and runs its sign-in is manufakt.io's side, and nexus-flow needs nothing from it beyond the library seam.
 
 **One relay per member database.** The SDK connects one database to one relay, and a relay per space was not taken (NoCentralDB RFC 0009, "The relay connection"). A member's repository space and coordination space therefore sync through the same relay, and the repositories of one coordination space must all use it. `nxs sync --relay <url>` sets the relay of the member it runs as, in that member's own configuration in the data directory, not in `nexus-flow.toml`: which relay a machine syncs through is the machine's choice, and a URL may carry a host a team keeps private.
 
