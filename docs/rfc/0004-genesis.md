@@ -18,7 +18,7 @@ The owner and the agents need from the genesis storage:
 
 The owner decided the main choice before this RFC was written, and the text below carries it: a team's GENESIS stays a file in git, and the file is the truth; `nxs` reads it from the working tree, and NoCentralDB holds nothing of it for now (NEX-14; decision of 2026-11-15, "A team's GENESIS and factory files stay in git, and the files are the truth").
 
-Out of scope, each elsewhere: the text of the template and the guide, which are default templates the owner decides in their own ticket (GENESIS.md, "What has to come back through me"); the merge gate's rules, their JSON schema and the script that decides, and how that script reads the rules this RFC keeps (the merge gate's own RFC); the factory's files, `nxs factory install` and the hash list of shipped defaults (RFC 0006); and the frame of spaces, members and `nexus-flow.toml` (RFC 0001). A mirror of GENESIS into the repository space, which NEX-14 left open for when manufakt.io or a coordination space needs to read it, is not part of v2: no v2 reader needs it yet, and a later RFC can add it without changing which copy is the truth.
+Out of scope, each elsewhere: the text of the template and the guide, which are default templates the owner decides in their own ticket (GENESIS.md, "What has to come back through me"); the merge gate's rules, their JSON schema and the script that decides, and how that script reads the rules this RFC keeps (RFC 0010, the merge gate, NEX-72); the factory's files, `nxs factory install` and the hash list of shipped defaults (RFC 0006); and the frame of spaces, members and `nexus-flow.toml` (RFC 0001). A mirror of GENESIS into the repository space, which NEX-14 left open for when manufakt.io or a coordination space needs to read it, is not part of v2: no v2 reader needs it yet, and a later RFC can add it without changing which copy is the truth.
 
 This RFC builds on RFC 0001 ("Creating and finding a space", for the repository's root and `nexus-flow.toml`) and on the draft RFC 0006 ("Which copy is the truth", "Installing the shipped defaults"), and cites NoCentralDB's RFCs as "NoCentralDB RFC", by number and section.
 
@@ -31,7 +31,7 @@ A repository's GENESIS is one Markdown file at a fixed path, relative to the rep
 ```
 factory/
   GENESIS.md          # the team's product description; written once by `nxs genesis create`, the team's own from then on
-  genesis-guide.md    # the guide for filling it in, as shipped (see "Open questions", 2)
+  genesis-guide.md    # the guide for filling it in, a shipped default of RFC 0006 (see "Open questions", 2, NEX-71)
 ```
 
 **The path is fixed,** next to the factory's files, because every role file and every session's instructions point at it, and the repositories nexus-flow follows already keep it there (this one and nocentraldb). The `factory/` folder is RFC 0006's; GENESIS.md is a neighbour in it, owned by this module, and `nxs factory install` neither writes nor reads it (RFC 0006, "The factory's files").
@@ -79,15 +79,15 @@ A team's GENESIS says which work comes back to the owner before it merges, as th
 
 **Reading the rules is deterministic.** Given the bytes of `factory/GENESIS.md`, the rules are the top-level items of the first list after the mark, in their order, each with its text as written, nested items included. A file with no mark, more than one mark, or a mark with no list after it has no readable rules, and that is a state of its own, not an empty list.
 
-**When the rules cannot be read, the owner reviews.** A missing file, a missing or doubled mark, or a mark with no list must never let a pull request merge without the owner. This RFC sets that as a requirement on the merge gate's RFC, which designs the script that reads the rules, the command or seam it reads them through, and how its JSON names each rule. The base branch's copy is the one read (see "Which copy is the truth").
+**When the rules cannot be read, the owner reviews.** A missing file, a missing or doubled mark, or a mark with no list must never let a pull request merge without the owner. This RFC sets that as a requirement on RFC 0010, the merge gate's RFC (NEX-72), which designs the script that reads the rules, the command or seam it reads them through, and how its JSON names each rule. The base branch's copy is the one read (see "Which copy is the truth").
 
 *Not taken:* the gate's sub-agent reading the whole GENESIS and listing the rules it finds (the list itself would be a model's judgement, and a rule could be skipped without anyone seeing it); and a separate rules file beside GENESIS, such as one under `factory/merge-gate/` (the rules would then live apart from the product description that gives them their reasons, and the owner would review two texts that can disagree).
 
 ### Installing the template
 
-nexus-flow ships a GENESIS template and a guide for filling it in (GENESIS.md, the `genesis` row). Their text is a default template, which the owner decides in its own ticket; this RFC decides how they are kept and installed.
+nexus-flow ships a GENESIS template and a guide for filling it in (GENESIS.md, the `genesis` row). Their text is a default template, which the owner decides in its own ticket; this RFC decides how the template is kept and installed, and where the guide goes.
 
-**Where nexus-flow keeps them.** In nexus-flow's source tree under `templates/genesis/` (`GENESIS.md`, `genesis-guide.md`), embedded in `nxs` at build time, so creating a GENESIS needs no network. The template carries the mark for the rules on what comes back to the owner, with the template's default rules under it.
+**Where nexus-flow keeps the template.** In nexus-flow's source tree as `templates/genesis/GENESIS.md`, embedded in `nxs` at build time, so creating a GENESIS needs no network. The template carries the mark for the rules on what comes back to the owner, with the template's default rules under it.
 
 **`nxs genesis create`** writes `factory/GENESIS.md` from the template, only where none exists. It is the only thing in nexus-flow that ever writes that path:
 
@@ -104,9 +104,9 @@ The write never replaces anything: it creates the file only if the path is free 
 
 *Not taken:* recognising an unchanged template by its hash and replacing it with a newer one on request, as RFC 0006 does for the factory's defaults (a GENESIS that still reads like the template describes no product yet, so there is nothing an update would keep current, and the hash machinery would earn nothing); and merging a team's text with a newer template (the result is a product description nobody wrote).
 
-**The guide.** How the guide reaches the agent that helps the owner fill in a GENESIS is the owner's choice under "Open questions", 2. The recommended form installs it as `factory/genesis-guide.md` under RFC 0006's rules for shipped defaults: written when missing, its shipped versions recognised by hash in `templates/genesis/shipped.toml`, replaced by a newer one only with `nxs genesis create --update`, and a team's changed guide never touched. `--update` never applies to `factory/GENESIS.md`.
+**The guide.** How the guide reaches the agent that helps the owner fill in a GENESIS is the owner's choice under "Open questions", 2 (NEX-71). The recommended form makes `factory/genesis-guide.md` one of RFC 0006's shipped defaults: it lies in `templates/factory/genesis-guide.md`, its shipped versions are listed by hash in `templates/factory/shipped.toml`, and `nxs factory install` writes it when missing and replaces it with a newer one only with `--update` while it is unchanged, as for every shipped default (RFC 0006, "Installing the shipped defaults"). Unlike GENESIS, the guide is nexus-flow's text, which a team rarely changes, so keeping it current is worth that rule. `nxs genesis create` does not write the guide, and nothing that updates the guide ever writes `factory/GENESIS.md`.
 
-**`nxs init`** (RFC 0001) runs `nxs genesis create` after `nxs factory install`, without `--update`, so a new factory has a GENESIS to fill in on day one, which its roles and FACTORY.md can point at. On an upgrade of nexus-flow nothing is installed until someone runs `nxs genesis create`.
+**`nxs init`** (RFC 0001) runs `nxs genesis create` after `nxs factory install`, so a new factory has a GENESIS to fill in on day one, which its roles and FACTORY.md can point at. On an upgrade of nexus-flow nothing is installed until someone runs `nxs genesis create`.
 
 **Finding the repository.** `create` finds the repository's root as RFC 0001 does, from the working directory up to the folder holding `nexus-flow.toml`. Without one it exits non-zero and says to run `nxs init`. It opens no NoCentralDB database: it touches only files and the local git.
 
@@ -115,8 +115,7 @@ The write never replaces anything: it creates the file only if the path is free 
 ```json
 {
   "files": [
-    { "path": "factory/GENESIS.md", "state": "written" },
-    { "path": "factory/genesis-guide.md", "state": "written" }
+    { "path": "factory/GENESIS.md", "state": "written" }
   ],
   "codeowners": {
     "file": ".github/CODEOWNERS",
@@ -125,16 +124,16 @@ The write never replaces anything: it creates the file only if the path is free 
 }
 ```
 
-A file's `state` is one of `written`, `team` or `tracked` for `factory/GENESIS.md`, and one of RFC 0006's states (`written`, `current`, `older_default`, `updated`, `team`, `retired`) for the guide. A `team` entry found under another case carries `found`, the path as it is on disk. `codeowners` is `null` when the repository has no CODEOWNERS file, and `uncovered` names `factory/GENESIS.md` when no rule covers it; the guide needs no code owner and is not checked. The `tracked` case exits non-zero with this report on standard output, so the caller sees which file is missing.
+`files` holds one entry, for `factory/GENESIS.md`, in a list so that the report has the shape of `nxs factory install`'s. Its `state` is `written`, `team` or `tracked`. A `team` entry found under another case carries `found`, the path as it is on disk. `codeowners` is `null` when the repository has no CODEOWNERS file, and `uncovered` names `factory/GENESIS.md` when no rule covers it. The `tracked` case exits non-zero with this report on standard output, so the caller sees which file is missing.
 
 ### Public surfaces this RFC brings
 
 GENESIS.md reserves these for the owner:
 
-- **Command:** `nxs genesis create [--update]` (`--update` for the guide only), which `nxs init` also runs, without `--update`.
-- **JSON output** of `nxs genesis create`: `files` (each with `path`, `state`: `written`, `team`, `tracked`, or for the guide one of RFC 0006's states, and `found` where a case variant was found), `codeowners` (`file`, `uncovered`, or `null`).
-- **Library seam:** `Engine::genesis_create(update: bool)`, the counterpart of the command, returning the same report (the decision on CLI and library parity stays in force).
-- **Stored formats:** `factory/GENESIS.md` as the fixed path of a team's GENESIS; the mark for the rules on what comes back to the owner and the rule that reads them; `factory/genesis-guide.md` and `templates/genesis/shipped.toml`, if the recommended answer to "Open questions", 2 is taken.
+- **Command:** `nxs genesis create`, which `nxs init` also runs.
+- **JSON output** of `nxs genesis create`: `files` (each with `path`, `state`: `written`, `team` or `tracked`, and `found` where a case variant was found), `codeowners` (`file`, `uncovered`, or `null`).
+- **Library seam:** `Engine::genesis_create()`, the counterpart of the command, returning the same report (the decision on CLI and library parity stays in force).
+- **Stored formats:** `factory/GENESIS.md` as the fixed path of a team's GENESIS; the mark for the rules on what comes back to the owner and the rule that reads them; `factory/genesis-guide.md` as one of RFC 0006's shipped defaults, if the recommended answer to "Open questions", 2 is taken.
 
 ### What nexus-flow needs from NoCentralDB
 
@@ -142,7 +141,7 @@ Nothing. GENESIS stays in git (NEX-14), so this RFC adds no collection to the mo
 
 ### What the build must prove
 
-The coding ticket that builds `nxs genesis create` proves the no-overwrite guarantee with tests at the seam (`Engine::genesis_create`), each of which must fail if the guarantee is broken: an existing `factory/GENESIS.md` with arbitrary bytes, the template's included, is unchanged after `create` and after `create --update`; a GENESIS deleted from the working tree but tracked in `HEAD`, or only on the base branch, is reported `tracked`, nothing is written, and the exit is non-zero; a dangling symbolic link at the path is not followed; a `factory/genesis.md` on a case-sensitive file system blocks the write; and `nxs init` run twice leaves the file as the first run, or the team, left it.
+The coding ticket that builds `nxs genesis create` proves the no-overwrite guarantee with tests at the seam (`Engine::genesis_create`, and `Engine::factory_install` for the guide), each of which must fail if the guarantee is broken: an existing `factory/GENESIS.md` with arbitrary bytes, the template's included, is unchanged after `nxs genesis create`, after `nxs factory install --update` and after `nxs init`; a GENESIS deleted from the working tree but tracked in `HEAD`, or only on the base branch, is reported `tracked`, nothing is written, and the exit is non-zero; a dangling symbolic link at the path is not followed; a `factory/genesis.md` on a case-sensitive file system blocks the write; and `nxs init` run twice leaves the file as the first run, or the team, left it.
 
 ## What it does not do
 
@@ -163,12 +162,12 @@ To have the merge gate check its rules, such a repository adds the mark before i
 
 ## Open questions
 
-1. **How the list of rules on what comes back to the owner is marked.** The merge gate's script must find the list whatever the team calls the section, and must notice when it is gone.
+1. **How the list of rules on what comes back to the owner is marked** (asked in NEX-70). The merge gate's script must find the list whatever the team calls the section, and must notice when it is gone.
    - **(a) A marker comment on the line before the list**, `<!-- nexus-flow: owner-rules -->`. It survives a renamed or translated heading, it sits in the same file and the same diff the owner reviews, and it needs no setting. It does not show in rendered Markdown, so an agent editing the section can delete it without seeing it; the gate then reserves every pull request for the owner until it is restored. Recommended.
    - **(b) A fixed heading**, the one the template uses, such as `## What has to come back to the owner`. Visible and simple, but the team can no longer name or translate the section, against "Strong opinions on what, open on how", and this repository's GENESIS would have to rename its own section.
    - **(c) The heading named in `nexus-flow.toml`**, such as `[genesis] owner_rules = "What has to come back through me"`, defaulting to the template's heading. The team keeps its heading, but renaming the section in GENESIS.md without changing the setting loses the rules, the setting lives in a second file the owner must review together with GENESIS.md, and it is the first `nexus-flow.toml` key this module adds.
-2. **How the guide for filling in a GENESIS reaches the agent.**
-   - **(a) Installed as `factory/genesis-guide.md`** by `nxs genesis create`, under RFC 0006's rules for shipped defaults: written when missing, updated only with `--update` and only while unchanged. It is local, readable by every agent, and stays current; the cost is a second file in every repository, and `--update` on a command named `create`. Recommended.
+2. **How the guide for filling in a GENESIS reaches the agent** (asked in NEX-71).
+   - **(a) Installed as `factory/genesis-guide.md`**, one of RFC 0006's shipped defaults, by `nxs factory install`: written when missing, updated only with `--update` and only while unchanged. It is local, readable by every agent, and stays current; the cost is a second file in every repository, and a file of the `genesis` module installed by the `factory` module's command. Recommended.
    - **(b) As comments inside the template**, one per section. Nothing more to install, and the guidance sits where it is needed; but it lives in the team's file, so it never gets newer, and it is gone once the team deletes the comments, when a later revision of GENESIS would still need it.
    - **(c) Only in nexus-flow's documentation**, online. Nothing in the repository, but an agent must fetch it, which a cloud container's network may not allow, and its version may not match the `nxs` installed.
 
