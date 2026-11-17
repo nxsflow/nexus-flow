@@ -328,35 +328,35 @@ Nothing to migrate. v1 has no daily note: `nxs recap` lists recently closed tick
 
 ## Open questions
 
-These need the owner's answer before the RFC is decided.
+These need the owner's answer before the RFC is decided. Each has its needs-owner ticket.
 
-1. **Does a group of repositories get a note of its own?**
+1. **Does a group of repositories get a note of its own?** (NEX-65)
    - (a) No: each repository writes its note into its own space, and the owner reads a group's notes of a day together through the read across spaces (as designed). One record per day and repository, with real links; an owner who is not a member of every repository space sees only some.
    - (b) Yes, in addition: one pm of the group, named in the coordination space, writes a summary note into the coordination space after the repositories' notes. One page for the owner, but a second record of the same day that can disagree with the first, a writer that must wait for every other note, and lines that are references, unresolved for most readers.
    - (c) The coordination space only. Rejected under "Where a note lives": a note could link nothing, and a repository without a group would have no note.
 
    Recommendation: (a).
 
-2. **Does a note carry a health?**
+2. **Does a note carry a health?** (NEX-66)
    - (a) Yes: `health`, on track, at risk or off track, set by the writer and optional, as the Linear note sets it today (as designed). manufakt.io can colour a row by it; it is one more judgement for pm to make each day.
    - (b) No: the headline says how things stand. One field fewer, but manufakt.io's table has nothing to sort or colour by, and the factory's note loses what it has today.
 
    Recommendation: (a).
 
-3. **How is a note corrected?**
+3. **How is a note corrected?** (NEX-67)
    - (a) By a new note for the same day that names the old one; nothing is rewritten (as designed). What the owner was told stays readable; a correction repeats the whole note.
    - (b) In place, by its writer, with `nxs status update`. Shorter, but the text the owner read that morning is gone from the view, and a note is no longer a record of what was reported.
    - (c) In place until the next note is written, then fixed. A window for typos, at the cost of a rule that depends on what another member has synced.
 
    Recommendation: (a), for the same reason a decision is never edited away (GENESIS.md, principle 4).
 
-4. **Who may write a note?**
+4. **Who may write a note?** (NEX-68)
    - (a) pm and people's devices (`pm`, `owner`, `developer`), and no other role session (as designed). A coder cannot write the repository's note by mistake; another role that should write one, such as a marketing pm of its own, would need the rule changed.
    - (b) Any writer of the repository space. No rule to explain, but any session can add a note that the owner then reads as the day's.
 
    Recommendation: (a), since pm writes the status (GENESIS.md, "Who it is for").
 
-5. **The command names.**
+5. **The command names.** (NEX-69)
    - (a) `nxs status <verb>`: `draft`, `write`, `list`, `show`, `waiting` (as designed), after the module's name, as `nxs ticket` and `nxs decision` are.
    - (b) `nxs note <verb>`. Shorter, but "note" is also a ticket's comment (RFC 0002, "Notes").
    - (c) `nxs status` alone prints the newest note, with the verbs beside it. One word for the most common read, but a command that is both a noun with verbs and a read of its own.
