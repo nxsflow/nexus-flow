@@ -217,4 +217,4 @@ pm opens one needs-owner ticket per question; each is linked here once it exists
 
 ## History
 
-- 2026-11-17: published as a draft in #<pull request>.
+- 2026-11-17: published as a draft in #161.
