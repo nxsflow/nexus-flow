@@ -166,6 +166,38 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
+      # ---- DOCS-ONLY: THE JOB RUNS, ITS WORK DOES NOT (NEX-36) -----------------------------------
+      #
+      # A pull request that changes only RFCs, factory files, decision files, research notes or
+      # change fragments used to run every heavy job here for tens of runner minutes, though nothing
+      # these jobs build or test reads those files. `.github/scripts/docs-only.sh` decides, from the
+      # diff and the event, whether the change is docs-only; its header holds the allowlist, the
+      # events that may take the path, and why each path is on it. `tests/docs-only.test.sh` tests it
+      # (run by `install-sh-ci.yml`). The rule lives in that one script, and every heavy job in this
+      # file and in `facade-semver.yml` calls it as its first step after the checkout.
+      #
+      # On a docs-only change every later step is skipped by `steps.scope.outputs.docs_only`, and
+      # the job ends GREEN UNDER ITS OWN NAME with a `::notice::` and a job-summary line saying what
+      # it did not run and why. NOT a job-level `if:`: GitHub reports a skipped required check as
+      # green with no reason attached, a silent pass nobody can tell from a real one.
+      #
+      # The verdict is a STEP OUTPUT on purpose, not a variable in `$GITHUB_ENV`: a step output is
+      # written by this step alone, while a build script compiled later in the job could append to
+      # `$GITHUB_ENV` and skip the steps after it. The step runs before any repository code is built.
+      #
+      # Always in full: a push to `main` or a maintenance line, a dispatch there, and `full=true`.
+      # A step whose `if:` already waits on an earlier guarded step (`Tests (release)`, the purge
+      # seam) needs no guard of its own: that step was skipped, so its outcome is not success.
+      # The cheap checks are not touched: `lint` (with `cargo xtask decisions --check`, which reads
+      # factory/decisions/), `changelog-check` (which reads changes/) and `dependency-audit`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "the sidecar suite and bundle, the xtask drift gates, the lean builds and cargo test --all"
+
       # ---- room for both profiles AND the cache save (nxf 6j6v.z5ae) ------------------------
       #
       # After `cargo test --all --release` the debug and release target dirs coexist, and
@@ -177,15 +209,18 @@ jobs:
       # they go before the first build. The cache's own behaviour (`save-if` and friends) is
       # deliberately untouched — see the memory `ci-cache-and-runtime-noise`.
       - name: Free the runner's disk
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       # ---- the nxc agent sidecar, BEFORE any cargo step (nexus-flow-6j6v.smsz) --------------
       #
@@ -208,10 +243,12 @@ jobs:
       # a bare checkout with no SDK installed — verified by running it with
       # `agent-sidecar/node_modules` removed entirely.
       - uses: actions/setup-node@v5
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           node-version: "22"
 
       - name: Sidecar tests (node --test)
+        if: steps.scope.outputs.docs_only != 'true'
         working-directory: agent-sidecar
         run: node --test
 
@@ -238,6 +275,7 @@ jobs:
       # FAILS rather than quietly embedding `None` if this step ever stops producing a bundle. The
       # tolerant default exists for a contributor without Node; it has no business in a gate.
       - name: Sidecar bundle builds and runs
+        if: steps.scope.outputs.docs_only != 'true'
         working-directory: agent-sidecar
         run: |
           set -euo pipefail
@@ -274,6 +312,7 @@ jobs:
       # It is the half of the guard that lives in the repo. Runner-group scoping and fork-PR
       # approval are the server-side half (6j6v.w07d); neither replaces the other.
       - name: Runner routing check (self-hosted stays off pull requests)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask runners check
 
       # The other half of the macOS lane below (nexus-flow-6j6v.fb1d). The lane is complete on the
@@ -282,6 +321,7 @@ jobs:
       # the lane does not run. Reading source text only, so it belongs on ubuntu and costs nothing.
       # Fail-closed and by name, same shape as the three single-source gates below.
       - name: macOS test-coverage check (every cfg(macos) test is in the lane)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask macos-tests check
 
       # Single source of truth for the 4 shipped platform keys (nexus-flow-4sr): fail fast and
@@ -290,6 +330,7 @@ jobs:
       # gate.) The updater Lambda's decide.ts was checked here too until 6j6v.sgfr moved it out
       # of the repo; release/platforms' header says what that costs.
       - name: Platforms single-source check
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask platforms check
 
       # Single source of truth for the promotion-ring channels (nexus-flow-85y.27): fail fast and
@@ -298,6 +339,7 @@ jobs:
       # stops being the canonical most-stable ring. decide.ts's download-path regex was a consumer
       # here too until 6j6v.sgfr; see release/channels' header.
       - name: Channels single-source check
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask channels check
 
       # Living documentation (nexus-flow-4oa.1): the nxf clap command tree is the single source
@@ -305,6 +347,7 @@ jobs:
       # man-pages + commands.json) drifts from the tree — i.e. a command changed without running
       # `cargo xtask docs gen`. Fail-closed. (cargo test --all also covers this; this is the gate.)
       - name: Docs drift check
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask docs check
 
       # Living-documentation coverage (nexus-flow-4oa.2): every non-hidden subcommand must have a
@@ -312,6 +355,7 @@ jobs:
       # name if a command was added/renamed without a golden example. The example-execution gate
       # itself (the trycmd cases run against the built nxf binary) is part of `cargo test --all`.
       - name: Docs coverage check
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo xtask docs coverage
 
       # The OMISSION gate (nexus-flow-6j6v.vtvs): every CLI verb must have a counterpart on the
@@ -330,6 +374,7 @@ jobs:
       # code between modules wants every module's verdict from one CI log, not the first one that
       # goes red and nothing about the other two.
       - name: Verb seam check (CLI ↔ Engine, all three modules)
+        if: steps.scope.outputs.docs_only != 'true'
         run: >
           cargo test --no-fail-fast --test verb_seam
           -p nexus-flow-cli -p nexus-memory -p nexus-chat
@@ -354,6 +399,7 @@ jobs:
       # `mcp`-on variant. This is the OTHER variant: the lean `nxs` must still compile + lint clean
       # without rmcp/tokio (#9ul acceptance — "CI builds both feature variants").
       - name: Lean build (nxs without the mcp feature)
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           cargo build -p nxs --no-default-features
           cargo clippy -p nxs --no-default-features --all-targets -- -D warnings
@@ -366,6 +412,7 @@ jobs:
       # seam takes too — it is an unconditional dependency now.) `--lib` scope on purpose —
       # the black-box tests spawn the built binary (cli on); the embed surface is the library.
       - name: Lean build (nexus-chat without the cli feature)
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           cargo build -p nexus-chat --no-default-features
           cargo clippy -p nexus-chat --no-default-features --lib -- -D warnings
@@ -392,6 +439,7 @@ jobs:
       # went red, this one is `skipped`, and so is everything that asks about it. What it costs: a
       # red job now takes as long as a green one, on a full run with the release profile in it.
       - name: Tests (debug)
+        if: steps.scope.outputs.docs_only != 'true'
         id: tests_debug
         run: cargo test --all --no-fail-fast
 
@@ -456,10 +504,22 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "clippy on nxs, nxs-service and nexus-run-host for Windows"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       # Scope is the library and binary, not `--all-targets`: Windows is not a unix, and several
       # `#[cfg(test)]` modules in this package use `std::os::unix` directly — while the
@@ -474,6 +534,7 @@ jobs:
       # start; nothing else compiles that half until `nxs` depends on the host (6j6v.b7ck), and after
       # that this names it so a later change of `nxs`'s dependencies cannot drop it unseen.
       - name: Clippy (nxs, warnings are errors)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo clippy -p nxs -p nxs-service -p nexus-run-host -- -D warnings
 
   # The macOS half runs on the ORG'S OWN Mac (6j6v.31rs, owner directive: "auf GitHub sollte niemals
@@ -537,7 +598,18 @@ jobs:
       # influence this one. What legitimately persists is `target/` + `~/.cargo` — a build cache,
       # which is the point.
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "clippy on nxs and nxs-service for macOS"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: clippy
       # Skipped when this really is the self-hosted runner, for the reason `release.yml` gives for
@@ -545,11 +617,12 @@ jobs:
       # uploading the same cache to GitHub is redundant — and its Post-save step once stalled for
       # hours and blocked the whole job. On the GitHub-hosted fallback the cache is worth having.
       - uses: Swatinem/rust-cache@v2
-        if: vars.NXF_MACOS_RUNS_ON == ''
+        if: vars.NXF_MACOS_RUNS_ON == '' && steps.scope.outputs.docs_only != 'true'
 
       # `--all-targets` here, unlike the Windows half: macOS IS a unix, so the test modules compile
       # too.
       - name: Clippy (nxs, warnings are errors)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo clippy -p nxs -p nxs-service --all-targets -- -D warnings
 
   # ── THE macOS TEST LANE (nexus-flow-6j6v.fb1d) ────────────────────────────────────────────────
@@ -620,6 +693,12 @@ jobs:
   # changed" leaves the gate ABSENT, not red. Measured alongside it: 9 of the last 25 pushes to
   # `main` touched the paths a filter would have keyed on, so it would skip about two thirds of the
   # push half — worth revisiting when `pull_request` is added with 6j6v.zc9q, not before.
+  #
+  # The docs-only rule (NEX-36, at `quality-gates`) is not such a filter, though it skips this lane
+  # too. A `paths:` filter names the paths that MATTER, and must be kept complete as the code grows,
+  # or it fails open. The docs-only rule names the few paths proven NOT to matter (RFCs, research,
+  # factory and change fragments), and any other path in the diff means the full run; a path added
+  # anywhere else in the repository can only make it run more, never less.
   macos-tests:
     name: macOS tests (hosted)
     needs: lint
@@ -630,14 +709,27 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "the macOS test lane"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       # `nxf`/`nxm`/`nxc` are argv[0] symlinks to the single `nxs` binary, and `nxs` is its own
       # package that DEPENDS on the persona crates rather than the other way round — so the black
       # box tests below resolve `target/debug/nxs` and the freshness gate (0yyw) refuses a stale
       # one. Building it first is what the postgres job does for the same reason.
       - name: Build the shipped nxs/nxf binaries the suites drive
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo build -p nxs
 
       # `--no-fail-fast`, for the same reason the verb-seam gate gives: this lane runs once per
@@ -645,6 +737,7 @@ jobs:
       # failing binary's verdict from THAT log, not the first one and a second 10x run to find the
       # rest.
       - name: Tests (debug, macOS)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo test --no-fail-fast -p nxs -p nexus-chat -p nxs-service -p nexus-run-host -p nexus-run-session-claude
 
   # The durable Postgres backend (spec §5/§10) is verified by differential parity against
@@ -674,12 +767,25 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "clippy and the Postgres parity tests"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       - name: Clippy (postgres backend, warnings are errors)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo clippy -p nxs-server --all-targets --features postgres -- -D warnings
 
       # The E2E proof (6j6v.6hbd) that runs inside this job: `tests/relay_e2e.rs` drives the
@@ -692,12 +798,15 @@ jobs:
       #
       # This is the half of that ticket's DoD that must hold on EVERY change with no foreign
       # dependency: the service container above is the endpoint, so the proof is deterministic.
-      # The `managed-postgres` job below runs the very same test against a real Supabase project.
+      # On `main` the `managed-postgres` job runs the very same test against a real Supabase
+      # project; `v2` has no such job (NEX-39, at the place the job stood below).
       - name: Build the shipped nxs/nxf binaries the relay E2E drives
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo build -p nxs
 
       # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: Postgres parity tests (debug)
+        if: steps.scope.outputs.docs_only != 'true'
         id: tests_debug
         run: cargo test -p nxs-server --features postgres --no-fail-fast
 
@@ -735,10 +844,23 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "the Postgres TLS suites"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       - name: Mint a throwaway CA and a server certificate for localhost
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pgtls"
@@ -756,6 +878,7 @@ jobs:
           sudo chmod 600 server.key
 
       - name: Start Postgres with TLS enabled
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           set -euo pipefail
           docker run -d --name pgtls \
@@ -775,6 +898,7 @@ jobs:
       # Two invocations, because the trust anchor is process-global env (see the suite's header).
       # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: TLS handshake succeeds and the session is really encrypted
+        if: steps.scope.outputs.docs_only != 'true'
         id: tls_handshake
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/nxf_test?sslmode=require
@@ -808,197 +932,13 @@ jobs:
         if: always()
         run: docker rm -f pgtls || true
 
-  # The proof against a REAL managed Postgres — a Supabase project that outlives the run
-  # (6j6v.da42 + 6j6v.6hbd). Everything above it uses a container this workflow starts and throws
-  # away: same code, but never a foreign network, a provider's pooler, a TLS-only endpoint, or a
-  # database that remembers yesterday. "Sync to a Postgres, e.g. Supabase" is a claim the shipped
-  # relay makes; this job is where it is answered instead of assumed.
-  #
-  # IT BLOCKS. Owner decision, 2026-08-10, reversing the earlier "must not be fail-closed" note in
-  # 6j6v.da42: a non-blocking job is a job nobody looks at, and the price of that was a silent
-  # break — the class this repo walked past twice in one day on 2026-08-09. Red because Supabase
-  # was unreachable is an acceptable price; red because the integration broke, unnoticed because
-  # the job was advisory, is not.
-  #
-  # THAT DECISION IS ONLY USABLE IF A HUMAN CAN TELL THE TWO APART IN SECONDS, so the real work is
-  # not the blocking, it is the verdict:
-  #
-  #   * The preflight step runs BEFORE any suite. If the endpoint is not there, THAT step is the
-  #     one that goes red and its name already says so — no log-reading required. It also proves
-  #     the endpoint is usable the way the suites need (CREATE SCHEMA, and startup `options`
-  #     surviving the provider's pooler), so a transaction-mode pooler is reported as such rather
-  #     than as a pile of inexplicable parity failures.
-  #   * If the preflight passed and a suite then fails, the failure can only be the integration —
-  #     and the `classify` step says exactly that, in those words, as a run annotation and in the
-  #     job summary.
-  #
-  # The classification lives in `crates/server/src/managed_pg.rs` and is unit-tested there, not
-  # spelled out in shell here: a verdict that decides whether we ship is not something to leave in
-  # a workflow file where nothing can test it.
-  #
-  # A missing secret is a HARD failure, never a skip (`managed-pg` reports "NO MANAGED POSTGRES
-  # CONFIGURED"). A skipped required check reports green to GitHub, which is the precise trap the
-  # owner's decision exists to close.
-  #
-  # ---- CONTRIBUTIONS FROM A FORK (6j6v.waeb) -------------------------------------------------
-  #
-  # GitHub withholds repository secrets from a pull request opened from a fork. That is the
-  # event's design and not a setting: the org-wide "require approval for outside contributors"
-  # gate, which this repository already has, decides whether the run STARTS — never whether it
-  # gets credentials. So the moment this repository is public, this blocking job would be
-  # unpassable for every outside contributor: an open-source project no stranger can contribute
-  # to, which is the opposite of the reason for opening it.
-  #
-  # The two shortcuts were both refused:
-  #
-  #   * A job-level `if:` that skips the job on forks. GitHub reports a skipped required check as
-  #     GREEN — the silent pass the blocking decision exists to close, arriving exactly where
-  #     unfamiliar code does.
-  #   * `pull_request_target`, or a `workflow_run` that checks out the pull request's head. Both
-  #     run contributor-authored code with the CI database URL in its environment; one `println!`
-  #     in a test exfiltrates it.
-  #
-  # What happens instead: the job ALWAYS runs, under its own name, and its first step decides
-  # which proof this run can give (`managed-pg mode`, the rule and the words in
-  # `crates/server/src/managed_pg.rs`, unit-tested there). A fork's pull request is DECLARED —
-  # green, because the contributor cannot fix GitHub's secret policy and has to be able to merge,
-  # but carrying a `::warning::` at the top of the run page and a verdict block in the job summary
-  # that name what went unproven and where it will be. The managed proof itself is not weakened:
-  # it still blocks on every push to `main` and to every maintenance line, which is where a
-  # release is cut from, and a maintainer who wants it before merging pushes the branch into this
-  # repository. The residual risk — a fork's change breaking the managed integration is caught on
-  # `main` rather than on the pull request — is the same trade this workflow already makes
-  # deliberately for the release-profile steps above (6j6v.6e0e).
-  #
-  # The rule is impossible to ship through: `not-configured` (endpoint missing where it was meant
-  # to be there) stays a hard failure, and the fork branch is reachable ONLY from a `pull_request`
-  # event whose head repository is a fork — never from the push a release is tagged on.
-  managed-postgres:
-    needs: lint
-    runs-on: ubuntu-latest
-    # **The endpoint is a SINGLETON, so this job is one too** (nxf 6j6v.4dtx). The workflow-level
-    # group above is `ci-${{ github.ref }}` and cancels only within one ref, so two runs on
-    # DIFFERENT refs never wait for each other — and our own release procedure guarantees exactly
-    # that pair: merging a feature PR starts a push run on `main`, and cutting the version opens a
-    # release PR moments later. Both contain this job, both talk to the one free-tier project, and
-    # on 2026-08-31 both went red — the second with `remaining connection slots are reserved for
-    # roles with the SUPERUSER attribute` before its preflight could even connect.
-    #
-    # A ref-INDEPENDENT group makes the second one wait instead. Named limitation, so nobody
-    # discovers it during a release: GitHub keeps only ONE pending entry per group, so with three
-    # overlapping runs the middle one is CANCELLED rather than queued — and a cancelled required
-    # check is not a pass either. That is rarer than today's guaranteed collision, not impossible.
-    concurrency:
-      group: managed-postgres
-      cancel-in-progress: false
-    # The platform gates' budget, and it matters more here than on any of them: this job is meant
-    # to become a REQUIRED check, and every step in it talks to a third-party endpoint over the
-    # internet. A stall with no ceiling would hold the merge gate open instead of failing fast —
-    # the opposite of what a blocking check is for. The probe's own `connect_timeout` bounds each
-    # connection; this bounds the job.
-    timeout-minutes: 30
-    env:
-      # The same variable the suites already key on, so the preflight and the suites can never
-      # disagree about which database they are talking about. Empty when the secret is unset —
-      # which `managed-pg` and `tests/common` both treat as "not configured", loudly.
-      DATABASE_URL: ${{ secrets.NXF_SUPABASE_DATABASE_URL }}
-      # Gentler than the 16-connection default: a free-tier managed project has a modest client
-      # limit, and several parity tests each build their own pool and race 8 writers through it.
-      # 8 still exercises the contended path the tests exist for (they spawn 8 threads), it just
-      # does not let four parallel test binaries ask for 64 connections at once.
-      NXF_RELAY_PG_POOL_MAX_SIZE: 8
-      # Supabase signs its Postgres AND pooler certificates with its own root (Supabase Root 2021
-      # CA), which the relay's bundled Mozilla roots do not chain to — so without this the
-      # handshake fails with `UnknownIssuer`. Found by this job's very first real run, which is
-      # what it is for. Job-level so the `nxf-relay` child the E2E spawns inherits it too: the
-      # relay is the process that actually has to trust the endpoint.
-      NXF_RELAY_PG_CA_FILE: ${{ github.workspace }}/.github/certs/supabase-root-2021-ca.pem
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
-
-      # Built as its own step so a COMPILE failure cannot be mistaken for the endpoint being down.
-      # Only the verdict tool: the shipped binaries below are built after the mode is known, so a
-      # fork's pull request does not pay for an end-to-end run it is not going to make.
-      - name: Build the managed-Postgres tooling
-        run: cargo build -p nxs-server --features postgres --example managed-pg
-
-      # Before anything talks to the network: can this run reach a managed endpoint at all, and if
-      # not, is that forgivable? Writes `mode` for the guards below, and — in the one forgivable
-      # case, a pull request from a fork — the warning and the summary block that keep a deliberate
-      # skip from reading like a pass. Exits non-zero when the endpoint is missing with no excuse.
-      - name: Which proof can this run give?
-        id: proof
-        env:
-          # The SAME fact the step reads out of the event payload, read a second time from the
-          # runner's own context — the tamper detector for the one gap the fork rule cannot close
-          # on its own (PR #321 review, Integrity #2). Contributor code has already compiled in
-          # this job by now, and a build script could rewrite `$GITHUB_EVENT_PATH` or export a
-          # `GITHUB_EVENT_NAME` through `$GITHUB_ENV`. It cannot touch this: the expression is
-          # evaluated by the runner, and a step-level `env:` wins over anything `$GITHUB_ENV` set.
-          # The two must agree or the job fails — see `cross_check_fork_signal`.
-          NXF_CI_HEAD_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
-        run: cargo run -p nxs-server --features postgres --example managed-pg -- mode
-
-      - name: Build the shipped binaries the relay E2E drives
-        if: steps.proof.outputs.mode == 'managed'
-        run: cargo build -p nxs
-
-      # The name of this step is the verdict when it goes red. That is the whole design.
-      - name: Preflight — is the managed Postgres reachable and usable?
-        if: steps.proof.outputs.mode == 'managed'
-        run: cargo run -p nxs-server --features postgres --example managed-pg -- preflight
-
-      # BEFORE the suites, not after. The suites isolate every test in its own schema, and against
-      # a project that persists that is a leak — one schema per test, forever. Sweeping first lets
-      # the cutoff stay generous (2 h), which is what makes it safe to run while another CI run is
-      # mid-flight: it decides by AGE, never by guessing whose schema it is looking at. The cost is
-      # that the most recent run's schemas outlive it and are cleaned by the next run.
-      - name: Sweep scratch schemas left behind by earlier runs
-        if: steps.proof.outputs.mode == 'managed'
-        run: cargo run -p nxs-server --features postgres --example managed-pg -- sweep
-
-      # The storage layer, over TLS, against the managed endpoint. `postgres_tls` is deliberately
-      # NOT in this list: it mints its own throwaway CA and asserts a rejection path that only
-      # makes sense against a server this workflow controls.
-      # **`--test-threads=1`, and the cap belongs HERE rather than on the pool** (nxf 6j6v.4dtx).
-      # Every `connect` builds its OWN lazy r2d2 pool of `NXF_RELAY_PG_POOL_MAX_SIZE`
-      # (`store_pg.rs`), so the demand on the endpoint is (tests running at once) x (pools per test)
-      # x 8 — and `NXF_RELAY_PG_POOL_MAX_SIZE` only bounds the LAST factor. The first one is what
-      # actually multiplies: a runner has 4 cores, so libtest ran 4 of these at once, while
-      # `opstore_concurrent_appends_get_unique_contiguous_sequences_postgres` deliberately holds 8
-      # connections for minutes (that concurrency IS the property it proves). The neighbour that
-      # wanted to OPEN one during that window died on the acquire timeout — measured repeatedly, and
-      # again on the release PR for v0.75.0 with the endpoint entirely to itself, which is what
-      # ruled out cross-run contention as the cause of the recurring one.
-      #
-      # Serial, not merely narrower: a free-tier project's ceiling is not published and not stable,
-      # so the only budget this job can reason about is "one test's worth". The suite is dominated
-      # by that one long test either way, and certainty is worth more here than the minutes — this
-      # job is meant to become a required check, and a required check that flakes is worse than a
-      # slow one.
-      - name: Storage parity against the managed endpoint
-        id: managed_parity
-        if: steps.proof.outputs.mode == 'managed'
-        run: |
-          cargo test -p nxs-server --features postgres --no-fail-fast \
-            --test postgres_parity --test postgres_in_runtime -- --test-threads=1
-
-      # …and the whole path: two workspaces, the shipped relay binary, an item travelling A -> B,
-      # and a relay restart in the middle. Same test the service-container job runs.
-      - name: Two workspaces, the shipped relay, an item travelling A → B
-        if: ${{ !cancelled() && steps.proof.outputs.mode == 'managed' && (steps.managed_parity.outcome == 'success' || steps.managed_parity.outcome == 'failure') }}
-        run: |
-          cargo test -p nxs-server --features postgres --no-fail-fast --test relay_e2e \
-            -- --nocapture --test-threads=1
-
-      # The other half of the owner's rule: when something above failed, say WHICH KIND of failure
-      # it was, in plain words, at the top of the run page. Exits 0 on purpose — the job is already
-      # red from the step that actually failed, and a second red step would only add noise.
-      - name: Availability or integration?
-        if: failure() && steps.proof.outputs.mode == 'managed'
-        run: cargo run -p nxs-server --features postgres --example managed-pg -- classify
+  # NO `managed-postgres` JOB ON v2 (NEX-39). `main` runs it: the proof of v1's Postgres relay
+  # against a real Supabase project, which v1 releases still need. On `v2` storage moves to
+  # NoCentralDB (RFC 0001), so that proof no longer serves `v2`'s target, and the shared project's
+  # rate limit and the job's repository-wide concurrency group turned unrelated pull requests red or
+  # cancelled. The owner turned it off here on 2026-11-15. When `main` is merged into `v2`, keep the
+  # job deleted; `crates/server/tests/ci_runs_no_managed_postgres.rs` fails if it comes back.
+  # `postgres-parity` and `postgres-tls` above stay: they need no external service.
 
   # The durable DynamoDB backend (ddb-opstore epic) is verified against a REAL DynamoDB
   # Local instance — same rationale as postgres-parity above: the suite skips itself unless
@@ -1038,26 +978,41 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "clippy and the DynamoDB Local tests"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
 
       # The server fold (6j6v.k7w7) is the second DynamoDB adapter: `nxs-fold-ddb --features
       # dynamodb`. Its rules run on every `cargo test` against the in-memory table; only the SDK
       # adapter needs this job — the same items as in memory, the same lanes, and a recorder that
       # proves no request is a Scan.
       - name: Clippy (dynamodb backend, warnings are errors)
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo clippy -p nxs-server -p nxs-fold-ddb --all-targets --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb -- -D warnings
 
       # The purge acceptance (6j6v.f6yb, `tests/purge_acceptance.rs`) writes its target stream
       # through two real workspaces, so the shipped `nxs`/`nxf` must exist and be current (the
       # freshness gate in nxs-test-support refuses a stale one).
       - name: Build the shipped nxs/nxf binaries the purge acceptance drives
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo build -p nxs
 
       # `--no-fail-fast` and the steps after a red: see `Tests (debug)` in `quality-gates`.
       - name: DynamoDB Local tests (debug)
+        if: steps.scope.outputs.docs_only != 'true'
         id: tests_debug
         run: cargo test -p nxs-server -p nxs-fold-ddb --features nxs-server/dynamodb,nxs-fold-ddb/dynamodb --no-fail-fast
 
@@ -1095,11 +1050,25 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      # Docs-only? (NEX-36) The rule, and why every later step carries this step's verdict instead
+      # of the job carrying an `if:`, is at the same step in `quality-gates`.
+      - name: Docs-only change?
+        id: scope
+        shell: bash
+        env:
+          NXF_FULL: ${{ inputs.full }}
+          NXF_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/docs-only.sh decide "cargo install of nxf-relay with the dynamodb feature"
+
       - uses: dtolnay/rust-toolchain@1.99.1
+        if: steps.scope.outputs.docs_only != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
       - name: cargo install nxf-relay --features dynamodb, as a consumer does
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo install --locked --path crates/server --features dynamodb --bin nxf-relay --root "$RUNNER_TEMP/relay"
       - name: The installed relay runs
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           out=$("$RUNNER_TEMP/relay/bin/nxf-relay" --help 2>&1 || true)
           echo "$out"

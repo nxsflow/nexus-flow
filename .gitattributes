@@ -1,0 +1,3 @@
+# The docs-only rule (NEX-36) runs under Git Bash on the Windows CI runner, whose git checks text out
+# with CRLF line endings (core.autocrlf=true); bash would read each CR as part of its line.
+.github/scripts/docs-only.sh text eol=lf
