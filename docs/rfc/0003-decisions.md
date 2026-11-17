@@ -41,6 +41,8 @@ The module owns four collections, named by RFC 0001's rule. One decision is one 
 
 *Not taken:* topics as `nc.set(nc.string())`, tickets as `nc.links("ticketsTicket")` and supersedes as `nc.links("decisionsDecision")` on the decision itself. They read more naturally, but none of them can be indexed in NoCentralDB v1, so every filter would read the whole log. Because a decision and the objects that belong to it are written in one change and never changed again (see "Append-only"), the three join collections cannot drift from the decision.
 
+RFC 0002 asks NoCentralDB for indexes over sets and many links (requirement R14). The join collections stay when R14 lands, and are the design, not a stop-gap. The model only grows (RFC 0001, "The model"), so they could not be removed, only deprecated. Moving to set fields would also need every decision written before R14 to gain those fields, and a decision takes no write after the change that creates it. Readers would then have to look in two places for the same data, with no gain. R14 would change nothing in this module.
+
 #### `decisionsDecision`
 
 | Field | Type | Holds | In a file today |
@@ -241,7 +243,7 @@ GENESIS.md reserves these for the owner:
 
 ### What nexus-flow needs from NoCentralDB
 
-Besides RFC 0001's requirements, of which this RFC rests on R6 (who signed a change, for `author` and for "edited") and R7 (computed views, for "in force"):
+Besides RFC 0001's requirements, of which this RFC rests on R6 (who signed a change, for `author` and for "edited") and R7 (computed views, for "in force"), and apart from RFC 0002's R14 (indexes over sets and many links), which this RFC does not need (see "The collections"):
 
 - **R12. Write-once collections.** A collection the model declares write-once: its objects take field writes only in their creating change and cannot be deleted or restored, and every member parks any other write to them, so that the decision log is append-only against every writer, not only against those that go through nexus-flow.
 - **R13. Erasing an unmarked value.** A work order, signed off as a shred is, that removes one field's value from the log, the view and the archive of every member and keeps the change's signature checkable, for personal data written by mistake into a field the schema could not mark.
