@@ -45,7 +45,7 @@ The module owns five collections, all in the repository space (RFC 0001, "The mo
 | `ticketsTicket` | Ticket, epics included | Its fields, its edges to other tickets in the space, its labels |
 | `ticketsNote` | Note on a ticket | The append-only comment stream, v1's notes |
 | `ticketsWork` | PR, branch or artifact linked to a ticket | What closes a ticket as done, and what "on main" is derived from |
-| `ticketsReference` | Reference from a ticket to an object in another space | Goals a ticket serves, tickets of other repositories, requests |
+| `ticketsReference` | Reference from a ticket to an object in another space | Goals a ticket serves, tickets of other repositories it cites |
 | `ticketsSettings` | Repository space (one) | The space's ticket key, and which member mints numbers (see "Ticket ids") |
 
 **Edges inside the space are fields of the ticket**, as NoCentralDB's own task model has them (NoCentralDB RFC 0005, "The schema in TypeScript"): `parent` is a single link, `dependsOn`, `contributesTo` and `mentions` are sets of links. A set of links merges as a set, add wins (NoCentralDB RFC 0004, "Sets"), which is exactly v1's observed-remove edge set, so the move keeps the edges' meaning. A dependency field is also what NoCentralDB's computed reach is written over (`nc.reach("dependsOn", …)`, NoCentralDB RFC 0005), so readiness can move into NoCentralDB without a migration once R7 lands. *Not taken:* an edge collection with one object per edge, which would make both directions indexable today but would have to be migrated into a links field for `nc.reach`, and would let two members create the same edge twice.
@@ -81,6 +81,7 @@ The module owns five collections, all in the repository space (RFC 0001, "The mo
 | `contributesTo` | `nc.links("ticketsTicket")` | `contributes_to` edges | Tickets it contributes to, without blocking |
 | `mentions` | `nc.links("ticketsTicket")` | `mentions` edges | Tickets it cites or is related to (see "Mentions") |
 | `labels` | `nc.set(nc.string())` | labels | The team's labels, such as `rfc` |
+| `request` | `nc.ref("requestsRequest")` | new | The request in the coordination space the ticket serves or waits for, if any; designed in RFC 0009 (see "References out of the space") |
 | `createdAt`, `updatedAt` | `nc.string()` | item timestamps | RFC 3339 instants of the create and of the last write, written by `nxs` |
 | `createdBy`, `updatedBy` | `nc.string()` | op `author` | Member ids of the creator and of the last writer: RFC 0001's author stop-gap, until R6 |
 
@@ -104,13 +105,14 @@ Every query runs through a declared index (NoCentralDB RFC 0006, "Declared index
 | | `byParent` | **`parent`**, `key` | an epic's children: `list --in`, the archive cascade, the epic tier of `next` |
 | | `byAssignee` | **`assignee`, `status`** | what a member or person holds; the owner's queue |
 | | `byType` | **`type`, `status`, `archivedAt`** | `list --type`, open questions to the owner |
+| | `byRequest` | **`request`** | a repository's tickets for one request (RFC 0009) |
 | | `byUpdatedAt` | `updatedAt` desc | what changed since a time, for the daily note (RFC 0007) |
 | `ticketsNote` | `byTicket` | **`ticket`**, `createdAt` | a ticket's notes, oldest first |
 | `ticketsWork` | `byTicket` | **`ticket`** | a ticket's work links |
 | | `byBranch` | **`branch`** | the ticket of the checked-out branch |
 | | `byUrl` | **`url`** | recording a PR's merge or close by its URL |
 | `ticketsReference` | `byTicket` | **`ticket`**, `kind` | a ticket's references |
-| | `byTarget` | **`target`**, `kind` | the tickets that serve a goal, wait for a request or came from one |
+| | `byTarget` | **`target`**, `kind` | the tickets that serve a goal, or cite another repository's ticket |
 
 A fixed key equals NoCentralDB's "unset" too (NoCentralDB RFC 0006, "Declared indexes": the equality prefix is written `k IS ?`), so `archivedAt` unset in an equality prefix selects the unarchived tickets.
 
@@ -192,7 +194,7 @@ A link stays inside its space (NoCentralDB RFC 0004, "Links"), so a ticket refer
 | Field | Type | Holds |
 | --- | --- | --- |
 | `ticket` | `nc.link("ticketsTicket")` | The referring ticket |
-| `kind` | `nc.oneOf(["serves", "waitsFor", "cites", "from"])` | What the reference means |
+| `kind` | `nc.oneOf(["serves", "cites"])` | What the reference means |
 | `target` | `nc.ref(["ticketsTicket"])` | The target's space id and object id (NoCentralDB RFC 0004, "References") |
 | `label` | `nc.string()` | The target's readable name when the reference was written, such as `NOC-12` or a goal's title |
 | `createdAt`, `createdBy` | `nc.string()` | As for work links |
@@ -200,15 +202,15 @@ A link stays inside its space (NoCentralDB RFC 0004, "Links"), so a ticket refer
 | Kind | Target | Means |
 | --- | --- | --- |
 | `serves` | A goal in the coordination space | The ticket serves this goal (GENESIS.md, "Goals set the focus"). A ticket may serve several goals, or none yet. |
-| `waitsFor` | Another repository's ticket, or a request | The ticket cannot start before the target is done |
 | `cites` | Another repository's ticket | It is cited, without blocking: the cross-space form of a mention |
-| `from` | A request | pm made this ticket from the request (GENESIS.md, "Work across repositories") |
 
-`target` names `ticketsTicket` only today, since every repository uses the same model: a ticket of another repository is a `ticketsTicket` in that repository's space. RFC 0005 adds `goalsGoal` and RFC 0009 adds `requestsRequest` to its targets when they declare those collections; adding a target is an additive change (NoCentralDB RFC 0005, "The additive-change rule").
+`target` names `ticketsTicket` only today, since every repository uses the same model: a ticket of another repository is a `ticketsTicket` in that repository's space. RFC 0005 adds `goalsGoal` to its targets when it declares that collection, and designs what serving a goal means for ranking; adding a target is an additive change (NoCentralDB RFC 0005, "The additive-change rule").
+
+**A request is the ticket's `request` field, not a reference object.** RFC 0009 designs requests between repositories and adds the field and its index `byRequest` to the ticket; this RFC declares both. A ticket answers or waits for at most one request, and "which of our tickets belong to this request" is one equality lookup. Whether the ticket serves the request or waits for it follows from whether the request is addressed to this repository (RFC 0009, "From a request to tickets"). Waiting for another repository's work goes through a request, never through a reference to its ticket, since a pm is not a member of another repository's space (GENESIS.md, "Work across repositories").
 
 **A reference resolves per reader.** It is `ok`, `notAccessible` or `missing` (NoCentralDB RFC 0005, "References into another space"), and the state differs from member to member: a coder is not a member of the coordination space (RFC 0001, "Roles in a space") and sees a goal as `notAccessible`. `label` is what such a reader shows instead of the target. Nothing derived from a reference is stored.
 
-`nxs ticket ref <key> --serves|--waits-for|--cites|--from <target> [--label <text>]` adds a reference, and `--remove` deletes it. `<target>` is `<space id>/<object id>`, or a key of a ticket in another space the member holds, which `nxs` then resolves and labels itself.
+`nxs ticket ref <key> --serves|--cites <target> [--label <text>]` adds a reference, and `--remove` deletes it. `<target>` is `<space id>/<object id>`, or a key of a ticket in another space the member holds, which `nxs` then resolves and labels itself.
 
 ### Notes
 
@@ -230,12 +232,12 @@ Nothing below is stored (GENESIS.md, "Done is not yet on main"). The storage cra
 - **`done`:** `status` is `closed` and `resolution` is `done`.
 - **`on_main`:** for a done ticket, true when a commit reachable from the base branch names its key in its title, a range included, or when every work link of the ticket is an artifact (GENESIS.md: such a ticket is on main once it is done); false otherwise. For a ticket that is not done it is false. Each work link has an `on_main` of its own: a PR when its recorded `commit` is reachable from the base branch, or, without one, when a commit on the base branch names the key and the PR's number (`(#143)`, the squash default); a branch when its tip is reachable; an artifact always. The base branch is `nexus-flow.toml`'s `[git] base` (RFC 0001). A caller without a checkout gets `null`, not known, for both.
 - **A dependency is resolved** when its ticket is done and on main, or closed as `canceled` or `replaced`, or deleted. A done dependency that is not yet on main still blocks: dependent tickets may stack on it, building on its branch, but count as unblocked only once it is on main (GENESIS.md). For a caller without a checkout, a done dependency resolves to `null`, and so does the readiness of the tickets it blocks.
-- **A `waitsFor` reference is resolved** when its target is `ok` and done as the reader sees it: a ticket whose `status` is `closed` and `resolution` `done`, or a request whose status is `done`. A target the reader cannot resolve leaves the ticket blocked, so no session takes up work it cannot see is free.
-- **`ready(now)`:** the ticket is `open`, not archived, not in a dependency cycle, every dependency and `waitsFor` reference is resolved, and `deferUntil` is unset or not after `now`.
-- **`blocked`:** `open`, not archived, and some dependency or `waitsFor` reference is unresolved, or it is in a cycle.
+- **Neither a reference nor a request blocks.** Readiness is computed from the repository space alone (RFC 0001, "Derived state"), and a reference's state differs from member to member, so a ticket that waits for a request would be ready for pm and not for a coder who cannot resolve it (NoCentralDB RFC 0004, "How a reference resolves"). `nxs` shows the request's status next to such a ticket instead, and pm, who holds both spaces, hands it out when the request is done (RFC 0009).
+- **`ready(now)`:** the ticket is `open`, not archived, not in a dependency cycle, every dependency is resolved, and `deferUntil` is unset or not after `now`.
+- **`blocked`:** `open`, not archived, and some dependency is unresolved, or it is in a cycle.
 - **`deferred(now)`:** `open`, not blocked, with `deferUntil` after `now`.
 - **`next(now)`:** the ready tickets and those in progress, in the order of "What the model is generated from", tiered as v1 tiers it: work that can close now, then each started epic with its open children, then the rest. Ranking by goals is priority 2.
-- **Flags**, each a string in a ticket's `flags`: `cycle` (it is in a dependency cycle; no edge is ever removed for it, as in v1), `holder_gone` (it is `in_progress` and its assignee is a member that is no longer one; NOC-170 stayed In Progress for four days with nobody on it, NEX-29), `pr_closed_unmerged` (a PR linked to it was closed without merge after its last close), and `unresolved_reference` (a `waitsFor` reference that this reader cannot resolve).
+- **Flags**, each a string in a ticket's `flags`: `cycle` (it is in a dependency cycle; no edge is ever removed for it, as in v1), `holder_gone` (it is `in_progress` and its assignee is a member that is no longer one; NOC-170 stayed In Progress for four days with nobody on it, NEX-29), and `pr_closed_unmerged` (a PR linked to it was closed without merge after its last close).
 
 The derived state is as fresh as the last sync for the tickets, and as the last `git fetch` of the base branch for "on main" (GENESIS.md, "Limits").
 
@@ -253,7 +255,7 @@ The ticket commands are one noun and a verb, `nxs ticket <verb>`, as RFC 0001's 
 | `nxs ticket archive <key>...`, `nxs ticket unarchive <key>...` | Hides and shows, with v1's cascades | `archive`, `unarchive` |
 | `nxs ticket note <key> <text \| -> [--reply-to <note id>]` | Adds a note | `note add` |
 | `nxs ticket work <key> (--pr <url> \| --branch <name> \| --artifact <url>) [--state <state>] [--commit <sha>]` | Adds or updates a work link | new |
-| `nxs ticket ref <key> (--serves \| --waits-for \| --cites \| --from) <target> [--label <text>] [--remove]` | Adds or removes a reference | new |
+| `nxs ticket ref <key> (--serves \| --cites) <target> [--label <text>] [--remove]` | Adds or removes a reference | new |
 | `nxs ticket show <key>` | One ticket, with its notes, links and derived state | `show` |
 | `nxs ticket list [--status <status>] [--type <type>]... [--in <key>] [--label <label>] [--assignee <identity>] [--owner] [--sort id\|rank] [--limit <n>] [--paginate] [--token <token>]` | Lists tickets | `list` |
 | `nxs ticket next`, `ready`, `blocked`, `deferred`, `closed`, `archived`, `recap` | v1's lanes, with v1's flags | the same |
@@ -264,7 +266,7 @@ The ticket commands are one noun and a verb, `nxs ticket <verb>`, as RFC 0001's 
 
 v1's `nxf thread` (links to chat threads) and `nxf entry` (list fields) have no counterpart: chat data lapses (NEX-20), and the model has no custom fields (NEX-23).
 
-**JSON.** A ticket in `list` and the lanes is an object with `id` (the object id), `key`, `type`, `title`, `status`, `resolution`, `priority` (the ordinal, or `null`), `assignee` (`{kind, id, role}` or `null`), `parent` (a key or `null`), `labels`, `due`, `defer_until`, `created_at`, `updated_at`, `closed_at`, `archived_at`, and the derived `ready`, `blocked`, `deferred`, `done`, `on_main` (`true`, `false` or `null`) and `flags`. `show` adds `description`, `design`, `completion_criterion`, `closing_comment`, `replaced_by`, `replaces`, `deps` and `dependents` (each `{key, status, done, on_main}`), `children`, `contributes_to`, `mentions`, `mentioned_by`, `notes` (each `{id, body, reply_to, created_at, created_by}`), `work` (each `{kind, url, branch, state, commit, on_main, created_at}`) and `references` (each `{kind, space, id, label, state}`, where `state` is the reader's: `ok`, `not_accessible` or `missing`). Keys are snake_case, as v1's; empty arrays and unset values are written as `[]` and `null`, so every record of a command has the same keys. Ordering follows v1's determinism rules (RFC 0001, "Reading and writing"). An error is v1's error object, with the new codes `ambiguous_key`, `key_not_found`, `close_needs_work`, `close_needs_replacement` and `not_a_ticket_space`.
+**JSON.** A ticket in `list` and the lanes is an object with `id` (the object id), `key`, `type`, `title`, `status`, `resolution`, `priority` (the ordinal, or `null`), `assignee` (`{kind, id, role}` or `null`), `parent` (a key or `null`), `labels`, `due`, `defer_until`, `created_at`, `updated_at`, `closed_at`, `archived_at`, `request` (RFC 0009's `{id, relation, status}`, with `status` `null` for a reader who cannot resolve the request, or `null`), and the derived `ready`, `blocked`, `deferred`, `done`, `on_main` (`true`, `false` or `null`) and `flags`. `show` adds `description`, `design`, `completion_criterion`, `closing_comment`, `replaced_by`, `replaces`, `deps` and `dependents` (each `{key, status, done, on_main}`), `children`, `contributes_to`, `mentions`, `mentioned_by`, `notes` (each `{id, body, reply_to, created_at, created_by}`), `work` (each `{kind, url, branch, state, commit, on_main, created_at}`) and `references` (each `{kind, space, id, label, state}`, where `state` is the reader's: `ok`, `not_accessible` or `missing`). Keys are snake_case, as v1's; empty arrays and unset values are written as `[]` and `null`, so every record of a command has the same keys. Ordering follows v1's determinism rules (RFC 0001, "Reading and writing"). An error is v1's error object, with the new codes `ambiguous_key`, `key_not_found`, `close_needs_work`, `close_needs_replacement` and `not_a_ticket_space`.
 
 **The seam.** Each command has its counterpart on `Engine` (the decision on CLI and library parity stays in force), with the derived state computed inside, so manufakt.io never re-implements a rule:
 
@@ -287,7 +289,7 @@ Named here, designed later by rewriting this RFC:
 - **Subscriptions to ticket comments.** A session learns that the owner answered as soon as its copy syncs, without polling (GENESIS.md, "Decide first, then build"). It is a `nxs ticket subscribe <key>` on `Engine::subscribe` (RFC 0001), which NoCentralDB already offers (R3).
 - **Ranking by goals.** pm ranks tickets by the goals in focus, through the `serves` references (GENESIS.md, "Goals set the focus"); RFC 0005 designs the rule. Until then `priority` orders `next`, as in v1, and the move keeps it (NEX-29).
 - **Which tickets serve a new goal.** A model's proposal to the owner when a goal is added (GENESIS.md); RFC 0005.
-- **A request's tickets.** How pm turns a request into tickets and reports back; RFC 0009 designs it, on the `from` and `waitsFor` references above.
+- **A request's tickets.** How pm turns a request into tickets and reports back; RFC 0009 designs it, on the ticket's `request` field above.
 
 ### Public surfaces this RFC brings
 
@@ -296,7 +298,7 @@ GENESIS.md reserves these for the owner:
 - **Commands:** the `nxs ticket` verbs and flags in the table above.
 - **JSON output:** the ticket record, `show`'s additions, the `assignee` object, the `flags` values and the error codes above.
 - **Library seam:** the `Engine::ticket*` symbols and their types above.
-- **Stored formats:** the collections `ticketsTicket`, `ticketsNote`, `ticketsWork`, `ticketsReference` and `ticketsSettings` with their fields and indexes; the `type`, `status`, `resolution`, `kind` and `state` values; the key format; the `member:` and `account:` prefixes of `assignee`; and the branch-name rule.
+- **Stored formats:** the `request` field and `byRequest` index, which RFC 0009 brings and this RFC declares; the collections `ticketsTicket`, `ticketsNote`, `ticketsWork`, `ticketsReference` and `ticketsSettings` with their fields and indexes; the `type`, `status`, `resolution`, `kind` and `state` values; the key format; the `member:` and `account:` prefixes of `assignee`; and the branch-name rule.
 
 ### What nexus-flow needs from NoCentralDB
 
@@ -315,7 +317,7 @@ GENESIS.md reserves these for the owner:
 - **Concurrent edits of one text keep one,** and the other as a readable conflict, until NoCentralDB's rich text exists.
 - **A PR's state is as fresh as the last time someone recorded it.** `nxs` does not ask GitHub; a PR merged or closed without anyone recording it is still `open` in the ticket.
 - **"On main" is as fresh as the last `git fetch`** of the base branch, and `null` for a caller without a checkout, and so is the readiness of a ticket whose only open blocker is done but not yet known to be on main.
-- **A reference blocks per reader.** A `waitsFor` reference that a reader cannot resolve keeps the ticket blocked for that reader, though it may be free for pm, who sees the target.
+- **Waiting for another repository does not block readiness.** A ticket that waits for a request reads as ready once its own dependencies are; pm, who sees the request's status, holds it back until the request is done (RFC 0009).
 - **Filters by label, reverse edges and search cost more than their result** until R12 and R13: they walk the tickets read for the derived state, or a local cache.
 - **The history of a ticket cannot be read** until R6. Its changes are all in the space's log and signed; only reading them back with their authors waits.
 - **Who wrote a ticket, note, work link or reference is a field,** not a checked signature, until R6 (RFC 0001, "Who decided").
