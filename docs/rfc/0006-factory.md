@@ -37,6 +37,7 @@ factory/
     coder.md        # shipped
     <name>.md       # a team's own roles, such as legal or marketing
   merge-gate/       # the merge rules, their JSON schema and script; the merge gate's RFC designs what is inside
+  status-note.md    # the daily note's template; RFC 0007 designs its content
 ```
 
 **The path is fixed.** Every repository keeps the factory in `factory/`, so every agent's instructions can point at the same place, and the factories nexus-flow follows already do (nocentraldb's and this repository's). *Not taken:* a setting in `nexus-flow.toml` that names another folder (a setting earns its place only when a real team needs it, GENESIS.md, "Every default belongs to the team", and one can be added later without breaking anyone); and a hidden folder or `.nxs/` (the owner reviews these files in pull requests, so they should be as visible as the code; `.nxs/` is v1's workspace and ignored in git).
@@ -79,7 +80,7 @@ While work runs, pm and the owner need to know which role holds which lane on wh
 
 ### Installing the shipped defaults
 
-nexus-flow ships the least a factory needs to run (GENESIS.md, the `factory` row): `FACTORY.md`, a `CONFIG.md` to fill in, `roles/pm.md`, `roles/coder.md`, and, once the merge gate's RFC is decided, its minimal set under `merge-gate/`. Their text is a default template, which the owner decides in its own ticket; this RFC decides how they are kept and installed.
+nexus-flow ships the least a factory needs to run (GENESIS.md, the `factory` row): `FACTORY.md`, a `CONFIG.md` to fill in, `roles/pm.md`, `roles/coder.md`, the daily note's template `status-note.md`, whose content RFC 0007 designs, and, once the merge gate's RFC is decided, its minimal set under `merge-gate/`. Each one's text is a default template, which the owner decides in its own ticket; this RFC decides how they are kept and installed.
 
 **Where nexus-flow keeps them.** In nexus-flow's source tree under `templates/factory/`, in the layout they are installed in, embedded in `nxs` at build time, so installing needs no network. Beside them, `templates/factory/shipped.toml` lists, for each path, the SHA-256 of every version nexus-flow has ever shipped, oldest first. A release adds to the list and never removes from it, so `nxs` recognises an old default however many releases ago it was installed. A path nexus-flow stops shipping stays in the list, marked `retired = true`. This file is part of nexus-flow's source, not of a team's repository.
 
