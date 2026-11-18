@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::bridge_resume::{resume, ResumeOutcome};
+use crate::bridge_targets::check_slot_targets;
+pub use crate::bridge_targets::UnresolvedTarget;
 pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
@@ -100,6 +102,8 @@ pub enum Refused {
         message: MessageId,
     },
     Compile(String),
+    /// A slot the flow would start names a persona the declarations do not hold (6j6v.yw6x).
+    UnresolvedTarget(UnresolvedTarget),
     Store(StoreError),
     Port(PortError),
 }
@@ -131,6 +135,7 @@ impl std::fmt::Display for Refused {
                 "message {message} is posted but the run has not heard of it: run the command again"
             ),
             Self::Compile(what) => write!(f, "the channel does not compile: {what}"),
+            Self::UnresolvedTarget(what) => write!(f, "{what}"),
             Self::Store(error) => write!(f, "{error}"),
             Self::Port(error) => write!(f, "{error}"),
         }
@@ -175,6 +180,7 @@ pub fn commission(
     let review = review_of(ctx, &flow);
     let def =
         compile(&flow, &review).map_err(|refusal| Refused::Compile(format!("{refusal:?}")))?;
+    check_slot_targets(ctx, &def)?;
     let run = RunId::new(Ulid::new());
     let root_thread = mint_thread_id();
     let hash = def.flow_ref();

@@ -1126,3 +1126,142 @@ fn a_v2_channel_the_new_engine_cannot_run_is_refused_before_anything_is_written(
         .unwrap_or(0);
     assert_eq!(runs, 0, "no run was opened");
 }
+
+// ---- a step target the declarations cannot resolve (6j6v.yw6x) ---------------------------------
+
+/// `coding-v2` in miniature with a judge step on a nested channel, as the repository declares it. `panel`
+/// is written into `channels.yaml` only by the case that wants it resolvable.
+fn judged(panel: Option<&str>) -> String {
+    let mut channels = "\
+- name: judged-v2
+  engine: v2
+  members: []
+  working_tree: exclusive
+  steps:
+    - id: build
+      target: coder
+      next: judge
+    - id: judge
+      target: panel
+"
+    .to_owned();
+    if let Some(members) = panel {
+        channels.push_str(&format!(
+            "- name: panel\n  members: [{members}]\n  on_complete: summarize\n  summary_prompt: Consolidate.\n"
+        ));
+    }
+    channels
+}
+
+fn declare(dir: &Path, channels: &str) {
+    std::fs::write(dir.join(".nxs-personas").join("channels.yaml"), channels).unwrap();
+}
+
+/// What `run.sqlite` holds under `prefix`, or nothing where the file was never created.
+fn run_keys(dir: &Path, prefix: &str) -> Vec<(String, Vec<u8>)> {
+    let path = run_sqlite(dir);
+    if !path.exists() {
+        return Vec::new();
+    }
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key")
+        .unwrap();
+    let rows = stmt
+        .query_map([format!("{prefix}%")], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    rows
+}
+
+fn assert_nothing_written(dir: &Path, chat_ops_before: i64) {
+    assert_eq!(chat_ops(dir), chat_ops_before, "no chat op was written");
+    assert!(run_keys(dir, "flow/").is_empty(), "no flow was stored");
+    assert!(
+        run_keys(dir, "pending/").is_empty(),
+        "no commission is pending"
+    );
+    let runs = nexus_run_host::bridge::open_store(&run_sqlite(dir))
+        .unwrap()
+        .map(|store| store.open_runs().unwrap().len())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "no run was opened");
+}
+
+/// **A step whose target is neither a persona nor a channel is refused at the send** — the b7ck smoke's
+/// FINDING H: with `panel` unresolvable the compile used to turn `judge` into `single: panel`, store it
+/// under the flow hash, and the run could only fail when judge was due to start. Refused now before
+/// anything is written, naming the step, the target and the port in the start refusal's vocabulary.
+#[test]
+fn a_step_target_that_is_neither_a_persona_nor_a_channel_is_refused_before_anything_is_written() {
+    let ws = workspace();
+    declare(ws.path(), &judged(None));
+    let before = chat_ops(ws.path());
+    let refused = send(&engine(ws.path()), the_owner(), "judged-v2").expect_err("panel is unknown");
+    assert_eq!(refused.kind, ErrorKind::Validation, "{refused}");
+    for named in ["`judge`", "`panel`", "declarations.persona"] {
+        assert!(refused.msg.contains(named), "names {named}: {refused}");
+    }
+    assert_nothing_written(ws.path(), before);
+}
+
+/// The same for a member of a nested channel that resolves: a fan-out slot starts a persona too.
+#[test]
+fn a_fan_out_member_no_persona_declares_is_refused_before_anything_is_written() {
+    let ws = workspace();
+    declare(ws.path(), &judged(Some("reviewer, ghost")));
+    let before = chat_ops(ws.path());
+    let refused = send(&engine(ws.path()), the_owner(), "judged-v2").expect_err("ghost is unknown");
+    assert_eq!(refused.kind, ErrorKind::Validation, "{refused}");
+    for named in ["`judge`", "`ghost`", "declarations.persona"] {
+        assert!(refused.msg.contains(named), "names {named}: {refused}");
+    }
+    assert!(
+        !refused.msg.contains("`reviewer`"),
+        "names only the one that fails: {refused}"
+    );
+    assert_nothing_written(ws.path(), before);
+}
+
+/// The check takes nothing from a nested channel that resolves: `judge` still compiles to `fan_out`.
+#[test]
+fn a_nested_channel_that_resolves_still_compiles_to_a_fan_out() {
+    let ws = workspace();
+    declare(ws.path(), &judged(Some("coder, reviewer")));
+    send(&engine(ws.path()), the_owner(), "judged-v2").expect("both resolve");
+    let flows = run_keys(ws.path(), "flow/");
+    assert_eq!(flows.len(), 1, "one flow stored");
+    let def: serde_json::Value = serde_json::from_slice(&flows[0].1).unwrap();
+    let judge = def["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "judge")
+        .unwrap();
+    assert_eq!(
+        judge["kind"]["fan_out"]["members"],
+        serde_json::json!(["coder", "reviewer"]),
+        "judge compiled to {}",
+        judge["kind"]
+    );
+}
+
+#[test]
+fn nxc_send_refuses_a_flow_whose_step_target_resolves_to_nothing() {
+    let ws = workspace();
+    declare(ws.path(), &judged(None));
+    let before = chat_ops(ws.path());
+    let out = nxc(ws.path())
+        .args(["send", "--to", "judged-v2", "--no-ref", "build it"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&out);
+    for named in ["`judge`", "`panel`", "declarations.persona"] {
+        assert!(stderr.contains(named), "names {named}: {stderr}");
+    }
+    assert_nothing_written(ws.path(), before);
+}

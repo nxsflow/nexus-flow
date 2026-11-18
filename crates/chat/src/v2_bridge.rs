@@ -81,7 +81,9 @@ pub fn store_refusal(path: &Path, reason: &str) -> NxfError {
 fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     match refused {
         Refused::Store(error) => store_refusal(path, &error.to_string()),
-        Refused::Compile(_) => NxfError::validation(refused.to_string()),
+        Refused::Compile(_) | Refused::UnresolvedTarget(_) => {
+            NxfError::validation(refused.to_string())
+        }
         Refused::Port(_) => NxfError::io(refused.to_string()),
         other => NxfError::new(crate::error::ErrorKind::Conflict, other.to_string()),
     }
