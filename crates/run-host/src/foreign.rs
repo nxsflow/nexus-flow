@@ -34,7 +34,7 @@ impl Host {
         if self.cache(run).logged.insert(LOGGED.to_owned()) {
             self.log(
                 run,
-                "is not claimed here: it was commissioned under workspace",
+                "is not claimed here (`nxc status` names the exit): it was commissioned under workspace",
                 workspace,
             );
         }

@@ -479,6 +479,8 @@ impl Host {
             let Phase::Queued { behind } = &state.phase else {
                 continue;
             };
+            // After the load on purpose: only a QUEUED run of another workspace is refused and logged, and a
+            // stale run is rare enough that its load per tick costs nothing worth a second path (6j6v.4b43).
             if self.foreign(&row.workspace_id) {
                 self.note_foreign(&row.run, &row.workspace_id);
                 continue;

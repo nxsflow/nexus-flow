@@ -82,6 +82,11 @@ fn a_run_of_another_workspace_is_never_claimed_and_starts_nothing() {
         .collect();
     assert_eq!(named.len(), 1, "one line, not one per tick: {lines:?}");
     assert!(named[0].contains("workspace"), "{}", named[0]);
+    assert!(
+        named[0].contains("nxc status"),
+        "the line points to the exit: {}",
+        named[0]
+    );
 }
 
 #[test]
@@ -105,6 +110,24 @@ fn status_names_the_other_workspace_and_how_to_end_the_run() {
         next.contains(&format!("nxc withdraw --thread {}", receipt.root_thread)),
         "{next}"
     );
+}
+
+/// The annotation is for a run of another workspace only: a run of this one reads as it did before.
+#[test]
+fn status_of_a_run_of_this_workspace_names_no_other_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    let receipt = rig.commission("this workspace's run");
+    for _ in 0..3 {
+        rig.tick();
+    }
+    let status = bridge::status(&rig.bridge, &receipt.run, rig.now())
+        .unwrap()
+        .expect("the run is known");
+    let waiting = status.waiting_for.unwrap_or_default();
+    assert!(!waiting.contains("a service of workspace"), "{waiting}");
+    let next = status.next_action.unwrap_or_default();
+    assert!(!next.contains("commissioned under workspace"), "{next}");
 }
 
 /// The question the ticket asks: the claim key is per workspace id, so before this a run under `local` and a run
@@ -307,4 +330,41 @@ fn the_owners_exit_is_refused_to_a_session() {
         bridge::withdraw_as_owner(&rig.bridge, &receipt.root_thread, &session, "x", rig.now()),
         Err(Refused::NotTheRequester)
     );
+}
+
+/// Before the host opens the root there is nowhere to post: the withdrawal goes straight into the inbox and
+/// nothing is returned. Once the root is open it is posted there, and the message is returned.
+#[test]
+fn the_owners_withdrawal_posts_only_once_the_root_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rig = Rig::scripted(dir.path(), CLOCK_START, Box::new(replies_pass));
+    let unopened = stale_commission(&rig);
+    assert_eq!(
+        bridge::withdraw_as_owner(
+            &rig.bridge,
+            &unopened.root_thread,
+            &owner(),
+            "stale",
+            rig.now()
+        ),
+        Ok(None)
+    );
+    let opened = stale_commission(&rig);
+    let check = opened.run.clone();
+    rig.run_until(10, move |rig| rig.state(&check).root_message.is_some());
+    let posted = bridge::withdraw_as_owner(
+        &rig.bridge,
+        &opened.root_thread,
+        &owner(),
+        "stale",
+        rig.now(),
+    )
+    .expect("the owner withdraws");
+    assert!(
+        posted.is_some(),
+        "the withdrawal is posted on the open root"
+    );
+    for run in [&unopened.run, &opened.run] {
+        rig.run_to_finished(run);
+    }
 }

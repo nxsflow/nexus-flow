@@ -19,7 +19,7 @@ use nexus_chat::surface::{SendToRefs, SendToRequest};
 use nexus_chat::timer::TimerConfig;
 use nexus_chat::worker::WorkerConfig;
 use nexus_chat::workspace::{chat_config, setup, ChatWorkspaceExt, Workspace};
-use nexus_run_contracts::{EventBody, LivenessPolicy, RunId, Timestamp, WithdrawnBy};
+use nexus_run_contracts::{EventBody, LivenessPolicy, RunId, RunStore, Timestamp, WithdrawnBy};
 use nexus_run_host::bridge::{self, BridgeCtx, SqliteRunStore};
 use nexus_run_host::ports::Refs;
 use nexus_run_host::test_support::scripted_backend::{pass, ScriptedBackend};
@@ -215,31 +215,100 @@ fn the_owners_withdrawal_is_posted_on_the_root_in_the_owners_own_name() {
     assert_eq!(withdrawals(ws.path(), &run), [WithdrawnBy::Owner]);
 }
 
+/// A session is never the owner, whatever it presents: each kind is refused in its own words, before
+/// anything is written.
+fn refused_with(
+    ws: &TempDir,
+    eng: &Engine,
+    run: &RunId,
+    root: &str,
+    caller: Caller<'_>,
+    words: &[&str],
+) {
+    let refused = eng.withdraw(caller, root).expect_err("a session");
+    assert_eq!(refused.kind, ErrorKind::Forbidden, "{refused}");
+    for word in words {
+        assert!(refused.msg.contains(word), "`{word}` in: {refused}");
+    }
+    assert!(withdrawals(ws.path(), run).is_empty());
+}
+
 #[test]
-fn no_session_withdraws_a_run_of_another_workspace() {
+fn a_session_of_a_run_on_the_new_engine_does_not_withdraw_a_run_of_another_workspace() {
     let ws = workspace();
     let eng = engine(ws.path());
     let (run, root) = stale_run(ws.path());
-    let session = "s-coder";
-    chat_store(ws.path())
-        .create_pending_session(session, "coder")
+    // A session the run store routes, as one of its slots would be.
+    store(ws.path())
+        .compare_and_set("session/s-v2", None, Some(root.as_bytes()))
         .unwrap();
-    for caller in [
-        Caller {
-            session: Some(session),
-            actor: Some("coder"),
-            now: Some(NOW),
-        },
-        Caller {
-            session: Some("s-unknown"),
-            actor: Some("owner"),
-            now: Some(NOW),
-        },
-    ] {
-        let refused = eng.withdraw(caller, &root).expect_err("a session");
-        assert_eq!(refused.kind, ErrorKind::Forbidden, "{refused}");
+    let caller = Caller {
+        session: Some("s-v2"),
+        actor: Some("owner"),
+        now: Some(NOW),
+    };
+    refused_with(&ws, &eng, &run, &root, caller, &["new engine", "s-v2"]);
+}
+
+#[test]
+fn a_persona_session_does_not_withdraw_a_run_of_another_workspace() {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let (run, root) = stale_run(ws.path());
+    chat_store(ws.path())
+        .create_pending_session("s-coder", "coder")
+        .unwrap();
+    let caller = Caller {
+        session: Some("s-coder"),
+        actor: Some("owner"),
+        now: Some(NOW),
+    };
+    refused_with(
+        &ws,
+        &eng,
+        &run,
+        &root,
+        caller,
+        &["you are `coder`", STALE_REQUESTER],
+    );
+}
+
+#[test]
+fn a_caller_presenting_any_session_does_not_withdraw_a_run_of_another_workspace() {
+    let ws = workspace();
+    let eng = engine(ws.path());
+    let (run, root) = stale_run(ws.path());
+    let caller = Caller {
+        session: Some("s-unknown"),
+        actor: Some("owner"),
+        now: Some(NOW),
+    };
+    refused_with(
+        &ws,
+        &eng,
+        &run,
+        &root,
+        caller,
+        &[STALE_REQUESTER, "from the terminal"],
+    );
+}
+
+/// Its requester at the terminal, bare or qualified, withdraws it as the requester, never as the owner
+/// (memory declared-members-bare-caller-qualified).
+#[test]
+fn the_requester_of_a_run_of_another_workspace_withdraws_it_as_the_requester() {
+    for actor in ["carsten", STALE_REQUESTER] {
+        let ws = workspace();
+        let eng = engine(ws.path());
+        let (run, root) = stale_run(ws.path());
+        eng.withdraw(at_the_terminal(actor), &root)
+            .expect("the requester withdraws");
+        assert_eq!(
+            withdrawals(ws.path(), &run),
+            [WithdrawnBy::Requester],
+            "{actor}"
+        );
     }
-    assert!(withdrawals(ws.path(), &run).is_empty());
 }
 
 /// The owner's exit is for a run nobody here can act for: on a run of this workspace, somebody who is not its
