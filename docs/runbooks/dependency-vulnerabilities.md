@@ -151,6 +151,10 @@ Recorded by 2dn0 on 2026-10-24, when the gate was introduced:
 | Advisory | Crate | Kind | Expires | Item |
 |---|---|---|---|---|
 | RUSTSEC-2024-0449 | unsafe-libyaml 0.2.11, via serde_yaml 0.9 (nexus-chat) | unmaintained | 2027-01-31 | 6j6v.spqq |
+| RUSTSEC-2026-0543 | chrono 0.4.45, via rmcp 3.9 and schemars 1.2 (nxs) | unmaintained | 2027-02-28 | 6j6v.n2wj |
 
 Every other advisory found on that day was fixed in the same change. The list is in the
 session report on 6j6v.2dn0.
+
+Recorded on 2026-11-18, when RUSTSEC-2026-0543 turned `dependency-audit` red: no safe upgrade
+exists, and rmcp 3.11.0 still requires chrono.
