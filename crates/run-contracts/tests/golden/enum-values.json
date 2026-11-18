@@ -64,6 +64,15 @@
     "revert",
     "bisect"
   ],
+  "start_port": [
+    "messages.open_thread",
+    "messages.post",
+    "declarations.turn",
+    "declarations.prompt",
+    "declarations.persona",
+    "sidecar.bundle_path",
+    "backend.start"
+  ],
   "step_states": [
     "open",
     "done"

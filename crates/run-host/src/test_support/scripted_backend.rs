@@ -93,6 +93,8 @@ pub struct ScriptedBackend {
     timeline: PathBuf,
     cwd: PathBuf,
     scenario: Mutex<Scenario>,
+    /// Every start refused while set, before anything is written: the backend cannot spawn.
+    pub refuse_starts: std::sync::atomic::AtomicBool,
 }
 
 fn io_error(error: std::io::Error) -> BackendError {
@@ -108,6 +110,7 @@ impl ScriptedBackend {
             timeline: timeline.to_owned(),
             cwd: cwd.to_owned(),
             scenario: Mutex::new(scenario),
+            refuse_starts: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -306,6 +309,11 @@ impl SessionBackend for ScriptedBackend {
 
     /// The ledger of §8.3: a key whose `spawn.json` exists does not spawn.
     fn start(&self, spec: &StartSpec) -> Result<StartOutcome, BackendError> {
+        if self.refuse_starts.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(BackendError {
+                what: "a scripted refusal to spawn".to_owned(),
+            });
+        }
         let key = &spec.session_key;
         let dir = PathBuf::from(&spec.ledger_dir);
         fs::create_dir_all(&dir).map_err(io_error)?;

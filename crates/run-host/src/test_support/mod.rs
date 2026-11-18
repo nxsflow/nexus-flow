@@ -23,7 +23,9 @@ use crate::host::{Host, Layout, Ports, TickReport};
 use crate::ports::{Clock, Refs};
 use crate::tree_ledger::TreeLedger;
 use crate::tree_worker::WorkTree;
-pub use file_ports::{coding_decl, read_port_lines, review_decl, FilePorts, PortLine};
+pub use file_ports::{
+    coding_decl, read_port_lines, review_decl, FilePorts, PortLine, SECRET_IN_A_PORT_ERROR,
+};
 use scripted_backend::{pass, Cue, Scenario, ScriptedBackend, SessionInfo};
 use scripted_tree::ScriptedTree;
 

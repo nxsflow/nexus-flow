@@ -4,7 +4,8 @@
 
 use nexus_run_contracts::{
     EndCause, EnvVar, Epoch, EventBody, MessageId, Origin, Prompt, RunId, RunStore, SessionFact,
-    Slot, StartOutcome, StartSpec, StoreError, Timestamp, Turn, CONTRACT_V,
+    Slot, StartOutcome, StartPort, StartRefusal, StartSpec, StoreError, Timestamp, Turn,
+    CONTRACT_V,
 };
 use nexus_run_engine::{RunState, StepDef, StepKind, TurnKind, TurnPart, SYNTH};
 use serde::{Deserialize, Serialize};
@@ -50,25 +51,29 @@ impl Host {
         let Some(step) = state.def.step(&slot.step).cloned() else {
             return Ok(());
         };
-        let Some(thread) = self.open_step_thread(state, epoch, &slot, &step, session_key, turn)?
-        else {
-            return Ok(());
+        let handle = slot.member.clone();
+        let thread = match self.open_step_thread(state, epoch, &slot, &step, session_key, turn)? {
+            Ok(thread) => thread,
+            Err(port) => return self.refused_start(run, session_key, &handle, port, now),
         };
-        let Some(text) = self.compose_turn(&slot, &step, turn, &thread) else {
-            return Ok(());
+        let text = match self.compose_turn(&slot, &step, turn, &thread) {
+            Ok(text) => text,
+            Err(port) => return self.refused_start(run, session_key, &handle, port, now),
         };
-        let Some(spec) = self.start_spec(state, &slot, &step, session_key, thread, text, resume)?
-        else {
-            return Ok(());
+        let spec = match self.start_spec(state, &slot, &step, session_key, thread, text, resume)? {
+            Ok(spec) => spec,
+            Err(port) => return self.refused_start(run, session_key, &handle, port, now),
         };
         crash_at(Boundary::BeforeSpawn);
         wrote("spawn");
         match self.backend.start(&spec) {
             Ok(StartOutcome::Spawned | StartOutcome::Reattached | StartOutcome::Waiting) => {
                 self.cache(run).started.insert(session_key.to_owned());
+                self.clear_start_refusal(run, session_key)?;
             }
             Ok(StartOutcome::Lost) => {
                 self.cache(run).started.insert(session_key.to_owned());
+                self.clear_start_refusal(run, session_key)?;
                 crash_at(Boundary::AfterEffectBeforeResult);
                 let body = EventBody::SessionFact {
                     session_key: session_key.to_owned(),
@@ -85,13 +90,13 @@ impl Host {
                 );
             }
             // A spawn failure is a `started`-less slot: `start_deadline` parks it after its attempts (§13).
-            Err(_) => self.log(run, "a session did not start:", session_key),
+            Err(_) => return self.refused_start(run, session_key, &handle, StartPort::Spawn, now),
         }
         Ok(())
     }
 
     /// The ledger keeps the id before the open; a restart reads it back and repeats the open, which is the
-    /// same op under the same id (§8.3). `Ok(None)` is a port that refused: the effect stays owed.
+    /// same op under the same id (§8.3). `Ok(Err(port))` is a port that refused: the effect stays owed.
     fn open_step_thread(
         &mut self,
         state: &RunState,
@@ -100,19 +105,23 @@ impl Host {
         step: &StepDef,
         session_key: &str,
         turn: &[TurnPart],
-    ) -> Result<Option<MessageId>, StoreError> {
+    ) -> Result<Result<MessageId, StartPort>, StoreError> {
         let run = &state.run;
         let ledger = format!("thread/{session_key}");
         let fresh = format!("{PENDING}:{}", mint_thread_id());
         let entry = self.entry_or_write(run, &ledger, epoch, &fresh)?;
         if let Some(id) = entry.strip_prefix(DONE) {
-            return Ok(Some(id.to_owned()));
+            return Ok(Ok(id.to_owned()));
         }
         let Some(thread) = entry
             .strip_prefix(&format!("{PENDING}:"))
             .map(str::to_owned)
         else {
-            return Ok(None);
+            // Only this file writes the entry, as `pending:<id>` or `done:<id>`: anything else is a damaged row.
+            return Err(StoreError::DamagedRow {
+                key: Self::effect_key(run, &ledger),
+                seq: None,
+            });
         };
         crash_at(Boundary::AfterThreadIdBeforeOpen);
         wrote("open");
@@ -122,10 +131,13 @@ impl Host {
             .messages
             .open_thread(&thread, root, &step.channel, &step.opener);
         if opened.is_err() {
-            return Ok(None);
+            return Ok(Err(StartPort::OpenThread));
         }
         crash_at(Boundary::AfterOpenBeforeTurnPost);
         let post_key = format!("turn/{session_key}");
+        // The turn is composed only when the store has none yet; a refusal there is the declarations', not
+        // the chat store's.
+        let mut composing = None;
         let posted = self.find_or_post(
             run,
             epoch,
@@ -133,10 +145,14 @@ impl Host {
             &step.opener,
             &Refs::default(),
             &post_key,
-            |host| host.compose_turn(slot, step, turn, &thread),
+            |host| {
+                host.compose_turn(slot, step, turn, &thread)
+                    .map_err(|port| composing = Some(port))
+                    .ok()
+            },
         );
         if posted.is_none() {
-            return Ok(None);
+            return Ok(Err(composing.unwrap_or(StartPort::PostTurn)));
         }
         crash_at(Boundary::AfterTurnPostBeforeRoutes);
         self.write_route(run, &thread, Some(session_key))?;
@@ -149,7 +165,7 @@ impl Host {
         }
         crash_at(Boundary::AfterRoutesBeforeSpawn);
         self.entry_set(run, &ledger, epoch, &format!("{DONE}{thread}"))?;
-        Ok(Some(thread))
+        Ok(Ok(thread))
     }
 
     fn write_route(
@@ -174,14 +190,14 @@ impl Host {
     }
 
     /// The parts that carry a message go through the port, which reads and frames them; the task and the
-    /// obligation come from the definition and from here. `None` leaves the effect owed.
+    /// obligation come from the definition and from here. A refusal leaves the effect owed.
     fn compose_turn(
         &self,
         slot: &Slot,
         step: &StepDef,
         turn: &[TurnPart],
         thread: &str,
-    ) -> Option<String> {
+    ) -> Result<String, StartPort> {
         let handle = slot.member.as_str();
         let mut sections: Vec<String> = Vec::new();
         let mut framed: Vec<TurnPart> = Vec::new();
@@ -202,7 +218,7 @@ impl Host {
         if slot.attempt > 1 && step.next.is_none() {
             sections.insert(0, compose::EARLIER_ATTEMPT.to_owned());
         }
-        Some(sections.join("\n\n"))
+        Ok(sections.join("\n\n"))
     }
 
     fn flush_framed(
@@ -210,12 +226,17 @@ impl Host {
         handle: &str,
         framed: &mut Vec<TurnPart>,
         sections: &mut Vec<String>,
-    ) -> Option<()> {
+    ) -> Result<(), StartPort> {
         if !framed.is_empty() {
-            sections.push(self.ports.declarations.turn(handle, framed).ok()?);
+            let text = self
+                .ports
+                .declarations
+                .turn(handle, framed)
+                .map_err(|_| StartPort::Turn)?;
+            sections.push(text);
             framed.clear();
         }
-        Some(())
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -228,7 +249,7 @@ impl Host {
         thread: MessageId,
         text: String,
         resume: bool,
-    ) -> Result<Option<StartSpec>, StoreError> {
+    ) -> Result<Result<StartSpec, StartPort>, StoreError> {
         let handle = slot.member.as_str();
         let declarations = &self.ports.declarations;
         let (prompt, tools, declared_tools, model, permissions) = if handle == SYNTH {
@@ -252,11 +273,13 @@ impl Host {
                 None,
             )
         } else {
-            let (Ok(bundle), Ok(persona)) = (
-                declarations.prompt(handle, PromptFor::V2),
-                declarations.persona(handle),
-            ) else {
-                return Ok(None);
+            // The persona first: a handle the declarations do not know fails both, and "no such persona" is the
+            // one that says why.
+            let Ok(persona) = declarations.persona(handle) else {
+                return Ok(Err(StartPort::Persona));
+            };
+            let Ok(bundle) = declarations.prompt(handle, PromptFor::V2) else {
+                return Ok(Err(StartPort::Prompt));
             };
             (
                 Prompt {
@@ -279,10 +302,10 @@ impl Host {
             None
         };
         let Ok(bundle_path) = self.ports.sidecar.bundle_path() else {
-            return Ok(None);
+            return Ok(Err(StartPort::BundlePath));
         };
         let layout = &self.ports.layout;
-        Ok(Some(StartSpec {
+        Ok(Ok(StartSpec {
             v: CONTRACT_V,
             session_key: session_key.to_owned(),
             cwd: layout.v2_dir().to_string_lossy().into_owned(),
@@ -300,6 +323,82 @@ impl Host {
                 .into_owned(),
         }))
     }
+
+    /// A start a port refused stays owed, and `start_deadline` counts its attempts (§13). What it waits for is
+    /// said once per session and port, in the log and in `kv['start_refusal/<run>']`, where status reads it:
+    /// ids and codes only, never what the port said (M8, PV1).
+    fn refused_start(
+        &mut self,
+        run: &RunId,
+        session_key: &str,
+        handle: &str,
+        port: StartPort,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let mut refusals = self.start_refusals(run)?;
+        if refusals
+            .iter()
+            .any(|known| known.session_key == session_key && known.port == port)
+        {
+            return Ok(());
+        }
+        let code = format!("{session_key} {}", port.as_str());
+        refusals.retain(|known| known.session_key != session_key);
+        refusals.push(StartRefusal {
+            session_key: session_key.to_owned(),
+            handle: handle.to_owned(),
+            port,
+            at: now,
+        });
+        self.put_start_refusals(run, refusals)?;
+        self.log(run, "a session could not start:", &code);
+        Ok(())
+    }
+
+    fn clear_start_refusal(&self, run: &RunId, session_key: &str) -> Result<(), StoreError> {
+        let mut refusals = self.start_refusals(run)?;
+        let before = refusals.len();
+        refusals.retain(|known| known.session_key != session_key);
+        if refusals.len() == before {
+            return Ok(());
+        }
+        self.put_start_refusals(run, refusals)
+    }
+
+    fn start_refusals(&self, run: &RunId) -> Result<Vec<StartRefusal>, StoreError> {
+        let key = start_refusal_key(run);
+        let Some(bytes) = self.store.get(&key)? else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_slice(&bytes).map_err(|_| StoreError::DamagedRow { key, seq: None })
+    }
+
+    fn put_start_refusals(
+        &self,
+        run: &RunId,
+        mut refusals: Vec<StartRefusal>,
+    ) -> Result<(), StoreError> {
+        let key = start_refusal_key(run);
+        let current = self.store.get(&key)?;
+        refusals.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+        let value = if refusals.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_vec(&refusals).map_err(|error| StoreError::Backend {
+                    what: error.to_string(),
+                })?,
+            )
+        };
+        wrote("start_refusal");
+        self.store
+            .compare_and_set(&key, current.as_deref(), value.as_deref())
+    }
+}
+
+/// The run's sessions a port refused to start: deleted when the run finishes.
+pub(crate) fn start_refusal_key(run: &RunId) -> String {
+    format!("start_refusal/{run}")
 }
 
 /// A step's task for its members; for the consolidator, its own prompt from the definition.
