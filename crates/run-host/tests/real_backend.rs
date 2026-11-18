@@ -75,6 +75,7 @@ impl RealRig {
             Arc::new(backend),
             rig.tree.clone(),
             rig.clock.clone(),
+            nexus_run_host::test_support::WORKSPACE,
         );
         rig.policy.quiet_after = Secs(600);
         rig.policy.subprocess_idle = Secs(1800);

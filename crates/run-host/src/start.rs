@@ -52,6 +52,9 @@ impl Host {
             return Ok(());
         };
         let handle = slot.member.clone();
+        if self.foreign(&state.workspace) {
+            return self.refused_start(run, session_key, &handle, StartPort::Workspace, now);
+        }
         let thread = match self.open_step_thread(state, epoch, &slot, &step, session_key, turn)? {
             Ok(thread) => thread,
             Err(port) => return self.refused_start(run, session_key, &handle, port, now),

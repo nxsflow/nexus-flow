@@ -101,6 +101,9 @@ closed_code! {
         BundlePath = "sidecar.bundle_path",
         /// The session backend refused the spawn.
         Spawn = "backend.start",
+        /// The run was commissioned under another workspace id than the one this host attends: no session of
+        /// it starts here (6j6v.4b43).
+        Workspace = "workspace.origin",
     }
 }
 

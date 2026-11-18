@@ -342,6 +342,25 @@ fn the_requester(
     state: &bridge::RunState,
     verb: &str,
 ) -> Result<bridge::Caller> {
+    a_person_at_the_terminal(ctx, store, state, verb)?;
+    if !crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor) {
+        return Err(not_the_requester(verb, &state.requester, None));
+    }
+    Ok(bridge::Caller {
+        actor: state.requester.clone(),
+        session: None,
+    })
+}
+
+/// **A person at this terminal, or the refusal that names what the caller is instead** — the half of
+/// [`the_requester`] that does not ask WHO: a session of a run on the new engine, a persona session, or any
+/// caller presenting a session is refused, each in its own words.
+fn a_person_at_the_terminal(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    state: &bridge::RunState,
+    verb: &str,
+) -> Result<()> {
     let (identity, v2) =
         resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)?;
     if let Some(v2) = v2 {
@@ -355,15 +374,10 @@ fn the_requester(
     if let crate::persona::Identity::Persona(handle) = &identity {
         return Err(not_the_requester(verb, &state.requester, Some(handle)));
     }
-    if ctx.session.is_some()
-        || !crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor)
-    {
+    if ctx.session.is_some() {
         return Err(not_the_requester(verb, &state.requester, None));
     }
-    Ok(bridge::Caller {
-        actor: state.requester.clone(),
-        session: None,
-    })
+    Ok(())
 }
 
 fn not_the_requester(verb: &str, requester: &str, persona: Option<&str>) -> NxfError {
@@ -554,14 +568,56 @@ pub fn withdraw_a_run(
     if state.is_finished() {
         return Err(refused_on(&run_thread, Refused::RunFinished));
     }
-    let caller = the_requester(ctx, store, &state, "withdraw")?;
-    let body = format!("withdrawn by {}", caller.actor);
-    bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
-        .map_err(|r| refused_on(&run_thread, r))?;
+    a_person_at_the_terminal(ctx, store, &state, "withdraw")?;
+    let requester = crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor);
+    if !requester && state.workspace != ctx.origin {
+        // A run of another workspace (6j6v.4b43): nobody here is its requester, so its owner withdraws it.
+        withdraw_as_the_owner(ctx, &run_thread, &state, thread, now)?;
+    } else if requester {
+        let caller = bridge::Caller {
+            actor: state.requester.clone(),
+            session: None,
+        };
+        let body = format!("withdrawn by {}", caller.actor);
+        bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
+            .map_err(|r| refused_on(&run_thread, r))?;
+    } else {
+        return Err(not_the_requester("withdraw", &state.requester, None));
+    }
     Ok(Some(crate::orchestration::WithdrawReceipt::of_a_run(
         thread,
         run_thread.route.run.as_str(),
     )))
+}
+
+/// **The owner's withdraw of a run commissioned under another workspace id** (6j6v.4b43) — a send from before
+/// this workspace had its origin: no service here ever claims it, and its requester is an identity of that
+/// other workspace. The caller is a person at this terminal who is not that requester; it withdraws the run in
+/// its own name, with no identity borrowed, and the run records it as the owner's.
+fn withdraw_as_the_owner(
+    ctx: &Ctx,
+    run_thread: &RunThread,
+    state: &bridge::RunState,
+    thread: &str,
+    now: Timestamp,
+) -> Result<()> {
+    let owner = format!(
+        "{}/{}",
+        ctx.origin,
+        crate::orchestration::bare_handle_of(ctx.actor)
+    );
+    let body = format!(
+        "withdrawn by {owner}, the owner of workspace {}: {} commissioned this run under workspace {}, \
+         which no service here attends",
+        ctx.origin, state.requester, state.workspace
+    );
+    let caller = bridge::Caller {
+        actor: owner,
+        session: None,
+    };
+    bridge::withdraw_as_owner(&run_thread.bridge, thread, &caller, &body, now)
+        .map_err(|r| refused_on(run_thread, r))?;
+    Ok(())
 }
 
 /// **`nxc resume --thread <root>` on a run on the new engine** (IN3) — `None` when `thread` is not one. The

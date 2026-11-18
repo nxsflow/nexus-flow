@@ -71,7 +71,8 @@
     "declarations.prompt",
     "declarations.persona",
     "sidecar.bundle_path",
-    "backend.start"
+    "backend.start",
+    "workspace.origin"
   ],
   "step_states": [
     "open",

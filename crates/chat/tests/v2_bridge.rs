@@ -751,6 +751,7 @@ fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once
             &eng.origin(),
         ))),
         std::sync::Arc::new(SimClock::at(now.unix_millis())),
+        &eng.origin(),
     );
     let chat = || chat_store(ws.path()).messages_in_thread(&root).unwrap();
     for _ in 0..5 {
@@ -949,6 +950,7 @@ fn real_v2_session(dir: &Path) -> String {
         )),
         tree.clone(),
         clock.clone(),
+        &eng.origin(),
     );
     let run = store.open_runs().unwrap()[0].run.clone();
     let key = format!("{run}/build/v1/coder/a1");

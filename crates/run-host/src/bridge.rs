@@ -12,6 +12,8 @@ use std::time::Duration;
 pub use crate::bridge_resume::{resume, ResumeOutcome};
 use crate::bridge_targets::check_slot_targets;
 pub use crate::bridge_targets::UnresolvedTarget;
+use crate::foreign::record_withdrawal;
+pub use crate::foreign::withdraw_as_owner;
 pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
@@ -361,7 +363,7 @@ pub(crate) fn input_key(run: &RunId) -> String {
 /// Posts, then enqueues. A crash between them leaves a message the run never folds, and the caller is told
 /// with the message id and the command to run again: nothing retries silently.
 #[allow(clippy::too_many_arguments)]
-fn post_and_enqueue(
+pub(crate) fn post_and_enqueue(
     ctx: &BridgeCtx,
     run: &RunId,
     thread: &str,
@@ -529,29 +531,15 @@ pub fn withdraw(
         return Err(Refused::RunFinished);
     }
     check_requester(&state, caller)?;
-    let key = input_key(&run);
-    if state.root_message.is_some() {
-        return post_and_enqueue(ctx, &run, root, &caller.actor, text, &key, now, |message| {
-            EventBody::Withdrawn {
-                message: Some(message.clone()),
-                by: WithdrawnBy::Requester,
-            }
-        })
-        .map(Some);
-    }
-    let event = Event::new(
-        run.clone(),
-        0,
+    record_withdrawal(
+        ctx,
+        root,
+        &state,
+        &caller.actor,
+        text,
+        WithdrawnBy::Requester,
         now,
-        key,
-        Origin::Cli,
-        EventBody::Withdrawn {
-            message: None,
-            by: WithdrawnBy::Requester,
-        },
-    );
-    ctx.store.enqueue(&run, &event, &[])?;
-    Ok(None)
+    )
 }
 
 /// Contract (d): the pure projection, with what only this machine can say around it. A reader without the
@@ -576,6 +564,7 @@ pub fn status(ctx: &BridgeCtx, run: &RunId, now: Timestamp) -> Result<Option<Run
             projected.next_action.unwrap_or_default()
         ));
     }
+    crate::foreign::annotate(ctx, &view.state, &mut projected);
     projected.local = Some(local(ctx, run, &view.state, now)?);
     Ok(Some(projected))
 }
