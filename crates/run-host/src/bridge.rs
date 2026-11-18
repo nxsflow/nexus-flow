@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::bridge_resume::{resume, ResumeOutcome};
+use crate::bridge_targets::check_slot_targets;
+pub use crate::bridge_targets::UnresolvedTarget;
 pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
@@ -17,9 +19,7 @@ use nexus_run_contracts::{
     Origin, Refusal, RunId, RunStatus, RunStore, SessionKey, StoreError, Timestamp, WithdrawnBy,
     LOCAL_TENANT,
 };
-use nexus_run_engine::{
-    compile, status as project, Asked, ChannelDecl, FlowDef, SlotState, StepKind,
-};
+use nexus_run_engine::{compile, status as project, Asked, ChannelDecl, SlotState};
 /// The fold and its projection, for the same callers: which verb a root thread takes depends on it (§10).
 pub use nexus_run_engine::{RunState, RunView};
 /// Re-exported for the bridge's callers on the old side, which may import this crate and no other new one
@@ -102,14 +102,8 @@ pub enum Refused {
         message: MessageId,
     },
     Compile(String),
-    /// A slot the flow would start names a handle the declarations do not resolve to a persona: the run
-    /// could only fail when that step is due (6j6v.yw6x). `member_of` is the nested channel a fan-out
-    /// member came from; `None` is the step's own target.
-    UnresolvedTarget {
-        step: String,
-        target: String,
-        member_of: Option<String>,
-    },
+    /// A slot the flow would start names a persona the declarations do not hold (6j6v.yw6x).
+    UnresolvedTarget(UnresolvedTarget),
     Store(StoreError),
     Port(PortError),
 }
@@ -141,26 +135,7 @@ impl std::fmt::Display for Refused {
                 "message {message} is posted but the run has not heard of it: run the command again"
             ),
             Self::Compile(what) => write!(f, "the channel does not compile: {what}"),
-            Self::UnresolvedTarget {
-                step,
-                target,
-                member_of: None,
-            } => write!(
-                f,
-                "the channel does not compile: step `{step}` targets `{target}`, which is neither a persona \
-                 the declarations hold nor a channel this flow fans out to (declarations.persona refused); \
-                 nothing was written. `nxc list` names what this workspace declares"
-            ),
-            Self::UnresolvedTarget {
-                step,
-                target,
-                member_of: Some(channel),
-            } => write!(
-                f,
-                "the channel does not compile: step `{step}` fans out to `{target}`, a member of \
-                 `{channel}` that no persona declaration resolves (declarations.persona refused); nothing \
-                 was written. `nxc list` names what this workspace declares"
-            ),
+            Self::UnresolvedTarget(what) => write!(f, "{what}"),
             Self::Store(error) => write!(f, "{error}"),
             Self::Port(error) => write!(f, "{error}"),
         }
@@ -277,27 +252,6 @@ pub fn commission(
             .map(|timeout| format!("{}: {}", timeout.scope, timeout.value))
             .collect(),
     })
-}
-
-/// **Every persona a slot of `def` would start is declared** (6j6v.yw6x), checked before anything is written.
-/// The compile alone cannot tell: a target that is no channel it knows compiles to `single`, so a nested
-/// channel the declarations cannot find became a persona that does not exist, stored under the flow hash.
-fn check_slot_targets(ctx: &BridgeCtx, def: &FlowDef) -> Result<(), Refused> {
-    let unresolved = |handle: &str| ctx.declarations.persona(handle).is_err();
-    for step in &def.steps {
-        let (handles, member_of) = match &step.kind {
-            StepKind::Single { target } => (std::slice::from_ref(target), None),
-            StepKind::FanOut { members, .. } => (members.as_slice(), Some(step.channel.clone())),
-        };
-        if let Some(target) = handles.iter().find(|handle| unresolved(handle)) {
-            return Err(Refused::UnresolvedTarget {
-                step: step.id.clone(),
-                target: target.clone(),
-                member_of,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// The channel a step fans out to: the first step target the declarations know as a channel.
