@@ -65,8 +65,10 @@ fn refused_coder(call: &'static str) -> (tempfile::TempDir, Rig, RunId, Lines) {
     let dir = tempfile::tempdir().unwrap();
     let mut rig = Rig::scripted(dir.path(), CLOCK_START, scenario_named("happy"));
     let lines = listening(&mut rig);
-    refuse(&rig, call);
+    // After the send and before the first tick: the send checks every persona it would start (6j6v.yw6x), so
+    // a persona refused here is one the declarations lost between the send and the start.
     let run = rig.commission("the commission").run;
+    refuse(&rig, call);
     let check = run.clone();
     rig.run_until(20, move |rig| !refusals(rig, &check).is_empty());
     (dir, rig, run, lines)
