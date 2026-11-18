@@ -209,6 +209,9 @@ impl Host {
         match effect {
             Effect::OpenRoot { .. } => self.open_root(state, epoch, now)?,
             Effect::TakeClaim { .. } => {}
+            Effect::PrepareTree { workspace } if self.foreign(&workspace) => {
+                self.note_foreign(run, &workspace);
+            }
             Effect::PrepareTree { .. } => self.prepare_tree(run, now),
             Effect::CancelTree { .. } => self.cancel_tree(state, now),
             Effect::ParkTree {
@@ -476,6 +479,10 @@ impl Host {
             let Phase::Queued { behind } = &state.phase else {
                 continue;
             };
+            if self.foreign(&row.workspace_id) {
+                self.note_foreign(&row.run, &row.workspace_id);
+                continue;
+            }
             if !self.may_work(std::mem::take(&mut owed)) {
                 return;
             }

@@ -157,6 +157,7 @@ fn every_v2_session_is_given_the_registered_roots_database_and_the_chat_origin()
         backend.clone(),
         tree.clone(),
         clock.clone(),
+        &origin,
     );
     let bridge = BridgeCtx {
         store: Arc::new(

@@ -554,14 +554,62 @@ pub fn withdraw_a_run(
     if state.is_finished() {
         return Err(refused_on(&run_thread, Refused::RunFinished));
     }
-    let caller = the_requester(ctx, store, &state, "withdraw")?;
-    let body = format!("withdrawn by {}", caller.actor);
-    bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
-        .map_err(|r| refused_on(&run_thread, r))?;
+    if state.workspace != ctx.origin {
+        withdraw_for_another_workspace(ctx, store, &run_thread, &state, thread, now)?;
+    } else {
+        let caller = the_requester(ctx, store, &state, "withdraw")?;
+        let body = format!("withdrawn by {}", caller.actor);
+        bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
+            .map_err(|r| refused_on(&run_thread, r))?;
+    }
     Ok(Some(crate::orchestration::WithdrawReceipt::of_a_run(
         thread,
         run_thread.route.run.as_str(),
     )))
+}
+
+/// **A run commissioned under another workspace id** (6j6v.4b43) — a send from before this workspace had its
+/// origin: no service here ever claims it, and its requester is an identity of that other workspace. Its
+/// requester at the terminal still withdraws it as the requester; anybody else at this terminal withdraws it as
+/// the workspace's owner, in their own name, with no identity borrowed. A session never does: the checks are
+/// [`the_requester`]'s, up to the identity.
+fn withdraw_for_another_workspace(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    run_thread: &RunThread,
+    state: &bridge::RunState,
+    thread: &str,
+    now: Timestamp,
+) -> Result<()> {
+    let (identity, v2) =
+        resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)?;
+    let persona = matches!(identity, crate::persona::Identity::Persona(_));
+    let at_the_terminal = v2.is_none() && !persona && ctx.session.is_none();
+    if !at_the_terminal || crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor) {
+        // The requester's own exit, or its refusal, which names the session or persona and what to do instead.
+        let caller = the_requester(ctx, store, state, "withdraw")?;
+        let body = format!("withdrawn by {}", caller.actor);
+        bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
+            .map_err(|r| refused_on(run_thread, r))?;
+        return Ok(());
+    }
+    let owner = format!(
+        "{}/{}",
+        ctx.origin,
+        crate::orchestration::bare_handle_of(ctx.actor)
+    );
+    let body = format!(
+        "withdrawn by {owner}, the owner of workspace {}: {} commissioned this run under workspace {}, \
+         which no service here attends",
+        ctx.origin, state.requester, state.workspace
+    );
+    let caller = bridge::Caller {
+        actor: owner,
+        session: None,
+    };
+    bridge::withdraw_as_owner(&run_thread.bridge, thread, &caller, &body, now)
+        .map_err(|r| refused_on(run_thread, r))?;
+    Ok(())
 }
 
 /// **`nxc resume --thread <root>` on a run on the new engine** (IN3) — `None` when `thread` is not one. The

@@ -252,6 +252,7 @@ impl Rig {
             self.backend.clone(),
             tree.clone(),
             self.clock.clone(),
+            WORKSPACE,
         );
         (host, tree)
     }
@@ -300,6 +301,7 @@ impl<T: RigTree> Rig<T> {
             backend.clone(),
             tree.clone(),
             clock.clone(),
+            WORKSPACE,
         );
         let bridge = BridgeCtx {
             store: bridge_store,
@@ -352,6 +354,7 @@ impl<T: RigTree> Rig<T> {
             self.backend.clone(),
             tree.clone(),
             self.clock.clone(),
+            WORKSPACE,
         );
         self.store = store;
         self.tree = tree;

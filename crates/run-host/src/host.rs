@@ -108,6 +108,9 @@ pub struct Host {
     pub(crate) tree: Arc<dyn WorkTree>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) owner_id: String,
+    /// The workspace id this host attends, the chat origin a send of this workspace commissions with: a run under
+    /// another one is never claimed here (6j6v.4b43).
+    pub(crate) workspace_id: String,
     pub(crate) runs: BTreeMap<RunId, RunCache>,
     pub(crate) track: TreeTrack,
     budget: Duration,
@@ -133,6 +136,7 @@ impl Host {
         backend: Arc<dyn SessionBackend>,
         tree: Arc<dyn WorkTree>,
         clock: Arc<dyn Clock>,
+        workspace_id: &str,
     ) -> Self {
         let owner_id = mint_owner_id();
         tree.bind(TreeBinding {
@@ -147,6 +151,7 @@ impl Host {
             tree,
             clock,
             owner_id,
+            workspace_id: workspace_id.to_owned(),
             runs: BTreeMap::new(),
             track: TreeTrack::default(),
             budget: TICK_BUDGET,
