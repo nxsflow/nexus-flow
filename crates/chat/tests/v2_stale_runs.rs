@@ -90,6 +90,7 @@ fn layout(dir: &Path) -> Layout {
         root: dir.to_owned(),
         agent_logs: dir.join(".nxs").join("agent-logs"),
         session_env: Vec::new(),
+        tools_dir: None,
     }
 }
 

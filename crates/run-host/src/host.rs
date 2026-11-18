@@ -38,6 +38,10 @@ pub struct Layout {
     pub root: PathBuf,
     pub agent_logs: PathBuf,
     pub session_env: Vec<EnvVar>,
+    /// The directory whose `nxc`, `nxf` and `nxm` are the host's own binary, put FIRST on every session's
+    /// `PATH` so a session speaks the version of the host that started it (6j6v.2kvn). `None` leaves the
+    /// `PATH` the host was given.
+    pub tools_dir: Option<PathBuf>,
 }
 
 impl Layout {

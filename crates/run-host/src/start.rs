@@ -312,7 +312,13 @@ impl Host {
             v: CONTRACT_V,
             session_key: session_key.to_owned(),
             cwd: layout.v2_dir().to_string_lossy().into_owned(),
-            env: session_env(&layout.session_env, session_key, handle, &bundle_path),
+            env: session_env(
+                &layout.session_env,
+                layout.tools_dir.as_deref(),
+                session_key,
+                handle,
+                &bundle_path,
+            ),
             prompt,
             turn: Turn { thread, text },
             resume,
@@ -418,9 +424,11 @@ fn task_text(step: &StepDef, handle: &str) -> Option<String> {
     step.task.clone()
 }
 
-/// The allowlist: identity is the session's environment, set here (§6.4 item 3, contract (c)).
+/// The allowlist: identity is the session's environment, set here (§6.4 item 3, contract (c)). `tools` goes
+/// first on the `PATH`, so the session's `nxc` is the host's own version (6j6v.2kvn).
 fn session_env(
     base: &[EnvVar],
+    tools: Option<&std::path::Path>,
     session_key: &str,
     handle: &str,
     bundle: &std::path::Path,
@@ -431,11 +439,50 @@ fn session_env(
     };
     let mut env: Vec<EnvVar> = ["PATH", "HOME", "USER"]
         .iter()
-        .filter_map(|name| std::env::var(name).ok().map(|value| var(name, value)))
+        .filter_map(|name| {
+            let value = std::env::var(name).ok();
+            let value = match (*name, tools) {
+                ("PATH", Some(tools)) => Some(tools_first(tools, value.as_deref())),
+                _ => value,
+            };
+            value.map(|value| var(name, value))
+        })
         .collect();
     env.extend(base.iter().cloned());
     env.push(var("NXC_SIDECAR", bundle.to_string_lossy().into_owned()));
     env.push(var("NXC_SESSION", session_key.to_owned()));
     env.push(var("NXC_ACTOR", handle.to_owned()));
     env
+}
+
+/// `tools`, then every entry of `path` but `tools`, in its order. A directory a `PATH` cannot carry leaves `path`
+/// as it was.
+fn tools_first(tools: &std::path::Path, path: Option<&str>) -> String {
+    let inherited = path.map(std::env::split_paths).into_iter().flatten();
+    let entries =
+        std::iter::once(tools.to_path_buf()).chain(inherited.filter(|entry| entry != tools));
+    std::env::join_paths(entries)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
+        .unwrap_or_else(|| path.unwrap_or_default().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tools_first;
+    use std::path::Path;
+
+    #[test]
+    fn the_tools_lead_the_path_once_and_the_rest_keeps_its_order() {
+        assert_eq!(
+            tools_first(Path::new("/tools"), Some("/b:/tools:/c")),
+            "/tools:/b:/c"
+        );
+        assert_eq!(tools_first(Path::new("/tools"), None), "/tools");
+    }
+
+    #[test]
+    fn a_directory_a_path_cannot_carry_leaves_the_path_as_it_was() {
+        assert_eq!(tools_first(Path::new("/a:b"), Some("/b:/c")), "/b:/c");
+    }
 }
