@@ -210,6 +210,7 @@ impl Rig {
             root: dir.join("root"),
             agent_logs: dir.join("agent-logs"),
             session_env: Vec::new(),
+            tools_dir: None,
         }
     }
 

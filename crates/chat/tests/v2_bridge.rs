@@ -723,6 +723,7 @@ fn the_host_opens_the_root_the_send_minted_and_posts_the_commission_into_it_once
         root: ws.path().to_owned(),
         agent_logs: ws.path().join(".nxs").join("agent-logs"),
         session_env: Vec::new(),
+        tools_dir: None,
     };
     let store = std::sync::Arc::new(
         nexus_run_host::bridge::SqliteRunStore::open(
@@ -920,6 +921,7 @@ fn real_v2_session(dir: &Path) -> String {
         root: dir.to_owned(),
         agent_logs: dir.join(".nxs").join("agent-logs"),
         session_env: Vec::new(),
+        tools_dir: None,
     };
     let store = std::sync::Arc::new(
         nexus_run_host::bridge::SqliteRunStore::open(
