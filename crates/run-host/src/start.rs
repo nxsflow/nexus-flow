@@ -468,21 +468,4 @@ fn tools_first(tools: &std::path::Path, path: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::tools_first;
-    use std::path::Path;
-
-    #[test]
-    fn the_tools_lead_the_path_once_and_the_rest_keeps_its_order() {
-        assert_eq!(
-            tools_first(Path::new("/tools"), Some("/b:/tools:/c")),
-            "/tools:/b:/c"
-        );
-        assert_eq!(tools_first(Path::new("/tools"), None), "/tools");
-    }
-
-    #[test]
-    fn a_directory_a_path_cannot_carry_leaves_the_path_as_it_was() {
-        assert_eq!(tools_first(Path::new("/a:b"), Some("/b:/c")), "/b:/c");
-    }
-}
+mod tests;
