@@ -113,13 +113,13 @@ enum Command {
         #[arg(long, default_value = "factory/decisions")]
         dir: PathBuf,
     },
-    /// The table of RFCs in `docs/rfc/README.md` (NEX-85): write it from the RFC files between its
-    /// two markers, or with `--check` fail when it is stale or was edited by hand (CI gate on `v2`).
+    /// The index of the RFCs in `docs/rfc/` (NEX-85): number, title and status of each, read from
+    /// the RFC files. No table is stored, so nothing can go stale.
     #[command(name = "rfc-index")]
     RfcIndex {
-        /// Check the table and write nothing.
+        /// Print a Markdown table instead of one line per RFC.
         #[arg(long)]
-        check: bool,
+        md: bool,
         /// Read another folder (for tests).
         #[arg(long, default_value = "docs/rfc")]
         dir: PathBuf,
@@ -363,12 +363,7 @@ fn main() -> Result<()> {
             };
             decisions::run(&root.join(dir), &filter, check)?;
         }
-        Command::RfcIndex { check, dir } => {
-            rfc_index::run(&root.join(dir), check)?;
-            if check {
-                println!("rfc-index: the RFC table in README.md matches the RFC files");
-            }
-        }
+        Command::RfcIndex { md, dir } => print!("{}", rfc_index::index(&root.join(dir), md)?),
         Command::CommitRoles {
             base,
             head,
