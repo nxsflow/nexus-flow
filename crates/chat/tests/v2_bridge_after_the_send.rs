@@ -234,6 +234,7 @@ impl V2Run {
             root: dir.clone(),
             agent_logs: dir.join(".nxs").join("agent-logs"),
             session_env: Vec::new(),
+            tools_dir: None,
         };
         let store = Arc::new(
             SqliteRunStore::open(&run_sqlite(&dir), nexus_run_host::bridge::HOST_BUSY_TIMEOUT)
@@ -261,6 +262,7 @@ impl V2Run {
             backend.clone(),
             tree.clone(),
             clock.clone(),
+            &eng.origin(),
         );
         let bridge = BridgeCtx {
             store: Arc::new(
