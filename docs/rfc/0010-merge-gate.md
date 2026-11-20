@@ -289,4 +289,4 @@ For this repository, the gate takes effect in steps that each change a path unde
 
 ## History
 
-- 2026-11-20: published as a draft in #<pull request>.
+- 2026-11-20: published as a draft in #171.
