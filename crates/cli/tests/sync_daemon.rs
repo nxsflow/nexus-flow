@@ -205,6 +205,16 @@ fn default_home(dir: &Path) -> String {
         .to_string()
 }
 
+/// The production instance's user-level persona folder, which the fake home does not hold: named, and no
+/// note, because only a development instance's missing folder is a gap (6j6v.yt1a).
+fn production_personas(dir: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "dir": format!("{}/personas", default_home(dir)),
+        "exists": false,
+        "note": null,
+    })
+}
+
 #[test]
 fn status_with_no_heartbeat_reports_not_running_without_erroring() {
     let tmp = TempDir::new().unwrap();
@@ -223,6 +233,7 @@ fn status_with_no_heartbeat_reports_not_running_without_erroring() {
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
             "memory_publish_failures": [],
+            "user_personas": production_personas(tmp.path()),
         })
     );
 }
@@ -272,6 +283,7 @@ fn status_with_a_heartbeat_reports_the_full_deterministic_shape() {
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
             "memory_publish_failures": [],
+            "user_personas": production_personas(tmp.path()),
             "heartbeat": {
                 "pid": pid,
                 "started_at": started_at,
@@ -466,6 +478,7 @@ fn status_with_a_heartbeat_naming_a_dead_pid_reports_not_running_but_still_rende
             "registration": NOBODY_LOOKED_AT_LAUNCHD,
             "shared_workspaces": [],
             "memory_publish_failures": [],
+            "user_personas": production_personas(tmp.path()),
             "heartbeat": {
                 "pid": 999_999_999,
                 "started_at": "2026-07-30T09:00:00Z",

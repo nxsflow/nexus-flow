@@ -7,8 +7,8 @@
 //! `flow/<hash>` (written once, never deleted while an open run references it), `pending/<run>`
 //! (the commission body, deleted by the append that folds `root_opened` or `finished`), `thread/<id>`,
 //! `session/<session_key>`, `persona_session/<run>/<handle>`, `effect/<run>/<key>`,
-//! `host-seen/<workspace_id>`, `tree_refusal/<run>`, `poison/<run>/<key>`. Values are opaque bytes in
-//! a canonical encoding: compact serde_json of the named struct.
+//! `host-seen/<workspace_id>`, `tree_refusal/<run>`, `start_refusal/<run>`, `poison/<run>/<key>`. Values
+//! are opaque bytes in a canonical encoding: compact serde_json of the named struct.
 //!
 //! The inbox keys: `input/<run>/<ulid>`, `fact/<session_key>/<byte offset>`,
 //! `claim_busy/<run>/<changes>`, `timer/<id>/<fire_at>`.
