@@ -397,9 +397,11 @@ This RFC is the migration. Each module RFC's "Migration" section gives the mappi
 
 ## Open questions
 
-Each question below has a needs-owner ticket, linked once pm has filed it.
+Each question below has its needs-owner ticket.
 
 ### Done v1 tickets and "on main"
+
+Asked in NEX-78.
 
 v1 records no work for an item, and RFC 0002 makes a closed item `done` only "where it has a work link, else `canceled`", leaving to this RFC how a v1 item's work is found. A `done` ticket counts as on main only when a commit on the base branch names its key (RFC 0002, "Derived state"), and a moved ticket's key is new, while v1-era commits name v1 item ids (`6j6v.pzkb — …`). A moved `done` ticket would therefore never be on main, and every ticket that depends on it would stay blocked.
 
@@ -411,6 +413,8 @@ Recommendation: option 1. It keeps what v1 knew (finished is finished) and deriv
 
 ### How v1 binaries refuse to write
 
+Asked in NEX-79.
+
 The marker is a new file, which no v1 binary released so far reads. v1 has one mechanism every release since schema 4 honours: a database whose header says it needs a newer schema (`PRAGMA user_version` and `application_id` above 9) is refused on open with zero writes, with the message "written by a newer nxs — upgrade nxs" (`crates/foundation/src/schema.rs`, `assess_open`).
 
 1. **The marker, a raised header, and a last v1 release.** The move writes `migrated.toml` and raises the header of `db.sqlite` to 10, recording the old values in the marker. Every v1 binary then refuses the workspace, its sync service included. A last v1 release from `main` reads the marker and, instead of refusing outright, opens the workspace read-only and says that it moved, to which space, and that `nxs migrate --undo` rolls it back. `--undo` restores the header. Cost: two header fields of `db.sqlite` change (no data), older v1 binaries say "upgrade nxs" rather than why, and a v1 release from `main` is needed for the clear message and for reading old chat threads.
@@ -421,6 +425,8 @@ Recommendation: option 1. It is the only one where every v1 binary already insta
 
 ### Forgotten memories
 
+Asked in NEX-80.
+
 v1's `forget` hides a memory but keeps it, and can be undone. NEX-21's mapping makes every memory a decision in force, which would bring a forgotten rule back.
 
 1. **Written, and withdrawn by one decision.** Every forgotten memory becomes a decision by NEX-21's mapping, and one more decision of the run, "Memories forgotten in v1 are withdrawn", supersedes them all. They stay readable, and none is in force. Cost: one decision in force that says only that.
@@ -430,6 +436,8 @@ v1's `forget` hides a memory but keeps it, and can be undone. NEX-21's mapping m
 Recommendation: option 1.
 
 ### Workspaces of other plugins
+
+Asked in NEX-81.
 
 The model is the `issue-tracker` plugin's (NEX-23). A v1 workspace can use `personal-todo` (types `project`, `todo` and `termin`, priorities `now` to `icebox`, several parents) or a consumer's plugin such as nexflow.it's.
 
