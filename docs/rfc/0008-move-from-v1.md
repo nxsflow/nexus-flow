@@ -104,14 +104,14 @@ The move writes from the local copy and never waits for the network: it is a wri
 Every v1 op is written by a migration member (NEX-19). `nxs migrate` creates one per run, on the device that runs it:
 
 1. It creates the member's keys and database under `<data dir>/migration/<run>/` (RFC 0001, "The local data on disk").
-2. The device pairs it into the developer's account as an `agent` (NoCentralDB RFC 0010, "Accounts"), both ends of the pairing in the same process, since the device already belongs to the account.
+2. The device pairs it into the developer's account as an `agent` (NoCentralDB RFC 0010, "Adding a device or an agent to an account"), both ends of the pairing in the same process, since the device already belongs to the account.
 3. The device adds it to the repository space as writer, with a `spaceMember` record of role `migration` and a free ticket tag (RFC 0001, "The role record"; RFC 0002, "Ticket ids").
 4. The run writes every change as this member.
 5. At the end of the run, the device removes the member and deletes its database. Its changes stay valid (NoCentralDB RFC 0008, "The cutoff"), and its tag becomes free and is reused with its numbering continued (RFC 0002), so no key repeats.
 
 Every change of the move is therefore signed, and its chain shows the developer's account, the migration agent and its `migration` role: the space shows who moved the data, and each change carries who wrote the v1 op it replays. `migration` joins `owner`, `developer` and `app` as a role of the frame that names no role file (RFC 0006, "The factory's files").
 
-*Not taken:* writing as the device's own member (the space could not tell the move's changes from the developer's own work), and a sub-agent (a sub-agent is added by an agent, not by a device; NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces").
+*Not taken:* writing as the device's own member (the space could not tell the move's changes from the developer's own work), and a sub-agent (a sub-agent is added by an agent, not by a device; NoCentralDB RFC 0003, "Sub-agents get an ad-hoc space"; RFC 0009, "Sub-agents and ad-hoc spaces").
 
 ### How the ops are replayed
 
