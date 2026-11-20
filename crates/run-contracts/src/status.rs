@@ -67,6 +67,44 @@ pub struct LocalStatus {
     /// Inputs in the inbox the owner has not folded yet: status never claims a reply arrived before that.
     pub pending_inputs: u32,
     pub tree: TreeStatus,
+    /// The sessions this machine could not start, each with the port that refused, until the session starts
+    /// or the run finishes. Absent on the wire when empty, so a v1 reader reads the same bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_refusals: Vec<StartRefusal>,
+}
+
+/// A session the owner could not start, from `kv['start_refusal/<run>']`. Ids and codes only: the port's own
+/// words may quote what the old side holds, and stay off it (M8, PV1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartRefusal {
+    pub session_key: SessionKey,
+    pub handle: Handle,
+    pub port: StartPort,
+    /// When this session's refusal last changed port.
+    pub at: Timestamp,
+}
+
+closed_code! {
+    /// The port that refused a session's start. An unknown one is rendered as it reads.
+    StartPort {
+        /// The chat store would not open the step's thread.
+        OpenThread = "messages.open_thread",
+        /// The chat store would not find or post the step's turn.
+        PostTurn = "messages.post",
+        /// The declarations would not compose the turn's messages.
+        Turn = "declarations.turn",
+        /// The declarations hold no prompt for this persona.
+        Prompt = "declarations.prompt",
+        /// The declarations hold no such persona: on a development instance, often no user-level personas.
+        Persona = "declarations.persona",
+        /// The sidecar bundle is not where the port looks.
+        BundlePath = "sidecar.bundle_path",
+        /// The session backend refused the spawn.
+        Spawn = "backend.start",
+        /// The run was commissioned under another workspace id than the one this host attends: no session of
+        /// it starts here (6j6v.4b43).
+        Workspace = "workspace.origin",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -27,6 +27,9 @@ ignore = [
     # unmaintained, not a vulnerability: reaches nxs through serde_yaml 0.9 (deprecated), which
     # nexus-chat reads persona and channel declarations with. Replacing it is 6j6v.spqq.
     { id = "RUSTSEC-2024-0449", reason = "expires 2027-01-31: unsafe-libyaml is unmaintained; no exploitable defect reported; reaches nxs via the deprecated serde_yaml, replaced in 6j6v.spqq (recorded by 6j6v.2dn0)" },
+    # unmaintained, not a vulnerability, no safe upgrade: reaches nxs only through rmcp (and
+    # rmcp's schemars); rmcp 3.11.0 still requires chrono. Dropping it is 6j6v.n2wj.
+    { id = "RUSTSEC-2026-0543", reason = "expires 2027-02-28: chrono 0.4.45 is unmaintained; no exploitable defect reported; reaches nxs only via rmcp/schemars, followed up in 6j6v.n2wj" },
 ]
 
 [licenses]

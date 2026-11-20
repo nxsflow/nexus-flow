@@ -49,6 +49,7 @@ fn layout(db_path: &str) -> Layout {
         root: declarations_root(&root),
         agent_logs: nxs.join("agent-logs"),
         session_env: Vec::new(),
+        tools_dir: None,
     }
 }
 
@@ -81,7 +82,9 @@ pub fn store_refusal(path: &Path, reason: &str) -> NxfError {
 fn refusal_of(path: &Path, refused: Refused) -> NxfError {
     match refused {
         Refused::Store(error) => store_refusal(path, &error.to_string()),
-        Refused::Compile(_) => NxfError::validation(refused.to_string()),
+        Refused::Compile(_) | Refused::UnresolvedTarget(_) => {
+            NxfError::validation(refused.to_string())
+        }
         Refused::Port(_) => NxfError::io(refused.to_string()),
         other => NxfError::new(crate::error::ErrorKind::Conflict, other.to_string()),
     }
@@ -340,6 +343,25 @@ fn the_requester(
     state: &bridge::RunState,
     verb: &str,
 ) -> Result<bridge::Caller> {
+    a_person_at_the_terminal(ctx, store, state, verb)?;
+    if !crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor) {
+        return Err(not_the_requester(verb, &state.requester, None));
+    }
+    Ok(bridge::Caller {
+        actor: state.requester.clone(),
+        session: None,
+    })
+}
+
+/// **A person at this terminal, or the refusal that names what the caller is instead** — the half of
+/// [`the_requester`] that does not ask WHO: a session of a run on the new engine, a persona session, or any
+/// caller presenting a session is refused, each in its own words.
+fn a_person_at_the_terminal(
+    ctx: &Ctx,
+    store: &crate::store::ChatStore,
+    state: &bridge::RunState,
+    verb: &str,
+) -> Result<()> {
     let (identity, v2) =
         resolve_caller(store, ctx.defs, None, ctx.session, ctx.db_path, ctx.origin)?;
     if let Some(v2) = v2 {
@@ -353,15 +375,10 @@ fn the_requester(
     if let crate::persona::Identity::Persona(handle) = &identity {
         return Err(not_the_requester(verb, &state.requester, Some(handle)));
     }
-    if ctx.session.is_some()
-        || !crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor)
-    {
+    if ctx.session.is_some() {
         return Err(not_the_requester(verb, &state.requester, None));
     }
-    Ok(bridge::Caller {
-        actor: state.requester.clone(),
-        session: None,
-    })
+    Ok(())
 }
 
 fn not_the_requester(verb: &str, requester: &str, persona: Option<&str>) -> NxfError {
@@ -552,14 +569,56 @@ pub fn withdraw_a_run(
     if state.is_finished() {
         return Err(refused_on(&run_thread, Refused::RunFinished));
     }
-    let caller = the_requester(ctx, store, &state, "withdraw")?;
-    let body = format!("withdrawn by {}", caller.actor);
-    bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
-        .map_err(|r| refused_on(&run_thread, r))?;
+    a_person_at_the_terminal(ctx, store, &state, "withdraw")?;
+    let requester = crate::facade::same_identity(Some(state.requester.as_str()), ctx.actor);
+    if !requester && state.workspace != ctx.origin {
+        // A run of another workspace (6j6v.4b43): nobody here is its requester, so its owner withdraws it.
+        withdraw_as_the_owner(ctx, &run_thread, &state, thread, now)?;
+    } else if requester {
+        let caller = bridge::Caller {
+            actor: state.requester.clone(),
+            session: None,
+        };
+        let body = format!("withdrawn by {}", caller.actor);
+        bridge::withdraw(&run_thread.bridge, thread, &caller, &body, now)
+            .map_err(|r| refused_on(&run_thread, r))?;
+    } else {
+        return Err(not_the_requester("withdraw", &state.requester, None));
+    }
     Ok(Some(crate::orchestration::WithdrawReceipt::of_a_run(
         thread,
         run_thread.route.run.as_str(),
     )))
+}
+
+/// **The owner's withdraw of a run commissioned under another workspace id** (6j6v.4b43) — a send from before
+/// this workspace had its origin: no service here ever claims it, and its requester is an identity of that
+/// other workspace. The caller is a person at this terminal who is not that requester; it withdraws the run in
+/// its own name, with no identity borrowed, and the run records it as the owner's.
+fn withdraw_as_the_owner(
+    ctx: &Ctx,
+    run_thread: &RunThread,
+    state: &bridge::RunState,
+    thread: &str,
+    now: Timestamp,
+) -> Result<()> {
+    let owner = format!(
+        "{}/{}",
+        ctx.origin,
+        crate::orchestration::bare_handle_of(ctx.actor)
+    );
+    let body = format!(
+        "withdrawn by {owner}, the owner of workspace {}: {} commissioned this run under workspace {}, \
+         which no service here attends",
+        ctx.origin, state.requester, state.workspace
+    );
+    let caller = bridge::Caller {
+        actor: owner,
+        session: None,
+    };
+    bridge::withdraw_as_owner(&run_thread.bridge, thread, &caller, &body, now)
+        .map_err(|r| refused_on(run_thread, r))?;
+    Ok(())
 }
 
 /// **`nxc resume --thread <root>` on a run on the new engine** (IN3) — `None` when `thread` is not one. The
@@ -820,7 +879,39 @@ pub fn workspace_root_of(ws: &crate::workspace::Workspace) -> PathBuf {
 /// **Where the service's host for `ws` works, and what its sessions are given** (§6.6): the registered root,
 /// its agent logs, and the identity a session's `nxc` resolves — `NXC_DB`, the root's database, and
 /// `NXC_ORIGIN`, the chat origin — beside the allowlist the host takes from the service process.
+///
+/// **A session speaks the version of the host that started it** (6j6v.2kvn): see [`service_layout_for`], which
+/// this calls with the binary this process runs and the instance it resolved.
 pub fn service_layout(ws: &crate::workspace::Workspace) -> Result<Layout> {
+    let instance = nxs_service::Instance::ambient()?;
+    service_layout_for(
+        ws,
+        nxs_service::program::running_program().as_deref(),
+        &instance,
+    )
+}
+
+/// [`service_layout`] for a named `program` and `instance` — the form a test can give a binary and an instance
+/// of its own.
+///
+/// Two things make a session's `nxc` the host's own (6j6v.2kvn):
+///
+/// - **The directory of `program` goes first on the session's `PATH`** where its `nxc`, `nxf` and `nxm` are that
+///   binary ([`session_tools_dir`]). The service's `PATH` holds no build tree by design (6j6v.8see: the plist
+///   must not freeze one), so under a development instance a session otherwise found the INSTALLED `nxc` —
+///   another version, which on 2026-11-15 had no v2 reply bridge at all. The directory is derived here, at
+///   every host start, from the binary that runs — never written into the plist, so a moved checkout or a
+///   `cargo clean` leaves nothing pointing at nothing. For the installed service it is `~/.local/bin`, where
+///   its `nxc` already was.
+/// - **A named instance travels as `NXS_SERVICE_INSTANCE`.** A session's `nxc` is then a BUILD, and a build
+///   that names no instance is production — which reads no user-level declarations at all
+///   ([`crate::definitions::user_declarations_dir`]) and the production registry. The production service
+///   names none: its `nxc` is installed and would not read the variable.
+pub fn service_layout_for(
+    ws: &crate::workspace::Workspace,
+    program: Option<&Path>,
+    instance: &nxs_service::Instance,
+) -> Result<Layout> {
     let root = workspace_root_of(ws);
     let nxs = root.join(".nxs");
     let db = nxs
@@ -837,9 +928,34 @@ pub fn service_layout(ws: &crate::workspace::Workspace) -> Result<Layout> {
         session_env: vec![
             var("NXC_DB", &db),
             var("NXC_ORIGIN", crate::workspace::origin_of(ws)),
-        ],
+        ]
+        .into_iter()
+        .chain(
+            instance
+                .qualifier()
+                .map(|_| var(nxs_service::instance::INSTANCE_ENV, &instance.name())),
+        )
+        .collect(),
+        tools_dir: program.and_then(session_tools_dir),
         root,
     })
+}
+
+/// The persona links a session runs, which must all be the host's own binary for its directory to go first.
+const SESSION_TOOLS: [&str; 3] = ["nxc", "nxf", "nxm"];
+
+/// **The directory whose `nxc`, `nxf` and `nxm` ARE `program`**, or `None` (6j6v.2kvn). Judged on canonical
+/// paths, so the service alias (`~/.nexusflow-dev/bin/nexus-flow-dev -> …/target/debug/nxs`) answers for the
+/// directory of the binary it names. An install and a build both lay the links out beside `nxs` (`self-update`
+/// and `crates/nxs/build.rs`); a test binary in `deps/` has none, and a link that is missing or names another
+/// binary disqualifies the directory — a session then finds what the service's `PATH` finds, as before.
+pub fn session_tools_dir(program: &Path) -> Option<PathBuf> {
+    let program = std::fs::canonicalize(program).ok()?;
+    let dir = program.parent()?;
+    SESSION_TOOLS
+        .iter()
+        .all(|tool| std::fs::canonicalize(dir.join(tool)).is_ok_and(|found| found == program))
+        .then(|| dir.to_path_buf())
 }
 
 /// **The host the background service ticks for one registered workspace** (§8.1; b8tj note 1-3), or `None`
