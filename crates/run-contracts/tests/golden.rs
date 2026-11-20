@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use nexus_run_contracts::status::{MEMBER_STATES, STEP_STATES, WAITING_FOR_FIXED};
+use nexus_run_contracts::status::{
+    StartPort, StartRefusal, MEMBER_STATES, STEP_STATES, WAITING_FOR_FIXED,
+};
 use nexus_run_contracts::{
     Appended, Capabilities, Decision, Disposition, DrainedFact, Enqueued, Event, EventBody,
     FlowRef, Key, Liveness, LivenessPolicy, MessageId, Origin, ReasonCode, RunId, RunRow,
@@ -486,9 +488,32 @@ fn a_status_without_local_is_byte_exact_and_holds_nothing_read_from_the_machine(
         "pending_inputs",
         "observed_at",
         "quiet_for_s",
+        "start_refusals",
     ] {
         assert!(!keys.contains(local_only), "{local_only} is in {keys:?}");
     }
+}
+
+/// A session the owner could not start reaches the local part with its port, and only there; with none, the
+/// field is absent, so the frozen v1 bytes stay what they were (6j6v.yt1a).
+#[test]
+fn a_start_refusal_is_local_and_absent_on_the_wire_when_there_is_none() {
+    let mut status: RunStatus = assert_byte_exact("run-status.json");
+    let local = status.local.as_mut().unwrap();
+    assert!(local.start_refusals.is_empty());
+    local.start_refusals.push(StartRefusal {
+        session_key: "r-1/build/v1/coder/a1".into(),
+        handle: "coder".into(),
+        port: StartPort::Persona,
+        at: local.observed_at,
+    });
+    let wire = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        wire["local"]["start_refusals"][0]["port"],
+        "declarations.persona"
+    );
+    let back: RunStatus = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, status);
 }
 
 #[test]

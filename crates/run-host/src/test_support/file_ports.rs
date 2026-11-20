@@ -47,6 +47,9 @@ pub struct FilePorts {
     pub post_delay_ms: std::sync::atomic::AtomicU64,
     /// Every prompt purpose and turn the host asked for.
     pub asked: std::sync::Mutex<Vec<String>>,
+    /// The port calls that refuse while named here: `open_thread` (a step's thread, which has a parent),
+    /// `post_turn` (a find or post of a step's turn), `turn`, `prompt`, `persona`, `bundle_path`.
+    pub refuse: std::sync::Mutex<std::collections::BTreeSet<&'static str>>,
 }
 
 impl FilePorts {
@@ -57,7 +60,33 @@ impl FilePorts {
             panic_on_body: std::sync::Mutex::new(None),
             post_delay_ms: std::sync::atomic::AtomicU64::new(0),
             asked: std::sync::Mutex::new(Vec::new()),
+            refuse: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// Refuses `call` from now on, with words a log line must not carry.
+    pub fn refuse(&self, call: &'static str) {
+        self.refusing().insert(call);
+    }
+
+    /// Answers `call` again.
+    pub fn answer(&self, call: &'static str) {
+        self.refusing().remove(call);
+    }
+
+    fn refusing(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<&'static str>> {
+        self.refuse
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn check(&self, call: &'static str) -> PortResult<()> {
+        if self.refusing().contains(call) {
+            return Err(port_error(format!(
+                "{SECRET_IN_A_PORT_ERROR} refused {call}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn lines(&self) -> Vec<PortLine> {
@@ -82,6 +111,9 @@ impl FilePorts {
             .push(what);
     }
 }
+
+/// What a refusing port says: text the old side holds, which no log line and no status may carry.
+pub const SECRET_IN_A_PORT_ERROR: &str = "the body of a private message";
 
 fn port_error(error: impl std::fmt::Display) -> PortError {
     PortError {
@@ -110,6 +142,9 @@ impl MessagePort for FilePorts {
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
         }
+        if key.starts_with("turn/") {
+            self.check("post_turn")?;
+        }
         if self.refuse_posts.load(Ordering::SeqCst) {
             return Err(port_error("the chat store is locked"));
         }
@@ -134,6 +169,9 @@ impl MessagePort for FilePorts {
     }
 
     fn find(&self, thread: &str, key: &str) -> PortResult<Option<MessageId>> {
+        if key.starts_with("turn/") {
+            self.check("post_turn")?;
+        }
         Ok(self.lines().into_iter().find_map(|line| match line {
             PortLine::Post {
                 id,
@@ -165,6 +203,9 @@ impl MessagePort for FilePorts {
         channel: &str,
         opener: &str,
     ) -> PortResult<()> {
+        if parent.is_some() {
+            self.check("open_thread")?;
+        }
         self.append(&PortLine::Open {
             thread: thread_id.to_owned(),
             parent: parent.map(str::to_owned),
@@ -227,6 +268,7 @@ impl DeclarationPort for FilePorts {
     }
 
     fn persona(&self, handle: &str) -> PortResult<PersonaDecl> {
+        self.check("persona")?;
         Ok(PersonaDecl {
             handle: handle.to_owned(),
             model: Some("a-model".to_owned()),
@@ -246,6 +288,7 @@ impl DeclarationPort for FilePorts {
     }
 
     fn prompt(&self, handle: &str, purpose: PromptFor) -> PortResult<PromptBundle> {
+        self.check("prompt")?;
         self.note(format!("prompt {handle} {purpose:?}"));
         Ok(PromptBundle {
             system_prompt: format!("Standing context of {handle}."),
@@ -257,6 +300,7 @@ impl DeclarationPort for FilePorts {
 
     /// Reads each part by id and frames it, as the v1 side does.
     fn turn(&self, handle: &str, parts: &[TurnPart]) -> PortResult<String> {
+        self.check("turn")?;
         let mut text = Vec::new();
         for part in parts {
             let id = part.message.as_deref().unwrap_or_default();
@@ -279,6 +323,7 @@ impl DeclarationPort for FilePorts {
 
 impl SidecarPort for FilePorts {
     fn bundle_path(&self) -> PortResult<PathBuf> {
+        self.check("bundle_path")?;
         Ok(PathBuf::from("/nonexistent/sidecar.mjs"))
     }
 }

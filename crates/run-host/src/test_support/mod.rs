@@ -23,7 +23,9 @@ use crate::host::{Host, Layout, Ports, TickReport};
 use crate::ports::{Clock, Refs};
 use crate::tree_ledger::TreeLedger;
 use crate::tree_worker::WorkTree;
-pub use file_ports::{coding_decl, read_port_lines, review_decl, FilePorts, PortLine};
+pub use file_ports::{
+    coding_decl, read_port_lines, review_decl, FilePorts, PortLine, SECRET_IN_A_PORT_ERROR,
+};
 use scripted_backend::{pass, Cue, Scenario, ScriptedBackend, SessionInfo};
 use scripted_tree::ScriptedTree;
 
@@ -208,6 +210,7 @@ impl Rig {
             root: dir.join("root"),
             agent_logs: dir.join("agent-logs"),
             session_env: Vec::new(),
+            tools_dir: None,
         }
     }
 
@@ -250,6 +253,7 @@ impl Rig {
             self.backend.clone(),
             tree.clone(),
             self.clock.clone(),
+            WORKSPACE,
         );
         (host, tree)
     }
@@ -298,6 +302,7 @@ impl<T: RigTree> Rig<T> {
             backend.clone(),
             tree.clone(),
             clock.clone(),
+            WORKSPACE,
         );
         let bridge = BridgeCtx {
             store: bridge_store,
@@ -350,6 +355,7 @@ impl<T: RigTree> Rig<T> {
             self.backend.clone(),
             tree.clone(),
             self.clock.clone(),
+            WORKSPACE,
         );
         self.store = store;
         self.tree = tree;
