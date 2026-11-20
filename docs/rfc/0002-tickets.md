@@ -12,10 +12,10 @@ GENESIS.md's row for `tickets`: "projects and tickets with dependencies, readine
 - **Readable ids.** A ticket is named in branches, commits, PR titles and other tickets within minutes of its creation, so its id must be short, final when the ticket is created, and a mention of it must link (owner, NEX-16).
 - **"Done" is not yet "on main".** A ticket is closed with a linked PR, branch or artifact; whether it is merged into the team's base branch is derived from git, never set (GENESIS.md, "Done is not yet on main"; NEX-33).
 - **Readiness from the graph**, never stored, with a dependency that is done but not yet on main still blocking.
-- **What served the factory in Linear**, carried over (NEX-23, NEX-24, NEX-29): the short id with its key prefix, mention links, `blocks` and `related`, a close reason, the holder of a ticket, epics with children, and history with an actor.
+- **What served the factory in Linear**, carried over (NEX-23, NEX-24, NEX-29): the short id, mention links, `blocks` and `related`, a close reason, the holder of a ticket, epics with children, and history with an actor.
 - **Who did what.** Every change shows the role that made it and the person who commissioned that role (NEX-16; RFC 0001, "Who decided").
 
-The owner decided before this RFC was written: one fixed ticket model for every repository, generated from the standard `issue-tracker` plugin, with what served us in Linear carried over, and no team-specific types or fields for now (NEX-23); "on main" against the team's configurable base branch, with ticket ranges in commit titles (NEX-33); closing needs a linked PR, branch or artifact (NEX-33); tickets may refer to people by their identity (NEX-33); and tickets is a full module, not an adapter to another tracker (NEX-33).
+The owner decided before this RFC was written: one fixed ticket model for every repository, generated from the standard `issue-tracker` plugin, with what served us in Linear carried over, and no team-specific types or fields for now (NEX-23); "on main" against the team's configurable base branch, with ticket ranges in commit titles (NEX-33); closing needs a linked PR, branch or artifact (NEX-33); tickets may refer to people by their identity (NEX-33); and tickets is a full module, not an adapter to another tracker (NEX-33). On 2026-11-20 the owner answered the questions this RFC asked (NEX-54 to NEX-57): how a ticket's key is formed, what puts a ticket in the owner's queue, the resolutions of a closed ticket, and the shape of the commands. The answers are written into the text below.
 
 **Scope.** This RFC designs what priority 1 needs: the storage of v1's tickets on NoCentralDB and the behaviour v1 has today, plus "done" and "on main", which GENESIS.md asks for and RFC 0001 already counts on. Behaviour v1 does not have, which priority 2 adds, is named here and designed later by rewriting this RFC (decision of 2026-11-15, "A module's storage in NoCentralDB is designed in the module's own RFC"): subscriptions to ticket comments, ranking by goals, and the proposal of which tickets serve a new goal (see "Left to priority 2").
 
@@ -38,7 +38,7 @@ v1's second plugin, `personal-todo`, and every plugin's custom and list fields a
 
 ### Collections
 
-The module owns five collections, all in the repository space (RFC 0001, "The model": the storage crate refuses to write them into a coordination space):
+The module owns four collections, all in the repository space (RFC 0001, "The model": the storage crate refuses to write them into a coordination space):
 
 | Collection | One object per | Holds |
 | --- | --- | --- |
@@ -46,7 +46,6 @@ The module owns five collections, all in the repository space (RFC 0001, "The mo
 | `ticketsNote` | Note on a ticket | The append-only comment stream, v1's notes |
 | `ticketsWork` | PR, branch or artifact linked to a ticket | What closes a ticket as done, and what "on main" is derived from |
 | `ticketsReference` | Reference from a ticket to an object in another space | Goals a ticket serves, tickets of other repositories it cites |
-| `ticketsSettings` | Repository space (one) | The space's ticket key, and which member mints numbers (see "Ticket ids") |
 
 **Edges inside the space are fields of the ticket**, as NoCentralDB's own task model has them (NoCentralDB RFC 0005, "The schema in TypeScript"): `parent` is a single link, `dependsOn`, `contributesTo` and `mentions` are sets of links. A set of links merges as a set, add wins (NoCentralDB RFC 0004, "Sets"), which is exactly v1's observed-remove edge set, so the move keeps the edges' meaning. A dependency field is also what NoCentralDB's computed reach is written over (`nc.reach("dependsOn", …)`, NoCentralDB RFC 0005), so readiness can move into NoCentralDB without a migration once R7 lands. *Not taken:* an edge collection with one object per edge, which would make both directions indexable today but would have to be migrated into a links field for `nc.reach`, and would let two members create the same edge twice.
 
@@ -60,7 +59,7 @@ The module owns five collections, all in the repository space (RFC 0001, "The mo
 
 | Field | Type | From v1 | Holds |
 | --- | --- | --- | --- |
-| `key` | `nc.string()` | the item id (`ab12.7x3k`) | The readable id, such as `NEX-42`, set once when the ticket is created (see "Ticket ids") |
+| `key` | `nc.string()` | the item id (`ab12.7x3k`) | The readable id, such as `ka.42`, set once when the ticket is created (see "Ticket ids") |
 | `type` | `nc.oneOf([...])` | `type` | One of the six types above |
 | `title` | `nc.string()` | `title` | One line |
 | `description` | `nc.string()` | `description` | Why the ticket exists and its goal |
@@ -122,26 +121,37 @@ RFC 0003 meets the same gap with join collections, one object per decision and t
 
 ### Ticket ids
 
-A ticket has two ids. Its **object id** is NoCentralDB's, 128 random bits (NoCentralDB RFC 0002, "Object ids"): every link, mention and reference stores it, so a link never changes meaning. Its **key** is the readable id people and commits use, such as `NEX-42`: the space's key prefix, a hyphen, and a code. The key is written once, when the ticket is created, and is final from then on, because branch names and commit titles carry it before any sync, and "on main" is derived from them (NEX-24: an option that renumbers fails here). `nxs` never writes the key again; NoCentralDB cannot stop a hostile member from doing so, and a key changed by hand is read as written.
+A ticket has two ids. Its **object id** is NoCentralDB's, 128 random bits (NoCentralDB RFC 0002, "Object ids"): every link, mention and reference stores it, so a link never changes meaning. Its **key** is the readable id people and commits use: the creating member's tag, a dot, and a number that counts up per tag, such as `ka.42` (decided by the owner, NEX-54). The key is written once, when the ticket is created, and is final from then on, because branch names and commit titles carry it before any sync, and "on main" is derived from them (NEX-24: an option that renumbers fails here). `nxs` never writes the key again; NoCentralDB cannot stop a hostile member from doing so, and a key changed by hand is read as written.
 
-The **key prefix** is stored in the space's `ticketsSettings` object (`key`, for example `NEX`), which `nxs init` writes when it creates the space; it is uppercase ASCII letters, two to six of them. Every member reads it from the space, manufakt.io included, so it needs no checkout. A changed prefix applies to new tickets only; old keys stay as written.
+There is no prefix such as `NEX-`: the owner chose against one, because it recalls Linear (NEX-54). A key is therefore unique within its repository space only, and a key cited from another repository is told apart by the reference that carries it, not by its text (see "References out of the space").
 
-**How the code after the prefix is formed is the owner's choice**, laid out under "Open questions" (question 1). The rest of this RFC holds for every option there:
+**The member tag** is two characters, lower-case ASCII letters and digits, starting with a letter, such as `ka` or `p7`. It is assigned when a member is invited: the inviter knows every tag in the space at that point and picks one that is free (NEX-54), and `nxs member add` writes it into the new member's `spaceMember` record (RFC 0001, "The role record"), as a field this RFC adds to that collection:
 
-- A key is resolved through `byKey`. When two tickets hold the same key, which options (a), (c) and (d) of question 1 allow in rare cases, `nxs` shows both with the first characters of their object ids, the way git abbreviates hashes (`NEX-42~3f9a`), and an argument that names only `NEX-42` fails with `ambiguous_key` and lists both. A mention or link written earlier keeps pointing at the object it was written for.
-- **A commit range**, `NEX-13..NEX-23`, names every ticket whose key has the same prefix and a number from the first to the last, both included (NEX-33). A range applies to numeric codes only; a code that is not a number is never inside a range.
+| Field | Type | Holds |
+| --- | --- | --- |
+| `tag` | `nc.string()` | The member's ticket tag; unset for a member that has none |
 
-`nxs ticket branch <key>` prints the branch name for a ticket: the key in lower case, a hyphen, and a slug of the title, at most 40 characters, with no person in it (NEX-24, NEX-29), for example `nex-6-tickets-in-nocentraldb`. A team may shorten or rename a branch; what matters is the key in it, and the branch a ticket's work is on is recorded as a work link.
+`nxs member add` picks a free tag unless `--tag <tag>` names one, and refuses a tag that a current member of the space holds. Which members get a tag, and whether a tag is free again once its member is removed, is still open ("Open questions", question 1).
+
+**The number** is the highest number among the keys with the member's own tag in its local copy, plus one. Only the member that holds a tag creates keys with it, and its own writes are always in its own copy, so its numbers never repeat while it alone holds the tag. A member that has not yet synced the space starts at 1 only when its copy holds no key with its tag.
+
+**Two members with one tag.** Two inviters who pick a tag offline at the same time can give two members the same one, and the two then mint the same keys. This is rare, and it is resolved when it happens (NEX-54): `nxs member list` marks both members with `tag_shared`, and pm files a ticket to give one of them a new tag with `nxs member retag <member> <tag>`. Keys already written keep their tag. Until then, and for the keys written meanwhile:
+
+- A key is resolved through `byKey`. When two tickets hold the same key, `nxs` shows both with the first characters of their object ids, the way git abbreviates hashes (`ka.42~3f9a`), and an argument that names only `ka.42` fails with `ambiguous_key` and lists both. A mention or link written earlier keeps pointing at the object it was written for.
+
+**A commit range**, `ka.13..ka.23`, names every ticket whose key has the same tag and a number from the first to the last, both included (NEX-33). A range never spans two tags.
+
+`nxs ticket branch <key>` prints the branch name for a ticket: the key, a hyphen, and a slug of the title, at most 40 characters, with no person in it (NEX-24, NEX-29), for example `ka.42-tickets-in-nocentraldb`. A team may shorten or rename a branch; what matters is the key in it, and the branch a ticket's work is on is recorded as a work link.
 
 ### Mentions
 
 `mentions` is one field for two uses that Linear had (NEX-24, NEX-29): a ticket key cited in text, and a relation added by hand (`related`, NOC's most used relation). Both are read from either end.
 
-- **Parsed on write.** When `nxs` writes a ticket's `description`, `design`, `completionCriterion` or `closingComment`, or a note on it, it finds every token of the form `<prefix>-<code>` with this space's prefix, resolves each through `byKey`, and adds the object ids it finds to the ticket's `mentions` in the same change. A key it cannot resolve, because that ticket has not arrived yet or never existed, is left as text. Editing the text later does not remove a mention: a mention records that the ticket was cited, as v1's did.
+- **Parsed on write.** When `nxs` writes a ticket's `description`, `design`, `completionCriterion` or `closingComment`, or a note on it, it finds every token of the form `<tag>.<number>` whose tag a member of this space holds or held, standing alone as a word, resolves each through `byKey`, and adds the object ids it finds to the ticket's `mentions` in the same change. A key it cannot resolve, because that ticket has not arrived yet or never existed, is left as text. Editing the text later does not remove a mention: a mention records that the ticket was cited, as v1's did.
 - **Added by hand,** with `nxs ticket update <key> --add-mention <key>`, without any text, at any time after creation, and removed the same way.
 - **Read from both ends.** `show` lists what a ticket mentions and, as `mentioned_by`, the tickets that mention it; `nxs ticket mentioned-by <key>` lists the latter with `list`'s filters.
 
-A key of another repository, such as `NOC-12` in a NEX ticket, is not parsed: the prefix is not this space's, and a link cannot leave the space. Citing another repository's ticket is a reference of kind `cites` (see "References out of the space").
+A key cited from another repository is not told apart by its text, since keys carry no prefix: if this space holds a ticket with the same key, the parser links that one. Another repository's ticket is cited through a reference of kind `cites`, which carries its space (see "References out of the space"), and its `label` names the repository, such as `nexus-flow ka.12`.
 
 A duplicate is closed as `replaced`, with `replacedBy` naming the ticket it duplicates; `show` of that ticket lists it under `replaces`.
 
@@ -150,7 +160,7 @@ A duplicate is closed as `replaced`, with `replacedBy` naming the ticket it dupl
 A ticket is `open`, `in_progress` or `closed`, as in v1. Linear's Backlog and Todo were used inconsistently, with hops seconds apart (NEX-29), and both mean "open"; readiness, not a status, says whether a ticket can start.
 
 - **Claim.** `nxs ticket claim <key>` sets `status` to `in_progress` and `assignee` to the member the command runs as, or to `--assignee`.
-- **Close.** `nxs ticket close <key> --reason <text> [--as done|canceled|replaced] [--replaced-by <key>]` closes the ticket with a resolution, `done` by default, and the reason as its closing comment. A reason is required for every close, as in v1 (NEX-29: a cancel without a reason was drift). `done` requires at least one work link on the ticket, a PR, a branch or an artifact (NEX-33); `replaced` requires `--replaced-by`; `canceled` requires neither.
+- **Close.** `nxs ticket close <key> --reason <text> [--as done|canceled|replaced] [--replaced-by <key>]` closes the ticket with a resolution, `done` by default, and the reason as its closing comment. A reason is required for every close, as in v1 (NEX-29: a cancel without a reason was drift). `done` requires at least one work link on the ticket, a PR, a branch or an artifact (NEX-33); `replaced` requires `--replaced-by`; `canceled` requires neither. The three resolutions are the owner's choice (NEX-56): `replaced` covers both a duplicate and a ticket folded into another, since both mean that the work continues in the ticket it names, and the closing comment says which.
 - **Reopen.** `nxs ticket reopen <key> --reason <text>` sets `status` to `open`, clears `resolution`, `replacedBy` and `closedAt`, and adds the reason as a note. Work links stay.
 - **Archive.** `nxs ticket archive <key>...` and `unarchive` keep v1's behaviour: archiving cascades down an epic's children and only when they are all closed; unarchiving cascades up to the parent.
 
@@ -187,7 +197,7 @@ A `ticketsWork` object links one piece of work to its ticket, and one ticket may
 
 An owner question is a ticket of type `question`: one question that can be answered from a phone, with options and a recommendation (FACTORY.md, "What goes to the owner"). It is a type, not a label, because NOC's queue hung on a label that agents forgot on about fourteen of its "Owner:" tickets (NEX-29), and because only a question carries options, while an owner *task*, such as a setup step, does not. The work a question blocks depends on it through `dependsOn`, recorded when the question is filed, so readiness follows from the answer instead of from a note (NEX-29). How a question's text is laid out stays a template the team owns.
 
-**The owner's queue** is derived: every open ticket of type `question`, and every open ticket assigned to the owner's account. `nxs ticket list --owner` reads it through `byType` and `byAssignee`. Which facts it is derived from is the owner's choice (question 2).
+**The owner's queue** is derived: every open ticket of type `question`, and every open ticket assigned to the owner's account. `nxs ticket list --owner` reads it through `byType` and `byAssignee`. The owner chose these facts over a label, which agents forget (NEX-55).
 
 ### References out of the space
 
@@ -198,7 +208,7 @@ A link stays inside its space (NoCentralDB RFC 0004, "Links"), so a ticket refer
 | `ticket` | `nc.link("ticketsTicket")` | The referring ticket |
 | `kind` | `nc.oneOf(["serves", "cites"])` | What the reference means |
 | `target` | `nc.ref(["ticketsTicket"])` | The target's space id and object id (NoCentralDB RFC 0004, "References") |
-| `label` | `nc.string()` | The target's readable name when the reference was written, such as `NOC-12` or a goal's title |
+| `label` | `nc.string()` | The target's readable name when the reference was written, such as `nocentraldb ka.12` or a goal's title |
 | `createdAt`, `createdBy` | `nc.string()` | As for work links |
 
 | Kind | Target | Means |
@@ -245,7 +255,7 @@ The derived state is as fresh as the last sync for the tickets, and as the last 
 
 ### Commands, JSON and the seam
 
-The ticket commands are one noun and a verb, `nxs ticket <verb>`, as RFC 0001's `nxs session start` and `nxs member add` are. A relation is changed by a flag of `update`, not by a third word, so no command is nested deeper than RFC 0001's flat commands (NEX-38); question 4 asks the owner to confirm the shape. Every command takes a key wherever it takes a ticket, prints JSON by default and Markdown with `--md`, and keeps v1's flag names where v1 had them.
+The ticket commands are one noun and a verb, `nxs ticket <verb>`, as RFC 0001's `nxs session start` and `nxs member add` are. A relation is changed by a flag of `update`, not by a third word, so no command is nested deeper than RFC 0001's flat commands (NEX-38). The owner chose this shape over nouns of their own (`nxs dep add`, `nxs note add`), which would add top-level nouns and make `note` ambiguous once decisions and status notes come, and over three words (`nxs ticket dep add`) (NEX-57). Every command takes a key wherever it takes a ticket, prints JSON by default and Markdown with `--md`, and keeps v1's flag names where v1 had them.
 
 | Command | Does | v1 |
 | --- | --- | --- |
@@ -297,10 +307,10 @@ Named here, designed later by rewriting this RFC:
 
 GENESIS.md reserves these for the owner:
 
-- **Commands:** the `nxs ticket` verbs and flags in the table above.
+- **Commands:** the `nxs ticket` verbs and flags in the table above, and, on RFC 0001's member commands, `nxs member add --tag <tag>` and `nxs member retag <member> <tag>`; `nxs member list` gains `tag` and the marker `tag_shared`.
 - **JSON output:** the ticket record, `show`'s additions, the `assignee` object, the `flags` values and the error codes above.
 - **Library seam:** the `Engine::ticket*` symbols and their types above.
-- **Stored formats:** the `request` field and `byRequest` index, which RFC 0009 brings and this RFC declares; the collections `ticketsTicket`, `ticketsNote`, `ticketsWork`, `ticketsReference` and `ticketsSettings` with their fields and indexes; the `type`, `status`, `resolution`, `kind` and `state` values; the key format; the `member:` and `account:` prefixes of `assignee`; and the branch-name rule.
+- **Stored formats:** the `request` field and `byRequest` index, which RFC 0009 brings and this RFC declares; the collections `ticketsTicket`, `ticketsNote`, `ticketsWork` and `ticketsReference` with their fields and indexes; the `tag` field this RFC adds to RFC 0001's `spaceMember`; the `type`, `status`, `resolution`, `kind` and `state` values; the key format `<tag>.<number>`; the `member:` and `account:` prefixes of `assignee`; and the branch-name rule.
 
 ### What nexus-flow needs from NoCentralDB
 
@@ -313,7 +323,9 @@ GENESIS.md reserves these for the owner:
 
 ## What it does not do
 
-- **A key can collide** under options (a), (c) and (d) of question 1, rarely under each. A collision shows both tickets with a suffix and makes the bare key ambiguous; it never re-points a link.
+- **A key can collide** when two inviters give two members one tag offline. A collision shows both tickets with a suffix and makes the bare key ambiguous; it never re-points a link, and pm retags one member once it is seen.
+- **A key is unique in its repository only.** Without a prefix, `ka.12` in two repositories names two tickets, and a key cited in text from another repository links to this repository's ticket of that key if there is one.
+- **A mention can be a false match.** A word of the form `<tag>.<number>` whose tag this space uses, written for another reason, links the ticket of that key.
 - **A mention of a ticket that has not arrived** is not linked: the key stays text, and a later write of the same text links it.
 - **A key is final by `nxs`'s rule, not NoCentralDB's,** and so is a note's body. A writer that does not use `nxs` can change either; the change is signed and, once R6 lands, visible in the history.
 - **Concurrent edits of one text keep one,** and the other as a readable conflict, until NoCentralDB's rich text exists.
@@ -331,7 +343,7 @@ This RFC moves no data; RFC 0008 designs the move, replaying every v1 op so hist
 
 | v1 | In v2 |
 | --- | --- |
-| Item id (`<prefix>.<code>`) | A new object id; the key is formed by question 1's answer, and the v1 id is kept in the first note so old references can be found |
+| Item id (`<prefix>.<code>`) | A new object id, and a key with the tag of the member that runs the move; the v1 id is kept in the first note so old references can be found |
 | `type`, `title`, `description`, `design`, `completion_criterion`, `status`, `priority`, `due`, `defer_until`, `assignee`, `closing_comment` | The fields of the same meaning, in the table under "The ticket"; `assignee`, free text in v1, is mapped to an identity where RFC 0008 can, and kept as written otherwise (see "Who holds a ticket") |
 | `closed_at`, `archived` | `closedAt`, `archivedAt` |
 | `deleted` | Object deletion |
@@ -350,37 +362,16 @@ This RFC moves no data; RFC 0008 designs the move, replaying every v1 op so hist
 
 ## Open questions
 
-The owner decides each on its own, in the needs-owner ticket named with it.
+The owner answered the four questions of the draft on 2026-11-20, and the answers are in the text above: the key is `<member tag>.<number>`, without a prefix (NEX-54); the owner's queue is the open questions and the tickets assigned to the owner (NEX-55); the resolutions are `done`, `canceled` and `replaced` (NEX-56); and the commands are `nxs ticket <verb>`, with relations as flags of `update` (NEX-57). One question follows from the answer to NEX-54; pm files a needs-owner ticket for it.
 
-1. **How is a ticket's code formed?** (NEX-54; NEX-16 asked for this question.) Every option keeps the prefix and stores the code once, at creation.
-   - **(a) A short random code**, `NEX-7x3k`, from the object id. Final at creation, needs no coordination. Cost: not ordered, harder to say aloud, and collisions are normal at NOC's rate of about 40 tickets a day unless the code has six or seven characters (NEX-29: 10% by 15,000 tickets at six characters, 0.3% at seven).
-   - **(b) A running number assigned at sync**, `NEX-42`, by the relay or a sequencer. The most readable, in creation order. Cost: NoCentralDB has no such authority, so it is a new request on NoCentralDB; and a ticket carries a provisional id until then, which branches and commits may already carry, so "on main" has to know both.
-   - **(c) A number range per member**, reserved while online, `NEX-42`, or with a member tag, `NEX-42.c7`. Numeric and final. Cost: reserving is itself a write that can collide unless one member allocates; ranges leave gaps, more so with one member per session (NEX-16); the tag variant is longer.
-   - **(d) One minter of numbers, codes for everyone else.** `ticketsSettings` names the member that mints numbers, `NEX-42`: the device that created the space, until pm is paired, which then mints (FACTORY.md: there is only ever one pm). Every other member, such as the owner's phone or manufakt.io, gives its tickets a random code, `NEX-k7x3`, which always contains a letter, so it never reads as a number. Final at creation, readable for the tickets pm files, which in both factories are nearly all (NEX-29). Cost: two shapes of key; a minter must sync fully before it mints after a takeover, or it can reuse a number; ranges cover numbers only.
-   - Highest number plus one, renumbered on conflict: ruled out, since a key written into a branch or commit before the conflict would later name another ticket (NEX-24).
+1. **Which members get a tag, and is a tag ever reused?** (needs-owner ticket to come.) A tag has two characters, so there are 936 of them (a letter, then a letter or digit). With one member per agent session (NEX-16), a space adds a member for every session it starts.
+   - **(a) Every member gets a tag, and a tag is free again once its member is removed.** The next member that gets it continues its numbers, from the highest key with that tag. Cost: a tag no longer says who created a ticket (`createdBy` does); a removed member's last writes that reach the space late can collide with its successor's.
+   - **(b) Every member gets a tag, and no tag is ever reused.** A tag then always names one member. Cost: the 936 tags run out after about as many sessions, within months at NOC's pace, and the format would have to grow.
+   - **(c) Only members that create tickets get a tag: the developers' devices, pm and manufakt.io. A new pm takes over its predecessor's tag.** A role session gets none, and proposes tickets to pm, which files them, as the factory already works (FACTORY.md; NEX-29: pm filed nearly every ticket). Cost: a role session cannot create a ticket itself; a tag is reused only along one pm's line, where the predecessor's last writes reach the space before the new pm starts (RFC 0001: `nxs session end` waits until nothing is unconfirmed).
 
-   **Recommendation: (d).** It gives `NEX-42` for nearly every ticket without an authority NoCentralDB lacks, and its random codes are few enough that four characters keep their collisions rare.
-
-2. **What puts a ticket in the owner's queue?** (NEX-55.)
-   - **(a) The label `needs-owner`,** as today. Cost: agents forget it; NOC lost about fourteen questions from the queue that way (NEX-29).
-   - **(b) Facts the model already has:** an open ticket of type `question`, or one assigned to the owner's account. Cost: a new type, `question`, in the fixed model; a team that wants another rule has to wait for team fields (NEX-23).
-   - **(c) Both,** the label as an extra way in. Cost: two rules to explain, and the label can still be forgotten.
-
-   **Recommendation: (b).** It cannot be forgotten, and the type also tells a question, which carries options, from an owner task, which does not.
-
-3. **What are a closed ticket's resolutions?** (NEX-56.)
-   - **(a) `done`, `canceled`, `replaced`,** where `replaced` covers both a duplicate and a ticket folded into another, and names that ticket. Cost: Linear's "duplicate" is not a word of its own.
-   - **(b) `done`, `canceled`, `duplicate`, `merged_into`,** as NOC used them (NEX-29). Cost: two resolutions that both name another ticket and differ only in why.
-
-   **Recommendation: (a).** Both cases mean "this work continues in that ticket", and the closing comment says which.
-
-4. **Is the command surface `nxs ticket <verb>`, with relations as flags of `update`?** (NEX-57.)
-   - **(a) `nxs ticket <verb>`,** as in the table above. Cost: v1's `nxf dep add`, `nxf label add` and `nxf note add` become flags or verbs of `nxs ticket`, so prompts and habits written for v1 change.
-   - **(b) Nouns of their own:** `nxs dep add`, `nxs label add`, `nxs note add`. Cost: more top-level nouns, and `note` would be ambiguous once decisions and status notes come.
-   - **(c) Three words:** `nxs ticket dep add`. Cost: deeper than the flat commands the owner chose for RFC 0001 (NEX-38).
-
-   **Recommendation: (a).** It stays two words deep, and one `update` changes fields and relations in one change.
+   **Recommendation: (c).** Tags stay few and stable, the keys pm files keep one tag across takeovers, and the factory's way of filing tickets does not change.
 
 ## History
 
 - 2026-11-17: published as a draft in #160.
+- 2026-11-20: the owner's answers to NEX-54 to NEX-57 written into the text, in #160.
