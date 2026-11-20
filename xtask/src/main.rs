@@ -13,6 +13,7 @@ mod facade;
 mod layering;
 mod macos_tests;
 mod platforms;
+mod rfc_index;
 mod runners;
 mod truth;
 mod version;
