@@ -408,4 +408,4 @@ None. The owner answered them on 2026-11-20 (NEX-65 to NEX-69), and the answers 
 
 - 2026-11-17: published as a draft in #162.
 - 2026-11-20: decided by the owner (NEX-65 to NEX-69), in #162.
-- 2026-11-20: the readers of a line about a request or a goal corrected to RFC 0009's final design (see "Decisions"), in #PR (NEX-83).
+- 2026-11-20: the readers of a line about a request or a goal corrected to RFC 0009's final design (see "Decisions"), in #173 (NEX-83).

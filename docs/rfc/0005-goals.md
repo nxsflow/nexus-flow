@@ -300,4 +300,4 @@ None. The owner answered them on 2026-11-20 (NEX-58 to NEX-64), and the answers 
 
 - 2026-11-17: published as a draft in #161.
 - 2026-11-20: decided by the owner (NEX-58 to NEX-64), in #161.
-- 2026-11-20: what a role session sees of goals corrected to RFC 0009's final design (see "Decisions"), in #PR (NEX-83).
+- 2026-11-20: what a role session sees of goals corrected to RFC 0009's final design (see "Decisions"), in #173 (NEX-83).

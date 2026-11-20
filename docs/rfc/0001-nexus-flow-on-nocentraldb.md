@@ -345,4 +345,4 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 
 - 2026-11-15: published as a draft in #142.
 - 2026-11-17: decided by the owner (NEX-38), in #142.
-- 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #PR (NEX-83).
+- 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #173 (NEX-83).

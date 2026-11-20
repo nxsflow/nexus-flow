@@ -391,4 +391,4 @@ None. The owner answered them on 2026-11-20 (NEX-54 to NEX-57, NEX-73), and the 
 
 - 2026-11-17: published as a draft in #160.
 - 2026-11-20: decided by the owner (NEX-54 to NEX-57, NEX-73), in #160.
-- 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), in #PR (NEX-83).
+- 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), in #173 (NEX-83).

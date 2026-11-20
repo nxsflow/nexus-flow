@@ -177,4 +177,4 @@ None. The owner answered them on 2026-11-20 (NEX-70, NEX-71), and the answers ar
 
 - 2026-11-17: published as a draft in #163.
 - 2026-11-20: decided by the owner (NEX-70, NEX-71), in #163.
-- 2026-11-20: the list of rules narrowed to the one directly after the mark, from RFC 0010 (see "Decisions"), in #PR (NEX-83).
+- 2026-11-20: the list of rules narrowed to the one directly after the mark, from RFC 0010 (see "Decisions"), in #173 (NEX-83).

@@ -217,4 +217,4 @@ None. The owner answered the one question this draft left open on 2026-11-20 (NE
 
 - 2026-11-17: published as a draft in #157.
 - 2026-11-20: decided by the owner (NEX-44), in #157.
-- 2026-11-20: `migration` added to the frame's roles, from RFC 0008 (see "Decisions"), in #PR (NEX-83).
+- 2026-11-20: `migration` added to the frame's roles, from RFC 0008 (see "Decisions"), in #173 (NEX-83).
