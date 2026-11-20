@@ -92,8 +92,9 @@ impl Host {
         occasion: Outcome,
         now: Timestamp,
     ) -> Result<(), StoreError> {
+        // A claim under another workspace's id is not a claim on this workspace's directory (6j6v.4b43).
         let holds = self.store.get(&format!("claim/{workspace}"))?;
-        if holds.as_deref() != Some(run.as_str().as_bytes()) {
+        if self.foreign(workspace) || holds.as_deref() != Some(run.as_str().as_bytes()) {
             self.enqueue(
                 run,
                 format!("tree_parked/{run}"),

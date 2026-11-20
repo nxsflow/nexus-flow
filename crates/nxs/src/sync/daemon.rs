@@ -1135,6 +1135,13 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
     // **Why a publication failed, where a person looks** (6j6v.g0ye). The job that failed has long
     // ended and its stderr is in a log, so this reads the record each workspace keeps. `null` when
     // the registry could not be read: "no failure" and "nobody looked" must not render identically.
+    // **Which user-level personas this instance reads, and a development instance's missing ones**
+    // (6j6v.yt1a). Nothing creates `~/.nexusflow-<qualifier>/personas`, and without it the instance
+    // knows no persona declared only at user level: in the b7ck smoke the new engine refused the
+    // coder's start three times over that, and nothing said so.
+    let personas_dir = home.personas();
+    let personas_exist = personas_dir.is_dir();
+    let personas_note = user_personas_note(home.instance(), &personas_dir, personas_exist);
     let memory_publish_failures = workspaces::load_registered().ok().map(|entries| {
         let (resolved, _) = resolve_registered(&entries);
         resolved
@@ -1192,6 +1199,11 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
                         "error": error,
                     })).collect::<Vec<_>>()
                 }),
+                "user_personas": {
+                    "dir": personas_dir.display().to_string(),
+                    "exists": personas_exist,
+                    "note": personas_note,
+                },
             })
         );
         return Ok(());
@@ -1267,7 +1279,32 @@ pub fn status(json: bool, allow_redirected_home: bool) -> Result<()> {
             publish_failure_line(workspace, error)
         );
     }
+    if let Some(note) = personas_note {
+        println!("note: {note}");
+    }
     Ok(())
+}
+
+/// The note a DEVELOPMENT instance gets when its user-level persona folder is missing (6j6v.yt1a).
+///
+/// Production gets none: its folder is the installed suite's own, where a person keeps it, and a
+/// machine that declares every persona in its workspaces has no reason to keep one. A development
+/// instance reads a folder of its own on purpose, so a build under test never runs the installed
+/// suite's personas — which is exactly why nothing fills it, and why it has to be said.
+fn user_personas_note(
+    instance: &nxs_service::Instance,
+    dir: &Path,
+    exists: bool,
+) -> Option<String> {
+    if instance.is_production() || exists {
+        return None;
+    }
+    Some(format!(
+        "this development instance has no user-level personas: {} does not exist, so a persona \
+         declared only at user level is unknown here, and the new engine refuses its session at \
+         the start (declarations.persona); link or copy a personas folder there",
+        dir.display()
+    ))
 }
 
 /// What launchd holds under this instance's label, or `None` when nobody could look.

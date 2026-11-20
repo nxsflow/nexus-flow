@@ -380,6 +380,7 @@ impl Host {
         if finished {
             self.delete_if_present(&format!("pending/{run}"), &mut cas)?;
             self.delete_if_present(&format!("tree_refusal/{run}"), &mut cas)?;
+            self.delete_if_present(&crate::start::start_refusal_key(run), &mut cas)?;
         }
         self.delete_if_present(&format!("poison/{run}/{input_key}"), &mut cas)?;
         cas_hook(input_key, &mut cas);
@@ -548,7 +549,8 @@ impl Host {
         let mut cas = Vec::new();
         let cleared = self
             .delete_if_present(&format!("pending/{run}"), &mut cas)
-            .and_then(|()| self.delete_if_present(&format!("tree_refusal/{run}"), &mut cas));
+            .and_then(|()| self.delete_if_present(&format!("tree_refusal/{run}"), &mut cas))
+            .and_then(|()| self.delete_if_present(&crate::start::start_refusal_key(run), &mut cas));
         if let Err(error) = cleared {
             self.note_store_error(&error);
             return;
