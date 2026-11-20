@@ -97,6 +97,12 @@ pub fn index(dir: &Path, md: bool) -> Result<String> {
         .collect())
 }
 
+/// The gate: fail when two RFC files share a number, or a file's heading or `Status:` line is
+/// wrong. It reads only the RFC files, so it fails on a mistake in them, never on a stale table.
+pub fn check(_dir: &Path) -> Result<()> {
+    todo!()
+}
+
 #[cfg(test)]
 #[path = "rfc_index_tests.rs"]
 mod tests;

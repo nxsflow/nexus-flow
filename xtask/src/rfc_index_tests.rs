@@ -174,3 +174,46 @@ fn the_repository_readme_keeps_no_table_of_rfcs() {
     assert!(!text.contains("| [0001]"), "{text}");
     assert!(text.contains("cargo xtask rfc-index"), "{text}");
 }
+
+#[test]
+fn check_passes_on_well_formed_rfcs() {
+    let dir = folder(&[
+        ("0001-one.md", "0001", "One", "Draft"),
+        ("0002-two.md", "0002", "Two", "Draft"),
+    ]);
+    check(dir.path()).unwrap();
+}
+
+#[test]
+fn check_fails_when_two_rfc_files_share_a_number() {
+    let dir = folder(&[
+        ("0011-a.md", "0011", "A", "Draft"),
+        ("0011-b.md", "0011", "B", "Draft"),
+    ]);
+    let err = check(dir.path()).unwrap_err().to_string();
+    assert!(
+        err.contains("0011-a.md") && err.contains("0011-b.md"),
+        "{err}"
+    );
+}
+
+#[test]
+fn check_fails_when_a_heading_number_differs_from_the_file_name() {
+    let dir = folder(&[("0012-a.md", "0013", "A", "Draft")]);
+    let err = check(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("0012-a.md"), "{err}");
+}
+
+/// CI runs the check in `lint` on every event: it can only fail on a mistake in the RFC files.
+#[test]
+fn ci_runs_the_check_in_lint_on_every_event() {
+    let ci = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/ci.yml");
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(ci).unwrap()).unwrap();
+    let steps = yaml["jobs"]["lint"]["steps"].as_sequence().unwrap();
+    let step = steps
+        .iter()
+        .find(|s| s["run"].as_str() == Some("cargo xtask rfc-index --check"))
+        .expect("lint runs cargo xtask rfc-index --check");
+    assert!(step.get("if").is_none(), "the check runs unconditionally");
+}
