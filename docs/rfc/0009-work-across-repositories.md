@@ -189,7 +189,7 @@ A ticket whose `request` names a request addressed to another repository (`relat
 - **The rule.** A waiting ticket is blocked while its request's status is anything but `done`, and also while the reference does not resolve to `ok`: the reader's copy does not hold the request yet, or the reader is not a member of the coordination space. A reader that cannot see the request therefore never sees the ticket as ready; it errs on the side of waiting. Its JSON carries the flag `waits_for_request` among RFC 0002's `flags`, beside `blocked: true`.
 - **Who resolves it.** Only a pm resolves the block, since role sessions cannot write in the coordination space: the receiving pm by marking the request `done`, or the waiting repository's pm by unlinking its ticket with `nxs request unlink <ticket>`, for example after the request was declined and the work is done another way. The waiting pm may also reopen a declined request.
 - **Where it is computed.** The storage crate computes it with the rest of the readiness behind the seam (RFC 0001, "Derived state"), reading the request through the ticket's reference in the member's own database. NoCentralDB's computed fields never follow a reference (NoCentralDB RFC 0005, "References into another space"), so this part of readiness stays nexus-flow's own even once readiness within a space moves to NoCentralDB (requirement R7).
-- **What it changes in the decided RFCs.** RFC 0001 computes readiness from the repository space alone ("Derived state"), and RFC 0002 says that neither a reference nor a request blocks ("Derived state", and "What it does not do"). Both are rewritten to match in follow-ups of their own; this RFC states the rule.
+- **What it changes in the decided RFCs** is listed under "Changes to the decided RFCs".
 
 *Not taken:* readiness within the repository space only, with the request's status shown beside the ticket and pm holding it back (pm could hand out a waiting ticket by mistake, and a coder would not see the block); and a block only for readers that can resolve the request, with readiness `null` for the others (two readers of one ticket would compute two answers).
 
@@ -240,6 +240,15 @@ GENESIS.md reserves these for the owner:
 - **Stored formats:** the collections `requestsRepository`, `requestsRequest` (with its `key` and the key format `<tag>.<number>` RFC 0002 defines) and `requestsComment` with their fields and indexes, the `request` field and `byRequest` index on RFC 0002's ticket collection, and the reader role of role sessions in the coordination space.
 - **Commands named** as proposed (decided by the owner, NEX-50). *Not taken:* nouns of their own, such as `nxs coordination create`, `join` and `leave`, which read shorter but split the space commands RFC 0001 began under `nxs space`.
 
+### Changes to the decided RFCs
+
+The owner's answers change four places in RFCs that are already decided. Each is rewritten in a follow-up of its own, as a decided RFC changes (`docs/rfc/README.md`, "How a decided RFC changes"); this RFC states the rule they follow.
+
+- **RFC 0001, "Roles in a space":** role sessions become readers of the coordination space, where the table says "not a member", and the paragraph after it says why (NEX-47). The decision of 2026-11-17 that role sessions are not members of the coordination space is superseded.
+- **RFC 0001, "Derived state":** readiness is computed from the repository space, except that a ticket that waits for a request reads that request through its reference in the member's coordination space (NEX-47).
+- **RFC 0002, "Derived state", "Commands, JSON and the seam" and "What it does not do":** a request blocks the tickets that wait for it, with the flag `waits_for_request`, where RFC 0002 says that neither a reference nor a request blocks; and the ticket's `request` object gains `key` (NEX-47, NEX-49).
+- **RFC 0002, "Ticket ids":** the member tags and the key rule hold in the coordination space too, for requests, and `nxs member add` gives a member a tag there as in a repository space (NEX-49).
+
 ### What nexus-flow needs from NoCentralDB
 
 **Met:**
@@ -282,7 +291,7 @@ The owner runs four repositories: nexus-flow, central-infra, app-foundations and
 - **One request per ticket.** A ticket refers to one request at most, since NoCentralDB has no field of many references.
 - **A repository belongs to one group** (RFC 0001, "Spaces"). A request can therefore go only to a repository of the same coordination space.
 - **Leaving keeps the copies.** A repository that leaves keeps its members' copies of everything they read until an admin removes them, and after (NoCentralDB RFC 0009, "Invitations and members").
-- **A new pm needs an admin.** Only an admin of the coordination space can add a repository's new pm; until one does, that repository receives requests but reads none.
+- **A new pm needs an admin.** Only an admin of the coordination space can add a repository's new pm; until one does, that repository receives requests but reads none. In a group of one owner's repositories that admin is always the owner, so every pm replacement waits for the owner's device. The owner decided this for v2 and asked for it to be improved in a later version (NEX-48).
 - **A wake-up needs an adapter,** or a framework that wakes a session when `nxs request watch --once` exits. This RFC ships no adapter.
 
 ## Migration
