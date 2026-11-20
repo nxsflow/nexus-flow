@@ -275,15 +275,15 @@ For this repository, the gate takes effect in steps that each change a path unde
 
 ## Open questions
 
-1. **Where the sub-agent runs.**
+1. **Where the sub-agent runs** (NEX-75).
    - *In the gate's workflow (recommended).* The workflow calls a model with a key kept as a repository secret. No agent whose pull request is judged can write the verdict, because every agent here works under the same agent account. Cost: a model call per ready pull request and per push to one, on a key for a paid service, which comes back to the owner under "Money".
    - *In pm's session.* pm runs a sub-agent and posts the verdict as a pull request comment; the workflow reads the newest verdict comment from the agent account for the head commit. No key in CI and no cost beyond pm's session, but any session on the agent account, the coder whose pull request is judged included, could post a verdict, so the gate's input rests on a prompt.
 
-2. **Who owns the decision's code.**
+2. **Who owns the decision's code** (NEX-76).
    - *Built into `nxs` (recommended),* as `nxs merge-gate decide`, with what each `format` decides fixed for good. It is tested in nexus-flow's suite, runs the same on every platform without another runtime, and an upgrade cannot change it. The team owns the rules, the schema, the prompt and its workflow, and a team that wants another procedure replaces the decide step in its workflow with its own script that reads the same JSON. This reads GENESIS.md's "the script belongs to the team" as "the team chooses it", not "the team edits nexus-flow's".
    - *A script file under `factory/merge-gate/`* that nexus-flow ships and the team edits, such as a Node script. Closer to the letter of GENESIS.md, but each team then runs and tests its own copy of the one deterministic step, and a broken edit can let pull requests through.
 
-3. **How close the list must follow the mark in GENESIS.** RFC 0004 reads "the top-level items of the first list after the mark".
+3. **How close the list must follow the mark in GENESIS** (NEX-77). RFC 0004 reads "the top-level items of the first list after the mark".
    - *Directly after it, with only blank lines between (recommended),* as written above. If the list under the mark is deleted, the gate reads no rules and sends every pull request to the owner.
    - *The first list anywhere after the mark.* Matches RFC 0004's words most literally, but a deleted list makes the gate read some later list in GENESIS as the rules, silently.
 
