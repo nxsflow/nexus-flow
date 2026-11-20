@@ -255,12 +255,13 @@ GENESIS.md reserves these for the owner:
 
 ### Changes to the decided RFCs
 
-The owner's answers change four places in RFCs that are already decided. Each is rewritten in a follow-up of its own, as a decided RFC changes (`docs/rfc/README.md`, "How a decided RFC changes"); this RFC states the rule they follow.
+The owner's answers change five places in RFCs that are already decided. Each is rewritten in a follow-up of its own, as a decided RFC changes (`docs/rfc/README.md`, "How a decided RFC changes"); this RFC states the rule they follow.
 
 - **RFC 0001, "Starting a role session" and "Ending a session's member":** pm also gives a session an ad-hoc space with copies of the requests its tickets wait for, and removes it from that space when it ends (NEX-47, NEX-82). RFC 0001's roles table stays as it is: role sessions are not members of the coordination space.
 - **RFC 0001, "Derived state":** readiness is computed from the repository space, except that a ticket that waits for a request reads that request through its reference, or through a copy in an ad-hoc space the reader belongs to (NEX-47).
 - **RFC 0002, "Derived state", "Commands, JSON and the seam" and "What it does not do":** a request blocks the tickets that wait for it, with the flag `waits_for_request`, where RFC 0002 says that neither a reference nor a request blocks; and the ticket's `request` object gains `key` (NEX-47, NEX-49).
 - **RFC 0002, "Ticket ids":** the member tags and the key rule hold in the coordination space too, for requests, and `nxs member add` gives a member a tag there as in a repository space (NEX-49).
+- **RFC 0007, the table of what each line points at:** a line about a request or a goal resolves for the members of the coordination space only; role sessions are not among them, and see a request only through a copy in their ad-hoc space (NEX-82), where RFC 0007 counts them "once added there as readers".
 
 ### What nexus-flow needs from NoCentralDB
 
