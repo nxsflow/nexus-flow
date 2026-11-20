@@ -1,6 +1,6 @@
 # RFC 0002: Tickets in NoCentralDB
 
-Status: Draft
+Status: Decided (2026-11-20)
 
 This RFC designs how the `tickets` module, v1's `flow`, keeps its data in a repository space: the collections and fields of projects and tickets, the edges between them, the references that leave the space, "done" and "on main" as `factory/GENESIS.md` defines them, the declared indexes every read goes through, how the derived states are computed, how a ticket's readable id is formed and how a mention of it links, and the `nxs` commands, JSON and `Engine` symbols that read and write it. It builds on RFC 0001, which sets the frame: one repository space per repository, one member per agent session, one model for the whole app, reads that never touch the network, and derived state computed behind the seam. Once it is decided, a coding ticket can declare the collections in `model/model.ts` and build the ticket commands on the seam, and RFC 0008 knows where every v1 field goes.
 
@@ -15,7 +15,7 @@ GENESIS.md's row for `tickets`: "projects and tickets with dependencies, readine
 - **What served the factory in Linear**, carried over (NEX-23, NEX-24, NEX-29): the short id, mention links, `blocks` and `related`, a close reason, the holder of a ticket, epics with children, and history with an actor.
 - **Who did what.** Every change shows the role that made it and the person who commissioned that role (NEX-16; RFC 0001, "Who decided").
 
-The owner decided before this RFC was written: one fixed ticket model for every repository, generated from the standard `issue-tracker` plugin, with what served us in Linear carried over, and no team-specific types or fields for now (NEX-23); "on main" against the team's configurable base branch, with ticket ranges in commit titles (NEX-33); closing needs a linked PR, branch or artifact (NEX-33); tickets may refer to people by their identity (NEX-33); and tickets is a full module, not an adapter to another tracker (NEX-33). On 2026-11-20 the owner answered the questions this RFC asked (NEX-54 to NEX-57): how a ticket's key is formed, what puts a ticket in the owner's queue, the resolutions of a closed ticket, and the shape of the commands. The answers are written into the text below.
+The owner decided before this RFC was written: one fixed ticket model for every repository, generated from the standard `issue-tracker` plugin, with what served us in Linear carried over, and no team-specific types or fields for now (NEX-23); "on main" against the team's configurable base branch, with ticket ranges in commit titles (NEX-33); closing needs a linked PR, branch or artifact (NEX-33); tickets may refer to people by their identity (NEX-33); and tickets is a full module, not an adapter to another tracker (NEX-33). On 2026-11-20 the owner answered the questions this RFC asked (NEX-54 to NEX-57, NEX-73): how a ticket's key is formed, which members get a tag and whether it is reused, what puts a ticket in the owner's queue, the resolutions of a closed ticket, and the shape of the commands. The answers are written into the text below.
 
 **Scope.** This RFC designs what priority 1 needs: the storage of v1's tickets on NoCentralDB and the behaviour v1 has today, plus "done" and "on main", which GENESIS.md asks for and RFC 0001 already counts on. Behaviour v1 does not have, which priority 2 adds, is named here and designed later by rewriting this RFC (decision of 2026-11-15, "A module's storage in NoCentralDB is designed in the module's own RFC"): subscriptions to ticket comments, ranking by goals, and the proposal of which tickets serve a new goal (see "Left to priority 2").
 
@@ -82,7 +82,8 @@ The module owns four collections, all in the repository space (RFC 0001, "The mo
 | `labels` | `nc.set(nc.string())` | labels | The team's labels, such as `rfc` |
 | `request` | `nc.ref("requestsRequest")` | new | The request in the coordination space the ticket serves or waits for, if any; designed in RFC 0009 (see "References out of the space") |
 | `createdAt`, `updatedAt` | `nc.string()` | item timestamps | RFC 3339 instants of the create and of the last write, written by `nxs` |
-| `createdBy`, `updatedBy` | `nc.string()` | op `author` | Member ids of the creator and of the last writer: RFC 0001's author stop-gap, until R6 |
+| `createdBy` | `nc.string()` | op `author` | The member id of the member that created the ticket, set at creation and never changed (see "Who created a ticket") |
+| `updatedBy` | `nc.string()` | op `author` | The member id of the last writer: RFC 0001's author stop-gap, until R6 |
 
 A deleted ticket is a deleted NoCentralDB object (NoCentralDB RFC 0004, "Creating and deleting an object"), which replaces v1's `deleted` tombstone; links to it read **deleted**, and it can be restored. `nxs` offers no delete: closing is final in the factory's sense, and archiving hides a ticket. Deletion stays for a ticket created by mistake and for RFC 0008.
 
@@ -131,11 +132,11 @@ There is no prefix such as `NEX-`: the owner chose against one, because it recal
 | --- | --- | --- |
 | `tag` | `nc.string()` | The member's ticket tag; unset for a member that has none |
 
-`nxs member add` picks a free tag unless `--tag <tag>` names one, and refuses a tag that a current member of the space holds. Which members get a tag, and whether a tag is free again once its member is removed, is still open ("Open questions", question 1).
+`nxs member add` picks a free tag unless `--tag <tag>` names one, and refuses a tag that a current member of the space holds. Every member gets a tag, a role session included, since a member that may write notes may also create tickets. A tag is free again once its member is removed, and the next member that gets it continues its numbers (decided by the owner, NEX-73). So a tag says which member created a ticket only while that member holds it; the ticket's `createdBy` says it for good (see "Who created a ticket"). The 936 tags (a letter, then a letter or a digit) bound the members of a space at one time, not over its life; `nxs member add` refuses with `no_free_tag` when every tag is held.
 
-**The number** is the highest number among the keys with the member's own tag in its local copy, plus one. Only the member that holds a tag creates keys with it, and its own writes are always in its own copy, so its numbers never repeat while it alone holds the tag. A member that has not yet synced the space starts at 1 only when its copy holds no key with its tag.
+**The number** is the highest number among the keys with the member's own tag in its local copy, plus one. Only the member that holds a tag creates keys with it, and its own writes are always in its own copy, so its numbers never repeat while it alone holds the tag. A member that takes over a freed tag continues from the highest number its copy holds for that tag, so no key repeats (NEX-73); `nxs member add` therefore hands out a freed tag only to a member whose first sync has completed, and a new member waits for that sync before it creates a ticket. A member whose copy holds no key with its tag starts at 1.
 
-**Two members with one tag.** Two inviters who pick a tag offline at the same time can give two members the same one, and the two then mint the same keys. This is rare, and it is resolved when it happens (NEX-54): `nxs member list` marks both members with `tag_shared`, and pm files a ticket to give one of them a new tag with `nxs member retag <member> <tag>`. Keys already written keep their tag. Until then, and for the keys written meanwhile:
+**Two members with one tag.** Two inviters who pick a tag offline at the same time can give two members the same one, and the two then mint the same keys. A removed member's last tickets that reach the space only after its tag passed on can repeat a key in the same way. This is rare, and it is resolved when it happens (NEX-54): `nxs member list` marks both members with `tag_shared`, and pm files a ticket to give one of them a new tag with `nxs member retag <member> <tag>`. Keys already written keep their tag. Until then, and for the keys written meanwhile:
 
 - A key is resolved through `byKey`. When two tickets hold the same key, `nxs` shows both with the first characters of their object ids, the way git abbreviates hashes (`ka.42~3f9a`), and an argument that names only `ka.42` fails with `ambiguous_key` and lists both. A mention or link written earlier keeps pointing at the object it was written for.
 
@@ -193,6 +194,12 @@ A `ticketsWork` object links one piece of work to its ticket, and one ticket may
 
 `claim` writes the member the command runs as. A value without either prefix, which only the move from v1 writes, is v1's free-text assignee kept as written. The JSON shows the holder as `{"kind": "member" | "person" | "text", "id", "role"}`, with the role from `spaceMember`, `owner` for the owner's account, and `null` for text.
 
+### Who created a ticket
+
+A ticket records the member that created it in `createdBy`, written in the change that creates the ticket and never changed by `nxs` (decided by the owner, NEX-73). A role session needs write access to add notes, so it can create tickets too, and a prompt that forbids it is no guarantee; the creator must therefore be recorded on the ticket, and a reused tag cannot tell it.
+
+NoCentralDB signs every change, the create included, but offers no way yet to read who signed one (RFC 0001, "Who decided"; R6). Until R6 lands, `createdBy` is what `nxs` shows, and nothing checks it against the signature. Once R6 lands, **the signer of the ticket's create counts**: `nxs` reads it, compares it with `createdBy`, and flags a ticket whose two differ with `creator_mismatch`. Unlike the other author fields, which go once R6 lands (NEX-42), `createdBy` on a ticket stays, so the creator reads from the ticket itself, in the move from v1 as well, where no NoCentralDB signature names v1's author.
+
 ### Questions to the owner
 
 An owner question is a ticket of type `question`: one question that can be answered from a phone, with options and a recommendation (FACTORY.md, "What goes to the owner"). It is a type, not a label, because NOC's queue hung on a label that agents forgot on about fourteen of its "Owner:" tickets (NEX-29), and because only a question carries options, while an owner *task*, such as a setup step, does not. The work a question blocks depends on it through `dependsOn`, recorded when the question is filed, so readiness follows from the answer instead of from a note (NEX-29). How a question's text is laid out stays a template the team owns.
@@ -249,7 +256,7 @@ Nothing below is stored (GENESIS.md, "Done is not yet on main"). The storage cra
 - **`blocked`:** `open`, not archived, and some dependency is unresolved, or it is in a cycle.
 - **`deferred(now)`:** `open`, not blocked, with `deferUntil` after `now`.
 - **`next(now)`:** the ready tickets and those in progress, in the order of "What the model is generated from", tiered as v1 tiers it: work that can close now, then each started epic with its open children, then the rest. Ranking by goals is priority 2.
-- **Flags**, each a string in a ticket's `flags`: `cycle` (it is in a dependency cycle; no edge is ever removed for it, as in v1), `holder_gone` (it is `in_progress` and its assignee is a member that is no longer one; NOC-170 stayed In Progress for four days with nobody on it, NEX-29), and `pr_closed_unmerged` (a PR linked to it was closed without merge after its last close).
+- **Flags**, each a string in a ticket's `flags`: `cycle` (it is in a dependency cycle; no edge is ever removed for it, as in v1), `holder_gone` (it is `in_progress` and its assignee is a member that is no longer one; NOC-170 stayed In Progress for four days with nobody on it, NEX-29), and `pr_closed_unmerged` (a PR linked to it was closed without merge after its last close), and, once R6 lands, `creator_mismatch` (its `createdBy` differs from the signer of its create).
 
 The derived state is as fresh as the last sync for the tickets, and as the last `git fetch` of the base branch for "on main" (GENESIS.md, "Limits").
 
@@ -278,7 +285,7 @@ The ticket commands are one noun and a verb, `nxs ticket <verb>`, as RFC 0001's 
 
 v1's `nxf thread` (links to chat threads) and `nxf entry` (list fields) have no counterpart: chat data lapses (NEX-20), and the model has no custom fields (NEX-23).
 
-**JSON.** A ticket in `list` and the lanes is an object with `id` (the object id), `key`, `type`, `title`, `status`, `resolution`, `priority` (the ordinal, or `null`), `assignee` (`{kind, id, role}` or `null`), `parent` (a key or `null`), `labels`, `due`, `defer_until`, `created_at`, `updated_at`, `closed_at`, `archived_at`, `request` (RFC 0009's `{id, relation, status}`, with `status` `null` for a reader who cannot resolve the request, or `null`), and the derived `ready`, `blocked`, `deferred`, `done`, `on_main` (`true`, `false` or `null`) and `flags`. `show` adds `description`, `design`, `completion_criterion`, `closing_comment`, `replaced_by`, `replaces`, `deps` and `dependents` (each `{key, status, done, on_main}`), `children`, `contributes_to`, `mentions`, `mentioned_by`, `notes` (each `{id, body, reply_to, created_at, created_by}`), `work` (each `{kind, url, branch, state, commit, on_main, created_at}`) and `references` (each `{kind, space, id, label, state}`, where `state` is the reader's: `ok`, `not_accessible` or `missing`). Keys are snake_case, as v1's; empty arrays and unset values are written as `[]` and `null`, so every record of a command has the same keys. Ordering follows v1's determinism rules (RFC 0001, "Reading and writing"). An error is v1's error object, with the new codes `ambiguous_key`, `key_not_found`, `close_needs_work`, `close_needs_replacement` and `not_a_ticket_space`.
+**JSON.** A ticket in `list` and the lanes is an object with `id` (the object id), `key`, `type`, `title`, `status`, `resolution`, `priority` (the ordinal, or `null`), `assignee` (`{kind, id, role}` or `null`), `parent` (a key or `null`), `labels`, `due`, `defer_until`, `created_at`, `updated_at`, `closed_at`, `archived_at`, `request` (RFC 0009's `{id, relation, status}`, with `status` `null` for a reader who cannot resolve the request, or `null`), and the derived `ready`, `blocked`, `deferred`, `done`, `on_main` (`true`, `false` or `null`) and `flags`. `show` adds `description`, `design`, `completion_criterion`, `closing_comment`, `replaced_by`, `replaces`, `deps` and `dependents` (each `{key, status, done, on_main}`), `children`, `contributes_to`, `mentions`, `mentioned_by`, `notes` (each `{id, body, reply_to, created_at, created_by}`), `work` (each `{kind, url, branch, state, commit, on_main, created_at}`) and `references` (each `{kind, space, id, label, state}`, where `state` is the reader's: `ok`, `not_accessible` or `missing`). Keys are snake_case, as v1's; empty arrays and unset values are written as `[]` and `null`, so every record of a command has the same keys. Ordering follows v1's determinism rules (RFC 0001, "Reading and writing"). An error is v1's error object, with the new codes `ambiguous_key`, `key_not_found`, `close_needs_work`, `close_needs_replacement`, `not_a_ticket_space` and, from `nxs member add`, `no_free_tag`.
 
 **The seam.** Each command has its counterpart on `Engine` (the decision on CLI and library parity stays in force), with the derived state computed inside, so manufakt.io never re-implements a rule:
 
@@ -334,7 +341,8 @@ GENESIS.md reserves these for the owner:
 - **Waiting for another repository does not block readiness.** A ticket that waits for a request reads as ready once its own dependencies are; pm, who sees the request's status, holds it back until the request is done (RFC 0009).
 - **Filters by label, reverse edges and search cost more than their result** until R14 and R15: they walk the tickets read for the derived state, or a local cache.
 - **The history of a ticket cannot be read** until R6. Its changes are all in the space's log and signed; only reading them back with their authors waits.
-- **Who wrote a ticket, note, work link or reference is a field,** not a checked signature, until R6 (RFC 0001, "Who decided").
+- **Who wrote a ticket, note, work link or reference is a field,** not a checked signature, until R6 (RFC 0001, "Who decided"). A ticket's `createdBy` is checked against its create's signer once R6 lands.
+- **The tags run out at 936 members at one time.** A space with more current members cannot add another until one is removed.
 - **Every read is as fresh as the last sync** (GENESIS.md, "Limits"): a ticket another session claimed or closed since then reads as it was.
 
 ## Migration
@@ -362,16 +370,9 @@ This RFC moves no data; RFC 0008 designs the move, replaying every v1 op so hist
 
 ## Open questions
 
-The owner answered the four questions of the draft on 2026-11-20, and the answers are in the text above: the key is `<member tag>.<number>`, without a prefix (NEX-54); the owner's queue is the open questions and the tickets assigned to the owner (NEX-55); the resolutions are `done`, `canceled` and `replaced` (NEX-56); and the commands are `nxs ticket <verb>`, with relations as flags of `update` (NEX-57). One question follows from the answer to NEX-54, asked in NEX-73.
-
-1. **Which members get a tag, and is a tag ever reused?** (NEX-73.) A tag has two characters, so there are 936 of them (a letter, then a letter or digit). With one member per agent session (NEX-16), a space adds a member for every session it starts.
-   - **(a) Every member gets a tag, and a tag is free again once its member is removed.** The next member that gets it continues its numbers, from the highest key with that tag. Cost: a tag no longer says who created a ticket (`createdBy` does); a removed member's last writes that reach the space late can collide with its successor's.
-   - **(b) Every member gets a tag, and no tag is ever reused.** A tag then always names one member. Cost: the 936 tags run out after about as many sessions, within months at NOC's pace, and the format would have to grow.
-   - **(c) Only members that create tickets get a tag: the developers' devices, pm and manufakt.io. A new pm takes over its predecessor's tag.** A role session gets none, and proposes tickets to pm, which files them, as the factory already works (FACTORY.md; NEX-29: pm filed nearly every ticket). Cost: a role session cannot create a ticket itself; a tag is reused only along one pm's line, where the predecessor's last writes reach the space before the new pm starts (RFC 0001: `nxs session end` waits until nothing is unconfirmed).
-
-   **Recommendation: (c).** Tags stay few and stable, the keys pm files keep one tag across takeovers, and the factory's way of filing tickets does not change.
+None. The owner answered them on 2026-11-20 (NEX-54 to NEX-57, NEX-73), and the answers are written into the text above. For which members get a tag (NEX-73), two options were not taken: only the members that create tickets (devices, pm, manufakt.io), with a new pm taking over its predecessor's tag, because a role session that may write notes may also create tickets and a prompt that forbids it is no guarantee; and tags that are never reused, because one member per session would use up the 936 tags within months.
 
 ## History
 
 - 2026-11-17: published as a draft in #160.
-- 2026-11-20: the owner's answers to NEX-54 to NEX-57 written into the text, in #160.
+- 2026-11-20: decided by the owner (NEX-54 to NEX-57, NEX-73), in #160.
