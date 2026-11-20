@@ -4,7 +4,7 @@
 
 Each RFC says at its top whether it is a draft or decided, and it states the design as one complete text. Its "History" section starts with its publication and lists by date what changed since, and in which pull request.
 
-The RFCs are the `NNNN-<slug>.md` files in this folder, each with its status line at the top. `cargo xtask rfc-index` prints their index: number, title and status, one line each, or a Markdown table with `--md`. No table is kept here, so an RFC pull request touches no shared file.
+The RFCs are the `NNNN-<slug>.md` files in this folder, each with its status line at the top. `cargo xtask rfc-index` prints their index: number, title and status, one line each, or a Markdown table with `--md`. No table is kept here, so an RFC pull request touches no shared file. CI runs `cargo xtask rfc-index --check`, which fails when two RFC files share a number or a file's heading or status line is malformed.
 
 Each area of GENESIS.md gets its own RFC: the six modules (genesis, goals, tickets, decisions, factory, status), the work across repositories, the merge gate, and the move from v1 to NoCentralDB.
 

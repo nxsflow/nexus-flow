@@ -4,11 +4,12 @@
 //! merge left the other open RFC pull requests in conflict, and the fix dismissed the owner's
 //! approval. No table is stored any more: `cargo xtask rfc-index` prints the index from the RFC
 //! files, each `NNNN-<slug>.md` with its `# RFC NNNN: Title` heading and its `Status:` line, and
-//! `--md` prints it as a Markdown table. An RFC pull request touches no shared file.
+//! `--md` prints it as a Markdown table. An RFC pull request touches no shared file. `--check` is
+//! the gate: it fails when two RFC files share a number or a heading is wrong, never on staleness.
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// One RFC file, read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +33,15 @@ pub fn read_rfcs(dir: &Path) -> Result<Vec<Rfc>> {
             std::fs::read_to_string(dir.join(&file)).with_context(|| format!("reading {file}"))?;
         rfcs.push(parse(&file, number, &text)?);
     }
-    rfcs.sort_by(|a, b| a.number.cmp(&b.number));
+    rfcs.sort_by(|a, b| (&a.number, &a.file).cmp(&(&b.number, &b.file)));
+    if let Some(pair) = rfcs.windows(2).find(|w| w[0].number == w[1].number) {
+        bail!(
+            "{} and {} share the number {}: give the newer one the next free number",
+            pair[0].file,
+            pair[1].file,
+            pair[0].number
+        );
+    }
     Ok(rfcs)
 }
 
@@ -99,8 +108,8 @@ pub fn index(dir: &Path, md: bool) -> Result<String> {
 
 /// The gate: fail when two RFC files share a number, or a file's heading or `Status:` line is
 /// wrong. It reads only the RFC files, so it fails on a mistake in them, never on a stale table.
-pub fn check(_dir: &Path) -> Result<()> {
-    todo!()
+pub fn check(dir: &Path) -> Result<()> {
+    read_rfcs(dir).map(|_| ())
 }
 
 #[cfg(test)]

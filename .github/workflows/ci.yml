@@ -144,6 +144,12 @@ jobs:
       - name: Decision log check
         run: cargo xtask decisions --check
 
+      # The RFCs in docs/rfc/ (NEX-85): no two files share a number, and each file's heading carries
+      # its file's number and it has a `Status:` line, so `cargo xtask rfc-index` can print the
+      # index. No table is stored, so this fails only on a mistake in the RFC files. Reads text only.
+      - name: RFC check
+        run: cargo xtask rfc-index --check
+
       # `decide` over the scripted cases in two separate processes, under a different clock and
       # environment (6j6v.zjyv §11). It says so and passes until nexus-run-engine exists, and requires
       # the test from then on.
