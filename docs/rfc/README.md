@@ -7,6 +7,7 @@ Each RFC says at its top whether it is a draft or decided, and it states the des
 | RFC | Title |
 | --- | --- |
 | [0001](0001-nexus-flow-on-nocentraldb.md) | nexus-flow on NoCentralDB |
+| [0002](0002-tickets.md) | Tickets in NoCentralDB |
 | [0003](0003-decisions.md) | decisions in NoCentralDB |
 | [0004](0004-genesis.md) | Genesis storage |
 | [0006](0006-factory.md) | Factory storage |
