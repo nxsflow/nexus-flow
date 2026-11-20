@@ -10,6 +10,7 @@ Each RFC says at its top whether it is a draft or decided, and it states the des
 | [0002](0002-tickets.md) | Tickets in NoCentralDB |
 | [0003](0003-decisions.md) | decisions in NoCentralDB |
 | [0004](0004-genesis.md) | Genesis storage |
+| [0005](0005-goals.md) | Goals in NoCentralDB |
 | [0006](0006-factory.md) | Factory storage |
 | [0007](0007-status.md) | status in NoCentralDB |
 
