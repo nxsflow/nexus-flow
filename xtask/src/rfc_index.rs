@@ -92,6 +92,12 @@ pub fn render(rfcs: &[Rfc]) -> String {
     table
 }
 
+/// The index of the RFCs in `dir`: one `NNNN · Title · Status` line each, or with `md` a
+/// Markdown table.
+pub fn index(_dir: &Path, _md: bool) -> Result<String> {
+    todo!()
+}
+
 /// `readme` with the text between the markers replaced by `table`.
 pub fn splice(readme: &str, table: &str) -> Result<String> {
     let missing = || {
