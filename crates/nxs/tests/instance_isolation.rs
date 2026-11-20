@@ -416,3 +416,68 @@ impl AssertOk for Command {
         );
     }
 }
+
+/// **A development instance that knows no user-level personas says so** (6j6v.yt1a). Its folder is
+/// `~/.nexusflow-<qualifier>/personas`, which nothing creates; without it the instance knows no persona
+/// that lives only at user level, and on the new engine a session of one is refused at its start. The
+/// b7ck smoke lost three start deadlines to that before the cause was found by reading code.
+#[test]
+fn daemon_status_names_a_development_instance_without_user_level_personas() {
+    let home = TempDir::new().unwrap();
+    let dir = service_home(home.path(), Some(DEV)).join("personas");
+
+    let out = nxs(home.path(), home.path(), Some(DEV))
+        .args(["sync", "daemon", "status", "--json"])
+        .output()
+        .expect("nxs runs");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["user_personas"]["dir"], dir.display().to_string(), "{v}");
+    assert_eq!(v["user_personas"]["exists"], false, "{v}");
+    let note = v["user_personas"]["note"].as_str().expect("a note");
+    assert!(note.contains("no user-level personas"), "{note}");
+
+    let human = nxs(home.path(), home.path(), Some(DEV))
+        .args(["sync", "daemon", "status"])
+        .output()
+        .expect("nxs runs");
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("no user-level personas") && text.contains(&dir.display().to_string()),
+        "the human branch must say it too, and where:\n{text}"
+    );
+
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = nxs(home.path(), home.path(), Some(DEV))
+        .args(["sync", "daemon", "status", "--json"])
+        .output()
+        .expect("nxs runs");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["user_personas"]["exists"], true, "{v}");
+    assert!(v["user_personas"]["note"].is_null(), "{v}");
+}
+
+/// The installed suite's own folder is not a development instance's gap: production says where it
+/// reads, and adds no note, whatever the folder holds.
+#[test]
+fn daemon_status_adds_no_personas_note_on_the_production_instance() {
+    let home = TempDir::new().unwrap();
+    let out = nxs(home.path(), home.path(), None)
+        .args(["sync", "daemon", "status", "--json"])
+        .output()
+        .expect("nxs runs");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        v["user_personas"]["dir"],
+        service_home(home.path(), None)
+            .join("personas")
+            .display()
+            .to_string(),
+        "{v}"
+    );
+    assert!(v["user_personas"]["note"].is_null(), "{v}");
+    let human = nxs(home.path(), home.path(), None)
+        .args(["sync", "daemon", "status"])
+        .output()
+        .expect("nxs runs");
+    assert!(!String::from_utf8_lossy(&human.stdout).contains("no user-level personas"));
+}

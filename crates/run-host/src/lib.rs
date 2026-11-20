@@ -8,9 +8,11 @@
 pub mod boundary;
 pub mod bridge;
 mod bridge_resume;
+mod bridge_targets;
 mod compose;
 mod effects;
 mod fold;
+mod foreign;
 pub mod git_tree;
 mod host;
 mod lease;
