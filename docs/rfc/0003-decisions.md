@@ -162,22 +162,39 @@ Two decisions in force can contradict each other, for example when two members s
 
 ### Reading decisions
 
-`nxs decision list` takes the filters `cargo xtask decisions` takes today, with the same meaning:
+`nxs decision list` prints the index by default: one line per decision, its header, oldest first. `--full` prints every selected decision in full instead (decided by the owner on 2026-11-20). The header states the decision (GENESIS.md, "Decisions and rules"), so the index is what a reader needs first, and the whole log in full costs a session tens of thousands of tokens; a reader asks for the full text when it needs the reasons. The command takes the filters `cargo xtask decisions` takes today, with the same meaning:
 
 | Flag | Reads through | Means |
 | --- | --- | --- |
-| none | `decisionsDecision.byDate` | Every decision, in full, oldest first |
-| `--index` | the same | One line per decision instead |
+| none | `decisionsDecision.byDate` | The index of every decision, oldest first |
+| `--full` | the same | Every selected decision in full instead of its index line |
 | `--current` | `decisionsSupersession.byDate` in addition | Leave out superseded decisions |
 | `--ticket <label>` | `decisionsSubject.byLabel` | Only the decisions about this ticket, goal or request |
 | `--topic <tag>` | `decisionsTopic.byTopic` | Only the decisions with this topic |
 | `--since <date>` | the date order of the index read | Only decisions made on or after this date |
 
-The filters combine. The command reads through the index of the narrowest filter given, `--ticket`, then `--topic`, then the date, and applies the others to the decisions it found, in memory. "Superseded by" is computed over every decision, whatever the filters, as today.
+The filters combine, with each other and with `--full`. The command reads through the index of the narrowest filter given, `--ticket`, then `--topic`, then the date, and applies the others to the decisions it found, in memory. "Superseded by" is computed over every decision, whatever the filters, as today.
 
-`nxs decision show <handle or id>` prints one decision in full, with what it supersedes and what superseded it.
+*Not taken:* the full text by default with `--index` for the index, as `cargo xtask decisions` does today (decided by the owner on 2026-11-20). It makes the costly read the one a reader gets without asking.
 
-Output is deterministic, JSON by default and Markdown with `--md` (RFC 0001, "Reading and writing"). One decision in JSON:
+`nxs decision show <handle or id>` prints one decision in full, with what it supersedes and what superseded it. It is the step from an index line to the reasons, so every index line carries the key `show` takes (see below).
+
+Output is deterministic, JSON by default and Markdown with `--md` (RFC 0001, "Reading and writing"). One index line in JSON, as `nxs decision list` prints it by default:
+
+```json
+{
+  "id": "6f1c…",
+  "handle": "2026-11-15-NEX-15-one-space-per-repository",
+  "date": "2026-11-15",
+  "tickets": "NEX-15",
+  "title": "One NoCentralDB space per repository holds its tickets, decisions and status notes",
+  "in_force": true,
+  "on_main": true,
+  "superseded_by": []
+}
+```
+
+One decision in full, as `nxs decision show` and `nxs decision list --full` print it:
 
 ```json
 {
@@ -208,13 +225,13 @@ Output is deterministic, JSON by default and Markdown with `--md` (RFC 0001, "Re
 - `subjects[].kind` is `ticket`, `goal` or `request`; `space` is `null` for a subject in the decision's own space and the other space's id otherwise; `object` is `null` for a subject known only by its label; `status` is `ok`, `notAccessible` or `missing`, as NoCentralDB reads it, or `null` with no `object`.
 - `supersedes` and `superseded_by` list `{ "id", "handle" }`, in date order.
 - `conflicts` appears only on an edited decision: per field, the values in conflict with the read value.
-- `nxs decision list` prints `{ "decisions": [ … ] }` in date order, oldest first, same day by handle; with `--index`, each decision carries only `id`, `handle`, `date`, `tickets`, `title`, `in_force`, `on_main` and `superseded_by`.
+- `nxs decision list` prints `{ "decisions": [ … ] }` in date order, oldest first, same day by handle: index lines by default, full decisions with `--full`. An index line is a full decision cut to its first eight fields, so a reader that handles one shape handles the other.
 
-In Markdown, `nxs decision show` prints the decision as a file in `factory/decisions/` reads today, heading, fields and body, followed by `> Superseded by …` when it is superseded and `> Not yet on main (<pr>)` when it is not on main. `--index --md` prints the line `cargo xtask decisions --index` prints today: `date · tickets · title`, followed by ` · superseded by <handles>` when it is superseded, so an agent moving from the files to `nxs` reads the same lines.
+In Markdown, a decision in full, as `nxs decision show` and `--full --md` print it, reads as a file in `factory/decisions/` reads today, heading, fields and body, followed by `> Superseded by …` when it is superseded and `> Not yet on main (<pr>)` when it is not on main; with `--full`, decisions are separated by a blank line, as today. An index line in Markdown is the line `cargo xtask decisions --index` prints today, `date · tickets · title`, followed by ` · superseded by <handles>` when it is superseded and ` · not yet on main` when it is not on main, and ending with ` · <handle>`, so an agent moving from the files to `nxs` reads the lines it knows, plus the key it passes to `nxs decision show`. Which key that last part is follows open question 1 (NEX-51): the handle as designed, or the object id or its prefix if the owner chooses either.
 
 ### `nxs prime`
 
-`nxs prime` prints what a session reads before it starts. Its decisions part is the index of the decisions in force: what `nxs decision list --current --index` prints, under the key `decisions` in JSON and the heading "Decisions in force" in Markdown. Each line ends with ` · not yet on main` for a decision that is not on main yet, so an agent knows the rule holds while the code it describes may be missing from its checkout. The headers are enough to know every rule (GENESIS.md, "Decisions and rules"); an agent reads a decision in full with `nxs decision show` when it needs the reasons. The other parts of `nxs prime`'s output, such as the session's ticket, are designed by the RFCs of the modules they come from.
+`nxs prime` prints what a session reads before it starts. Its decisions part is the index of the decisions in force: what `nxs decision list --current` prints, under the key `decisions` in JSON and the heading "Decisions in force" in Markdown. A line says ` · not yet on main` for a decision that is not on main yet, so an agent knows the rule holds while the code it describes may be missing from its checkout. The headers are enough to know every rule (GENESIS.md, "Decisions and rules"); an agent reads a decision in full with `nxs decision show` when it needs the reasons. The other parts of `nxs prime`'s output, such as the session's ticket, are designed by the RFCs of the modules they come from.
 
 `nxs prime` reads the local copy only and does not sync (RFC 0001, "Reading and writing"). It writes no file and installs no hook (GENESIS.md, "Decisions and rules").
 
@@ -225,19 +242,20 @@ In Markdown, `nxs decision show` prints the decision as a file in `factory/decis
 | Symbol | What it does |
 | --- | --- |
 | `Engine::decision_add(NewDecision) -> Decision` | Writes a decision with its topics, subjects and supersessions, after the checks of "Writing a decision" |
-| `Engine::decisions(&DecisionFilter) -> Vec<Decision>` | The decisions the filter selects, with their derived state, in date order |
+| `Engine::decisions(&DecisionFilter) -> Vec<DecisionIndexLine>` | The index lines of the decisions the filter selects, with their derived state, in date order: `nxs decision list` |
+| `Engine::decisions_full(&DecisionFilter) -> Vec<Decision>` | The same decisions in full: `nxs decision list --full` |
 | `Engine::decision(&DecisionKey) -> Decision` | One decision by handle or object id; an ambiguous handle is an error that lists the matches |
 | `Engine::rules_in_force() -> Vec<DecisionIndexLine>` | What `nxs prime` prints as its decisions part |
 
-`NewDecision`, `Decision`, `DecisionFilter` (`index`, `current`, `ticket`, `topic`, `since`), `DecisionKey` (a handle or an `ObjectId`), `DecisionIndexLine` and `Subject` are the types they take and return; their fields are the JSON fields above. Every `nxs decision` verb has its counterpart here (the decision on CLI and library parity stays in force). There is deliberately no symbol that changes or deletes a decision.
+`NewDecision`, `Decision`, `DecisionFilter` (`current`, `ticket`, `topic`, `since`), `DecisionKey` (a handle or an `ObjectId`), `DecisionIndexLine` and `Subject` are the types they take and return; their fields are the JSON fields above. The index and the full text are two symbols with two return types rather than one with a flag, so a caller's type says which it holds. Every `nxs decision` verb has its counterpart here (the decision on CLI and library parity stays in force). There is deliberately no symbol that changes or deletes a decision.
 
 ### Public surfaces this RFC brings
 
 GENESIS.md reserves these for the owner:
 
-- **Commands:** `nxs decision add --title <text> --why <text> --instead-of <text> --topic <tag>… [--ticket <label>…] [--supersedes <handle or id>…] [--pr <url>] [--decided-by <text>] [--date <YYYY-MM-DD>] [--slug <slug>] [--body <text> | --body-file <path>]`, `nxs decision list [--index] [--current] [--ticket <label>] [--topic <tag>] [--since <YYYY-MM-DD>]`, `nxs decision show <handle or id>`, and the decisions part of `nxs prime`. Flat, as RFC 0001's commands are.
+- **Commands:** `nxs decision add --title <text> --why <text> --instead-of <text> --topic <tag>… [--ticket <label>…] [--supersedes <handle or id>…] [--pr <url>] [--decided-by <text>] [--date <YYYY-MM-DD>] [--slug <slug>] [--body <text> | --body-file <path>]`, `nxs decision list [--full] [--current] [--ticket <label>] [--topic <tag>] [--since <YYYY-MM-DD>]`, `nxs decision show <handle or id>`, and the decisions part of `nxs prime`. Flat, as RFC 0001's commands are.
 - **JSON output:** the fields under "Reading decisions", and `decisions` in `nxs prime`.
-- **Markdown output:** the decision as a file reads today, and the index line of `cargo xtask decisions --index`.
+- **Markdown output:** the decision as a file reads today, and the index line of `cargo xtask decisions --index` with the decision's handle at its end.
 - **Library seam:** the `Engine` symbols and types above.
 - **Stored formats:** the collections `decisionsDecision`, `decisionsTopic`, `decisionsSubject` and `decisionsSupersession` with their fields and indexes, the handle format, and the 200-character title.
 
@@ -287,6 +305,13 @@ This RFC moves no data. RFC 0008 moves a v1 workspace's memories and a repositor
 
 A file has no PR link, and its decision is on main, since the file itself was merged. The move writes each decision as one change, older decisions first, so a supersession always finds the decision it names.
 
+**What reads the log today.** Until v2 carries decisions, the factory reads `factory/decisions/` with `cargo xtask decisions`, whose default is the full text and whose `--index` prints the index. This RFC does not change that tool. Three texts rely on its flags and change when the factory moves to `nxs`, which is the move's ticket, not this RFC's:
+
+- `factory/roles/coder.md` and `factory/roles/pm.md` read the index with `cargo xtask decisions --current --index`, which becomes `nxs decision list --current`. They read the decisions of a ticket or a topic in full with `cargo xtask decisions --ticket <id>` and `--topic <tag>`, which become `nxs decision list --full --ticket <id>` and `--full --topic <tag>`: without `--full` they would get only the index lines. Both role files are under CODEOWNERS, so that change waits for the owner.
+- `factory/FACTORY.md`, "The decision log", names the same commands, and `factory/CONFIG.md` and `factory/DECISIONS.md` describe `cargo xtask decisions` and its options.
+
+`cargo xtask decisions --check`, the CI gate, reads the files and prints no decision, so the change does not touch it.
+
 **A v1 memory**, by the mapping the owner decided in NEX-21: the introduction becomes `title`, the body becomes `body`, the date of the last write becomes `date`, the author becomes `decidedBy`, `tickets` is `no ticket`, the memory's key becomes a topic, and `why` and `insteadOf` read "carried over from memory". The handle is `<date>-no-ticket-<key as a slug>`. What becomes of a memory's category, scope, references to board items and reading position, which NEX-21's mapping does not name, and of forgotten memories, is RFC 0008's; this RFC's subjects can hold a memory's references to tickets as labels.
 
 ## Open questions
@@ -316,3 +341,4 @@ These need the owner's answer before the RFC is decided. Each has its needs-owne
 ## History
 
 - 2026-11-17: published as a draft in #159.
+- 2026-11-20: `nxs decision list` prints the index by default and `--full` prints every decision in full, decided by the owner, in #159.
