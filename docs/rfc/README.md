@@ -10,6 +10,7 @@ Each RFC says at its top whether it is a draft or decided, and it states the des
 | [0002](0002-tickets.md) | Tickets in NoCentralDB |
 | [0003](0003-decisions.md) | decisions in NoCentralDB |
 | [0006](0006-factory.md) | Factory storage |
+| [0008](0008-move-from-v1.md) | The move from v1 to NoCentralDB |
 
 Each area of GENESIS.md gets its own RFC: the six modules (genesis, goals, tickets, decisions, factory, status), the work across repositories, the merge gate, and the move from v1 to NoCentralDB.
 
