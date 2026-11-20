@@ -4056,6 +4056,7 @@ fn run_status_lines(
                     local.pending_inputs
                 ));
             }
+            lines.extend(local.start_refusals.iter().map(start_refusal_line));
         }
     }
     // Every field above comes from the run's log or the tree, so none is let near a terminal raw: each line
@@ -4094,6 +4095,18 @@ fn withdrawn_line(w: &crate::facade::WithdrawnHolderStatus) -> String {
             w.pinned_by.join(", ")
         )
     }
+}
+
+/// One `nxc status` line for a session the new engine could not start (6j6v.yt1a).
+// v2-bridge: deleted with the old engine (6j6v.2vtw)
+fn start_refusal_line(refusal: &nexus_run_contracts::StartRefusal) -> String {
+    format!(
+        "  · {} could not be started: {} refused (session {}, since {})",
+        refusal.handle,
+        refusal.port.as_str(),
+        refusal.session_key,
+        refusal.at
+    )
 }
 
 /// One `nxc status` line for a refused park being retried: which refusal, its own words — which
@@ -5511,6 +5524,23 @@ mod tests {
             session_suffix(&open_row(SessionState::Ended, None)),
             " — ITS SESSION HAS ENDED, nothing is coming",
             "unchanged for a session that ended with nothing recorded"
+        );
+    }
+
+    /// **A session the new engine could not start names the port that refused** (6j6v.yt1a): who, which
+    /// session, which port and since when — the cause the b7ck smoke had to find by reading code.
+    #[test]
+    fn a_start_refusal_line_names_the_member_the_session_and_the_port() {
+        let refusal = nexus_run_contracts::StartRefusal {
+            session_key: "r-1/build/v1/coder/a1".into(),
+            handle: "coder".into(),
+            port: nexus_run_contracts::StartPort::Persona,
+            at: nexus_run_contracts::Timestamp::parse("2026-11-15T10:00:00.000Z").unwrap(),
+        };
+        assert_eq!(
+            start_refusal_line(&refusal),
+            "  · coder could not be started: declarations.persona refused (session \
+             r-1/build/v1/coder/a1, since 2026-11-15T10:00:00.000Z)"
         );
     }
 
