@@ -79,7 +79,7 @@ A team's GENESIS says which work comes back to the owner before it merges, as th
 
 The marker survives a renamed or translated heading, it sits in the same file and the same diff the owner reviews, and it needs no setting. It does not show in rendered Markdown, so an agent editing the section can delete it without seeing it; the merge gate then reserves every pull request for the owner until it is restored (see below).
 
-**Reading the rules is deterministic.** Given the bytes of `factory/GENESIS.md`, the mark is a line that reads exactly `<!-- nexus-flow: owner-rules -->`, apart from surrounding whitespace, outside a fenced code block, and the rules are the top-level items of the first list after the mark, in their order, each with its text as written, nested items included. A file with no mark, more than one mark, or a mark with no list after it has no readable rules, and that is a state of its own, not an empty list.
+**Reading the rules is deterministic.** Given the bytes of `factory/GENESIS.md`, the mark is a line that reads exactly `<!-- nexus-flow: owner-rules -->`, apart from surrounding whitespace, outside a fenced code block, and the rules come from the list that follows the mark directly: a CommonMark list whose first item starts on the first line after the mark that is not blank (decided by the owner, NEX-77; RFC 0010, "The rules from GENESIS"). The rules are its top-level items, in their order, each with its text as written, nested items included. Any other line there, such as a paragraph or a heading, means the mark has no list after it, so a list further down the file is never read as the rules once the list under the mark is deleted. A file with no mark, more than one mark, or a mark with no list after it has no readable rules, and that is a state of its own, not an empty list.
 
 **When the rules cannot be read, the owner reviews.** A missing file, a missing or doubled mark, or a mark with no list must never let a pull request merge without the owner. This RFC sets that as a requirement on RFC 0010, the merge gate's RFC (NEX-72), which designs the script that reads the rules, the command or seam it reads them through, and how its JSON names each rule. The base branch's copy is the one read (see "Which copy is the truth").
 
@@ -138,7 +138,7 @@ GENESIS.md reserves these for the owner:
 - **Command:** `nxs genesis create [--update]` (`--update` for the guide only), which `nxs init` also runs, without `--update`.
 - **JSON output** of `nxs genesis create`: `files` (each with `path`, `state`: `written`, `team` or `tracked` for GENESIS, one of RFC 0006's states for the guide, and `found` where a case variant was found), `codeowners` (`file`, `uncovered`, or `null`).
 - **Library seam:** `Engine::genesis_create(update: bool)`, the counterpart of the command, returning the same report (the decision on CLI and library parity stays in force).
-- **Stored formats:** `factory/GENESIS.md` as the fixed path of a team's GENESIS; the mark `<!-- nexus-flow: owner-rules -->` and the rule that reads the list after it; `factory/genesis-guide.md` as the guide's path; `templates/genesis/shipped.toml` in RFC 0006's format.
+- **Stored formats:** `factory/GENESIS.md` as the fixed path of a team's GENESIS; the mark `<!-- nexus-flow: owner-rules -->` and the rule that reads the list directly after it; `factory/genesis-guide.md` as the guide's path; `templates/genesis/shipped.toml` in RFC 0006's format.
 
 ### What nexus-flow needs from NoCentralDB
 
@@ -169,7 +169,12 @@ To have the merge gate check its rules, such a repository adds the mark before i
 
 None. The owner answered them on 2026-11-20 (NEX-70, NEX-71), and the answers are written into the text above.
 
+## Decisions
+
+- **The rules are the list directly after the mark** ("The rules on what comes back to the owner"). Decided by the owner on 2026-11-20 (NEX-77), with RFC 0010 (#171). This narrows "the first list after the mark": only blank lines may stand between the mark and the list's first item. Why: if the list under the mark is deleted, the merge gate must read no rules and send every pull request to the owner, not read some later list in GENESIS as the rules, silently. *Not taken:* the first list anywhere after the mark, which matched this RFC's words most literally.
+
 ## History
 
 - 2026-11-17: published as a draft in #163.
 - 2026-11-20: decided by the owner (NEX-70, NEX-71), in #163.
+- 2026-11-20: the list of rules narrowed to the one directly after the mark, from RFC 0010 (see "Decisions"), in #173 (NEX-83).

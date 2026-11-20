@@ -114,7 +114,7 @@ The kinds are fixed, so manufakt.io and `nxs status waiting` can read them the s
 | A ticket of this repository | `ticket`, a link | Every member of the repository space |
 | A decision of this repository | `decision`, a link | Every member of the repository space |
 | A pull request | `pr`, its URL | Everyone: a URL is text. Its state comes from the ticket's work link with that URL (RFC 0002, `ticketsWork.byUrl`), if one records it |
-| A request or a goal | `elsewhere`, a reference into the coordination space | Members of the coordination space: pm, the owner's devices, manufakt.io, and role sessions once added there as readers (RFC 0009; RFC 0005, "A member who reads one space but not the other") |
+| A request or a goal | `elsewhere`, a reference into the coordination space | Members of the coordination space: pm, the owner's devices and manufakt.io. Role sessions are not members there, and see a request only through a copy in the ad-hoc space pm gives them (RFC 0009, "Members and roles"; RFC 0005, "A member who reads one space but not the other") |
 | Another repository's ticket | `elsewhere`, a reference into that repository's space | Members of that space only |
 
 A pull request is a URL rather than a link to a work-link object, because a note may report a pull request that no ticket records, such as a merge of `main` into the base branch. A reference resolves per reader to `ok`, `notAccessible` or `missing` (NoCentralDB RFC 0005, "References into another space"), and nothing derived from it is stored, as in RFC 0002 ("References out of the space").
@@ -387,7 +387,7 @@ Nothing new. The design rests on RFC 0001's R6 (who signed a change, for `author
 - **A note covers what its writer's copy held.** It is as fresh as the writer's last sync (GENESIS.md, "Limits"): in island mode, or with a relay that withholds changes, a note leaves out what has not arrived, and says nothing of it.
 - **"What works now" is a judgement.** Nothing checks it against the code.
 - **The computed health sees only tickets.** It reads the goals in focus and this repository's tickets that serve them; an outage, a slow review or work no ticket records is invisible to it, which is why the writer may override it. It sees this repository only: a goal that stalls in another repository of the group shows in that repository's note. A member without a copy of the coordination space gets no computed health, and a ticket that serves no goal in focus never moves it.
-- **A line's state is the reader's.** A member without the coordination space reads a request or a goal as `not_accessible`, with its label only; manufakt.io reads every `on_main` as `null`.
+- **A line's state is the reader's.** A member without the coordination space, every role session among them, reads a request or a goal as `not_accessible`, with its label only; manufakt.io reads every `on_main` as `null`.
 - **There is no note for a group of repositories.** The owner's view of a group is a read across the repository spaces they are a member of; a member who holds only some of them sees only those.
 - **The day is counted in the zone the writer gives,** until priority 2 stores a default: two repositories of one group can date the same morning differently if their writers' machines differ.
 - **The `author` field is written by the writer and not checked** against the change's signature, until R6 (RFC 0001, "Who decided").
@@ -400,7 +400,12 @@ Nothing to migrate. v1 has no daily note: `nxs recap` lists recently closed tick
 
 None. The owner answered them on 2026-11-20 (NEX-65 to NEX-69), and the answers are written into the text above.
 
+## Decisions
+
+- **Role sessions are not readers of the coordination space** ("How a note refers to what it reports on", "What it does not do"). Decided by the owner on 2026-11-20 (NEX-82), with RFC 0009 (#158). This RFC had counted role sessions among the readers of a line about a request or a goal "once added there as readers"; under NEX-82 they are never added, and see a request only through a copy in the ad-hoc space pm gives them. Why: pm, a writer of the coordination space, cannot add members there. *Not taken:* role sessions as readers of the coordination space.
+
 ## History
 
 - 2026-11-17: published as a draft in #162.
 - 2026-11-20: decided by the owner (NEX-65 to NEX-69), in #162.
+- 2026-11-20: the readers of a line about a request or a goal corrected to RFC 0009's final design (see "Decisions"), in #173 (NEX-83).

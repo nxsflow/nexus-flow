@@ -152,14 +152,13 @@ A reference resolves per reader to `ok`, `notAccessible` or `missing` (NoCentral
 | --- | --- | --- |
 | pm | Both spaces | Every goal, and for its own tickets which goals they serve, with the goal's status and place in the order. Ranks by focus. |
 | The owner's devices, manufakt.io | Every space | As pm, for every repository |
-| A role session (coder, legal, …) once it reads the coordination space | Both spaces, the coordination space as reader (RFC 0009, "Members and roles") | As pm, for its repository: the goals, their order and its ticket's `focus`. It cannot change a goal. |
-| A role session not yet added to the coordination space, or any member of a repository space that is not in its coordination space | The repository space only | Its tickets' goal references as `not_accessible`, each with its `label`. It sees no goal status, so `focus` is `null` (see "Ranking"). |
+| A role session (coder, legal, …), or any other member of a repository space that is not in its coordination space | The repository space only, and for a role session perhaps an ad-hoc space with copies of requests (RFC 0009, "Members and roles") | Its tickets' goal references as `not_accessible`, each with its `label`. It sees no goal status, so `focus` is `null` (see "Ranking"). |
 | A developer device in the coordination space, but not in a repository's space | The coordination space only | The goals and the requests, but no ticket of that repository |
 | Any member, for a goal not yet synced | Both spaces | The reference as `missing`, with its `label`, until the goal arrives |
 
 A reference to a goal that reads `not_accessible` or `missing` never counts for focus, for that reader. Nothing derived from a reference's state is stored (NoCentralDB RFC 0005, "References into another space").
 
-Under RFC 0001 alone, every role session was in the row with `focus: null`. RFC 0009 makes role sessions readers of the coordination space (decided by the owner, NEX-47), so once a session has been added there, it computes `focus` as pm does. The case without the coordination space becomes rarer, but it remains: a session that has not been added there yet (who adds it is RFC 0009's question, NEX-82), and a member a team keeps out of the coordination space.
+A role session never reads the coordination space: it is not a member there (RFC 0001, "Roles in a space"), and the ad-hoc space pm may give it holds copies of requests, not goals (decided by the owner, NEX-82; RFC 0009, "Members and roles"). It is therefore always in the row with `focus: null`, and its `nxs ticket next` leaves the focus key out. pm hands out work in the order of the goals, so a session needs no focus of its own. The same row holds a member a team keeps out of the coordination space.
 
 ### Ranking
 
@@ -266,14 +265,14 @@ The owner's four repositories, nexus-flow, central-infra, app-foundations and ne
 3. **Tickets serve them.** nexflowit-app's pm has a ticket for the checkout page and runs `nxs ticket ref p7.12 --serves cb.1`. central-infra's pm accepts the webhook request that names `cb.1`, and links its two tickets with `nxs request link`. That writes the same reference on both (RFC 0009, "From a request to tickets"). nexus-flow's pm writes `--serves p3.1` on its three tickets.
 4. **Work moves.** central-infra's `nxs ticket next` lists the database migration one webhook ticket depends on as `focus: "inherited"`, with `focus_goal` `cb.1` at position 1. It lists it before a `P1` refactoring that serves no goal, and the pm hands out the migration first.
 5. **Goals in parallel.** In nexus-flow, nothing serves `cb.1`, so `next` starts with the tickets of `p3.1`, and its pm hands them out. Later, the only ready ticket for `cb.1` in central-infra is already in progress, so its spare lane takes the next ticket of the order, which serves no goal there.
-6. **A coder reads its ticket.** The coder on the migration reads the coordination space (RFC 0009, NEX-47). It sees the goal `cb.1`, and its ticket's `focus` is `inherited`. A coder not yet added there would see the reference as `not_accessible`, with the label "cb.1 Win 20 paying customers for nexflow.it", and `focus: null`.
+6. **A coder reads its ticket.** The coder on the migration is not a member of the coordination space (RFC 0009, NEX-82). It sees the reference as `not_accessible`, with the label "cb.1 Win 20 paying customers for nexflow.it", and `focus: null`; it works on the ticket pm handed it, in the order pm read.
 7. **Two people reorder.** The owner and a second developer, both offline, each move `p3.1` before `cb.1`: one with `nxs goal edit p3.1 --first`, the other with `--before cb.1`. After sync, the last write wins and `nxs goal list` shows `p3.1` first with `conflict: true`. The owner confirms the place with one more move, which clears the conflict.
 8. **The focus changes.** Twenty customers pay. The owner runs `nxs goal status cb.1 reached --comment "20 paying on 2027-03-02"`. On the next read, after sync, the tickets that served it are `focus: "none"` in every repository, and `p3.1` is first. No ticket was changed.
 
 ## What it does not do
 
 - **Every read is as fresh as the last sync.** A goal put into focus or moved in the order ranks a repository's work only once that repository's pm has synced it. Until then pm ranks by the focus its copy holds (GENESIS.md, "Limits").
-- **The focus is known only to a member of the coordination space.** A member without it sees its tickets' goals as `not_accessible`, with the label they had when they were written, and `focus: null`. Its `nxs ticket next` leaves the focus key out. Since role sessions read the coordination space (RFC 0009, NEX-47), that is a session not yet added there, or a member a team keeps out of it.
+- **The focus is known only to a member of the coordination space.** A member without it sees its tickets' goals as `not_accessible`, with the label they had when they were written, and `focus: null`. Its `nxs ticket next` leaves the focus key out. That is every role session (RFC 0009, NEX-82), and a member a team keeps out of the coordination space.
 - **A pm sees its own repository's tickets for a goal, not the others'.** A view of a goal across every repository needs a member of every repository space, such as the owner's devices or manufakt.io.
 - **A label can be stale.** A reference's `label` holds the goal's key and title when the reference was written. A renamed goal shows its old title to a reader who cannot resolve it.
 - **Two concurrent reorders can give an order neither person meant.** Every member sees the same order, and no move is lost, but moves of different goals combine. A person settles it with one more move.
@@ -293,7 +292,12 @@ Nothing to migrate. v1 has no goals: its board holds one repository's tickets, o
 
 None. The owner answered them on 2026-11-20 (NEX-58 to NEX-64), and the answers are written into the text above.
 
+## Decisions
+
+- **A role session never reads the coordination space** ("A member who reads one space but not the other", "A worked example", "What it does not do"). Decided by the owner on 2026-11-20 (NEX-82), with RFC 0009 (#158). This RFC had given role sessions a row of their own "once it reads the coordination space", after NEX-47; under NEX-82 a role session sees only copies of the requests its tickets wait for, in an ad-hoc space pm gives it, so it always has `focus: null`. Why: pm, a writer of the coordination space, cannot add members there, and a coder would read every request and goal of the group. *Not taken:* role sessions as readers of the coordination space.
+
 ## History
 
 - 2026-11-17: published as a draft in #161.
 - 2026-11-20: decided by the owner (NEX-58 to NEX-64), in #161.
+- 2026-11-20: what a role session sees of goals corrected to RFC 0009's final design (see "Decisions"), in #173 (NEX-83).

@@ -46,7 +46,7 @@ factory/
 
 **nexus-flow reads nothing inside the files.** They are prompts for agents and text for people, and their shape is the team's (GENESIS.md, "Strong opinions on what, open on how"). nexus-flow reads only which files exist:
 
-- **A role exists when its file exists.** The role's name is the file's name without `.md`, and it matches `^[a-z][a-z0-9-]{0,62}$`. The names of the frame's own roles in RFC 0001, "The role record" (`owner`, `developer`, `app`) are not role names, so a role file cannot be named after them; `pm` is a role and has its file.
+- **A role exists when its file exists.** The role's name is the file's name without `.md`, and it matches `^[a-z][a-z0-9-]{0,62}$`. The names of the frame's own roles in RFC 0001, "The role record" (`owner`, `developer`, `app`, `migration`) are not role names, so a role file cannot be named after them; `pm` is a role and has its file.
 - **A session's role names a role file.** The role a `spaceMember` record gives a session (RFC 0001, "The role record") is the name of a file in `factory/roles/`. `nxs member add <invitation> --role <role>` for a session refuses a role that has no file in the working tree, and says which file is missing, so no session holds a role nobody wrote down.
 - **CONFIG.md holds no value a script reads.** It is Markdown for agents and people. A value that a command must read the same way every time goes into `nexus-flow.toml`, as the base branch already does (`[git] base`, RFC 0001); this RFC adds no key there. The merge gate's RFC may add files under `factory/merge-gate/` that its script reads, in a format it designs.
 
@@ -209,7 +209,12 @@ Both are reports, not moves: the team decides what to do with the work. Before t
 
 None. The owner answered the one question this draft left open on 2026-11-20 (NEX-44), and the answer is written into the text above.
 
+## Decisions
+
+- **`migration` joins the frame's own roles** ("The factory's files"). Decided by the owner on 2026-11-20, when deciding RFC 0008 (#172). Why: the member that moves a v1 workspace holds the role `migration` in its `spaceMember` record, and a role file of that name would make it a session role. *Not taken:* writing the move as the device's own member, which would need no role of its own but could not tell the move's changes from the developer's work.
+
 ## History
 
 - 2026-11-17: published as a draft in #157.
 - 2026-11-20: decided by the owner (NEX-44), in #157.
+- 2026-11-20: `migration` added to the frame's roles, from RFC 0008 (see "Decisions"), in #173 (NEX-83).
