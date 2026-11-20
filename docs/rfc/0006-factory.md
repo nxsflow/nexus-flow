@@ -1,6 +1,6 @@
 # RFC 0006: Factory storage
 
-Status: Draft
+Status: Decided (2026-11-20)
 
 This RFC designs where the `factory` module keeps a team's way of working, and what becomes of the storage of v1's `chat`, which `factory` replaces. It follows `factory/GENESIS.md`, "What we build" (the `factory` row: roles, lanes, the merge gate and the gate command, stored in git) and "How work moves". It says where the role files, FACTORY.md, CONFIG.md and the merge rules live and which copy of them is the truth, which of the factory's running state needs storage and where that storage is, how the defaults nexus-flow ships reach a repository without overwriting a team's own, and that v1's chat storage ends, table by table. Once it is decided, a coding ticket can build `nxs factory install`, the check that ties a session's role to a role file, and the removal of v1's chat crates from `v2`.
 
@@ -70,9 +70,11 @@ While work runs, pm and the owner need to know which role holds which lane on wh
 | A ticket's pull request, branch or artifact | A field of the ticket | RFC 0002 |
 | pm's review and the owner's approval | The pull request's reviews on the forge, and the merge gate's status check | The merge gate's RFC |
 | Merged | "On main", derived from git | RFC 0001, RFC 0002 |
-| The agent framework's handle on a running session, such as a Claude Code session id, which pm needs to message, wake or archive it | A comment pm writes on the ticket when it starts the session | Open question 1 |
+| The agent framework's handle on a running session, such as a Claude Code session id, which pm needs to message, wake or archive it | A comment pm writes on the session's ticket when it starts the session (below) | This RFC |
 
 **A lane is derived.** A lane is held by a current member whose `spaceMember` record has a session role and names a ticket, while that ticket is in a state that holds a lane. Which states hold a lane is the team's rule, in CONFIG.md ("A lane is free again"); the states themselves are RFC 0002's. In v2, pm applies the rule and CONFIG.md's limit when it reads the members (`nxs member list`) and the tickets; nexus-flow does not count lanes itself. A command that counts them is factory behaviour, for a later revision of this RFC, and the limit would then move into `nexus-flow.toml` so that a command can read it.
+
+**pm keeps the framework's handle in a ticket comment.** When pm starts a session, it writes the agent framework's handle on that session, such as a Claude Code session id, as a comment on the session's ticket. pm reads it from there to message, wake or archive the session, and a new pm reads it there to take over the running sessions (decided by the owner, NEX-44). It needs no new field and outlives the session, and it is how this repository's factory works today. Its shape is the framework's, and nexus-flow neither reads nor checks it. *Not taken:* a `framework` field on the `spaceMember` record (an additive change to RFC 0001's collection, and nexus-flow would store a framework detail it otherwise leaves to the framework, principle 6); and storing no handle at all (a new pm could not take over the running sessions unless the framework hands them over).
 
 **A session that waits for the owner holds no lane but stays a member.** Its member and its `spaceMember` record stay until the session ends (RFC 0001, "Ending a session's member"), so it can still answer review; its lane is free because its ticket's state no longer holds one.
 
@@ -186,7 +188,7 @@ Nothing. The factory's files stay in git, and its running state lives in RFC 000
 - **It does not stop a session from editing its own rules.** A session reads its working tree, so it can change a role file and act on the change at once. The guard is at the merge: what judges a pull request reads the base branch, and the paths are under CODEOWNERS. A repository without CODEOWNERS, or on a forge without it, has no such guard; `nxs factory install` reports it but cannot make one.
 - **It does not read a role's content.** nexus-flow checks that a role's file exists, not what it says; a role file that is empty or wrong is the team's to find.
 - **It does not count lanes.** pm applies CONFIG.md's limit itself in v2, so a pm that miscounts can open one lane too many; nothing in nexus-flow refuses it yet.
-- **It does not know a session's framework handle.** pm writes it on the ticket; a session started by hand, outside pm, has no handle anywhere unless someone writes it there.
+- **It does not read a session's framework handle.** The handle is a comment pm writes on the ticket, in the framework's shape. A reader has to find it among the comments, and a session started by hand, outside pm, has no handle anywhere unless someone writes it there.
 - **It does not bring a new default to a team that changed the old one.** A `team` file never gets a newer default; the team reads the release notes and changes its file itself.
 - **It recognises only defaults nexus-flow shipped.** A file that differs from every shipped version by one character is the team's, and `--update` leaves it.
 - **It does not give manufakt.io the factory's files.** A caller with no checkout cannot read the roles or CONFIG until a later RFC adds a mirror.
@@ -205,11 +207,9 @@ Both are reports, not moves: the team decides what to do with the work. Before t
 
 ## Open questions
 
-1. **Where pm keeps the agent framework's handle on a session** (asked in NEX-44). pm needs it to message, wake or archive a running session, and a new pm needs it to take over. The options:
-   - **(a) A comment on the session's ticket, written by pm when it starts the session.** No new field; it is how this repository's factory works today, and it outlives the session. A reader must find it among the comments, and its shape is the framework's. Recommended.
-   - **(b) A `framework` field on the `spaceMember` record**, holding the framework's name and its session id. A command can read it, but it changes RFC 0001's collection (an additive field), and nexus-flow then stores a framework detail it otherwise leaves to the framework (principle 6).
-   - **(c) Not stored by nexus-flow**: the framework keeps its own list of sub-agents. Nothing to build, but a new pm cannot take over the running sessions unless the framework hands them over.
+None. The owner answered the one question this draft left open on 2026-11-20 (NEX-44), and the answer is written into the text above.
 
 ## History
 
 - 2026-11-17: published as a draft in #157.
+- 2026-11-20: decided by the owner (NEX-44), in #157.
