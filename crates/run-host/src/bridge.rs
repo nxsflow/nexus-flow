@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::bridge_resume::{resume, ResumeOutcome};
+use crate::bridge_targets::check_slot_targets;
+pub use crate::bridge_targets::UnresolvedTarget;
+use crate::foreign::record_withdrawal;
+pub use crate::foreign::withdraw_as_owner;
 pub use crate::start::ThreadRoute;
 use nexus_run_contracts::status::{Owner, TreeStatus};
 use nexus_run_contracts::{
@@ -100,6 +104,8 @@ pub enum Refused {
         message: MessageId,
     },
     Compile(String),
+    /// A slot the flow would start names a persona the declarations do not hold (6j6v.yw6x).
+    UnresolvedTarget(UnresolvedTarget),
     Store(StoreError),
     Port(PortError),
 }
@@ -131,6 +137,7 @@ impl std::fmt::Display for Refused {
                 "message {message} is posted but the run has not heard of it: run the command again"
             ),
             Self::Compile(what) => write!(f, "the channel does not compile: {what}"),
+            Self::UnresolvedTarget(what) => write!(f, "{what}"),
             Self::Store(error) => write!(f, "{error}"),
             Self::Port(error) => write!(f, "{error}"),
         }
@@ -175,6 +182,7 @@ pub fn commission(
     let review = review_of(ctx, &flow);
     let def =
         compile(&flow, &review).map_err(|refusal| Refused::Compile(format!("{refusal:?}")))?;
+    check_slot_targets(ctx, &def)?;
     let run = RunId::new(Ulid::new());
     let root_thread = mint_thread_id();
     let hash = def.flow_ref();
@@ -355,7 +363,7 @@ pub(crate) fn input_key(run: &RunId) -> String {
 /// Posts, then enqueues. A crash between them leaves a message the run never folds, and the caller is told
 /// with the message id and the command to run again: nothing retries silently.
 #[allow(clippy::too_many_arguments)]
-fn post_and_enqueue(
+pub(crate) fn post_and_enqueue(
     ctx: &BridgeCtx,
     run: &RunId,
     thread: &str,
@@ -523,29 +531,15 @@ pub fn withdraw(
         return Err(Refused::RunFinished);
     }
     check_requester(&state, caller)?;
-    let key = input_key(&run);
-    if state.root_message.is_some() {
-        return post_and_enqueue(ctx, &run, root, &caller.actor, text, &key, now, |message| {
-            EventBody::Withdrawn {
-                message: Some(message.clone()),
-                by: WithdrawnBy::Requester,
-            }
-        })
-        .map(Some);
-    }
-    let event = Event::new(
-        run.clone(),
-        0,
+    record_withdrawal(
+        ctx,
+        root,
+        &state,
+        &caller.actor,
+        text,
+        WithdrawnBy::Requester,
         now,
-        key,
-        Origin::Cli,
-        EventBody::Withdrawn {
-            message: None,
-            by: WithdrawnBy::Requester,
-        },
-    );
-    ctx.store.enqueue(&run, &event, &[])?;
-    Ok(None)
+    )
 }
 
 /// Contract (d): the pure projection, with what only this machine can say around it. A reader without the
@@ -570,6 +564,7 @@ pub fn status(ctx: &BridgeCtx, run: &RunId, now: Timestamp) -> Result<Option<Run
             projected.next_action.unwrap_or_default()
         ));
     }
+    crate::foreign::annotate(ctx, &view.state, &mut projected);
     projected.local = Some(local(ctx, run, &view.state, now)?);
     Ok(Some(projected))
 }
@@ -640,6 +635,11 @@ fn local(
                 at: stored.at,
             }),
         },
+        start_refusals: ctx
+            .store
+            .get(&crate::start::start_refusal_key(run))?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default(),
     })
 }
 

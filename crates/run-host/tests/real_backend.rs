@@ -75,6 +75,7 @@ impl RealRig {
             Arc::new(backend),
             rig.tree.clone(),
             rig.clock.clone(),
+            nexus_run_host::test_support::WORKSPACE,
         );
         rig.policy.quiet_after = Secs(600);
         rig.policy.subprocess_idle = Secs(1800);
@@ -130,15 +131,55 @@ impl RealRig {
             .count()
     }
 
-    fn end_processes(&self) {
+    fn leader_pid(&self) -> u64 {
         let child: serde_json::Value =
             serde_json::from_slice(&std::fs::read(self.ledger.join("child.json")).unwrap())
                 .unwrap();
-        let leader = child["pid"].as_u64().unwrap();
+        child["pid"].as_u64().unwrap()
+    }
+
+    fn kill(target: &str) {
+        let _ = Command::new("kill").args(["-KILL", "--", target]).status();
+    }
+
+    /// The tool first, and only once it is gone the sidecar: a host that looks between two kills in the other order
+    /// sees a dead leader beside a live tool, which is a lingering group and reported lost at once (see
+    /// `a_sidecar_that_dies_before_its_tool_is_lost_at_once_and_its_tool_is_stopped`).
+    fn end_processes(&self) {
         let tool = tool_pid(&self.ledger).unwrap();
-        for target in [format!("-{leader}"), tool.to_string()] {
-            let _ = Command::new("kill").args(["-KILL", "--", &target]).status();
+        Self::kill(&tool.to_string());
+        let limit = Instant::now() + HANG_CEILING;
+        while nexus_run_session_claude::procs::alive(tool) {
+            assert!(Instant::now() < limit, "never happened: the tool is gone");
+            std::thread::sleep(Duration::from_millis(5));
         }
+        Self::kill(&format!("-{}", self.leader_pid()));
+    }
+
+    fn ended_lost(&self) -> bool {
+        self.rig.events(&self.run).iter().any(|e| {
+            matches!(
+                &e.body,
+                EventBody::SessionFact {
+                    fact: SessionFact::Ended {
+                        cause: EndCause::Lost
+                    },
+                    ..
+                }
+            )
+        })
+    }
+
+    fn lingering(&self) -> bool {
+        self.rig.events(&self.run).iter().any(|e| {
+            matches!(
+                &e.body,
+                EventBody::SessionFact {
+                    fact: SessionFact::GroupLingering { .. },
+                    ..
+                }
+            )
+        })
     }
 }
 
@@ -180,20 +221,29 @@ fn a_killed_sidecar_is_lost_without_the_clock_moving() {
     let at = real.rig.now();
 
     real.end_processes();
-    real.tick_until("the end reached the log", |r| {
-        r.rig.events(&r.run).iter().any(|e| {
-            matches!(
-                &e.body,
-                EventBody::SessionFact {
-                    fact: SessionFact::Ended {
-                        cause: EndCause::Lost
-                    },
-                    ..
-                }
-            )
-        })
-    });
+    real.tick_until("the end reached the log", RealRig::ended_lost);
 
     assert_eq!(real.rig.now(), at);
     assert_eq!(real.liveness(), Vec::<ReasonCode>::new());
+}
+
+/// The window `end_processes` leaves open between its two kills, held open on purpose: the host sees the sidecar dead
+/// while its tool still runs. A dead leader with a live group is not an end: the slot is reported lost at once, the
+/// host stops the tool that lingers, and the confirmed end follows. `[Lost]` beside `ended { lost }` is this, not a race.
+#[test]
+fn a_sidecar_that_dies_before_its_tool_is_lost_at_once_and_its_tool_is_stopped() {
+    let mut real = RealRig::commissioned("exec sleep 600");
+    let at = real.rig.now();
+    let tool = tool_pid(&real.ledger).unwrap();
+
+    RealRig::kill(&format!("-{}", real.leader_pid()));
+    real.tick_until("the lingering tool reached the log", RealRig::lingering);
+    assert_eq!(real.liveness(), vec![ReasonCode::Lost]);
+    assert!(!real.ended_lost());
+
+    real.tick_until("the end reached the log", RealRig::ended_lost);
+
+    assert!(!nexus_run_session_claude::procs::alive(tool));
+    assert_eq!(real.rig.now(), at);
+    assert_eq!(real.liveness(), vec![ReasonCode::Lost]);
 }

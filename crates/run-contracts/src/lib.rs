@@ -44,7 +44,7 @@ pub use session::{
 };
 pub use status::{
     ClaimStatus, FlowStatus, InFlight, LocalStatus, MemberStatus, Needs, NeedsKind, Owner, Refusal,
-    RunState, RunStatus, SlotLiveness, StepStatus, TreeStatus, Verdict,
+    RunState, RunStatus, SlotLiveness, StartPort, StartRefusal, StepStatus, TreeStatus, Verdict,
 };
 pub use store::{
     Appended, Cas, Enqueued, RunRow, RunStore, StoreError, StoreLimits, StoreResult, Timer,
