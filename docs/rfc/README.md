@@ -14,6 +14,7 @@ Each RFC says at its top whether it is a draft or decided, and it states the des
 | [0006](0006-factory.md) | Factory storage |
 | [0007](0007-status.md) | status in NoCentralDB |
 | [0009](0009-work-across-repositories.md) | Work across repositories |
+| [0010](0010-merge-gate.md) | The merge gate |
 
 Each area of GENESIS.md gets its own RFC: the six modules (genesis, goals, tickets, decisions, factory, status), the work across repositories, the merge gate, and the move from v1 to NoCentralDB.
 
