@@ -216,7 +216,7 @@ Every note carries a health: `on_track`, `at_risk` or `off_track`. The owner ask
 
 The rule is `nxs`'s, the same for every repository, and a later version of nexus-flow may refine it; the counts and `healthComputed` written with each note say what the rule saw that day, so an old note stays explained by its own record. A team's own health rule is not designed now, as a team's own ticket fields are not (NEX-23).
 
-*Not taken:* a health the writer sets with no rule beside it, as the Linear note has it today (it is the judgement the owner asked to have supported deterministically); a health computed and never overridden (the rule cannot see what no ticket records, such as an outage); thresholds in days, such as "blocked for more than three days" (a number someone must choose and keep, where the period between two notes already says how long nothing moved); and weighting goal 1 above the others (a goal in focus that stalls is worth the owner's attention whatever its place).
+*Not taken:* a health the writer sets with no rule beside it, as the Linear note has it today (it is the judgement the owner asked to have supported deterministically); a health computed and never overridden (the rule cannot see what no ticket records, such as an outage); thresholds in days, such as `stalled_days` (off track when nothing on a goal moved for that many days) and `waiting_days` (at risk when something waited for the owner longer than that) as keys in `nexus-flow.toml` (two numbers the owner would have to choose and keep, where the period since the last note is a better clock and needs no setting); and weighting goal 1 above the others (a goal in focus that stalls is worth the owner's attention whatever its place).
 
 ### Correcting a note
 
