@@ -4,24 +4,13 @@
 
 Each RFC says at its top whether it is a draft or decided, and it states the design as one complete text. Its "History" section starts with its publication and lists by date what changed since, and in which pull request.
 
-| RFC | Title |
-| --- | --- |
-| [0001](0001-nexus-flow-on-nocentraldb.md) | nexus-flow on NoCentralDB |
-| [0002](0002-tickets.md) | Tickets in NoCentralDB |
-| [0003](0003-decisions.md) | decisions in NoCentralDB |
-| [0004](0004-genesis.md) | Genesis storage |
-| [0005](0005-goals.md) | Goals in NoCentralDB |
-| [0006](0006-factory.md) | Factory storage |
-| [0007](0007-status.md) | status in NoCentralDB |
-| [0008](0008-move-from-v1.md) | The move from v1 to NoCentralDB |
-| [0009](0009-work-across-repositories.md) | Work across repositories |
-| [0010](0010-merge-gate.md) | The merge gate |
+The RFCs are the `NNNN-<slug>.md` files in this folder, each with its status line at the top. `cargo xtask rfc-index` prints their index: number, title and status, one line each, or a Markdown table with `--md`. No table is kept here, so an RFC pull request touches no shared file. CI runs `cargo xtask rfc-index --check`, which fails when two RFC files share a number or a file's heading or status line is malformed.
 
 Each area of GENESIS.md gets its own RFC: the six modules (genesis, goals, tickets, decisions, factory, status), the work across repositories, the merge gate, and the move from v1 to NoCentralDB.
 
 ## Writing one
 
-Copy [`0000-template.md`](0000-template.md) to `NNNN-<slug>.md`, with the next free number, and open it as a draft pull request. Its title starts with the RFC number. A draft names, in "Open questions", every choice it leaves to the owner, with the options and a recommendation, so that each can be decided on its own.
+Copy [`0000-template.md`](0000-template.md) to `NNNN-<slug>.md`, with the next free number, and open it as a draft pull request. Its title starts with the RFC number. Keep the heading and the `Status:` line in the template's form, since the index is read from them. The pull request does not touch this README. A draft names, in "Open questions", every choice it leaves to the owner, with the options and a recommendation, so that each can be decided on its own.
 
 An RFC states its design directly. Each choice sits in the section it belongs to: what was chosen, a sentence on why, and the options not taken where a reader would ask "why not X?". There is no list of decisions, and there are no references such as "decision S13".
 

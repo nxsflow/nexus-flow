@@ -13,6 +13,7 @@ mod facade;
 mod layering;
 mod macos_tests;
 mod platforms;
+mod rfc_index;
 mod runners;
 mod truth;
 mod version;
@@ -110,6 +111,21 @@ enum Command {
         check: bool,
         /// Read another folder (for tests).
         #[arg(long, default_value = "factory/decisions")]
+        dir: PathBuf,
+    },
+    /// The index of the RFCs in `docs/rfc/` (NEX-85): number, title and status of each, read from
+    /// the RFC files. No table is stored, so nothing can go stale.
+    #[command(name = "rfc-index")]
+    RfcIndex {
+        /// Print a Markdown table instead of one line per RFC.
+        #[arg(long)]
+        md: bool,
+        /// Check the RFC files and print nothing else: fail when two share a number, or a heading
+        /// or `Status:` line is wrong (CI gate).
+        #[arg(long, conflicts_with = "md")]
+        check: bool,
+        /// Read another folder (for tests).
+        #[arg(long, default_value = "docs/rfc")]
         dir: PathBuf,
     },
 }
@@ -350,6 +366,16 @@ fn main() -> Result<()> {
                 since,
             };
             decisions::run(&root.join(dir), &filter, check)?;
+        }
+        Command::RfcIndex { md, check, dir } => {
+            if check {
+                rfc_index::check(&root.join(dir))?;
+                println!(
+                    "rfc-index check: every RFC file has its own number and a well-formed heading"
+                );
+            } else {
+                print!("{}", rfc_index::index(&root.join(dir), md)?);
+            }
         }
         Command::CommitRoles {
             base,
