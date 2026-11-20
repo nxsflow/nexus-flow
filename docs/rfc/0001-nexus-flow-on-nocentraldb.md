@@ -73,7 +73,7 @@ A relay creates a space only for an allowlisted creator (NoCentralDB RFC 0007). 
 
 ### Members
 
-A NoCentralDB member is a device, an agent or a sub-agent, each with its own keys (NoCentralDB `MemberKind`: `device`, `agent`, `subAgent`; NoCentralDB RFC 0003, RFC 0009). An account is a key pair that signs the certificates of its devices and agents; it is not a login, and no server holds it (NoCentralDB RFC 0010, "Accounts"). A device or an agent joins an account by pairing, which runs on a device that already belongs to the account; the agent receives a certificate, never the account key. A sub-agent holds no account: its parent agent signs its certificate when it adds it, so the chain runs sub-agent, parent agent, account (NoCentralDB RFC 0010, rule 4; RFC 0009, "Sub-agents and ad-hoc spaces"). nexus-flow uses four kinds of member:
+A NoCentralDB member is a device, an agent or a sub-agent, each with its own keys (NoCentralDB `MemberKind`: `device`, `agent`, `subAgent`; NoCentralDB RFC 0003, RFC 0009). An account is a key pair that signs the certificates of its devices and agents; it is not a login, and no server holds it (NoCentralDB RFC 0010, "Adding a device or an agent to an account"). A device or an agent joins an account by pairing, which runs on a device that already belongs to the account; the agent receives a certificate, never the account key. A sub-agent holds no account: its parent agent signs its certificate when it adds it, so the chain runs sub-agent, parent agent, account (NoCentralDB RFC 0010, rule 4; RFC 0009, "Sub-agents and ad-hoc spaces"). nexus-flow uses five kinds of member:
 
 | Member | NoCentralDB kind | Created | Keys live | Removed |
 | --- | --- | --- | --- | --- |
@@ -81,6 +81,7 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 | pm | `agent` | When the pm session starts, paired once into the account of the developer who commissions it | In pm's own member database, created in the session (see "The local data on disk"); never written to the repository, the environment, a ticket or a log | When pm ends, or by the developer when a new pm takes over |
 | A role session that pm starts (coder, legal, …) | `subAgent` of pm | When the session starts, added by pm | In the session's own member database, as for pm | When the session ends, or by pm when it archives the session |
 | manufakt.io | `device` of the person's account | When the person pairs manufakt.io into their account and adds it to their spaces | Where manufakt.io keeps its device keys | By the person |
+| The migration member | `agent` | When `nxs migrate` moves a v1 workspace, paired into the developer's account by their device for that one run (RFC 0008, "The migration member") | In its own member database under `migration/<run>/` | By the device, at the end of the run |
 
 **One member per agent session** (NEX-16). Its role is the role on its trigger, for example `coder on NEX-42` or `pm`, and the chain of certificates says which person commissioned it: a coder is pm's sub-agent, and pm is an agent of the developer's account, so every change shows the chain person, pm, coder (decided by the owner on 2026-11-17). The person acts once per pm, when pm is paired, and never per session. The design names no particular person: nexus-flow is an open-source tool for any developer or team. How a ticket is written in that role (`NEX-42` or otherwise) follows RFC 0002.
 
@@ -93,10 +94,10 @@ NoCentralDB has no member names: an invitation carries a member id, its public k
 | Field | Holds |
 | --- | --- |
 | `member` | The NoCentralDB member id |
-| `role` | `owner`, `developer`, `pm`, `app`, or the role of a session (`coder`, `legal`, …) |
+| `role` | `owner`, `developer`, `pm`, `app`, `migration`, or the role of a session (`coder`, `legal`, …) |
 | `ticket` | For a session: an `nc.ref` to the ticket it was started on, if any |
 
-The member that adds another writes its record in the same step. Who commissioned a member is not part of the record: it is the member's certificate chain, which NoCentralDB signs and checks.
+`owner`, `developer`, `app` and `migration` are roles of the frame itself, which name no role file (RFC 0006, "The factory's files"); `migration` is the role of the member that writes RFC 0008's move of a v1 workspace. The member that adds another writes its record in the same step. Who commissioned a member is not part of the record: it is the member's certificate chain, which NoCentralDB signs and checks.
 
 #### Roles in a space
 
@@ -109,12 +110,13 @@ NoCentralDB's roles are reader, writer and admin, per space (NoCentralDB RFC 000
 | pm | admin, so it can add and remove the sessions it starts | writer |
 | Every other role session (coder, legal, …) | writer | not a member |
 | manufakt.io | writer, so the person can read and act through it | writer |
+| The migration member | writer, for the run that adds it | not a member |
 
-pm is admin of its repository space because it starts sessions, and starting one means adding its member. Other role sessions are writers: they change tickets and decisions but cannot add members. manufakt.io reads and writes in both kinds of space, as the person would from any of their devices. A role session is not a member of the coordination space: pm ranks the work against the goals and turns requests into tickets (GENESIS.md, "Goals set the focus", "Work across repositories"), so a coder never needs it; it sees a goal only as the unresolved `nc.ref` its ticket holds (decided by the owner, NEX-38). Making role sessions readers would add a second membership to add and remove per session. A later version may give a coder the access to the coordination space that pm names (NEX-40); since a coder is already pm's sub-agent, pm can add it there itself. RFC 0005 can revisit this.
+pm is admin of its repository space because it starts sessions, and starting one means adding its member. Other role sessions are writers: they change tickets and decisions but cannot add members. manufakt.io reads and writes in both kinds of space, as the person would from any of their devices. A role session is not a member of the coordination space: pm ranks the work against the goals and turns requests into tickets (GENESIS.md, "Goals set the focus", "Work across repositories"), so a coder never needs it; it sees a goal only as the unresolved `nc.ref` its ticket holds (decided by the owner, NEX-38). Making role sessions readers would add a second membership to add and remove per session, and pm, a writer there, could not add them. What a role session must see of the coordination space, the requests its tickets wait for, pm gives it as copies in an ad-hoc space of its own (see "Starting a role session"; RFC 0009, "Members and roles"; decided by the owner, NEX-82).
 
 #### Starting pm
 
-pm is paired once into the account of the developer who commissions it (NoCentralDB RFC 0010, "Accounts"):
+pm is paired once into the account of the developer who commissions it (NoCentralDB RFC 0010, "Adding a device or an agent to an account"):
 
 1. The pm session runs `nxs session start --role pm --pairing`. It opens its member database for pairing from its first open (`OpenOptions::pairing()`; NoCentralDB RFC 0009) and prints a pairing request. The request holds nothing secret and may travel through any channel the developer trusts.
 2. On one of their devices, the developer runs `nxs member pair <request>`, which pairs pm into their account as an agent (`account.pair` with kind `agent`) and prints the response.
@@ -129,7 +131,8 @@ No secret travels between sessions. A starting session creates its own keys and 
 
 1. The new session runs `nxs session start`. It opens its member database as a sub-agent (`OpenOptions::sub_agent()`; NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces") and prints its invitation (`ncdb-invite-…`): its member id and public keys, without a certificate. The invitation holds nothing secret. It reaches pm as a session message through the agent framework, and where the framework cannot send one, as a comment on the session's ticket (decided by the owner, NEX-38). The fallback is needed today: a Claude Code cloud session cannot reliably message back ([how sessions reach each other](../research/2026-11-14-how-sessions-reach-each-other.md)), and the session cannot write to the repository space before it is a member, so the comment goes through the tracker in use until v2's own tickets carry it.
 2. pm runs `nxs member add <invitation> --role <role> [--ticket <ref>]`. pm's `members.add` signs the sub-agent's certificate with pm's member key, adds it to the repository space as writer, writes its `spaceMember` record, and syncs. A sub-agent creates no space of its own; pm adds it to the spaces it works in.
-3. The new session's next sync finds itself a member and pulls the space.
+3. When the session's tickets wait for a request in the coordination space, pm creates an ad-hoc space for the session (`createAdHoc`; NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces") with a copy of each such request, and adds the session there as its sub-agent; it does the same when it later links a ticket of a running session to a request. The session only reads the copies, and pm keeps their status current (RFC 0009, "Members and roles"; decided by the owner, NEX-47, NEX-82).
+4. The new session's next sync finds itself a member and pulls its spaces.
 
 In a cloud container this works the same: the keys are created in the container and die with it. A cloud environment holds secrets only as proxy-injected headers, which cannot carry a signing key, and a key stored in the environment would be shared by every session started there, which defeats one member per session.
 
@@ -137,7 +140,7 @@ In a cloud container this works the same: the keys are created in the container 
 
 #### Ending a session's member
 
-`nxs session end` removes the session's own member, syncs (see "Sync"), and deletes its member database. A session that dies without ending leaves a member behind; pm removes it with `nxs member remove <member>` when it archives the session, and does so for every session it archives. Until NoCentralDB offers members that lapse on their own (requirement R5), a dead session's member stays a member until someone removes it. Its keys are gone with the container, so nobody can sign as it.
+`nxs session end` removes the session's own member, syncs (see "Sync"), and deletes its member database. A session that dies without ending leaves a member behind; pm removes it with `nxs member remove <member>` when it archives the session, and does so for every session it archives, from the repository space and from the session's ad-hoc space, if pm gave it one (RFC 0009, "Members and roles"). Until NoCentralDB offers members that lapse on their own (requirement R5), a dead session's member stays a member until someone removes it. Its keys are gone with the container, so nobody can sign as it.
 
 A removed member's past changes stay valid: NoCentralDB checks a change against the member's rights at the time it was made, up to the removal's cutoff (NoCentralDB RFC 0008, "The cutoff").
 
@@ -184,6 +187,7 @@ What replaces v1's `.nxs/`: each member nexus-flow runs as has one NoCentralDB d
   device/                 # the device member's NoCentralDB database, with all its spaces (NoCentralDB RFC 0006); its format is NoCentralDB's
   sessions/<session id>/  # one session member's database and keys; created by `nxs session start`, removed by `nxs session end`
   derived/<member id>/    # nexus-flow's rebuildable cache, if any (see "Derived state"); deletable at any time
+  migration/<run>/        # the migration member's database and keys, for one run of RFC 0008's move; removed at its end
 ```
 
 `NXS_DATA_DIR` overrides the directory, so that tests, cloud containers and several instances on one machine stay apart.
@@ -232,13 +236,14 @@ A member with no relay works in island mode.
 
 ### Derived state
 
-Readiness, blocked and "on main" are never stored (GENESIS.md, "Done is not yet on main"). NoCentralDB reserves computed fields and views (`nc.reach`, `nc.view`) but has not designed them yet (requirement R7), so nexus-flow computes them itself, behind the seam.
+Readiness, blocked, focus and "on main" are never stored (GENESIS.md, "Done is not yet on main"). NoCentralDB reserves computed fields and views (`nc.reach`, `nc.view`) but has not designed them yet (requirement R7), so nexus-flow computes them itself, behind the seam.
 
-- **Readiness and blocked** are computed by the storage crate from the dependency links in the repository space: it reads the tickets and their links through the model's indexes and walks the graph in memory. The rules themselves (what counts as done, as blocked) are RFC 0002's.
-- **"On main"** is computed from the repository's local git: a ticket is on main when a commit reachable from the base branch `nexus-flow.toml` names (`[git] base`, `main` unless the team configures another) names the ticket in its title, squash merges included. A title may name tickets as a range: `NEX-13..NEX-23` names every ticket from NEX-13 to NEX-23 (decided in NEX-33). It reads the local git and never fetches, so it is as fresh as the last `git fetch` of the base branch. A caller with no checkout (manufakt.io) gets `null`, meaning not known, instead of a guess.
+- **Readiness and blocked** are computed by the storage crate from the dependency links in the repository space: it reads the tickets and their links through the model's indexes and walks the graph in memory. One input comes from outside that space: a ticket that waits for a request is blocked until the request is done, and the storage crate reads the request through the ticket's reference in the member's own copy of the coordination space, or through a copy of it in an ad-hoc space the member belongs to (RFC 0009, "A request blocks the tickets that wait for it"; decided by the owner, NEX-47). The rules themselves (what counts as done, as blocked) are RFC 0002's.
+- **Focus**, which orders the ready work by the goals in focus, is computed the same way: the walk over epics and dependencies runs in the repository space, and the status and rank of each goal are read through the ticket's reference in the member's own copy of the coordination space (RFC 0005, "Ranking"; decided by the owner, NEX-61, NEX-63). A member without a copy of the coordination space gets no focus.
+- **"On main"** is computed from the repository's local git: a ticket is on main when a commit reachable from the base branch `nexus-flow.toml` names (`[git] base`, `main` unless the team configures another) names the ticket in its title, squash merges included. A title may name tickets as a range: `NEX-13..NEX-23` names every ticket from NEX-13 to NEX-23 (decided in NEX-33). A ticket moved from v1 is also on main when such a title names its v1 id (RFC 0008, "How the ops are replayed"). It reads the local git and never fetches, so it is as fresh as the last `git fetch` of the base branch. A caller with no checkout (manufakt.io) gets `null`, meaning not known, instead of a guess.
 - **A cache** under `derived/<member id>/` may hold what the computation found, keyed by the database's version and the git commit it read. It is rebuilt whenever either moves, never synced, and deleting it changes no answer.
 
-This is a **stop-gap** under NEX-13: it is temporary, it lives only behind the storage crate's functions that return derived state, and once NoCentralDB's computed fields can express reach (R7), those functions read them instead and the in-memory walk goes.
+This is a **stop-gap** under NEX-13: it is temporary, it lives only behind the storage crate's functions that return derived state, and once NoCentralDB's computed fields can express reach (R7), those functions read them instead and the in-memory walk within the repository space goes. The steps across a reference, to a request and to a goal, stay nexus-flow's for good, since NoCentralDB computes no value that follows a reference (NoCentralDB RFC 0004, "How a reference resolves").
 
 ### The library seam
 
@@ -288,7 +293,7 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 
 - **R1. A space id grants nothing.** A relay connection proves only that a member key is held, and whether that member may read or write a space is checked per request (NoCentralDB RFC 0007, "Opening a connection"); content is encrypted, and the relay cannot read it (NoCentralDB RFC 0001, "The design in one page"). Knowing a space's id therefore reads nothing, and the id can be committed.
 - **R2. Join by invitation.** A new member creates its own keys and hands over an invitation, which an admin adds, so no secret travels (NoCentralDB RFC 0009, RFC 0003). A role name is not part of it, and nexus-flow keeps the role in its own `spaceMember` record.
-- **R8. An agent in the person's account, and its sub-agents.** An agent is paired into an account and receives a certificate, never the account key (NoCentralDB RFC 0010, "Accounts"; built in Rust and TypeScript). A sub-agent opens with `OpenOptions::sub_agent()`, holds no account, and its parent's `members.add` signs its certificate (NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces"; RFC 0010, rule 4). The chain person, pm, coder is therefore NoCentralDB's own.
+- **R8. An agent in the person's account, and its sub-agents.** An agent is paired into an account and receives a certificate, never the account key (NoCentralDB RFC 0010, "Adding a device or an agent to an account"; built in Rust and TypeScript). A sub-agent opens with `OpenOptions::sub_agent()`, holds no account, and its parent's `members.add` signs its certificate (NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces"; RFC 0010, rule 4). The chain person, pm, coder is therefore NoCentralDB's own.
 - **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`.
 - **R4. An additive check.** `ncdb model check` says whether one `model.lock.json` is an additive change of another (NoCentralDB RFC 0005); it needs Node 24.
 - **R9. A first sync for a new member.** A member that joins a space pulls the whole log from the relay (NoCentralDB RFC 0007, "Pull: read from a cursor"), so a new member with an empty database, such as a cloud container, gets the whole space.
@@ -317,7 +322,7 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 - **Every read is as fresh as the last sync** (GENESIS.md, "Limits"). A command does not wait for sync, so a read can miss what another member wrote since.
 - **Island mode reaches no one else, yet.** Without a relay, a space is the device member's alone until R11: until members on one device can find each other, the sessions there and the repositories that share a coordination space cannot sync with each other. A cloud session needs a relay either way.
 - **"On main" is as fresh as the last `git fetch`** of the base branch, and is not known (`null`) to a caller without a checkout.
-- **Derived state is computed in memory** until R7 lands, so it costs time in proportion to the space's tickets and links, on every read that needs it, unless the cache is fresh.
+- **Derived state is computed in memory:** the walk within a repository space until R7 lands, and the steps across a reference to a request or a goal for good. It costs time in proportion to the space's tickets and links, on every read that needs it, unless the cache is fresh.
 - **A ticket cannot link to a goal or a request.** They live in another space; a ticket names them through an `nc.ref`, which stays unresolved for a reader who is not a member there.
 - **A repository belongs to at most one coordination space** in v2.
 
@@ -329,7 +334,15 @@ This RFC moves no data. A v1 workspace (`.nxs/`) is left as it is: v2 neither op
 
 None. The owner answered them on 2026-11-17 (NEX-38), and the answers are written into the text above.
 
+## Decisions
+
+- **A role session gets copies of the requests it waits for, in an ad-hoc space pm gives it** ("Roles in a space", "Starting a role session", "Ending a session's member"). Decided by the owner on 2026-11-20 (NEX-47, NEX-82), with RFC 0009 (#158). Why: a request now blocks the tickets that wait for it, for every reader, so a coder must see the request's status, and pm, a writer of the coordination space, cannot add members there. *Not taken:* role sessions as readers of the coordination space, which replaces the opening this RFC left for it (NEX-40); pm as an admin of the coordination space; the owner's device adding every session. The roles table stays: role sessions are not members of the coordination space.
+- **Readiness reads a request across spaces** ("Derived state"). Decided by the owner on 2026-11-20 (NEX-47), with RFC 0009 (#158). Why: a ticket that waits for another repository's work must not read as ready to anyone. *Not taken:* readiness from the repository space alone, with pm holding a waiting ticket back.
+- **Focus joins the derived state** ("Derived state"). Decided by the owner on 2026-11-20 (NEX-61, NEX-63), with RFC 0005 (#161). Why: the goals in focus order the ready work, and that order is computed on read like readiness. *Not taken:* focus for a ticket's direct references only.
+- **`migration` joins the frame's roles, with a member of its own** ("Members", "The role record", "Roles in a space", "The local data on disk", and the v1 id in "Derived state"). Decided by the owner on 2026-11-20, when deciding RFC 0008 (#172); the v1 id in "on main" is NEX-78. Why: every change of the move is signed by a member whose role says it moved the data, and a v1-era commit names a moved ticket by its v1 id. *Not taken:* writing the move as the device's own member; a sub-agent, which a device cannot add.
+
 ## History
 
 - 2026-11-15: published as a draft in #142.
 - 2026-11-17: decided by the owner (NEX-38), in #142.
+- 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #PR (NEX-83).
