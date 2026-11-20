@@ -1,6 +1,6 @@
 # RFC 0003: decisions in NoCentralDB
 
-Status: Draft
+Status: Decided (2026-11-20)
 
 This RFC designs how the `decisions` module, which replaces v1's `memory`, keeps its records in a repository space: the collections and their fields, how "in force", "superseded" and "on main" are derived, why no change can delete or rewrite a decision and where that guarantee ends, the indexes behind every filter, the `nxs` commands with their JSON, `nxs prime`, and the `Engine` symbols manufakt.io calls. It follows `factory/GENESIS.md`, "Decisions and rules" and "Done is not yet on main", inside the frame of RFC 0001. Once it is decided, a coding ticket can build the module, and RFC 0008 can move v1's memories and a repository's `factory/decisions/` folder into it.
 
@@ -113,7 +113,7 @@ Every decision has a handle, which agents and people type and read: `YYYY-MM-DD-
 
 The handle is written once with the decision, so a moved file keeps its name as its handle and every `Supersedes:` line and every reference in a text still leads to it. NoCentralDB cannot keep a field unique across members that write concurrently, so two decisions can share a handle; that needs the same day, the same ticket and the same title. A command that takes a handle refuses an ambiguous one and lists the matching decisions with their object ids, and every command takes an object id as well (32 lowercase hex digits, NoCentralDB RFC 0009, "The Rust SDK"). The writer of a decision gets a warning when its handle is taken already in its local copy.
 
-*Not taken:* the object id alone (unreadable in a prompt, and a moved file would lose the name that other decisions cite) and a running number such as `D-42` (members that write offline cannot agree on the next number). Whether this is the handle the owner wants is open question 1 (NEX-51).
+The owner chose this handle on 2026-11-20 (NEX-51). *Not taken:* the object id alone (never ambiguous, but unreadable in a prompt, and a moved file would lose the name that other decisions cite), a short prefix of the object id, as git abbreviates commits (short, but just as unreadable, with the same loss), and a running number such as `D-42` (members that write offline cannot agree on the next number).
 
 ### Writing a decision
 
@@ -146,7 +146,7 @@ nexus-flow therefore asks NoCentralDB for **R12, write-once collections**: a col
 
 GENESIS.md forbids writing personal data into decisions; referring to people by their identity is not personal data in that sense ("What it must never do"). No field of a decision is therefore marked personal (NoCentralDB RFC 0005, "Personal fields"), and a shred of a person reaches nothing in a decision.
 
-The append-only guarantee meets its limit where personal data was written into a decision anyway, by mistake or because a person whose name a decision carries asks to have it erased. NoCentralDB can erase only fields marked personal, and does not reach free text (NoCentralDB RFC 0005, "Two limits", "Personal data in free text"). A field's value can be overwritten, but the log keeps it, so an overwrite hides the value without erasing it. nexus-flow cannot erase such a value today, and says so. It asks NoCentralDB for **R13, erasing an unmarked value**: a work order, signed off like a shred, that removes one field's value from every member's log, view and archive and leaves the change's signature checkable, as a shred does for a personal field (NoCentralDB RFC 0001, "The design in one page", shred and audit). Whether nexus-flow offers anything before R13 is open question 3 (NEX-53).
+The append-only guarantee meets its limit where personal data was written into a decision anyway, by mistake or because a person whose name a decision carries asks to have it erased. NoCentralDB can erase only fields marked personal, and does not reach free text (NoCentralDB RFC 0005, "Two limits", "Personal data in free text"). A field's value can be overwritten, but the log keeps it, so an overwrite hides the value without erasing it. nexus-flow cannot erase such a value today, and says so. It asks NoCentralDB for **R13, erasing an unmarked value**: a work order, signed off like a shred, that removes one field's value from every member's log, view and archive and leaves the change's signature checkable, as a shred does for a personal field (NoCentralDB RFC 0001, "The design in one page", shred and audit). Until R13 lands, nexus-flow offers nothing beyond this limit, and there is no exception to append-only (decided by the owner on 2026-11-20, NEX-53). *Not taken:* an admin-only `nxs decision redact <handle> --field <name>` that overwrites a field with "redacted" and records a decision that says so. It would hide the value from every reader of the view, but the value would stay in every member's log, so it would look like erasure without being one, and it would be the one exception to "a decision is never edited away".
 
 ### Derived state
 
@@ -158,7 +158,14 @@ Nothing below is stored. It is computed by the storage crate from the decision c
 
 Two decisions in force can contradict each other, for example when two members supersede the same decision at the same time, each with its own new rule. Nothing detects that; a later decision supersedes both. A command that looks for contradictions, stale decisions and duplicates is outside v2's scope (GENESIS.md, "Decisions and rules").
 
-**On main.** A decision without `pr` has no code to merge, so it is on main once it is made, as a ticket closed with an artifact is (GENESIS.md, "Done is not yet on main"). A decision with `pr` is on main when a commit reachable from the base branch that `nexus-flow.toml` names references that pull request, by the rule of open question 2 (NEX-52). It is derived from the local git and never fetched, as the ticket's state is (RFC 0001, "Derived state"), so it is as fresh as the last `git fetch`, and it is `null`, not known, for a caller without a checkout.
+**On main.** A decision without `pr` has no code to merge, so it is on main once it is made, as a ticket closed with an artifact is (GENESIS.md, "Done is not yet on main"). A decision with `pr` is on main when either of two rules finds it there (decided by the owner on 2026-11-20, NEX-52):
+
+1. **The pull request's commit.** A commit reachable from the base branch that `nexus-flow.toml` names has a title that ends with `(#<n>)`, as a squash merge on GitHub writes it, or starts with `Merge pull request #<n>`, as a merge commit does. `<n>` is the number at the end of the decision's `pr` URL; a URL that ends in no number skips this rule.
+2. **The triggering ticket,** where the first rule finds no such commit: the decision is on main once its triggering ticket is on main by RFC 0002's rule. A decision with `no ticket` has no triggering ticket and follows the first rule only.
+
+The first rule is precise for GitHub's squash and merge commits, which this factory uses; the second still ends in "on main" for a rebase merge or another forge's commit titles. Its cost: a ticket with several pull requests is on main after the first one merges, which may not be the one the decision describes. *Not taken:* either rule alone. The first leaves a decision "not yet on main" for ever after a rebase merge or on another forge; the second alone is wrong for every ticket with several pull requests, also where the first rule would have been right.
+
+"On main" is derived from the local git and never fetched, as the ticket's state is (RFC 0001, "Derived state"), so it is as fresh as the last `git fetch`, and it is `null`, not known, for a caller without a checkout.
 
 ### Reading decisions
 
@@ -227,7 +234,7 @@ One decision in full, as `nxs decision show` and `nxs decision list --full` prin
 - `conflicts` appears only on an edited decision: per field, the values in conflict with the read value.
 - `nxs decision list` prints `{ "decisions": [ … ] }` in date order, oldest first, same day by handle: index lines by default, full decisions with `--full`. An index line is a full decision cut to its first eight fields, so a reader that handles one shape handles the other.
 
-In Markdown, a decision in full, as `nxs decision show` and `--full --md` print it, reads as a file in `factory/decisions/` reads today, heading, fields and body, followed by `> Superseded by …` when it is superseded and `> Not yet on main (<pr>)` when it is not on main; with `--full`, decisions are separated by a blank line, as today. An index line in Markdown is the line `cargo xtask decisions --index` prints today, `date · tickets · title`, followed by ` · superseded by <handles>` when it is superseded and ` · not yet on main` when it is not on main, and ending with ` · <handle>`, so an agent moving from the files to `nxs` reads the lines it knows, plus the key it passes to `nxs decision show`. Which key that last part is follows open question 1 (NEX-51): the handle as designed, or the object id or its prefix if the owner chooses either.
+In Markdown, a decision in full, as `nxs decision show` and `--full --md` print it, reads as a file in `factory/decisions/` reads today, heading, fields and body, followed by `> Superseded by …` when it is superseded and `> Not yet on main (<pr>)` when it is not on main; with `--full`, decisions are separated by a blank line, as today. An index line in Markdown is the line `cargo xtask decisions --index` prints today, `date · tickets · title`, followed by ` · superseded by <handles>` when it is superseded and ` · not yet on main` when it is not on main, and ending with ` · <handle>`, so an agent moving from the files to `nxs` reads the lines it knows, plus the key it passes to `nxs decision show`. That last part is the handle (NEX-51). Where two decisions share a handle, their index lines end with the object id instead, so every line names a key `show` accepts without refusing it.
 
 ### `nxs prime`
 
@@ -273,7 +280,8 @@ Besides RFC 0001's requirements, of which this RFC rests on R6 (who signed a cha
 - **Personal data written into a decision cannot be erased,** until R13. Overwriting it hides it in the view but leaves it in every member's log. GENESIS.md forbids writing it, and nexus-flow does not scan text for it.
 - **Two decisions in force can contradict each other.** Nothing detects it.
 - **A decision is in force before its code is on main.** An agent reads a rule whose code its checkout may not have yet; `nxs prime` marks it.
-- **A decision whose PR is closed without merging stays "not yet on main"** until a decision supersedes it. `nxs` knows a PR only from the local git, which does not record that a PR was closed.
+- **A decision whose PR is closed without merging stays "not yet on main"** until a decision supersedes it or its triggering ticket is on main through another PR. `nxs` knows a PR only from the local git, which does not record that a PR was closed.
+- **"On main" through the triggering ticket can be early.** When the first rule finds no commit, a decision follows its ticket, and a ticket with several PRs is on main after the first one merges.
 - **"On main" is as fresh as the last `git fetch`,** and `null` for a caller without a checkout.
 - **Two decisions can share a handle** when they are written concurrently with the same date, ticket and title. A command refuses the ambiguous handle and names the object ids.
 - **A goal, a request or another repository's ticket reads as its label only** to a member who is not in that space.
@@ -316,29 +324,10 @@ A file has no PR link, and its decision is on main, since the file itself was me
 
 ## Open questions
 
-These need the owner's answer before the RFC is decided. Each has its needs-owner ticket.
-
-1. **The handle** (NEX-51). How agents and people name a decision.
-   - (a) The handle `YYYY-MM-DD-<ticket>-<slug>`, stored once, with the object id as the fallback for the rare clash (as designed above). Readable, and every file and memory keeps its name through the move; the cost is a refusal and a second step when two decisions share a handle.
-   - (b) The object id only. Never ambiguous; unreadable in a prompt, and the moved files lose the names their texts cite.
-   - (c) A short prefix of the object id, as git abbreviates commits. Short and rarely ambiguous; still unreadable, and the same loss as (b).
-
-   Recommendation: (a).
-
-2. **When a decision's PR counts as on main** (NEX-52).
-   - (a) A commit reachable from the base branch whose title ends with `(#<n>)`, as a squash merge on GitHub writes it, or starts with `Merge pull request #<n>`, as a merge commit does; `<n>` is the number in the decision's `pr` URL. Precise and offline, but tied to GitHub's commit titles: a rebase merge, or another forge's titles, leaves the decision "not yet on main" for ever.
-   - (b) The decision follows its triggering ticket: on main once that ticket is on main by RFC 0002's rule. Works for every forge and every merge method, and reuses the ticket's rule; but a ticket with several PRs is on main after the first, which may not be the one the decision describes.
-   - (c) Both: (a) where the PR number is found, (b) otherwise. Covers most cases; two rules to explain.
-
-   Recommendation: (c), because it is right for GitHub squash merges, which this factory uses, and still ends in "on main" for other forges.
-
-3. **Personal data written into a decision before R13** (NEX-53).
-   - (a) Nothing beyond the limit stated above: GENESIS.md forbids writing it, and nexus-flow says plainly that it cannot erase it. No exception to append-only.
-   - (b) An admin-only `nxs decision redact <handle> --field <name>`, which overwrites the field with "redacted" and records a decision that says so. Hides the value from every reader of the view at once; but the value stays in every member's log, so it looks like erasure without being one, and it is the one exception to "a decision is never edited away".
-
-   Recommendation: (a), until R13 makes a real erasure possible; a redaction that is not an erasure would promise more than it keeps.
+None. The owner answered them on 2026-11-20 (NEX-51 to NEX-53), and the answers are written into the text above: the handle under "Handles", when a decision's PR counts as on main under "Derived state", and that nothing is offered before R13 under "Personal data and erasure".
 
 ## History
 
 - 2026-11-17: published as a draft in #159.
 - 2026-11-20: `nxs decision list` prints the index by default and `--full` prints every decision in full, decided by the owner, in #159.
+- 2026-11-20: decided by the owner: the handle (NEX-51), the PR's commit or else the triggering ticket for "on main" (NEX-52), and no redaction before R13 (NEX-53), in #159.
