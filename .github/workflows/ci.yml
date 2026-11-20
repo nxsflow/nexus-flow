@@ -144,6 +144,15 @@ jobs:
       - name: Decision log check
         run: cargo xtask decisions --check
 
+      # The table of RFCs in docs/rfc/README.md is generated from the RFC files (NEX-85). An RFC
+      # pull request adds its file and leaves README.md alone, so two open RFC pull requests never
+      # conflict over the table, and on a pull request the table is stale by design. It is checked
+      # on v2 only: after a merge that adds or changes an RFC this step turns red until a pull
+      # request with `cargo xtask rfc-index`'s output lands. Reads text only.
+      - name: RFC table check
+        if: github.event_name == 'push' && github.ref_name == 'v2'
+        run: cargo xtask rfc-index --check
+
       # `decide` over the scripted cases in two separate processes, under a different clock and
       # environment (6j6v.zjyv §11). It says so and passes until nexus-run-engine exists, and requires
       # the test from then on.

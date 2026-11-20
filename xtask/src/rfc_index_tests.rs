@@ -80,7 +80,10 @@ fn an_rfc_without_a_status_line_is_an_error() {
     )
     .unwrap();
     let err = read_rfcs(dir.path()).unwrap_err().to_string();
-    assert!(err.contains("0005-goals.md") && err.contains("Status:"), "{err}");
+    assert!(
+        err.contains("0005-goals.md") && err.contains("Status:"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -153,7 +156,14 @@ fn check_fails_when_an_rfc_has_no_row_yet() {
 
 fn git(repo: &Path, args: &[&str]) -> std::process::Output {
     let out = Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(args)
         .current_dir(repo)
         .output()
@@ -193,7 +203,10 @@ fn two_rfc_branches_merge_without_conflict_and_the_base_regenerates_both_rows() 
     git(path, &["merge-tree", "--write-tree", "v2", "rfc-b"]);
     git(path, &["merge", "-q", "--no-ff", "--no-edit", "rfc-b"]);
 
-    assert!(run(path, true).is_err(), "the base's table is stale until regenerated");
+    assert!(
+        run(path, true).is_err(),
+        "the base's table is stale until regenerated"
+    );
     run(path, false).unwrap();
     run(path, true).unwrap();
     let text = readme(path);

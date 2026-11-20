@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Context, Result};
 
 /// The line that opens the generated table in README.md.
 pub const BEGIN: &str =
@@ -28,23 +28,99 @@ pub struct Rfc {
 }
 
 /// Every RFC file in `dir`, by number. The template (`0000-template.md`) and README.md are not RFCs.
-pub fn read_rfcs(_dir: &Path) -> Result<Vec<Rfc>> {
-    todo!()
+pub fn read_rfcs(dir: &Path) -> Result<Vec<Rfc>> {
+    let mut rfcs = Vec::new();
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let file = entry?.file_name().to_string_lossy().into_owned();
+        let Some(number) = rfc_number(&file) else {
+            continue;
+        };
+        let text =
+            std::fs::read_to_string(dir.join(&file)).with_context(|| format!("reading {file}"))?;
+        rfcs.push(parse(&file, number, &text)?);
+    }
+    rfcs.sort_by(|a, b| a.number.cmp(&b.number));
+    Ok(rfcs)
+}
+
+/// `NNNN` of a file named `NNNN-<slug>.md`, unless it is the template's `0000`.
+fn rfc_number(file: &str) -> Option<&str> {
+    let stem = file.strip_suffix(".md")?;
+    let (number, slug) = stem.split_once('-')?;
+    let well_formed = number.len() == 4 && number.bytes().all(|b| b.is_ascii_digit());
+    (well_formed && !slug.is_empty() && number != "0000").then_some(number)
+}
+
+/// The title from the first line, `# RFC NNNN: Title`, and the first `Status:` line.
+fn parse(file: &str, number: &str, text: &str) -> Result<Rfc> {
+    let heading = text.lines().next().unwrap_or_default();
+    let title = heading
+        .strip_prefix(&format!("# RFC {number}: "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .with_context(|| {
+            format!("{file}: the first line must be `# RFC {number}: <title>`, found `{heading}`")
+        })?;
+    let status = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Status:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("{file}: no `Status:` line"))?;
+    Ok(Rfc {
+        number: number.to_string(),
+        file: file.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+    })
 }
 
 /// The Markdown table for `rfcs`, header included, one row per RFC.
-pub fn render(_rfcs: &[Rfc]) -> String {
-    todo!()
+pub fn render(rfcs: &[Rfc]) -> String {
+    let cell = |text: &str| text.replace('|', "\\|");
+    let mut table = String::from("| RFC | Title | Status |\n| --- | --- | --- |\n");
+    for rfc in rfcs {
+        table.push_str(&format!(
+            "| [{}]({}) | {} | {} |\n",
+            rfc.number,
+            rfc.file,
+            cell(&rfc.title),
+            cell(&rfc.status)
+        ));
+    }
+    table
 }
 
 /// `readme` with the text between the markers replaced by `table`.
-pub fn splice(_readme: &str, _table: &str) -> Result<String> {
-    todo!()
+pub fn splice(readme: &str, table: &str) -> Result<String> {
+    let missing = || {
+        anyhow!(
+            "README.md has no `{BEGIN}` line followed by an `{END}` line for cargo xtask rfc-index"
+        )
+    };
+    let begin = readme.find(BEGIN).ok_or_else(missing)? + BEGIN.len();
+    let end = begin + readme[begin..].find(END).ok_or_else(missing)?;
+    Ok(format!("{}\n{table}{}", &readme[..begin], &readme[end..]))
 }
 
 /// Write the table into `dir/README.md`, or with `check` fail when the one there is stale.
-pub fn run(_dir: &Path, _check: bool) -> Result<()> {
-    todo!()
+pub fn run(dir: &Path, check: bool) -> Result<()> {
+    let path = dir.join("README.md");
+    let readme =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let fresh = splice(&readme, &render(&read_rfcs(dir)?))?;
+    if fresh == readme {
+        return Ok(());
+    }
+    if check {
+        bail!(
+            "the RFC table in {} differs from the RFC files: it is stale or was edited by hand. \
+             Run `cargo xtask rfc-index` and commit README.md.",
+            path.display()
+        );
+    }
+    std::fs::write(&path, fresh).with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
