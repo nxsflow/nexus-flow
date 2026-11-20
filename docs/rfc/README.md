@@ -13,6 +13,7 @@ Each RFC says at its top whether it is a draft or decided, and it states the des
 | [0005](0005-goals.md) | Goals in NoCentralDB |
 | [0006](0006-factory.md) | Factory storage |
 | [0007](0007-status.md) | status in NoCentralDB |
+| [0008](0008-move-from-v1.md) | The move from v1 to NoCentralDB |
 | [0009](0009-work-across-repositories.md) | Work across repositories |
 | [0010](0010-merge-gate.md) | The merge gate |
 
