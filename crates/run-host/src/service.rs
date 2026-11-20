@@ -41,6 +41,7 @@ pub fn service_host(
         backend,
         tree,
         Arc::new(SystemClock),
+        workspace_id,
     ))
 }
 
