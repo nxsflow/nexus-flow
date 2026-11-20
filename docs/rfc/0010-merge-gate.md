@@ -1,6 +1,6 @@
 # RFC 0010: The merge gate
 
-Status: Draft
+Status: Decided (2026-11-20)
 
 This RFC designs the merge gate of the `factory` module: the step that decides whether a pull request goes to the owner before it merges, or whether pm may merge it. It follows `factory/GENESIS.md`, "The merge gate" and its limit "The merge gate's verdict is a model's judgement". It says how a team writes its merge rules and in which file, how the rules on what comes back to the owner are read out of GENESIS, what the sub-agent's verdict looks like as JSON, how a deterministic decision is made on top of the verdicts, how that decision becomes a status check that repository rules enforce, which copy of the rules judges a pull request, and the minimal set nexus-flow ships. Once it is decided, a coding ticket can build `nxs merge-gate rules`, `nxs merge-gate decide` and their library counterparts, and a ticket of its own can write the shipped defaults.
 
@@ -33,17 +33,17 @@ The gate is five parts. Two are files the team owns, two are `nxs` commands, and
 | --- | --- | --- |
 | The rules | `factory/merge-gate/gate.toml` and the marked list in `factory/GENESIS.md` | Written by the team, reviewed by the owner |
 | The rules reader | `nxs merge-gate rules`: reads every rule from the base branch and gives each an id | Deterministic |
-| The verdict | A sub-agent judges the pull request against each rule and writes JSON in the format of `factory/merge-gate/verdict.schema.json` | A model's judgement |
-| The decision | `nxs merge-gate decide`: reads the rules again, the verdict, the changed paths and the reviews, and decides | Deterministic |
+| The verdict | A sub-agent in pm's session judges the pull request against each rule and writes JSON in the format of `factory/merge-gate/verdict.schema.json`; pm posts it as a comment on the pull request | A model's judgement |
+| The decision | `nxs merge-gate decide`: reads the rules again, the verdict, the changed paths and the reviews, and decides | Deterministic, built into `nxs` |
 | The status check | The workflow posts the decision as the commit status `merge-gate` on the pull request's head commit; a ruleset requires it | Enforced by the forge |
 
-`nxs` never touches the network (GENESIS.md, principle 3): it reads files and the local git, and its input about the forge, the reviews, comes in as a file. The workflow fetches what the forge knows and posts what `nxs` decided.
+`nxs` never touches the network (GENESIS.md, principle 3): it reads files and the local git, and its input about the forge, the pull request's comments and reviews, comes in as files. The workflow fetches what the forge knows and posts what `nxs` decided.
 
 ### Which copy of the rules judges a pull request
 
 The base branch's, never the pull request's head (RFC 0006). Both commands read the rules from the commit given as `--base`, which the workflow sets to the commit the pull request's base branch points at when the event fires. A pull request that loosens a merge rule, removes a rule from GENESIS or deletes the mark is judged by the rules it would replace, and it touches paths under CODEOWNERS, so it needs the owner's review anyway.
 
-The workflow that judges is read from the base branch too: it runs on `pull_request_target`, which takes the workflow file and the `nxs` it installs from the base branch, and it never checks out or runs the head's code. It fetches the head's commits only as data, to diff them. *Not taken:* `pull_request`, which runs the workflow file of the pull request's own merge ref, so a pull request could change how it is judged. GitHub has no counterpart of `pull_request_target` for reviews, so the run a review starts takes its workflow file from the pull request's merge ref; it never judges, and a pull request that changes it changes `.github/`, which CODEOWNERS holds for the owner (see "The workflow").
+The workflow that decides never runs the head's code: it checks out the base commit, runs the `nxs` it installs there, and fetches the head's commits only as data, to diff them. Where its own workflow file comes from depends on the event that starts it, as GitHub defines it: a push to the pull request starts it on `pull_request_target`, which takes the file from the base branch; a verdict comment starts it on `issue_comment`, which takes the file from the repository's default branch; a review starts it on `pull_request_review`, which takes the file from the pull request's merge ref. A pull request that changes the workflow changes `.github/`, which CODEOWNERS holds for the owner (see "What it does not do"). *Not taken:* `pull_request` for pushes, which runs the workflow file of the pull request's own merge ref, so a pull request could change how it is judged on every push.
 
 ### The merge rules
 
@@ -57,6 +57,9 @@ default = "owner"
 
 # The forge logins whose approving review counts as the owner's.
 owners = ["cabcookie"]
+
+# The forge logins whose comments may carry the verdict.
+verdict_authors = ["nexusflow-ug"]
 
 [[rule]]
 id = "decided-design"
@@ -77,6 +80,7 @@ The pull request changes a stored format.
 - **`format`** is `1`. It fixes how `nxs merge-gate decide` reads this file and decides; a release of nexus-flow never changes what format 1 decides, so an upgrade of `nxs` cannot change which pull requests reach the owner. A new decision procedure comes as a new format, which a team adopts in a pull request the owner reviews.
 - **`default`** is what the gate decides when no rule says otherwise: `owner` or `pm`.
 - **`owners`** lists the forge logins whose approving review satisfies the gate when it reserves a pull request for the owner (see "The status check"). It must not be empty. CONFIG.md names the owner for people; this list is the value a script reads (RFC 0006: CONFIG.md holds no value a script reads).
+- **`verdict_authors`** lists the forge logins whose pull request comments `nxs merge-gate decide` reads a verdict from (see "Where the verdict comes from"). It must not be empty.
 - **Each `[[rule]]`** has an `id` matching `^[a-z][a-z0-9-]{0,62}$`, unique in the file, an `effect`, and a `text` in Markdown that the sub-agent judges. Rules keep their order in the file.
 
 A rule has one of two effects:
@@ -86,14 +90,14 @@ A rule has one of two effects:
 
 **One TOML file, with ids the team chooses.** The decision must find every rule the same way every time, see which rules have no verdict, and tell the two effects apart; TOML gives each rule an explicit id and effect, an empty set of exceptions is written as no `[[rule]]` of that effect rather than as a missing mark, and the ids stay the same when a rule is added before them. The rules are short, and the owner reviews them in the same diff as the settings. *Not taken:* a Markdown file with marked lists, as GENESIS has (an empty kind could not be told from a lost mark, and the ids would be positions); one file per rule (more files for the owner to review together, and the effect would need a header format of its own); and the rules in `nexus-flow.toml` (that file holds the space ids and is not under CODEOWNERS everywhere, RFC 0001).
 
-**Reading `gate.toml` is deterministic.** The file is read from the base commit. It cannot be read, and the gate decides `owner`, when it is missing, is not valid TOML, has a `format` other than `1`, a `default` other than `owner` or `pm`, an empty or missing `owners`, a rule whose `id` does not match the pattern or repeats, whose `effect` is not `owner` or `pm`, or whose `text` is empty. Unknown keys are ignored, so a team may keep notes beside the rules.
+**Reading `gate.toml` is deterministic.** The file is read from the base commit. It cannot be read, and the gate decides `owner`, when it is missing, is not valid TOML, has a `format` other than `1`, a `default` other than `owner` or `pm`, an empty or missing `owners` or `verdict_authors`, a rule whose `id` does not match the pattern or repeats, whose `effect` is not `owner` or `pm`, or whose `text` is empty. Unknown keys are ignored, so a team may keep notes beside the rules.
 
 ### The rules from GENESIS
 
 `nxs merge-gate rules` reads the rules on what comes back to the owner from `factory/GENESIS.md` at the base commit, as RFC 0004 defines the mark and the list:
 
 - The mark is a line that reads exactly `<!-- nexus-flow: owner-rules -->`, apart from surrounding whitespace, outside a fenced code block.
-- The list is a CommonMark list whose first item starts on the first line after the mark that is not blank. Any other line there, such as a paragraph or a heading, means the mark has no list after it (see "Open questions", question 3).
+- The list is a CommonMark list whose first item starts on the first line after the mark that is not blank. Any other line there, such as a paragraph or a heading, means the mark has no list after it. This narrows RFC 0004's "the first list after the mark" (decided by the owner, NEX-77): if the list under the mark is deleted, the gate reads no rules and sends every pull request to the owner. *Not taken:* the first list anywhere after the mark, which matches RFC 0004's words most literally, but would make the gate read some later list in GENESIS as the rules, silently, once the list under the mark is deleted.
 - Each top-level item of that list is one rule, in order, with its text as written, nested items included, from its marker to the line before the next top-level item or the end of the list.
 
 Each GENESIS rule has the effect `owner` and the id `genesis.<n>`, its 1-based position in the list. The dot keeps these ids apart from the ids in `gate.toml`, which cannot contain one.
@@ -112,6 +116,7 @@ Each GENESIS rule has the effect `owner` and the id `genesis.<n>`, its 1-based p
   "readable": true,
   "default": "owner",
   "owners": ["cabcookie"],
+  "verdict_authors": ["nexusflow-ug"],
   "rules": [
     { "id": "genesis.1", "effect": "owner", "source": "factory/GENESIS.md", "text": "Anything a user sees first: …" },
     { "id": "genesis.2", "effect": "owner", "source": "factory/GENESIS.md", "text": "A change to a stored format, …" },
@@ -121,11 +126,11 @@ Each GENESIS rule has the effect `owner` and the id `genesis.<n>`, its 1-based p
 }
 ```
 
-`base` is the full object id `<ref>` resolved to. The GENESIS rules come first, in their order, then the rules of `gate.toml`, in theirs. When anything cannot be read, `readable` is `false`, `rules` is empty, `default` and `owners` are `null`, and `errors` names each problem as `{ "source": <path>, "code": <code> }`, with the codes `file_missing`, `mark_missing`, `mark_doubled`, `list_missing`, `toml_invalid`, `format_unknown`, `default_invalid`, `owners_empty`, `rule_id_invalid`, `rule_id_duplicate`, `effect_invalid` and `text_empty`; a rule's error also carries `rule`, its id or position. The command then exits non-zero, with the report on standard output, as `nxs genesis create` does for `tracked` (RFC 0004). A team runs it to check its rules before it asks the owner to review them; the workflow runs it to brief the sub-agent.
+`base` is the full object id `<ref>` resolved to. The GENESIS rules come first, in their order, then the rules of `gate.toml`, in theirs. When anything cannot be read, `readable` is `false`, `rules` is empty, `default`, `owners` and `verdict_authors` are `null`, and `errors` names each problem as `{ "source": <path>, "code": <code> }`, with the codes `file_missing`, `mark_missing`, `mark_doubled`, `list_missing`, `toml_invalid`, `format_unknown`, `default_invalid`, `owners_empty`, `verdict_authors_empty`, `rule_id_invalid`, `rule_id_duplicate`, `effect_invalid` and `text_empty`; a rule's error also carries `rule`, its id or position. The command then exits non-zero, with the report on standard output, as `nxs genesis create` does for `tracked` (RFC 0004). A team runs it to check its rules before it asks the owner to review them; pm runs it to brief the sub-agent.
 
 ### The verdict
 
-The sub-agent receives the rules from `nxs merge-gate rules`, the diff between the base and the head, and the prompt `factory/merge-gate/prompt.md`, and writes one JSON document, the verdict, in the format `factory/merge-gate/verdict.schema.json` describes (JSON Schema, draft 2020-12):
+The sub-agent runs in pm's session (decided by the owner, NEX-75). When pm has reviewed a pull request that is ready for review, it starts a sub-agent with the rules from `nxs merge-gate rules --base <base>`, the diff between the base and the head, and the prompt `factory/merge-gate/prompt.md`. The sub-agent writes one JSON document, the verdict, in the format `factory/merge-gate/verdict.schema.json` describes (JSON Schema, draft 2020-12):
 
 ```json
 {
@@ -151,17 +156,29 @@ The verdict carries the two questions GENESIS.md asks of the sub-agent: whether 
 
 **A decision is cited by a path in the repository.** The gate's decision runs where the repository is checked out at the base commit and no NoCentralDB database is open, so the one thing it can check about a cited decision is that its file exists there. The decisions in RFCs, which are where the owner decides a design before it is built, are in the repository. *Not taken:* citing a decision record or a ticket by its handle (RFC 0003, RFC 0002), which the workflow cannot read; a pull request whose only cover is such a record goes to the owner, unless the team's own `pm` rule covers it.
 
+### Where the verdict comes from
+
+pm posts the verdict as a comment on the pull request: a line that reads exactly `<!-- nexus-flow: merge-gate-verdict -->`, apart from surrounding whitespace, followed by a fenced code block with the info string `json` that holds the verdict. Text after the block is for people and is ignored.
+
+`nxs merge-gate decide --comments <file>` reads the verdict from the pull request's comments, as GitHub's "list issue comments" endpoint returns them, all pages as one JSON array; it reads `id`, `user.login`, `created_at` and `body`. The verdict is the newest comment, by `created_at` and then by `id`, whose author is a login in `verdict_authors` (compared without regard to ASCII case) and whose body holds the mark. Comments by anyone else are ignored, so a person or a bot outside the list cannot post a verdict. If that newest comment has no fenced `json` block after the mark, or its verdict is for another base or head, there is no valid verdict, and the gate does not fall back to an older comment: a push or a moved base needs a new verdict.
+
+The owner chose to start with pm's session: no model key in CI, and no cost beyond pm's session. The price is that the gate's input rests on a prompt: any session that works under a login in `verdict_authors` can post a verdict, the coder whose pull request is judged included, because every agent here works under the same agent account (see "What it does not do"). The gate can move the sub-agent into the workflow later, where it would call a model with a key kept as a repository secret and pass its verdict with `--verdict`; that changes no format, only the workflow and `verdict_authors`.
+
+*Not taken, for now* (decided by the owner, NEX-75): the sub-agent in the gate's workflow, which no agent whose pull request is judged could write for, at the cost of a model call per ready pull request and per push to one, on a key for a paid service.
+
 The schema and the prompt are the team's files: the team may tighten the schema or reword the prompt. `nxs merge-gate decide` does not read either; it reads format 1 as this section defines it, and a verdict that does not fit it sends the pull request to the owner.
 
 ### `nxs merge-gate decide`
 
-`nxs merge-gate decide --base <sha> --head <sha> [--verdict <file>] [--reviews <file>]` decides, and prints the decision. It opens no NoCentralDB database and reads only the local git and the two files, so the same commits and the same file bytes give the same output bytes.
+`nxs merge-gate decide --base <sha> --head <sha> [--comments <file> | --verdict <file>] [--reviews <file>]` decides, and prints the decision. `--comments` reads the verdict from the pull request's comments (see "Where the verdict comes from"); `--verdict` reads it from a file that holds the verdict alone, for a workflow that judges itself and for tests; the two cannot be given together. It opens no NoCentralDB database and reads only the local git and the files it is given, so the same commits and the same file bytes give the same output bytes.
+
+**The decision is built into `nxs`** (decided by the owner, NEX-76), and what each `format` of `gate.toml` decides is fixed for good. It is tested in nexus-flow's suite, runs the same on every platform without another runtime, and an upgrade of `nxs` cannot change it. The team owns the rules, the schema, the prompt and its workflow; a team that wants another procedure replaces the decide step in its workflow with its own script that reads the same JSON. This reads GENESIS.md's "the script belongs to the team" as "the team chooses it", not "the team edits nexus-flow's". *Not taken:* a script file under `factory/merge-gate/` that nexus-flow ships and the team edits, such as a Node script, which is closer to the letter of GENESIS.md, but each team would then run and test its own copy of the one deterministic step, and a broken edit could let pull requests through.
 
 It reads the rules from `--base` as `nxs merge-gate rules` does, takes the changed paths from the diff between the merge base of `--base` and `--head` and `--head` (both paths of a rename count), and reads the repository's CODEOWNERS file from the base commit, in the places and order GitHub looks for it and with RFC 0006's matcher. Then, in this order:
 
 1. **The rules cannot be read:** `owner`, with the reason `rules_unreadable` and the errors of `nxs merge-gate rules`. Nothing else is checked.
-2. **The verdict is not valid:** `owner`, with the reason `verdict_invalid` and what is wrong. A verdict is valid when the file is JSON with `format` 1; its `base` and `head` equal `--base` and `--head`; it has exactly one entry for each rule id and none for an id that is not a rule; each outcome is one its rule's effect allows; each `reason` is a non-empty string; and `decision` is present exactly for `decided`, with a `path` that names a file at the base commit. Without `--verdict`, or with a file that does not exist, there is no valid verdict. Unknown fields are ignored.
-3. **Every reason the pull request needs the owner is collected,** in this order: `codeowners`, with the changed paths a CODEOWNERS rule covers; then, for each rule in order, `unsure` for a rule whose outcome is `unsure`, and `applies` for an `owner` rule whose outcome is `applies`. If any is found, the decision is `owner`.
+2. **The verdict is not valid:** `owner`, with the reason `verdict_invalid` and what is wrong. A verdict is valid when the file is JSON with `format` 1; its `base` and `head` equal `--base` and `--head`; it has exactly one entry for each rule id and none for an id that is not a rule; each outcome is one its rule's effect allows; each `reason` is a non-empty string; and `decision` is present exactly for `decided`, with a `path` that names a file at the base commit. Without `--comments` or `--verdict`, with a file that does not exist, or with comments that hold no verdict, there is no valid verdict. Unknown fields are ignored.
+3. **Every reason the pull request needs the owner is collected,** in this order: `codeowners`, with the changed paths a CODEOWNERS rule covers; `changes_requested`, when an owner's latest deciding review (see "The owner's approval") is `CHANGES_REQUESTED`, on any commit; then, for each rule in order, `unsure` for a rule whose outcome is `unsure`, and `applies` for an `owner` rule whose outcome is `applies`. If any is found, the decision is `owner`.
 4. **Otherwise the pull request is pm's** when `default` is `pm`, with the reason `default`, or when a `pm` rule is `met`, with the reason `pm_rule` naming each such rule. When neither holds, the decision is `owner`, with the reason `default`.
 
 A rule outcome of `not_concerned`, `decided` or `not_met` adds no reason of its own.
@@ -188,7 +205,7 @@ A rule outcome of `not_concerned`, `decided` or `not_met` adds no reason of its 
 ```
 
 - **`decision`** is `owner` or `pm`.
-- **`reasons`** lists why, with `code` one of `rules_unreadable` (with `errors`), `verdict_invalid` (with `detail`, one line per problem), `codeowners` (with `paths`, sorted bytewise), `unsure` and `applies` (with `rule` and the verdict's `reason`), `pm_rule` (with `rules`), and `default`.
+- **`reasons`** lists why, with `code` one of `rules_unreadable` (with `errors`), `verdict_invalid` (with `detail`, one line per problem), `codeowners` (with `paths`, sorted bytewise), `changes_requested` (with `by`, the login), `unsure` and `applies` (with `rule` and the verdict's `reason`), `pm_rule` (with `rules`), and `default`.
 - **`owner_approved`** says whether the owner approved the head commit.
 - **`status`** is the state to post: `success` when `decision` is `pm` or the owner approved, otherwise `pending`.
 - **`description`** is a line of at most 140 characters for the status, built from `decision` and the reasons' codes and rule ids.
@@ -203,23 +220,22 @@ A ruleset on the base branch requires the status check `merge-gate`, with its so
 
 - **A pull request the gate gives to pm** has `merge-gate` green. pm merges it once its own review in `roles/pm.md` passes and every other required check is green; the gate allows the merge, it does not make it.
 - **A pull request the gate reserves for the owner** has `merge-gate` pending, and nobody can merge it, pm included. When the owner approves its head commit, the review event runs the gate again, `owner_approved` is `true`, and the status turns green.
-- **A new push** runs the gate again on the new head: a new verdict, a new decision, and an approval of the old head no longer counts.
+- **A new push** runs the gate again on the new head. Until pm posts a verdict for it, the decision is `owner` and the status pending; an approval of the old head no longer counts.
+- **An owner's request for changes** turns a green `merge-gate` pending, until the owner approves the head commit.
 
 The owner's approval satisfies the gate through the gate's own status, because a ruleset cannot require a review only for some pull requests: requiring the owner's review on every pull request would leave nothing for pm to merge, and requiring it on none would leave the gate's decision unenforced. *Not taken:* a failing status while the pull request waits for the owner (waiting is not an error, and pm and the owner would have to tell a broken gate from a waiting one by the description); and enforcing the decision through pm's prompt alone, which NEX-33 decided against.
 
 ### The workflow
 
-The shipped workflow, which the team copies into `.github/workflows/` (see "The minimal set nexus-flow ships"), runs on `pull_request_target` when a pull request is opened, reopened, marked ready for review or pushed to, and on `pull_request_review` when a review is submitted or dismissed. It skips draft pull requests, which cannot merge, so a coding agent's pushes during its work cost no verdict. On a pull request event, in one job, it:
+The shipped workflow, which the team copies into `.github/workflows/` (see "The minimal set nexus-flow ships"), decides; it does not judge. It runs on `pull_request_target` when a pull request is opened, reopened, marked ready for review or pushed to; on `issue_comment` when a comment is created on a pull request and holds the verdict's mark; and on `pull_request_review` when a review is submitted or dismissed. It skips draft pull requests, which cannot merge. On every event, in one job, it:
 
-1. checks out the base commit and fetches the head's commits as data, without checking them out;
-2. installs `nxs` at a version the workflow pins, with its checksum;
-3. runs `nxs merge-gate rules --base <base>` and, when the rules are readable, runs the sub-agent with the rules, the diff and `prompt.md`, which writes `verdict.json`;
-4. fetches the pull request's reviews into `reviews.json`;
-5. runs `nxs merge-gate decide --base <base> --head <head> --verdict verdict.json --reviews reviews.json` and posts its `status` as `merge-gate`.
+1. reads the pull request's current base and head commits from the forge;
+2. checks out the base commit and fetches the head's commits as data, without checking them out;
+3. installs `nxs` at a version the workflow pins, with its checksum;
+4. fetches the pull request's comments into `comments.json` and its reviews into `reviews.json`;
+5. runs `nxs merge-gate decide --base <base> --head <head> --comments comments.json --reviews reviews.json` and posts its `status` as `merge-gate`.
 
-On a review event it does not judge again. It runs only for a review by a login in `owners` whose state is `APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`, and runs `nxs merge-gate decide` without `--verdict`, so the decision is `owner` and the status is green exactly when the owner approved the head commit. An owner's request for changes therefore turns a green `merge-gate` pending, and the next push judges again.
-
-The sub-agent's step is the agent framework's (GENESIS.md, principle 6, "Bring your own agents"): the shipped workflow names one framework's action as its example, and a team uses its own. Where the sub-agent runs is the first open question.
+It needs no secret beyond the token the forge gives each run, with the right to write commit statuses. The sub-agent that writes the verdict is the agent framework's, started by pm in its session (GENESIS.md, principle 6, "Bring your own agents"); `roles/pm.md` says when pm judges and posts a verdict.
 
 ### The minimal set nexus-flow ships
 
@@ -227,66 +243,58 @@ The sub-agent's step is the agent framework's (GENESIS.md, principle 6, "Bring y
 
 | File | What it holds |
 | --- | --- |
-| `gate.toml` | `format = 1`, `default = "owner"`, an `owners` list the team fills in, and one `pm` rule: the pull request only carries out decisions the owner has already made and departs from none of them |
+| `gate.toml` | `format = 1`, `default = "owner"`, the `owners` and `verdict_authors` lists the team fills in, and one `pm` rule: the pull request only carries out decisions the owner has already made and departs from none of them |
 | `verdict.schema.json` | The verdict's format 1 as a JSON Schema |
-| `prompt.md` | The sub-agent's instructions: judge each rule against the diff, cite the decision a `decided` outcome rests on, answer `unsure` rather than guess, and write a verdict that fits the schema |
+| `prompt.md` | The instructions pm gives its sub-agent: judge each rule against the diff, cite the decision a `decided` outcome rests on, answer `unsure` rather than guess, and write a verdict that fits the schema |
 | `github-workflow.yml` | The workflow above, for the team to copy into `.github/workflows/merge-gate.yml` |
 
 Together with the rules in the GENESIS template (RFC 0004), this minimal gate sends to the owner every pull request that does anything other than carry out the owner's decisions, every one that touches a rule in GENESIS without a decision behind it, and every one the gate cannot judge. The text of each file is a default template, which the owner decides in its own ticket.
 
-**`nxs` never writes outside `factory/`.** The workflow is shipped as a file in `factory/merge-gate/` for the team to copy, because `.github/` and the rulesets are the team's own and come back to the owner (GENESIS.md, "What has to come back through me"), and because RFC 0006 installs nothing outside `factory/`. `nxs factory install` reports which of the gate's files no CODEOWNERS rule covers (RFC 0006). *Not taken:* writing `.github/workflows/merge-gate.yml` from `nxs factory install` (nexus-flow would write a file that runs with the repository's secrets, outside the folder it owns).
+**`nxs` never writes outside `factory/`.** The workflow is shipped as a file in `factory/merge-gate/` for the team to copy, because `.github/` and the rulesets are the team's own and come back to the owner (GENESIS.md, "What has to come back through me"), and because RFC 0006 installs nothing outside `factory/`. `nxs factory install` reports which of the gate's files no CODEOWNERS rule covers (RFC 0006). *Not taken:* writing `.github/workflows/merge-gate.yml` from `nxs factory install` (nexus-flow would write a file that runs with the repository's token, outside the folder it owns).
 
 ### Public surfaces this RFC brings
 
 GENESIS.md reserves these for the owner:
 
-- **Commands:** `nxs merge-gate rules [--base <ref>]` and `nxs merge-gate decide --base <sha> --head <sha> [--verdict <file>] [--reviews <file>]`, both with `--md`. The noun is `merge-gate`, not `gate`, because "gate" already names CI's gate command in a factory's CONFIG.md.
-- **JSON output** of `nxs merge-gate rules`: `base`, `readable`, `default`, `owners`, `rules` (each with `id`, `effect`, `source`, `text`), `errors` (each with `source`, `code`, and `rule` where it concerns one), with the error codes above. Of `nxs merge-gate decide`: `base`, `head`, `decision`, `reasons` (each with `code` and, by code, `errors`, `detail`, `paths`, `rule`, `reason`, `rules`), `owner_approved`, `status`, `description`.
-- **Library seam:** `Engine::merge_gate_rules(base: &str)`, returning the rules report, and `Engine::merge_gate_decide(base: &str, head: &str, verdict: Option<&[u8]>, reviews: Option<&[u8]>)`, returning the decision report: the counterparts of the commands (the decision on CLI and library parity stays in force).
-- **Stored formats:** `factory/merge-gate/gate.toml` (format 1: `format`, `default`, `owners`, `[[rule]]` with `id`, `effect`, `text`); the GENESIS rule ids `genesis.<n>`; the verdict's format 1 and `factory/merge-gate/verdict.schema.json`; `factory/merge-gate/prompt.md` and `factory/merge-gate/github-workflow.yml` as shipped files.
-- **Forge surface:** the commit status context `merge-gate` and its states `success` and `pending`; the reviews input in GitHub's format.
+- **Commands:** `nxs merge-gate rules [--base <ref>]` and `nxs merge-gate decide --base <sha> --head <sha> [--comments <file> | --verdict <file>] [--reviews <file>]`, both with `--md`. The noun is `merge-gate`, not `gate`, because "gate" already names CI's gate command in a factory's CONFIG.md.
+- **JSON output** of `nxs merge-gate rules`: `base`, `readable`, `default`, `owners`, `verdict_authors`, `rules` (each with `id`, `effect`, `source`, `text`), `errors` (each with `source`, `code`, and `rule` where it concerns one), with the error codes above. Of `nxs merge-gate decide`: `base`, `head`, `decision`, `reasons` (each with `code` and, by code, `errors`, `detail`, `paths`, `by`, `rule`, `reason`, `rules`), `owner_approved`, `status`, `description`.
+- **Library seam:** `Engine::merge_gate_rules(base: &str)`, returning the rules report, and `Engine::merge_gate_decide(base: &str, head: &str, comments: Option<&[u8]>, verdict: Option<&[u8]>, reviews: Option<&[u8]>)`, returning the decision report: the counterparts of the commands (the decision on CLI and library parity stays in force).
+- **Stored formats:** `factory/merge-gate/gate.toml` (format 1: `format`, `default`, `owners`, `verdict_authors`, `[[rule]]` with `id`, `effect`, `text`); the GENESIS rule ids `genesis.<n>`; the verdict's format 1 and `factory/merge-gate/verdict.schema.json`; the verdict comment, with the mark `<!-- nexus-flow: merge-gate-verdict -->` and a fenced `json` block; `factory/merge-gate/prompt.md` and `factory/merge-gate/github-workflow.yml` as shipped files.
+- **Forge surface:** the commit status context `merge-gate` and its states `success` and `pending`; the comments and reviews inputs in GitHub's formats.
 
 ### What nexus-flow needs from NoCentralDB
 
-Nothing. The gate reads files and git at the base commit, and its input from the forge comes as a file, so this RFC adds no collection to the model and no request to NoCentralDB.
+Nothing. The gate reads files and git at the base commit, and its input from the forge comes as files, so this RFC adds no collection to the model and no request to NoCentralDB.
 
 ### What the build must prove
 
-The coding ticket that builds the two commands proves at the seam (`Engine::merge_gate_rules`, `Engine::merge_gate_decide`) that the gate never gives a pull request to pm when it should not, with tests that each fail if the guarantee is broken: the decision is `owner` and `status` `pending` when GENESIS is missing at the base, has no mark, two marks, or a paragraph between the mark and the list; when `gate.toml` is missing, invalid, of another format, or has no owners; when the verdict file is missing, not JSON, of another format, for another base or head, missing a rule, carrying an unknown rule, an outcome the rule's effect does not allow, or a `decision` whose path does not exist at the base; when any rule is `unsure`; when an `owner` rule `applies` even though a `pm` rule is `met`; when a changed path, the old path of a rename included, is covered by CODEOWNERS at the base; and when a rule was loosened only on the head. It proves that the owner's approval counts only on the head commit and only when it is the owner's latest deciding review, that a login outside `owners` never counts, and that the same inputs give the same output bytes.
+The coding ticket that builds the two commands proves at the seam (`Engine::merge_gate_rules`, `Engine::merge_gate_decide`) that the gate never gives a pull request to pm when it should not, with tests that each fail if the guarantee is broken: the decision is `owner` and `status` `pending` when GENESIS is missing at the base, has no mark, two marks, or a paragraph between the mark and the list; when `gate.toml` is missing, invalid, of another format, or has no owners or no verdict authors; when the verdict file is missing, not JSON, of another format, for another base or head, missing a rule, carrying an unknown rule, an outcome the rule's effect does not allow, or a `decision` whose path does not exist at the base; when the only verdict comment is by a login outside `verdict_authors`, or the newest verdict comment is for an older head even though an older comment matches; when an owner's latest deciding review requests changes; when any rule is `unsure`; when an `owner` rule `applies` even though a `pm` rule is `met`; when a changed path, the old path of a rename included, is covered by CODEOWNERS at the base; and when a rule was loosened only on the head. It proves that the owner's approval counts only on the head commit and only when it is the owner's latest deciding review, that a login outside `owners` never counts, and that the same inputs give the same output bytes.
 
 ## What it does not do
 
 - **It does not make the verdict right.** The verdict per rule is a model's judgement (GENESIS.md, "Limits"). A sub-agent can misjudge a rule, and text in the diff can try to steer it. The gate makes the decision on top of the verdicts deterministic and fails safe on every gap it can see; it cannot see a confident wrong verdict.
+- **The verdict rests on a prompt.** The sub-agent runs in pm's session, and any session under a login in `verdict_authors` can post a verdict, the coder whose pull request is judged included. The gate checks who posted it, not which session; until the sub-agent moves into the workflow, an agent that ignores its role can write the verdict for its own pull request.
 - **It checks only that a cited decision exists.** `decided` needs a file at the base commit; whether that file is a decided design and whether the pull request follows it is the sub-agent's judgement.
 - **It does not set up the repository rules.** The guarantee holds only while a ruleset requires `merge-gate` from the app that runs the workflow, and while CODEOWNERS covers `.github/`, `factory/merge-gate/` and `factory/GENESIS.md` with the owner. `nxs` reads no forge settings, so it cannot check the ruleset; `nxs factory install` reports the CODEOWNERS gaps (RFC 0006). Without these, an agent with write access can post the status itself, or change the workflow or the rules in the pull request they judge.
-- **It does not judge again when the rules change.** A verdict is made against the base commit at the time of the event. If the base branch's rules change later, an open pull request keeps its status until its next push, review or a re-run.
+- **It does not judge again when the rules change.** A verdict is made against one base commit. If the base branch moves later, an open pull request keeps its status until the next event on it; that run then finds the verdict made for an older base, decides `owner`, and waits for pm's next verdict.
 - **It does not merge.** A green `merge-gate` allows pm to merge; pm's own review and the other required checks still apply.
 - **It does not check what the owner read.** An approving review by an owner on the head commit satisfies the gate, whatever the decision's reasons were.
 - **GENESIS rule ids are positions.** `genesis.2` is the second rule at that base commit; a rule inserted above it renumbers the rest, so ids from different commits cannot be compared.
 - **It speaks GitHub.** The reviews input, the workflow and the status check are GitHub's. Another forge needs its own workflow and a reviews input of its shape, in a later format.
-- **The review run is not read from the base branch.** It takes its workflow file from the pull request's merge ref, so a pull request that edits the workflow could change what a review run posts; only CODEOWNERS on `.github/` keeps such a pull request with the owner.
-- **It does not judge drafts.** The shipped workflow skips them, so a draft's `merge-gate` is missing until it is marked ready.
+- **Two of the runs are not read from the base branch.** A review run takes its workflow file from the pull request's merge ref, and a comment run from the default branch, so a pull request that edits the workflow could change what a review run posts; only CODEOWNERS on `.github/` keeps such a pull request with the owner. A team whose base branch is not its default branch keeps the workflow on both.
+- **It does not judge drafts.** The shipped workflow skips them, and pm posts a verdict only for a pull request that is ready for review, so a draft's `merge-gate` is missing until it is marked ready.
 
 ## Migration
 
 Nothing to migrate from v1. v1 has no merge gate; its step chains, whose last step could be a judge, lapse with the rest of chat (NEX-20).
 
-For this repository, the gate takes effect in steps that each change a path under CODEOWNERS or a ruleset, so each is a pull request or a setting the owner approves: add `/factory/merge-gate/` to `.github/CODEOWNERS`; add the mark before the list in GENESIS.md's "What has to come back through me"; add `factory/merge-gate/` with this repository's rules, among them the exception for a pull request that only implements a decided RFC that CONFIG.md and `roles/pm.md` state today; add the workflow, which on `v2` builds `nxs` from the base commit, since `v2` cuts no release; require `merge-gate` in `v2`'s ruleset; and rewrite CONFIG.md's merge rule and `roles/pm.md` to point at the gate. Until the last step, the merge rule in CONFIG.md applies as it does today.
+For this repository, the gate takes effect in steps that each change a path under CODEOWNERS or a ruleset, so each is a pull request or a setting the owner approves: add `/factory/merge-gate/` to `.github/CODEOWNERS`; add the mark before the list in GENESIS.md's "What has to come back through me"; add `factory/merge-gate/` with this repository's rules, among them the exception for a pull request that only implements a decided RFC that CONFIG.md and `roles/pm.md` state today; add the workflow, which on `v2` builds `nxs` from the base commit, since `v2` cuts no release, and which must be on `main` too, the default branch, for verdict comments to start it; require `merge-gate` in `v2`'s ruleset; and rewrite CONFIG.md's merge rule and `roles/pm.md` to point at the gate and to say when pm judges and posts a verdict. Until the last step, the merge rule in CONFIG.md applies as it does today.
 
 ## Open questions
 
-1. **Where the sub-agent runs** (NEX-75).
-   - *In the gate's workflow (recommended).* The workflow calls a model with a key kept as a repository secret. No agent whose pull request is judged can write the verdict, because every agent here works under the same agent account. Cost: a model call per ready pull request and per push to one, on a key for a paid service, which comes back to the owner under "Money".
-   - *In pm's session.* pm runs a sub-agent and posts the verdict as a pull request comment; the workflow reads the newest verdict comment from the agent account for the head commit. No key in CI and no cost beyond pm's session, but any session on the agent account, the coder whose pull request is judged included, could post a verdict, so the gate's input rests on a prompt.
-
-2. **Who owns the decision's code** (NEX-76).
-   - *Built into `nxs` (recommended),* as `nxs merge-gate decide`, with what each `format` decides fixed for good. It is tested in nexus-flow's suite, runs the same on every platform without another runtime, and an upgrade cannot change it. The team owns the rules, the schema, the prompt and its workflow, and a team that wants another procedure replaces the decide step in its workflow with its own script that reads the same JSON. This reads GENESIS.md's "the script belongs to the team" as "the team chooses it", not "the team edits nexus-flow's".
-   - *A script file under `factory/merge-gate/`* that nexus-flow ships and the team edits, such as a Node script. Closer to the letter of GENESIS.md, but each team then runs and tests its own copy of the one deterministic step, and a broken edit can let pull requests through.
-
-3. **How close the list must follow the mark in GENESIS** (NEX-77). RFC 0004 reads "the top-level items of the first list after the mark".
-   - *Directly after it, with only blank lines between (recommended),* as written above. If the list under the mark is deleted, the gate reads no rules and sends every pull request to the owner.
-   - *The first list anywhere after the mark.* Matches RFC 0004's words most literally, but a deleted list makes the gate read some later list in GENESIS as the rules, silently.
+None. The owner answered them on 2026-11-20 (NEX-75, NEX-76, NEX-77), and the answers are written into the text above.
 
 ## History
 
 - 2026-11-20: published as a draft in #171.
+- 2026-11-20: decided by the owner (NEX-75, NEX-76, NEX-77), in #171.
