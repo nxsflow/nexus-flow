@@ -1,6 +1,6 @@
 # RFC 0008: the move from v1 to NoCentralDB
 
-Status: Draft
+Status: Decided (2026-11-20)
 
 This RFC designs how an existing v1 workspace and all its data reach NoCentralDB without loss. It follows `factory/GENESIS.md`, "What it must never do" ("Never break an existing workspace or its stored data. Format changes are additive or come with a migration, including the move from v1 to NoCentralDB"), and builds on the frame of RFC 0001 and on the module RFCs that say where each piece of v1 data goes: RFC 0002 for tickets, RFC 0003 for decisions, RFC 0006 for the factory and the end of chat. It lists every place v1 keeps data, says for each where it goes or that it ends, and designs `nxs migrate`: what it reads, what it writes, how v1's history and authors survive, how a second run, a half-finished run and a rollback behave, how a workspace synced across several devices moves, what happens to the v1 binaries and embedders still installed, and how the move is proven. Once it is decided, a coding ticket can build `nxs migrate` on the seam.
 
@@ -136,7 +136,7 @@ The move reads the database read-only, with its own reader, and never through v1
 - A closed item without such a commit is `canceled`, with its closing comment kept, as RFC 0002's table has it.
 - RFC 0002's on-main rule also accepts the v1 id: a done ticket with a `v1Id` is on main when a commit reachable from the base branch names its key or its v1 id in its title. A range of v1 ids does not exist, so the v1 id is matched alone.
 
-This is an additive change to decided RFC 0002 (one field, one index, one rule), made here because only moved tickets have a v1 id; RFC 0002 gets a line that points to it. Its limit: a commit title that names a v1 id for another reason makes the item `done` and on main. *Not taken:* RFC 0002's table alone, where every closed item would read `canceled` for ever, in `recap`, the daily note and manufakt.io; and an artifact link on every closed item, which stretches "artifact" and would call on main what never merged.
+This is an additive change to decided RFC 0002 (one field, one index, one rule; see "Changes to the decided RFCs"). Its limit: a commit title that names a v1 id for another reason makes the item `done` and on main. *Not taken:* RFC 0002's table alone, where every closed item would read `canceled` for ever, in `recap`, the daily note and manufakt.io; and an artifact link on every closed item, which stretches "artifact" and would call on main what never merged.
 
 ### The migration records
 
@@ -248,7 +248,7 @@ Memories become decisions in force by NEX-21's mapping, as RFC 0003 writes it ("
 - **Category** becomes a second topic, the same way, unless it is v1's default `unsorted`. **References to board items** (`refs`) become one `decisionsSubject` each, with the moved ticket's key as `label` and its link as `ticket`, or the v1 item id as `label` when that item did not move.
 - **Scope** (`item`, `project`, `global`) and **reading position** (`ordinal`) have no place in a decision: a repository space is one project, and decisions are read by date. Both stay in the memory's migration records.
 
-**Forgotten memories** are not written as decisions (decided by the owner, NEX-80). v1's `forget` hides a memory and can be undone, so a memory forgotten at the time of the move is one the team took back. Its ops are replayed like every other memory op, as changes that write their migration records, so its text, its history and the forget itself stay in the space and readable through `byItem`; but no decision is written for it, and the report lists each one (`forgotten_memory`). A memory that was forgotten and then restored in v1 is not forgotten, and becomes a decision. *Not taken:* writing them as decisions withdrawn by one superseding decision, which keeps them in `nxs decision list` at the cost of a decision in force that says only that; and writing them in force, which would make rules a team took back rules again.
+**Forgotten memories** are not written as decisions (decided by the owner, NEX-80). v1's `forget` hides a memory and can be undone, so a memory forgotten at the time of the move is one the team took back. Its ops are replayed like every other memory op, as changes that write their migration records, so its text, its history and the forget itself stay in the space; but no decision is written for it. The run's report lists each one (`forgotten_memory`) with its key, its last introduction and body, and when it was forgotten, and the report is stored on the run (`migrationRun.report`): `nxs migrate --check` on a moved workspace prints the stored report of its complete run, so a reader finds every forgotten memory there, and its full history in its migration records through `byItem`. A memory that was forgotten and then restored in v1 is not forgotten, and becomes a decision. *Not taken:* writing them as decisions withdrawn by one superseding decision, which keeps them in `nxs decision list` at the cost of a decision in force that says only that; and writing them in force, which would make rules a team took back rules again.
 
 A decision takes no write after the change that creates it (RFC 0003, "Append-only"), so a memory cannot follow its ops change by change as a ticket does. Each memory op is replayed as a change that writes its migration record, in order, and once every op is replayed, each memory's decision is written in one change of its own, oldest memory first. The decision's `author` is the migration member; `nxs decision show` lists the memory's history through `byItem`.
 
@@ -334,7 +334,7 @@ A v1 workspace that belongs to no repository, such as the default workspace v1's
     { "kind": "other_replicas", "site": 3, "prefix": "k2p9", "last_op_at": "…" },
     { "kind": "dropped", "ticket": "mg.17", "what": "custom_field", "field": "…", "value": "…" },
     { "kind": "late_conflict", "ticket": "mg.4", "field": "title", "v1": "…", "v2": "…" },
-    { "kind": "forgotten_memory", "key": "…", "forgotten_at": "…" },
+    { "kind": "forgotten_memory", "key": "…", "introduction": "…", "body": "…", "forgotten_at": "…" },
     { "kind": "unresolved_supersedes", "decision": "…", "names": "…" },
     { "kind": "v1_workspace_elsewhere", "path": "…" },
     { "kind": "v1_binary", "path": "…", "version": "…" },
@@ -344,11 +344,11 @@ A v1 workspace that belongs to no repository, such as the default workspace v1's
 }
 ```
 
-- `state` is one of `complete`, `already_complete`, `caught_up`, `checked` (with `--check`) and `undone` (with `--undo`).
+- `state` is one of `complete`, `already_complete`, `caught_up`, `checked` (with `--check`) and `undone` (with `--undo`). `--check` on a workspace whose run is complete prints that run's stored report, with `state` `checked`, and any late ops it would catch up.
 - `parked_work`: every row of v1's `parked_work` with no `resumed_at`, with its branch and commit (RFC 0006).
 - `second_working_copy`: `<repository root>-v2/`, when it exists and is not clean (RFC 0006).
 - `other_replicas`: the other sites in the log (see "Several devices").
-- `forgotten_memory`: every memory forgotten at the time of the move, which becomes no decision (see "Memories").
+- `forgotten_memory`: every memory forgotten at the time of the move, which becomes no decision, with its key, last introduction and body, and when it was forgotten (see "Memories").
 - `v1_workspace_elsewhere`: every v1 workspace in `~/.nexusflow/workspaces.toml` and the default MCP workspace that has not moved, so a team finds the workspaces it has not run the move for.
 - `v1_binary`: every `nxf`, `nxm`, `nxc` or v1 `nxs` on `PATH`, with its version, and `v1_service`: whether v1's sync service still has the workspace registered (see "The installed base").
 - `mismatches`: what verifying found, empty unless `state` is a refusal with `verification_failed`.
@@ -386,6 +386,15 @@ GENESIS.md reserves these for the owner:
 - **Library seam:** `Engine::migrate`, `Engine::migrate_check`, `Engine::migrate_undo`, `MigrateOptions`, `MigrationReport`.
 - **Stored formats:** the collections `migrationRun` and `migrationRecord` with their fields and indexes; the role `migration` in RFC 0001's `spaceMember`; the `v1:` prefix in `createdBy` and `updatedBy`; the first note of a moved ticket; the field `v1Id` and the index `byV1Id` added to RFC 0002's `ticketsTicket`, and the v1 id in RFC 0002's on-main rule; the mapping of a memory's key, category and references; `.nxs/migrated.toml` with its `[header]` table, and the raised header of a moved `.nxs/db.sqlite`; and the migration member's directory `<data dir>/migration/<run>/`.
 
+### Changes to the decided RFCs
+
+This RFC's design and the owner's answers change four places in RFCs that are already decided. Each is rewritten in a follow-up of its own, as a decided RFC changes (`docs/rfc/README.md`, "How a decided RFC changes"); the change to RFC 0002's on-main rule is NEX-83. This RFC states the rule they follow.
+
+- **RFC 0002, "The ticket", "Indexes" and "Derived state":** `ticketsTicket` gains `v1Id` (`nc.string()`, the v1 item id of a moved ticket, unset otherwise, written once) and the index `byV1Id`; a done ticket with a `v1Id` is on main when a commit reachable from the base branch names its key or its v1 id in its title (NEX-78; see "How the ops are replayed"). RFC 0002's "Migration" table points to this RFC for how a closed item becomes `done` or `canceled`.
+- **RFC 0002, "Who created a ticket" and "Derived state":** `creator_mismatch` is not raised for a ticket whose `createdBy` starts with `v1:` and whose create a member with the role `migration` signed; `createdBy` and `updatedBy` take the `v1:` prefix for moved records (see "The migration records").
+- **RFC 0002, "Commands, JSON and the seam":** `nxs ticket history` and `Engine::ticket_history` read a moved ticket's migration records through `byTicket` for its v1 part, without waiting for R6 (see "The migration records").
+- **RFC 0001, "The role record", and RFC 0006, "The factory's files":** `migration` joins `owner`, `developer` and `app` as a role of the frame, and no role file can be named `migration`.
+
 ### What nexus-flow needs from NoCentralDB
 
 Nothing new is required for the move itself: it writes ordinary changes as an ordinary member. It rests on what RFC 0001 found met: an agent paired into the person's account (R8), and past changes of a removed member staying valid (NoCentralDB RFC 0008, "The cutoff"). It adds `migrationRecord` to R12 (write-once collections), which RFC 0003 asks for, and reads the v2 part of a moved ticket's history only once R6 lands.
@@ -395,7 +404,7 @@ Nothing new is required for the move itself: it writes ordinary changes as an or
 - **It does not move what lapses.** Chat ops, chat tables, personas, run state and agent logs stay on disk, readable with v1 only (NEX-20).
 - **It does not reach other devices.** Each replica moves on its own device; a device that never runs the move keeps its v1 writes to itself, and a v1 binary there writes on until it does.
 - **Older v1 binaries do not say why.** A v1 binary older than the last v1 release refuses a moved workspace with v1's message "written by a newer nxs — upgrade nxs", which does not mention the move.
-- **A forgotten memory is no decision.** It stays in its migration records, readable through its history, but `nxs decision list` does not show it.
+- **A forgotten memory is no decision** (NEX-80). `nxs decision list`, `nxs prime` and manufakt.io's decision views do not show it, so a team that looks for what it once decided does not find it in the decision log. It is found in the move's stored report (`nxs migrate --check`, `forgotten_memory`) and in its migration records; a team that wants it back as a rule records it again with `nxs decision add`.
 - **A v1 id named by accident counts.** A commit title that names a v1 item id for another reason makes that item `done` and on main.
 - **A late op can lose to v2.** A v1 write that reaches the space after v2 changed the same field is kept in its record and reported, not applied.
 - **It does not verify v1's signatures against trust.** It keeps each op's signature and the replica's verdict; it does not decide again whom v1 trusted. An op v1 marked `invalid` is replayed like any other, as v1 folded it.
@@ -425,4 +434,4 @@ None. The owner answered them on 2026-11-20 (NEX-78 to NEX-81), and the answers 
 ## History
 
 - 2026-11-20: published as a draft in #172.
-- 2026-11-20: the owner's answers to NEX-78 to NEX-81 written in, in #172.
+- 2026-11-20: decided by the owner (NEX-78 to NEX-81), in #172.
