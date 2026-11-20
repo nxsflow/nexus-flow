@@ -440,4 +440,4 @@ Recommendation: option 1, since v2 is a tool for coding work (NEX-18), and a con
 
 ## History
 
-- 2026-11-20: published as a draft in #<pull request>.
+- 2026-11-20: published as a draft in #172.
