@@ -76,6 +76,15 @@ A PR that only implements a decided design may be merged without the owner, wher
 
 When all of that holds, say in a PR comment that you merge it as the implementation of a decided RFC, with the RFC sections you checked, merge as CONFIG.md says, and list the PR under "Merged without the owner" in the next daily note. When any of it does not hold, or you are unsure, the PR waits for the owner like any other.
 
+Until the merge gate (RFC 0010) runs, a PR that only writes the owner's answers into an RFC may also be merged without the owner (NEX-86). Check that:
+
+- Every changed line of the RFC carries an answer the owner gave on a needs-owner ticket, or follows from one directly (an emptied "Open questions", the status line, a History line, a "Changes to the decided RFCs" line another decided RFC already lists). Quote the ticket for each in the PR comment.
+- It adds no new design, no new option and no new open question. A coder's own call inside an answer is new design and goes to the owner.
+- Its other files are only the matching decision files in `factory/decisions/`, each "Decided by" the owner.
+- It touches no path in `.github/CODEOWNERS`.
+
+A PR that implements code never touches `docs/rfc/`: an implementation that needs an RFC changed waits, and the RFC change goes to the owner or through the check above on its own. When any of it does not hold, or you are unsure, the PR waits for the owner. List each such merge under "Merged without the owner" in the next daily note, with the tickets whose answers it wrote in.
+
 ## The daily note
 
 At the time in CONFIG.md, post the status update FACTORY.md describes on the initiative, with its health. Keep it short enough to read on a phone. It has these sections, in this order:
