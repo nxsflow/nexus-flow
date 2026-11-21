@@ -1,0 +1,14 @@
+[package]
+name = "nxs-v2"
+version.workspace = true
+edition = "2021"
+description = "v2's nxs binary (RFC 0001) on the library seam, under a temporary name until the cut-over (NEX-194)"
+publish = false
+
+# The dependencies NEX-97 builds `nxs init` and the output contract with, declared here so that the
+# lockfile settles in NEX-212 and not in each ticket after it.
+[dependencies]
+nexus-flow-seam = { path = "../seam" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "nexus-flow-migrate"
+version.workspace = true
+edition = "2021"
+description = "The move of a v1 workspace into NoCentralDB (RFC 0008)"
+publish = false
+
+# What NEX-177 reads a v1 workspace with: `.nxs/db.sqlite` through SQLite, never v1's `Store::open`,
+# and `replica.toml`, `config.toml` and `sync.toml` through TOML. Declared here so that the lockfile
+# settles in NEX-212 and not in the ticket after it.
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+toml.workspace = true

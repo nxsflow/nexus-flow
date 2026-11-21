@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/foundation", "crates/core", "crates/facade", "crates/cli", "crates/memory", "crates/chat", "crates/nxs", "crates/nxs-init", "crates/nxs-ui", "crates/guide", "crates/sync", "crates/service", "crates/server", "crates/fold-ddb", "crates/plugin-probe", "crates/test-support", "crates/run-contracts", "crates/run-engine", "crates/run-store-sqlite", "crates/run-session-claude", "crates/run-host", "crates/store", "xtask"]
+members = ["crates/foundation", "crates/core", "crates/facade", "crates/cli", "crates/memory", "crates/chat", "crates/nxs", "crates/nxs-init", "crates/nxs-ui", "crates/guide", "crates/sync", "crates/service", "crates/server", "crates/fold-ddb", "crates/plugin-probe", "crates/test-support", "crates/run-contracts", "crates/run-engine", "crates/run-store-sqlite", "crates/run-session-claude", "crates/run-host", "crates/store", "crates/seam", "crates/nxs-v2", "crates/merge-gate", "crates/migrate", "xtask"]
 # The Tauri example links the engine as a real embedding host. It is kept OUT of the workspace so
 # `cargo test`/CI never build Tauri + WebKit; it builds standalone from its own dir. Being out of
 # the workspace is also how it silently rotted for seven weeks (a facade signature moved under
@@ -21,6 +21,17 @@ version = "0.224.0"
 # `cargo test -p xtask sdk_pin` fails on any other form of this entry.
 [workspace.dependencies]
 nocentraldb = "=0.1.0-beta.1"
+
+# What the v2 crates after NEX-212 build with, declared once here so that those tickets touch neither
+# this file nor the lockfile: NEX-97 (nxs-v2: clap, serde, serde_json), NEX-169 (merge-gate:
+# pulldown-cmark) and NEX-177 (migrate: rusqlite, serde, toml). The versions are the ones v1's crates
+# already resolve, so the lockfile gains no second copy; pulldown-cmark is new to the workspace.
+clap = { version = "4", features = ["derive"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 
 # Trim the debug build cache (nexus-flow-k1i). `target/debug` had grown to ~24 GB of `.o`/DWARF
 # in `deps/` because the default `debug = true` emits FULL debug info — and on macOS

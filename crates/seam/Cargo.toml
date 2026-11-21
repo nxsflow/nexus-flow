@@ -1,0 +1,11 @@
+[package]
+name = "nexus-flow-seam"
+version.workspace = true
+edition = "2021"
+description = "v2's library seam (RFC 0001): the crate an embedder links, under a temporary name until the cut-over (NEX-194)"
+publish = false
+
+# Depends on `store` and on nothing of v1 (RFC 0001, "The library seam"). It reaches NoCentralDB only
+# through `store`.
+[dependencies]
+nexus-flow-store = { path = "../store" }
