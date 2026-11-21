@@ -117,3 +117,38 @@ fn a_file_whose_only_mark_is_in_a_code_fence_has_no_mark() {
         Err(GenesisError::MarkMissing)
     );
 }
+
+#[test]
+fn nested_items_stay_with_their_parent_rule() {
+    let genesis = format!(
+        "{MARK}\n- Anything a user sees first:\n  - command names,\n  - their output.\n\n  A paragraph of the same rule.\n- A change to a stored format.\n"
+    );
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Ok(vec![
+            rule(
+                1,
+                "Anything a user sees first:\n  - command names,\n  - their output.\n\n  A paragraph of the same rule."
+            ),
+            rule(2, "A change to a stored format."),
+        ])
+    );
+}
+
+#[test]
+fn an_ordered_list_after_the_mark_gives_its_items() {
+    let genesis = format!("{MARK}\n1. First.\n2. Second.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Ok(vec![rule(1, "First."), rule(2, "Second.")])
+    );
+}
+
+#[test]
+fn the_rules_end_where_the_list_ends() {
+    let genesis = format!("{MARK}\n- The only rule.\n\nA paragraph.\n\n- A later list.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Ok(vec![rule(1, "The only rule.")])
+    );
+}
