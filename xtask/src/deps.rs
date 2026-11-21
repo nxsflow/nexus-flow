@@ -486,6 +486,27 @@ ignore = [
         assert!(got[0].contains("board item"), "{got:?}");
     }
 
+    #[test]
+    fn a_linear_ticket_id_names_the_board_item_and_a_malformed_one_does_not() {
+        for reason in [
+            "expires 2027-01-31: accepted for now (NEX-214)",
+            "expires 2027-01-31: NEX-214 carries it",
+        ] {
+            let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
+            assert!(got.is_empty(), "reason {reason:?} must pass: {got:?}");
+        }
+        for reason in [
+            "expires 2027-01-31: accepted for now (NEX-)",
+            "expires 2027-01-31: accepted for now (nex-214)",
+            "expires 2027-01-31: accepted for now (xNEX-214)",
+            "expires 2027-01-31: accepted for now (NEX-214a)",
+        ] {
+            let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
+            assert_eq!(got.len(), 1, "reason {reason:?} must be refused: {got:?}");
+            assert!(got[0].contains("board item"), "{got:?}");
+        }
+    }
+
     /// Trimmed from a real `npm audit --omit=dev --json` run on agent-sidecar before 2dn0 fixed
     /// it: a package with its own advisory, and one whose `via` only points at another package.
     const AUDIT: &str = r#"{
