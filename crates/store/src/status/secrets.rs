@@ -12,17 +12,24 @@ pub enum SecretPattern {
     PrivateKey,
     /// A GitHub token: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`, and its body.
     GitHubToken,
+    /// An AWS access key id: `AKIA` or `ASIA` and 16 upper-case letters or digits.
+    AwsAccessKeyId,
 }
 
 impl SecretPattern {
     /// Every pattern, in the order a text is scanned for them.
-    pub const ALL: [SecretPattern; 2] = [SecretPattern::PrivateKey, SecretPattern::GitHubToken];
+    pub const ALL: [SecretPattern; 3] = [
+        SecretPattern::PrivateKey,
+        SecretPattern::GitHubToken,
+        SecretPattern::AwsAccessKeyId,
+    ];
 
     /// The pattern's name, as the refusal shows it.
     pub fn name(self) -> &'static str {
         match self {
             SecretPattern::PrivateKey => "private_key",
             SecretPattern::GitHubToken => "github_token",
+            SecretPattern::AwsAccessKeyId => "aws_access_key_id",
         }
     }
 
@@ -32,6 +39,7 @@ impl SecretPattern {
             SecretPattern::GitHubToken => ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
                 .into_iter()
                 .any(|prefix| prefixed(text, prefix, is_word)),
+            SecretPattern::AwsAccessKeyId => aws_access_key_id(text),
         }
     }
 }
@@ -97,6 +105,23 @@ fn private_key(text: &str) -> bool {
             .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b' ')
             .count();
         rest[label_len..].starts_with("-----") && rest[..label_len].contains("PRIVATE KEY")
+    })
+}
+
+/// A run of exactly 20 upper-case letters or digits, not part of a longer word, that starts with
+/// `AKIA` or `ASIA`.
+fn aws_access_key_id(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let is_key = |b: u8| b.is_ascii_uppercase() || b.is_ascii_digit();
+    ["AKIA", "ASIA"].into_iter().any(|prefix| {
+        text.match_indices(prefix).any(|(at, _)| {
+            let end = at + 20;
+            let starts_word = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+            let ends_word = bytes.get(end).is_none_or(|b| !b.is_ascii_alphanumeric());
+            starts_word
+                && ends_word
+                && bytes.get(at..end).is_some_and(|key| key.iter().all(|b| is_key(*b)))
+        })
     })
 }
 
