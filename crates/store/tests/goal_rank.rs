@@ -233,7 +233,7 @@ fn goals_in_focus_order_by_rank_then_key_then_object_id() {
         key,
         object_id,
     };
-    let mut order = vec![
+    let mut order = [
         place("i", "cb.1", "0001"),
         place("9", "cb.9", "0009"),
         place("9", "ab.4", "0400"),
