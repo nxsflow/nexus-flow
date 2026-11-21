@@ -25,3 +25,75 @@ fn each_top_level_item_of_the_list_after_the_mark_is_a_rule_in_order() {
         ])
     );
 }
+
+#[test]
+fn blank_lines_may_stand_between_the_mark_and_the_list() {
+    let genesis = format!("{MARK}\n\n  \n* The only rule.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Ok(vec![rule(1, "The only rule.")])
+    );
+}
+
+#[test]
+fn a_missing_file_has_no_readable_rules() {
+    assert_eq!(read_genesis_rules(None), Err(GenesisError::FileMissing));
+    assert_eq!(GenesisError::FileMissing.code(), "file_missing");
+}
+
+#[test]
+fn a_file_without_the_mark_has_no_readable_rules() {
+    let genesis = "## What has to come back through me\n\n- A rule nobody marked.\n";
+    assert_eq!(
+        read_genesis_rules(Some(genesis)),
+        Err(GenesisError::MarkMissing)
+    );
+    assert_eq!(GenesisError::MarkMissing.code(), "mark_missing");
+}
+
+#[test]
+fn a_mark_that_must_read_exactly_is_missing_when_it_differs() {
+    let genesis = "<!-- nexus-flow: owner-rules (old) -->\n- A rule.\n";
+    assert_eq!(
+        read_genesis_rules(Some(genesis)),
+        Err(GenesisError::MarkMissing)
+    );
+}
+
+#[test]
+fn a_doubled_mark_has_no_readable_rules() {
+    let genesis = format!("{MARK}\n- First list.\n\n   {MARK}  \n- Second list.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Err(GenesisError::MarkDoubled)
+    );
+    assert_eq!(GenesisError::MarkDoubled.code(), "mark_doubled");
+}
+
+#[test]
+fn a_paragraph_between_the_mark_and_the_list_gives_list_missing() {
+    let genesis = format!("{MARK}\nThese are the rules:\n\n- A rule further down.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Err(GenesisError::ListMissing)
+    );
+    assert_eq!(GenesisError::ListMissing.code(), "list_missing");
+}
+
+#[test]
+fn a_heading_after_the_mark_gives_list_missing() {
+    let genesis = format!("{MARK}\n\n## Next section\n\n- Not a rule.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Err(GenesisError::ListMissing)
+    );
+}
+
+#[test]
+fn a_mark_at_the_end_of_the_file_gives_list_missing() {
+    let genesis = format!("- Before the mark.\n\n{MARK}\n\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Err(GenesisError::ListMissing)
+    );
+}
