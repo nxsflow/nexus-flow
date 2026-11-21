@@ -521,6 +521,14 @@ ignore = [
     }
 
     #[test]
+    fn a_ticket_id_at_either_end_of_the_text_stands_alone() {
+        assert!(names_a_board_item("NEX-214"));
+        assert!(names_a_board_item("NEX-214 carries it"));
+        assert!(names_a_board_item("carried by NEX-214"));
+        assert!(!names_a_board_item("-214"));
+    }
+
+    #[test]
     fn a_linear_ticket_id_names_the_board_item_and_a_malformed_one_does_not() {
         for reason in [
             "expires 2027-01-31: accepted for now (NEX-214)",
