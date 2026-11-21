@@ -179,7 +179,9 @@ fn names_a_linear_ticket_id(text: &str) -> bool {
             .count();
         team > 0
             && number > 0
-            && b.get(dash - team - 1)
+            && (dash - team)
+                .checked_sub(1)
+                .and_then(|before| b.get(before))
                 .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
             && b.get(dash + 1 + number)
                 .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
