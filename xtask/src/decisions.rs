@@ -458,6 +458,26 @@ mod tests {
     }
 
     #[test]
+    fn a_field_given_twice_is_refused_and_named() {
+        let text = format!(
+            "{GOOD}- Supersedes: 2026-11-01-no-ticket-one.md\n\
+             - Supersedes: 2026-11-02-no-ticket-two.md\n"
+        );
+        let dir = folder(&[
+            ("2026-11-01-no-ticket-one.md", "x"),
+            ("2026-11-02-no-ticket-two.md", "x"),
+            ("2026-11-14-NEX-3-tickets-live-in-linear.md", &text),
+        ]);
+        let (_, problems) = read_decisions(dir.path()).unwrap();
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "2026-11-14-NEX-3-tickets-live-in-linear.md: the field `- Supersedes:` appears twice"
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn ticket_parts_name_lists_and_ranges() {
         assert_eq!(tickets_of("no ticket"), Some(vec![]));
         assert_eq!(
