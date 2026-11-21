@@ -26,13 +26,13 @@ NoCentralDB's own design is in nocentraldb/nocentraldb, `docs/rfc/`, all decided
 
 ### The dependency on NoCentralDB
 
-nexus-flow depends on NoCentralDB's Rust SDK (`crates/nocentraldb` in nocentraldb/nocentraldb, NoCentralDB RFC 0009) through a pinned git revision in the workspace `Cargo.toml`, the only way in, since the crate is not published (requirement R10): `rev = "<full commit hash>"`, never a branch or a tag. The pin moves deliberately, one pull request per move, and that pull request carries nothing else. Because `Cargo.toml` and `Cargo.lock` are code-owned, every move waits for the owner (decided in NEX-13).
+nexus-flow depends on NoCentralDB's Rust SDK (`nocentraldb`, NoCentralDB RFC 0009) from crates.io at an exact version in the workspace `Cargo.toml`: `nocentraldb = "=0.1.0-beta.1"`, never a range, a git source or a path (decided by the owner, NEX-211). The pin moves deliberately, one pull request per move, and that pull request carries nothing else. Because `Cargo.toml` and `Cargo.lock` are code-owned, every move waits for the owner (decided in NEX-13).
 
 Only one crate of nexus-flow depends on the SDK: the storage crate under the seam (see "The library seam"). Every other crate reaches NoCentralDB through it, so that a change in NoCentralDB's API at a pin move touches one crate.
 
 When nexus-flow needs something NoCentralDB lacks, pm files it as a request on NoCentralDB's tracker. nexus-flow may build a stop-gap meanwhile, only behind its own seam, named as temporary in the RFC that brings it, with a ticket to remove it (NEX-13). This RFC brings two stop-gaps: the derived state (see "Derived state") and the author field a record carries until NoCentralDB can say who signed a change (see "Who decided"). When the RFC is decided, pm opens a ticket to remove each, blocked by the NoCentralDB request it waits for.
 
-*Not taken:* waiting for a crates.io release (priority 1 would stall on another repository's date) and vendoring a copy (two copies drift).
+*Not taken:* a git revision pin, the form this RFC first chose while the crate was unpublished (it needs an allowed git source in `deny.toml` and clones the repository on every build), and vendoring a copy (two copies drift).
 
 ### Spaces
 
@@ -249,7 +249,7 @@ This is a **stop-gap** under NEX-13: it is temporary, it lives only behind the s
 
 v2 keeps one library seam, designed for manufakt.io, the owner's view onto nexus-flow (NEX-18). nexflow.it is not a v2 consumer: it stays on v1 from `main` until it decides its own move, and nothing in v2 serves its proprietary plugin.
 
-The seam is the crate `nexus-flow-facade` in a new major version, with `Engine` as its entry point, as in v1 (decided by the owner, NEX-38). The same name then carries two incompatible lines, v1's on `main` for nexflow.it and v2's here; nexflow.it pins v1, and the major version says the rest. A new crate name was not taken: manufakt.io would rename its dependency for nothing. It is the only crate an embedder links. `nxs` is built on the same seam, and every `nxs` verb has a counterpart on it (the decision on CLI and library parity stays in force). The seam this RFC brings:
+The seam is the crate `nexus-flow-facade` in a new major version, with `Engine` as its entry point, as in v1 (decided by the owner, NEX-38). The same name then carries two incompatible lines, v1's on `main` for nexflow.it and v2's here; nexflow.it pins v1, and the major version says the rest. A new crate name was not taken: manufakt.io would rename its dependency for nothing. It is the only crate an embedder links. While v1's facade and `nxs` are still in the workspace on `v2`, v2's seam and binary are built under temporary names, `crates/seam` and `crates/nxs-v2`, and one cut-over ticket renames them to `nexus-flow-facade` and `nxs` and removes v1's (decided by the owner, NEX-204). `nxs` is built on the same seam, and every `nxs` verb has a counterpart on it (the decision on CLI and library parity stays in force). The seam this RFC brings:
 
 | Symbol | What it does |
 | --- | --- |
@@ -297,7 +297,7 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 - **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`.
 - **R4. An additive check.** `ncdb model check` says whether one `model.lock.json` is an additive change of another (NoCentralDB RFC 0005); it needs Node 24.
 - **R9. A first sync for a new member.** A member that joins a space pulls the whole log from the relay (NoCentralDB RFC 0007, "Pull: read from a cursor"), so a new member with an empty database, such as a cloud container, gets the whole space.
-- **R10. A git-pinnable SDK.** The Rust SDK opens a database from the committed lock, `Db::open(OpenOptions::new(include_str!(…)))`, with no build script, so it builds from a git revision without `ncdb` (NoCentralDB RFC 0009, "The Rust SDK"). The crate is not published (`publish = false`), so a git pin is the only way to depend on it.
+- **R10. A pinnable SDK.** The Rust SDK opens a database from the committed lock, `Db::open(OpenOptions::new(include_str!(…)))`, with no build script, so it builds without `ncdb` (NoCentralDB RFC 0009, "The Rust SDK"). Met: 0.1.0-beta.1 is published to crates.io (2026-11-21).
 - Past changes of a removed member stay valid, up to the removal's cutoff (NoCentralDB RFC 0008, "The cutoff").
 
 **Requests:**
@@ -341,8 +341,12 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - **Focus joins the derived state** ("Derived state"). Decided by the owner on 2026-11-20 (NEX-61, NEX-63), with RFC 0005 (#161). Why: the goals in focus order the ready work, and that order is computed on read like readiness. *Not taken:* focus for a ticket's direct references only.
 - **`migration` joins the frame's roles, with a member of its own** ("Members", "The role record", "Roles in a space", "The local data on disk", and the v1 id in "Derived state"). Decided by the owner on 2026-11-20, when deciding RFC 0008 (#172); the v1 id in "on main" is NEX-78. Why: every change of the move is signed by a member whose role says it moved the data, and a v1-era commit names a moved ticket by its v1 id. *Not taken:* writing the move as the device's own member; a sub-agent, which a device cannot add.
 
+- **The SDK is pinned from crates.io at an exact version** ("The dependency on NoCentralDB", R10). Decided by the owner on 2026-11-21 (NEX-211). Why: the git pin was chosen only because the crate was unpublished, and NoCentralDB 0.1.0-beta.1 is on crates.io; an exact version keeps every move deliberate. *Not taken:* keeping the git revision pin.
+- **v2's seam and binary use temporary names until the cut-over** ("The library seam"). Decided by the owner on 2026-11-21 (NEX-204). Why: one workspace cannot hold two packages named `nexus-flow-facade` or two `nxs` binaries, and v1 keeps working on `v2` until v2's replaces it, which keeps the weekly merge of `main` easy. *Not taken:* removing v1's facade and binary from `v2` first.
+
 ## History
 
 - 2026-11-15: published as a draft in #142.
 - 2026-11-17: decided by the owner (NEX-38), in #142.
 - 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #173 (NEX-83).
+- 2026-11-21: the owner's answers to NEX-211 (crates.io pin) and NEX-204 (temporary names) written into the text.
