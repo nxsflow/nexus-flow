@@ -10,22 +10,28 @@ use std::fmt;
 pub enum SecretPattern {
     /// A private key block: `-----BEGIN … PRIVATE KEY-----`.
     PrivateKey,
+    /// A GitHub token: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`, and its body.
+    GitHubToken,
 }
 
 impl SecretPattern {
     /// Every pattern, in the order a text is scanned for them.
-    pub const ALL: [SecretPattern; 1] = [SecretPattern::PrivateKey];
+    pub const ALL: [SecretPattern; 2] = [SecretPattern::PrivateKey, SecretPattern::GitHubToken];
 
     /// The pattern's name, as the refusal shows it.
     pub fn name(self) -> &'static str {
         match self {
             SecretPattern::PrivateKey => "private_key",
+            SecretPattern::GitHubToken => "github_token",
         }
     }
 
     fn matches(self, text: &str) -> bool {
         match self {
             SecretPattern::PrivateKey => private_key(text),
+            SecretPattern::GitHubToken => ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+                .into_iter()
+                .any(|prefix| prefixed(text, prefix, is_word)),
         }
     }
 }
@@ -92,4 +98,25 @@ fn private_key(text: &str) -> bool {
             .count();
         rest[label_len..].starts_with("-----") && rest[..label_len].contains("PRIVATE KEY")
     })
+}
+
+/// The fewest token characters after a token's prefix for it to count as a token, so that a line
+/// that only names a prefix, such as "classic tokens start with ghp_", is not refused. Every token
+/// these prefixes start is longer.
+const MIN_TOKEN_BODY: usize = 20;
+
+/// `prefix` followed by at least [`MIN_TOKEN_BODY`] bytes that `is_body` accepts.
+fn prefixed(text: &str, prefix: &str, is_body: fn(u8) -> bool) -> bool {
+    text.match_indices(prefix).any(|(at, _)| {
+        text[at + prefix.len()..]
+            .bytes()
+            .take_while(|b| is_body(*b))
+            .count()
+            >= MIN_TOKEN_BODY
+    })
+}
+
+/// A letter, a digit or `_`.
+fn is_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
