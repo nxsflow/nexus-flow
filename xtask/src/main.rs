@@ -15,6 +15,7 @@ mod macos_tests;
 mod platforms;
 mod rfc_index;
 mod runners;
+mod sdk_boundary;
 #[cfg(test)]
 mod sdk_pin;
 mod truth;
