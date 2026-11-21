@@ -2656,6 +2656,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-flow-merge-gate"
+version = "0.224.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
+name = "nexus-flow-migrate"
+version = "0.224.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "nexus-flow-seam"
+version = "0.224.0"
+dependencies = [
+ "nexus-flow-store",
+]
+
+[[package]]
 name = "nexus-flow-store"
 version = "0.224.0"
 dependencies = [
@@ -3064,6 +3087,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nxs-v2"
+version = "0.224.0"
+dependencies = [
+ "clap",
+ "nexus-flow-seam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3399,6 +3432,17 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
@@ -4359,7 +4403,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -4832,6 +4876,12 @@ dependencies = [
  "rand 0.9.4",
  "web-time",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

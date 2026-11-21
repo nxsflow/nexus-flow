@@ -1,0 +1,11 @@
+[package]
+name = "nexus-flow-merge-gate"
+version.workspace = true
+edition = "2021"
+description = "The merge gate of the factory module (RFC 0010): reads the rules and decides who merges"
+publish = false
+
+# The CommonMark parser NEX-169 reads the owner-rules list in GENESIS.md with, declared here so that
+# the lockfile settles in NEX-212 and not in the ticket after it.
+[dependencies]
+pulldown-cmark.workspace = true
