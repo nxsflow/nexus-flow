@@ -5,7 +5,7 @@
 //! that reads exactly `<!-- nexus-flow: owner-rules -->` apart from surrounding whitespace. Each
 //! top-level item of that list is one rule, with the effect `owner` and the id `genesis.<n>`.
 
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::ops::Range;
 
 /// The line that marks the list of rules.
@@ -50,17 +50,7 @@ pub fn read_genesis_rules(genesis: Option<&str>) -> Result<Vec<GenesisRule>, Gen
     let events: Vec<(Event, Range<usize>)> = Parser::new(source).into_offset_iter().collect();
     let after_mark = mark_end(source, &fences(&events))?;
     let list_line = next_non_blank_line(source, after_mark).ok_or(GenesisError::ListMissing)?;
-    let items: Vec<Range<usize>> = events
-        .into_iter()
-        .skip_while(|(event, range)| {
-            !(matches!(event, Event::Start(Tag::List(_))) && list_line.contains(&range.start))
-        })
-        .filter(|(event, _)| matches!(event, Event::Start(Tag::Item)))
-        .map(|(_, range)| range)
-        .collect();
-    if items.is_empty() {
-        return Err(GenesisError::ListMissing);
-    }
+    let items = top_level_items(&events, list_line).ok_or(GenesisError::ListMissing)?;
     Ok(items
         .into_iter()
         .enumerate()
@@ -99,6 +89,31 @@ fn next_non_blank_line(source: &str, from: usize) -> Option<Range<usize>> {
     lines(&source[from..])
         .map(|line| line.start + from..line.end + from)
         .find(|line| !source[line.clone()].trim().is_empty())
+}
+
+/// The ranges of the top-level items of the list that starts on `line`, each from its marker to
+/// the next top-level item or the end of the list, so that nested items stay with their parent.
+fn top_level_items(
+    events: &[(Event, Range<usize>)],
+    line: Range<usize>,
+) -> Option<Vec<Range<usize>>> {
+    let first = events.iter().position(|(event, range)| {
+        matches!(event, Event::Start(Tag::List(_))) && line.contains(&range.start)
+    })?;
+    let list_end = events[first].1.end;
+    let mut depth = 0;
+    let mut starts = Vec::new();
+    for (event, range) in &events[first..] {
+        match event {
+            Event::Start(Tag::List(_)) => depth += 1,
+            Event::End(TagEnd::List(_)) if depth == 1 => break,
+            Event::End(TagEnd::List(_)) => depth -= 1,
+            Event::Start(Tag::Item) if depth == 1 => starts.push(range.start),
+            _ => {}
+        }
+    }
+    let ends = starts.iter().skip(1).copied().chain([list_end]);
+    Some(starts.iter().copied().zip(ends).map(|(s, e)| s..e).collect())
 }
 
 /// The byte range of each line, its line ending included.
