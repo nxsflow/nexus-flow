@@ -97,3 +97,23 @@ fn a_mark_at_the_end_of_the_file_gives_list_missing() {
         Err(GenesisError::ListMissing)
     );
 }
+
+#[test]
+fn a_mark_inside_a_code_fence_is_ignored() {
+    let genesis = format!(
+        "The guide shows the mark:\n\n```markdown\n{MARK}\n- An example rule.\n```\n\n~~~\n{MARK}\n~~~\n\n{MARK}\n- The real rule.\n"
+    );
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Ok(vec![rule(1, "The real rule.")])
+    );
+}
+
+#[test]
+fn a_file_whose_only_mark_is_in_a_code_fence_has_no_mark() {
+    let genesis = format!("```\n{MARK}\n```\n\n- Not a rule.\n");
+    assert_eq!(
+        read_genesis_rules(Some(&genesis)),
+        Err(GenesisError::MarkMissing)
+    );
+}
