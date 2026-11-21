@@ -117,3 +117,25 @@ fn a_near_slack_token_is_not_one() {
     assert_eq!(found("xoxb2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"), None);
     assert_eq!(found("bot tokens start with xoxb- in Slack"), None);
 }
+
+const JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.\
+SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+#[test]
+fn a_json_web_token_is_refused() {
+    assert_eq!(found(JWT), Some(SecretPattern::JsonWebToken));
+    assert_eq!(
+        found(&format!("Authorization: Bearer {JWT}")),
+        Some(SecretPattern::JsonWebToken)
+    );
+}
+
+#[test]
+fn a_near_json_web_token_is_not_one() {
+    // Two parts only, an empty part, or a first part that does not start `eyJ`.
+    assert_eq!(found("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0"), None);
+    assert_eq!(found("eyJhbGciOiJIUzI1NiJ9..SflKxwRJSMeKKF2QT4fw"), None);
+    assert_eq!(found("abJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
+    assert_eq!(found("keyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
+}
