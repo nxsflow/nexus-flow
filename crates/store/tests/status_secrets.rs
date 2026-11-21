@@ -64,3 +64,21 @@ fn the_refusal_holds_no_part_of_the_secret() {
         assert!(!shown.contains("MIIE"), "{shown}");
     }
 }
+
+#[test]
+fn a_github_token_is_refused() {
+    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
+        let text = format!("token={prefix}16C7e42F292c6912E7710c838347Ae178B4a");
+        assert_eq!(found(&text), Some(SecretPattern::GitHubToken), "{text}");
+    }
+    let fine_grained =
+        "github_pat_11ABCDEFG0123456789abc_0123456789abcdefghijABCDEFGHIJ0123456789abcdefghijKLMNO";
+    assert_eq!(found(fine_grained), Some(SecretPattern::GitHubToken));
+}
+
+#[test]
+fn a_github_token_prefix_alone_is_not_a_token() {
+    assert_eq!(found("classic tokens start with ghp_ and fine-grained ones with github_pat_"), None);
+    assert_eq!(found("ghp_short1234"), None);
+    assert_eq!(found("ghx_16C7e42F292c6912E7710c838347Ae178B4a"), None);
+}
