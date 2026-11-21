@@ -66,7 +66,10 @@ fn fences(events: &[(Event, Range<usize>)]) -> Vec<Range<usize>> {
     events
         .iter()
         .filter(|(event, _)| {
-            matches!(event, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))))
+            matches!(
+                event,
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+            )
         })
         .map(|(_, range)| range.clone())
         .collect()
@@ -113,7 +116,14 @@ fn top_level_items(
         }
     }
     let ends = starts.iter().skip(1).copied().chain([list_end]);
-    Some(starts.iter().copied().zip(ends).map(|(s, e)| s..e).collect())
+    Some(
+        starts
+            .iter()
+            .copied()
+            .zip(ends)
+            .map(|(s, e)| s..e)
+            .collect(),
+    )
 }
 
 /// The byte range of each line, its line ending included.
@@ -125,11 +135,15 @@ fn lines(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     })
 }
 
-/// An item's text: its source with the list marker and trailing whitespace taken off.
+/// An item's text: its source without the list marker, a bullet or a number with its `.` or `)`,
+/// and without the whitespace after the marker and at the end.
 fn item_text(item: &str) -> String {
-    let rest = item.trim_start_matches(|c: char| c.is_ascii_digit());
-    let rest = rest
-        .strip_prefix(['-', '*', '+', '.', ')'])
-        .unwrap_or(rest);
+    let rest = match item.strip_prefix(['-', '*', '+']) {
+        Some(rest) => rest,
+        None => item
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .strip_prefix(['.', ')'])
+            .unwrap_or(item),
+    };
     rest.trim_start_matches([' ', '\t']).trim_end().to_string()
 }
