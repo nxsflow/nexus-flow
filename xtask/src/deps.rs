@@ -532,6 +532,8 @@ ignore = [
             "expires 2027-01-31: accepted for now (nex-214)",
             "expires 2027-01-31: accepted for now (xNEX-214)",
             "expires 2027-01-31: accepted for now (NEX-214a)",
+            "expires 2027-01-31: same as RUSTSEC-2024-0449",
+            "expires 2027-01-31: same as CVE-2024-1234",
         ] {
             let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
             assert_eq!(got.len(), 1, "reason {reason:?} must be refused: {got:?}");
