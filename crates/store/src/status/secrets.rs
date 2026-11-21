@@ -16,15 +16,18 @@ pub enum SecretPattern {
     AwsAccessKeyId,
     /// A Slack token: `xoxa-`, `xoxb-`, `xoxp-`, `xoxr-` or `xoxs-`, and its body.
     SlackToken,
+    /// A JSON web token: three base64url parts joined by `.`, the first starting `eyJ`.
+    JsonWebToken,
 }
 
 impl SecretPattern {
     /// Every pattern, in the order a text is scanned for them.
-    pub const ALL: [SecretPattern; 4] = [
+    pub const ALL: [SecretPattern; 5] = [
         SecretPattern::PrivateKey,
         SecretPattern::GitHubToken,
         SecretPattern::AwsAccessKeyId,
         SecretPattern::SlackToken,
+        SecretPattern::JsonWebToken,
     ];
 
     /// The pattern's name, as the refusal shows it.
@@ -34,6 +37,7 @@ impl SecretPattern {
             SecretPattern::GitHubToken => "github_token",
             SecretPattern::AwsAccessKeyId => "aws_access_key_id",
             SecretPattern::SlackToken => "slack_token",
+            SecretPattern::JsonWebToken => "json_web_token",
         }
     }
 
@@ -47,6 +51,7 @@ impl SecretPattern {
             SecretPattern::SlackToken => ["xoxa-", "xoxb-", "xoxp-", "xoxr-", "xoxs-"]
                 .into_iter()
                 .any(|prefix| prefixed(text, prefix, is_word_or_dash)),
+            SecretPattern::JsonWebToken => json_web_token(text),
         }
     }
 }
@@ -129,6 +134,32 @@ fn aws_access_key_id(text: &str) -> bool {
                 && ends_word
                 && bytes.get(at..end).is_some_and(|key| key.iter().all(|b| is_key(*b)))
         })
+    })
+}
+
+/// Three non-empty runs of base64url characters joined by `.`, the first starting `eyJ` (the
+/// encoding of `{"`) at the start of a word.
+fn json_web_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.match_indices("eyJ").any(|(at, _)| {
+        if at > 0 && is_word_or_dash(bytes[at - 1]) {
+            return false;
+        }
+        let mut rest = &bytes[at..];
+        for part in 0..3 {
+            let len = rest.iter().take_while(|b| is_word_or_dash(**b)).count();
+            if len == 0 {
+                return false;
+            }
+            rest = &rest[len..];
+            if part < 2 {
+                match rest.split_first() {
+                    Some((b'.', after)) => rest = after,
+                    _ => return false,
+                }
+            }
+        }
+        true
     })
 }
 
