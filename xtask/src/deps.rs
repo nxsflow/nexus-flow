@@ -5,7 +5,8 @@
 //! accepted for now is an `[advisories] ignore` entry in `deny.toml`. cargo-deny takes exactly two
 //! keys there, `id` and `reason`, so it has no notion of an exception running OUT: an ignore entry
 //! written today silences that advisory for good. `deps exceptions` is the missing half. Every
-//! entry must carry its expiry and its board item at the head of its reason —
+//! entry must carry its expiry at the head of its reason and name its board item, a Linear ticket
+//! id (`NEX-214`) or a v1 board id (`6j6v.xxxx`) —
 //!
 //! ```toml
 //! { id = "RUSTSEC-2024-0449", reason = "expires 2027-01-31: <why it is accepted> (6j6v.xxxx)" }
@@ -103,8 +104,8 @@ pub fn problems(exceptions: &[Exception], today: &str) -> Vec<String> {
         }
         if !names_a_board_item(&e.reason) {
             out.push(format!(
-                "{}: the reason names no board item (`<prefix>.<suffix>`, e.g. 6j6v.2dn0) that \
-                 carries the decision",
+                "{}: the reason names no board item (`NEX-214` or `<prefix>.<suffix>`, e.g. \
+                 6j6v.2dn0) that carries the decision",
                 e.id
             ));
         }
@@ -137,10 +138,17 @@ fn expiry(reason: &str) -> Option<&str> {
     (1..=days_in_month).contains(&day).then_some(date)
 }
 
-/// Whether `text` holds a board id: four lowercase alphanumerics, a dot, four more, standing alone.
-/// This restates the board's `<prefix>.<suffix>` id shape (both four characters today); if the id
-/// format changes, this matcher and its test change with it.
+/// Whether `text` holds a board id, standing alone: either v1's board id, four lowercase
+/// alphanumerics, a dot and four more (`6j6v.2dn0`), or a Linear ticket id, uppercase letters, a
+/// dash and digits (`NEX-214`), which is where v2's tickets live until they move into v2
+/// (RFC 0002). This restates both id shapes; if either changes, this matcher and its tests change
+/// with it.
 fn names_a_board_item(text: &str) -> bool {
+    names_a_v1_board_id(text) || names_a_linear_ticket_id(text)
+}
+
+/// `<prefix>.<suffix>`, both four lowercase alphanumerics, standing alone.
+fn names_a_v1_board_id(text: &str) -> bool {
     let b = text.as_bytes();
     let id_char = |c: u8| c.is_ascii_digit() || c.is_ascii_lowercase();
     (4..b.len().saturating_sub(4)).any(|dot| {
@@ -149,6 +157,35 @@ fn names_a_board_item(text: &str) -> bool {
             && b[dot + 1..dot + 5].iter().all(|&c| id_char(c))
             && (dot == 4 || !b[dot - 5].is_ascii_alphanumeric())
             && b.get(dot + 5).is_none_or(|c| !c.is_ascii_alphanumeric())
+    })
+}
+
+/// `<UPPER>-<digits>`, at least one of each, standing alone. A dash on either side does not
+/// count as standing alone, so an advisory id such as `RUSTSEC-2024-0449` or `CVE-2024-1234` is
+/// not taken for a ticket.
+fn names_a_linear_ticket_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    (1..b.len()).any(|dash| {
+        if b[dash] != b'-' {
+            return false;
+        }
+        let team = b[..dash]
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_uppercase())
+            .count();
+        let number = b[dash + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        team > 0
+            && number > 0
+            && (dash - team)
+                .checked_sub(1)
+                .and_then(|before| b.get(before))
+                .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
+            && b.get(dash + 1 + number)
+                .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
     })
 }
 
@@ -484,6 +521,37 @@ ignore = [
         );
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(got[0].contains("board item"), "{got:?}");
+    }
+
+    #[test]
+    fn a_ticket_id_at_either_end_of_the_text_stands_alone() {
+        assert!(names_a_board_item("NEX-214"));
+        assert!(names_a_board_item("NEX-214 carries it"));
+        assert!(names_a_board_item("carried by NEX-214"));
+        assert!(!names_a_board_item("-214"));
+    }
+
+    #[test]
+    fn a_linear_ticket_id_names_the_board_item_and_a_malformed_one_does_not() {
+        for reason in [
+            "expires 2027-01-31: accepted for now (NEX-214)",
+            "expires 2027-01-31: NEX-214 carries it",
+        ] {
+            let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
+            assert!(got.is_empty(), "reason {reason:?} must pass: {got:?}");
+        }
+        for reason in [
+            "expires 2027-01-31: accepted for now (NEX-)",
+            "expires 2027-01-31: accepted for now (nex-214)",
+            "expires 2027-01-31: accepted for now (xNEX-214)",
+            "expires 2027-01-31: accepted for now (NEX-214a)",
+            "expires 2027-01-31: same as RUSTSEC-2024-0449",
+            "expires 2027-01-31: same as CVE-2024-1234",
+        ] {
+            let got = problems(&[ex("RUSTSEC-2024-0449", reason)], "2026-10-24");
+            assert_eq!(got.len(), 1, "reason {reason:?} must be refused: {got:?}");
+            assert!(got[0].contains("board item"), "{got:?}");
+        }
     }
 
     /// Trimmed from a real `npm audit --omit=dev --json` run on agent-sidecar before 2dn0 fixed
