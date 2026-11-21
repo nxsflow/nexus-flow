@@ -14,14 +14,17 @@ pub enum SecretPattern {
     GitHubToken,
     /// An AWS access key id: `AKIA` or `ASIA` and 16 upper-case letters or digits.
     AwsAccessKeyId,
+    /// A Slack token: `xoxa-`, `xoxb-`, `xoxp-`, `xoxr-` or `xoxs-`, and its body.
+    SlackToken,
 }
 
 impl SecretPattern {
     /// Every pattern, in the order a text is scanned for them.
-    pub const ALL: [SecretPattern; 3] = [
+    pub const ALL: [SecretPattern; 4] = [
         SecretPattern::PrivateKey,
         SecretPattern::GitHubToken,
         SecretPattern::AwsAccessKeyId,
+        SecretPattern::SlackToken,
     ];
 
     /// The pattern's name, as the refusal shows it.
@@ -30,6 +33,7 @@ impl SecretPattern {
             SecretPattern::PrivateKey => "private_key",
             SecretPattern::GitHubToken => "github_token",
             SecretPattern::AwsAccessKeyId => "aws_access_key_id",
+            SecretPattern::SlackToken => "slack_token",
         }
     }
 
@@ -40,6 +44,9 @@ impl SecretPattern {
                 .into_iter()
                 .any(|prefix| prefixed(text, prefix, is_word)),
             SecretPattern::AwsAccessKeyId => aws_access_key_id(text),
+            SecretPattern::SlackToken => ["xoxa-", "xoxb-", "xoxp-", "xoxr-", "xoxs-"]
+                .into_iter()
+                .any(|prefix| prefixed(text, prefix, is_word_or_dash)),
         }
     }
 }
@@ -144,4 +151,9 @@ fn prefixed(text: &str, prefix: &str, is_body: fn(u8) -> bool) -> bool {
 /// A letter, a digit or `_`.
 fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// A letter, a digit, `_` or `-`.
+fn is_word_or_dash(b: u8) -> bool {
+    is_word(b) || b == b'-'
 }
