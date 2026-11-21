@@ -4,3 +4,5 @@
 //! state. It is not public: the facade re-exports what an embedder needs, never the SDK whole.
 
 use nocentraldb as _;
+
+pub mod goals;
