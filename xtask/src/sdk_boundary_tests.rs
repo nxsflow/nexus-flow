@@ -68,7 +68,10 @@ fn names_every_crate_that_crosses_the_boundary() {
     packages.push(pkg("nexus-flow-cli", vec![dep("nocentraldb", None)]));
     packages.push(pkg("xtask", vec![dep("nocentraldb", Some("dev"))]));
     let err = check(&metadata(packages)).unwrap_err().to_string();
-    assert!(err.contains("nexus-flow-cli") && err.contains("xtask"), "{err}");
+    assert!(
+        err.contains("nexus-flow-cli") && err.contains("xtask"),
+        "{err}"
+    );
 }
 
 #[test]

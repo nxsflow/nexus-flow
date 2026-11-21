@@ -78,6 +78,10 @@ enum Command {
     /// (nexus-flow-6j6v.k8cw).
     #[command(subcommand)]
     Layering(LayeringCmd),
+    /// The SDK boundary (NEX-89, RFC 0001): only the storage crate `nexus-flow-store` may depend on
+    /// NoCentralDB's SDK, in any dependency kind.
+    #[command(subcommand, name = "sdk-boundary")]
+    SdkBoundary(SdkBoundaryCmd),
     /// The commit-role gate (NEX-37): fail when a commit in `<base>..<head>` carries no
     /// `Role: <role>` trailer naming the session role that made it. Merge commits, commits an
     /// excluded ref reaches, and commits authored before the rule landed on the base are left out.
@@ -131,6 +135,13 @@ enum Command {
         #[arg(long, default_value = "docs/rfc")]
         dir: PathBuf,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SdkBoundaryCmd {
+    /// Fail when a workspace crate other than `nexus-flow-store` lists the SDK (CI gate,
+    /// fail-closed).
+    Check,
 }
 
 #[derive(Subcommand, Debug)]
@@ -388,6 +399,13 @@ fn main() -> Result<()> {
         Command::Layering(LayeringCmd::Check) => {
             layering::run(&root)?;
             println!("layering check: the nexus-run-* crates keep their edges and their budget");
+        }
+        Command::SdkBoundary(SdkBoundaryCmd::Check) => {
+            sdk_boundary::run(&root)?;
+            println!(
+                "sdk-boundary check: only {} depends on the SDK",
+                sdk_boundary::STORE
+            );
         }
         Command::Deps(DepsCmd::Audit) => {
             println!("{}", deps::audit(&root)?);
