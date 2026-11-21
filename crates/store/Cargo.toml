@@ -1,0 +1,12 @@
+[package]
+name = "nexus-flow-store"
+version.workspace = true
+edition = "2021"
+description = "nexus-flow's storage crate under the library seam: the only crate that depends on the NoCentralDB SDK (RFC 0001)"
+publish = false
+
+# The only crate of the workspace that depends on the SDK (RFC 0001, "The dependency on
+# NoCentralDB"): a change in NoCentralDB's API at a pin move touches this crate alone. The pin
+# itself is in the workspace Cargo.toml.
+[dependencies]
+nocentraldb.workspace = true

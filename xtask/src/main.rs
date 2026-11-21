@@ -15,6 +15,8 @@ mod macos_tests;
 mod platforms;
 mod rfc_index;
 mod runners;
+#[cfg(test)]
+mod sdk_pin;
 mod truth;
 mod version;
 
