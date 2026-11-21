@@ -101,3 +101,19 @@ fn a_near_aws_access_key_id_is_not_one() {
     assert_eq!(found("XAKIAIOSFODNN7EXAMPLE"), None);
     assert_eq!(found("AKIAIOSFODNN7EXAMPLEX"), None);
 }
+
+#[test]
+fn a_slack_token_is_refused() {
+    for kind in ['a', 'b', 'p', 'r', 's'] {
+        let text = format!("SLACK_TOKEN=xox{kind}-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8");
+        assert_eq!(found(&text), Some(SecretPattern::SlackToken), "{text}");
+    }
+}
+
+#[test]
+fn a_near_slack_token_is_not_one() {
+    // Another kind letter, no dash, or the prefix alone.
+    assert_eq!(found("xoxc-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"), None);
+    assert_eq!(found("xoxb2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"), None);
+    assert_eq!(found("bot tokens start with xoxb- in Slack"), None);
+}
