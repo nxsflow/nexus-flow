@@ -6,6 +6,8 @@
 //! A port of nocentraldb's `scripts/decisions.mjs`, so both repositories read and check their logs
 //! by the same rules: the name pattern, the heading's date and first ticket against the file
 //! name, the four required fields, lowercase topics, and that each `Supersedes:` file exists.
+//! It also refuses a field given twice in one file, which the script lets through: a second
+//! `- Supersedes:` line would otherwise be dropped without a word.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -216,10 +218,23 @@ fn parse(file: &str, text: &str) -> (Entry, Vec<String>) {
         ),
     }
     let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut repeated: Vec<&str> = Vec::new();
     for line in text.lines().skip(1) {
         if let Some((key, value)) = parse_field(line) {
-            fields.entry(key).or_insert(value);
+            if fields.contains_key(key) {
+                if !repeated.contains(&key) {
+                    repeated.push(key);
+                }
+            } else {
+                fields.insert(key, value);
+            }
         }
+    }
+    for key in repeated {
+        problems.push(format!(
+            "the field `- {key}:` appears twice; give it once (Supersedes takes a \
+             comma-separated list on one line)"
+        ));
     }
     for key in REQUIRED {
         if fields.get(key).is_none_or(|v| v.is_empty()) {

@@ -30,6 +30,6 @@ Add a new file, `factory/decisions/YYYY-MM-DD-<ticket>-<slug>.md`, or `YYYY-MM-D
 ```
 
 - **Topics** is required: one or more lowercase tags, separated by commas, so a reader can find every decision on a subject.
-- **Supersedes** is optional: the file names of earlier decisions this one replaces, separated by commas. Nobody edits an old entry; a decision is superseded when a later file names it here.
+- **Supersedes** is optional: the file names of earlier decisions this one replaces, separated by commas on one line. Nobody edits an old entry; a decision is superseded when a later file names it here.
 
-CI checks every file (`cargo xtask decisions --check`, in the `lint` job): the name pattern, the heading's date and first ticket against the file name, the four required fields, lowercase topics, and that each `Supersedes:` file exists. The folder holds decision files only: any other file, a `.gitkeep` included, fails the name pattern.
+CI checks every file (`cargo xtask decisions --check`, in the `lint` job): the name pattern, the heading's date and first ticket against the file name, the four required fields, that no field appears twice in one file, lowercase topics, and that each `Supersedes:` file exists. The folder holds decision files only: any other file, a `.gitkeep` included, fails the name pattern.
