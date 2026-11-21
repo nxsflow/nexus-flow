@@ -34,9 +34,15 @@ fn a_private_key_block_is_refused() {
 
 #[test]
 fn a_public_key_or_a_certificate_is_not_a_private_key() {
-    assert_eq!(found("-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----"), None);
+    assert_eq!(
+        found("-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----"),
+        None
+    );
     assert_eq!(found("-----BEGIN CERTIFICATE-----\nMIIB\n"), None);
-    assert_eq!(found("rotated the BEGIN PRIVATE KEY block in the vault"), None);
+    assert_eq!(
+        found("rotated the BEGIN PRIVATE KEY block in the vault"),
+        None
+    );
 }
 
 #[test]
@@ -78,14 +84,20 @@ fn a_github_token_is_refused() {
 
 #[test]
 fn a_github_token_prefix_alone_is_not_a_token() {
-    assert_eq!(found("classic tokens start with ghp_ and fine-grained ones with github_pat_"), None);
+    assert_eq!(
+        found("classic tokens start with ghp_ and fine-grained ones with github_pat_"),
+        None
+    );
     assert_eq!(found("ghp_short1234"), None);
     assert_eq!(found("ghx_16C7e42F292c6912E7710c838347Ae178B4a"), None);
 }
 
 #[test]
 fn an_aws_access_key_id_is_refused() {
-    assert_eq!(found("AKIAIOSFODNN7EXAMPLE"), Some(SecretPattern::AwsAccessKeyId));
+    assert_eq!(
+        found("AKIAIOSFODNN7EXAMPLE"),
+        Some(SecretPattern::AwsAccessKeyId)
+    );
     assert_eq!(
         found("export AWS_ACCESS_KEY_ID=ASIAY34FZKBOKMUTVV7A;"),
         Some(SecretPattern::AwsAccessKeyId)
@@ -113,8 +125,14 @@ fn a_slack_token_is_refused() {
 #[test]
 fn a_near_slack_token_is_not_one() {
     // Another kind letter, no dash, or the prefix alone.
-    assert_eq!(found("xoxc-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"), None);
-    assert_eq!(found("xoxb2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"), None);
+    assert_eq!(
+        found("xoxc-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"),
+        None
+    );
+    assert_eq!(
+        found("xoxb2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"),
+        None
+    );
     assert_eq!(found("bot tokens start with xoxb- in Slack"), None);
 }
 
@@ -136,8 +154,14 @@ fn a_near_json_web_token_is_not_one() {
     // Two parts only, an empty part, or a first part that does not start `eyJ`.
     assert_eq!(found("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0"), None);
     assert_eq!(found("eyJhbGciOiJIUzI1NiJ9..SflKxwRJSMeKKF2QT4fw"), None);
-    assert_eq!(found("abJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
-    assert_eq!(found("keyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
+    assert_eq!(
+        found("abJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"),
+        None
+    );
+    assert_eq!(
+        found("keyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"),
+        None
+    );
 }
 
 #[test]
@@ -153,5 +177,8 @@ fn a_near_linear_api_key_is_not_one() {
     // The prefix alone, a short body, or another prefix.
     assert_eq!(found("Linear's personal keys start with lin_api_"), None);
     assert_eq!(found("lin_api_Xk3J9vQm"), None);
-    assert_eq!(found("lin_oauth_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"), None);
+    assert_eq!(
+        found("lin_oauth_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"),
+        None
+    );
 }

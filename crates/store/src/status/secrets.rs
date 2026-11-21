@@ -18,16 +18,19 @@ pub enum SecretPattern {
     SlackToken,
     /// A JSON web token: three base64url parts joined by `.`, the first starting `eyJ`.
     JsonWebToken,
+    /// A Linear API key: `lin_api_` and its body.
+    LinearApiKey,
 }
 
 impl SecretPattern {
     /// Every pattern, in the order a text is scanned for them.
-    pub const ALL: [SecretPattern; 5] = [
+    pub const ALL: [SecretPattern; 6] = [
         SecretPattern::PrivateKey,
         SecretPattern::GitHubToken,
         SecretPattern::AwsAccessKeyId,
         SecretPattern::SlackToken,
         SecretPattern::JsonWebToken,
+        SecretPattern::LinearApiKey,
     ];
 
     /// The pattern's name, as the refusal shows it.
@@ -38,6 +41,7 @@ impl SecretPattern {
             SecretPattern::AwsAccessKeyId => "aws_access_key_id",
             SecretPattern::SlackToken => "slack_token",
             SecretPattern::JsonWebToken => "json_web_token",
+            SecretPattern::LinearApiKey => "linear_api_key",
         }
     }
 
@@ -52,6 +56,7 @@ impl SecretPattern {
                 .into_iter()
                 .any(|prefix| prefixed(text, prefix, is_word_or_dash)),
             SecretPattern::JsonWebToken => json_web_token(text),
+            SecretPattern::LinearApiKey => prefixed(text, "lin_api_", is_word),
         }
     }
 }
@@ -132,7 +137,9 @@ fn aws_access_key_id(text: &str) -> bool {
             let ends_word = bytes.get(end).is_none_or(|b| !b.is_ascii_alphanumeric());
             starts_word
                 && ends_word
-                && bytes.get(at..end).is_some_and(|key| key.iter().all(|b| is_key(*b)))
+                && bytes
+                    .get(at..end)
+                    .is_some_and(|key| key.iter().all(|b| is_key(*b)))
         })
     })
 }
