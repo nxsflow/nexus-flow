@@ -119,8 +119,11 @@ ignore = [
   date, without anybody touching the tree, so the decision gets taken again rather than
   forgotten. Pick the date by severity: no further out than the response time for critical and
   high, the next regular release for medium, at most three months for low.
-- The reason **names the board item** that carries the decision (`6j6v.xxxx`). The item holds
-  the reading of whether we are exposed, and the follow-up that removes the exception.
+- The reason **names the board item** that carries the decision, standing alone: a Linear ticket
+  id such as `NEX-214` (uppercase team key, a dash, digits), which is where v2's tickets live
+  until they move into v2 (RFC 0002), or a v1 board id such as `6j6v.xxxx`. The item holds the
+  reading of whether we are exposed, and the follow-up that removes the exception. An advisory
+  id such as `RUSTSEC-2024-0449` or `CVE-2024-1234` is not taken for a ticket id.
 - One entry per advisory, never a pattern, never a whole crate.
 - A bare id without a reason is refused, and so is any entry without an expiry or a board item.
 - An exception whose advisory no longer fires is reported. For npm, `deps npm-audit` warns; for

@@ -5,7 +5,8 @@
 //! accepted for now is an `[advisories] ignore` entry in `deny.toml`. cargo-deny takes exactly two
 //! keys there, `id` and `reason`, so it has no notion of an exception running OUT: an ignore entry
 //! written today silences that advisory for good. `deps exceptions` is the missing half. Every
-//! entry must carry its expiry and its board item at the head of its reason —
+//! entry must carry its expiry at the head of its reason and name its board item, a Linear ticket
+//! id (`NEX-214`) or a v1 board id (`6j6v.xxxx`) —
 //!
 //! ```toml
 //! { id = "RUSTSEC-2024-0449", reason = "expires 2027-01-31: <why it is accepted> (6j6v.xxxx)" }
