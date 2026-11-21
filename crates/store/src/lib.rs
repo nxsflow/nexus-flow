@@ -6,3 +6,4 @@
 use nocentraldb as _;
 
 pub mod goals;
+pub mod status;
