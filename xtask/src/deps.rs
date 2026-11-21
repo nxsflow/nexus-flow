@@ -103,8 +103,8 @@ pub fn problems(exceptions: &[Exception], today: &str) -> Vec<String> {
         }
         if !names_a_board_item(&e.reason) {
             out.push(format!(
-                "{}: the reason names no board item (`<prefix>.<suffix>`, e.g. 6j6v.2dn0) that \
-                 carries the decision",
+                "{}: the reason names no board item (`NEX-214` or `<prefix>.<suffix>`, e.g. \
+                 6j6v.2dn0) that carries the decision",
                 e.id
             ));
         }
@@ -137,10 +137,17 @@ fn expiry(reason: &str) -> Option<&str> {
     (1..=days_in_month).contains(&day).then_some(date)
 }
 
-/// Whether `text` holds a board id: four lowercase alphanumerics, a dot, four more, standing alone.
-/// This restates the board's `<prefix>.<suffix>` id shape (both four characters today); if the id
-/// format changes, this matcher and its test change with it.
+/// Whether `text` holds a board id, standing alone: either v1's board id, four lowercase
+/// alphanumerics, a dot and four more (`6j6v.2dn0`), or a Linear ticket id, uppercase letters, a
+/// dash and digits (`NEX-214`), which is where v2's tickets live until they move into v2
+/// (RFC 0002). This restates both id shapes; if either changes, this matcher and its tests change
+/// with it.
 fn names_a_board_item(text: &str) -> bool {
+    names_a_v1_board_id(text) || names_a_linear_ticket_id(text)
+}
+
+/// `<prefix>.<suffix>`, both four lowercase alphanumerics, standing alone.
+fn names_a_v1_board_id(text: &str) -> bool {
     let b = text.as_bytes();
     let id_char = |c: u8| c.is_ascii_digit() || c.is_ascii_lowercase();
     (4..b.len().saturating_sub(4)).any(|dot| {
@@ -149,6 +156,31 @@ fn names_a_board_item(text: &str) -> bool {
             && b[dot + 1..dot + 5].iter().all(|&c| id_char(c))
             && (dot == 4 || !b[dot - 5].is_ascii_alphanumeric())
             && b.get(dot + 5).is_none_or(|c| !c.is_ascii_alphanumeric())
+    })
+}
+
+/// `<UPPER>-<digits>`, at least one of each, standing alone.
+fn names_a_linear_ticket_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    (1..b.len()).any(|dash| {
+        if b[dash] != b'-' {
+            return false;
+        }
+        let team = b[..dash]
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_uppercase())
+            .count();
+        let number = b[dash + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        team > 0
+            && number > 0
+            && b.get(dash - team - 1)
+                .is_none_or(|c| !c.is_ascii_alphanumeric())
+            && b.get(dash + 1 + number)
+                .is_none_or(|c| !c.is_ascii_alphanumeric())
     })
 }
 
