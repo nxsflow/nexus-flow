@@ -159,7 +159,9 @@ fn names_a_v1_board_id(text: &str) -> bool {
     })
 }
 
-/// `<UPPER>-<digits>`, at least one of each, standing alone.
+/// `<UPPER>-<digits>`, at least one of each, standing alone. A dash on either side does not
+/// count as standing alone, so an advisory id such as `RUSTSEC-2024-0449` or `CVE-2024-1234` is
+/// not taken for a ticket.
 fn names_a_linear_ticket_id(text: &str) -> bool {
     let b = text.as_bytes();
     (1..b.len()).any(|dash| {
@@ -178,9 +180,9 @@ fn names_a_linear_ticket_id(text: &str) -> bool {
         team > 0
             && number > 0
             && b.get(dash - team - 1)
-                .is_none_or(|c| !c.is_ascii_alphanumeric())
+                .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
             && b.get(dash + 1 + number)
-                .is_none_or(|c| !c.is_ascii_alphanumeric())
+                .is_none_or(|&c| !c.is_ascii_alphanumeric() && c != b'-')
     })
 }
 
