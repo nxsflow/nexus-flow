@@ -139,3 +139,19 @@ fn a_near_json_web_token_is_not_one() {
     assert_eq!(found("abJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
     assert_eq!(found("keyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fw"), None);
 }
+
+#[test]
+fn a_linear_api_key_is_refused() {
+    assert_eq!(
+        found("LINEAR_API_KEY=lin_api_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"),
+        Some(SecretPattern::LinearApiKey)
+    );
+}
+
+#[test]
+fn a_near_linear_api_key_is_not_one() {
+    // The prefix alone, a short body, or another prefix.
+    assert_eq!(found("Linear's personal keys start with lin_api_"), None);
+    assert_eq!(found("lin_api_Xk3J9vQm"), None);
+    assert_eq!(found("lin_oauth_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"), None);
+}
