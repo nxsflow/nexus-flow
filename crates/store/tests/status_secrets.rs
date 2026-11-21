@@ -10,7 +10,7 @@ fn found(text: &str) -> Option<SecretPattern> {
 }
 
 const RSA_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
-MIIEowIBAAKCAQEA3Tz2mr7SZiAMfQyuvBjM9OiZ1BjP5CE/Wm/Rr500P\n\
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
 -----END RSA PRIVATE KEY-----";
 
 #[test]
@@ -67,14 +67,14 @@ fn the_refusal_holds_no_part_of_the_secret() {
     assert!(message.contains("private_key"), "{message}");
     for shown in [message, format!("{err:?}")] {
         assert!(!shown.contains("BEGIN"), "{shown}");
-        assert!(!shown.contains("MIIE"), "{shown}");
+        assert!(!shown.contains("AAAA"), "{shown}");
     }
 }
 
 #[test]
 fn a_github_token_is_refused() {
     for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
-        let text = format!("token={prefix}16C7e42F292c6912E7710c838347Ae178B4a");
+        let text = format!("token={prefix}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         assert_eq!(found(&text), Some(SecretPattern::GitHubToken), "{text}");
     }
     let fine_grained =
@@ -89,7 +89,7 @@ fn a_github_token_prefix_alone_is_not_a_token() {
         None
     );
     assert_eq!(found("ghp_short1234"), None);
-    assert_eq!(found("ghx_16C7e42F292c6912E7710c838347Ae178B4a"), None);
+    assert_eq!(found("ghx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), None);
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn an_aws_access_key_id_is_refused() {
         Some(SecretPattern::AwsAccessKeyId)
     );
     assert_eq!(
-        found("export AWS_ACCESS_KEY_ID=ASIAY34FZKBOKMUTVV7A;"),
+        found("export AWS_ACCESS_KEY_ID=ASIAIOSFODNN7EXAMPLE;"),
         Some(SecretPattern::AwsAccessKeyId)
     );
 }
@@ -117,7 +117,7 @@ fn a_near_aws_access_key_id_is_not_one() {
 #[test]
 fn a_slack_token_is_refused() {
     for kind in ['a', 'b', 'p', 'r', 's'] {
-        let text = format!("SLACK_TOKEN=xox{kind}-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8");
+        let text = format!("SLACK_TOKEN=xox{kind}-0000000000-0000000000-xxxxxxxxxxxxxxxxxxxxxxxx");
         assert_eq!(found(&text), Some(SecretPattern::SlackToken), "{text}");
     }
 }
@@ -126,11 +126,11 @@ fn a_slack_token_is_refused() {
 fn a_near_slack_token_is_not_one() {
     // Another kind letter, no dash, or the prefix alone.
     assert_eq!(
-        found("xoxc-2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"),
+        found("xoxc-0000000000-0000000000-xxxxxxxxxxxxxxxxxxxxxxxx"),
         None
     );
     assert_eq!(
-        found("xoxb2948312470-3051276984-tjYwvVq3RXbcXUyJ4hZ8"),
+        found("xoxb0000000000-0000000000-xxxxxxxxxxxxxxxxxxxxxxxx"),
         None
     );
     assert_eq!(found("bot tokens start with xoxb- in Slack"), None);
@@ -167,7 +167,7 @@ fn a_near_json_web_token_is_not_one() {
 #[test]
 fn a_linear_api_key_is_refused() {
     assert_eq!(
-        found("LINEAR_API_KEY=lin_api_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"),
+        found("LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
         Some(SecretPattern::LinearApiKey)
     );
 }
@@ -176,9 +176,9 @@ fn a_linear_api_key_is_refused() {
 fn a_near_linear_api_key_is_not_one() {
     // The prefix alone, a short body, or another prefix.
     assert_eq!(found("Linear's personal keys start with lin_api_"), None);
-    assert_eq!(found("lin_api_Xk3J9vQm"), None);
+    assert_eq!(found("lin_api_xxxxxxxx"), None);
     assert_eq!(
-        found("lin_oauth_Xk3J9vQm2PzT8rLw4NcY7bHd1FsGa6ZeUo0RiKqE"),
+        found("lin_oauth_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
         None
     );
 }
