@@ -82,3 +82,22 @@ fn a_github_token_prefix_alone_is_not_a_token() {
     assert_eq!(found("ghp_short1234"), None);
     assert_eq!(found("ghx_16C7e42F292c6912E7710c838347Ae178B4a"), None);
 }
+
+#[test]
+fn an_aws_access_key_id_is_refused() {
+    assert_eq!(found("AKIAIOSFODNN7EXAMPLE"), Some(SecretPattern::AwsAccessKeyId));
+    assert_eq!(
+        found("export AWS_ACCESS_KEY_ID=ASIAY34FZKBOKMUTVV7A;"),
+        Some(SecretPattern::AwsAccessKeyId)
+    );
+}
+
+#[test]
+fn a_near_aws_access_key_id_is_not_one() {
+    // One character short, lower case, another prefix, or part of a longer word.
+    assert_eq!(found("AKIAIOSFODNN7EXAMPL"), None);
+    assert_eq!(found("akiaiosfodnn7example"), None);
+    assert_eq!(found("ABIAIOSFODNN7EXAMPLE"), None);
+    assert_eq!(found("XAKIAIOSFODNN7EXAMPLE"), None);
+    assert_eq!(found("AKIAIOSFODNN7EXAMPLEX"), None);
+}
