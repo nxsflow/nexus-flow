@@ -9,3 +9,4 @@ pub mod data_dir;
 pub mod goals;
 pub mod model;
 pub mod status;
+pub mod repo_root;
