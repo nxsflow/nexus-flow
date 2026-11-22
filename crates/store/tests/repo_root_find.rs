@@ -56,7 +56,12 @@ fn no_file_up_to_the_filesystem_root_is_an_error_naming_the_start() {
     fs::create_dir_all(&start).unwrap();
 
     let err = RepoRoot::find(&start).unwrap_err();
-    assert_eq!(err, RootError::NotFound { start: start.clone() });
+    assert_eq!(
+        err,
+        RootError::NotFound {
+            start: start.clone()
+        }
+    );
     let message = err.to_string();
     assert!(message.contains("nexus-flow.toml"), "{message}");
     assert!(message.contains(&start.display().to_string()), "{message}");
@@ -71,7 +76,12 @@ fn a_folder_named_like_the_file_does_not_count() {
     fs::create_dir_all(repo.join("nexus-flow.toml")).unwrap();
 
     let err = RepoRoot::find(&repo).unwrap_err();
-    assert_eq!(err, RootError::NotFound { start: repo.clone() });
+    assert_eq!(
+        err,
+        RootError::NotFound {
+            start: repo.clone()
+        }
+    );
 
     fs::remove_dir_all(&base).unwrap();
 }

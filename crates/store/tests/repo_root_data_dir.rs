@@ -84,7 +84,10 @@ fn a_dotted_path_back_into_the_root_is_refused() {
     let base = scratch("dotted");
     let root = repo_in(&base);
 
-    assert_inside(&root, &base.join("missing").join("..").join("repo").join("data"));
+    assert_inside(
+        &root,
+        &base.join("missing").join("..").join("repo").join("data"),
+    );
     assert_inside(&root, &base.join(".").join("repo").join("data"));
 
     fs::remove_dir_all(&base).unwrap();

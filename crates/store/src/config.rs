@@ -56,7 +56,10 @@ pub enum Problem {
     /// Writing found a file that names no repository space.
     AlreadyExists,
     /// The file could not be read or written.
-    Io { kind: io::ErrorKind, message: String },
+    Io {
+        kind: io::ErrorKind,
+        message: String,
+    },
 }
 
 impl fmt::Display for Problem {
@@ -201,11 +204,10 @@ impl Config {
             only_keys(git, "git.", &["base"])?;
         }
 
-        let repository = string(space, "repository", "space.repository")?.ok_or(
-            Problem::Missing {
+        let repository =
+            string(space, "repository", "space.repository")?.ok_or(Problem::Missing {
                 key: "space.repository",
-            },
-        )?;
+            })?;
         let coordination = string(space, "coordination", "space.coordination")?;
         let base = string(git, "base", "git.base")?.unwrap_or_else(|| DEFAULT_BASE.to_owned());
         Ok(Config {
@@ -235,11 +237,7 @@ fn subtable<'a>(table: &'a Table, key: &'static str) -> Result<Option<&'a Table>
 }
 
 /// The non-empty string at `key` of `table`, if both are there; `path` names it in an error.
-fn string(
-    table: Option<&Table>,
-    key: &str,
-    path: &'static str,
-) -> Result<Option<String>, Problem> {
+fn string(table: Option<&Table>, key: &str, path: &'static str) -> Result<Option<String>, Problem> {
     match table.and_then(|t| t.get(key)) {
         None => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Err(Problem::Empty { key: path }),

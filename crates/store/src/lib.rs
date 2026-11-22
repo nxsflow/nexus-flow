@@ -5,9 +5,9 @@
 
 use nocentraldb as _;
 
+pub mod config;
 pub mod data_dir;
 pub mod goals;
 pub mod model;
-pub mod status;
 pub mod repo_root;
-pub mod config;
+pub mod status;

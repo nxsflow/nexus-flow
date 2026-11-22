@@ -46,7 +46,11 @@ fn a_file_that_names_a_repository_space_is_never_overwritten() {
         }
     );
     assert!(err.to_string().contains("sp_team"), "{err}");
-    assert_eq!(fs::read(&file).unwrap(), existing, "the bytes are unchanged");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        existing,
+        "the bytes are unchanged"
+    );
 
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -65,7 +69,11 @@ fn a_file_of_a_future_format_that_names_a_space_is_never_overwritten() {
             repository: "sp_future".into()
         }
     );
-    assert_eq!(fs::read(&file).unwrap(), existing, "the bytes are unchanged");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        existing,
+        "the bytes are unchanged"
+    );
 
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -79,7 +87,11 @@ fn any_other_existing_file_is_not_overwritten_either() {
 
     let err = Config::new("sp_other").write_new(&dir).unwrap_err();
     assert_eq!(err.problem, Problem::AlreadyExists);
-    assert_eq!(fs::read(&file).unwrap(), existing, "the bytes are unchanged");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        existing,
+        "the bytes are unchanged"
+    );
 
     fs::remove_dir_all(&dir).unwrap();
 }
