@@ -1,0 +1,19 @@
+{
+  "collections": {
+    "spaceMember": {
+      "fields": {
+        "member": { "rule": 1, "since": 1, "type": "ncdb/string" },
+        "role": { "rule": 1, "since": 1, "type": "ncdb/string" },
+        "ticket": { "rule": 1, "since": 1, "targets": [], "type": "ncdb/ref" }
+      },
+      "since": 1
+    }
+  },
+  "format": 1,
+  "model": {
+    "hash": "sha256:371e2258928e5137c0fd5ef978e4008a030ad774a2667eb8c7484155181d8bca",
+    "id": "e8a10b62deb8f08993d64c9e60053a9f",
+    "version": 1
+  },
+  "plugins": {}
+}
