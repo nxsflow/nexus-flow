@@ -6,6 +6,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::data_dir::DataDir;
+
 /// The file whose folder is the repository's root.
 pub const FILE_NAME: &str = "nexus-flow.toml";
 
@@ -14,6 +16,8 @@ pub const FILE_NAME: &str = "nexus-flow.toml";
 pub enum RootError {
     /// No folder from `start` up to the filesystem's root holds `nexus-flow.toml`.
     NotFound { start: PathBuf },
+    /// The data directory lies inside the repository's root.
+    DataDirInside { data_dir: PathBuf, root: PathBuf },
 }
 
 impl fmt::Display for RootError {
@@ -24,6 +28,7 @@ impl fmt::Display for RootError {
                 "no {FILE_NAME} in {} or any folder above it; run nxs init at the repository's root",
                 start.display()
             ),
+            RootError::DataDirInside { .. } => Ok(()),
         }
     }
 }
@@ -54,6 +59,10 @@ impl RepoRoot {
     /// The root folder itself.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn check_data_dir(&self, _data: &DataDir) -> Result<(), RootError> {
+        Ok(())
     }
 
     /// The root's `nexus-flow.toml`.
