@@ -12,6 +12,8 @@
 
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// The directory's own name under the platform's data directory.
@@ -110,6 +112,11 @@ impl DataDir {
             Platform::Windows => absolute("LOCALAPPDATA")?.join(NAME),
         };
         Ok(DataDir { root })
+    }
+
+    /// Creates the directory, and its parents, if it does not exist yet.
+    pub fn open(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.root)
     }
 
     /// The directory itself.

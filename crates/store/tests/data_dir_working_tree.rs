@@ -48,15 +48,21 @@ fn opening_the_data_directory_leaves_the_working_tree_unchanged() {
     let before = snapshot(&repo);
 
     let data = base.join("data");
-    let dir = DataDir::resolve(Platform::current(), env(vec![("NXS_DATA_DIR", data.clone())]))
-        .unwrap();
+    let dir = DataDir::resolve(
+        Platform::current(),
+        env(vec![("NXS_DATA_DIR", data.clone())]),
+    )
+    .unwrap();
     dir.open().expect("the data directory opens");
     assert!(data.is_dir(), "opening creates the data directory");
 
     let home = base.join("home");
     let dir = DataDir::resolve(
         Platform::Linux,
-        env(vec![("HOME", home.clone()), ("XDG_DATA_HOME", "share".into())]),
+        env(vec![
+            ("HOME", home.clone()),
+            ("XDG_DATA_HOME", "share".into()),
+        ]),
     )
     .unwrap();
     dir.open().expect("the data directory opens");

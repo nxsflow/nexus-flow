@@ -42,7 +42,10 @@ fn linux_uses_xdg_data_home_when_it_is_set() {
     assert_eq!(
         root(
             Platform::Linux,
-            &[("HOME", abs("home/ada")), ("XDG_DATA_HOME", abs("data/ada"))]
+            &[
+                ("HOME", abs("home/ada")),
+                ("XDG_DATA_HOME", abs("data/ada"))
+            ]
         ),
         abs("data/ada/nexus-flow")
     );
@@ -124,7 +127,13 @@ fn a_relative_nxs_data_dir_is_refused_so_it_cannot_land_in_the_working_tree() {
     ];
     let err = DataDir::resolve(Platform::Linux, env(&vars)).unwrap_err();
     assert!(
-        matches!(err, DataDirError::Relative { variable: "NXS_DATA_DIR", .. }),
+        matches!(
+            err,
+            DataDirError::Relative {
+                variable: "NXS_DATA_DIR",
+                ..
+            }
+        ),
         "{err:?}"
     );
 }
@@ -146,10 +155,16 @@ fn a_platform_without_its_home_variable_is_refused() {
 
 #[test]
 fn a_relative_home_is_refused() {
-    let err = DataDir::resolve(Platform::Linux, env(&[("HOME", PathBuf::from("ada"))]))
-        .unwrap_err();
+    let err =
+        DataDir::resolve(Platform::Linux, env(&[("HOME", PathBuf::from("ada"))])).unwrap_err();
     assert!(
-        matches!(err, DataDirError::Relative { variable: "HOME", .. }),
+        matches!(
+            err,
+            DataDirError::Relative {
+                variable: "HOME",
+                ..
+            }
+        ),
         "{err:?}"
     );
 }
