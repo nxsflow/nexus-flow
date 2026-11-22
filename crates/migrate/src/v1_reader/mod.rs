@@ -28,6 +28,7 @@ const SCHEMA: i64 = 9;
 pub struct V1Workspace {
     dir: PathBuf,
     conn: Connection,
+    unchanged: db::Unchanged,
     replica: Replica,
     plugin: String,
     name: Option<String>,
@@ -56,7 +57,7 @@ impl V1Workspace {
         if !db_path.is_file() {
             return Err(Error::Refused(Refusal::NothingToMigrate));
         }
-        db::refuse_in_use(&db_path)?;
+        let unchanged = db::Unchanged::take(&db_path)?;
         let replica = files::replica(dir)?;
         let config = files::config(dir)?;
         if config.plugin != SUPPORTED_PLUGIN {
@@ -76,10 +77,11 @@ impl V1Workspace {
         if db::is_based(&conn)? {
             return Err(Error::Refused(Refusal::V1BasedStore));
         }
-        db::refuse_in_use(&db_path)?;
+        unchanged.check()?;
         Ok(V1Workspace {
             dir: dir.to_path_buf(),
             conn,
+            unchanged,
             replica,
             plugin: config.plugin,
             name: config.name,
@@ -121,11 +123,14 @@ impl V1Workspace {
 
     /// Every op of the log, chat's included, in v1's order: `lamport`, then `site`, then `op_id`.
     ///
-    /// The database is read without a lock, so a v1 process that opened it meanwhile could have
-    /// changed it under the read: the read is refused with [`Refusal::V1InUse`] then.
+    /// The database is read without a lock, so a v1 process that opened it since [`open`]
+    /// could have changed it under the read: the read is refused with [`Refusal::V1InUse`] then,
+    /// whatever it returned.
+    ///
+    /// [`open`]: Self::open
     pub fn ops(&self) -> Result<Vec<V1Op>, Error> {
-        let ops = db::ops(&self.conn)?;
-        db::refuse_in_use(&self.dir.join(db::FILE))?;
-        Ok(ops)
+        let ops = db::ops(&self.conn);
+        self.unchanged.check()?;
+        ops
     }
 }

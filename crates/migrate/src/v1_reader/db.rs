@@ -1,6 +1,7 @@
 //! `.nxs/db.sqlite`, opened so that nothing on disk changes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -21,12 +22,59 @@ pub(super) fn open(path: &Path) -> Result<Connection, Error> {
     })
 }
 
+/// The database as it was when the reader first looked at it, so that a read can tell whether v1
+/// had it open, or changed it, while the read ran.
+pub(super) struct Unchanged {
+    path: PathBuf,
+    stamp: Stamp,
+}
+
+/// What the file system says of the database file: its length and when it was last written.
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Unchanged {
+    /// Takes the database's stamp, after refusing it when v1 has it open.
+    pub(super) fn take(path: &Path) -> Result<Self, Error> {
+        refuse_in_use(path)?;
+        Ok(Unchanged {
+            path: path.to_path_buf(),
+            stamp: stamp(path)?,
+        })
+    }
+
+    /// Refuses with [`Refusal::V1InUse`] when v1 has the database open now, or wrote it since
+    /// [`take`](Self::take): a process that opened, wrote and closed it in between leaves no file
+    /// beside it, but its checkpoint changed the file under the read.
+    pub(super) fn check(&self) -> Result<(), Error> {
+        refuse_in_use(&self.path)?;
+        if stamp(&self.path)? != self.stamp {
+            return Err(Error::Refused(Refusal::V1InUse));
+        }
+        Ok(())
+    }
+}
+
+fn stamp(path: &Path) -> Result<Stamp, Error> {
+    let meta = std::fs::metadata(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(Stamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
 /// Refuses with [`Refusal::V1InUse`] when a file SQLite keeps beside the database while a
 /// connection has it open lies beside it: `-wal` and `-shm` for v1's WAL mode, `-journal` for a
 /// write in rollback mode. SQLite removes them when the last connection closes; one left behind
 /// by a process that ended without closing may hold writes `db.sqlite` does not have yet, which
 /// v1 takes in the next time it opens the workspace.
-pub(super) fn refuse_in_use(path: &Path) -> Result<(), Error> {
+fn refuse_in_use(path: &Path) -> Result<(), Error> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut beside = path.as_os_str().to_owned();
         beside.push(suffix);
