@@ -37,7 +37,10 @@ fn the_plugin_falls_back_as_v1_resolves_it() {
     assert_eq!(ws.name(), None);
 
     f.write("config.toml", "plugin = \"issue-tracker\"\n");
-    assert_eq!(V1Workspace::open(&f.nxs()).unwrap().plugin(), "issue-tracker");
+    assert_eq!(
+        V1Workspace::open(&f.nxs()).unwrap().plugin(),
+        "issue-tracker"
+    );
 }
 
 /// `sync.toml`'s endpoint may carry a password: a TOML error would quote the line it failed on,
