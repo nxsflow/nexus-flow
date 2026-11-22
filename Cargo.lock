@@ -2666,6 +2666,7 @@ dependencies = [
 name = "nexus-flow-migrate"
 version = "0.224.0"
 dependencies = [
+ "nxs-foundation",
  "rusqlite",
  "serde",
  "toml",
