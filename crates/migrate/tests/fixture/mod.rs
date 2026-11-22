@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -184,9 +185,10 @@ impl Fixture {
         }
     }
 
-    /// Every file under `.nxs/`, by its path relative to it, with its bytes.
-    pub fn snapshot(&self) -> Vec<(String, Vec<u8>)> {
-        fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    /// Every file under `.nxs/`, by its path relative to it, with its length and a hash of its
+    /// bytes, so that a failed comparison prints a list a reader can take in.
+    pub fn snapshot(&self) -> Vec<(String, usize, u64)> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, usize, u64)>) {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .unwrap()
                 .map(|e| e.unwrap().path())
@@ -197,7 +199,10 @@ impl Fixture {
                     walk(base, &path, out);
                 } else {
                     let name = path.strip_prefix(base).unwrap().display().to_string();
-                    out.push((name, std::fs::read(&path).unwrap()));
+                    let bytes = std::fs::read(&path).unwrap();
+                    let mut hasher = DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    out.push((name, bytes.len(), hasher.finish()));
                 }
             }
         }
