@@ -12,11 +12,17 @@ mod op;
 
 use std::path::{Path, PathBuf};
 
-pub use error::Error;
+pub use error::{Error, Refusal};
 pub use files::Replica;
 pub use op::V1Op;
 
 use rusqlite::Connection;
+
+/// The one plugin whose workspaces move (decided by the owner, NEX-81).
+const SUPPORTED_PLUGIN: &str = "issue-tracker";
+
+/// The one schema of v1's database the reader knows.
+const SCHEMA: i64 = 9;
 
 /// A v1 workspace directory (a `.nxs/` folder), opened for reading.
 pub struct V1Workspace {
@@ -43,13 +49,34 @@ impl std::fmt::Debug for V1Workspace {
 }
 
 impl V1Workspace {
-    /// Opens the v1 workspace in `dir`, a `.nxs/` folder.
+    /// Opens the v1 workspace in `dir`, a `.nxs/` folder, or refuses it. The checks run in the
+    /// order of [`Refusal`]'s variants, and none of them writes: a refused workspace is as it was.
     pub fn open(dir: &Path) -> Result<Self, Error> {
+        let db_path = dir.join(db::FILE);
+        if !db_path.is_file() {
+            return Err(Error::Refused(Refusal::NothingToMigrate));
+        }
+        db::refuse_in_use(&db_path)?;
         let replica = files::replica(dir)?;
         let config = files::config(dir)?;
+        if config.plugin != SUPPORTED_PLUGIN {
+            return Err(Error::Refused(Refusal::UnsupportedPlugin {
+                plugin: config.plugin,
+            }));
+        }
         let stream_id = files::stream_id(dir)?;
-        let conn = db::open(&dir.join(db::FILE))?;
+        let conn = db::open(&db_path)?;
         let schema = db::schema(&conn)?;
+        if schema < SCHEMA {
+            return Err(Error::Refused(Refusal::V1FormatOld { schema }));
+        }
+        if schema > SCHEMA {
+            return Err(Error::Refused(Refusal::V1FormatUnknown { schema }));
+        }
+        if db::is_based(&conn)? {
+            return Err(Error::Refused(Refusal::V1BasedStore));
+        }
+        db::refuse_in_use(&db_path)?;
         Ok(V1Workspace {
             dir: dir.to_path_buf(),
             conn,
@@ -93,7 +120,12 @@ impl V1Workspace {
     }
 
     /// Every op of the log, chat's included, in v1's order: `lamport`, then `site`, then `op_id`.
+    ///
+    /// The database is read without a lock, so a v1 process that opened it meanwhile could have
+    /// changed it under the read: the read is refused with [`Refusal::V1InUse`] then.
     pub fn ops(&self) -> Result<Vec<V1Op>, Error> {
-        db::ops(&self.conn)
+        let ops = db::ops(&self.conn)?;
+        db::refuse_in_use(&self.dir.join(db::FILE))?;
+        Ok(ops)
     }
 }

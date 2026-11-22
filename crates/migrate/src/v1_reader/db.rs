@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::{Error, V1Op};
+use super::{Error, Refusal, V1Op};
 
 /// The database file in a v1 workspace directory.
 pub(super) const FILE: &str = "db.sqlite";
@@ -19,6 +19,28 @@ pub(super) fn open(path: &Path) -> Result<Connection, Error> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Refuses with [`Refusal::V1InUse`] when a file SQLite keeps beside the database while a
+/// connection has it open lies beside it: `-wal` and `-shm` for v1's WAL mode, `-journal` for a
+/// write in rollback mode. SQLite removes them when the last connection closes; one left behind
+/// by a process that ended without closing may hold writes `db.sqlite` does not have yet, which
+/// v1 takes in the next time it opens the workspace.
+pub(super) fn refuse_in_use(path: &Path) -> Result<(), Error> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut beside = path.as_os_str().to_owned();
+        beside.push(suffix);
+        if Path::new(&beside).exists() {
+            return Err(Error::Refused(Refusal::V1InUse));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the store started from a snapshot: v1 keeps its base in the one row of `log_base`.
+pub(super) fn is_based(conn: &Connection) -> Result<bool, Error> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM log_base)", [], |r| r.get(0))
+        .map_err(|source| sqlite(conn, source))
 }
 
 /// The database's `PRAGMA user_version`.
