@@ -49,6 +49,9 @@ pub enum DataDirError {
         variable: &'static str,
         path: PathBuf,
     },
+    /// A session id, member id or run is not one plain name, so its folder could lie outside
+    /// the folder it belongs in.
+    NotAName { kind: &'static str, id: String },
 }
 
 impl fmt::Display for DataDirError {
@@ -63,6 +66,9 @@ impl fmt::Display for DataDirError {
                 "{variable} must be an absolute path, not {}",
                 path.display()
             ),
+            DataDirError::NotAName { kind, id } => {
+                write!(f, "{kind} {id:?} is not a plain name for a folder")
+            }
         }
     }
 }
@@ -109,5 +115,40 @@ impl DataDir {
     /// The directory itself.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The device member's NoCentralDB database.
+    pub fn device(&self) -> PathBuf {
+        self.root.join("device")
+    }
+
+    /// One session member's database and keys, created by `nxs session start`.
+    pub fn session(&self, session_id: &str) -> Result<PathBuf, DataDirError> {
+        self.under("sessions", "session id", session_id)
+    }
+
+    /// nexus-flow's rebuildable cache for one member, deletable at any time.
+    pub fn derived(&self, member_id: &str) -> Result<PathBuf, DataDirError> {
+        self.under("derived", "member id", member_id)
+    }
+
+    /// The migration member's database and keys for one run of RFC 0008's move.
+    pub fn migration(&self, run: &str) -> Result<PathBuf, DataDirError> {
+        self.under("migration", "migration run", run)
+    }
+
+    fn under(&self, folder: &str, kind: &'static str, id: &str) -> Result<PathBuf, DataDirError> {
+        let plain = !id.is_empty()
+            && id != "."
+            && id != ".."
+            && !id.contains(['/', '\\'])
+            && Path::new(id).components().count() == 1;
+        if !plain {
+            return Err(DataDirError::NotAName {
+                kind,
+                id: id.to_owned(),
+            });
+        }
+        Ok(self.root.join(folder).join(id))
     }
 }
