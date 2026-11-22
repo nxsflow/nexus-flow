@@ -59,7 +59,9 @@ fn a_database_opened_by_v1_while_it_is_read_is_v1_in_use() {
     let ws = V1Workspace::open(&f.nxs()).unwrap();
     let v1 = Connection::open(f.db()).unwrap();
     v1.execute_batch("SELECT COUNT(*) FROM ops").unwrap();
-    let err = ws.ops().expect_err("the log is not read while v1 has it open");
+    let err = ws
+        .ops()
+        .expect_err("the log is not read while v1 has it open");
     assert_eq!(err.refusal().map(Refusal::code), Some("v1_in_use"));
 }
 
