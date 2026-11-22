@@ -49,7 +49,10 @@ fn a_database_opens_from_the_committed_lock_under_the_data_dir() {
         .key_file(dir.join("device.keys"));
     let db = block_on(Db::open(options)).expect("the committed lock opens a database");
     drop(db);
-    assert!(device.is_dir(), "the database lives under the data directory");
+    assert!(
+        device.is_dir(),
+        "the database lives under the data directory"
+    );
 
     let options = OpenOptions::new(model::LOCK)
         .path(&device)
@@ -64,12 +67,19 @@ fn a_role_record_is_written_to_space_member_and_read_back() {
     let space = block_on(db.spaces().create()).unwrap();
     let written = block_on(space.create(
         "spaceMember",
-        [("member", Value::from("m1")), ("role", Value::from("coder"))],
+        [
+            ("member", Value::from("m1")),
+            ("role", Value::from("coder")),
+        ],
     ))
     .expect("spaceMember is a collection of the model");
     let id = written.ids[0];
     let record = block_on(space.get("spaceMember", id)).unwrap().unwrap();
     assert_eq!(record.get::<&str>("member").unwrap(), Some("m1"));
     assert_eq!(record.get::<&str>("role").unwrap(), Some("coder"));
-    assert_eq!(record.get::<Reference>("ticket").unwrap(), None, "a field left unset");
+    assert_eq!(
+        record.get::<Reference>("ticket").unwrap(),
+        None,
+        "a field left unset"
+    );
 }

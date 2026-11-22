@@ -78,10 +78,18 @@ fn a_name_is_its_module_prefix_and_an_upper_camel_case_name() {
     }
     for (name, module, why) in [
         ("space", Module::Space, "the prefix alone"),
-        ("spacemember", Module::Space, "the own name not upper camel case"),
+        (
+            "spacemember",
+            Module::Space,
+            "the own name not upper camel case",
+        ),
         ("ticketsTicket", Module::Space, "another module's prefix"),
         ("space_Member", Module::Space, "a separator"),
-        ("spaceMember-2", Module::Space, "a character outside [A-Za-z0-9]"),
+        (
+            "spaceMember-2",
+            Module::Space,
+            "a character outside [A-Za-z0-9]",
+        ),
         ("SpaceMember", Module::Space, "an upper-case first letter"),
         ("spaceMÜmber", Module::Space, "a non-ASCII letter"),
     ] {
@@ -91,7 +99,10 @@ fn a_name_is_its_module_prefix_and_an_upper_camel_case_name() {
     assert_eq!(longest.len(), 63);
     assert!(model::is_collection_name(&longest, Module::Space));
     let too_long = format!("space{}", "M".repeat(59));
-    assert!(!model::is_collection_name(&too_long, Module::Space), "64 characters");
+    assert!(
+        !model::is_collection_name(&too_long, Module::Space),
+        "64 characters"
+    );
 }
 
 /// Just enough of a JSON reader to list an object's keys and skip their values: the lock is
@@ -117,7 +128,11 @@ impl<'a> Json<'a> {
 
     fn expect(&mut self, byte: u8) {
         self.space();
-        assert_eq!(self.text[self.at] as char, byte as char, "at byte {}", self.at);
+        assert_eq!(
+            self.text[self.at] as char, byte as char,
+            "at byte {}",
+            self.at
+        );
         self.at += 1;
     }
 
