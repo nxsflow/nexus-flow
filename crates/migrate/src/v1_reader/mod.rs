@@ -8,21 +8,38 @@
 mod db;
 mod error;
 mod files;
+mod op;
 
 use std::path::{Path, PathBuf};
 
 pub use error::Error;
 pub use files::Replica;
+pub use op::V1Op;
+
+use rusqlite::Connection;
 
 /// A v1 workspace directory (a `.nxs/` folder), opened for reading.
-#[derive(Debug)]
 pub struct V1Workspace {
     dir: PathBuf,
+    conn: Connection,
     replica: Replica,
     plugin: String,
     name: Option<String>,
     stream_id: Option<String>,
     schema: i64,
+}
+
+impl std::fmt::Debug for V1Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V1Workspace")
+            .field("dir", &self.dir)
+            .field("replica", &self.replica)
+            .field("plugin", &self.plugin)
+            .field("name", &self.name)
+            .field("stream_id", &self.stream_id)
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
+    }
 }
 
 impl V1Workspace {
@@ -35,6 +52,7 @@ impl V1Workspace {
         let schema = db::schema(&conn)?;
         Ok(V1Workspace {
             dir: dir.to_path_buf(),
+            conn,
             replica,
             plugin: config.plugin,
             name: config.name,
@@ -72,5 +90,10 @@ impl V1Workspace {
     /// The database's schema version, its `PRAGMA user_version`.
     pub fn schema(&self) -> i64 {
         self.schema
+    }
+
+    /// Every op of the log, chat's included, in v1's order: `lamport`, then `site`, then `op_id`.
+    pub fn ops(&self) -> Result<Vec<V1Op>, Error> {
+        db::ops(&self.conn)
     }
 }

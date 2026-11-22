@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::Error;
+use super::{Error, V1Op};
 
 /// The database file in a v1 workspace directory.
 pub(super) const FILE: &str = "db.sqlite";
@@ -24,6 +24,40 @@ pub(super) fn open(path: &Path) -> Result<Connection, Error> {
 /// The database's `PRAGMA user_version`.
 pub(super) fn schema(conn: &Connection) -> Result<i64, Error> {
     pragma(conn, "user_version")
+}
+
+/// Every op of the log in v1's order, `lamport` then `site`, with ties broken by `op_id`, compared
+/// bytewise (SQLite's `BINARY` collation).
+pub(super) fn ops(conn: &Connection) -> Result<Vec<V1Op>, Error> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT op_id, lamport, site, domain, target_kind, target_id, field, op_type, value,
+                    author, wall_clock, key_id, sig, provenance
+             FROM ops ORDER BY lamport, site, op_id",
+        )
+        .map_err(|source| sqlite(conn, source))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(V1Op {
+                op_id: r.get(0)?,
+                lamport: r.get(1)?,
+                site: r.get(2)?,
+                domain: r.get(3)?,
+                target_kind: r.get(4)?,
+                target_id: r.get(5)?,
+                field: r.get(6)?,
+                op_type: r.get(7)?,
+                value: r.get(8)?,
+                author: r.get(9)?,
+                wall_clock: r.get(10)?,
+                key_id: r.get(11)?,
+                sig: r.get(12)?,
+                provenance: r.get(13)?,
+            })
+        })
+        .map_err(|source| sqlite(conn, source))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|source| sqlite(conn, source))
 }
 
 fn pragma(conn: &Connection, name: &str) -> Result<i64, Error> {
