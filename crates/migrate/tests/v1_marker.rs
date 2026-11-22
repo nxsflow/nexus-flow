@@ -177,7 +177,10 @@ fn undo_restores_the_header_byte_for_byte_and_removes_the_marker() {
     );
     assert_eq!(header(&f), (9, 4));
     assert!(db_bytes(&f) == before, "the database is as it was");
-    assert!(!f.nxs().join("migrated.toml").exists(), "the marker is gone");
+    assert!(
+        !f.nxs().join("migrated.toml").exists(),
+        "the marker is gone"
+    );
     assert!(marker::read(&f.nxs()).unwrap().is_none());
     V1Workspace::open(&f.nxs()).expect("the move reads the workspace again");
 }
