@@ -107,3 +107,16 @@ fn a_store_started_from_a_snapshot_is_v1_based_store() {
     f.sql("INSERT INTO log_base(id, relay_position, clock) VALUES(1, 40, 1200);");
     assert_eq!(refused(&f).code(), "v1_based_store");
 }
+
+/// A v1 process that opened the database, wrote and closed it again between two checks leaves no
+/// file beside it, but the database itself changed under the read.
+#[test]
+fn a_database_v1_changed_while_it_is_read_is_v1_in_use() {
+    let f = Fixture::v1();
+    let ws = V1Workspace::open(&f.nxs()).unwrap();
+    f.insert(&[fixture::Op::title("late", 1, 1)]);
+    let err = ws
+        .ops()
+        .expect_err("a log that changed under the read is not returned");
+    assert_eq!(err.refusal().map(Refusal::code), Some("v1_in_use"));
+}
