@@ -36,7 +36,10 @@ fn as_session_on_a_session_that_is_not_running_fails_and_creates_nothing() {
     let err = block_on(engine.as_session("gone".parse().unwrap())).unwrap_err();
 
     let text = err.to_string();
-    assert!(text.contains("gone") && text.contains("not running"), "{text}");
+    assert!(
+        text.contains("gone") && text.contains("not running"),
+        "{text}"
+    );
     assert!(!base.join("data").join("sessions").exists());
     fs::remove_dir_all(&base).unwrap();
 }
@@ -56,7 +59,10 @@ fn open_runs_as_the_session_nxs_session_names() {
     ))
     .unwrap_err();
     let text = err.to_string();
-    assert!(text.contains("gone") && text.contains("NXS_SESSION"), "{text}");
+    assert!(
+        text.contains("gone") && text.contains("NXS_SESSION"),
+        "{text}"
+    );
     assert!(!data.exists(), "nothing was written");
 
     std::env::set_var("NXS_SESSION", "../device");

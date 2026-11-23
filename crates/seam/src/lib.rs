@@ -4,5 +4,6 @@ mod engine;
 
 pub use engine::{Engine, Error, Options};
 pub use nexus_flow_store::data_dir::{DataDir, DataDirError};
-pub use nexus_flow_store::id::{NotASpaceId, SpaceId};
+pub use nexus_flow_store::id::{NotASessionId, NotASpaceId, SessionId, SpaceId};
+pub use nexus_flow_store::member_select::SessionVarError;
 pub use nexus_flow_store::space::{DeviceKeys, InitError};
