@@ -144,6 +144,71 @@ jobs:
       - name: SDK boundary
         run: cargo xtask sdk-boundary check
 
+      # ---- THE MODEL LOCK (NEX-91, RFC 0001 "The model": "Building it", "The model only grows") ----
+      #
+      # model/model.lock.json is what `ncdb model build` writes from model/model.ts, and the Rust build
+      # reads only the lock. `.github/scripts/model-lock.sh` holds the rules (its header says why each
+      # check is built the way it is); these steps give it what it needs:
+      #
+      #   - the pin: Cargo.lock's `nocentraldb` version, which model/package.json's SDK must equal;
+      #   - `ncdb` at exactly that version (`cargo install --locked`), cached under the version, so a
+      #     pin move installs the new one and a cache hit costs seconds;
+      #   - Node 24, which `ncdb` needs to run model.ts (still so at 0.1.0-beta.1: it refuses Node 22);
+      #   - model/node_modules from model/package-lock.json, without install scripts.
+      #
+      # Then the check: the committed lock is what a rebuild writes, and model.ts is an additive change
+      # of the lock on the base: the PR's base branch (HEAD is the merge commit), the previous tip on
+      # a push, `v2` on a dispatch. A dispatch on a branch behind v2's model fails as if it removed
+      # v2's newer fields; merging v2 in answers it. Then the script's harness, with the same ncdb.
+      #
+      # Only where model/ exists: `main` and its maintenance lines have none, and run none of this.
+      - name: Model lock - the pin
+        id: ncdb
+        if: hashFiles('model/model.lock.json') != ''
+        run: |
+          version="$(bash .github/scripts/model-lock.sh pin)" || { echo "$version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v5
+        if: steps.ncdb.outputs.version != ''
+        with:
+          node-version: "24"
+      - uses: actions/cache@v4
+        if: steps.ncdb.outputs.version != ''
+        with:
+          path: ~/.ncdb
+          key: ncdb-${{ runner.os }}-${{ steps.ncdb.outputs.version }}
+      - name: Model lock - ncdb at the pin
+        if: steps.ncdb.outputs.version != ''
+        run: |
+          bash .github/scripts/model-lock.sh install "$HOME/.ncdb"
+          echo "$HOME/.ncdb/bin" >> "$GITHUB_PATH"
+      - name: Model lock - the SDK
+        if: steps.ncdb.outputs.version != ''
+        working-directory: model
+        run: npm ci --ignore-scripts
+      - name: Model lock - rebuilt, and the model only grows
+        if: steps.ncdb.outputs.version != ''
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) ref="$BASE_REF" ;;
+            push) ref="$BEFORE" ;;
+            *) ref=v2 ;;
+          esac
+          if [ -z "$ref" ] || [ "$ref" = 0000000000000000000000000000000000000000 ]; then
+            echo "::notice::no earlier commit to check the model against; the rebuild still runs"
+            base=HEAD
+          else
+            git fetch --no-tags --depth=1 origin "$ref"
+            base="$(git rev-parse FETCH_HEAD)"
+          fi
+          bash .github/scripts/model-lock.sh check "$base"
+      - name: Model lock - the harness
+        if: steps.ncdb.outputs.version != ''
+        run: tests/model-lock.test.sh
+
       # The software factory's decision log (factory/FACTORY.md): every file in factory/decisions/
       # has the name pattern, a heading that agrees with it, the four required fields, lowercase
       # topics, and a `Supersedes:` that names a file that exists. Reads text only.

@@ -24,6 +24,9 @@ name: install-sh-ci
 #
 # And `.github/scripts/docs-only.sh` (NEX-36), which decides whether a CI job may skip its builds and
 # tests: a wrong "yes" is a gate that silently did not run, so it gets the same treatment.
+#
+# And `.github/scripts/model-lock.sh` (NEX-91), CI's model lock step, for shellcheck only: its
+# harness needs the real `ncdb` and Node 24, so ci.yml's lint job runs it after installing both.
 on:
   push:
     branches: [main]
@@ -38,6 +41,8 @@ on:
       - ".github/workflows/isolated-test.yml"
       - "tests/docs-only.test.sh"
       - ".github/scripts/docs-only.sh"
+      - "tests/model-lock.test.sh"
+      - ".github/scripts/model-lock.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/install-sh-ci.yml"
   pull_request:
@@ -52,6 +57,8 @@ on:
       - ".github/workflows/isolated-test.yml"
       - "tests/docs-only.test.sh"
       - ".github/scripts/docs-only.sh"
+      - "tests/model-lock.test.sh"
+      - ".github/scripts/model-lock.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/install-sh-ci.yml"
 
@@ -86,6 +93,7 @@ jobs:
           shellcheck .github/scripts/require-green-ci.sh tests/require-green-ci.test.sh
           shellcheck .github/scripts/isolated-test.sh tests/isolated-test.test.sh
           shellcheck .github/scripts/docs-only.sh tests/docs-only.test.sh
+          shellcheck .github/scripts/model-lock.sh tests/model-lock.test.sh
 
       # The embedded minisign pubkey IS the authenticity anchor — a typo or a missed rotation
       # would ship an installer whose signature gate can never pass (silent downgrade to
