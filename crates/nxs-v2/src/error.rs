@@ -1,9 +1,10 @@
 //! Errors as v1 prints them (RFC 0001, "Reading and writing"; RFC 0002, "JSON"): the error object
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
-//! stderr instead, as v1's human output does. The codes are v1's, and `no_key_store` (NEX-224).
+//! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
+//! `timeout` (NEX-102).
 
-use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError};
+use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError, SyncError};
 
 use crate::output::Format;
 use crate::Outcome;
@@ -21,6 +22,8 @@ pub enum Kind {
     Io,
     /// The machine has no key store, where `nxs` keeps the device's keys (NEX-224).
     NoKeyStore,
+    /// `nxs sync --timeout` passed while something was still behind or unconfirmed (NEX-102).
+    Timeout,
 }
 
 impl Kind {
@@ -31,6 +34,7 @@ impl Kind {
             Kind::Conflict => "conflict",
             Kind::Io => "io",
             Kind::NoKeyStore => "no_key_store",
+            Kind::Timeout => "timeout",
         }
     }
 }
@@ -90,7 +94,9 @@ impl From<Error> for CliError {
         let kind = match &e {
             Error::DataDir(_) => Kind::Validation,
             Error::Open(open) => open_kind(open),
-            Error::Sync(_) => Kind::Io,
+            Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
+            Error::Sync(SyncError::NoRelay) => Kind::Validation,
+            Error::Sync(SyncError::Open(open)) => open_kind(open),
         };
         CliError { kind, msg }
     }
