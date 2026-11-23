@@ -2683,6 +2683,7 @@ name = "nexus-flow-store"
 version = "0.224.0"
 dependencies = [
  "nocentraldb",
+ "toml",
 ]
 
 [[package]]

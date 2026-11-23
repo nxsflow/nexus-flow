@@ -10,3 +10,6 @@ publish = false
 # itself is in the workspace Cargo.toml.
 [dependencies]
 nocentraldb.workspace = true
+# Reads and writes nexus-flow.toml (RFC 0001, "Creating and finding a space"), at the version the
+# workspace already declares.
+toml.workspace = true
