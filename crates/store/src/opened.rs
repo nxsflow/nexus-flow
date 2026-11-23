@@ -22,7 +22,7 @@ use nocentraldb::{Db, ErrorCode, Space};
 use crate::config::Config;
 use crate::data_dir::DataDir;
 use crate::id::SpaceId;
-use crate::open::{open_db, open_device, DeviceKeys, InitError};
+use crate::open::{open_db, open_device, DeviceKeys, InitError, Network};
 use crate::repo_root::RepoRoot;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
 
@@ -39,7 +39,7 @@ pub struct Checkout {
 pub struct Opened {
     /// Kept open for as long as the spaces are: sync runs only while a database is open
     /// (RFC 0001, "Sync").
-    _db: Db,
+    db: Db,
     spaces: Vec<(SpaceId, Option<Space>)>,
     /// The kinds `nexus-flow.toml` names, for the spaces it names.
     kinds: Vec<(SpaceId, SpaceKind)>,
@@ -76,6 +76,26 @@ impl Opened {
     pub fn checkout(&self) -> Option<&Checkout> {
         self.checkout.as_ref()
     }
+
+    /// The open database, for sync (`crate::sync`).
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// The open spaces, each with what the database holds of it.
+    pub(crate) fn spaces(&self) -> &[(SpaceId, Option<Space>)] {
+        &self.spaces
+    }
+
+    /// Looks again for the open spaces the database did not hold, which sync may have brought.
+    pub(crate) async fn refresh(&mut self) -> Result<(), InitError> {
+        for (id, space) in &mut self.spaces {
+            if space.is_none() {
+                *space = get(&self.db, *id).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Opened {
@@ -92,11 +112,21 @@ impl fmt::Debug for Opened {
 /// `nexus-flow.toml` names. Outside a repository the error says to run `nxs init`, and nothing
 /// is created.
 pub async fn repository(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<Opened, InitError> {
+    repository_on(dir, data, keys, Network::Relay).await
+}
+
+/// [`repository`], on the network `network` allows.
+pub(crate) async fn repository_on(
+    dir: &Path,
+    data: &DataDir,
+    keys: DeviceKeys,
+    network: Network,
+) -> Result<Opened, InitError> {
     let root = RepoRoot::find(dir)?;
     let config = Config::read(&root)?;
     let kinds = named_kinds(&config, &root)?;
     let ids = kinds.iter().map(|&(id, _)| id).collect();
-    let db = open_device(&root, data, keys).await?;
+    let db = open_device(&root, data, keys, network).await?;
     let checkout = Checkout {
         path: root.path().to_path_buf(),
         base: config.base,
@@ -118,14 +148,14 @@ pub async fn space(
             let root = RepoRoot::find(dir)?;
             let config = Config::read(&root)?;
             let kinds = named_kinds(&config, &root)?;
-            let db = open_device(&root, data, keys).await?;
+            let db = open_device(&root, data, keys, Network::Relay).await?;
             let checkout = Checkout {
                 path: root.path().to_path_buf(),
                 base: config.base,
             };
             (db, kinds, Some(checkout))
         }
-        None => (open_db(data, keys).await?, Vec::new(), None),
+        None => (open_db(data, keys, Network::Relay).await?, Vec::new(), None),
     };
     open(db, vec![id], kinds, checkout).await
 }
@@ -147,19 +177,23 @@ async fn open(
 ) -> Result<Opened, InitError> {
     let mut spaces = Vec::with_capacity(ids.len());
     for id in ids {
-        let space = match db.spaces().get(id.0).await {
-            Ok(space) => Some(space),
-            Err(e) if e.code() == ErrorCode::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        spaces.push((id, space));
+        spaces.push((id, get(&db, id).await?));
     }
     Ok(Opened {
-        _db: db,
+        db,
         spaces,
         kinds,
         checkout,
     })
+}
+
+/// The space `id`, or `None` while the database holds none of it.
+async fn get(db: &Db, id: SpaceId) -> Result<Option<Space>, InitError> {
+    match db.spaces().get(id.0).await {
+        Ok(space) => Ok(Some(space)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn parse(text: &str, root: &RepoRoot) -> Result<SpaceId, InitError> {

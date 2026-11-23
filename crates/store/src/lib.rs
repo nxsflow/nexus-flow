@@ -17,3 +17,4 @@ pub mod repo_root;
 pub mod space;
 pub mod space_kind;
 pub mod status;
+pub mod sync;

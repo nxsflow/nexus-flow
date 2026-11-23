@@ -2,6 +2,10 @@
 //! writing"): once the repository's root is found, the data directory is checked to lie outside
 //! it, and only then is anything created. The database lives under `device/` in the data
 //! directory and opens from the committed model lock.
+//!
+//! The database syncs, while it is open, through the relay the device's settings name, and works
+//! in island mode without one (RFC 0001, "Sync"). Opening never waits for sync; a caller that must
+//! not touch the network, such as `nxs sync --status`, opens it [`Network::Offline`].
 
 use std::fmt;
 use std::io;
@@ -11,6 +15,7 @@ use nocentraldb::{Db, ErrorCode, OpenOptions};
 
 use crate::config::ConfigError;
 use crate::data_dir::DataDir;
+use crate::device::{DeviceSettings, SettingsError};
 use crate::id::NotASpaceId;
 use crate::model;
 use crate::repo_root::{RepoRoot, RootError};
@@ -39,8 +44,19 @@ pub enum InitError {
     /// The device's keys live in the platform's key store, and this machine has none that can
     /// be reached (NEX-224).
     KeyStoreUnavailable,
+    /// The device's settings in the data directory could not be read.
+    Settings(SettingsError),
     /// NoCentralDB refused to open the database or to create the space.
     Database { message: String },
+}
+
+/// Whether an open database may reach the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// It syncs through the relay the device's settings name, if any.
+    Relay,
+    /// It stays off the network, whatever the settings name.
+    Offline,
 }
 
 impl fmt::Display for InitError {
@@ -57,6 +73,7 @@ impl fmt::Display for InitError {
             InitError::KeyStoreUnavailable => f.write_str(
                 "this machine has no key store that nxs can reach, and nxs keeps the device's keys only there",
             ),
+            InitError::Settings(e) => e.fmt(f),
             InitError::Database { message } => {
                 write!(f, "the device's database: {message}")
             }
@@ -78,6 +95,12 @@ impl From<ConfigError> for InitError {
     }
 }
 
+impl From<SettingsError> for InitError {
+    fn from(e: SettingsError) -> Self {
+        InitError::Settings(e)
+    }
+}
+
 impl From<nocentraldb::Error> for InitError {
     fn from(e: nocentraldb::Error) -> Self {
         match e.code() {
@@ -95,19 +118,29 @@ pub(crate) async fn open_device(
     root: &RepoRoot,
     data: &DataDir,
     keys: DeviceKeys,
+    network: Network,
 ) -> Result<Db, InitError> {
     root.check_data_dir(data)?;
-    open_db(data, keys).await
+    open_db(data, keys, network).await
 }
 
-/// Opens the device member's database in `data`, creating it on first open. The database opens
-/// without a relay: no relay is configured yet, so it works in island mode.
-pub(crate) async fn open_db(data: &DataDir, keys: DeviceKeys) -> Result<Db, InitError> {
+/// Opens the device member's database in `data`, creating it on first open. With
+/// [`Network::Relay`] it syncs through the relay the device's settings name; without one, or
+/// offline, it works in island mode.
+pub(crate) async fn open_db(
+    data: &DataDir,
+    keys: DeviceKeys,
+    network: Network,
+) -> Result<Db, InitError> {
     data.open().map_err(|error| InitError::DataDir {
         path: data.root().to_path_buf(),
         error,
     })?;
     let options = OpenOptions::new(model::LOCK).path(data.device());
+    let options = match (network, DeviceSettings::read(data)?.relay) {
+        (Network::Relay, Some(relay)) => options.relay(relay.as_str()),
+        _ => options,
+    };
     let options = match keys {
         DeviceKeys::KeyStore => options,
         DeviceKeys::File(file) => options.key_file(file),

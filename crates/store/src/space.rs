@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::data_dir::DataDir;
-use crate::open::open_device;
+use crate::open::{open_device, Network};
 use crate::repo_root::{RepoRoot, RootError};
 
 pub use crate::open::{DeviceKeys, InitError};
@@ -85,7 +85,7 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
         Err(RootError::NotFound { .. }) => (RepoRoot::at(dir), None),
         Err(e) => return Err(e.into()),
     };
-    let db = open_device(&root, data, keys).await?;
+    let db = open_device(&root, data, keys, Network::Relay).await?;
     let (space, created) = match existing {
         Some(space) => (space, false),
         None => {

@@ -1,6 +1,8 @@
 //! What the tests that open a database share: a scratch folder per test, a data directory in
 //! it, a key file for a machine without a key store, and a way to run a future on this thread.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};

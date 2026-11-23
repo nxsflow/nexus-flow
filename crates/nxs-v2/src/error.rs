@@ -107,6 +107,7 @@ fn open_kind(e: &InitError) -> Kind {
         InitError::DataDir { .. } => Kind::Io,
         InitError::SpaceId { .. } => Kind::Validation,
         InitError::KeyStoreUnavailable => Kind::NoKeyStore,
+        InitError::Settings(_) => Kind::Validation,
         InitError::Database { .. } => Kind::Io,
     }
 }
