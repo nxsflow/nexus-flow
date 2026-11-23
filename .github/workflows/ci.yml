@@ -138,6 +138,12 @@ jobs:
       - name: Layering gate
         run: cargo xtask layering check
 
+      # The SDK boundary (NEX-89, RFC 0001 "The dependency on NoCentralDB"): only nexus-flow-store
+      # depends on NoCentralDB's SDK, in any dependency kind, so an API change at a pin move touches
+      # one crate. A metadata lint, so it needs no build.
+      - name: SDK boundary
+        run: cargo xtask sdk-boundary check
+
       # The software factory's decision log (factory/FACTORY.md): every file in factory/decisions/
       # has the name pattern, a heading that agrees with it, the four required fields, lowercase
       # topics, and a `Supersedes:` that names a file that exists. Reads text only.
