@@ -69,7 +69,12 @@ fn an_ad_hoc_space_takes_only_copies_of_requests() {
 
 #[test]
 fn a_space_of_unknown_kind_takes_no_kind_restricted_write() {
-    for collection in ["spaceMember", "ticketsTicket", "goalsGoal", "requestsRequest"] {
+    for collection in [
+        "spaceMember",
+        "ticketsTicket",
+        "goalsGoal",
+        "requestsRequest",
+    ] {
         let err = refused(collection, None);
         assert_eq!(err.space, None);
         assert_eq!(err.code(), None, "{collection}: no RFC names this code");

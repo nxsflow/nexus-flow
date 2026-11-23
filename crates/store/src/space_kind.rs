@@ -27,12 +27,6 @@ pub enum SpaceKind {
     AdHoc,
 }
 
-/// Every collection of the model, with the kinds of space it may be written into.
-pub const KINDS: &[(&str, &[SpaceKind])] = &[(
-    "spaceMember",
-    &[SpaceKind::Repository, SpaceKind::Coordination],
-)];
-
 impl SpaceKind {
     /// Every kind of space.
     pub const ALL: [SpaceKind; 3] = [
@@ -49,6 +43,12 @@ impl SpaceKind {
         }
     }
 }
+
+/// Every collection of the model, with the kinds of space it may be written into.
+pub const KINDS: &[(&str, &[SpaceKind])] = &[(
+    "spaceMember",
+    &[SpaceKind::Repository, SpaceKind::Coordination],
+)];
 
 /// Why a write was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
