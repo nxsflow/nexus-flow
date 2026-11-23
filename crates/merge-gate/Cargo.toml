@@ -9,3 +9,4 @@ publish = false
 # the lockfile settles in NEX-212 and not in the ticket after it.
 [dependencies]
 pulldown-cmark.workspace = true
+toml.workspace = true
