@@ -1,0 +1,209 @@
+//! `nxs sync` (RFC 0001, "Sync"; "Public surfaces this RFC brings"): `--relay <url>` stores the
+//! device's relay in the data directory, never in `nexus-flow.toml`; `--status` prints `member`,
+//! `relay`, `unconfirmed` and `synced_at` from the local database without the network; a plain
+//! command never waits for sync; `--watch` keeps the database open.
+//!
+//! No NoCentralDB relay is published for an embedder's tests (NEX-227): the relay here is a TCP
+//! listener that counts connections and never answers. A write reaching another member waits for
+//! NEX-228.
+
+mod common;
+
+use std::fs;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use common::{json, nxs, scratch, stdout};
+
+/// A relay that accepts every connection, counts it and never answers.
+struct SilentRelay {
+    url: String,
+    connections: Arc<AtomicUsize>,
+}
+
+impl SilentRelay {
+    fn start() -> SilentRelay {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&connections);
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                count.fetch_add(1, Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        SilentRelay { url, connections }
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    fn connected_within(&self, wait: Duration) -> bool {
+        let until = Instant::now() + wait;
+        while Instant::now() < until {
+            if self.connections() > 0 {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+}
+
+/// A repository given its space by `nxs init`, in island mode.
+fn repository(test: &str) -> (PathBuf, PathBuf) {
+    let base = scratch(test);
+    let repo = base.join("repo");
+    let out = nxs(&base, &repo, &["init"]);
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    (base, repo)
+}
+
+/// Sets the relay with `nxs sync --relay <url> --status`, which stays off the network.
+fn set_relay(base: &Path, repo: &Path, url: &str) {
+    let out = nxs(base, repo, &["sync", "--relay", url, "--status"]);
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+}
+
+#[test]
+fn relay_is_stored_in_the_data_directory_and_not_in_nexus_flow_toml() {
+    let (base, repo) = repository("sync-relay");
+    let file = fs::read(repo.join("nexus-flow.toml")).unwrap();
+
+    let out = nxs(
+        &base,
+        &repo,
+        &[
+            "sync",
+            "--relay",
+            "wss://relay.example.org/team",
+            "--status",
+        ],
+    );
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(json(&out)["relay"], "wss://relay.example.org/team");
+    assert_eq!(fs::read(repo.join("nexus-flow.toml")).unwrap(), file);
+    let settings = fs::read_to_string(base.join("data").join("device.toml")).unwrap();
+    assert!(
+        settings.contains("wss://relay.example.org/team"),
+        "{settings}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_relay_url_that_is_not_ws_or_wss_is_refused_and_not_stored() {
+    let (base, repo) = repository("sync-relay-bad");
+
+    let out = nxs(
+        &base,
+        &repo,
+        &["sync", "--relay", "https://relay.example.org", "--status"],
+    );
+
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["kind"], "validation");
+    let msg = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
+    assert!(msg.contains("ws://"), "{msg}");
+    assert!(!base.join("data").join("device.toml").exists());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn status_prints_member_relay_unconfirmed_and_synced_at_without_the_network() {
+    let (base, repo) = repository("sync-status");
+    let relay = SilentRelay::start();
+    set_relay(&base, &repo, &relay.url);
+
+    let out = nxs(&base, &repo, &["sync", "--status"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    let status = json(&out);
+    let keys: Vec<&str> = status
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["member", "relay", "unconfirmed", "synced_at"]);
+    assert_eq!(status["member"].as_str().map(str::len), Some(64));
+    assert_eq!(status["relay"], relay.url.as_str());
+    assert!(status["unconfirmed"].as_u64().unwrap() > 0, "{status}");
+    assert!(status["synced_at"].is_null(), "{status}");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(relay.connections(), 0, "--status went online");
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn status_without_a_relay_reports_relay_null() {
+    let (base, repo) = repository("sync-status-island");
+
+    let out = nxs(&base, &repo, &["sync", "--status"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert!(json(&out)["relay"].is_null());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_plain_command_never_waits_and_its_open_reaches_for_the_relay() {
+    let (base, repo) = repository("sync-plain");
+    let relay = SilentRelay::start();
+    set_relay(&base, &repo, &relay.url);
+
+    let started = Instant::now();
+    let out = nxs(&base, &repo, &["init"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a command does not wait for sync: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        relay.connected_within(Duration::from_secs(10)),
+        "the queued write goes out while the database is open"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn watch_keeps_the_database_open_and_syncing() {
+    let (base, repo) = repository("sync-watch");
+    let relay = SilentRelay::start();
+    set_relay(&base, &repo, &relay.url);
+
+    let watching = {
+        let (base, repo) = (base.clone(), repo.clone());
+        thread::spawn(move || nxs(&base, &repo, &["sync", "--watch"]))
+    };
+
+    assert!(relay.connected_within(Duration::from_secs(10)));
+    thread::sleep(Duration::from_secs(2));
+    assert!(!watching.is_finished(), "--watch returned");
+    // The watching thread ends with the test process.
+}
+
+#[test]
+fn status_takes_neither_watch_nor_timeout() {
+    let (base, repo) = repository("sync-status-flags");
+
+    for flags in [["--status", "--watch"], ["--status", "--timeout=1"]] {
+        let args: Vec<&str> = std::iter::once("sync").chain(flags).collect();
+        let out = nxs(&base, &repo, &args);
+        assert_eq!(out.code, 1, "{flags:?}");
+        assert_eq!(json(&out)["error"]["kind"], "validation", "{flags:?}");
+        let msg = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
+        assert!(msg.contains("cannot be used with"), "{msg}");
+    }
+    fs::remove_dir_all(&base).unwrap();
+}
