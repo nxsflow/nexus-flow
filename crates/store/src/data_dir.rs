@@ -151,12 +151,7 @@ impl DataDir {
     }
 
     fn under(&self, folder: &str, kind: &'static str, id: &str) -> Result<PathBuf, DataDirError> {
-        let plain = !id.is_empty()
-            && id != "."
-            && id != ".."
-            && !id.contains(['/', '\\'])
-            && Path::new(id).components().count() == 1;
-        if !plain {
+        if !is_plain_name(id) {
             return Err(DataDirError::NotAName {
                 kind,
                 id: id.to_owned(),
@@ -164,4 +159,14 @@ impl DataDir {
         }
         Ok(self.root.join(folder).join(id))
     }
+}
+
+/// Whether `id` is one plain name for a folder, so that the folder it names lies inside the one
+/// it belongs in.
+pub(crate) fn is_plain_name(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.contains(['/', '\\'])
+        && Path::new(id).components().count() == 1
 }

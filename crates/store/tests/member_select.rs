@@ -27,7 +27,7 @@ fn selected(value: Option<&str>) -> Result<Option<SessionId>, String> {
 /// Starts the session `id` as `nxs session start` leaves it: a sub-agent's database and its keys
 /// in the session's folder.
 fn start_session(data: &DataDir, id: &SessionId) {
-    let files = SessionFiles::of(data, id).unwrap();
+    let files = SessionFiles::of(data, id);
     let options = OpenOptions::new(model::LOCK)
         .sub_agent()
         .path(&files.database)
@@ -124,7 +124,10 @@ fn a_session_opens_a_space_by_id_without_the_device() {
     .unwrap();
 
     assert_eq!(opened.session(), Some(&session));
-    assert!(!data.device().exists(), "the device's database is not created");
+    assert!(
+        !data.device().exists(),
+        "the device's database is not created"
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -164,13 +167,25 @@ fn a_session_that_is_not_running_fails_and_creates_nothing() {
 
     assert!(matches!(err, InitError::NoSession { .. }), "{err:?}");
     let text = err.to_string();
-    assert!(text.contains("gone") && text.contains("not running"), "{text}");
-    assert!(!data.root().join("sessions").exists(), "nothing was created");
+    assert!(
+        text.contains("gone") && text.contains("not running"),
+        "{text}"
+    );
+    assert!(
+        !data.root().join("sessions").exists(),
+        "nothing was created"
+    );
     assert_eq!(fs::read_dir(data.root()).unwrap().count(), before);
 
     let fresh = data_dir(&base.join("fresh"));
     let space: SpaceId = report.space.parse().unwrap();
-    let err = block_on(opened::space_as(space, None, &fresh, RunAs::Session(session))).unwrap_err();
+    let err = block_on(opened::space_as(
+        space,
+        None,
+        &fresh,
+        RunAs::Session(session),
+    ))
+    .unwrap_err();
     assert!(matches!(err, InitError::NoSession { .. }), "{err:?}");
     assert!(!fresh.root().exists(), "not even the data directory");
     fs::remove_dir_all(&base).unwrap();
@@ -181,11 +196,17 @@ fn a_session_folder_without_its_database_is_not_running() {
     let base = scratch("half-session");
     let data = data_dir(&base.join("data"));
     let session: SessionId = "half".parse().unwrap();
-    let files = SessionFiles::of(&data, &session).unwrap();
+    let files = SessionFiles::of(&data, &session);
     fs::create_dir_all(files.database.parent().unwrap()).unwrap();
     let space: SpaceId = "00112233445566778899aabbccddeeff".parse().unwrap();
 
-    let err = block_on(opened::space_as(space, None, &data, RunAs::Session(session))).unwrap_err();
+    let err = block_on(opened::space_as(
+        space,
+        None,
+        &data,
+        RunAs::Session(session),
+    ))
+    .unwrap_err();
 
     assert!(matches!(err, InitError::NoSession { .. }), "{err:?}");
     assert!(!files.database.exists() && !files.keys.exists());
