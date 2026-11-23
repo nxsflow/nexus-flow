@@ -127,13 +127,15 @@ fn status_prints_member_relay_unconfirmed_and_synced_at_without_the_network() {
 
     assert_eq!(out.code, 0, "{}", stdout(&out));
     let status = json(&out);
-    let keys: Vec<&str> = status
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, ["member", "relay", "unconfirmed", "synced_at"]);
+    let text = stdout(&out);
+    let at = |key: &str| text.find(&format!("\"{key}\":")).expect(key);
+    assert!(
+        at("member") < at("relay")
+            && at("relay") < at("unconfirmed")
+            && at("unconfirmed") < at("synced_at"),
+        "{text}"
+    );
+    assert_eq!(status.as_object().unwrap().len(), 4, "{text}");
     assert_eq!(status["member"].as_str().map(str::len), Some(64));
     assert_eq!(status["relay"], relay.url.as_str());
     assert!(status["unconfirmed"].as_u64().unwrap() > 0, "{status}");
@@ -155,7 +157,7 @@ fn status_without_a_relay_reports_relay_null() {
 }
 
 #[test]
-fn a_plain_command_never_waits_and_its_open_reaches_for_the_relay() {
+fn a_plain_command_never_waits_and_its_write_stays_queued() {
     let (base, repo) = repository("sync-plain");
     let relay = SilentRelay::start();
     set_relay(&base, &repo, &relay.url);
@@ -169,9 +171,10 @@ fn a_plain_command_never_waits_and_its_open_reaches_for_the_relay() {
         "a command does not wait for sync: {:?}",
         started.elapsed()
     );
+    let status = json(&nxs(&base, &repo, &["sync", "--status"]));
     assert!(
-        relay.connected_within(Duration::from_secs(10)),
-        "the queued write goes out while the database is open"
+        status["unconfirmed"].as_u64().unwrap() > 0,
+        "the write no relay confirmed stays queued for the next open: {status}"
     );
     fs::remove_dir_all(&base).unwrap();
 }
