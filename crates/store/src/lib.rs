@@ -14,4 +14,5 @@ mod open;
 pub mod opened;
 pub mod repo_root;
 pub mod space;
+pub mod space_kind;
 pub mod status;

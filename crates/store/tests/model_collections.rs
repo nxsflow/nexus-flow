@@ -3,6 +3,7 @@
 //! followed by the collection's own name in upper camel case.
 
 use nexus_flow_store::model::{self, Module};
+use nexus_flow_store::space_kind;
 
 /// The names of the collections the committed lock declares: the keys of its top-level
 /// `collections` object.
@@ -34,6 +35,23 @@ fn the_table_names_every_collection_of_the_lock_once() {
     let mut lock = lock_collections();
     lock.sort_unstable();
     assert_eq!(table, lock, "model::COLLECTIONS and model.lock.json differ");
+}
+
+/// RFC 0001, "The model": the store refuses a collection in a space of the wrong kind, so every
+/// collection the lock declares must name the kinds of space it belongs in.
+#[test]
+fn every_collection_of_the_lock_has_its_kinds_of_space() {
+    let mut table: Vec<&str> = space_kind::KINDS.iter().map(|c| c.0).collect();
+    table.sort_unstable();
+    let before = table.len();
+    table.dedup();
+    assert_eq!(table.len(), before, "a collection is given kinds twice");
+    let mut lock = lock_collections();
+    lock.sort_unstable();
+    assert_eq!(table, lock, "space_kind::KINDS and model.lock.json differ");
+    for &(name, kinds) in space_kind::KINDS {
+        assert!(!kinds.is_empty(), "{name} belongs in no kind of space");
+    }
 }
 
 #[test]
