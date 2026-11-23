@@ -78,8 +78,8 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 | Member | NoCentralDB kind | Created | Keys live | Removed |
 | --- | --- | --- | --- | --- |
 | A developer's device | `device` | When the developer first runs `nxs init` or `nxs device join` on it, paired into the developer's account (NoCentralDB RFC 0010) | In the device's key store (NoCentralDB RFC 0003, RFC 0009) | By the developer, when the device is retired or lost |
-| pm | `agent` | When the pm session starts, paired once into the account of the developer who commissions it | In pm's own member database, created in the session (see "The local data on disk"); never written to the repository, the environment, a ticket or a log | When pm ends, or by the developer when a new pm takes over |
-| A role session that pm starts (coder, legal, …) | `subAgent` of pm | When the session starts, added by pm | In the session's own member database, as for pm | When the session ends, or by pm when it archives the session |
+| pm | `agent` | When the pm session starts, paired once into the account of the developer who commissions it | In a key file beside pm's own member database, both created in the session (see "The local data on disk"); never written to the repository, the environment, a ticket or a log | When pm ends, or by the developer when a new pm takes over |
+| A role session that pm starts (coder, legal, …) | `subAgent` of pm | When the session starts, added by pm | In a key file beside the session's own member database, as for pm | When the session ends, or by pm when it archives the session |
 | manufakt.io | `device` of the person's account | When the person pairs manufakt.io into their account and adds it to their spaces | Where manufakt.io keeps its device keys | By the person |
 | The migration member | `agent` | When `nxs migrate` moves a v1 workspace, paired into the developer's account by their device for that one run (RFC 0008, "The migration member") | In its own member database under `migration/<run>/` | By the device, at the end of the run |
 
@@ -185,7 +185,7 @@ What replaces v1's `.nxs/`: each member nexus-flow runs as has one NoCentralDB d
 ```
 <data dir>/
   device/                 # the device member's NoCentralDB database, with all its spaces (NoCentralDB RFC 0006); its format is NoCentralDB's
-  sessions/<session id>/  # one session member's database and keys; created by `nxs session start`, removed by `nxs session end`
+  sessions/<session id>/  # one session member's database (db/) and its key file (member.keys); created by `nxs session start`, removed by `nxs session end`
   derived/<member id>/    # nexus-flow's rebuildable cache, if any (see "Derived state"); deletable at any time
   migration/<run>/        # the migration member's database and keys, for one run of RFC 0008's move; removed at its end
 ```
@@ -344,9 +344,12 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - **The SDK is pinned from crates.io at an exact version** ("The dependency on NoCentralDB", R10). Decided by the owner on 2026-11-21 (NEX-211). Why: the git pin was chosen only because the crate was unpublished, and NoCentralDB 0.1.0-beta.1 is on crates.io; an exact version keeps every move deliberate. *Not taken:* keeping the git revision pin.
 - **v2's seam and binary use temporary names until the cut-over** ("The library seam"). Decided by the owner on 2026-11-21 (NEX-204). Why: one workspace cannot hold two packages named `nexus-flow-facade` or two `nxs` binaries, and v1 keeps working on `v2` until v2's replaces it, which keeps the weekly merge of `main` easy. *Not taken:* removing v1's facade and binary from `v2` first.
 
+- **A session's keys are in a key file beside its member database** ("Members", "The local data on disk"). Decided by the owner on 2026-11-23 (NEX-226). Why: NoCentralDB 0.1.0-beta.1 keeps a member's keys either in the platform key store or in a key file the app names, never inside the database, and a cloud session has no key store; the file lives in the container's data directory, so the keys still die with the container and never reach the repository, the environment, a ticket or a log. *Not taken:* the key store when one exists and a file otherwise, a second path for the same thing; waiting for NoCentralDB to keep keys inside the database.
+
 ## History
 
 - 2026-11-15: published as a draft in #142.
 - 2026-11-17: decided by the owner (NEX-38), in #142.
 - 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #173 (NEX-83).
 - 2026-11-21: the owner's answers to NEX-211 (crates.io pin) and NEX-204 (temporary names) written into the text.
+- 2026-11-23: the owner's answer to NEX-226 (session keys in a key file) written into the text.
