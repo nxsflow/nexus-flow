@@ -227,3 +227,52 @@ fn status_prints_the_last_sync_as_an_rfc_3339_time_in_utc() {
     assert_eq!(json(&out)["synced_at"], "2026-11-18T11:06:40Z");
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn timeout_exits_non_zero_and_lists_what_is_still_behind() {
+    let (base, repo) = repository("sync-timeout");
+    let relay = SilentRelay::start();
+    set_relay(&base, &repo, &relay.url);
+    let space = json(&nxs(&base, &repo, &["init"]))["space"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let started = Instant::now();
+    let out = nxs(&base, &repo, &["sync", "--timeout", "1"]);
+
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_ne!(out.code, 0);
+    let msg = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
+    assert!(msg.contains("timed out"), "{msg}");
+    assert!(msg.contains("unconfirmed"), "{msg}");
+    assert!(msg.contains(&space), "{msg}");
+    assert!(json(&nxs(&base, &repo, &["sync", "--status"]))["synced_at"].is_null());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn status_in_markdown_names_each_field_for_a_person() {
+    let (base, repo) = repository("sync-status-md");
+    fs::write(
+        base.join("data").join("device.toml"),
+        "relay = \"wss://relay.example.org\"\nsynced_at = 1795000000\n",
+    )
+    .unwrap();
+
+    let out = nxs(&base, &repo, &["sync", "--status", "--md"]);
+
+    assert_eq!(out.code, 0);
+    let text = stdout(&out);
+    assert!(text.starts_with("- member `"), "{text}");
+    assert!(
+        text.contains("- relay `wss://relay.example.org`\n"),
+        "{text}"
+    );
+    assert!(text.contains(" unconfirmed\n"), "{text}");
+    assert!(
+        text.ends_with("- last synced at 2026-11-18T11:06:40Z\n"),
+        "{text}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
