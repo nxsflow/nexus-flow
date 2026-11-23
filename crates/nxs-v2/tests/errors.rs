@@ -45,7 +45,10 @@ fn a_data_directory_inside_the_repository_is_a_validation_error() {
 
     let msg = error_object(&out, "validation");
     assert!(msg.contains("NXS_DATA_DIR"), "{msg}");
-    assert!(!repo.join("nexus-flow.toml").exists(), "nothing was written");
+    assert!(
+        !repo.join("nexus-flow.toml").exists(),
+        "nothing was written"
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -53,7 +56,10 @@ fn a_data_directory_inside_the_repository_is_a_validation_error() {
 fn an_unknown_command_is_a_validation_error() {
     let base = scratch("err-usage");
 
-    error_object(&nxs(&base, &base.join("repo"), &["frobnicate"]), "validation");
+    error_object(
+        &nxs(&base, &base.join("repo"), &["frobnicate"]),
+        "validation",
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 

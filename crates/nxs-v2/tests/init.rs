@@ -12,7 +12,11 @@ use common::{json, nxs, scratch, stdout};
 fn init_in_a_fresh_git_repo_writes_the_file_and_prints_the_space_id() {
     let base = scratch("init");
     let repo = base.join("repo");
-    let git = Command::new("git").arg("init").arg("-q").arg(&repo).status();
+    let git = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(&repo)
+        .status();
     assert!(git.unwrap().success(), "git init");
 
     let out = nxs(&base, &repo, &["init"]);
@@ -24,7 +28,10 @@ fn init_in_a_fresh_git_repo_writes_the_file_and_prints_the_space_id() {
     assert_eq!(space.len(), 32, "{space}");
     assert_eq!(report["created"], true);
     let file = fs::read_to_string(repo.join("nexus-flow.toml")).unwrap();
-    assert!(file.contains(&format!("repository = \"{space}\"")), "{file}");
+    assert!(
+        file.contains(&format!("repository = \"{space}\"")),
+        "{file}"
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 

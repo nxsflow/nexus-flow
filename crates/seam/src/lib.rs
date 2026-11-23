@@ -5,6 +5,8 @@ mod init;
 
 pub use engine::{Engine, Error, Options};
 pub use init::{init, init_with};
-pub use nexus_flow_store::data_dir::{DataDir, DataDirError};
+pub use nexus_flow_store::config::{ConfigError, Problem};
+pub use nexus_flow_store::data_dir::{DataDir, DataDirError, Platform};
 pub use nexus_flow_store::id::{NotASpaceId, SpaceId};
+pub use nexus_flow_store::repo_root::RootError;
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};
