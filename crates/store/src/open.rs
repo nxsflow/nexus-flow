@@ -11,6 +11,7 @@ use nocentraldb::{Db, OpenOptions};
 
 use crate::config::ConfigError;
 use crate::data_dir::DataDir;
+use crate::id::NotASpaceId;
 use crate::model;
 use crate::repo_root::{RepoRoot, RootError};
 
@@ -33,6 +34,8 @@ pub enum InitError {
     Config(ConfigError),
     /// The data directory could not be created.
     DataDir { path: PathBuf, error: io::Error },
+    /// A space id in `nexus-flow.toml` is not one.
+    SpaceId { file: PathBuf, error: NotASpaceId },
     /// NoCentralDB refused to open the database or to create the space.
     Database { message: String },
 }
@@ -47,6 +50,7 @@ impl fmt::Display for InitError {
                 "cannot create the data directory {}: {error}",
                 path.display()
             ),
+            InitError::SpaceId { file, error } => write!(f, "{}: {error}", file.display()),
             InitError::Database { message } => {
                 write!(f, "the device's database: {message}")
             }
@@ -77,14 +81,19 @@ impl From<nocentraldb::Error> for InitError {
 }
 
 /// Opens the device member's database for the repository at `root`, creating it on first open.
-/// A data directory inside the root is refused before anything is created. The database opens
-/// without a relay: no relay is configured yet, so it works in island mode.
+/// A data directory inside the root is refused before anything is created.
 pub(crate) async fn open_device(
     root: &RepoRoot,
     data: &DataDir,
     keys: DeviceKeys,
 ) -> Result<Db, InitError> {
     root.check_data_dir(data)?;
+    open_db(data, keys).await
+}
+
+/// Opens the device member's database in `data`, creating it on first open. The database opens
+/// without a relay: no relay is configured yet, so it works in island mode.
+pub(crate) async fn open_db(data: &DataDir, keys: DeviceKeys) -> Result<Db, InitError> {
     data.open().map_err(|error| InitError::DataDir {
         path: data.root().to_path_buf(),
         error,
