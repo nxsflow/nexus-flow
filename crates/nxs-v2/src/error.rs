@@ -1,7 +1,7 @@
 //! Errors as v1 prints them (RFC 0001, "Reading and writing"; RFC 0002, "JSON"): the error object
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
-//! stderr instead, as v1's human output does. The codes are v1's.
+//! stderr instead, as v1's human output does. The codes are v1's, and `no_key_store` (NEX-224).
 
 use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError};
 
@@ -19,6 +19,8 @@ pub enum Kind {
     Conflict,
     /// Reading or writing the disk or the database failed.
     Io,
+    /// The machine has no key store, where `nxs` keeps the device's keys (NEX-224).
+    NoKeyStore,
 }
 
 impl Kind {
@@ -28,6 +30,7 @@ impl Kind {
             Kind::Validation => "validation",
             Kind::Conflict => "conflict",
             Kind::Io => "io",
+            Kind::NoKeyStore => "no_key_store",
         }
     }
 }
@@ -103,6 +106,7 @@ fn open_kind(e: &InitError) -> Kind {
         },
         InitError::DataDir { .. } => Kind::Io,
         InitError::SpaceId { .. } => Kind::Validation,
+        InitError::KeyStoreUnavailable => Kind::NoKeyStore,
         InitError::Database { .. } => Kind::Io,
     }
 }
