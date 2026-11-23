@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Test harness for .github/scripts/model-lock.sh (NEX-91, RFC 0001 "The model": "Building it" and
-# "The model only grows").
+# Test harness for .github/scripts/model-lock.sh (NEX-91 and NEX-223, RFC 0001 "The model":
+# "Building it" and "The model only grows").
 #
 # The script is CI's model lock step: `pin` names the NoCentralDB version the repository pins,
 # `install` puts `ncdb` at that version into a directory, and `check` rebuilds model/model.lock.json
-# from model/model.ts and checks the model against the lock on the base branch. Every way `check`
-# can answer is run here against a real git repository on disk with the REAL `ncdb` and Node 24,
-# because what decides "additive" is ncdb, and a stub would only test the stub. `install` runs
+# from model/model.ts and checks the model, its id and its version against the lock on the base
+# branch. Every way `check` can answer is run here against a real git repository on disk with the
+# REAL `ncdb` and Node 24, because what decides "additive" is ncdb, and a stub would only test the
+# stub. `install` runs
 # against a stubbed `cargo`, so the harness compiles nothing.
 #
 # Needs: bash, git, Node 24 or later and `ncdb` at the pinned version on PATH, and model/node_modules
@@ -19,6 +20,9 @@
 #   M2  no byte comparison after the rebuild → model.ts without a rebuild, the hand-edited lock  2 red
 #   M3  `cargo install` without `=` and --locked → the empty root, the other version          2 red
 #   M4  model/package.json's SDK pin not compared with Cargo.lock → the differing SDK pin      1 red
+#   M5  no model id comparison with the base lock → the hand-edited id, its name, the lock
+#       rebuilt from nothing                                                                    3 red
+#   M6  no model version comparison with the base lock → the lowered version, its two numbers  2 red
 #
 # Run: tests/model-lock.test.sh
 set -euo pipefail
@@ -128,6 +132,27 @@ r="$(fixture)"; git -C "$r" rm -rq model; git -C "$r" commit -qm "no model"; git
 git -C "$r" checkout -q "$(git -C "$r" rev-list --max-parents=0 HEAD)" -- model; commit "$r"
 expect_pass "a base branch without a lock passes: there is nothing to grow from" "$r"
 if grep -q "no model/model.lock.json" <<<"$OUT"; then ok "it says the base has no lock"; else bad "it says the base has no lock ($OUT)"; fi
+
+# ---- check: the model's identity against the base branch (NEX-223) ----------------------------
+
+echo "check: the lock keeps the base's model id, and its model version never goes down"
+
+BASE_ID="$(sed -n 's/^ *"id": "\([^"]*\)".*/\1/p' "$ROOT/model/model.lock.json")"
+set_lock() { # <repo> <sed expression>: a hand edit of the committed lock
+  sed -i.bak "$2" "$1/model/model.lock.json"; rm "$1/model/model.lock.json.bak"
+}
+
+r="$(fixture)"; set_lock "$r" "s/\"id\": \"$BASE_ID\"/\"id\": \"00000000000000000000000000000000\"/"; commit "$r"
+expect_fail "a lock whose model id was edited by hand fails, though ncdb rebuilds it alike" "$r" "model id"
+if grep -qF "$BASE_ID" <<<"$OUT"; then ok "it names the base's model id"; else bad "it names the base's model id ($OUT)"; fi
+
+r="$(fixture)"; rebuild_fresh "$r"; commit "$r"
+expect_fail "a lock rebuilt from nothing fails, though model.ts is unchanged: its model id is new" "$r" "model id"
+
+r="$(fixture)"; add_field "$r" note; rebuild "$r"; commit "$r"; git -C "$r" tag -f base >/dev/null
+set_lock "$r" 's/"version": 2/"version": 1/'; commit "$r"
+expect_fail "a lock whose model version went down fails, though ncdb rebuilds it alike" "$r" "model version"
+if grep -qF "below the base's 2" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
 
 r="$(fixture)"
 check "$r" no-such-ref
