@@ -191,23 +191,3 @@ fn sync_without_a_relay_is_refused() {
     assert!(matches!(result, Err(SyncError::NoRelay)), "{result:?}");
     fs::remove_dir_all(&base).unwrap();
 }
-
-#[test]
-fn watch_keeps_the_database_open_until_stopped() {
-    let base = scratch("sync-watch");
-    let relay = SilentRelay::start();
-    let data = repository_with_relay(&base, &relay.url);
-    let polls = AtomicUsize::new(0);
-
-    let result = block_on(sync::watch(&base.join("repo"), &data, keys(&data), || {
-        polls.fetch_add(1, Ordering::SeqCst) >= 10
-    }));
-
-    assert!(result.is_ok(), "{result:?}");
-    assert!(polls.load(Ordering::SeqCst) > 10);
-    assert!(
-        relay.connections() > 0,
-        "the database synced while it was open"
-    );
-    fs::remove_dir_all(&base).unwrap();
-}

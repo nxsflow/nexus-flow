@@ -1,7 +1,7 @@
 //! Sync (RFC 0001, "Sync"): the device's database syncs while it is open, through the relay its
-//! settings name. The SDK has no one-shot sync call, so [`sync`] opens the database and waits
-//! until nothing is behind or unconfirmed, [`watch`] keeps it open until its caller stops it, and
-//! [`status`] reads the local database without the network.
+//! settings name. The SDK has no one-shot sync call, so [`wait`] waits on an open database until
+//! nothing is behind or unconfirmed, [`sync`] opens one and waits, and [`status`] reads the local
+//! database without the network. Keeping a database open keeps it syncing.
 //!
 //! The SDK reports no time of the last sync, so nxs records it in the device's settings whenever
 //! it finds nothing behind or unconfirmed (NEX-102).
@@ -134,25 +134,37 @@ pub fn set_relay(data: &DataDir, relay: &RelayUrl) -> Result<(), SettingsError> 
 /// database alone: it is opened off the network.
 pub async fn status(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<SyncStatus, SyncError> {
     let opened = repository_on(dir, data, keys, Network::Offline).await?;
-    report(&opened, data).await
+    report(&opened).await
 }
 
-/// Opens the device's database for the repository at or above `dir`, waits until nothing is
-/// behind or unconfirmed, records the time, and reports the sync state. With `timeout`, a wait
-/// that outlasts it ends in [`SyncError::TimedOut`] with what is still behind.
+/// Opens the device's database for the repository at or above `dir` and [`wait`]s on it.
 pub async fn sync(
     dir: &Path,
     data: &DataDir,
     keys: DeviceKeys,
     timeout: Option<Duration>,
 ) -> Result<SyncStatus, SyncError> {
-    let mut opened = open(dir, data, keys).await?;
+    if DeviceSettings::read(data)?.relay.is_none() {
+        return Err(SyncError::NoRelay);
+    }
+    let mut opened = repository_on(dir, data, keys, Network::Relay).await?;
+    wait(&mut opened, timeout).await
+}
+
+/// Waits until nothing in `opened` is behind or unconfirmed, records the time, and reports the
+/// sync state. With `timeout`, a wait that outlasts it ends in [`SyncError::TimedOut`] with what
+/// is still behind. Without a relay there is nothing to wait for, and it ends in
+/// [`SyncError::NoRelay`].
+pub async fn wait(opened: &mut Opened, timeout: Option<Duration>) -> Result<SyncStatus, SyncError> {
+    if DeviceSettings::read(opened.data())?.relay.is_none() {
+        return Err(SyncError::NoRelay);
+    }
     let deadline = timeout.map(|t| Instant::now() + t);
     loop {
-        match behind(&mut opened).await? {
+        match behind(opened).await? {
             None => {
-                record(data)?;
-                return report(&opened, data).await;
+                record(opened.data())?;
+                return report(opened).await;
             }
             Some(behind) if deadline.is_some_and(|d| Instant::now() >= d) => {
                 return Err(SyncError::TimedOut(behind))
@@ -160,40 +172,6 @@ pub async fn sync(
             Some(_) => thread::sleep(POLL),
         }
     }
-}
-
-/// Opens the device's database for the repository at or above `dir` and keeps it open, and so
-/// syncing, until `stop` returns `true`; `stop` is asked after every look at the SDK's reports.
-/// Each time nothing is behind or unconfirmed, the time is recorded.
-pub async fn watch(
-    dir: &Path,
-    data: &DataDir,
-    keys: DeviceKeys,
-    mut stop: impl FnMut() -> bool,
-) -> Result<(), SyncError> {
-    let mut opened = open(dir, data, keys).await?;
-    let mut recorded = None;
-    loop {
-        if behind(&mut opened).await?.is_none() {
-            let now = now();
-            if recorded != Some(now) {
-                record(data)?;
-                recorded = Some(now);
-            }
-        }
-        if stop() {
-            return Ok(());
-        }
-        thread::sleep(POLL);
-    }
-}
-
-/// Opens the database on the relay; without one there is nothing to sync with.
-async fn open(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<Opened, SyncError> {
-    if DeviceSettings::read(data)?.relay.is_none() {
-        return Err(SyncError::NoRelay);
-    }
-    Ok(repository_on(dir, data, keys, Network::Relay).await?)
 }
 
 /// What is still behind or unconfirmed; `None` when nothing is.
@@ -226,9 +204,9 @@ async fn behind(opened: &mut Opened) -> Result<Option<Behind>, InitError> {
     }))
 }
 
-/// The sync state of `opened`, with the settings in `data`.
-async fn report(opened: &Opened, data: &DataDir) -> Result<SyncStatus, SyncError> {
-    let settings = DeviceSettings::read(data)?;
+/// The sync state of `opened`, with the device's settings.
+pub async fn report(opened: &Opened) -> Result<SyncStatus, SyncError> {
+    let settings = DeviceSettings::read(opened.data())?;
     Ok(SyncStatus {
         member: member(opened).await?,
         relay: settings.relay,

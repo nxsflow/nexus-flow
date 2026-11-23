@@ -40,6 +40,8 @@ pub struct Opened {
     /// Kept open for as long as the spaces are: sync runs only while a database is open
     /// (RFC 0001, "Sync").
     db: Db,
+    /// The data directory it lives in, which holds the device's settings.
+    data: DataDir,
     spaces: Vec<(SpaceId, Option<Space>)>,
     /// The kinds `nexus-flow.toml` names, for the spaces it names.
     kinds: Vec<(SpaceId, SpaceKind)>,
@@ -80,6 +82,11 @@ impl Opened {
     /// The open database, for sync (`crate::sync`).
     pub(crate) fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// The data directory the database lives in.
+    pub(crate) fn data(&self) -> &DataDir {
+        &self.data
     }
 
     /// The open spaces, each with what the database holds of it.
@@ -131,7 +138,7 @@ pub(crate) async fn repository_on(
         path: root.path().to_path_buf(),
         base: config.base,
     };
-    open(db, ids, kinds, Some(checkout)).await
+    open(db, data, ids, kinds, Some(checkout)).await
 }
 
 /// Opens the device member's database on the space `id`. With `git`, the checkout is the
@@ -157,7 +164,7 @@ pub async fn space(
         }
         None => (open_db(data, keys, Network::Relay).await?, Vec::new(), None),
     };
-    open(db, vec![id], kinds, checkout).await
+    open(db, data, vec![id], kinds, checkout).await
 }
 
 /// The spaces `config` names, with their kinds: the repository space first.
@@ -171,6 +178,7 @@ fn named_kinds(config: &Config, root: &RepoRoot) -> Result<Vec<(SpaceId, SpaceKi
 
 async fn open(
     db: Db,
+    data: &DataDir,
     ids: Vec<SpaceId>,
     kinds: Vec<(SpaceId, SpaceKind)>,
     checkout: Option<Checkout>,
@@ -181,6 +189,7 @@ async fn open(
     }
     Ok(Opened {
         db,
+        data: data.clone(),
         spaces,
         kinds,
         checkout,
