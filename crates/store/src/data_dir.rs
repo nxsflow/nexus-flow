@@ -114,6 +114,12 @@ impl DataDir {
         Ok(DataDir { root })
     }
 
+    /// Resolves the data directory by the rule of the platform this binary was built for, from
+    /// the process's environment. Touches no file.
+    pub fn from_env() -> Result<Self, DataDirError> {
+        Self::resolve(Platform::current(), |name| std::env::var_os(name))
+    }
+
     /// Creates the directory, and its parents, if it does not exist yet.
     pub fn open(&self) -> io::Result<()> {
         fs::create_dir_all(&self.root)
