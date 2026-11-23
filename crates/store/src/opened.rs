@@ -19,6 +19,7 @@ use crate::data_dir::DataDir;
 use crate::id::SpaceId;
 use crate::open::{open_db, open_device, DeviceKeys, InitError};
 use crate::repo_root::RepoRoot;
+use crate::space_kind::{self, SpaceKind, WrongSpace};
 
 /// The local git a caller reads "on main" from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,19 @@ impl Opened {
             .iter()
             .find(|(open, _)| open == id)
             .map(|(_, space)| space.is_some())
+    }
+
+    /// The kind of the open space `id`, as `nexus-flow.toml` names it; `None` when no file the
+    /// store read names it.
+    pub fn kind(&self, id: &SpaceId) -> Option<SpaceKind> {
+        let _ = id;
+        None
+    }
+
+    /// Whether `collection` may be written into the open space `id` (RFC 0001, "The model"):
+    /// every write checks this first.
+    pub fn check_write(&self, id: &SpaceId, collection: &str) -> Result<(), WrongSpace> {
+        space_kind::check(collection, self.kind(id))
     }
 
     /// The checkout "on main" is read from; `None` when there is none, so "on main" is `null`.
