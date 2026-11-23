@@ -90,6 +90,7 @@ impl From<Error> for CliError {
         let kind = match &e {
             Error::DataDir(_) => Kind::Validation,
             Error::Open(open) => open_kind(open),
+            Error::Sync(_) => Kind::Io,
         };
         CliError { kind, msg }
     }

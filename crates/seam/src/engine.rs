@@ -6,14 +6,22 @@
 //! the platform's) and keep the device's keys in the platform's key store. A caller that keeps
 //! them elsewhere, such as a machine with no key store, names both with `open_with` and
 //! `open_space_with`.
+//!
+//! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
+//! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
+//! reads the sync state from the local database without the network. [`set_relay`] sets the
+//! relay, in the data directory.
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
+use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::SpaceId;
 use nexus_flow_store::opened::{self, Opened};
 use nexus_flow_store::space::{DeviceKeys, InitError};
+use nexus_flow_store::sync::{self, SyncError, SyncStatus};
 
 /// Where the device member's database and keys live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +49,8 @@ pub enum Error {
     DataDir(DataDirError),
     /// The repository, its `nexus-flow.toml` or the database could not be opened.
     Open(InitError),
+    /// Sync did not finish: no relay is set, or the timeout passed.
+    Sync(SyncError),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +58,7 @@ impl fmt::Display for Error {
         match self {
             Error::DataDir(e) => e.fmt(f),
             Error::Open(e) => e.fmt(f),
+            Error::Sync(e) => e.fmt(f),
         }
     }
 }
@@ -66,10 +77,31 @@ impl From<InitError> for Error {
     }
 }
 
+impl From<SyncError> for Error {
+    fn from(e: SyncError) -> Self {
+        match e {
+            SyncError::Open(e) => Error::Open(e),
+            e => Error::Sync(e),
+        }
+    }
+}
+
+impl From<SettingsError> for Error {
+    fn from(e: SettingsError) -> Self {
+        Error::Open(InitError::Settings(e))
+    }
+}
+
+/// Sets the relay the device's database syncs through, in the data directory `options` names;
+/// it is never written into `nexus-flow.toml`. An engine opened afterwards syncs through it.
+pub fn set_relay(options: &Options, relay: &RelayUrl) -> Result<(), Error> {
+    Ok(sync::set_relay(&options.data, relay)?)
+}
+
 /// The device member's database, open on the spaces a caller reads.
 #[derive(Debug)]
 pub struct Engine {
-    _opened: Opened,
+    opened: Opened,
 }
 
 impl Engine {
@@ -82,7 +114,7 @@ impl Engine {
     /// [`Engine::open`], with the data directory and keys `options` names.
     pub async fn open_with(repository: &Path, options: Options) -> Result<Self, Error> {
         let opened = opened::repository(repository, &options.data, options.keys).await?;
-        Ok(Engine { _opened: opened })
+        Ok(Engine { opened })
     }
 
     /// Opens the device member's database on the space `space`, for a caller without a checkout;
@@ -98,6 +130,27 @@ impl Engine {
         options: Options,
     ) -> Result<Self, Error> {
         let opened = opened::space(space, git, &options.data, options.keys).await?;
-        Ok(Engine { _opened: opened })
+        Ok(Engine { opened })
+    }
+
+    /// Waits until nothing in the open spaces is behind or unconfirmed, and reports the sync
+    /// state. With `timeout`, a wait that outlasts it fails with what is still behind. Without a
+    /// relay it fails at once: there is nothing to sync with.
+    pub async fn sync(&mut self, timeout: Option<Duration>) -> Result<SyncStatus, Error> {
+        Ok(sync::wait(&mut self.opened, timeout).await?)
+    }
+
+    /// The sync state of the device's database for the repository at or above `repository`,
+    /// read from the local database: it opens the database off the network.
+    pub async fn sync_status(repository: &Path) -> Result<SyncStatus, Error> {
+        Self::sync_status_with(repository, Options::from_env()?).await
+    }
+
+    /// [`Engine::sync_status`], with the data directory and keys `options` names.
+    pub async fn sync_status_with(
+        repository: &Path,
+        options: Options,
+    ) -> Result<SyncStatus, Error> {
+        Ok(sync::status(repository, &options.data, options.keys).await?)
     }
 }
