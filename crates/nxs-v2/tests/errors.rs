@@ -110,3 +110,41 @@ fn the_binary_prints_the_error_object_and_exits_1() {
     assert!(!base.join("repo").join("nexus-flow.toml").exists());
     fs::remove_dir_all(&base).unwrap();
 }
+
+/// NEX-224: on a machine with no key store, `nxs init` refuses and says so, and creates nothing.
+/// Linux only: pointing D-Bus at nothing leaves the Secret Service unreachable, while macOS and
+/// Windows always have a key store.
+#[cfg(target_os = "linux")]
+#[test]
+fn init_on_a_machine_with_no_key_store_refuses() {
+    let base = scratch("err-no-key-store");
+    let repo = base.join("repo");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_nxs-v2"))
+        .arg("init")
+        .current_dir(&repo)
+        .env("NXS_DATA_DIR", base.join("data"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/nxs-v2-test-bus",
+        )
+        .output()
+        .expect("run nxs-v2");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    assert_eq!(value["error"]["kind"], "no_key_store", "{value}");
+    let msg = value["error"]["msg"].as_str().unwrap();
+    assert!(msg.contains("no key store"), "{msg}");
+    assert!(!msg.contains("key_file"), "no key-file advice: {msg}");
+    assert!(
+        !repo.join("nexus-flow.toml").exists(),
+        "nothing was written"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
