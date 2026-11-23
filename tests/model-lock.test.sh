@@ -12,6 +12,14 @@
 # Needs: bash, git, Node 24 or later and `ncdb` at the pinned version on PATH, and model/node_modules
 # (`npm ci` in model/). CI's lint job runs it after it has installed all three.
 #
+# MUTATION-CHECKED, recorded rather than asserted (the bar `tests/require-green-ci.test.sh` sets).
+# Each perturbation below was planted in the script, seen RED here, and reverted:
+#
+#   M1  no build over the base lock          → the removal and the rename rebuilt from nothing  2 red
+#   M2  no byte comparison after the rebuild → model.ts without a rebuild, the hand-edited lock  2 red
+#   M3  `cargo install` without `=` and --locked → the empty root, the other version          2 red
+#   M4  model/package.json's SDK pin not compared with Cargo.lock → the differing SDK pin      1 red
+#
 # Run: tests/model-lock.test.sh
 set -euo pipefail
 
