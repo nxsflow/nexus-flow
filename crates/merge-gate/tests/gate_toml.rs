@@ -173,7 +173,7 @@ fn an_id_off_the_pattern_is_rule_id_invalid() {
     }
     let longest = format!("a{}", "b".repeat(62));
     let source = HEAD.to_string() + &rule_toml(&longest, "owner", "A rule.");
-    assert!(read_gate_toml(Some(&source)).is_ok(), "64 characters fit");
+    assert!(read_gate_toml(Some(&source)).is_ok(), "63 characters fit");
     assert_eq!(
         GateTomlError::RuleIdInvalid(id("x")).code(),
         "rule_id_invalid"
