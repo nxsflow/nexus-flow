@@ -1,0 +1,6 @@
+# 2026-11-23 · NEX-223 · The model lock keeps the base's model id, so a lock rebuilt from nothing fails
+
+- Decided by: coder on NEX-223
+- Why: RFC 0001, "The model only grows", makes a model on `v2` permanent, and the model id in `model/model.lock.json` is what names it. `ncdb model build` at 0.1.0-beta.1 rebuilds a lock with a hand-edited id or a lowered model version byte for byte, and accepts `model.ts` over the base lock either way, so NEX-91's two checks let both through. CI's `model-lock.sh check` now compares the committed lock's model id and version with the base lock's: the id must be equal, the version no lower (equal when the PR leaves the model alone). A lock rebuilt from nothing gets a new id from `ncdb`, so it fails too, even when `model.ts` only adds fields: the fix is to rebuild over the committed lock. The comparison reads the lock's JSON with Node, which the step already needs for `ncdb`.
+- Instead of: allowing a new id when the lock was rebuilt from nothing and `model.ts` is additive, which would let a PR start a second model under the same name; or requiring the version to rise, which fails every PR that does not touch the model.
+- Topics: model, nocentraldb, ci, v2
