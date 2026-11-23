@@ -242,7 +242,8 @@ fn timeout_exits_non_zero_and_lists_what_is_still_behind() {
     let out = nxs(&base, &repo, &["sync", "--timeout", "1"]);
 
     assert!(started.elapsed() < Duration::from_secs(10));
-    assert_ne!(out.code, 0);
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["kind"], "timeout");
     let msg = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
     assert!(msg.contains("timed out"), "{msg}");
     assert!(msg.contains("unconfirmed"), "{msg}");
@@ -274,5 +275,18 @@ fn status_in_markdown_names_each_field_for_a_person() {
         text.ends_with("- last synced at 2026-11-18T11:06:40Z\n"),
         "{text}"
     );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn sync_without_a_relay_is_a_validation_error_that_names_relay() {
+    let (base, repo) = repository("sync-no-relay");
+
+    let out = nxs(&base, &repo, &["sync"]);
+
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["kind"], "validation");
+    let msg = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
+    assert!(msg.contains("nxs sync --relay <url>"), "{msg}");
     fs::remove_dir_all(&base).unwrap();
 }
