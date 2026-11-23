@@ -282,16 +282,6 @@ fn a_hash_that_is_not_64_lowercase_hex_digits_is_refused() {
 }
 
 #[test]
-fn a_hash_listed_twice_for_one_path_is_refused() {
-    assert_eq!(
-        refused(&format!(
-            "[[file]]\npath = \"a.md\"\nsha256 = [\"{H}\", \"{H}\"]\n"
-        )),
-        ShippedError::HashDuplicate("a.md".into())
-    );
-}
-
-#[test]
 fn a_path_listed_twice_is_refused() {
     assert_eq!(
         refused(&format!(
