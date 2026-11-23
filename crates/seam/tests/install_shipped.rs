@@ -68,8 +68,14 @@ fn a_missing_file_is_written() {
 
 #[test]
 fn the_current_default_is_current() {
-    assert_eq!(state("roles/coder.md", Some(V3), false), Some(State::Current));
-    assert_eq!(state("roles/coder.md", Some(V3), true), Some(State::Current));
+    assert_eq!(
+        state("roles/coder.md", Some(V3), false),
+        Some(State::Current)
+    );
+    assert_eq!(
+        state("roles/coder.md", Some(V3), true),
+        Some(State::Current)
+    );
 }
 
 #[test]
@@ -294,7 +300,14 @@ fn a_path_listed_twice_is_refused() {
 #[test]
 fn a_path_that_is_not_relative_and_plain_is_refused() {
     for bad in [
-        "", "/a.md", "a.md/", "a//b.md", "./a.md", "roles/../a.md", "..", "roles\\a.md",
+        "",
+        "/a.md",
+        "a.md/",
+        "a//b.md",
+        "./a.md",
+        "roles/../a.md",
+        "..",
+        "roles\\a.md",
     ] {
         assert_eq!(
             refused(&format!(
