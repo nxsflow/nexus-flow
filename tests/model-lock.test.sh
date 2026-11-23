@@ -129,6 +129,27 @@ git -C "$r" checkout -q "$(git -C "$r" rev-list --max-parents=0 HEAD)" -- model;
 expect_pass "a base branch without a lock passes: there is nothing to grow from" "$r"
 if grep -q "no model/model.lock.json" <<<"$OUT"; then ok "it says the base has no lock"; else bad "it says the base has no lock ($OUT)"; fi
 
+# ---- check: the model's identity against the base branch (NEX-223) ----------------------------
+
+echo "check: the lock keeps the base's model id, and its model version never goes down"
+
+BASE_ID="$(sed -n 's/^ *"id": "\([^"]*\)".*/\1/p' "$ROOT/model/model.lock.json")"
+set_lock() { # <repo> <sed expression>: a hand edit of the committed lock
+  sed -i.bak "$2" "$1/model/model.lock.json"; rm "$1/model/model.lock.json.bak"
+}
+
+r="$(fixture)"; set_lock "$r" "s/\"id\": \"$BASE_ID\"/\"id\": \"00000000000000000000000000000000\"/"; commit "$r"
+expect_fail "a lock whose model id was edited by hand fails, though ncdb rebuilds it alike" "$r" "model id"
+if grep -qF "$BASE_ID" <<<"$OUT"; then ok "it names the base's model id"; else bad "it names the base's model id ($OUT)"; fi
+
+r="$(fixture)"; rebuild_fresh "$r"; commit "$r"
+expect_fail "a lock rebuilt from nothing fails, though model.ts is unchanged: its model id is new" "$r" "model id"
+
+r="$(fixture)"; add_field "$r" note; rebuild "$r"; commit "$r"; git -C "$r" tag -f base >/dev/null
+set_lock "$r" 's/"version": 2/"version": 1/'; commit "$r"
+expect_fail "a lock whose model version went down fails, though ncdb rebuilds it alike" "$r" "model version"
+if grep -qF "below the base's 2" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
+
 r="$(fixture)"
 check "$r" no-such-ref
 if [ "$RC" != 0 ] && grep -q "no-such-ref" <<<"$OUT"; then ok "a base git cannot resolve fails, named"; else bad "a base git cannot resolve fails, named (exit $RC: $OUT)"; fi
