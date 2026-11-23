@@ -135,6 +135,11 @@ impl DataDir {
         self.root.join("device")
     }
 
+    /// The device member's own settings, `device.toml`: its relay and its last sync.
+    pub fn settings(&self) -> PathBuf {
+        self.root.join("device.toml")
+    }
+
     /// One session member's database and keys, created by `nxs session start`.
     pub fn session(&self, session_id: &str) -> Result<PathBuf, DataDirError> {
         self.under("sessions", "session id", session_id)

@@ -7,6 +7,7 @@ use nocentraldb as _;
 
 pub mod config;
 pub mod data_dir;
+pub mod device;
 pub mod goals;
 pub mod id;
 pub mod model;

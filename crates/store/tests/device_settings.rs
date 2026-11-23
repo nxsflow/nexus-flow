@@ -45,12 +45,15 @@ fn a_relay_written_is_read_back_from_the_data_directory() {
 fn only_a_ws_or_wss_url_is_a_relay() {
     assert!("ws://127.0.0.1:4000".parse::<RelayUrl>().is_ok());
     assert!("wss://relay.example.org".parse::<RelayUrl>().is_ok());
-    for text in ["", "https://relay.example.org", "relay.example.org", "wss://", "ws://"] {
+    for text in [
+        "",
+        "https://relay.example.org",
+        "relay.example.org",
+        "wss://",
+        "ws://",
+    ] {
         let refused = text.parse::<RelayUrl>().unwrap_err();
-        assert!(
-            refused.to_string().contains("ws://"),
-            "{text:?}: {refused}"
-        );
+        assert!(refused.to_string().contains("ws://"), "{text:?}: {refused}");
     }
 }
 
@@ -59,7 +62,11 @@ fn a_settings_file_with_an_unknown_key_is_refused() {
     let base = scratch("settings-unknown");
     let data = data_dir(&base.join("data"));
     data.open().unwrap();
-    fs::write(data.settings(), "relay = \"wss://r.example.org\"\ncolour = \"red\"\n").unwrap();
+    fs::write(
+        data.settings(),
+        "relay = \"wss://r.example.org\"\ncolour = \"red\"\n",
+    )
+    .unwrap();
 
     let refused = DeviceSettings::read(&data).unwrap_err();
 
