@@ -1,0 +1,6 @@
+# 2026-11-23 · NEX-224 · nxs keeps a device's keys in the key store only, and refuses without one
+
+- Decided by: Carsten
+- Why: RFC 0001's members table already keeps the keys of every member but the device outside the platform key store. pm, every role session (a sub-agent, in its own member database under `sessions/<id>/`, with ad-hoc spaces included) and the migration member keep them in their own member databases, so a temporary cloud session needs no key store. Only the device member uses the key store, and a cloud session never runs as a device. That leaves a device on a machine with no key store, such as a headless Linux server without Secret Service, or CI. `nxs` passes `DeviceKeys::KeyStore` there too, and `nxs init` refuses with an error that says the machine has no key store. No environment variable, flag or fallback file chooses a key file. The seam's `Options` stays the only way to name one, for tests and for embedders such as manufakt.io (NEX-96). The headless-device case is taken up when a real user needs it.
+- Instead of: (a) a new `NXS_KEY_FILE` variable, a public surface RFC 0001 does not name; (b) a fixed fallback file in the data directory, which only file permissions protect; (c) a flag on `nxs init` stored in the member's config; or (e) asking NoCentralDB for an opt-in key-file fallback for devices.
+- Topics: nocentraldb, storage, v2
