@@ -158,8 +158,8 @@ jobs:
       #
       # Then the check: the committed lock is what a rebuild writes, model.ts is an additive change of
       # the lock on the base, and the lock keeps the base lock's model id and a model version no lower
-      # than its own (NEX-223). The base is the PR's base branch (HEAD is the merge commit), the previous tip on
-      # a push, `v2` on a dispatch. A dispatch on a branch behind v2's model fails as if it removed
+      # than its own (NEX-223). The base is the PR's base branch (HEAD is the merge commit), the
+      # previous tip on a push, `v2` on a dispatch. A dispatch on a branch behind v2's model fails as if it removed
       # v2's newer fields; merging v2 in answers it. Then the script's harness, with the same ncdb.
       #
       # Only where model/ exists: `main` and its maintenance lines have none, and run none of this.
