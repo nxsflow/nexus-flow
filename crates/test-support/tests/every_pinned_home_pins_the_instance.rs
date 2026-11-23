@@ -111,6 +111,14 @@ fn runs_init(body: &str) -> bool {
         })
 }
 
+/// The suites of v2's `nxs init` (NEX-97), which the init gate below does not read. That gate
+/// guards against v1's `nxf init`/`nxm init` registering a workspace with the background service
+/// under `$HOME`. v2's `init` registers with no service and writes nothing under `$HOME`: its
+/// in-process tests run no binary and name the data directory in `Options`, and its binary tests
+/// set `NXS_DATA_DIR`, which wins over `$HOME`. Pinning a home there would also need
+/// `nxs_test_support`, a dependency that `nxs-v2` may not take without a lockfile change (NEX-212).
+const V2_INIT_SUITES: &[&str] = &["crates/nxs-v2/tests"];
+
 /// Does `body` reach a pinned `$HOME` at all — by any of the three sanctioned routes?
 fn reaches_a_pinned_home(body: &str) -> bool {
     [
@@ -380,6 +388,12 @@ fn every_test_that_runs_init_pins_a_home_first() {
         // Test sources only: production code re-execs `nxs init` (the front doors' umbrella
         // hand-off) and must never pin a home.
         if !path.components().any(|c| c.as_os_str() == "tests") {
+            continue;
+        }
+        if V2_INIT_SUITES
+            .iter()
+            .any(|dir| path.starts_with(root.join(dir)))
+        {
             continue;
         }
         let body = std::fs::read_to_string(&path).expect("a workspace source is readable");
