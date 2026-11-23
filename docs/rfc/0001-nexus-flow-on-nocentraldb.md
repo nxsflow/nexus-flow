@@ -78,8 +78,8 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 | Member | NoCentralDB kind | Created | Keys live | Removed |
 | --- | --- | --- | --- | --- |
 | A developer's device | `device` | When the developer first runs `nxs init` or `nxs device join` on it, paired into the developer's account (NoCentralDB RFC 0010) | In the device's key store (NoCentralDB RFC 0003, RFC 0009) | By the developer, when the device is retired or lost |
-| pm | `agent` | When the pm session starts, paired once into the account of the developer who commissions it | In pm's own member database, created in the session (see "The local data on disk"); never written to the repository, the environment, a ticket or a log | When pm ends, or by the developer when a new pm takes over |
-| A role session that pm starts (coder, legal, …) | `subAgent` of pm | When the session starts, added by pm | In the session's own member database, as for pm | When the session ends, or by pm when it archives the session |
+| pm | `agent` | When the pm session starts, paired once into the account of the developer who commissions it | In a key file beside pm's own member database, both created in the session (see "The local data on disk"); never written to the repository, the environment, a ticket or a log | When pm ends, or by the developer when a new pm takes over |
+| A role session that pm starts (coder, legal, …) | `subAgent` of pm | When the session starts, added by pm | In a key file beside the session's own member database, as for pm | When the session ends, or by pm when it archives the session |
 | manufakt.io | `device` of the person's account | When the person pairs manufakt.io into their account and adds it to their spaces | Where manufakt.io keeps its device keys | By the person |
 | The migration member | `agent` | When `nxs migrate` moves a v1 workspace, paired into the developer's account by their device for that one run (RFC 0008, "The migration member") | In its own member database under `migration/<run>/` | By the device, at the end of the run |
 
@@ -185,7 +185,7 @@ What replaces v1's `.nxs/`: each member nexus-flow runs as has one NoCentralDB d
 ```
 <data dir>/
   device/                 # the device member's NoCentralDB database, with all its spaces (NoCentralDB RFC 0006); its format is NoCentralDB's
-  sessions/<session id>/  # one session member's database and keys; created by `nxs session start`, removed by `nxs session end`
+  sessions/<session id>/  # one session member's database (db/) and its key file (member.keys); created by `nxs session start`, removed by `nxs session end`
   derived/<member id>/    # nexus-flow's rebuildable cache, if any (see "Derived state"); deletable at any time
   migration/<run>/        # the migration member's database and keys, for one run of RFC 0008's move; removed at its end
 ```
@@ -259,7 +259,7 @@ The seam is the crate `nexus-flow-facade` in a new major version, with `Engine` 
 | `Engine::session_start`, `Engine::session_end` | Start and end a session's member, as `nxs session start` and `end` |
 | `Engine::member_add`, `Engine::member_remove`, `Engine::members` | Add a member from its invitation with its role record, remove one, and list the current members with their role records |
 | `Engine::sync`, `Engine::sync_status` | Wait until nothing is behind or unconfirmed, and report the sync state |
-| `Engine::subscribe` | A stream of changes to the local database, for a view that redraws (requirement R3, met) |
+| `Engine::subscribe` | A stream of changes to the local database, for a view that redraws: one `Change { space, origin }` per fold, `origin` local or remote, bursts coalesced (requirement R3; the origin waits for NoCentralDB, see R3) |
 
 Each module RFC adds its own reads and writes to `Engine` (tickets, decisions, goals, requests, status notes), with derived state computed inside, so manufakt.io never re-implements a rule.
 
@@ -294,7 +294,7 @@ Each requirement this design rests on is either met, with the NoCentralDB RFC th
 - **R1. A space id grants nothing.** A relay connection proves only that a member key is held, and whether that member may read or write a space is checked per request (NoCentralDB RFC 0007, "Opening a connection"); content is encrypted, and the relay cannot read it (NoCentralDB RFC 0001, "The design in one page"). Knowing a space's id therefore reads nothing, and the id can be committed.
 - **R2. Join by invitation.** A new member creates its own keys and hands over an invitation, which an admin adds, so no secret travels (NoCentralDB RFC 0009, RFC 0003). A role name is not part of it, and nexus-flow keeps the role in its own `spaceMember` record.
 - **R8. An agent in the person's account, and its sub-agents.** An agent is paired into an account and receives a certificate, never the account key (NoCentralDB RFC 0010, "Adding a device or an agent to an account"; built in Rust and TypeScript). A sub-agent opens with `OpenOptions::sub_agent()`, holds no account, and its parent's `members.add` signs its certificate (NoCentralDB RFC 0009, "Sub-agents and ad-hoc spaces"; RFC 0010, rule 4). The chain person, pm, coder is therefore NoCentralDB's own.
-- **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`.
+- **R3. Change notification.** A subscription re-runs its query after every fold, from a local write or a sync, without the network (NoCentralDB RFC 0006, "Reads never touch the network"; RFC 0009, "Subscribe"), for `Engine::subscribe`. At 0.1.0-beta.1 the SDK's public subscription yields query pages without the change's origin, and no test relay is published for embedders; nexus-flow has asked NoCentralDB for both (NEX-227), and `Engine::subscribe` waits for them.
 - **R4. An additive check.** `ncdb model check` says whether one `model.lock.json` is an additive change of another (NoCentralDB RFC 0005); it needs Node 24.
 - **R9. A first sync for a new member.** A member that joins a space pulls the whole log from the relay (NoCentralDB RFC 0007, "Pull: read from a cursor"), so a new member with an empty database, such as a cloud container, gets the whole space.
 - **R10. A pinnable SDK.** The Rust SDK opens a database from the committed lock, `Db::open(OpenOptions::new(include_str!(…)))`, with no build script, so it builds without `ncdb` (NoCentralDB RFC 0009, "The Rust SDK"). Met: 0.1.0-beta.1 is published to crates.io (2026-11-21).
@@ -344,9 +344,15 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - **The SDK is pinned from crates.io at an exact version** ("The dependency on NoCentralDB", R10). Decided by the owner on 2026-11-21 (NEX-211). Why: the git pin was chosen only because the crate was unpublished, and NoCentralDB 0.1.0-beta.1 is on crates.io; an exact version keeps every move deliberate. *Not taken:* keeping the git revision pin.
 - **v2's seam and binary use temporary names until the cut-over** ("The library seam"). Decided by the owner on 2026-11-21 (NEX-204). Why: one workspace cannot hold two packages named `nexus-flow-facade` or two `nxs` binaries, and v1 keeps working on `v2` until v2's replaces it, which keeps the weekly merge of `main` easy. *Not taken:* removing v1's facade and binary from `v2` first.
 
+- **A session's keys are in a key file beside its member database** ("Members", "The local data on disk"). Decided by the owner on 2026-11-23 (NEX-226). Why: NoCentralDB 0.1.0-beta.1 keeps a member's keys either in the platform key store or in a key file the app names, never inside the database, and a cloud session has no key store; the file lives in the container's data directory, so the keys still die with the container and never reach the repository, the environment, a ticket or a log. *Not taken:* the key store when one exists and a file otherwise, a second path for the same thing; waiting for NoCentralDB to keep keys inside the database.
+
+- **`Engine::subscribe` yields one `Change { space, origin }` per fold, and waits for NoCentralDB** ("The library seam", R3). Decided by the owner on 2026-11-23 (NEX-227). Why: a view needs to know which space changed and whether the change was local or came in by sync, and NoCentralDB 0.1.0-beta.1 exposes neither the origin nor a test relay for embedders, so nexus-flow asks NoCentralDB for both and builds the stream once they ship. *Not taken:* a subset without the origin, whose item type would change later; NoCentralDB's query pages as the item type; dropping the origin.
+
 ## History
 
 - 2026-11-15: published as a draft in #142.
 - 2026-11-17: decided by the owner (NEX-38), in #142.
 - 2026-11-20: the changes of RFC 0005, RFC 0008 and RFC 0009 written into the text (see "Decisions"), and the citations of NoCentralDB RFC 0010 corrected to its section "Adding a device or an agent to an account", in #173 (NEX-83).
 - 2026-11-21: the owner's answers to NEX-211 (crates.io pin) and NEX-204 (temporary names) written into the text.
+- 2026-11-23: the owner's answer to NEX-226 (session keys in a key file) written into the text.
+- 2026-11-23: the owner's answer to NEX-227 (`Engine::subscribe`'s item type, and waiting for NoCentralDB) written into the text.

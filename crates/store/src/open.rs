@@ -7,7 +7,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use nocentraldb::{Db, OpenOptions};
+use nocentraldb::{Db, ErrorCode, OpenOptions};
 
 use crate::config::ConfigError;
 use crate::data_dir::DataDir;
@@ -36,6 +36,9 @@ pub enum InitError {
     DataDir { path: PathBuf, error: io::Error },
     /// A space id in `nexus-flow.toml` is not one.
     SpaceId { file: PathBuf, error: NotASpaceId },
+    /// The device's keys live in the platform's key store, and this machine has none that can
+    /// be reached (NEX-224).
+    KeyStoreUnavailable,
     /// NoCentralDB refused to open the database or to create the space.
     Database { message: String },
 }
@@ -51,6 +54,9 @@ impl fmt::Display for InitError {
                 path.display()
             ),
             InitError::SpaceId { file, error } => write!(f, "{}: {error}", file.display()),
+            InitError::KeyStoreUnavailable => f.write_str(
+                "this machine has no key store that nxs can reach, and nxs keeps the device's keys only there",
+            ),
             InitError::Database { message } => {
                 write!(f, "the device's database: {message}")
             }
@@ -74,8 +80,11 @@ impl From<ConfigError> for InitError {
 
 impl From<nocentraldb::Error> for InitError {
     fn from(e: nocentraldb::Error) -> Self {
-        InitError::Database {
-            message: e.to_string(),
+        match e.code() {
+            ErrorCode::KeyStoreUnavailable => InitError::KeyStoreUnavailable,
+            _ => InitError::Database {
+                message: e.to_string(),
+            },
         }
     }
 }
