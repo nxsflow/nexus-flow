@@ -2660,6 +2660,7 @@ name = "nexus-flow-merge-gate"
 version = "0.224.0"
 dependencies = [
  "pulldown-cmark",
+ "toml",
 ]
 
 [[package]]
