@@ -59,9 +59,7 @@ impl Opened {
     /// The kind of the open space `id`, as `nexus-flow.toml` names it; `None` when no file the
     /// store read names it.
     pub fn kind(&self, id: &SpaceId) -> Option<SpaceKind> {
-        if self.held(id).is_none() {
-            return None;
-        }
+        self.held(id)?;
         self.kinds
             .iter()
             .find(|(named, _)| named == id)
