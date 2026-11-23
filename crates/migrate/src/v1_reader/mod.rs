@@ -3,7 +3,8 @@
 //! The reader opens `.nxs/` itself and never through v1's `Store::open`, which writes on open. It
 //! reads four things and nothing else: `replica.toml`, `config.toml`, the stream id in
 //! `sync.toml`, and `db.sqlite`. `signing.key` is never opened, and nothing of `sync.toml` but its
-//! stream id is kept.
+//! stream id is kept. The one write is [`V1Workspace::mark`], which the move calls before it
+//! replays anything (see [`crate::marker`]).
 
 mod db;
 mod error;
@@ -16,7 +17,11 @@ pub use error::{Error, Refusal};
 pub use files::Replica;
 pub use op::V1Op;
 
+pub(crate) use db::{refuse_in_use, FILE as DB_FILE};
+
 use rusqlite::Connection;
+
+use crate::marker::{self, Mark, Marker};
 
 /// The one plugin whose workspaces move (decided by the owner, NEX-81).
 const SUPPORTED_PLUGIN: &str = "issue-tracker";
@@ -132,5 +137,17 @@ impl V1Workspace {
         let ops = db::ops(&self.conn);
         self.unchanged.check()?;
         ops
+    }
+
+    /// Marks the workspace as moved before the run replays it (RFC 0008, "The marker"): writes
+    /// `migrated.toml` and raises the database's header to [`marker::RAISED`], so every v1 binary
+    /// refuses the workspace from then on. Refused with [`Refusal::V1InUse`] while a v1 process
+    /// holds the database, or after one changed it since [`open`](Self::open). The ops still read
+    /// afterwards, since the header is the only part of the database that changed.
+    pub fn mark(&mut self, mark: &Mark) -> Result<Marker, marker::Error> {
+        self.unchanged.check()?;
+        let marker = marker::write(&self.dir, mark)?;
+        self.unchanged = db::Unchanged::take(&self.dir.join(db::FILE))?;
+        Ok(marker)
     }
 }

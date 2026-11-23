@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 use super::{Error, Refusal, V1Op};
 
 /// The database file in a v1 workspace directory.
-pub(super) const FILE: &str = "db.sqlite";
+pub(crate) const FILE: &str = "db.sqlite";
 
 /// Opens the database read-only and `immutable`: SQLite then takes no lock and creates no `-wal`,
 /// `-shm` or `-journal` file beside it, so not one byte in the workspace changes.
@@ -74,7 +74,7 @@ fn stamp(path: &Path) -> Result<Stamp, Error> {
 /// write in rollback mode. SQLite removes them when the last connection closes; one left behind
 /// by a process that ended without closing may hold writes `db.sqlite` does not have yet, which
 /// v1 takes in the next time it opens the workspace.
-fn refuse_in_use(path: &Path) -> Result<(), Error> {
+pub(crate) fn refuse_in_use(path: &Path) -> Result<(), Error> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut beside = path.as_os_str().to_owned();
         beside.push(suffix);
