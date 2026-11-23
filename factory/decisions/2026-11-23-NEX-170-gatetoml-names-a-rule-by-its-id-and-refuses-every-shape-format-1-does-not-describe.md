@@ -1,0 +1,6 @@
+# 2026-11-23 · NEX-170 · gate.toml names a rule by its id, and refuses every shape format 1 does not describe
+
+- Decided by: coder on NEX-170
+- Why: RFC 0010 says a rule's error carries "its id or position" and lists the codes, but not which code a value of the wrong type gets. A rule's error carries its id when the rule has one as a string, even an invalid or repeated one, and its 1-based position only when it has none. A wrong type gets the code of its key: `format = "1"` is `format_unknown`; `owners` or `verdict_authors` that is not a list, or holds anything but non-empty strings, is `owners_empty` or `verdict_authors_empty`; an `effect` or `text` that is not a string is `effect_invalid` or `text_empty`, and a `text` of only whitespace is `text_empty`. A `rule` key that is not a list of tables is `toml_invalid`. Every problem is named, in file order, so a team fixes them in one pass. Each case is refused, so the gate decides `owner`, as the RFC requires of a file it cannot read.
+- Instead of: always the position (the owner reads rules by id), the first problem only (a team would fix one at a time), or a new code for a wrong type, which would widen the public list of error codes the RFC decided.
+- Topics: merge-gate, v2
