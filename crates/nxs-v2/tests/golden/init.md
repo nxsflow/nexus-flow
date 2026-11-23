@@ -1,0 +1,2 @@
+- `nexus-flow.toml` already names the repository space `0123456789abcdef0123456789abcdef`; nothing was created
+- no relay is set, so the space stays on this device in island mode; `nxs sync --relay <url>` connects it
