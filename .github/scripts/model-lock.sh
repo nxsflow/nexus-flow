@@ -11,7 +11,7 @@
 #                    or keeps the one there when `cargo install --list` says it is that version, and
 #                    fails unless it ends at the pin. CI caches <root> under the pin.
 #   check <base>     Run from the repository root, with `ncdb`, Node 24 or later and model/node_modules
-#                    in place. Two checks, both always run, either one fails the step:
+#                    in place. Three checks:
 #                      1. the rebuild: `ncdb model build` over a scratch copy of the committed lock
 #                         must write it byte for byte. A model.ts edited without a rebuild, or a lock
 #                         edited by hand, fails here.
@@ -19,7 +19,12 @@
 #                         <base> must accept model.ts, so no field or collection on the base branch is
 #                         removed or renamed, even when the PR rebuilt its lock from nothing. A base
 #                         without a lock passes with a notice. A base git cannot resolve fails.
-#                    Neither touches the working tree.
+#                      3. the lock is the base's model (NEX-223): its model id is the base lock's,
+#                         and its model version is no lower than the base lock's. ncdb rebuilds a
+#                         hand-edited id or a lowered version byte for byte and accepts model.ts over
+#                         the base lock, so checks 1 and 2 pass both; a lock rebuilt from nothing has a
+#                         new id and fails here. Skipped, as 2 is, on a base without a lock.
+#                    All three run, any one fails the step, and none touches the working tree.
 #
 # Why `ncdb model build` on a scratch copy for check 2 and not `ncdb model check --lock <base>`:
 # `check` also fails when the lock is out of date, so against the base lock it fails every PR that
@@ -68,8 +73,19 @@ install() { # <root>
   [ "$got" = "$version" ] || die "ncdb in $root is '$got', not the pinned $version"
 }
 
+# Prints "<id> <version>" of a lock's model, with the Node that ncdb needs anyway. Fails on a lock
+# without a model id or a whole-number model version, which ncdb refuses too.
+model_identity() { # <lock>
+  # shellcheck disable=SC2016 # the backticks are JavaScript's, for node
+  node -e '
+    const { id, version } = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).model;
+    if (typeof id !== "string" || !Number.isSafeInteger(version)) process.exit(1);
+    console.log(`${id} ${version}`);
+  ' "$1"
+}
+
 check() { # <base>
-  local base="$1" base_commit scratch failed=0
+  local base="$1" base_commit scratch failed=0 head_identity="" base_identity="" head_id head_version base_id base_version
   base_commit="$(git rev-parse --verify --quiet "$base^{commit}")" ||
     die "the base '$base' is no commit git can resolve: fetch it before the check"
   [ -f "$LOCK" ] || die "$LOCK is missing"
@@ -91,9 +107,27 @@ check() { # <base>
   echo "2. the model only grows: model.ts against the lock at $base ($base_commit)"
   if git cat-file -e "$base_commit:$LOCK" 2>/dev/null; then
     git show "$base_commit:$LOCK" > "$scratch/base.json"
+    # Read before the build below raises the scratch copy's version. A lock ncdb cannot read has
+    # failed check 1 or check 2 already, so a failed read only skips check 3.
+    head_identity="$(model_identity "$LOCK" 2>/dev/null)" || failed=1
+    base_identity="$(model_identity "$scratch/base.json" 2>/dev/null)" || failed=1
     if ! (cd "$MODEL_DIR" && ncdb model build --lock "$scratch/base.json"); then
       printf '::error file=%s::model.ts is not an additive change of the lock on %s (above): a field or collection, once on the base branch, is never renamed or removed (RFC 0001, "The model only grows")\n' "$MODEL_DIR/model.ts" "$base"
       failed=1
+    fi
+
+    echo "3. the lock is the base's model: the same model id, and a model version no lower than the base's"
+    if [ -n "$head_identity" ] && [ -n "$base_identity" ]; then
+      read -r head_id head_version <<<"$head_identity"
+      read -r base_id base_version <<<"$base_identity"
+      if [ "$head_id" != "$base_id" ]; then
+        printf '::error file=%s::the model id is %s where the lock on %s has %s: a model keeps its id for good, so edit model.ts and rebuild over the committed lock, never start a new one (RFC 0001, "The model only grows")\n' "$LOCK" "$head_id" "$base" "$base_id"
+        failed=1
+      fi
+      if [ "$head_version" -lt "$base_version" ]; then
+        printf "::error file=%s::the model version is %s, below the base's %s on %s: the version only rises (RFC 0001, \"The model only grows\")\n" "$LOCK" "$head_version" "$base_version" "$base"
+        failed=1
+      fi
     fi
   else
     printf '::notice::%s has no %s: there is no older model to grow from\n' "$base" "$LOCK"

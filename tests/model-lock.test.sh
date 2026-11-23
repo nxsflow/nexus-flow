@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Test harness for .github/scripts/model-lock.sh (NEX-91, RFC 0001 "The model": "Building it" and
-# "The model only grows").
+# Test harness for .github/scripts/model-lock.sh (NEX-91 and NEX-223, RFC 0001 "The model":
+# "Building it" and "The model only grows").
 #
 # The script is CI's model lock step: `pin` names the NoCentralDB version the repository pins,
 # `install` puts `ncdb` at that version into a directory, and `check` rebuilds model/model.lock.json
-# from model/model.ts and checks the model against the lock on the base branch. Every way `check`
-# can answer is run here against a real git repository on disk with the REAL `ncdb` and Node 24,
-# because what decides "additive" is ncdb, and a stub would only test the stub. `install` runs
+# from model/model.ts and checks the model, its id and its version against the lock on the base
+# branch. Every way `check` can answer is run here against a real git repository on disk with the
+# REAL `ncdb` and Node 24, because what decides "additive" is ncdb, and a stub would only test the
+# stub. `install` runs
 # against a stubbed `cargo`, so the harness compiles nothing.
 #
 # Needs: bash, git, Node 24 or later and `ncdb` at the pinned version on PATH, and model/node_modules
@@ -19,6 +20,9 @@
 #   M2  no byte comparison after the rebuild → model.ts without a rebuild, the hand-edited lock  2 red
 #   M3  `cargo install` without `=` and --locked → the empty root, the other version          2 red
 #   M4  model/package.json's SDK pin not compared with Cargo.lock → the differing SDK pin      1 red
+#   M5  no model id comparison with the base lock → the hand-edited id, its name, the lock
+#       rebuilt from nothing                                                                    3 red
+#   M6  no model version comparison with the base lock → the lowered version, its two numbers  2 red
 #
 # Run: tests/model-lock.test.sh
 set -euo pipefail
