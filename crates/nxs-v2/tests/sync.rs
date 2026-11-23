@@ -207,3 +207,20 @@ fn status_takes_neither_watch_nor_timeout() {
     }
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn status_prints_the_last_sync_as_an_rfc_3339_time_in_utc() {
+    let (base, repo) = repository("sync-status-synced-at");
+    // No relay is published for tests (NEX-227), so the time a sync recorded is written directly.
+    fs::write(
+        base.join("data").join("device.toml"),
+        "relay = \"wss://relay.example.org\"\nsynced_at = 1795000000\n",
+    )
+    .unwrap();
+
+    let out = nxs(&base, &repo, &["sync", "--status"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(json(&out)["synced_at"], "2026-11-18T11:06:40Z");
+    fs::remove_dir_all(&base).unwrap();
+}
