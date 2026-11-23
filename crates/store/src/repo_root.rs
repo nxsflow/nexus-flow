@@ -65,6 +65,13 @@ impl RepoRoot {
             })
     }
 
+    /// The root `nxs init` makes of `dir`, where no `nexus-flow.toml` was found yet.
+    pub fn at(dir: &Path) -> Self {
+        RepoRoot {
+            path: dir.to_path_buf(),
+        }
+    }
+
     /// The root folder itself.
     pub fn path(&self) -> &Path {
         &self.path

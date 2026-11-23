@@ -9,5 +9,7 @@ pub mod config;
 pub mod data_dir;
 pub mod goals;
 pub mod model;
+mod open;
 pub mod repo_root;
+pub mod space;
 pub mod status;

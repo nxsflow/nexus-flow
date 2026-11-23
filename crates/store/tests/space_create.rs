@@ -87,7 +87,11 @@ fn creating_twice_creates_one_space_and_reports_the_existing_id() {
     let second = init_in(&base).unwrap();
     assert!(!second.created, "{second:?}");
     assert_eq!(second.space, first.space);
-    assert_eq!(fs::read(&file).unwrap(), written, "the file is left as it was");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        written,
+        "the file is left as it was"
+    );
     assert!(
         second.lines().iter().any(|l| l.contains(&first.space)),
         "{:?}",
@@ -145,7 +149,11 @@ fn a_v1_workspace_is_left_untouched_beside_an_empty_space() {
         .map(|e| e.unwrap().file_name())
         .collect();
     entries.sort();
-    assert_eq!(entries, ["db.sqlite", "plugins"], "nothing was added to .nxs/");
+    assert_eq!(
+        entries,
+        ["db.sqlite", "plugins"],
+        "nothing was added to .nxs/"
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
