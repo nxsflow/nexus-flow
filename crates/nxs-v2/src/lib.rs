@@ -42,6 +42,9 @@ struct Cli {
 enum Command {
     /// Create the repository space and nexus-flow.toml, or name the space the file holds.
     Init,
+    /// Add, remove and list the members of the repository's spaces, with their role records.
+    #[command(subcommand)]
+    Member(cmd::member::MemberCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
 }
@@ -65,6 +68,9 @@ where
     let format = if cli.md { Format::Md } else { Format::Json };
     let result = match cli.command {
         Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
+        Command::Member(command) => {
+            cmd::member::run(dir, options, command).map(|r| format.render(&r))
+        }
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
     };
     match result {
