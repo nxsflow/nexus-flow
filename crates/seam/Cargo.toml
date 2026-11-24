@@ -9,6 +9,9 @@ publish = false
 # through `store`.
 [dependencies]
 nexus-flow-store = { path = "../store" }
+# The merge gate's readers (RFC 0010), so that `Engine::merge_gate_rules` is the counterpart of
+# `nxs merge-gate rules` (NEX-171).
+nexus-flow-merge-gate = { path = "../merge-gate" }
 # Installing the shipped defaults (RFC 0006, NEX-132): `shipped.toml` is read with serde and toml,
 # and every shipped version is recognised by its SHA-256.
 serde.workspace = true

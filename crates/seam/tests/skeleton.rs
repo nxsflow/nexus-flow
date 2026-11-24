@@ -4,7 +4,7 @@
 use std::path::Path;
 
 const RFC: &str = "RFC 0001";
-const WORKSPACE_DEPS: &[&str] = &["nexus-flow-store"];
+const WORKSPACE_DEPS: &[&str] = &["nexus-flow-store", "nexus-flow-merge-gate"];
 
 fn read(file: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
