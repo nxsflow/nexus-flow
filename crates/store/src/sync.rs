@@ -19,6 +19,7 @@ use nocentraldb::Connection;
 use crate::data_dir::DataDir;
 use crate::device::{DeviceSettings, RelayUrl, SettingsError};
 use crate::id::SpaceId;
+use crate::member_select::RunAs;
 use crate::open::{DeviceKeys, InitError, Network};
 use crate::opened::{repository_on, Opened};
 
@@ -133,7 +134,7 @@ pub fn set_relay(data: &DataDir, relay: &RelayUrl) -> Result<(), SettingsError> 
 /// The sync state of the device's database for the repository at or above `dir`, from the local
 /// database alone: it is opened off the network.
 pub async fn status(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<SyncStatus, SyncError> {
-    let opened = repository_on(dir, data, keys, Network::Offline).await?;
+    let opened = repository_on(dir, data, RunAs::Device(keys), Network::Offline).await?;
     report(&opened).await
 }
 
@@ -147,16 +148,17 @@ pub async fn sync(
     if DeviceSettings::read(data)?.relay.is_none() {
         return Err(SyncError::NoRelay);
     }
-    let mut opened = repository_on(dir, data, keys, Network::Relay).await?;
+    let mut opened = repository_on(dir, data, RunAs::Device(keys), Network::Relay).await?;
     wait(&mut opened, timeout).await
 }
 
 /// Waits until nothing in `opened` is behind or unconfirmed, records the time, and reports the
 /// sync state. With `timeout`, a wait that outlasts it ends in [`SyncError::TimedOut`] with what
-/// is still behind. Without a relay there is nothing to wait for, and it ends in
+/// is still behind. A database opened without a relay, such as in island mode or as a session's
+/// member, which has no relay setting yet, has nothing to wait for, and it ends in
 /// [`SyncError::NoRelay`].
 pub async fn wait(opened: &mut Opened, timeout: Option<Duration>) -> Result<SyncStatus, SyncError> {
-    if DeviceSettings::read(opened.data())?.relay.is_none() {
+    if opened.relay().is_none() {
         return Err(SyncError::NoRelay);
     }
     let deadline = timeout.map(|t| Instant::now() + t);
@@ -204,9 +206,13 @@ async fn behind(opened: &mut Opened) -> Result<Option<Behind>, InitError> {
     }))
 }
 
-/// The sync state of `opened`, with the device's settings.
+/// The sync state of `opened`, with the device's settings when it is the device's member; a
+/// session's member has no relay or last sync of its own yet.
 pub async fn report(opened: &Opened) -> Result<SyncStatus, SyncError> {
-    let settings = DeviceSettings::read(opened.data())?;
+    let settings = match opened.session() {
+        None => DeviceSettings::read(opened.data())?,
+        Some(_) => DeviceSettings::default(),
+    };
     Ok(SyncStatus {
         member: member(opened).await?,
         relay: settings.relay,
