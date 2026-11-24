@@ -191,6 +191,9 @@ impl From<WriteError> for MemberError {
             WriteError::WriteOnce(e) => MemberError::Invalid {
                 message: e.to_string(),
             },
+            WriteError::MoveOnly(e) => MemberError::Invalid {
+                message: e.to_string(),
+            },
             WriteError::Database(e) => e.into(),
         }
     }

@@ -170,6 +170,129 @@
       },
       "since": 4
     },
+    "migrationRecord": {
+      "fields": {
+        "author": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "item": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "keyId": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "kind": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "lamport": { "rule": 1, "since": 5, "type": "ncdb/int" },
+        "origin": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "outcome": {
+          "options": [
+            "applied",
+            "noEffect",
+            "dropped",
+            "withheld",
+            "lateConflict"
+          ],
+          "rule": 1,
+          "since": 5,
+          "type": "ncdb/choice"
+        },
+        "payload": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "position": { "rule": 1, "since": 5, "type": "ncdb/int" },
+        "provenance": {
+          "options": ["own", "verified", "invalid", "unsigned"],
+          "rule": 1,
+          "since": 5,
+          "type": "ncdb/choice"
+        },
+        "run": {
+          "rule": 1,
+          "since": 5,
+          "targets": ["migrationRun"],
+          "type": "ncdb/link"
+        },
+        "sig": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "site": { "rule": 1, "since": 5, "type": "ncdb/int" },
+        "source": {
+          "options": ["op", "file"],
+          "rule": 1,
+          "since": 5,
+          "type": "ncdb/choice"
+        },
+        "ticket": {
+          "rule": 1,
+          "since": 5,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        },
+        "wallClock": { "rule": 1, "since": 5, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byItem": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "item" },
+            { "direction": "asc", "field": "position" }
+          ],
+          "scope": "space",
+          "since": 5
+        },
+        "byOrigin": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "origin" }],
+          "scope": "space",
+          "since": 5
+        },
+        "byRun": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "run" },
+            { "direction": "asc", "field": "position" }
+          ],
+          "scope": "space",
+          "since": 5
+        },
+        "byTicket": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "ticket" },
+            { "direction": "asc", "field": "position" }
+          ],
+          "scope": "space",
+          "since": 5
+        }
+      },
+      "since": 5
+    },
+    "migrationRun": {
+      "fields": {
+        "endedAt": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "last": { "rule": 1, "since": 5, "type": "ncdb/int" },
+        "member": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "ops": { "rule": 1, "since": 5, "type": "ncdb/int" },
+        "replica": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "report": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "startedAt": { "rule": 1, "since": 5, "type": "ncdb/string" },
+        "state": {
+          "options": [
+            "replaying",
+            "verifying",
+            "complete",
+            "verificationFailed",
+            "undone"
+          ],
+          "rule": 1,
+          "since": 5,
+          "type": "ncdb/choice"
+        },
+        "workspace": { "rule": 1, "since": 5, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byWorkspace": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "workspace" },
+            { "direction": "asc", "field": "startedAt" }
+          ],
+          "scope": "space",
+          "since": 5
+        }
+      },
+      "since": 5
+    },
     "spaceMember": {
       "fields": {
         "member": { "rule": 1, "since": 1, "type": "ncdb/string" },
@@ -187,7 +310,7 @@
           "equal": 1,
           "fields": [{ "direction": "asc", "field": "member" }],
           "scope": "space",
-          "since": 5
+          "since": 6
         }
       },
       "since": 1
@@ -347,7 +470,8 @@
           "type": "ncdb/choice"
         },
         "updatedAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
-        "updatedBy": { "rule": 1, "since": 2, "type": "ncdb/string" }
+        "updatedBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "v1Id": { "rule": 1, "since": 5, "type": "ncdb/string" }
       },
       "indexes": {
         "byArchivedAt": {
@@ -424,6 +548,12 @@
           "fields": [{ "direction": "desc", "field": "updatedAt" }],
           "scope": "space",
           "since": 2
+        },
+        "byV1Id": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "v1Id" }],
+          "scope": "space",
+          "since": 5
         }
       },
       "since": 2
@@ -479,9 +609,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:ca401d39bc04725f3be3aeed368372033c48e9ece3541d2fa750291308d5dfd9",
+    "hash": "sha256:8648c90e89c4e517981ea06900264a4fdefb9c8e0fd9cb441cd42154cdf46cd9",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 5
+    "version": 6
   },
   "plugins": {}
 }

@@ -13,6 +13,7 @@ pub mod goals;
 pub mod id;
 pub mod member_select;
 pub mod members;
+pub mod migration;
 pub mod model;
 mod open;
 pub mod opened;
