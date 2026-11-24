@@ -44,6 +44,9 @@ enum Command {
     Init,
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
+    /// Install the factory's shipped defaults under factory/.
+    #[command(subcommand)]
+    Factory(cmd::factory::FactoryCommand),
 }
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
@@ -66,6 +69,9 @@ where
     let result = match cli.command {
         Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
+        Command::Factory(command) => {
+            cmd::factory::run(dir, options, command).map(|r| format.render(&r))
+        }
     };
     match result {
         Ok(stdout) => Outcome {

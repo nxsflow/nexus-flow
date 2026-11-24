@@ -53,13 +53,14 @@ fn install_writes_every_missing_default_and_prints_the_report() {
     let out = nxs(&base, &repo, &["factory", "install"]);
 
     assert_eq!(out.code, 0, "{}", stdout(&out));
-    let states: Vec<(&str, &str)> = SHIPPED.iter().map(|p| (*p, "written")).collect();
+    // The fields in the RFC's order: `files` first, then `codeowners`.
+    let files: Vec<String> = SHIPPED
+        .iter()
+        .map(|p| format!(r#"{{"path":"{p}","state":"written"}}"#))
+        .collect();
     assert_eq!(
         stdout(&out),
-        format!(
-            "{}\n",
-            json!({ "files": files(&states), "codeowners": null })
-        )
+        format!("{{\"files\":[{}],\"codeowners\":null}}\n", files.join(","))
     );
     for path in SHIPPED {
         assert!(repo.join(path).is_file(), "{path} is written");
