@@ -1,12 +1,13 @@
 //! `nxs genesis create [--update]` (RFC 0004, "Installing the template"): writes
-//! `factory/GENESIS.md` from the template through the seam, only where the path is free, and
-//! prints the report. It opens no database. A GENESIS git still tracks is refused: the report goes
+//! `factory/GENESIS.md` from the template through the seam, only where the path is free, installs
+//! the guide, and prints the report with the CODEOWNERS check. It opens no database. A GENESIS git still tracks is refused: the report goes
 //! to stdout as always, the error naming the file to stderr, and the exit code is 1.
 
 use std::path::Path;
 
 use clap::{Args, Subcommand};
-use nexus_flow_seam::genesis::{FileReport, GenesisError, Report};
+use nexus_flow_seam::genesis::{FileReport, GenesisError, Report, PATH};
+use nexus_flow_seam::install::codeowners;
 use nexus_flow_seam::{Engine, Problem, RootError};
 use serde::Serialize;
 
@@ -29,10 +30,19 @@ pub struct CreateArgs {
     update: bool,
 }
 
-/// What `nxs genesis create` prints (RFC 0004, "Output").
+/// What `nxs genesis create` prints (RFC 0004, "Output"), its keys in the RFC's order.
 #[derive(Debug, Serialize)]
 pub struct Create {
     files: Vec<File>,
+    /// `null` when the repository has no CODEOWNERS file.
+    codeowners: Option<Codeowners>,
+}
+
+/// The CODEOWNERS file found, and the paths no rule in it covers.
+#[derive(Debug, Serialize)]
+struct Codeowners {
+    file: String,
+    uncovered: Vec<String>,
 }
 
 /// One file of the report.
@@ -54,8 +64,7 @@ pub fn run(dir: &Path, command: GenesisCommand, format: Format) -> Outcome {
     let stdout = format.render(&Create::from(&report)).into_bytes();
     if report.is_refused() {
         let msg = format!(
-            "{PATH} is missing from the working tree but git still tracks it; nothing was written. Restore it from git, such as with `git checkout -- {PATH}` or `git restore {PATH}`",
-            PATH = nexus_flow_seam::genesis::PATH
+            "{PATH} is missing from the working tree but git still tracks it; nothing was written. Restore it from git, such as with `git checkout -- {PATH}` or `git restore {PATH}`"
         );
         return Outcome {
             stdout,
@@ -74,6 +83,16 @@ impl From<&Report> for Create {
     fn from(report: &Report) -> Self {
         Create {
             files: report.files.iter().map(File::from).collect(),
+            codeowners: report.codeowners.as_ref().map(Codeowners::from),
+        }
+    }
+}
+
+impl From<&codeowners::Report> for Codeowners {
+    fn from(report: &codeowners::Report) -> Self {
+        Codeowners {
+            file: report.file.clone(),
+            uncovered: report.uncovered.clone(),
         }
     }
 }
@@ -90,27 +109,56 @@ impl From<&FileReport> for File {
 
 impl Render for Create {
     fn markdown(&self) -> String {
-        self.files
-            .iter()
-            .map(|file| {
-                let path = &file.path;
-                let what = match (file.state, &file.found) {
-                    ("written", _) => {
-                        "written from the template; fill it in and commit it".to_owned()
-                    }
-                    ("team", Some(found)) => {
-                        format!("team: `{found}` is there, so nothing was written")
-                    }
-                    ("team", None) => "team: it is there, so nothing was written".to_owned(),
-                    ("tracked", _) => {
-                        "tracked: missing here but tracked in git, so nothing was written; restore it from git"
-                            .to_owned()
-                    }
-                    (state, _) => state.to_owned(),
-                };
-                format!("- `{path}`: {what}\n")
-            })
-            .collect()
+        let mut text: String = self.files.iter().map(File::markdown).collect();
+        text.push_str(&match &self.codeowners {
+            None => format!(
+                "- CODEOWNERS: there is no CODEOWNERS file, so no rule sends a change of `{PATH}` to the owner\n"
+            ),
+            Some(c) if c.uncovered.is_empty() => {
+                format!("- CODEOWNERS: `{}` covers `{PATH}`\n", c.file)
+            }
+            Some(c) => {
+                let uncovered: Vec<_> = c.uncovered.iter().map(|p| format!("`{p}`")).collect();
+                format!(
+                    "- CODEOWNERS: no rule in `{}` covers {}; add one so that its changes come back to the owner\n",
+                    c.file,
+                    uncovered.join(", ")
+                )
+            }
+        });
+        text
+    }
+}
+
+impl File {
+    /// The file's line in the Markdown report.
+    fn markdown(&self) -> String {
+        let path = &self.path;
+        if path != PATH {
+            let what = match self.state {
+                "written" => "written: the current guide; commit it",
+                "current" => "current: the current guide, so nothing was done",
+                "older_default" => {
+                    "older_default: an earlier shipped guide, left as it is; `--update` replaces it"
+                }
+                "updated" => "updated: replaced by the current guide; commit it",
+                "team" => "team: the team changed it, so it was left as it is",
+                "retired" => "retired: nexus-flow no longer ships it, so it was left as it is",
+                state => state,
+            };
+            return format!("- `{path}`: {what}\n");
+        }
+        let what = match (self.state, &self.found) {
+            ("written", _) => "written from the template; fill it in and commit it".to_owned(),
+            ("team", Some(found)) => format!("team: `{found}` is there, so nothing was written"),
+            ("team", None) => "team: it is there, so nothing was written".to_owned(),
+            ("tracked", _) => {
+                "tracked: missing here but tracked in git, so nothing was written; restore it from git"
+                    .to_owned()
+            }
+            (state, _) => state.to_owned(),
+        };
+        format!("- `{path}`: {what}\n")
     }
 }
 
