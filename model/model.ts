@@ -7,6 +7,7 @@
 // a field or collection, once on v2, is never renamed or removed.
 import { nc } from "@nocentraldb/sdk";
 
+import { decisions } from "./decisions.ts";
 import { tickets } from "./tickets.ts";
 
 export const model = nc.model({
@@ -24,4 +25,5 @@ export const model = nc.model({
     tag: nc.string(),
   }),
   ...tickets,
+  ...decisions,
 });
