@@ -44,7 +44,7 @@
         "elsewhere": {
           "rule": 1,
           "since": 3,
-          "targets": ["ticketsTicket"],
+          "targets": ["ticketsTicket", "goalsGoal"],
           "type": "ncdb/ref"
         },
         "label": { "rule": 1, "since": 3, "type": "ncdb/string" },
@@ -130,6 +130,46 @@
       },
       "since": 3
     },
+    "goalsGoal": {
+      "fields": {
+        "createdAt": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "createdBy": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "description": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "key": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "owner": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "rank": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "reachedWhen": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "status": {
+          "options": ["proposed", "focus", "later", "reached", "dropped"],
+          "rule": 1,
+          "since": 4,
+          "type": "ncdb/choice"
+        },
+        "statusAt": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "statusBy": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "statusComment": { "rule": 1, "since": 4, "type": "ncdb/string" },
+        "title": { "rule": 1, "since": 4, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byKey": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "key" }],
+          "scope": "space",
+          "since": 4
+        },
+        "byStatus": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "status" },
+            { "direction": "asc", "field": "rank" },
+            { "direction": "asc", "field": "statusAt" }
+          ],
+          "scope": "space",
+          "since": 4
+        }
+      },
+      "since": 4
+    },
     "spaceMember": {
       "fields": {
         "member": { "rule": 1, "since": 1, "type": "ncdb/string" },
@@ -147,7 +187,7 @@
           "equal": 1,
           "fields": [{ "direction": "asc", "field": "member" }],
           "scope": "space",
-          "since": 4
+          "since": 5
         }
       },
       "since": 1
@@ -188,7 +228,7 @@
         "createdAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
         "createdBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
         "kind": {
-          "options": ["serves", "cites"],
+          "options": ["serves", "cites", "proposed"],
           "rule": 1,
           "since": 2,
           "type": "ncdb/choice"
@@ -197,7 +237,7 @@
         "target": {
           "rule": 1,
           "since": 2,
-          "targets": ["ticketsTicket"],
+          "targets": ["ticketsTicket", "goalsGoal"],
           "type": "ncdb/ref"
         },
         "ticket": {
@@ -439,9 +479,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:2234c3346ec65a96e9188161ea82323857e1f1e5815f3fe5e4fceb679dc63246",
+    "hash": "sha256:ca401d39bc04725f3be3aeed368372033c48e9ece3541d2fa750291308d5dfd9",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 4
+    "version": 5
   },
   "plugins": {}
 }
