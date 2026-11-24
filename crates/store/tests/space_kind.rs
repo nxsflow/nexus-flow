@@ -168,3 +168,25 @@ fn a_goal_goes_into_coordination_spaces_only() {
         assert_eq!(err.code(), None);
     }
 }
+
+/// RFC 0007, "Where a note lives": a note, its lines and its goals' verdicts are in the repository
+/// space, and the storage crate refuses them in a coordination space with
+/// `not_a_repository_space`.
+#[test]
+fn a_status_collection_goes_into_repository_spaces_only() {
+    for collection in ["statusNote", "statusItem", "statusGoal"] {
+        assert_eq!(
+            space_kind::check(collection, Some(Repository)),
+            Ok(()),
+            "{collection}"
+        );
+        let err = space_kind::check(collection, Some(Coordination))
+            .expect_err(&format!("{collection} in a coordination space"));
+        assert_eq!(err.belongs_in, [Repository], "{collection}");
+        assert_eq!(err.code(), Some("not_a_repository_space"), "{collection}");
+        for kind in [Some(AdHoc), None] {
+            space_kind::check(collection, kind)
+                .expect_err(&format!("{collection} in {kind:?} must be refused"));
+        }
+    }
+}
