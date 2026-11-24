@@ -17,6 +17,7 @@ mod cmd;
 mod error;
 mod output;
 mod retired;
+mod v1_notice;
 
 use error::CliError;
 use output::Format;
@@ -71,14 +72,18 @@ where
         Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
     };
-    match result {
+    let mut outcome = match result {
         Ok(stdout) => Outcome {
             stdout: stdout.into_bytes(),
             stderr: Vec::new(),
             code: 0,
         },
         Err(e) => e.outcome(format),
+    };
+    if let Some(notice) = v1_notice::check(dir) {
+        outcome.stderr.extend_from_slice(notice.as_bytes());
     }
+    outcome
 }
 
 /// Help and the version are printed as clap writes them; any other parse error is a usage
