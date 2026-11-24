@@ -57,7 +57,7 @@ fixture() {
   repo="$(mktemp -d "$WORK/repo.XXXXXX")"
   mkdir -p "$repo/model"
   cp "$ROOT/Cargo.lock" "$repo/"
-  cp "$ROOT/model/model.ts" "$ROOT/model/model.lock.json" "$ROOT/model/package.json" \
+  cp "$ROOT"/model/*.ts "$ROOT/model/model.lock.json" "$ROOT/model/package.json" \
      "$ROOT/model/package-lock.json" "$repo/model/"
   ln -s "$ROOT/model/node_modules" "$repo/model/node_modules"
   printf 'node_modules\n' > "$repo/.gitignore"
@@ -68,9 +68,9 @@ fixture() {
   printf '%s\n' "$repo"
 }
 
-# Adds a field to spaceMember in model.ts, after `ticket`.
+# Adds a field to spaceMember in model.ts, after `member`.
 add_field() { # <repo> <name>
-  sed -i.bak "s|^    ticket: nc.ref(\[\]),|    ticket: nc.ref([]),\n    $2: nc.string(),|" "$1/model/model.ts"
+  sed -i.bak "s|^    member: nc.string(),|    member: nc.string(),\n    $2: nc.string(),|" "$1/model/model.ts"
   rm -f "$1/model/model.ts.bak"
 }
 # Rebuilds the committed lock the way a coder does.
