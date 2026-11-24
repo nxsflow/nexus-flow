@@ -45,10 +45,16 @@ impl SpaceKind {
 }
 
 /// Every collection of the model, with the kinds of space it may be written into.
-pub const KINDS: &[(&str, &[SpaceKind])] = &[(
-    "spaceMember",
-    &[SpaceKind::Repository, SpaceKind::Coordination],
-)];
+pub const KINDS: &[(&str, &[SpaceKind])] = &[
+    (
+        "spaceMember",
+        &[SpaceKind::Repository, SpaceKind::Coordination],
+    ),
+    ("ticketsTicket", &[SpaceKind::Repository]),
+    ("ticketsNote", &[SpaceKind::Repository]),
+    ("ticketsWork", &[SpaceKind::Repository]),
+    ("ticketsReference", &[SpaceKind::Repository]),
+];
 
 /// Why a write was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
