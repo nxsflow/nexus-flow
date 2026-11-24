@@ -4,8 +4,8 @@
 // Every index runs in one space (`scope: "space"`), so a query reads one repository space even
 // where a member holds several (RFC 0002, "Indexes").
 //
-// Left for later tickets, each an additive change: the ticket's `request` and its index
-// `byRequest` (RFC 0009), once `requestsRequest` exists; and `v1Id` and `byV1Id` (RFC 0008).
+// Left for a later ticket, an additive change: the ticket's `request` and its index `byRequest`
+// (RFC 0009), once `requestsRequest` exists.
 import { nc } from "@nocentraldb/sdk";
 
 const space = { scope: "space" } as const;
@@ -67,6 +67,10 @@ export const tickets = {
       createdBy: nc.string(),
       // The member id of the last writer: RFC 0001's author stop-gap.
       updatedBy: nc.string(),
+      // The v1 item id of a moved ticket, such as `6j6v.pzkb`, written when the move creates it
+      // and never changed; unset for a ticket created in v2 (RFC 0008, "How the ops are
+      // replayed").
+      v1Id: nc.string(),
     },
     {
       indexes: {
@@ -85,6 +89,7 @@ export const tickets = {
         byAssignee: nc.index(["assignee", "status"], { equal: 2, ...space }),
         byType: nc.index(["type", "status", "archivedAt"], { equal: 3, ...space }),
         byUpdatedAt: nc.index([{ field: "updatedAt", direction: "desc" }], space),
+        byV1Id: nc.index(["v1Id"], { equal: 1, ...space }),
       },
     },
   ),

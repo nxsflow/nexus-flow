@@ -21,17 +21,20 @@ pub enum Module {
     Requests,
     /// RFC 0007.
     Status,
+    /// RFC 0008: the move from v1.
+    Migration,
 }
 
 impl Module {
     /// Every module, in the order of the prefix table.
-    pub const ALL: [Module; 6] = [
+    pub const ALL: [Module; 7] = [
         Module::Space,
         Module::Tickets,
         Module::Decisions,
         Module::Goals,
         Module::Requests,
         Module::Status,
+        Module::Migration,
     ];
 
     /// The prefix of the module's collection names: the module's name in lower case.
@@ -43,6 +46,7 @@ impl Module {
             Module::Goals => "goals",
             Module::Requests => "requests",
             Module::Status => "status",
+            Module::Migration => "migration",
         }
     }
 }
@@ -60,6 +64,8 @@ pub const COLLECTIONS: &[(&str, Module)] = &[
     ("decisionsSubject", Module::Decisions),
     ("decisionsSupersession", Module::Decisions),
     ("goalsGoal", Module::Goals),
+    ("migrationRun", Module::Migration),
+    ("migrationRecord", Module::Migration),
 ];
 
 /// Whether `name` is a collection name of `module`: it matches `^[a-z][A-Za-z0-9]{0,62}$`
