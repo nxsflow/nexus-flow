@@ -16,8 +16,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use nexus_flow_store::repo_root::{RepoRoot, RootError};
-
 use super::codeowners;
 use super::embedded;
 use super::shipped::{sha256_lf, Shipped, State};
@@ -142,33 +140,6 @@ impl std::error::Error for InstallError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
     }
-}
-
-/// Why the factory's defaults could not be installed into a repository.
-#[derive(Debug)]
-pub enum FactoryError {
-    /// No `nexus-flow.toml` was found from the folder upward.
-    Root(RootError),
-    /// A file could not be read or written.
-    Install(InstallError),
-}
-
-impl fmt::Display for FactoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FactoryError::Root(e) => e.fmt(f),
-            FactoryError::Install(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for FactoryError {}
-
-/// Installs the embedded defaults into the `factory/` of the repository at or above `dir`, the
-/// folder that holds `nexus-flow.toml`. It opens no database.
-pub fn install_in(dir: &Path, update: bool) -> Result<Report, FactoryError> {
-    let root = RepoRoot::find(dir).map_err(FactoryError::Root)?;
-    install(root.path(), &Defaults::embedded(), update).map_err(FactoryError::Install)
 }
 
 /// Installs `defaults` into the `factory/` of the repository at `root`, and reports each shipped

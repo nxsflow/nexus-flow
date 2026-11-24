@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 
-use crate::install::factory::{self, FactoryError, Report};
+use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
@@ -60,6 +60,11 @@ pub enum Error {
     Open(InitError),
     /// Sync did not finish: no relay is set, or the timeout passed.
     Sync(SyncError),
+    /// The engine was opened on a space without a checkout, so it has no `factory/` to install
+    /// into.
+    NoCheckout,
+    /// Installing the factory's defaults could not read or write a file.
+    Install(InstallError),
 }
 
 impl fmt::Display for Error {
@@ -69,6 +74,11 @@ impl fmt::Display for Error {
             Error::Session(e) => e.fmt(f),
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
+            Error::NoCheckout => write!(
+                f,
+                "the engine is open on a space without a checkout, so there is no factory/ to install into"
+            ),
+            Error::Install(e) => e.fmt(f),
         }
     }
 }
@@ -189,14 +199,14 @@ impl Engine {
         Ok(sync::status(repository, &options.data, options.keys).await?)
     }
 
-    /// Installs the factory's shipped defaults into `factory/` of the repository at or above
-    /// `repository`, and reports each shipped file's state and the factory's paths no CODEOWNERS
-    /// rule covers (RFC 0006, "Installing the shipped defaults"). A missing file gets the current
-    /// default; with `update`, an earlier default is replaced by it. Nothing else is written, and
-    /// nothing is deleted or committed. It touches only files: it opens no database, so it takes
-    /// no engine. Its form waits for the owner (NEX-232).
-    pub fn factory_install(repository: &Path, update: bool) -> Result<Report, FactoryError> {
-        factory::install_in(repository, update)
+    /// Installs the factory's shipped defaults into `factory/` at the checkout's root, and
+    /// reports each shipped file's state and the factory's paths no CODEOWNERS rule covers (RFC
+    /// 0006, "Installing the shipped defaults"). A missing file gets the current default; with
+    /// `update`, an earlier default is replaced by it. Nothing else is written, nothing is
+    /// deleted or committed, and the database is not touched.
+    pub fn factory_install(&self, update: bool) -> Result<Report, Error> {
+        let checkout = self.opened.checkout().ok_or(Error::NoCheckout)?;
+        install(&checkout.path, &Defaults::embedded(), update).map_err(Error::Install)
     }
 
     fn new(opened: Opened, options: Options) -> Self {

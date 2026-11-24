@@ -199,16 +199,3 @@ fn outside_a_repository_install_says_to_run_nxs_init_and_writes_nothing() {
     assert_eq!(json(&out)["error"]["kind"], "no_workspace");
     assert!(!repo.join("factory").exists());
 }
-
-#[test]
-fn install_reads_no_data_directory_and_opens_no_database() {
-    let (_base, repo) = repository("factory-install-no-data");
-    let argv = ["nxs", "factory", "install"];
-
-    let out = nxs_v2::run(argv, &repo, || {
-        panic!("nxs factory install reads no options")
-    });
-
-    assert_eq!(out.code, 0, "{}", stdout(&out));
-    assert!(repo.join("factory/roles/pm.md").is_file());
-}

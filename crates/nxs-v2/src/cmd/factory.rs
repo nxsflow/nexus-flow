@@ -1,14 +1,15 @@
 //! `nxs factory install [--update]` (RFC 0006, "Installing the shipped defaults"): installs the
 //! factory's shipped defaults through the seam's `Engine::factory_install`, and prints each
-//! shipped file's state and the factory's paths no CODEOWNERS rule covers. It opens no database.
+//! shipped file's state and the factory's paths no CODEOWNERS rule covers.
 
 use std::path::Path;
 
 use clap::{Args, Subcommand};
 use nexus_flow_seam::install::factory::Report;
-use nexus_flow_seam::Engine;
+use nexus_flow_seam::{DataDirError, Engine, Options};
 use serde::Serialize;
 
+use crate::block_on::block_on;
 use crate::error::CliError;
 use crate::output::Render;
 
@@ -49,9 +50,14 @@ struct Codeowners {
 }
 
 /// Runs `nxs factory <command>` in `dir`.
-pub fn run(dir: &Path, command: FactoryCommand) -> Result<Install, CliError> {
+pub fn run(
+    dir: &Path,
+    options: impl FnOnce() -> Result<Options, DataDirError>,
+    command: FactoryCommand,
+) -> Result<Install, CliError> {
     let FactoryCommand::Install(args) = command;
-    Ok(Engine::factory_install(dir, args.update)?.into())
+    let engine = block_on(Engine::open_with(dir, options()?))?;
+    Ok(engine.factory_install(args.update)?.into())
 }
 
 impl From<Report> for Install {

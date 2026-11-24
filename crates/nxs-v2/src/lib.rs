@@ -69,7 +69,9 @@ where
     let result = match cli.command {
         Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
-        Command::Factory(command) => cmd::factory::run(dir, command).map(|r| format.render(&r)),
+        Command::Factory(command) => {
+            cmd::factory::run(dir, options, command).map(|r| format.render(&r))
+        }
     };
     match result {
         Ok(stdout) => Outcome {

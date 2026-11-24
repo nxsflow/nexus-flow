@@ -4,7 +4,6 @@
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102).
 
-use nexus_flow_seam::install::factory::FactoryError;
 use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError, SyncError};
 
 use crate::output::Format;
@@ -98,18 +97,9 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
-        };
-        CliError { kind, msg }
-    }
-}
-
-impl From<FactoryError> for CliError {
-    fn from(e: FactoryError) -> Self {
-        let msg = e.to_string();
-        let kind = match &e {
-            FactoryError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-            FactoryError::Root(RootError::DataDirInside { .. }) => Kind::Validation,
-            FactoryError::Install(_) => Kind::Io,
+            // nxs opens a repository, which always has a checkout.
+            Error::NoCheckout => Kind::Validation,
+            Error::Install(_) => Kind::Io,
         };
         CliError { kind, msg }
     }
