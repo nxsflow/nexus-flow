@@ -111,13 +111,15 @@ fn runs_init(body: &str) -> bool {
         })
 }
 
-/// The suites of v2's `nxs init` (NEX-97), which the init gate below does not read. That gate
-/// guards against v1's `nxf init`/`nxm init` registering a workspace with the background service
-/// under `$HOME`. v2's `init` registers with no service and writes nothing under `$HOME`: its
-/// in-process tests run no binary and name the data directory in `Options`, and its binary tests
-/// set `NXS_DATA_DIR`, which wins over `$HOME`. Pinning a home there would also need
-/// `nxs_test_support`, a dependency that `nxs-v2` may not take without a lockfile change (NEX-212).
-const V2_INIT_SUITES: &[&str] = &["crates/nxs-v2/tests"];
+/// The suites of v2's `nxs` and its library seam (NEX-97, NEX-133), which the init gate below does
+/// not read. That gate guards against v1's `nxf init`/`nxm init` registering a workspace with the
+/// background service under `$HOME`. v2's `init` registers with no service and writes nothing under
+/// `$HOME`: its in-process tests run no binary and name the data directory in `Options`, and its
+/// binary tests set `NXS_DATA_DIR`, which wins over `$HOME`. The seam links nothing of v1, so its
+/// suites can run no v1 `init`; the `"init"` the gate finds there is `git init`, for the
+/// repositories `genesis create` reads. Pinning a home there would also need `nxs_test_support`, a
+/// dependency that `nxs-v2` and the seam may not take without a lockfile change (NEX-212).
+const V2_INIT_SUITES: &[&str] = &["crates/nxs-v2/tests", "crates/seam/tests"];
 
 /// Does `body` reach a pinned `$HOME` at all — by any of the three sanctioned routes?
 fn reaches_a_pinned_home(body: &str) -> bool {

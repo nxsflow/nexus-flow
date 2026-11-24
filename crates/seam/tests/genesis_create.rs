@@ -36,6 +36,8 @@ fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
         .args([
             "-c",
