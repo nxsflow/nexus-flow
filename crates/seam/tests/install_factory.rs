@@ -187,7 +187,10 @@ fn a_team_changed_role_file_stays_byte_identical_with_and_without_update() {
         assert!(report
             .files
             .contains(&file("factory/roles/coder.md", State::Team)));
-        assert_eq!(fs::read(root.join("factory/roles/coder.md")).unwrap(), before);
+        assert_eq!(
+            fs::read(root.join("factory/roles/coder.md")).unwrap(),
+            before
+        );
     }
 }
 
@@ -212,7 +215,10 @@ fn a_missing_retired_file_is_neither_written_nor_listed() {
 
     let report = install(&root, &defaults(), true).unwrap();
 
-    assert!(report.files.iter().all(|f| f.path != "factory/roles/old.md"));
+    assert!(report
+        .files
+        .iter()
+        .all(|f| f.path != "factory/roles/old.md"));
     assert!(!root.join("factory/roles/old.md").exists());
 }
 
@@ -363,10 +369,7 @@ fn defaults_refuse_a_text_for_a_path_the_list_does_not_name_or_retired() {
     ))
     .unwrap();
 
-    let retired = Defaults::new(
-        shipped.clone(),
-        [("roles/old.md", OLD.as_bytes().to_vec())],
-    );
+    let retired = Defaults::new(shipped.clone(), [("roles/old.md", OLD.as_bytes().to_vec())]);
     assert!(retired.is_err());
     let unnamed = Defaults::new(shipped, [("roles/new.md", b"new\n".to_vec())]);
     assert!(unnamed.is_err());
