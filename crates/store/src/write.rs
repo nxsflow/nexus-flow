@@ -1,8 +1,9 @@
 //! The store's one write path (RFC 0001, "Reading and writing"): every write of nexus-flow goes
 //! through [`Opened::write`], for every member and every caller, as one change of one open space.
 //! Each write a caller records is checked before NoCentralDB sees it: the collection must belong
-//! in the space's kind ([`Opened::check_write`]). A refused write refuses the whole change, so
-//! nothing of it is written.
+//! in the space's kind ([`Opened::check_write`]), and a set, delete or restore of an existing object
+//! must not be one of a write-once collection (`crate::write_once`), such as a decision. A
+//! refused write refuses the whole change, so nothing of it is written.
 
 use std::fmt;
 
@@ -11,12 +12,16 @@ use nocentraldb::{ObjectId, Transaction, Value, Written};
 use crate::id::SpaceId;
 use crate::opened::Opened;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
+use crate::write_once::{self, Change, WriteOnce};
 
 /// Why a write was refused or failed. A refusal writes nothing of the change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
     /// The collection does not belong in the space's kind.
     WrongSpace(WrongSpace),
+    /// The change would rewrite, delete or restore an existing object of a write-once
+    /// collection.
+    WriteOnce(WriteOnce),
     /// The space is not one of the open spaces.
     NotOpen(SpaceId),
     /// The space is open, but the database holds none of it yet.
@@ -29,6 +34,7 @@ impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WriteError::WrongSpace(e) => e.fmt(f),
+            WriteError::WriteOnce(e) => e.fmt(f),
             WriteError::NotOpen(space) => write!(f, "the space {space} is not open"),
             WriteError::NotHeld(space) => write!(
                 f,
@@ -44,6 +50,12 @@ impl std::error::Error for WriteError {}
 impl From<WrongSpace> for WriteError {
     fn from(e: WrongSpace) -> Self {
         WriteError::WrongSpace(e)
+    }
+}
+
+impl From<WriteOnce> for WriteError {
+    fn from(e: WriteOnce) -> Self {
+        WriteError::WriteOnce(e)
     }
 }
 
@@ -70,31 +82,41 @@ impl Write<'_, '_> {
         Ok(self.tx.create(collection, values)?)
     }
 
-    /// Records a write of `values` to the existing object `id` of `collection`.
+    /// Records a write of `values` to the existing object `id` of `collection`, which must not be
+    /// write-once.
     pub fn update<'v>(
         &mut self,
         collection: &str,
         id: ObjectId,
         values: impl IntoIterator<Item = (&'v str, Value)>,
     ) -> Result<(), WriteError> {
-        self.check(collection)?;
+        self.check_change(collection, Change::Set)?;
         Ok(self.tx.update(collection, id, values)?)
     }
 
-    /// Records the deletion of the existing object `id` of `collection`.
+    /// Records the deletion of the existing object `id` of `collection`, which must not be
+    /// write-once.
     pub fn delete(&mut self, collection: &str, id: ObjectId) -> Result<(), WriteError> {
-        self.check(collection)?;
+        self.check_change(collection, Change::Delete)?;
         Ok(self.tx.delete(collection, id)?)
     }
 
-    /// Records the restore of the deleted object `id` of `collection`.
+    /// Records the restore of the deleted object `id` of `collection`, which must not be
+    /// write-once.
     pub fn restore(&mut self, collection: &str, id: ObjectId) -> Result<(), WriteError> {
-        self.check(collection)?;
+        self.check_change(collection, Change::Restore)?;
         Ok(self.tx.restore(collection, id)?)
     }
 
     fn check(&self, collection: &str) -> Result<(), WriteError> {
         Ok(space_kind::check(collection, self.kind)?)
+    }
+
+    /// The checks of a change to an existing object: its collection's kind, and that it is not
+    /// write-once.
+    fn check_change(&self, collection: &str, change: Change) -> Result<(), WriteError> {
+        self.check(collection)?;
+        Ok(write_once::check(collection, change)?)
     }
 }
 
