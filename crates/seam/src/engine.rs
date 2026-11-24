@@ -227,7 +227,10 @@ impl Engine {
         Ok(sync::status(repository, &options.data, options.keys).await?)
     }
 
-    /// Writes `factory/GENESIS.md` for the repository at or above `repository`.
+    /// Writes `factory/GENESIS.md` from the template for the repository at or above
+    /// `repository`, only where the path is free, and reports what it found (RFC 0004,
+    /// "Installing the template"). It touches only files and the local git: it opens no database,
+    /// so it takes no engine. `update` applies to the guide only, never to GENESIS.
     pub fn genesis_create(
         repository: &Path,
         update: bool,
