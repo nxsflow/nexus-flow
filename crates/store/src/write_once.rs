@@ -5,8 +5,8 @@
 //!
 //! The guard is generic: each module that keeps a write-once record declares its collections in
 //! a table of its own, and [`WRITE_ONCE`] lists those tables. The decisions module declares its
-//! four collections (`crate::decisions::guard`), the move its records (`crate::migration`); status
-//! notes will be declared the same way. Once NoCentralDB declares write-once collections in the model (R12),
+//! four collections (`crate::decisions::guard`), the move its records (`crate::migration`), the
+//! status module its three (`crate::status`). Once NoCentralDB declares write-once collections in the model (R12),
 //! every member parks such a change, and this guard stays as the check it already is.
 
 use std::fmt;
@@ -15,6 +15,7 @@ use std::fmt;
 pub const WRITE_ONCE: &[&[&str]] = &[
     crate::decisions::guard::WRITE_ONCE,
     crate::migration::WRITE_ONCE,
+    crate::status::WRITE_ONCE,
 ];
 
 /// A change to an existing object.
