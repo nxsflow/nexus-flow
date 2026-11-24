@@ -7,8 +7,8 @@ use nexus_flow_store::space_kind::{self, SpaceKind, WrongSpace};
 
 use SpaceKind::{AdHoc, Coordination, Repository};
 
-/// The collections the module RFCs declare, with their kinds: the lock holds only `spaceMember`
-/// so far, and the rule must already hold for what the modules add.
+/// The collections the module RFCs declare, with their kinds: the rule must already hold for the
+/// collections of modules the lock does not hold yet.
 const MODULES: &[(&str, &[SpaceKind])] = &[
     ("spaceMember", &[Repository, Coordination]),
     ("ticketsTicket", &[Repository]),
