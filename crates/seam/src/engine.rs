@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::genesis;
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
@@ -224,6 +225,14 @@ impl Engine {
         options: Options,
     ) -> Result<SyncStatus, Error> {
         Ok(sync::status(repository, &options.data, options.keys).await?)
+    }
+
+    /// Writes `factory/GENESIS.md` for the repository at or above `repository`.
+    pub fn genesis_create(
+        repository: &Path,
+        update: bool,
+    ) -> Result<genesis::Report, genesis::GenesisError> {
+        genesis::create(repository, update)
     }
 
     fn new(opened: Opened, options: Options) -> Self {
