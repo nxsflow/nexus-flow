@@ -4,6 +4,7 @@
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102).
 
+use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError, SyncError};
 
 use crate::output::Format;
@@ -97,6 +98,8 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
+            Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
+            Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
         CliError { kind, msg }
     }

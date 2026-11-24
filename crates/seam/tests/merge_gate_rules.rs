@@ -136,7 +136,10 @@ fn outside_a_repository_it_says_so() {
     let error = Engine::merge_gate_rules(&dir, Some("main")).unwrap_err();
 
     assert!(
-        matches!(error, Error::Open(InitError::Root(RootError::NotFound { .. }))),
+        matches!(
+            error,
+            Error::Open(InitError::Root(RootError::NotFound { .. }))
+        ),
         "{error:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
