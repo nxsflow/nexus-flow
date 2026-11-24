@@ -106,3 +106,28 @@ fn a_refusal_names_the_collection_and_both_kinds() {
     let unknown = refused("ticketsTicket", None).to_string();
     assert!(unknown.contains("kind"), "{unknown}");
 }
+
+/// RFC 0002, "Collections": the four ticket collections are in the repository space, and the
+/// storage crate refuses them in a coordination or ad-hoc space.
+#[test]
+fn the_ticket_collections_go_into_repository_spaces_only() {
+    for collection in [
+        "ticketsTicket",
+        "ticketsNote",
+        "ticketsWork",
+        "ticketsReference",
+    ] {
+        assert_eq!(
+            space_kind::check(collection, Some(Repository)),
+            Ok(()),
+            "{collection}"
+        );
+        for kind in [Some(Coordination), Some(AdHoc), None] {
+            let err = space_kind::check(collection, kind)
+                .expect_err(&format!("{collection} in {kind:?} must be refused"));
+            assert_eq!(err.belongs_in, [Repository], "{collection}");
+        }
+        let err = space_kind::check(collection, Some(Coordination)).unwrap_err();
+        assert_eq!(err.code(), Some("not_a_ticket_space"), "{collection}");
+    }
+}
