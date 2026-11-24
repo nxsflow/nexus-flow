@@ -13,7 +13,7 @@ use nexus_flow_store::write::WriteError;
 use nocentraldb::{ObjectId, Value};
 
 fn ticket(key: &str) -> Vec<(&'static str, Value)> {
-    vec![("key", Value::from(key)), ("type", Value::from("task"))]
+    vec![("key", Value::from(key)), ("type", Value::from("chore"))]
 }
 
 fn decision(handle: &str) -> Vec<(&'static str, Value)> {
