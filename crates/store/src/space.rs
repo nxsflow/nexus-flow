@@ -10,7 +10,8 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::data_dir::DataDir;
-use crate::open::{open_device, Network};
+use crate::member_select::RunAs;
+use crate::open::{open_in, Network};
 use crate::repo_root::{RepoRoot, RootError};
 
 pub use crate::open::{DeviceKeys, InitError};
@@ -23,6 +24,9 @@ const V1_WORKSPACE: &str = ".nxs";
 pub enum SyncMode {
     /// No relay: the space is local to this device (RFC 0001, "Sync", **Island mode.**).
     Island,
+    /// The device's settings name a relay, and the database syncs through it while it is open
+    /// (RFC 0001, "Sync", **One relay per member database.**).
+    Relay,
 }
 
 /// What `init` did.
@@ -58,6 +62,10 @@ impl InitReport {
                 "no relay is set, so the space stays on this device in island mode; nxs sync --relay <url> connects it"
                     .to_owned(),
             ),
+            SyncMode::Relay => lines.push(
+                "the space syncs through the relay set on this device; nxs sync waits until nothing is behind or unconfirmed"
+                    .to_owned(),
+            ),
         }
         if self.v1_workspace {
             lines.push(format!(
@@ -85,7 +93,7 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
         Err(RootError::NotFound { .. }) => (RepoRoot::at(dir), None),
         Err(e) => return Err(e.into()),
     };
-    let db = open_device(&root, data, keys, Network::Relay).await?;
+    let (db, relay) = open_in(&root, data, RunAs::Device(keys), Network::Relay).await?;
     let (space, created) = match existing {
         Some(space) => (space, false),
         None => {
@@ -97,7 +105,10 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
     Ok(InitReport {
         space,
         created,
-        sync: SyncMode::Island,
+        sync: match relay {
+            Some(_) => SyncMode::Relay,
+            None => SyncMode::Island,
+        },
         v1_workspace: root.path().join(V1_WORKSPACE).symlink_metadata().is_ok(),
     })
 }

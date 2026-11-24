@@ -121,17 +121,6 @@ impl From<nocentraldb::Error> for InitError {
     }
 }
 
-/// Opens the device member's database for the repository at `root`, creating it on first open.
-/// A data directory inside the root is refused before anything is created.
-pub(crate) async fn open_device(
-    root: &RepoRoot,
-    data: &DataDir,
-    keys: DeviceKeys,
-    network: Network,
-) -> Result<Db, InitError> {
-    Ok(open_in(root, data, RunAs::Device(keys), network).await?.0)
-}
-
 /// Opens the database of the member `run_as` names, for the repository at `root`, with the relay
 /// it syncs through. A data directory inside the root is refused before anything is created.
 pub(crate) async fn open_in(
