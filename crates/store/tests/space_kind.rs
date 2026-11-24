@@ -155,3 +155,16 @@ fn the_decision_collections_go_into_repository_spaces_only() {
         }
     }
 }
+
+/// RFC 0005, "Where goals live": a goal is in the coordination space, and the storage crate
+/// refuses it in a repository or ad-hoc space. RFC 0005 names no code.
+#[test]
+fn a_goal_goes_into_coordination_spaces_only() {
+    assert_eq!(space_kind::check("goalsGoal", Some(Coordination)), Ok(()));
+    for kind in [Some(Repository), Some(AdHoc), None] {
+        let err = space_kind::check("goalsGoal", kind)
+            .expect_err(&format!("goalsGoal in {kind:?} must be refused"));
+        assert_eq!(err.belongs_in, [Coordination]);
+        assert_eq!(err.code(), None);
+    }
+}

@@ -5,8 +5,7 @@
 // where a member holds several (RFC 0002, "Indexes").
 //
 // Left for later tickets, each an additive change: the ticket's `request` and its index
-// `byRequest` (RFC 0009), once `requestsRequest` exists; `v1Id` and `byV1Id` (RFC 0008); and
-// `goalsGoal` as a reference target with the kind `proposed` (RFC 0005).
+// `byRequest` (RFC 0009), once `requestsRequest` exists; and `v1Id` and `byV1Id` (RFC 0008).
 import { nc } from "@nocentraldb/sdk";
 
 const space = { scope: "space" } as const;
@@ -141,11 +140,15 @@ export const tickets = {
     {
       // The referring ticket.
       ticket: ticket(),
-      // `serves` a goal, or `cites` another repository's ticket.
-      kind: nc.oneOf(["serves", "cites"]),
-      // The target's space id and object id.
-      target: nc.ref(["ticketsTicket"]),
-      // The target's readable name when the reference was written.
+      // `serves` a goal, `cites` another repository's ticket, or `proposed`: a goal a model
+      // proposed the ticket serves, which the owner has not yet confirmed and which never counts
+      // for focus (RFC 0005, "What the re-evaluation stores").
+      kind: nc.oneOf(["serves", "cites", "proposed"]),
+      // The target's space id and object id: a ticket of another repository, or a goal in the
+      // coordination space (RFC 0005, "A ticket serves a goal").
+      target: nc.ref(["ticketsTicket", "goalsGoal"]),
+      // The target's readable name when the reference was written; for a goal, its key and
+      // title.
       label: nc.string(),
       createdAt: nc.string(),
       // RFC 0001's author stop-gap.

@@ -59,6 +59,7 @@ pub const COLLECTIONS: &[(&str, Module)] = &[
     ("decisionsTopic", Module::Decisions),
     ("decisionsSubject", Module::Decisions),
     ("decisionsSupersession", Module::Decisions),
+    ("goalsGoal", Module::Goals),
 ];
 
 /// Whether `name` is a collection name of `module`: it matches `^[a-z][A-Za-z0-9]{0,62}$`
