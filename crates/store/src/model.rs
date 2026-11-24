@@ -49,7 +49,13 @@ impl Module {
 
 /// Every collection the model declares, with the module that owns it. A test keeps it equal to
 /// the collections of [`LOCK`].
-pub const COLLECTIONS: &[(&str, Module)] = &[("spaceMember", Module::Space)];
+pub const COLLECTIONS: &[(&str, Module)] = &[
+    ("spaceMember", Module::Space),
+    ("ticketsTicket", Module::Tickets),
+    ("ticketsNote", Module::Tickets),
+    ("ticketsWork", Module::Tickets),
+    ("ticketsReference", Module::Tickets),
+];
 
 /// Whether `name` is a collection name of `module`: it matches `^[a-z][A-Za-z0-9]{0,62}$`
 /// (NoCentralDB RFC 0005), and it is the module's prefix followed by the collection's own name in

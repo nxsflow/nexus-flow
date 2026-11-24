@@ -4,16 +4,306 @@
       "fields": {
         "member": { "rule": 1, "since": 1, "type": "ncdb/string" },
         "role": { "rule": 1, "since": 1, "type": "ncdb/string" },
-        "ticket": { "rule": 1, "since": 1, "targets": [], "type": "ncdb/ref" }
+        "tag": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "ticket": {
+          "rule": 1,
+          "since": 1,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/ref"
+        }
       },
       "since": 1
+    },
+    "ticketsNote": {
+      "fields": {
+        "body": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "replyTo": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsNote"],
+          "type": "ncdb/link"
+        },
+        "ticket": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        }
+      },
+      "indexes": {
+        "byTicket": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "ticket" },
+            { "direction": "asc", "field": "createdAt" }
+          ],
+          "scope": "space",
+          "since": 2
+        }
+      },
+      "since": 2
+    },
+    "ticketsReference": {
+      "fields": {
+        "createdAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "kind": {
+          "options": ["serves", "cites"],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "label": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "target": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/ref"
+        },
+        "ticket": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        }
+      },
+      "indexes": {
+        "byTarget": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "target" },
+            { "direction": "asc", "field": "kind" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byTicket": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "ticket" },
+            { "direction": "asc", "field": "kind" }
+          ],
+          "scope": "space",
+          "since": 2
+        }
+      },
+      "since": 2
+    },
+    "ticketsTicket": {
+      "fields": {
+        "archivedAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "assignee": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "closedAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "closingComment": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "completionCriterion": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "contributesTo": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/links"
+        },
+        "createdAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "deferUntil": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "dependsOn": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/links"
+        },
+        "description": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "design": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "due": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "key": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "labels": {
+          "of": { "type": "ncdb/string" },
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/set"
+        },
+        "mentions": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/links"
+        },
+        "parent": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        },
+        "priority": { "rule": 1, "since": 2, "type": "ncdb/int" },
+        "replacedBy": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        },
+        "resolution": {
+          "options": ["done", "canceled", "replaced"],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "status": {
+          "options": ["open", "in_progress", "closed"],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "title": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "type": {
+          "options": [
+            "epic",
+            "bug",
+            "feature",
+            "chore",
+            "decision",
+            "question"
+          ],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "updatedAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "updatedBy": { "rule": 1, "since": 2, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byArchivedAt": {
+          "equal": 0,
+          "fields": [{ "direction": "desc", "field": "archivedAt" }],
+          "scope": "space",
+          "since": 2
+        },
+        "byAssignee": {
+          "equal": 2,
+          "fields": [
+            { "direction": "asc", "field": "assignee" },
+            { "direction": "asc", "field": "status" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byClosedAt": {
+          "equal": 2,
+          "fields": [
+            { "direction": "asc", "field": "status" },
+            { "direction": "asc", "field": "archivedAt" },
+            { "direction": "desc", "field": "closedAt" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byClosedAtAll": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "status" },
+            { "direction": "desc", "field": "closedAt" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byKey": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "key" }],
+          "scope": "space",
+          "since": 2
+        },
+        "byParent": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "parent" },
+            { "direction": "asc", "field": "key" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byStatus": {
+          "equal": 2,
+          "fields": [
+            { "direction": "asc", "field": "status" },
+            { "direction": "asc", "field": "archivedAt" },
+            { "direction": "asc", "field": "key" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byType": {
+          "equal": 3,
+          "fields": [
+            { "direction": "asc", "field": "type" },
+            { "direction": "asc", "field": "status" },
+            { "direction": "asc", "field": "archivedAt" }
+          ],
+          "scope": "space",
+          "since": 2
+        },
+        "byUpdatedAt": {
+          "equal": 0,
+          "fields": [{ "direction": "desc", "field": "updatedAt" }],
+          "scope": "space",
+          "since": 2
+        }
+      },
+      "since": 2
+    },
+    "ticketsWork": {
+      "fields": {
+        "branch": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "commit": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdAt": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "createdBy": { "rule": 1, "since": 2, "type": "ncdb/string" },
+        "kind": {
+          "options": ["pr", "branch", "artifact"],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "state": {
+          "options": ["open", "merged", "closed"],
+          "rule": 1,
+          "since": 2,
+          "type": "ncdb/choice"
+        },
+        "ticket": {
+          "rule": 1,
+          "since": 2,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        },
+        "url": { "rule": 1, "since": 2, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byBranch": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "branch" }],
+          "scope": "space",
+          "since": 2
+        },
+        "byTicket": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "ticket" }],
+          "scope": "space",
+          "since": 2
+        },
+        "byUrl": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "url" }],
+          "scope": "space",
+          "since": 2
+        }
+      },
+      "since": 2
     }
   },
   "format": 1,
   "model": {
-    "hash": "sha256:371e2258928e5137c0fd5ef978e4008a030ad774a2667eb8c7484155181d8bca",
+    "hash": "sha256:9a0abb5814610433798cf2f51e1e2c53b14e1b99b1760f966298e02e27dad8c6",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 1
+    "version": 2
   },
   "plugins": {}
 }
