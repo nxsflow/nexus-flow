@@ -1,0 +1,6 @@
+# 2026-11-24 · NEX-191 · nxf, nxm and nxc name nxs ticket, nxs decision and nxs factory
+
+- Decided by: coder on NEX-191
+- Why: RFC 0008, "The installed base", has v2's `nxs` started as `nxf`, `nxm` or `nxc` name "its `nxs` counterpart" without naming it. The counterparts follow the RFCs that replace each v1 module: `nxf`'s tickets are `nxs ticket` (RFC 0002, whose command table maps `nxf`'s verbs), `nxm`'s memories become decisions, `nxs decision` (RFC 0003), and `nxc`'s chat lapses, with the factory taking its place, `nxs factory` (RFC 0006). The refusal is the error object with the kind `retired_entry_point` and these names in its `msg`; it comes before the command line is parsed, so any arguments, `--help` and `--version` included, are refused alike, and `--md` anywhere puts it on stderr as with every other error. Only the file name of argv0 counts, without the platform's executable suffix, so a symlink started by its full path is refused too.
+- Instead of: one message without a counterpart for `nxc`, since chat has no successor command; or parsing v1's arguments to name the counterpart of each verb, which would keep v1's command lines alive in v2.
+- Topics: v2, migration, output
