@@ -11,6 +11,7 @@ pub mod device;
 pub mod goals;
 pub mod id;
 pub mod member_select;
+pub mod members;
 pub mod model;
 mod open;
 pub mod opened;
@@ -19,3 +20,5 @@ pub mod space;
 pub mod space_kind;
 pub mod status;
 pub mod sync;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
