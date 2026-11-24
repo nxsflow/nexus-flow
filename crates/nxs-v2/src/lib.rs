@@ -47,6 +47,9 @@ enum Command {
     Member(cmd::member::MemberCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
+    /// Write the repository's GENESIS from the template, only where none exists.
+    #[command(subcommand)]
+    Genesis(cmd::genesis::GenesisCommand),
 }
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
@@ -72,6 +75,7 @@ where
             cmd::member::run(dir, options, command).map(|r| format.render(&r))
         }
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
+        Command::Genesis(command) => return cmd::genesis::run(dir, command, format),
     };
     match result {
         Ok(stdout) => Outcome {
