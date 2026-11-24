@@ -39,7 +39,12 @@ fn reads_every_rule_from_the_base_commit_genesis_first() {
     assert_eq!(
         report.rules,
         vec![
-            rule("genesis.1", Effect::Owner, GENESIS_PATH, "Anything a user sees first."),
+            rule(
+                "genesis.1",
+                Effect::Owner,
+                GENESIS_PATH,
+                "Anything a user sees first."
+            ),
             rule(
                 "genesis.2",
                 Effect::Owner,
