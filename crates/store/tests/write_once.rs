@@ -45,13 +45,19 @@ fn the_guard_checks_any_table_of_write_once_collections() {
     for change in CHANGES {
         let err = write_once::check_in(table, "statusNote", change).unwrap_err();
         assert_eq!(err.collection, "statusNote");
-        assert_eq!(write_once::check_in(table, "decisionsDecision", change), Ok(()));
+        assert_eq!(
+            write_once::check_in(table, "decisionsDecision", change),
+            Ok(())
+        );
     }
 }
 
 #[test]
 fn every_write_once_collection_is_a_collection_of_the_model() {
-    let declared: Vec<&str> = write_once::WRITE_ONCE.iter().flat_map(|t| t.iter().copied()).collect();
+    let declared: Vec<&str> = write_once::WRITE_ONCE
+        .iter()
+        .flat_map(|t| t.iter().copied())
+        .collect();
     assert_eq!(declared, DECISIONS, "the write-once collections");
     for name in declared {
         assert!(
