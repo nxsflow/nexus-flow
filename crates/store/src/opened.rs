@@ -5,6 +5,10 @@
 //! and the base branch "on main" is checked against. A space opened by id has a checkout only
 //! when the caller names one, and without it every "on main" value is `null` ("Derived state").
 //!
+//! The database is the device member's, or a running session's when the caller names one
+//! (RFC 0001, "Reading and writing": the member a command runs as); an open opened as the device
+//! reopens as a session with [`Opened::as_session`].
+//!
 //! A space's kind comes from `nexus-flow.toml` too: the space it names as `repository` or
 //! `coordination`, in the repository opened or the checkout named. A space no file names, such
 //! as one opened by id without a checkout, is of no known kind, and every write checks
@@ -21,8 +25,9 @@ use nocentraldb::{Db, ErrorCode, Space};
 
 use crate::config::Config;
 use crate::data_dir::DataDir;
-use crate::id::SpaceId;
-use crate::open::{open_db, open_device, DeviceKeys, InitError};
+use crate::id::{SessionId, SpaceId};
+use crate::member_select::RunAs;
+use crate::open::{open_in, open_member, DeviceKeys, InitError};
 use crate::repo_root::RepoRoot;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
 
@@ -35,11 +40,12 @@ pub struct Checkout {
     pub base: String,
 }
 
-/// The device member's database, open on some spaces.
+/// A member's database, open on some spaces.
 pub struct Opened {
     /// Kept open for as long as the spaces are: sync runs only while a database is open
     /// (RFC 0001, "Sync").
     _db: Db,
+    session: Option<SessionId>,
     spaces: Vec<(SpaceId, Option<Space>)>,
     /// The kinds `nexus-flow.toml` names, for the spaces it names.
     kinds: Vec<(SpaceId, SpaceKind)>,
@@ -47,6 +53,22 @@ pub struct Opened {
 }
 
 impl Opened {
+    /// The session whose member's database is open; `None` for the device's member.
+    pub fn session(&self) -> Option<&SessionId> {
+        self.session.as_ref()
+    }
+
+    /// The same spaces and checkout, opened on the running session `session`'s database in
+    /// `data` instead. A session that is not running fails, and nothing is created.
+    pub async fn as_session(self, data: &DataDir, session: SessionId) -> Result<Opened, InitError> {
+        let ids = self.spaces.into_iter().map(|(id, _)| id).collect();
+        let kinds = self.kinds;
+        let checkout = self.checkout;
+        drop(self._db);
+        let db = open_member(data, RunAs::Session(session.clone())).await?;
+        open(db, Some(session), ids, kinds, checkout).await
+    }
+
     /// Whether the space `id` is held: `None` when it is not one of the open spaces, `Some(false)`
     /// when it is but the database holds none of it yet.
     pub fn held(&self, id: &SpaceId) -> Option<bool> {
@@ -81,6 +103,7 @@ impl Opened {
 impl fmt::Debug for Opened {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Opened")
+            .field("session", &self.session)
             .field("spaces", &self.spaces)
             .field("kinds", &self.kinds)
             .field("checkout", &self.checkout)
@@ -92,16 +115,22 @@ impl fmt::Debug for Opened {
 /// `nexus-flow.toml` names. Outside a repository the error says to run `nxs init`, and nothing
 /// is created.
 pub async fn repository(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<Opened, InitError> {
+    repository_as(dir, data, RunAs::Device(keys)).await
+}
+
+/// [`repository`], on the database of the member `run_as` names.
+pub async fn repository_as(dir: &Path, data: &DataDir, run_as: RunAs) -> Result<Opened, InitError> {
     let root = RepoRoot::find(dir)?;
     let config = Config::read(&root)?;
     let kinds = named_kinds(&config, &root)?;
     let ids = kinds.iter().map(|&(id, _)| id).collect();
-    let db = open_device(&root, data, keys).await?;
+    let session = session_of(&run_as);
+    let db = open_in(&root, data, run_as).await?;
     let checkout = Checkout {
         path: root.path().to_path_buf(),
         base: config.base,
     };
-    open(db, ids, kinds, Some(checkout)).await
+    open(db, session, ids, kinds, Some(checkout)).await
 }
 
 /// Opens the device member's database on the space `id`. With `git`, the checkout is the
@@ -113,21 +142,39 @@ pub async fn space(
     data: &DataDir,
     keys: DeviceKeys,
 ) -> Result<Opened, InitError> {
+    space_as(id, git, data, RunAs::Device(keys)).await
+}
+
+/// [`space`], on the database of the member `run_as` names.
+pub async fn space_as(
+    id: SpaceId,
+    git: Option<&Path>,
+    data: &DataDir,
+    run_as: RunAs,
+) -> Result<Opened, InitError> {
+    let session = session_of(&run_as);
     let (db, kinds, checkout) = match git {
         Some(dir) => {
             let root = RepoRoot::find(dir)?;
             let config = Config::read(&root)?;
             let kinds = named_kinds(&config, &root)?;
-            let db = open_device(&root, data, keys).await?;
+            let db = open_in(&root, data, run_as).await?;
             let checkout = Checkout {
                 path: root.path().to_path_buf(),
                 base: config.base,
             };
             (db, kinds, Some(checkout))
         }
-        None => (open_db(data, keys).await?, Vec::new(), None),
+        None => (open_member(data, run_as).await?, Vec::new(), None),
     };
-    open(db, vec![id], kinds, checkout).await
+    open(db, session, vec![id], kinds, checkout).await
+}
+
+fn session_of(run_as: &RunAs) -> Option<SessionId> {
+    match run_as {
+        RunAs::Device(_) => None,
+        RunAs::Session(session) => Some(session.clone()),
+    }
 }
 
 /// The spaces `config` names, with their kinds: the repository space first.
@@ -141,6 +188,7 @@ fn named_kinds(config: &Config, root: &RepoRoot) -> Result<Vec<(SpaceId, SpaceKi
 
 async fn open(
     db: Db,
+    session: Option<SessionId>,
     ids: Vec<SpaceId>,
     kinds: Vec<(SpaceId, SpaceKind)>,
     checkout: Option<Checkout>,
@@ -156,6 +204,7 @@ async fn open(
     }
     Ok(Opened {
         _db: db,
+        session,
         spaces,
         kinds,
         checkout,

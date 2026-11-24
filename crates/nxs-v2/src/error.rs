@@ -88,7 +88,7 @@ impl From<Error> for CliError {
     fn from(e: Error) -> Self {
         let msg = e.to_string();
         let kind = match &e {
-            Error::DataDir(_) => Kind::Validation,
+            Error::DataDir(_) | Error::Session(_) => Kind::Validation,
             Error::Open(open) => open_kind(open),
         };
         CliError { kind, msg }
@@ -108,5 +108,7 @@ fn open_kind(e: &InitError) -> Kind {
         InitError::SpaceId { .. } => Kind::Validation,
         InitError::KeyStoreUnavailable => Kind::NoKeyStore,
         InitError::Database { .. } => Kind::Io,
+        // NXS_SESSION names a session that is not running on this device: a setting nxs refuses.
+        InitError::NoSession { .. } => Kind::Validation,
     }
 }

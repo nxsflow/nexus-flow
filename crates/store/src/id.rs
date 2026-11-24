@@ -48,3 +48,59 @@ impl fmt::Display for NotASpaceId {
 }
 
 impl std::error::Error for NotASpaceId {}
+
+/// A running session's id: the name of its folder under `sessions/` in the data directory
+/// (RFC 0001, "The local data on disk"), as `NXS_SESSION` names it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// The id as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SessionId({})", self.0)
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = NotASessionId;
+
+    fn from_str(text: &str) -> Result<Self, NotASessionId> {
+        if crate::data_dir::is_plain_name(text) {
+            Ok(SessionId(text.to_owned()))
+        } else {
+            Err(NotASessionId {
+                text: text.to_owned(),
+            })
+        }
+    }
+}
+
+/// A text that is not a session id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotASessionId {
+    pub text: String,
+}
+
+impl fmt::Display for NotASessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} is not a session id: one is a plain folder name, without a path separator",
+            self.text
+        )
+    }
+}
+
+impl std::error::Error for NotASessionId {}

@@ -7,6 +7,7 @@ pub use engine::{Engine, Error, Options};
 pub use init::{init, init_with};
 pub use nexus_flow_store::config::{ConfigError, Problem};
 pub use nexus_flow_store::data_dir::{DataDir, DataDirError, Platform};
-pub use nexus_flow_store::id::{NotASpaceId, SpaceId};
+pub use nexus_flow_store::id::{NotASessionId, NotASpaceId, SessionId, SpaceId};
+pub use nexus_flow_store::member_select::SessionVarError;
 pub use nexus_flow_store::repo_root::RootError;
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};

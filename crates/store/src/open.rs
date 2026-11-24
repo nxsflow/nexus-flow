@@ -11,7 +11,8 @@ use nocentraldb::{Db, ErrorCode, OpenOptions};
 
 use crate::config::ConfigError;
 use crate::data_dir::DataDir;
-use crate::id::NotASpaceId;
+use crate::id::{NotASpaceId, SessionId};
+use crate::member_select::{RunAs, SessionFiles};
 use crate::model;
 use crate::repo_root::{RepoRoot, RootError};
 
@@ -41,6 +42,8 @@ pub enum InitError {
     KeyStoreUnavailable,
     /// NoCentralDB refused to open the database or to create the space.
     Database { message: String },
+    /// The session a command runs as is not running: its folder holds no database and keys.
+    NoSession { session: SessionId, folder: PathBuf },
 }
 
 impl fmt::Display for InitError {
@@ -60,6 +63,11 @@ impl fmt::Display for InitError {
             InitError::Database { message } => {
                 write!(f, "the device's database: {message}")
             }
+            InitError::NoSession { session, folder } => write!(
+                f,
+                "the session {session} is not running: {} holds no session database and keys; check NXS_SESSION or start the session with nxs session start",
+                folder.display()
+            ),
         }
     }
 }
@@ -96,8 +104,18 @@ pub(crate) async fn open_device(
     data: &DataDir,
     keys: DeviceKeys,
 ) -> Result<Db, InitError> {
+    open_in(root, data, RunAs::Device(keys)).await
+}
+
+/// Opens the database of the member `run_as` names, for the repository at `root`. A data
+/// directory inside the root is refused before anything is created.
+pub(crate) async fn open_in(
+    root: &RepoRoot,
+    data: &DataDir,
+    run_as: RunAs,
+) -> Result<Db, InitError> {
     root.check_data_dir(data)?;
-    open_db(data, keys).await
+    open_member(data, run_as).await
 }
 
 /// Opens the device member's database in `data`, creating it on first open. The database opens
@@ -113,4 +131,26 @@ pub(crate) async fn open_db(data: &DataDir, keys: DeviceKeys) -> Result<Db, Init
         DeviceKeys::File(file) => options.key_file(file),
     };
     Ok(Db::open(options).await?)
+}
+
+/// Opens the database of the member `run_as` names in `data`. A session that is not running is
+/// refused before anything is created, the data directory included.
+pub(crate) async fn open_member(data: &DataDir, run_as: RunAs) -> Result<Db, InitError> {
+    match run_as {
+        RunAs::Device(keys) => open_db(data, keys).await,
+        RunAs::Session(session) => {
+            let files = SessionFiles::of(data, &session);
+            if !files.running() {
+                return Err(InitError::NoSession {
+                    session,
+                    folder: files.folder,
+                });
+            }
+            let options = OpenOptions::new(model::LOCK)
+                .sub_agent()
+                .path(files.database)
+                .key_file(files.keys);
+            Ok(Db::open(options).await?)
+        }
+    }
 }

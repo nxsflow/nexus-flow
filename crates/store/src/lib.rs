@@ -9,6 +9,7 @@ pub mod config;
 pub mod data_dir;
 pub mod goals;
 pub mod id;
+pub mod member_select;
 pub mod model;
 mod open;
 pub mod opened;
