@@ -1,6 +1,7 @@
-//! `Engine::factory_install(update)` (RFC 0006, "Public surfaces this RFC brings"): the seam's
-//! counterpart of `nxs factory install`, which installs the defaults `nxs` embeds from
-//! `templates/factory/` into the `factory/` of the engine's checkout.
+//! `Engine::factory_install(repository, update)` (RFC 0006, "Public surfaces this RFC brings"; its
+//! form waits for the owner in NEX-232): the seam's counterpart of `nxs factory install`, which
+//! installs the defaults `nxs` embeds from `templates/factory/` into the `factory/` of the
+//! repository at or above `repository`. It opens no database.
 
 mod common;
 
@@ -8,9 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{block_on, options, scratch};
-use nexus_flow_seam::install::factory::Defaults;
+use nexus_flow_seam::install::factory::{Defaults, FactoryError};
 use nexus_flow_seam::install::shipped::{Shipped, State};
-use nexus_flow_seam::{init_with, Engine, Error};
+use nexus_flow_seam::{init_with, Engine, RootError};
 
 /// The shipped defaults in nexus-flow's source tree.
 fn templates() -> PathBuf {
@@ -36,13 +37,12 @@ fn tree(dir: &Path) -> Vec<String> {
     out
 }
 
-/// A repository given its space, and an engine open on it.
-fn engine(test: &str) -> (PathBuf, Engine) {
+/// A repository given its space by `init`, and the data directory, which the install never needs.
+fn repository(test: &str) -> PathBuf {
     let base = scratch(test);
     let repo = base.join("repo");
     block_on(init_with(&repo, options(&base.join("data")))).unwrap();
-    let engine = block_on(Engine::open_with(&repo, options(&base.join("data")))).unwrap();
-    (repo, engine)
+    repo
 }
 
 // --- the embedded defaults -----------------------------------------------------------------------
@@ -99,9 +99,9 @@ fn neither_genesis_nor_the_genesis_guide_is_a_factory_default() {
 
 #[test]
 fn factory_install_writes_the_embedded_defaults_into_the_checkout() {
-    let (repo, engine) = engine("engine-factory-install");
+    let repo = repository("engine-factory-install");
 
-    let report = engine.factory_install(false).unwrap();
+    let report = Engine::factory_install(&repo, false).unwrap();
 
     let defaults = Defaults::embedded();
     let expected: Vec<String> = defaults
@@ -121,23 +121,23 @@ fn factory_install_writes_the_embedded_defaults_into_the_checkout() {
 
 #[test]
 fn factory_install_again_with_update_finds_every_file_current() {
-    let (_repo, engine) = engine("engine-factory-again");
-    engine.factory_install(false).unwrap();
+    let repo = repository("engine-factory-again");
+    Engine::factory_install(&repo, false).unwrap();
 
-    let report = engine.factory_install(true).unwrap();
+    let report = Engine::factory_install(&repo, true).unwrap();
 
     assert!(report.files.iter().all(|f| f.state == State::Current));
 }
 
 #[test]
 fn factory_install_keeps_a_team_changed_role_file_byte_identical() {
-    let (repo, engine) = engine("engine-factory-team");
+    let repo = repository("engine-factory-team");
     let file = repo.join("factory/roles/coder.md");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, "# Our coder\n").unwrap();
 
     for update in [false, true] {
-        let report = engine.factory_install(update).unwrap();
+        let report = Engine::factory_install(&repo, update).unwrap();
         let coder = report
             .files
             .iter()
@@ -149,20 +149,43 @@ fn factory_install_keeps_a_team_changed_role_file_byte_identical() {
 }
 
 #[test]
-fn factory_install_needs_a_checkout() {
-    let base = scratch("engine-factory-no-checkout");
+fn factory_install_from_a_folder_below_the_root_installs_at_the_root() {
+    let repo = repository("engine-factory-below");
+    let below = repo.join("src/deep");
+    fs::create_dir_all(&below).unwrap();
+
+    Engine::factory_install(&below, false).unwrap();
+
+    assert!(repo.join("factory/roles/pm.md").is_file());
+    assert!(!below.join("factory").exists());
+}
+
+#[test]
+fn factory_install_opens_no_database() {
+    let base = scratch("engine-factory-no-database");
     let repo = base.join("repo");
-    let report = block_on(init_with(&repo, options(&base.join("data")))).unwrap();
-    let space = report.space.parse().unwrap();
-    let engine = block_on(Engine::open_space_with(
-        space,
-        None,
-        options(&base.join("data")),
-    ))
+    fs::write(
+        repo.join("nexus-flow.toml"),
+        "format = 1\nrepository = \"not read by the install\"\n",
+    )
     .unwrap();
 
-    let result = engine.factory_install(false);
+    let report = Engine::factory_install(&repo, false).unwrap();
 
-    assert!(matches!(result, Err(Error::NoCheckout)), "{result:?}");
+    assert!(report.files.iter().all(|f| f.state == State::Written));
+    assert!(!base.join("data").exists());
+}
+
+#[test]
+fn factory_install_outside_a_repository_writes_nothing() {
+    let base = scratch("engine-factory-no-repo");
+    let repo = base.join("repo");
+
+    let result = Engine::factory_install(&repo, false);
+
+    assert!(
+        matches!(result, Err(FactoryError::Root(RootError::NotFound { .. }))),
+        "{result:?}"
+    );
     assert!(!repo.join("factory").exists());
 }
