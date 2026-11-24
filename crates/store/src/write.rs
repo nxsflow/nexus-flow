@@ -3,13 +3,16 @@
 //! Each write a caller records is checked before NoCentralDB sees it: the collection must belong
 //! in the space's kind ([`Opened::check_write`]), and a set, delete or restore of an existing object
 //! must not be one of a write-once collection (`crate::write_once`), such as a decision. A
-//! refused write refuses the whole change, so nothing of it is written.
+//! collection only the move from v1 writes (`crate::migration`) is written only through
+//! [`Opened::write_as_move`]. A refused write refuses the whole change, so nothing of it is
+//! written.
 
 use std::fmt;
 
 use nocentraldb::{ObjectId, Transaction, Value, Written};
 
 use crate::id::SpaceId;
+use crate::migration::{self, MoveOnly};
 use crate::opened::Opened;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
 use crate::write_once::{self, Change, WriteOnce};
@@ -22,6 +25,8 @@ pub enum WriteError {
     /// The change would rewrite, delete or restore an existing object of a write-once
     /// collection.
     WriteOnce(WriteOnce),
+    /// The collection is written only by the move from v1, and the write is not the move's.
+    MoveOnly(MoveOnly),
     /// The space is not one of the open spaces.
     NotOpen(SpaceId),
     /// The space is open, but the database holds none of it yet.
@@ -35,6 +40,7 @@ impl fmt::Display for WriteError {
         match self {
             WriteError::WrongSpace(e) => e.fmt(f),
             WriteError::WriteOnce(e) => e.fmt(f),
+            WriteError::MoveOnly(e) => e.fmt(f),
             WriteError::NotOpen(space) => write!(f, "the space {space} is not open"),
             WriteError::NotHeld(space) => write!(
                 f,
@@ -59,6 +65,12 @@ impl From<WriteOnce> for WriteError {
     }
 }
 
+impl From<MoveOnly> for WriteError {
+    fn from(e: MoveOnly) -> Self {
+        WriteError::MoveOnly(e)
+    }
+}
+
 impl From<nocentraldb::Error> for WriteError {
     fn from(e: nocentraldb::Error) -> Self {
         WriteError::Database(e)
@@ -69,6 +81,8 @@ impl From<nocentraldb::Error> for WriteError {
 pub struct Write<'t, 'm> {
     tx: &'t mut Transaction<'m>,
     kind: Option<SpaceKind>,
+    /// Whether the change is the move's, which alone writes the move's collections.
+    by_move: bool,
 }
 
 impl Write<'_, '_> {
@@ -109,7 +123,8 @@ impl Write<'_, '_> {
     }
 
     fn check(&self, collection: &str) -> Result<(), WriteError> {
-        Ok(space_kind::check(collection, self.kind)?)
+        space_kind::check(collection, self.kind)?;
+        Ok(migration::check(collection, self.by_move)?)
     }
 
     /// The checks of a change to an existing object: its collection's kind, and that it is not
@@ -128,6 +143,28 @@ impl Opened {
     where
         F: FnOnce(&mut Write<'_, '_>) -> Result<(), WriteError>,
     {
+        self.write_by(space, false, record).await
+    }
+
+    /// [`Opened::write`], as a change of the move from v1 (RFC 0008), which alone writes a
+    /// `migrationRun` or a `migrationRecord`. Only `nxs migrate` calls it; every other check
+    /// holds as for any write, so a record still takes no write after its create.
+    pub async fn write_as_move<F>(&self, space: &SpaceId, record: F) -> Result<Written, WriteError>
+    where
+        F: FnOnce(&mut Write<'_, '_>) -> Result<(), WriteError>,
+    {
+        self.write_by(space, true, record).await
+    }
+
+    async fn write_by<F>(
+        &self,
+        space: &SpaceId,
+        by_move: bool,
+        record: F,
+    ) -> Result<Written, WriteError>
+    where
+        F: FnOnce(&mut Write<'_, '_>) -> Result<(), WriteError>,
+    {
         let Some((_, held)) = self.spaces().iter().find(|(id, _)| id == space) else {
             return Err(WriteError::NotOpen(*space));
         };
@@ -138,7 +175,7 @@ impl Opened {
         let mut refused = None;
         let written = target
             .write(|tx| {
-                let outcome = record(&mut Write { tx, kind });
+                let outcome = record(&mut Write { tx, kind, by_move });
                 outcome.map_err(|e| {
                     refused = Some(e);
                     abort(tx)
