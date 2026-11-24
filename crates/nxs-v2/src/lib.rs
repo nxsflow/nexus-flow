@@ -44,6 +44,8 @@ enum Command {
     Init,
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
+    /// Read the merge gate's rules from the base commit.
+    MergeGate(cmd::merge_gate::MergeGateArgs),
 }
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
@@ -64,14 +66,17 @@ where
     };
     let format = if cli.md { Format::Md } else { Format::Json };
     let result = match cli.command {
-        Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
-        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
+        Command::Init => cmd::init::run(dir, options).map(|r| (format.render(&r), 0)),
+        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| (format.render(&r), 0)),
+        Command::MergeGate(args) => {
+            cmd::merge_gate::run(dir, args).map(|r| (format.render(&r), r.code()))
+        }
     };
     match result {
-        Ok(stdout) => Outcome {
+        Ok((stdout, code)) => Outcome {
             stdout: stdout.into_bytes(),
             stderr: Vec::new(),
-            code: 0,
+            code,
         },
         Err(e) => e.outcome(format),
     }

@@ -102,7 +102,9 @@ impl Repo {
     /// Runs `nxs <args>` in `dir`; a command that asks for the database's options fails the test.
     fn nxs_in(&self, dir: &Path, args: &[&str]) -> Outcome {
         let argv = std::iter::once("nxs").chain(args.iter().copied());
-        nxs_v2::run(argv, dir, || panic!("nxs merge-gate rules opens no database"))
+        nxs_v2::run(argv, dir, || {
+            panic!("nxs merge-gate rules opens no database")
+        })
     }
 
     fn nxs(&self, args: &[&str]) -> Outcome {
@@ -289,10 +291,7 @@ fn the_command_prints_what_the_engine_returns() {
             printed["default"],
             json!(settings.map(|s| effect(s.default)))
         );
-        assert_eq!(
-            printed["owners"],
-            json!(settings.map(|s| s.owners.clone()))
-        );
+        assert_eq!(printed["owners"], json!(settings.map(|s| s.owners.clone())));
         assert_eq!(
             printed["verdict_authors"],
             json!(settings.map(|s| s.verdict_authors.clone()))
