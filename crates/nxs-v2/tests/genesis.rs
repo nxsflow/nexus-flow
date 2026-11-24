@@ -1,7 +1,8 @@
 //! `nxs genesis create [--update]` (RFC 0004, "Installing the template", "Output"): writes
-//! `factory/GENESIS.md` only where the path is free and prints the report; a GENESIS git still
-//! tracks exits non-zero with the report on stdout; without `nexus-flow.toml` it names `nxs init`.
-//! It never opens the database: the options are never asked for.
+//! `factory/GENESIS.md` only where the path is free, installs the guide, and prints the report,
+//! its keys in the RFC's order and `codeowners` `null` without a CODEOWNERS file; a GENESIS git
+//! still tracks exits non-zero with the report on stdout; without `nexus-flow.toml` it names
+//! `nxs init`. It never opens the database: the options are never asked for.
 
 mod common;
 
@@ -13,6 +14,7 @@ use common::{json, stdout};
 use nxs_v2::Outcome;
 
 const GENESIS: &str = "factory/GENESIS.md";
+const GUIDE: &str = "factory/genesis-guide.md";
 
 /// A fresh git repository with a `nexus-flow.toml`.
 fn repository(test: &str) -> PathBuf {
@@ -70,9 +72,14 @@ fn create_writes_genesis_and_prints_the_report() {
     assert!(out.stderr.is_empty());
     assert_eq!(
         stdout(&out),
-        "{\"files\":[{\"path\":\"factory/GENESIS.md\",\"state\":\"written\"}]}\n"
+        concat!(
+            r#"{"files":[{"path":"factory/GENESIS.md","state":"written"},"#,
+            r#"{"path":"factory/genesis-guide.md","state":"written"}],"codeowners":null}"#,
+            "\n"
+        )
     );
     assert!(repo.join(GENESIS).is_file());
+    assert!(repo.join(GUIDE).is_file());
     cleanup(&repo);
 }
 
@@ -101,7 +108,11 @@ fn a_case_variant_is_reported_with_the_path_found() {
     assert_eq!(out.code, 0, "{}", stdout(&out));
     assert_eq!(
         stdout(&out),
-        "{\"files\":[{\"path\":\"factory/GENESIS.md\",\"state\":\"team\",\"found\":\"factory/Genesis.md\"}]}\n"
+        concat!(
+            r#"{"files":[{"path":"factory/GENESIS.md","state":"team","found":"factory/Genesis.md"},"#,
+            r#"{"path":"factory/genesis-guide.md","state":"written"}],"codeowners":null}"#,
+            "\n"
+        )
     );
     assert!(!repo.join(GENESIS).exists());
     cleanup(&repo);
@@ -121,7 +132,11 @@ fn a_tracked_but_missing_genesis_exits_non_zero_with_the_report() {
     assert_ne!(out.code, 0);
     assert_eq!(
         stdout(&out),
-        "{\"files\":[{\"path\":\"factory/GENESIS.md\",\"state\":\"tracked\"}]}\n"
+        concat!(
+            r#"{"files":[{"path":"factory/GENESIS.md","state":"tracked"},"#,
+            r#"{"path":"factory/genesis-guide.md","state":"written"}],"codeowners":null}"#,
+            "\n"
+        )
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains(GENESIS), "{stderr}");
@@ -139,7 +154,48 @@ fn markdown_names_each_file_and_its_state() {
     assert_eq!(out.code, 0);
     let text = stdout(&out);
     assert!(text.contains("`factory/GENESIS.md`"), "{text}");
+    assert!(text.contains("`factory/genesis-guide.md`"), "{text}");
     assert!(text.contains("written"), "{text}");
+    assert!(text.contains("no CODEOWNERS file"), "{text}");
+    cleanup(&repo);
+}
+
+#[test]
+fn the_report_names_genesis_when_codeowners_leaves_it_uncovered() {
+    let repo = repository("codeowners");
+    fs::create_dir_all(repo.join(".github")).unwrap();
+    fs::write(repo.join(".github/CODEOWNERS"), "/src/ @owner\n").unwrap();
+
+    let out = nxs(&repo, &["genesis", "create"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(
+        stdout(&out),
+        concat!(
+            r#"{"files":[{"path":"factory/GENESIS.md","state":"written"},"#,
+            r#"{"path":"factory/genesis-guide.md","state":"written"}],"#,
+            r#""codeowners":{"file":".github/CODEOWNERS","uncovered":["factory/GENESIS.md"]}}"#,
+            "\n"
+        )
+    );
+    let md = stdout(&nxs(&repo, &["genesis", "create", "--md"]));
+    assert!(md.contains("`.github/CODEOWNERS`"), "{md}");
+    assert!(md.contains("`factory/GENESIS.md`"), "{md}");
+    cleanup(&repo);
+}
+
+#[test]
+fn update_reports_the_teams_guide_and_leaves_it_as_it_is() {
+    let repo = repository("guide-team");
+    fs::create_dir_all(repo.join("factory")).unwrap();
+    fs::write(repo.join(GUIDE), "our guide").unwrap();
+
+    let out = nxs(&repo, &["genesis", "create", "--update"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(json(&out)["files"][1]["path"], GUIDE);
+    assert_eq!(json(&out)["files"][1]["state"], "team");
+    assert_eq!(fs::read_to_string(repo.join(GUIDE)).unwrap(), "our guide");
     cleanup(&repo);
 }
 
