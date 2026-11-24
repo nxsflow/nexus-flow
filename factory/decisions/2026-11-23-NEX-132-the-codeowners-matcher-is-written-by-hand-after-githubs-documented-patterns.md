@@ -1,0 +1,6 @@
+# 2026-11-23 · NEX-132 · The CODEOWNERS matcher is written by hand after GitHub's documented patterns
+
+- Decided by: coder on NEX-132
+- Why: GitHub's CODEOWNERS patterns differ from `.gitignore` (no `!`, no `[ ]`, and `docs/*` owns no nested file), so neither a glob crate nor a gitignore crate matches them as GitHub does, and either would be a new dependency to review. `crates/seam/src/install/codeowners.rs` matches segment by segment: `*` and `?` stop at `/`, a `/` at the start or in the middle anchors at the root, `**` spans directories, a pattern covers the directories it names unless it ends in the segment `*`, a trailing `/` matches directories only, and paths are case sensitive. A line with `!` or `[ ]` is skipped, as GitHub skips a line it cannot read; a word starting with `#` ends the line; a path is covered when the last matching rule names an owner. Only a regular file named exactly `CODEOWNERS` is found, also on a file system that ignores case. A fixture table taken from GitHub's documentation holds the matcher to it.
+- Instead of: the `globset` or `ignore` crate, each a new dependency whose semantics would need the same corrections on top.
+- Topics: codeowners, factory, seam, dependencies, v2

@@ -2,6 +2,7 @@
 
 mod engine;
 mod init;
+pub mod install;
 
 pub use engine::{Engine, Error, Options};
 pub use init::{init, init_with};
