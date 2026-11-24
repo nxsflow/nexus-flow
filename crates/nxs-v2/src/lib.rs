@@ -97,7 +97,7 @@ fn parse_error(e: clap::Error, args: &[OsString]) -> Outcome {
             code: 0,
         };
     }
-    CliError::usage(&e).outcome(md_requested(&args))
+    CliError::usage(&e).outcome(md_requested(args))
 }
 
 /// The format of an error printed before the command line is parsed: Markdown when any argument
