@@ -1,0 +1,6 @@
+# 2026-11-24 · NEX-171 · Engine::merge_gate_rules takes the repository and an optional base, and opens no database
+
+- Decided by: coder on NEX-171
+- Why: RFC 0010 names the counterpart `Engine::merge_gate_rules(base: &str)` and says the command opens no NoCentralDB database; it runs in the gate's workflow, on a machine with no key store, so it cannot be a method of an open `Engine`. Like `Engine::sync_status(repository)` (NEX-102), it is an associated function, `Engine::merge_gate_rules(repository: &Path, base: Option<&str>) -> Result<RulesReport, Error>`: it finds the root as `Engine::open` does, and `None` reads the branch `[git] base` names in `nexus-flow.toml`, so `nxs merge-gate rules` with and without `--base` has the same result as the call. Rules that cannot be read are the report, with `readable()` false; a failure of the local git is the new `Error::Git`. The report's types are re-exported in `nexus_flow_seam::merge_gate`. The seam now links `nexus-flow-merge-gate`. This signature is a public surface; pm was told, to take it to the owner if it counts as a departure from the RFC.
+- Instead of: `&self` on an open engine, which would open the device's database and fail without a key store; or `base: &str` with the default resolved by the caller, which would leave `nxs` reading `nexus-flow.toml` outside the seam.
+- Topics: merge-gate, seam
