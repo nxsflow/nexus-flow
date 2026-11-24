@@ -124,7 +124,8 @@ impl From<GenesisError> for CliError {
                 Problem::Io { .. } => Kind::Io,
                 _ => Kind::Validation,
             },
-            GenesisError::Io { .. } | GenesisError::Git(_) => Kind::Io,
+            // An unreadable shipped list is a bug in this release, read from nxs's own bytes.
+            GenesisError::Io { .. } | GenesisError::Git(_) | GenesisError::Shipped(_) => Kind::Io,
         };
         CliError { kind, msg }
     }

@@ -241,11 +241,12 @@ fn a_lowercase_genesis_blocks_the_write_and_is_named() {
         only_file(&report),
         (GENESIS, GenesisState::Team, Some("factory/genesis.md"))
     );
-    let names: Vec<_> = fs::read_dir(repo.join("factory"))
+    let mut names: Vec<_> = fs::read_dir(repo.join("factory"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names, ["genesis.md"]);
+    names.sort();
+    assert_eq!(names, ["genesis-guide.md", "genesis.md"]);
     assert_eq!(
         fs::read(repo.join("factory/genesis.md")).unwrap(),
         ARBITRARY

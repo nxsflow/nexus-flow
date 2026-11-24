@@ -33,7 +33,7 @@ pub use git::GitError;
 pub use guide::{install_guide, GUIDE, GUIDE_PATH, SHIPPED};
 
 use crate::install::codeowners;
-use crate::install::shipped::{ShippedError, State};
+use crate::install::shipped::{Shipped, ShippedError, State};
 
 /// The template nexus-flow writes as a new GENESIS, embedded at build time.
 pub const TEMPLATE: &str = include_str!("../../../../templates/genesis/GENESIS.md");
@@ -153,16 +153,22 @@ impl fmt::Display for GenesisError {
 impl std::error::Error for GenesisError {}
 
 /// Writes `factory/GENESIS.md` from the template for the repository at or above `dir`, only where
-/// the path is free. `update` applies to the guide only, never to GENESIS.
+/// the path is free, installs the guide, and reports CODEOWNERS. `update` applies to the guide
+/// only, never to GENESIS. GENESIS and the guide are handled each on its own: a `tracked` GENESIS
+/// does not keep the guide from being installed.
 pub fn create(dir: &Path, update: bool) -> Result<Report, GenesisError> {
-    let _ = update;
     let root = RepoRoot::find(dir).map_err(GenesisError::Root)?;
     let config = Config::read(&root).map_err(GenesisError::Config)?;
-    let genesis = genesis(root.path(), &config.base)?;
-    Ok(Report {
-        files: vec![genesis],
-        codeowners: None,
-    })
+    let root = root.path();
+    let mut files = vec![genesis(root, &config.base)?];
+    let shipped = Shipped::parse(SHIPPED).map_err(GenesisError::Shipped)?;
+    files.extend(install_guide(root, &shipped, GUIDE, update)?);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let codeowners = codeowners::report(root, &[PATH]).map_err(|source| GenesisError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    Ok(Report { files, codeowners })
 }
 
 /// The state of GENESIS under `root`, writing the template where the path is free.
