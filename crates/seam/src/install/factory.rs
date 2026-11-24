@@ -17,6 +17,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::codeowners;
+use super::embedded;
 use super::shipped::{sha256_lf, Shipped, State};
 
 /// The folder at the repository's root that holds the factory (RFC 0006, "The path is fixed").
@@ -83,6 +84,13 @@ impl Defaults {
             return Err(DefaultsError::Missing(path.to_string()));
         }
         Ok(Defaults { shipped, texts })
+    }
+
+    /// The defaults this `nxs` embeds from `templates/factory/`.
+    pub fn embedded() -> Defaults {
+        let shipped = Shipped::parse(embedded::SHIPPED).expect("the embedded shipped.toml reads");
+        let texts = embedded::TEXTS.iter().map(|&(p, t)| (p, t.to_vec()));
+        Defaults::new(shipped, texts).expect("the embedded defaults hold together")
     }
 
     /// The shipped list.

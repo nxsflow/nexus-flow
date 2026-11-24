@@ -4,5 +4,6 @@
 //! CODEOWNERS.
 
 pub mod codeowners;
+mod embedded;
 pub mod factory;
 pub mod shipped;
