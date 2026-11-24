@@ -25,9 +25,10 @@ use nocentraldb::{Db, ErrorCode, Space};
 
 use crate::config::Config;
 use crate::data_dir::DataDir;
+use crate::device::RelayUrl;
 use crate::id::{SessionId, SpaceId};
 use crate::member_select::RunAs;
-use crate::open::{open_in, open_member, DeviceKeys, InitError};
+use crate::open::{open_in, open_member, DeviceKeys, InitError, Network};
 use crate::repo_root::RepoRoot;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
 
@@ -44,8 +45,12 @@ pub struct Checkout {
 pub struct Opened {
     /// Kept open for as long as the spaces are: sync runs only while a database is open
     /// (RFC 0001, "Sync").
-    _db: Db,
+    db: Db,
+    /// The data directory it lives in, which holds the device's settings.
+    data: DataDir,
     session: Option<SessionId>,
+    /// The relay it syncs through; `None` in island mode or when opened off the network.
+    relay: Option<RelayUrl>,
     spaces: Vec<(SpaceId, Option<Space>)>,
     /// The kinds `nexus-flow.toml` names, for the spaces it names.
     kinds: Vec<(SpaceId, SpaceKind)>,
@@ -64,9 +69,16 @@ impl Opened {
         let ids = self.spaces.into_iter().map(|(id, _)| id).collect();
         let kinds = self.kinds;
         let checkout = self.checkout;
-        drop(self._db);
-        let db = open_member(data, RunAs::Session(session.clone())).await?;
-        open(db, Some(session), ids, kinds, checkout).await
+        drop(self.db);
+        let (db, relay) =
+            open_member(data, RunAs::Session(session.clone()), Network::Relay).await?;
+        let member = Member {
+            db,
+            data,
+            session: Some(session),
+            relay,
+        };
+        open(member, ids, kinds, checkout).await
     }
 
     /// Whether the space `id` is held: `None` when it is not one of the open spaces, `Some(false)`
@@ -98,12 +110,43 @@ impl Opened {
     pub fn checkout(&self) -> Option<&Checkout> {
         self.checkout.as_ref()
     }
+
+    /// The open database, for sync (`crate::sync`).
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// The data directory the database lives in.
+    pub(crate) fn data(&self) -> &DataDir {
+        &self.data
+    }
+
+    /// The relay the database syncs through; `None` when it syncs with none.
+    pub(crate) fn relay(&self) -> Option<&RelayUrl> {
+        self.relay.as_ref()
+    }
+
+    /// The open spaces, each with what the database holds of it.
+    pub(crate) fn spaces(&self) -> &[(SpaceId, Option<Space>)] {
+        &self.spaces
+    }
+
+    /// Looks again for the open spaces the database did not hold, which sync may have brought.
+    pub(crate) async fn refresh(&mut self) -> Result<(), InitError> {
+        for (id, space) in &mut self.spaces {
+            if space.is_none() {
+                *space = get(&self.db, *id).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Opened {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Opened")
             .field("session", &self.session)
+            .field("relay", &self.relay)
             .field("spaces", &self.spaces)
             .field("kinds", &self.kinds)
             .field("checkout", &self.checkout)
@@ -120,17 +163,33 @@ pub async fn repository(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<
 
 /// [`repository`], on the database of the member `run_as` names.
 pub async fn repository_as(dir: &Path, data: &DataDir, run_as: RunAs) -> Result<Opened, InitError> {
+    repository_on(dir, data, run_as, Network::Relay).await
+}
+
+/// [`repository_as`], on the network `network` allows.
+pub(crate) async fn repository_on(
+    dir: &Path,
+    data: &DataDir,
+    run_as: RunAs,
+    network: Network,
+) -> Result<Opened, InitError> {
     let root = RepoRoot::find(dir)?;
     let config = Config::read(&root)?;
     let kinds = named_kinds(&config, &root)?;
     let ids = kinds.iter().map(|&(id, _)| id).collect();
     let session = session_of(&run_as);
-    let db = open_in(&root, data, run_as).await?;
+    let (db, relay) = open_in(&root, data, run_as, network).await?;
     let checkout = Checkout {
         path: root.path().to_path_buf(),
         base: config.base,
     };
-    open(db, session, ids, kinds, Some(checkout)).await
+    let member = Member {
+        db,
+        data,
+        session,
+        relay,
+    };
+    open(member, ids, kinds, Some(checkout)).await
 }
 
 /// Opens the device member's database on the space `id`. With `git`, the checkout is the
@@ -153,21 +212,31 @@ pub async fn space_as(
     run_as: RunAs,
 ) -> Result<Opened, InitError> {
     let session = session_of(&run_as);
-    let (db, kinds, checkout) = match git {
+    let ((db, relay), kinds, checkout) = match git {
         Some(dir) => {
             let root = RepoRoot::find(dir)?;
             let config = Config::read(&root)?;
             let kinds = named_kinds(&config, &root)?;
-            let db = open_in(&root, data, run_as).await?;
+            let db = open_in(&root, data, run_as, Network::Relay).await?;
             let checkout = Checkout {
                 path: root.path().to_path_buf(),
                 base: config.base,
             };
             (db, kinds, Some(checkout))
         }
-        None => (open_member(data, run_as).await?, Vec::new(), None),
+        None => (
+            open_member(data, run_as, Network::Relay).await?,
+            Vec::new(),
+            None,
+        ),
     };
-    open(db, session, vec![id], kinds, checkout).await
+    let member = Member {
+        db,
+        data,
+        session,
+        relay,
+    };
+    open(member, vec![id], kinds, checkout).await
 }
 
 fn session_of(run_as: &RunAs) -> Option<SessionId> {
@@ -186,29 +255,42 @@ fn named_kinds(config: &Config, root: &RepoRoot) -> Result<Vec<(SpaceId, SpaceKi
     Ok(kinds)
 }
 
-async fn open(
+/// A member's database as it was opened.
+struct Member<'a> {
     db: Db,
+    data: &'a DataDir,
     session: Option<SessionId>,
+    relay: Option<RelayUrl>,
+}
+
+async fn open(
+    member: Member<'_>,
     ids: Vec<SpaceId>,
     kinds: Vec<(SpaceId, SpaceKind)>,
     checkout: Option<Checkout>,
 ) -> Result<Opened, InitError> {
     let mut spaces = Vec::with_capacity(ids.len());
     for id in ids {
-        let space = match db.spaces().get(id.0).await {
-            Ok(space) => Some(space),
-            Err(e) if e.code() == ErrorCode::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        spaces.push((id, space));
+        spaces.push((id, get(&member.db, id).await?));
     }
     Ok(Opened {
-        _db: db,
-        session,
+        db: member.db,
+        data: member.data.clone(),
+        session: member.session,
+        relay: member.relay,
         spaces,
         kinds,
         checkout,
     })
+}
+
+/// The space `id`, or `None` while the database holds none of it.
+async fn get(db: &Db, id: SpaceId) -> Result<Option<Space>, InitError> {
+    match db.spaces().get(id.0).await {
+        Ok(space) => Ok(Some(space)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn parse(text: &str, root: &RepoRoot) -> Result<SpaceId, InitError> {

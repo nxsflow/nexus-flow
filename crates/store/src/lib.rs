@@ -7,6 +7,7 @@ use nocentraldb as _;
 
 pub mod config;
 pub mod data_dir;
+pub mod device;
 pub mod goals;
 pub mod id;
 pub mod member_select;
@@ -17,3 +18,4 @@ pub mod repo_root;
 pub mod space;
 pub mod space_kind;
 pub mod status;
+pub mod sync;
