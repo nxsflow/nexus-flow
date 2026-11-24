@@ -20,7 +20,11 @@ fn run_as(base: &Path, argv0: &str, args: &[&str]) -> Outcome {
 /// The error object's message, after checking that the run printed `retired_entry_point`.
 fn retired(out: &Outcome) -> String {
     assert_eq!(out.code, 1, "{}", stdout(out));
-    assert!(out.stderr.is_empty(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let error = json(out);
     assert_eq!(error["error"]["kind"], "retired_entry_point", "{error}");
     error["error"]["msg"].as_str().unwrap().to_owned()

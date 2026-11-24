@@ -16,6 +16,7 @@ mod block_on;
 mod cmd;
 mod error;
 mod output;
+mod retired;
 
 use error::CliError;
 use output::Format;
@@ -58,6 +59,9 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if let Some(e) = args.first().and_then(|argv0| retired::check(argv0)) {
+        return e.outcome(md_requested(&args));
+    }
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(e) => return parse_error(e, &args),
@@ -88,7 +92,15 @@ fn parse_error(e: clap::Error, args: &[OsString]) -> Outcome {
             code: 0,
         };
     }
-    let md = args.iter().skip(1).any(|a| a == "--md");
-    let format = if md { Format::Md } else { Format::Json };
-    CliError::usage(&e).outcome(format)
+    CliError::usage(&e).outcome(md_requested(&args))
+}
+
+/// The format of an error printed before the command line is parsed: Markdown when any argument
+/// is `--md`, JSON otherwise.
+fn md_requested(args: &[OsString]) -> Format {
+    if args.iter().skip(1).any(|a| a == "--md") {
+        Format::Md
+    } else {
+        Format::Json
+    }
 }

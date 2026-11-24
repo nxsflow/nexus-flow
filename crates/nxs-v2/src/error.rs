@@ -2,7 +2,7 @@
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
-//! `timeout` (NEX-102).
+//! `timeout` (NEX-102), and `retired_entry_point` (RFC 0008, NEX-191).
 
 use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError, SyncError};
 
@@ -24,6 +24,8 @@ pub enum Kind {
     NoKeyStore,
     /// `nxs sync --timeout` passed while something was still behind or unconfirmed (NEX-102).
     Timeout,
+    /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
+    RetiredEntryPoint,
 }
 
 impl Kind {
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Io => "io",
             Kind::NoKeyStore => "no_key_store",
             Kind::Timeout => "timeout",
+            Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
 }
