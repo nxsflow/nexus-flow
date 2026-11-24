@@ -61,6 +61,9 @@ pub const KINDS: &[(&str, &[SpaceKind])] = &[
     ("goalsGoal", &[SpaceKind::Coordination]),
     ("migrationRun", &[SpaceKind::Repository]),
     ("migrationRecord", &[SpaceKind::Repository]),
+    ("statusNote", &[SpaceKind::Repository]),
+    ("statusItem", &[SpaceKind::Repository]),
+    ("statusGoal", &[SpaceKind::Repository]),
 ];
 
 /// Why a write was refused.

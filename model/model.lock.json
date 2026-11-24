@@ -307,6 +307,193 @@
       },
       "since": 1
     },
+    "statusGoal": {
+      "fields": {
+        "blocked": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "date": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "doneInPeriod": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "flagged": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "goal": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["goalsGoal"],
+          "type": "ncdb/ref"
+        },
+        "inProgress": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "label": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "note": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["statusNote"],
+          "type": "ncdb/link"
+        },
+        "open": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "overdue": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "position": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "ready": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "verdict": {
+          "options": ["onTrack", "atRisk", "offTrack", "noWork"],
+          "rule": 1,
+          "since": 6,
+          "type": "ncdb/choice"
+        },
+        "waitingForOwner": { "rule": 1, "since": 6, "type": "ncdb/int" }
+      },
+      "indexes": {
+        "byGoal": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "goal" },
+            { "direction": "desc", "field": "date" }
+          ],
+          "scope": "space",
+          "since": 6
+        },
+        "byNote": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "note" },
+            { "direction": "asc", "field": "position" }
+          ],
+          "scope": "space",
+          "since": 6
+        }
+      },
+      "since": 6
+    },
+    "statusItem": {
+      "fields": {
+        "date": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "decision": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["decisionsDecision"],
+          "type": "ncdb/link"
+        },
+        "elsewhere": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["goalsGoal", "ticketsTicket"],
+          "type": "ncdb/ref"
+        },
+        "kind": {
+          "options": ["changed", "works", "waits", "decided", "blocked"],
+          "rule": 1,
+          "since": 6,
+          "type": "ncdb/choice"
+        },
+        "label": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "note": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["statusNote"],
+          "type": "ncdb/link"
+        },
+        "position": { "rule": 1, "since": 6, "type": "ncdb/int" },
+        "pr": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "text": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "ticket": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        }
+      },
+      "indexes": {
+        "byDecision": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "decision" },
+            { "direction": "desc", "field": "date" }
+          ],
+          "scope": "space",
+          "since": 6
+        },
+        "byNote": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "note" },
+            { "direction": "asc", "field": "kind" },
+            { "direction": "asc", "field": "position" }
+          ],
+          "scope": "space",
+          "since": 6
+        },
+        "byTicket": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "ticket" },
+            { "direction": "desc", "field": "date" }
+          ],
+          "scope": "space",
+          "since": 6
+        }
+      },
+      "since": 6
+    },
+    "statusNote": {
+      "fields": {
+        "author": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "body": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "corrects": {
+          "rule": 1,
+          "since": 6,
+          "targets": ["statusNote"],
+          "type": "ncdb/link"
+        },
+        "date": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "headline": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "health": {
+          "options": ["onTrack", "atRisk", "offTrack"],
+          "rule": 1,
+          "since": 6,
+          "type": "ncdb/choice"
+        },
+        "healthBasis": {
+          "options": ["noCoordinationSpace", "noGoalInFocus", "noWorkForGoals"],
+          "rule": 1,
+          "since": 6,
+          "type": "ncdb/choice"
+        },
+        "healthComputed": {
+          "options": ["onTrack", "atRisk", "offTrack"],
+          "rule": 1,
+          "since": 6,
+          "type": "ncdb/choice"
+        },
+        "healthWhy": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "repository": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "since": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "timeZone": { "rule": 1, "since": 6, "type": "ncdb/string" },
+        "until": { "rule": 1, "since": 6, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byCorrects": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "corrects" }],
+          "scope": "space",
+          "since": 6
+        },
+        "byDate": {
+          "equal": 0,
+          "fields": [
+            { "direction": "desc", "field": "date" },
+            { "direction": "desc", "field": "until" }
+          ],
+          "scope": "space",
+          "since": 6
+        },
+        "byDateAcrossSpaces": {
+          "equal": 0,
+          "fields": [
+            { "direction": "desc", "field": "date" },
+            { "direction": "desc", "field": "until" }
+          ],
+          "since": 6
+        }
+      },
+      "since": 6
+    },
     "ticketsNote": {
       "fields": {
         "body": { "rule": 1, "since": 2, "type": "ncdb/string" },
@@ -601,9 +788,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:b70ae14b2cc5bd684e46e104233ed7a69663bf329e683c45060556d96dcf2626",
+    "hash": "sha256:8c4d3d0f62fb979f97babe700f08a7d5086f35f8b55be0031eac063955d3a781",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 5
+    "version": 6
   },
   "plugins": {}
 }
