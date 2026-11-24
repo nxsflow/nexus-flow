@@ -7,8 +7,8 @@
 // filters `--topic`, `--ticket` and "superseded by" each need an index (RFC 0003, "The
 // collections"). Every index runs in one space (`scope: "space"`).
 //
-// Left for later tickets, each an additive change: `goalsGoal` (RFC 0005) and `requestsRequest`
-// (RFC 0009) as targets of `decisionsSubject.elsewhere`, once those collections exist.
+// Left for a later ticket, an additive change: `requestsRequest` (RFC 0009) as a target of
+// `decisionsSubject.elsewhere`, once that collection exists.
 import { nc } from "@nocentraldb/sdk";
 
 const space = { scope: "space" } as const;
@@ -80,8 +80,8 @@ export const decisions = {
       decision: decision(),
       // A ticket in the same space, when it exists there.
       ticket: nc.link("ticketsTicket"),
-      // A subject in another space.
-      elsewhere: nc.ref(["ticketsTicket"]),
+      // A subject in another space: a ticket of another repository, or a goal.
+      elsewhere: nc.ref(["ticketsTicket", "goalsGoal"]),
       // The subject's human-readable id as written, such as `NEX-22`; always written.
       label: nc.string(),
       // The decision's date, copied.

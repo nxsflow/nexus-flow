@@ -152,7 +152,7 @@ fn a_goal_is_found_by_its_key() {
 
 /// RFC 0005, "A ticket serves a goal" and "What the re-evaluation stores": a ticket names a goal
 /// in another space through a `ticketsReference` whose target is the goal, of kind `serves` or
-/// `proposed`, and pm finds both through `byTarget`.
+/// `proposed`, and pm finds both through `byTarget`, ordered by kind.
 #[test]
 fn a_ticket_serves_or_is_proposed_for_a_goal_in_another_space() {
     let (db, repository) = open();
@@ -188,9 +188,17 @@ fn a_ticket_serves_or_is_proposed_for_a_goal_in_another_space() {
     let serves = reference("serves");
     let proposed = reference("proposed");
 
-    let by = |equal: Vec<Value>| found(&db, &repository, "ticketsReference", "byTarget", equal);
-    assert_eq!(by(vec![target.into(), "serves".into()]), [serves]);
-    assert_eq!(by(vec![target.into(), "proposed".into()]), [proposed]);
+    // `byTarget` is equal on `target` and then ordered by `kind`.
+    assert_eq!(
+        found(
+            &db,
+            &repository,
+            "ticketsReference",
+            "byTarget",
+            vec![target.into()]
+        ),
+        [proposed, serves]
+    );
     let read = block_on(repository.get("ticketsReference", proposed))
         .unwrap()
         .unwrap();
