@@ -26,7 +26,9 @@ fn options(folder: &Path) -> OpenOptions {
 /// and returns the agent's invitation, which that account certified: the invitation pm hands the
 /// device for `nxs member add --role pm` (RFC 0001, "Starting pm").
 pub async fn paired_agent(data: &DataDir, keys: DeviceKeys, folder: &Path) -> String {
-    let device = open_db(data, keys, None).await.expect("the device's database");
+    let device = open_db(data, keys, None)
+        .await
+        .expect("the device's database");
     let agent = Db::open(options(folder).pairing().agent())
         .await
         .expect("the agent's database");
@@ -64,7 +66,9 @@ pub async fn other_device(folder: &Path) -> String {
 /// Creates a space that the device whose database is in `data` is the only admin of, such as a
 /// coordination space, and returns its id.
 pub async fn create_space(data: &DataDir, keys: DeviceKeys) -> SpaceId {
-    let device = open_db(data, keys, None).await.expect("the device's database");
+    let device = open_db(data, keys, None)
+        .await
+        .expect("the device's database");
     let space = device.spaces().create().await.expect("a new space");
     SpaceId(space.id())
 }
@@ -73,7 +77,9 @@ pub async fn create_space(data: &DataDir, keys: DeviceKeys) -> SpaceId {
 /// SDK refuses to demote a space's last admin, so the agent of `admin`, an invitation of the
 /// device's own account, is made an admin first.
 pub async fn demote_device(data: &DataDir, keys: DeviceKeys, space: SpaceId, admin: &str) {
-    let device = open_db(data, keys, None).await.expect("the device's database");
+    let device = open_db(data, keys, None)
+        .await
+        .expect("the device's database");
     let space = device.spaces().get(space.0).await.expect("the space");
     let admin = admin.parse().expect("an invitation");
     space

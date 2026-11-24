@@ -17,7 +17,11 @@ fn the_roles_in_a_repository_space_follow_rfc_0001() {
         ("legal", SpaceRole::Writer),
     ];
     for (role, expected) in table {
-        assert_eq!(space_role(role, SpaceKind::Repository), Some(expected), "{role}");
+        assert_eq!(
+            space_role(role, SpaceKind::Repository),
+            Some(expected),
+            "{role}"
+        );
     }
 }
 
@@ -33,7 +37,11 @@ fn the_roles_in_a_coordination_space_follow_rfc_0001() {
         ("legal", None),
     ];
     for (role, expected) in table {
-        assert_eq!(space_role(role, SpaceKind::Coordination), expected, "{role}");
+        assert_eq!(
+            space_role(role, SpaceKind::Coordination),
+            expected,
+            "{role}"
+        );
     }
 }
 

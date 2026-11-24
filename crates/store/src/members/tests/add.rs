@@ -44,12 +44,25 @@ impl Repo {
     }
 
     fn list(&self) -> Vec<Member> {
-        let opened = block_on(opened::repository(&self.repo(), &self.data, keys(&self.data)));
+        let opened = block_on(opened::repository(
+            &self.repo(),
+            &self.data,
+            keys(&self.data),
+        ));
         block_on(members::list(&opened.unwrap())).unwrap()
     }
 
-    fn add(&self, invitation: &str, role: &str, ticket: Option<&str>) -> Result<Member, MemberError> {
-        let opened = block_on(opened::repository(&self.repo(), &self.data, keys(&self.data)));
+    fn add(
+        &self,
+        invitation: &str,
+        role: &str,
+        ticket: Option<&str>,
+    ) -> Result<Member, MemberError> {
+        let opened = block_on(opened::repository(
+            &self.repo(),
+            &self.data,
+            keys(&self.data),
+        ));
         block_on(members::add(&opened.unwrap(), invitation, role, ticket))
     }
 }
@@ -81,7 +94,10 @@ fn adding_a_paired_agent_writes_the_member_and_its_record() {
     assert_eq!(list.len(), 2, "{list:?}");
     assert_eq!(find(&list, &added.member), &added);
     let device = list.iter().find(|m| m.kind == MemberKind::Device).unwrap();
-    assert_eq!(device.account, added.account, "pm is paired into the device's account");
+    assert_eq!(
+        device.account, added.account,
+        "pm is paired into the device's account"
+    );
 }
 
 #[test]
@@ -92,7 +108,10 @@ fn a_ticket_is_written_into_the_record_as_a_reference() {
 
     let added = repo.add(&invitation, "coder", Some(&ticket)).unwrap();
 
-    assert_eq!(added.ticket.as_ref().map(|t| t.to_string()), Some(ticket.clone()));
+    assert_eq!(
+        added.ticket.as_ref().map(|t| t.to_string()),
+        Some(ticket.clone())
+    );
     let listed = find(&repo.list(), &added.member).clone();
     assert_eq!(listed.ticket.map(|t| t.to_string()), Some(ticket));
     assert_eq!(listed.role.as_deref(), Some("coder"));
@@ -130,7 +149,10 @@ fn a_text_that_is_no_invitation_is_refused() {
 
     let err = repo.add("ncdb-invite-1:nope", "pm", None).unwrap_err();
 
-    assert!(matches!(err, MemberError::NotAnInvitation { .. }), "{err:?}");
+    assert!(
+        matches!(err, MemberError::NotAnInvitation { .. }),
+        "{err:?}"
+    );
     assert_eq!(repo.list().len(), 1);
 }
 
@@ -195,9 +217,10 @@ fn name_coordination(repo: &Repo, coordination: &str) {
 }
 
 fn coordination_members(repo: &Repo, coordination: &str) -> Vec<Member> {
+    let root = repo.repo();
     let opened = opened::space(
         coordination.parse().unwrap(),
-        Some(&repo.repo()),
+        Some(&root),
         &repo.data,
         keys(&repo.data),
     );
