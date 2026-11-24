@@ -1,5 +1,135 @@
 {
   "collections": {
+    "decisionsDecision": {
+      "fields": {
+        "author": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "body": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "date": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "decidedBy": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "handle": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "insteadOf": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "pr": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "tickets": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "title": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "why": { "rule": 1, "since": 3, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byDate": {
+          "equal": 0,
+          "fields": [
+            { "direction": "desc", "field": "date" },
+            { "direction": "desc", "field": "handle" }
+          ],
+          "scope": "space",
+          "since": 3
+        },
+        "byHandle": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "handle" }],
+          "scope": "space",
+          "since": 3
+        }
+      },
+      "since": 3
+    },
+    "decisionsSubject": {
+      "fields": {
+        "date": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "decision": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["decisionsDecision"],
+          "type": "ncdb/link"
+        },
+        "elsewhere": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/ref"
+        },
+        "label": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "ticket": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["ticketsTicket"],
+          "type": "ncdb/link"
+        }
+      },
+      "indexes": {
+        "byLabel": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "label" },
+            { "direction": "desc", "field": "date" }
+          ],
+          "scope": "space",
+          "since": 3
+        },
+        "byTicket": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "ticket" }],
+          "scope": "space",
+          "since": 3
+        }
+      },
+      "since": 3
+    },
+    "decisionsSupersession": {
+      "fields": {
+        "date": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "decision": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["decisionsDecision"],
+          "type": "ncdb/link"
+        },
+        "supersedes": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["decisionsDecision"],
+          "type": "ncdb/link"
+        }
+      },
+      "indexes": {
+        "byDate": {
+          "equal": 0,
+          "fields": [{ "direction": "desc", "field": "date" }],
+          "scope": "space",
+          "since": 3
+        },
+        "bySuperseded": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "supersedes" }],
+          "scope": "space",
+          "since": 3
+        }
+      },
+      "since": 3
+    },
+    "decisionsTopic": {
+      "fields": {
+        "date": { "rule": 1, "since": 3, "type": "ncdb/string" },
+        "decision": {
+          "rule": 1,
+          "since": 3,
+          "targets": ["decisionsDecision"],
+          "type": "ncdb/link"
+        },
+        "topic": { "rule": 1, "since": 3, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byTopic": {
+          "equal": 1,
+          "fields": [
+            { "direction": "asc", "field": "topic" },
+            { "direction": "desc", "field": "date" }
+          ],
+          "scope": "space",
+          "since": 3
+        }
+      },
+      "since": 3
+    },
     "spaceMember": {
       "fields": {
         "member": { "rule": 1, "since": 1, "type": "ncdb/string" },
@@ -301,9 +431,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:9a0abb5814610433798cf2f51e1e2c53b14e1b99b1760f966298e02e27dad8c6",
+    "hash": "sha256:61f22e954442cf9fd3e824043c7fdb7081c4e26aa2fa917a5fd883d6a8a2e58c",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 2
+    "version": 3
   },
   "plugins": {}
 }
