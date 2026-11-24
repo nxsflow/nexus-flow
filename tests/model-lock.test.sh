@@ -150,9 +150,10 @@ r="$(fixture)"; rebuild_fresh "$r"; commit "$r"
 expect_fail "a lock rebuilt from nothing fails, though model.ts is unchanged: its model id is new" "$r" "model id"
 
 r="$(fixture)"; add_field "$r" note; rebuild "$r"; commit "$r"; git -C "$r" tag -f base >/dev/null
-set_lock "$r" 's/"version": 2/"version": 1/'; commit "$r"
+V="$(sed -n 's/^ *"version": \([0-9]*\).*/\1/p' "$r/model/model.lock.json")"
+set_lock "$r" "s/\"version\": $V/\"version\": $((V - 1))/"; commit "$r"
 expect_fail "a lock whose model version went down fails, though ncdb rebuilds it alike" "$r" "model version"
-if grep -qF "below the base's 2" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
+if grep -qF "below the base's $V" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
 
 r="$(fixture)"
 check "$r" no-such-ref
