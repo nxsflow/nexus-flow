@@ -1,0 +1,8 @@
+# Every version of the genesis guide nexus-flow has shipped, oldest first; the last is the current
+# guide (RFC 0004, "Installing the template"; the format of RFC 0006's shipped.toml). Paths are
+# relative to the repository's factory/. A release adds hashes and never removes one. GENESIS.md
+# has no entry: nexus-flow never updates a GENESIS.
+
+[[file]]
+path = "genesis-guide.md"
+sha256 = ["178a36d65f21da7fc426579131ecd29cda4fc23d4ae45d2f7b10c6dc502c83bc"]

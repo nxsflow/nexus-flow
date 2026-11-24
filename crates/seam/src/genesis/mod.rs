@@ -11,10 +11,15 @@
 //! - `tracked`: the path is missing but git still tracks it; nothing is written, and the report
 //!   is refused, so that `nxs` exits non-zero and says to restore the file from git.
 //!
+//! Beside GENESIS, `create` installs the guide, `factory/genesis-guide.md`, under RFC 0006's rules
+//! for shipped defaults (see [`install_guide`]), and reports which of the paths CODEOWNERS leaves
+//! without a code owner: GENESIS only, the guide is not checked.
+//!
 //! It never commits, never opens a NoCentralDB database, and `update` never touches GENESIS: it
-//! applies to the guide alone (NEX-134).
+//! applies to the guide alone.
 
 mod git;
+mod guide;
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -25,6 +30,10 @@ use nexus_flow_store::config::{Config, ConfigError};
 use nexus_flow_store::repo_root::{RepoRoot, RootError};
 
 pub use git::GitError;
+pub use guide::{install_guide, GUIDE, GUIDE_PATH, SHIPPED};
+
+use crate::install::codeowners;
+use crate::install::shipped::{ShippedError, State};
 
 /// The template nexus-flow writes as a new GENESIS, embedded at build time.
 pub const TEMPLATE: &str = include_str!("../../../../templates/genesis/GENESIS.md");
@@ -62,27 +71,50 @@ impl GenesisState {
     }
 }
 
+/// The state of one file of the report: GENESIS has its own three, the guide RFC 0006's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileState {
+    /// The state of `factory/GENESIS.md`.
+    Genesis(GenesisState),
+    /// The state of the guide, a shipped default.
+    Shipped(State),
+}
+
+impl FileState {
+    /// The state's name in the report.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileState::Genesis(state) => state.as_str(),
+            FileState::Shipped(state) => state.as_str(),
+        }
+    }
+}
+
 /// One file of the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileReport {
     /// The path, relative to the repository's root.
     pub path: String,
     /// What was found there, and done.
-    pub state: GenesisState,
+    pub state: FileState,
     /// For a case variant, the path as it is on disk.
     pub found: Option<String>,
 }
 
-/// What `create` reports: its files, ordered by path, bytewise.
+/// What `create` reports: its files, ordered by path, bytewise, and the CODEOWNERS report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub files: Vec<FileReport>,
+    /// `None` when the repository has no CODEOWNERS file.
+    pub codeowners: Option<codeowners::Report>,
 }
 
 impl Report {
     /// Whether a file is `tracked`: the caller exits non-zero, with the report.
     pub fn is_refused(&self) -> bool {
-        self.files.iter().any(|f| f.state == GenesisState::Tracked)
+        self.files
+            .iter()
+            .any(|f| f.state == FileState::Genesis(GenesisState::Tracked))
     }
 }
 
@@ -97,6 +129,8 @@ pub enum GenesisError {
     Io { path: PathBuf, source: io::Error },
     /// git could not say whether it tracks GENESIS.
     Git(GitError),
+    /// The guide's shipped list cannot be read: a bug in this release.
+    Shipped(ShippedError),
 }
 
 impl fmt::Display for GenesisError {
@@ -111,6 +145,7 @@ impl fmt::Display for GenesisError {
             GenesisError::Git(GitError::Failed { args, stderr }) => {
                 write!(f, "git {args} failed while checking {PATH}: {stderr}")
             }
+            GenesisError::Shipped(e) => write!(f, "the genesis guide's {e}"),
         }
     }
 }
@@ -126,6 +161,7 @@ pub fn create(dir: &Path, update: bool) -> Result<Report, GenesisError> {
     let genesis = genesis(root.path(), &config.base)?;
     Ok(Report {
         files: vec![genesis],
+        codeowners: None,
     })
 }
 
@@ -133,7 +169,7 @@ pub fn create(dir: &Path, update: bool) -> Result<Report, GenesisError> {
 fn genesis(root: &Path, base: &str) -> Result<FileReport, GenesisError> {
     let report = |state, found| FileReport {
         path: PATH.to_owned(),
-        state,
+        state: FileState::Genesis(state),
         found,
     };
     let folder = root.join(FOLDER);
