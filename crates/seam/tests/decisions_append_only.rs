@@ -33,8 +33,8 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
 fn violations(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     for line in source.lines().map(str::trim) {
-        if line.starts_with("pub use") || line.starts_with("pub(crate) use") {
-            if line.starts_with("pub use") && WRITE_PATH.iter().any(|m| line.contains(m)) {
+        if line.starts_with("pub use") {
+            if WRITE_PATH.iter().any(|m| line.contains(m)) {
                 found.push(line.to_owned());
             }
             continue;
