@@ -28,6 +28,7 @@ use nocentraldb::{
 use crate::id::SpaceId;
 use crate::opened::Opened;
 use crate::space_kind::WrongSpace;
+use crate::write::WriteError;
 
 mod record;
 mod roles;
@@ -180,6 +181,21 @@ impl fmt::Display for MemberError {
 
 impl std::error::Error for MemberError {}
 
+impl From<WriteError> for MemberError {
+    fn from(e: WriteError) -> Self {
+        match e {
+            WriteError::WrongSpace(e) => MemberError::WrongSpace(e),
+            WriteError::NotOpen(space) | WriteError::NotHeld(space) => {
+                MemberError::NotHeld { space }
+            }
+            WriteError::WriteOnce(e) => MemberError::Invalid {
+                message: e.to_string(),
+            },
+            WriteError::Database(e) => e.into(),
+        }
+    }
+}
+
 impl From<SdkError> for MemberError {
     fn from(e: SdkError) -> Self {
         let message = e.to_string();
@@ -225,9 +241,6 @@ pub async fn add(
     // record.
     let mut added: Option<MemberId> = None;
     for (id, space, space_role) in &targets {
-        opened
-            .check_write(id, record::COLLECTION)
-            .map_err(MemberError::WrongSpace)?;
         let before = ids(space).await?;
         let options = AddMember {
             role: space_role.sdk(),
@@ -242,7 +255,7 @@ pub async fn add(
             }
             (Err(e), _) => return Err(e.into()),
         };
-        record::write(opened.db(), space, member, role, ticket.as_ref()).await?;
+        record::write(opened, id, space, member, role, ticket.as_ref()).await?;
         added = Some(member);
     }
     let member = added.expect("the repository space is always a target");

@@ -10,6 +10,7 @@ use nocentraldb::{Db, MemberId, Object, Reference, Space, Value};
 
 use super::{MemberError, TicketRef};
 use crate::id::SpaceId;
+use crate::opened::Opened;
 
 /// The collection of the role records.
 pub(crate) const COLLECTION: &str = "spaceMember";
@@ -44,10 +45,12 @@ pub(crate) async fn read(
     }))
 }
 
-/// Writes the record of `member` in `space` with `role` and `ticket`: a new one, or the one it
-/// already has, rewritten.
+/// Writes the record of `member` in the open space `id` with `role` and `ticket`: a new one, or
+/// the one it already has, rewritten. It goes through the store's one write path
+/// ([`Opened::write`]), which checks that the collection belongs in the space's kind.
 pub(crate) async fn write(
-    db: &Db,
+    opened: &Opened,
+    id: &SpaceId,
     space: &Space,
     member: MemberId,
     role: &str,
@@ -58,16 +61,17 @@ pub(crate) async fn write(
         None => Value::clear(),
     };
     let values = [("role", Value::from(role)), ("ticket", ticket)];
-    match find(db, space, member).await? {
-        Some(object) => {
-            space.update(COLLECTION, object.id(), values).await?;
-        }
-        None => {
-            let member = Value::from(member.to_string());
-            let values = std::iter::once(("member", member)).chain(values);
-            space.create(COLLECTION, values).await?;
-        }
-    }
+    let existing = find(opened.db(), space, member).await?.map(|o| o.id());
+    opened
+        .write(id, |w| match existing {
+            Some(object) => w.update(COLLECTION, object, values),
+            None => {
+                let member = Value::from(member.to_string());
+                let values = std::iter::once(("member", member)).chain(values);
+                w.create(COLLECTION, values).map(|_| ())
+            }
+        })
+        .await?;
     Ok(())
 }
 
