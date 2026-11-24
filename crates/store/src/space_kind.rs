@@ -54,6 +54,10 @@ pub const KINDS: &[(&str, &[SpaceKind])] = &[
     ("ticketsNote", &[SpaceKind::Repository]),
     ("ticketsWork", &[SpaceKind::Repository]),
     ("ticketsReference", &[SpaceKind::Repository]),
+    ("decisionsDecision", &[SpaceKind::Repository]),
+    ("decisionsTopic", &[SpaceKind::Repository]),
+    ("decisionsSubject", &[SpaceKind::Repository]),
+    ("decisionsSupersession", &[SpaceKind::Repository]),
 ];
 
 /// Why a write was refused.
