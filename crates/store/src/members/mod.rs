@@ -32,7 +32,7 @@ use crate::opened::Opened;
 use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
-mod record;
+pub(crate) mod record;
 mod retag;
 mod roles;
 pub mod tags;

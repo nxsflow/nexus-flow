@@ -1,5 +1,6 @@
 //! One module per command.
 
+pub mod decision;
 pub mod factory;
 pub mod genesis;
 pub mod init;

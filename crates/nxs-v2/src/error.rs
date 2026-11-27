@@ -4,12 +4,13 @@
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
 //! `no_free_tag` from RFC 0002 (NEX-108); a retired v1 entry point is `retired_entry_point`
-//! (RFC 0008, NEX-191).
+//! (RFC 0008, NEX-191); `nxs decision add` refuses with
+//! `validation`, or `not_found` for a decision to supersede that the local copy does not hold.
 
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
-    ConfigError, DataDirError, Error, InitError, JoinError, MemberError, Problem, RootError,
-    SyncError,
+    ConfigError, DataDirError, DecisionError, Error, InitError, JoinError, MemberError, Problem,
+    RootError, SyncError,
 };
 
 use crate::output::Format;
@@ -119,6 +120,7 @@ impl From<Error> for CliError {
             Error::NoCheckout => Kind::Validation,
             Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
+            Error::Decision(decision) => decision_kind(decision),
             Error::Coordination(join) => join_kind(join),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
@@ -185,5 +187,13 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,
+    }
+}
+
+fn decision_kind(e: &DecisionError) -> Kind {
+    match e {
+        DecisionError::SupersedesUnknown { .. } => Kind::NotFound,
+        DecisionError::Database { .. } => Kind::Io,
+        _ => Kind::Validation,
     }
 }
