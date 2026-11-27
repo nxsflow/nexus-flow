@@ -19,6 +19,7 @@
 //! ticket are `None`.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use nocentraldb::{
@@ -31,6 +32,7 @@ use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
 mod record;
+mod role_file;
 mod roles;
 
 pub use roles::{space_role, SpaceRole};
@@ -116,6 +118,8 @@ pub enum MemberError {
     NotATicket { text: String },
     /// The role is empty.
     EmptyRole,
+    /// A session's role names no file in `factory/roles/` of the working tree.
+    NoRoleFile { role: String, path: PathBuf },
     /// A space the change needs is named but not held yet: this database has not synced it.
     NotHeld { space: SpaceId },
     /// This member is not an admin of a space the change needs.
@@ -153,6 +157,11 @@ impl fmt::Display for MemberError {
                 "{text:?} is not a reference to a ticket: one is <space id>/<object id>"
             ),
             MemberError::EmptyRole => f.write_str("the role is empty"),
+            MemberError::NoRoleFile { role, path } => write!(
+                f,
+                "the role {role} has no role file: {} is missing",
+                path.display()
+            ),
             MemberError::NotHeld { space } => write!(
                 f,
                 "this device does not hold the space {space} yet; sync it with nxs sync first"
@@ -232,6 +241,11 @@ pub async fn add(
     let role = role.trim();
     if role.is_empty() {
         return Err(MemberError::EmptyRole);
+    }
+    if !role_file::is_frame_role(role) {
+        if let Some(checkout) = opened.checkout() {
+            role_file::role_file(&checkout.path, role)?;
+        }
     }
     let ticket = ticket.map(str::parse::<TicketRef>).transpose()?;
     let targets = targets(opened, role)?;
