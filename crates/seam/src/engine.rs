@@ -14,8 +14,9 @@
 //! functions of commands that open no database (NEX-232), it takes the repository.
 //!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
-//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
-//! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
+//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`],
+//! [`Engine::member_retag`] and [`Engine::members`], the counterparts of `nxs member add`,
+//! `remove`, `retag` and `list`.
 //!
 //! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
 //! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
@@ -224,24 +225,34 @@ impl Engine {
         })
     }
 
-    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
-    /// started on, written `<space id>/<object id>`: to the repository space, and to the
-    /// coordination space unless it is a role session or the migration member, each with its
-    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
-    /// spaces adds, and a refusal changes nothing.
+    /// Adds the member of `invitation` with the role `role`, the ticket `ticket` it was started
+    /// on, written `<space id>/<object id>`, and the ticket tag `tag`, or a free one when it is
+    /// `None`: to the repository space, and to the coordination space unless it is a role session
+    /// or the migration member, each with its `spaceMember` record. Returns it as
+    /// [`Engine::members`] lists it. Only an admin of those spaces adds, and a refusal changes
+    /// nothing.
     pub async fn member_add(
         &self,
         invitation: &str,
         role: &str,
         ticket: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Member, Error> {
-        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+        Ok(members::add(&self.opened, invitation, role, ticket, tag).await?)
     }
 
     /// Removes the member `member`, by its id, from every open space it is a member of, and
     /// returns it as it was listed. Its role record stays. Only an admin removes.
     pub async fn member_remove(&self, member: &str) -> Result<Member, Error> {
         Ok(members::remove(&self.opened, member).await?)
+    }
+
+    /// Gives the member `member`, by its id, the ticket tag `tag` in every open space it is a
+    /// member of, and returns it as [`Engine::members`] lists it (RFC 0002, "Two members with one
+    /// tag"). The keys it already wrote keep their tag. Only an admin retags, and a tag a current
+    /// member holds is refused.
+    pub async fn member_retag(&self, member: &str, tag: &str) -> Result<Member, Error> {
+        Ok(members::retag(&self.opened, member, tag).await?)
     }
 
     /// The current members of the repository space, in member-id order, with their role records.

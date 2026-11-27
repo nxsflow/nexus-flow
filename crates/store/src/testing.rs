@@ -1,7 +1,8 @@
 //! What the tests of the crates above the store need from NoCentralDB and nexus-flow cannot do
 //! yet, behind the feature `test-support`: the invitations of members that later tickets start
 //! (a paired pm, a role session, another person's device), and a device that is no longer an
-//! admin of its space. Only the store may name the SDK (NEX-89), so these live here.
+//! admin of its space, and a space whose every ticket tag is held. Only the store may name the SDK
+//! (NEX-89), so these live here.
 //!
 //! Every database here lives in a folder the caller names, with its keys in a file there: a test
 //! machine has no key store.
@@ -107,4 +108,39 @@ pub async fn demote_device(data: &DataDir, keys: DeviceKeys, space: SpaceId, adm
         .set_role(me, Role::Writer)
         .await
         .expect("the device lowers its own role");
+}
+
+/// Writes one role record per ticket tag in the repository space of `repo`, each naming the
+/// device's own member, so that every tag is held and `nxs member add` finds none free.
+pub async fn hold_every_tag(repo: &Path, data: &DataDir, keys: DeviceKeys) {
+    let opened = crate::opened::repository(repo, data, keys)
+        .await
+        .expect("the repository's spaces");
+    let (id, space) = &opened.spaces()[0];
+    let space = space.as_ref().expect("the repository space is held");
+    let me = space
+        .members()
+        .list()
+        .await
+        .expect("the members")
+        .into_iter()
+        .find(|m| m.is_self)
+        .expect("the device is a member")
+        .id
+        .to_string();
+    opened
+        .write(id, |w| {
+            for tag in crate::members::tags::all() {
+                w.create(
+                    "spaceMember",
+                    [
+                        ("member", nocentraldb::Value::from(me.as_str())),
+                        ("tag", nocentraldb::Value::from(tag.as_str())),
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("the records are written");
 }

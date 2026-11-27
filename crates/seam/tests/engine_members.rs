@@ -22,7 +22,7 @@ fn an_engine_adds_lists_and_removes_a_member_with_its_role_record() {
     ));
     let engine = block_on(Engine::open_with(&base.join("repo"), setup)).unwrap();
 
-    let added = block_on(engine.member_add(&invitation, "pm", None)).unwrap();
+    let added = block_on(engine.member_add(&invitation, "pm", None, None)).unwrap();
     let listed = block_on(engine.members()).unwrap();
     let removed = block_on(engine.member_remove(&added.member)).unwrap();
     let after = block_on(engine.members()).unwrap();
@@ -43,11 +43,37 @@ fn a_refused_add_is_a_member_error() {
     block_on(init(&base.join("repo"), &setup.data, setup.keys.clone())).unwrap();
     let engine = block_on(Engine::open_with(&base.join("repo"), setup)).unwrap();
 
-    let err = block_on(engine.member_add("not an invitation", "pm", None)).unwrap_err();
+    let err = block_on(engine.member_add("not an invitation", "pm", None, None)).unwrap_err();
 
     assert!(
         matches!(err, Error::Member(MemberError::NotAnInvitation { .. })),
         "{err:?}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn an_engine_adds_with_a_tag_and_retags() {
+    let base = scratch("engine-members-retag");
+    let setup = options(&base.join("data"));
+    block_on(init(&base.join("repo"), &setup.data, setup.keys.clone())).unwrap();
+    let invitation = block_on(testing::paired_agent(
+        &setup.data,
+        setup.keys.clone(),
+        &base.join("coder"),
+    ));
+    let engine = block_on(Engine::open_with(&base.join("repo"), setup)).unwrap();
+
+    let added = block_on(engine.member_add(&invitation, "coder", None, Some("ka"))).unwrap();
+    let retagged = block_on(engine.member_retag(&added.member, "kb")).unwrap();
+    let held = block_on(engine.member_retag(&added.member, "K1")).unwrap_err();
+
+    assert_eq!(added.tag.as_deref(), Some("ka"));
+    assert_eq!(retagged.tag.as_deref(), Some("kb"));
+    assert!(block_on(engine.members()).unwrap().contains(&retagged));
+    assert!(
+        matches!(held, Error::Member(MemberError::NotATag { .. })),
+        "{held:?}"
     );
     fs::remove_dir_all(&base).unwrap();
 }

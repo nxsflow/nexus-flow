@@ -3,7 +3,8 @@
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
-//! a retired v1 entry point is `retired_entry_point` (RFC 0008, NEX-191).
+//! `no_free_tag` from RFC 0002 (NEX-108); a retired v1 entry point is `retired_entry_point`
+//! (RFC 0008, NEX-191).
 
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
@@ -33,6 +34,8 @@ pub enum Kind {
     Forbidden,
     /// What the command names does not exist, such as a member that is not one.
     NotFound,
+    /// Every one of the 936 ticket tags is held, so `nxs member add` has none to give (RFC 0002).
+    NoFreeTag,
     /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
     RetiredEntryPoint,
 }
@@ -48,6 +51,7 @@ impl Kind {
             Kind::Timeout => "timeout",
             Kind::Forbidden => "forbidden",
             Kind::NotFound => "not_found",
+            Kind::NoFreeTag => "no_free_tag",
             Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
@@ -168,13 +172,16 @@ fn member_kind(e: &MemberError) -> Kind {
         MemberError::NotAdmin { .. }
         | MemberError::NotAllowed { .. }
         | MemberError::UnknownAccount { .. } => Kind::Forbidden,
-        MemberError::AlreadyMember { .. } => Kind::Conflict,
+        MemberError::AlreadyMember { .. } | MemberError::TagHeld { .. } => Kind::Conflict,
+        MemberError::NoFreeTag => Kind::NoFreeTag,
         MemberError::NotFound { .. } => Kind::NotFound,
         MemberError::Database { .. } => Kind::Io,
         MemberError::NotAnInvitation { .. }
         | MemberError::NotAMemberId { .. }
         | MemberError::NotATicket { .. }
         | MemberError::EmptyRole
+        | MemberError::NotATag { .. }
+        | MemberError::TagFreed { .. }
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,

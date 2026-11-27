@@ -5,18 +5,20 @@
 //! **Adding.** `add` adds the invitation's member to every open space its role belongs in, as
 //! "Roles in a space" gives it ([`space_role`]): the repository space, and the coordination space
 //! for every role but a role session's and the migration member's. In each it adds the member and
-//! then writes its `spaceMember` record, or rewrites the one a member added before still has. It
-//! checks first that this member is an admin of each of those spaces, that each is held, and that
-//! the new member is in none of them, so a refusal changes nothing.
+//! then writes its `spaceMember` record, or rewrites the one a member added before still has. The
+//! record carries the member's ticket tag (RFC 0002, "Ticket ids"), the same in every space: the
+//! one `--tag` names, or a free one ([`taken`] says which). It checks first that this member is an
+//! admin of each of those spaces, that each is held, that the new member is in none of them, and
+//! that the tag can be given, so a refusal changes nothing.
 //!
 //! **Removing.** `remove` removes a member from every open space it is a member of, after the same
 //! checks. Its record stays: who wrote what stays readable after its member is gone (RFC 0001,
 //! "Who decided").
 //!
 //! **Listing.** `list` gives the repository space's current members in member-id order, each with
-//! its kind and account from its certificate and its role and ticket from its record. A member
-//! nexus-flow did not add, such as the device that created the space, has no record: its role and
-//! ticket are `None`.
+//! its kind and account from its certificate and its role, ticket and tag from its record, and
+//! whether another current member holds the same tag. A member nexus-flow did not add, such as the
+//! device that created the space, has no record: its role, ticket and tag are `None`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,9 +33,16 @@ use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
 mod record;
+mod retag;
 mod roles;
+pub mod tags;
+mod taken;
 
+pub use retag::retag;
 pub use roles::{space_role, SpaceRole};
+
+use tags::Tag;
+use taken::Taken;
 
 /// What a member is, from its certificate (NoCentralDB's `MemberKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,6 +109,11 @@ pub struct Member {
     pub ticket: Option<TicketRef>,
     /// The member that signed a sub-agent's certificate; `None` for a device or an agent.
     pub parent: Option<String>,
+    /// Its ticket tag, such as `ka`, as its record holds it; `None` when it has none.
+    pub tag: Option<String>,
+    /// Whether another current member holds the same tag, as two inviters picking offline at
+    /// once can leave it (RFC 0002, "Two members with one tag").
+    pub tag_shared: bool,
     /// The fingerprint of the account its certificate chain leads to: twelve blocks of five
     /// digits, as a person compares it.
     pub account: String,
@@ -116,6 +130,14 @@ pub enum MemberError {
     NotATicket { text: String },
     /// The role is empty.
     EmptyRole,
+    /// The text is not a tag.
+    NotATag { text: String },
+    /// A current member holds the tag.
+    TagHeld { tag: String },
+    /// Only removed members held the tag, and nxs does not hand a freed tag out again yet.
+    TagFreed { tag: String },
+    /// Every tag is held.
+    NoFreeTag,
     /// A space the change needs is named but not held yet: this database has not synced it.
     NotHeld { space: SpaceId },
     /// This member is not an admin of a space the change needs.
@@ -153,6 +175,20 @@ impl fmt::Display for MemberError {
                 "{text:?} is not a reference to a ticket: one is <space id>/<object id>"
             ),
             MemberError::EmptyRole => f.write_str("the role is empty"),
+            MemberError::NotATag { text } => write!(
+                f,
+                "{text:?} is not a tag: one is two characters matching ^[a-z][a-z0-9]$"
+            ),
+            MemberError::TagHeld { tag } => {
+                write!(f, "the tag {tag} is held by a current member of the space")
+            }
+            MemberError::TagFreed { tag } => write!(
+                f,
+                "the tag {tag} was held by a removed member, and nxs does not hand a freed tag out again yet"
+            ),
+            MemberError::NoFreeTag => f.write_str(
+                "every one of the 936 tags is in use; remove a member to free one",
+            ),
             MemberError::NotHeld { space } => write!(
                 f,
                 "this device does not hold the space {space} yet; sync it with nxs sync first"
@@ -214,13 +250,14 @@ impl From<SdkError> for MemberError {
 }
 
 /// Adds the member of `invitation` to the open spaces its `role` belongs in, each with its
-/// `spaceMember` record naming `role` and `ticket`, and returns it as the repository space lists
-/// it.
+/// `spaceMember` record naming `role`, `ticket` and its tag, `tag` or a free one, and returns it
+/// as the repository space lists it.
 pub async fn add(
     opened: &Opened,
     invitation: &str,
     role: &str,
     ticket: Option<&str>,
+    tag: Option<&str>,
 ) -> Result<Member, MemberError> {
     let parsed: Invitation =
         invitation
@@ -234,34 +271,45 @@ pub async fn add(
         return Err(MemberError::EmptyRole);
     }
     let ticket = ticket.map(str::parse::<TicketRef>).transpose()?;
+    let named = tag.map(parse_tag).transpose()?;
     let targets = targets(opened, role)?;
     for (_, space, _) in &targets {
         admin(space).await?;
+    }
+    let taken = Taken::read(opened.db(), targets.iter().map(|(_, space, _)| *space)).await?;
+    match named {
+        Some(tag) => taken.check(tag)?,
+        None => taken.any_free()?,
     }
     // An invitation does not show its member's id, so it is read from the first space once the
     // member is added there. A member already in the repository space is refused before anything
     // is written; one a coordination admin already added there keeps that membership and gets its
     // record.
-    let mut added: Option<MemberId> = None;
+    let mut added: Option<(MemberId, Tag)> = None;
     for (id, space, space_role) in &targets {
         let before = ids(space).await?;
         let options = AddMember {
             role: space_role.sdk(),
             fingerprint: None,
         };
-        let member = match (space.members().add(&parsed, options).await, added) {
-            (Ok(_), Some(member)) => member,
-            (Ok(_), None) => new_member(space, &before).await?,
-            (Err(e), Some(member)) if e.code() == ErrorCode::AlreadyMember => member,
+        let (member, tag) = match (space.members().add(&parsed, options).await, added) {
+            (Ok(_), Some(added)) => added,
+            (Ok(_), None) => {
+                let member = new_member(space, &before).await?;
+                let own = record::read(opened.db(), space, member).await?;
+                let own = own.and_then(|r| r.tag);
+                (member, taken.choose(named, own.as_deref(), member)?)
+            }
+            (Err(e), Some(added)) if e.code() == ErrorCode::AlreadyMember => added,
             (Err(e), None) if e.code() == ErrorCode::AlreadyMember => {
                 return Err(MemberError::AlreadyMember { space: *id })
             }
             (Err(e), _) => return Err(e.into()),
         };
-        record::write(opened, id, space, member, role, ticket.as_ref()).await?;
-        added = Some(member);
+        record::write(opened, id, space, member, role, ticket.as_ref(), Some(&tag)).await?;
+        added = Some((member, tag));
     }
-    let member = added.expect("the repository space is always a target");
+    let (member, _) = added.expect("the repository space is always a target");
     let (_, repository, _) = &targets[0];
     listed(opened.db(), repository, member).await
 }
@@ -269,6 +317,21 @@ pub async fn add(
 /// Removes `member` from every open space it is a member of, and returns it as the first of
 /// them listed it. Its `spaceMember` records stay.
 pub async fn remove(opened: &Opened, member: &str) -> Result<Member, MemberError> {
+    let (id, spaces) = spaces_of(opened, member).await?;
+    let (_, first) = spaces[0];
+    let removed = listed(opened.db(), first, id).await?;
+    for (_, space) in &spaces {
+        space.members().remove(id).await?;
+    }
+    Ok(removed)
+}
+
+/// The member id `member` and the open spaces it is a current member of, at least one, after
+/// checking that this member is an admin of each.
+pub(crate) async fn spaces_of<'a>(
+    opened: &'a Opened,
+    member: &str,
+) -> Result<(MemberId, Vec<(SpaceId, &'a Space)>), MemberError> {
     let id: MemberId = member.parse().map_err(|_| MemberError::NotAMemberId {
         text: member.to_owned(),
     })?;
@@ -279,19 +342,15 @@ pub async fn remove(opened: &Opened, member: &str) -> Result<Member, MemberError
             spaces.push((*space_id, space));
         }
     }
-    let Some(&(_, first)) = spaces.first() else {
+    if spaces.is_empty() {
         return Err(MemberError::NotFound {
             member: member.to_owned(),
         });
-    };
+    }
     for (_, space) in &spaces {
         admin(space).await?;
     }
-    let removed = listed(opened.db(), first, id).await?;
-    for (_, space) in &spaces {
-        space.members().remove(id).await?;
-    }
-    Ok(removed)
+    Ok((id, spaces))
 }
 
 /// The current members of the repository space, in member-id order, with their records. A
@@ -309,7 +368,27 @@ pub(crate) async fn list_in(db: &Db, space: &Space) -> Result<Vec<Member>, Membe
     for info in space.members().list().await? {
         members.push(member(db, space, &info).await?);
     }
+    let holders = |tag: &str| {
+        members
+            .iter()
+            .filter(|m| m.tag.as_deref() == Some(tag))
+            .count()
+    };
+    let shared: Vec<bool> = members
+        .iter()
+        .map(|m| m.tag.as_deref().is_some_and(|tag| holders(tag) > 1))
+        .collect();
+    for (member, shared) in members.iter_mut().zip(shared) {
+        member.tag_shared = shared;
+    }
     Ok(members)
+}
+
+/// `text` as a tag.
+pub(crate) fn parse_tag(text: &str) -> Result<Tag, MemberError> {
+    text.parse().map_err(|_| MemberError::NotATag {
+        text: text.to_owned(),
+    })
 }
 
 /// The spaces `role` belongs in, among the open ones, each with the role it gets there: the
@@ -361,7 +440,7 @@ async fn admin(space: &Space) -> Result<(), MemberError> {
 }
 
 /// The ids of the current members of `space`.
-async fn ids(space: &Space) -> Result<Vec<MemberId>, MemberError> {
+pub(crate) async fn ids(space: &Space) -> Result<Vec<MemberId>, MemberError> {
     Ok(space
         .members()
         .list()
@@ -384,16 +463,12 @@ async fn new_member(space: &Space, before: &[MemberId]) -> Result<MemberId, Memb
 
 /// `member` as `space` lists it, with its record.
 async fn listed(db: &Db, space: &Space, member: MemberId) -> Result<Member, MemberError> {
-    let info = space
-        .members()
-        .list()
+    let member = member.to_string();
+    list_in(db, space)
         .await?
         .into_iter()
-        .find(|m| m.id == member)
-        .ok_or_else(|| MemberError::NotFound {
-            member: member.to_string(),
-        })?;
-    self::member(db, space, &info).await
+        .find(|m| m.member == member)
+        .ok_or(MemberError::NotFound { member })
 }
 
 /// The member `info` describes, with its record in `space`.
@@ -402,9 +477,11 @@ async fn member(db: &Db, space: &Space, info: &MemberInfo) -> Result<Member, Mem
     Ok(Member {
         member: info.id.to_string(),
         kind: kind(info.kind),
-        role: record.as_ref().map(|r| r.role.clone()),
-        ticket: record.and_then(|r| r.ticket),
+        role: record.as_ref().and_then(|r| r.role.clone()),
+        ticket: record.as_ref().and_then(|r| r.ticket),
         parent: None,
+        tag: record.and_then(|r| r.tag),
+        tag_shared: false,
         account: info.account.to_string(),
     })
 }
