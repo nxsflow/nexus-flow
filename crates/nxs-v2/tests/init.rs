@@ -1,9 +1,13 @@
 //! `nxs init` (RFC 0001, "Creating and finding a space"): in a fresh git repository it writes
-//! `nexus-flow.toml` and prints the space id as JSON; run again it changes nothing.
+//! `nexus-flow.toml` and prints the space id as JSON; run again it changes nothing. It ends with
+//! `nxs factory install` and then `nxs genesis create` (RFC 0006, RFC 0004): a GENESIS git still
+//! tracks is not written, and `nxs init` exits non-zero with its record on stdout and the error on
+//! stderr.
 
 mod common;
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use common::{json, nxs, scratch, stdout};
@@ -65,4 +69,73 @@ fn init_from_a_subfolder_finds_the_repository_root() {
     assert_eq!(second["space"], first["space"]);
     assert!(!nested.join("nexus-flow.toml").exists());
     fs::remove_dir_all(&base).unwrap();
+}
+
+/// Runs git in `repo` with an identity of its own, and fails the test when it fails.
+fn git(repo: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+const GENESIS: &str = "factory/GENESIS.md";
+
+#[test]
+fn init_installs_the_factory_and_genesis() {
+    let base = scratch("init-installs");
+    let repo = base.join("repo");
+
+    let out = nxs(&base, &repo, &["init"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert!(repo.join("factory/FACTORY.md").is_file());
+    assert!(repo.join("factory/roles/coder.md").is_file());
+    assert!(repo.join(GENESIS).is_file());
+    assert!(repo.join("factory/genesis-guide.md").is_file());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn init_with_a_tracked_genesis_writes_nothing_there_and_exits_non_zero() {
+    for md in [false, true] {
+        let base = scratch(&format!("init-tracked-{md}"));
+        let repo = base.join("repo");
+        git(&repo, &["init", "-q"]);
+        fs::create_dir_all(repo.join("factory")).unwrap();
+        fs::write(repo.join(GENESIS), "ours").unwrap();
+        git(&repo, &["add", GENESIS]);
+        git(&repo, &["commit", "-q", "-m", "genesis"]);
+        fs::remove_file(repo.join(GENESIS)).unwrap();
+
+        let args: &[&str] = if md { &["init", "--md"] } else { &["init"] };
+        let out = nxs(&base, &repo, args);
+
+        assert_eq!(out.code, 1, "{}", stdout(&out));
+        assert!(!repo.join(GENESIS).exists());
+        let file = fs::read_to_string(repo.join("nexus-flow.toml")).unwrap();
+        if md {
+            assert!(
+                stdout(&out).contains("created the repository space"),
+                "{}",
+                stdout(&out)
+            );
+        } else {
+            let space = json(&out)["space"].as_str().unwrap().to_owned();
+            assert!(file.contains(&space), "{file}");
+        }
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.starts_with("error: "), "{stderr}");
+        assert!(stderr.contains(GENESIS), "{stderr}");
+        assert!(stderr.contains("git"), "{stderr}");
+        fs::remove_dir_all(&base).unwrap();
+    }
 }
