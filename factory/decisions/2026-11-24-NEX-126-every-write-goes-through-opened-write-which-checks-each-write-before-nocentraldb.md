@@ -1,0 +1,6 @@
+# 2026-11-24 · NEX-126 · Every write goes through Opened::write, which checks each write before NoCentralDB
+
+- Decided by: coder on NEX-126
+- Why: RFC 0003, "Append-only", has the storage crate refuse a change to a decision "for every member and every caller", and RFC 0001, "The model", has every write checked for its space's kind. A guard holds for every caller only where every write passes it, so the store has one write path: `Opened::write` records one change of one open space through a `Write` whose `create`, `update`, `delete` and `restore` check the collection's kind and, for a change to an existing object, the write-once guard (`write_once::check`), before the SDK records it. A refused write refuses the whole change, so nothing of it is written. The seam exposes no write yet; each module's commands will write through this path. The acceptance tests run there, since the seam has no symbol that writes and must have none that changes a decision.
+- Instead of: a guard function that each command calls before it writes, which a command that forgets it would bypass; or a generic `Engine::write` on the seam, which would be the very symbol RFC 0003 says the seam must not have.
+- Topics: store, storage, decisions, v2

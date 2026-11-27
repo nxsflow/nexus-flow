@@ -2677,6 +2677,7 @@ dependencies = [
 name = "nexus-flow-seam"
 version = "0.224.0"
 dependencies = [
+ "nexus-flow-merge-gate",
  "nexus-flow-store",
  "serde",
  "sha2 0.10.9",

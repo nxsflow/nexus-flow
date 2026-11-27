@@ -7,8 +7,8 @@ use nexus_flow_store::space_kind::{self, SpaceKind, WrongSpace};
 
 use SpaceKind::{AdHoc, Coordination, Repository};
 
-/// The collections the module RFCs declare, with their kinds: the lock holds only `spaceMember`
-/// so far, and the rule must already hold for what the modules add.
+/// The collections the module RFCs declare, with their kinds: the rule must already hold for the
+/// collections of modules the lock does not hold yet.
 const MODULES: &[(&str, &[SpaceKind])] = &[
     ("spaceMember", &[Repository, Coordination]),
     ("ticketsTicket", &[Repository]),
@@ -105,4 +105,88 @@ fn a_refusal_names_the_collection_and_both_kinds() {
     assert!(text.contains("repository space"), "{text}");
     let unknown = refused("ticketsTicket", None).to_string();
     assert!(unknown.contains("kind"), "{unknown}");
+}
+
+/// RFC 0002, "Collections": the four ticket collections are in the repository space, and the
+/// storage crate refuses them in a coordination or ad-hoc space.
+#[test]
+fn the_ticket_collections_go_into_repository_spaces_only() {
+    for collection in [
+        "ticketsTicket",
+        "ticketsNote",
+        "ticketsWork",
+        "ticketsReference",
+    ] {
+        assert_eq!(
+            space_kind::check(collection, Some(Repository)),
+            Ok(()),
+            "{collection}"
+        );
+        for kind in [Some(Coordination), Some(AdHoc), None] {
+            let err = space_kind::check(collection, kind)
+                .expect_err(&format!("{collection} in {kind:?} must be refused"));
+            assert_eq!(err.belongs_in, [Repository], "{collection}");
+        }
+        let err = space_kind::check(collection, Some(Coordination)).unwrap_err();
+        assert_eq!(err.code(), Some("not_a_ticket_space"), "{collection}");
+    }
+}
+
+/// RFC 0003, "Where decisions live": the four decision collections are in the repository space,
+/// and the storage crate refuses them in a coordination or ad-hoc space. RFC 0003 names no code.
+#[test]
+fn the_decision_collections_go_into_repository_spaces_only() {
+    for collection in [
+        "decisionsDecision",
+        "decisionsTopic",
+        "decisionsSubject",
+        "decisionsSupersession",
+    ] {
+        assert_eq!(
+            space_kind::check(collection, Some(Repository)),
+            Ok(()),
+            "{collection}"
+        );
+        for kind in [Some(Coordination), Some(AdHoc), None] {
+            let err = space_kind::check(collection, kind)
+                .expect_err(&format!("{collection} in {kind:?} must be refused"));
+            assert_eq!(err.belongs_in, [Repository], "{collection}");
+            assert_eq!(err.code(), None, "{collection}");
+        }
+    }
+}
+
+/// RFC 0005, "Where goals live": a goal is in the coordination space, and the storage crate
+/// refuses it in a repository or ad-hoc space. RFC 0005 names no code.
+#[test]
+fn a_goal_goes_into_coordination_spaces_only() {
+    assert_eq!(space_kind::check("goalsGoal", Some(Coordination)), Ok(()));
+    for kind in [Some(Repository), Some(AdHoc), None] {
+        let err = space_kind::check("goalsGoal", kind)
+            .expect_err(&format!("goalsGoal in {kind:?} must be refused"));
+        assert_eq!(err.belongs_in, [Coordination]);
+        assert_eq!(err.code(), None);
+    }
+}
+
+/// RFC 0007, "Where a note lives": a note, its lines and its goals' verdicts are in the repository
+/// space, and the storage crate refuses them in a coordination space with
+/// `not_a_repository_space`.
+#[test]
+fn a_status_collection_goes_into_repository_spaces_only() {
+    for collection in ["statusNote", "statusItem", "statusGoal"] {
+        assert_eq!(
+            space_kind::check(collection, Some(Repository)),
+            Ok(()),
+            "{collection}"
+        );
+        let err = space_kind::check(collection, Some(Coordination))
+            .expect_err(&format!("{collection} in a coordination space"));
+        assert_eq!(err.belongs_in, [Repository], "{collection}");
+        assert_eq!(err.code(), Some("not_a_repository_space"), "{collection}");
+        for kind in [Some(AdHoc), None] {
+            space_kind::check(collection, kind)
+                .expect_err(&format!("{collection} in {kind:?} must be refused"));
+        }
+    }
 }

@@ -42,8 +42,19 @@ struct Cli {
 enum Command {
     /// Create the repository space and nexus-flow.toml, or name the space the file holds.
     Init,
+    /// Add, remove and list the members of the repository's spaces, with their role records.
+    #[command(subcommand)]
+    Member(cmd::member::MemberCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
+    /// Install the factory's shipped defaults under factory/.
+    #[command(subcommand)]
+    Factory(cmd::factory::FactoryCommand),
+    /// Read the merge gate's rules from the base commit.
+    MergeGate(cmd::merge_gate::MergeGateArgs),
+    /// Write the repository's GENESIS from the template, only where none exists.
+    #[command(subcommand)]
+    Genesis(cmd::genesis::GenesisCommand),
 }
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
@@ -64,14 +75,24 @@ where
     };
     let format = if cli.md { Format::Md } else { Format::Json };
     let result = match cli.command {
-        Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
-        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
+        Command::Init => cmd::init::run(dir, options).map(|r| (format.render(&r), 0)),
+        Command::Member(command) => {
+            cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
+        }
+        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| (format.render(&r), 0)),
+        Command::MergeGate(args) => {
+            cmd::merge_gate::run(dir, args).map(|r| (format.render(&r), r.code()))
+        }
+        Command::Genesis(command) => return cmd::genesis::run(dir, command, format),
+        Command::Factory(command) => {
+            cmd::factory::run(dir, options, command).map(|r| (format.render(&r), 0))
+        }
     };
     match result {
-        Ok(stdout) => Outcome {
+        Ok((stdout, code)) => Outcome {
             stdout: stdout.into_bytes(),
             stderr: Vec::new(),
-            code: 0,
+            code,
         },
         Err(e) => e.outcome(format),
     }
