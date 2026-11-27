@@ -118,6 +118,8 @@ pub enum MemberError {
     NotATicket { text: String },
     /// The role is empty.
     EmptyRole,
+    /// A session's role does not match `^[a-z][a-z0-9-]{0,62}$`.
+    NotARoleName { role: String },
     /// A session's role names no file in `factory/roles/` of the working tree.
     NoRoleFile { role: String, path: PathBuf },
     /// A space the change needs is named but not held yet: this database has not synced it.
@@ -157,6 +159,10 @@ impl fmt::Display for MemberError {
                 "{text:?} is not a reference to a ticket: one is <space id>/<object id>"
             ),
             MemberError::EmptyRole => f.write_str("the role is empty"),
+            MemberError::NotARoleName { role } => write!(
+                f,
+                "{role:?} is not a role name: one matches ^[a-z][a-z0-9-]{{0,62}}$"
+            ),
             MemberError::NoRoleFile { role, path } => write!(
                 f,
                 "the role {role} has no role file: {} is missing",

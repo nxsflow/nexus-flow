@@ -148,6 +148,7 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotAMemberId { .. }
         | MemberError::NotATicket { .. }
         | MemberError::EmptyRole
+        | MemberError::NotARoleName { .. }
         | MemberError::NoRoleFile { .. }
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
