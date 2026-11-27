@@ -24,6 +24,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::genesis;
+use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_merge_gate::rules::GitError;
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
@@ -65,6 +66,11 @@ pub enum Error {
     Open(InitError),
     /// Sync did not finish: no relay is set, or the timeout passed.
     Sync(SyncError),
+    /// The engine was opened on a space without a checkout, so it has no `factory/` to install
+    /// into.
+    NoCheckout,
+    /// Installing the factory's defaults could not read or write a file.
+    Install(InstallError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
     /// The local git could not give what the merge gate reads: the base names no commit.
@@ -78,6 +84,11 @@ impl fmt::Display for Error {
             Error::Session(e) => e.fmt(f),
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
+            Error::NoCheckout => write!(
+                f,
+                "the engine is open on a space without a checkout, so there is no factory/ to install into"
+            ),
+            Error::Install(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
             Error::Git(e) => e.fmt(f),
         }
@@ -235,6 +246,16 @@ impl Engine {
         options: Options,
     ) -> Result<SyncStatus, Error> {
         Ok(sync::status(repository, &options.data, options.keys).await?)
+    }
+
+    /// Installs the factory's shipped defaults into `factory/` at the checkout's root, and
+    /// reports each shipped file's state and the factory's paths no CODEOWNERS rule covers (RFC
+    /// 0006, "Installing the shipped defaults"). A missing file gets the current default; with
+    /// `update`, an earlier default is replaced by it. Nothing else is written, nothing is
+    /// deleted or committed, and the database is not touched.
+    pub fn factory_install(&self, update: bool) -> Result<Report, Error> {
+        let checkout = self.opened.checkout().ok_or(Error::NoCheckout)?;
+        install(&checkout.path, &Defaults::embedded(), update).map_err(Error::Install)
     }
 
     /// Writes `factory/GENESIS.md` from the template for the repository at or above

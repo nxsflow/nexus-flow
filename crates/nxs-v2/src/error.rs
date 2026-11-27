@@ -2,7 +2,8 @@
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
-//! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99).
+//! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
+//! a retired v1 entry point is `retired_entry_point` (RFC 0008, NEX-191).
 
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
@@ -31,6 +32,8 @@ pub enum Kind {
     Forbidden,
     /// What the command names does not exist, such as a member that is not one.
     NotFound,
+    /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
+    RetiredEntryPoint,
 }
 
 impl Kind {
@@ -44,6 +47,7 @@ impl Kind {
             Kind::Timeout => "timeout",
             Kind::Forbidden => "forbidden",
             Kind::NotFound => "not_found",
+            Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
 }
@@ -106,6 +110,9 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
+            // nxs opens a repository, which always has a checkout.
+            Error::NoCheckout => Kind::Validation,
+            Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
