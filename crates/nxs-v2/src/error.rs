@@ -3,12 +3,14 @@
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
-//! `nxs decision add` refuses with `validation`, or `not_found` for a decision to supersede that
-//! the local copy does not hold.
+//! `no_free_tag` from RFC 0002 (NEX-108); a retired v1 entry point is `retired_entry_point`
+//! (RFC 0008, NEX-191); `nxs decision add` refuses with
+//! `validation`, or `not_found` for a decision to supersede that the local copy does not hold.
 
+use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
-    ConfigError, DataDirError, DecisionError, Error, InitError, MemberError, Problem, RootError,
-    SyncError,
+    ConfigError, DataDirError, DecisionError, Error, InitError, JoinError, MemberError, Problem,
+    RootError, SyncError,
 };
 
 use crate::output::Format;
@@ -33,6 +35,10 @@ pub enum Kind {
     Forbidden,
     /// What the command names does not exist, such as a member that is not one.
     NotFound,
+    /// Every one of the 936 ticket tags is held, so `nxs member add` has none to give (RFC 0002).
+    NoFreeTag,
+    /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
+    RetiredEntryPoint,
 }
 
 impl Kind {
@@ -46,6 +52,8 @@ impl Kind {
             Kind::Timeout => "timeout",
             Kind::Forbidden => "forbidden",
             Kind::NotFound => "not_found",
+            Kind::NoFreeTag => "no_free_tag",
+            Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
 }
@@ -108,8 +116,14 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
+            // nxs opens a repository, which always has a checkout.
+            Error::NoCheckout => Kind::Validation,
+            Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
             Error::Decision(decision) => decision_kind(decision),
+            Error::Coordination(join) => join_kind(join),
+            Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
+            Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
         CliError { kind, msg }
     }
@@ -117,13 +131,8 @@ impl From<Error> for CliError {
 
 fn open_kind(e: &InitError) -> Kind {
     match e {
-        InitError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-        InitError::Root(RootError::DataDirInside { .. }) => Kind::Validation,
-        InitError::Config(ConfigError { problem, .. }) => match problem {
-            Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
-            Problem::Io { .. } => Kind::Io,
-            _ => Kind::Validation,
-        },
+        InitError::Root(root) => root_kind(root),
+        InitError::Config(config) => config_kind(config),
         InitError::DataDir { .. } => Kind::Io,
         InitError::SpaceId { .. } => Kind::Validation,
         InitError::KeyStoreUnavailable => Kind::NoKeyStore,
@@ -134,18 +143,47 @@ fn open_kind(e: &InitError) -> Kind {
     }
 }
 
+fn root_kind(e: &RootError) -> Kind {
+    match e {
+        RootError::NotFound { .. } => Kind::NoWorkspace,
+        RootError::DataDirInside { .. } => Kind::Validation,
+    }
+}
+
+fn config_kind(e: &ConfigError) -> Kind {
+    match e.problem {
+        Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
+        Problem::Io { .. } => Kind::Io,
+        _ => Kind::Validation,
+    }
+}
+
+/// A second coordination space is `conflict`: the file already names one, and nxs does not
+/// overwrite it (NEX-104).
+fn join_kind(e: &JoinError) -> Kind {
+    match e {
+        JoinError::Root(root) => root_kind(root),
+        JoinError::Config(config) => config_kind(config),
+        JoinError::OtherCoordination { .. } => Kind::Conflict,
+        JoinError::OwnSpace { .. } | JoinError::CannotPlace { .. } => Kind::Validation,
+    }
+}
+
 fn member_kind(e: &MemberError) -> Kind {
     match e {
         MemberError::NotAdmin { .. }
         | MemberError::NotAllowed { .. }
         | MemberError::UnknownAccount { .. } => Kind::Forbidden,
-        MemberError::AlreadyMember { .. } => Kind::Conflict,
+        MemberError::AlreadyMember { .. } | MemberError::TagHeld { .. } => Kind::Conflict,
+        MemberError::NoFreeTag => Kind::NoFreeTag,
         MemberError::NotFound { .. } => Kind::NotFound,
         MemberError::Database { .. } => Kind::Io,
         MemberError::NotAnInvitation { .. }
         | MemberError::NotAMemberId { .. }
         | MemberError::NotATicket { .. }
         | MemberError::EmptyRole
+        | MemberError::NotATag { .. }
+        | MemberError::TagFreed { .. }
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,

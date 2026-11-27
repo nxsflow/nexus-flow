@@ -343,22 +343,25 @@ async fn me(space: &Space) -> Result<MemberId, DecisionError> {
 }
 
 /// Who decided, by the role record of `me`: its role, and `on <ticket key>` when it names a
-/// ticket.
+/// ticket. A record without a role, such as one only `nxs member retag` wrote, does not say it.
 async fn role(opened: &Opened, space: &Space, me: MemberId) -> Result<String, DecisionError> {
     let record = record::read(opened.db(), space, me)
         .await
         .map_err(|e| DecisionError::Database {
             message: e.to_string(),
         })?
-        .filter(|r| !r.role.trim().is_empty())
+        .ok_or(DecisionError::NoRole)?;
+    let role = record
+        .role
+        .filter(|role| !role.trim().is_empty())
         .ok_or(DecisionError::NoRole)?;
     let Some(ticket) = record.ticket else {
-        return Ok(record.role);
+        return Ok(role);
     };
     let key = opened
         .get(&ticket.space, "ticketsTicket", ticket.object)
         .await?
         .and_then(|t| t.get::<&str>("key").ok().flatten().map(str::to_owned))
         .ok_or(DecisionError::NoRole)?;
-    Ok(format!("{} on {key}", record.role))
+    Ok(format!("{role} on {key}"))
 }

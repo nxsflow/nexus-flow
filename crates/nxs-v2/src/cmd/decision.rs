@@ -16,7 +16,8 @@ use serde::Serialize;
 
 use crate::block_on::block_on;
 use crate::error::{CliError, Kind};
-use crate::output::Render;
+use crate::output::{Format, Render};
+use crate::Outcome;
 
 /// The verbs of `nxs decision`.
 #[derive(Debug, Subcommand)]
@@ -106,8 +107,29 @@ struct LinkedRow {
     handle: String,
 }
 
-/// Runs `nxs decision <verb>` in `dir`, and returns what it prints and its warnings.
+/// Runs `nxs decision <verb>` in `dir` and returns what it prints: the decision on stdout, and
+/// each warning as `warning: <text>` on stderr, in both formats.
 pub fn run(
+    dir: &Path,
+    options: impl FnOnce() -> Result<Options, DataDirError>,
+    command: DecisionCommand,
+    format: Format,
+) -> Outcome {
+    match add(dir, options, command) {
+        Ok((full, warnings)) => Outcome {
+            stdout: format.render(&full).into_bytes(),
+            stderr: warnings
+                .iter()
+                .map(|w| format!("warning: {w}\n"))
+                .collect::<String>()
+                .into_bytes(),
+            code: 0,
+        },
+        Err(e) => e.outcome(format),
+    }
+}
+
+fn add(
     dir: &Path,
     options: impl FnOnce() -> Result<Options, DataDirError>,
     command: DecisionCommand,

@@ -89,7 +89,7 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 
 #### The role record
 
-NoCentralDB has no member names: an invitation carries a member id, its public keys and, for a device or an agent, a certificate and an account fingerprint, nothing else (NoCentralDB RFC 0003, RFC 0009). The role therefore lives in nexus-flow's own model. Each space nexus-flow uses holds a collection `spaceMember`, owned by this RFC, with one record per member nexus-flow added:
+NoCentralDB has no member names: an invitation carries a member id, its public keys and, for a device or an agent, a certificate and an account fingerprint, nothing else (NoCentralDB RFC 0003, RFC 0009). The role therefore lives in nexus-flow's own model. Each space nexus-flow uses holds a collection `spaceMember`, owned by this RFC, with one record per member nexus-flow added, and one, with role `owner`, for the device that created the space, which `nxs init` writes (decided by the owner, NEX-240; RFC 0002, "Ticket ids"):
 
 | Field | Holds |
 | --- | --- |
@@ -160,7 +160,7 @@ model/
   model.lock.json    # the built model, committed; the Rust code reads only this
 ```
 
-**One model, both kinds of space.** A NoCentralDB model belongs to an app, not to a space. nexus-flow's model declares every collection of every module; the storage crate refuses to write a collection into a space of the wrong kind (a goal into a repository space, a ticket into a coordination space). That rule is nexus-flow's own, and the module RFCs say which kind of space each collection belongs to.
+**One model, both kinds of space.** A NoCentralDB model belongs to an app, not to a space. nexus-flow's model declares every collection of every module; the storage crate refuses to write a collection into a space of the wrong kind (a goal into a repository space, a ticket into a coordination space). That rule is nexus-flow's own, and the module RFCs say which kind of space each collection belongs to. The store knows a space's kind from a marker record written when the space is created: a collection `spaceKind` holding one object that names the kind (repository, coordination or ad-hoc). Every reader reads it, including a caller that opens the space by id alone through `Engine::open_space` and has no `nexus-flow.toml`; NoCentralDB spaces carry no type of their own.
 
 **Each module owns its collections.** A collection's name must match `^[a-z][A-Za-z0-9]{0,62}$` (NoCentralDB RFC 0005), so it has no separator. A collection's name is its module's name in lower case followed by the collection's own name in upper camel case: `ticketsTicket`, `decisionsDecision`, `goalsGoal`, `requestsRequest`, `statusNote`. The frame's own collections use the prefix `space`, as `spaceMember` does. Two module RFCs therefore never declare the same name.
 
@@ -347,6 +347,7 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - **A session's keys are in a key file beside its member database** ("Members", "The local data on disk"). Decided by the owner on 2026-11-23 (NEX-226). Why: NoCentralDB 0.1.0-beta.1 keeps a member's keys either in the platform key store or in a key file the app names, never inside the database, and a cloud session has no key store; the file lives in the container's data directory, so the keys still die with the container and never reach the repository, the environment, a ticket or a log. *Not taken:* the key store when one exists and a file otherwise, a second path for the same thing; waiting for NoCentralDB to keep keys inside the database.
 
 - **`Engine::subscribe` yields one `Change { space, origin }` per fold, and waits for NoCentralDB** ("The library seam", R3). Decided by the owner on 2026-11-23 (NEX-227). Why: a view needs to know which space changed and whether the change was local or came in by sync, and NoCentralDB 0.1.0-beta.1 exposes neither the origin nor a test relay for embedders, so nexus-flow asks NoCentralDB for both and builds the stream once they ship. *Not taken:* a subset without the origin, whose item type would change later; NoCentralDB's query pages as the item type; dropping the origin.
+- **A space's kind is a marker record written at creation** ("The model"). Decided by the owner on 2026-11-27 (NEX-205). Why: a space opened by id alone has no `nexus-flow.toml`, and NoCentralDB spaces carry no type, so the kind-of-space rule needs a source every reader has. *Not taken:* deriving the kind from the collections the space holds, which leaves an empty space without a kind and lets one mistaken write change it; only `nexus-flow.toml`, which would refuse manufakt.io's ticket writes.
 
 ## History
 
@@ -356,3 +357,5 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - 2026-11-21: the owner's answers to NEX-211 (crates.io pin) and NEX-204 (temporary names) written into the text.
 - 2026-11-23: the owner's answer to NEX-226 (session keys in a key file) written into the text.
 - 2026-11-23: the owner's answer to NEX-227 (`Engine::subscribe`'s item type, and waiting for NoCentralDB) written into the text.
+- 2026-11-27: the owner's answer to NEX-240 (`nxs init` writes the first device's role record) written into the text, with RFC 0002.
+- 2026-11-27: the owner's answer to NEX-205 (a space's kind is a `spaceKind` marker record written at creation) written into the text.

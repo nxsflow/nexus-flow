@@ -9,9 +9,14 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! [`Engine::space_join_coordination`], the counterpart of `nxs space join-coordination`,
+//! records the repository's coordination space in `nexus-flow.toml`; like the other seam
+//! functions of commands that open no database (NEX-232), it takes the repository.
+//!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
-//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
-//! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
+//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`],
+//! [`Engine::member_retag`] and [`Engine::members`], the counterparts of `nxs member add`,
+//! `remove`, `retag` and `list`.
 //!
 //! An open engine writes a decision with its topics, subjects and supersessions, after the
 //! checks of RFC 0003, "Writing a decision": [`Engine::decision_add`], the counterpart of
@@ -28,6 +33,10 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::genesis;
+use crate::install::factory::{install, Defaults, InstallError, Report};
+use nexus_flow_merge_gate::rules::GitError;
+use nexus_flow_store::coordination::{self, JoinError, JoinReport};
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::decisions::{self, Decision, DecisionError, NewDecision};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
@@ -69,10 +78,19 @@ pub enum Error {
     Open(InitError),
     /// Sync did not finish: no relay is set, or the timeout passed.
     Sync(SyncError),
+    /// The engine was opened on a space without a checkout, so it has no `factory/` to install
+    /// into.
+    NoCheckout,
+    /// Installing the factory's defaults could not read or write a file.
+    Install(InstallError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
     /// A decision was refused, or could not be written.
     Decision(DecisionError),
+    /// The coordination space could not be recorded in `nexus-flow.toml`.
+    Coordination(JoinError),
+    /// The local git could not give what the merge gate reads: the base names no commit.
+    Git(GitError),
 }
 
 impl fmt::Display for Error {
@@ -82,8 +100,15 @@ impl fmt::Display for Error {
             Error::Session(e) => e.fmt(f),
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
+            Error::NoCheckout => write!(
+                f,
+                "the engine is open on a space without a checkout, so there is no factory/ to install into"
+            ),
+            Error::Install(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
             Error::Decision(e) => e.fmt(f),
+            Error::Coordination(e) => e.fmt(f),
+            Error::Git(e) => e.fmt(f),
         }
     }
 }
@@ -93,6 +118,12 @@ impl std::error::Error for Error {}
 impl From<DataDirError> for Error {
     fn from(e: DataDirError) -> Self {
         Error::DataDir(e)
+    }
+}
+
+impl From<GitError> for Error {
+    fn from(e: GitError) -> Self {
+        Error::Git(e)
     }
 }
 
@@ -114,6 +145,12 @@ impl From<SyncError> for Error {
             SyncError::Open(e) => Error::Open(e),
             e => Error::Sync(e),
         }
+    }
+}
+
+impl From<JoinError> for Error {
+    fn from(e: JoinError) -> Self {
+        Error::Coordination(e)
     }
 }
 
@@ -149,6 +186,14 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Records the coordination space `space` in the `nexus-flow.toml` of the repository at or
+    /// above `repository`, the counterpart of `nxs space join-coordination`. It opens no
+    /// database. The same space again writes nothing; another coordination space, or the
+    /// repository's own space, is refused, and nothing is written.
+    pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
+        Ok(coordination::join(repository, space)?)
+    }
+
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
     /// names, for the repository at or above `repository`.
     pub async fn open(repository: &Path) -> Result<Self, Error> {
@@ -195,24 +240,34 @@ impl Engine {
         })
     }
 
-    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
-    /// started on, written `<space id>/<object id>`: to the repository space, and to the
-    /// coordination space unless it is a role session or the migration member, each with its
-    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
-    /// spaces adds, and a refusal changes nothing.
+    /// Adds the member of `invitation` with the role `role`, the ticket `ticket` it was started
+    /// on, written `<space id>/<object id>`, and the ticket tag `tag`, or a free one when it is
+    /// `None`: to the repository space, and to the coordination space unless it is a role session
+    /// or the migration member, each with its `spaceMember` record. Returns it as
+    /// [`Engine::members`] lists it. Only an admin of those spaces adds, and a refusal changes
+    /// nothing.
     pub async fn member_add(
         &self,
         invitation: &str,
         role: &str,
         ticket: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Member, Error> {
-        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+        Ok(members::add(&self.opened, invitation, role, ticket, tag).await?)
     }
 
     /// Removes the member `member`, by its id, from every open space it is a member of, and
     /// returns it as it was listed. Its role record stays. Only an admin removes.
     pub async fn member_remove(&self, member: &str) -> Result<Member, Error> {
         Ok(members::remove(&self.opened, member).await?)
+    }
+
+    /// Gives the member `member`, by its id, the ticket tag `tag` in every open space it is a
+    /// member of, and returns it as [`Engine::members`] lists it (RFC 0002, "Two members with one
+    /// tag"). The keys it already wrote keep their tag. Only an admin retags, and a tag a current
+    /// member holds is refused.
+    pub async fn member_retag(&self, member: &str, tag: &str) -> Result<Member, Error> {
+        Ok(members::retag(&self.opened, member, tag).await?)
     }
 
     /// The current members of the repository space, in member-id order, with their role records.
@@ -253,6 +308,27 @@ impl Engine {
         options: Options,
     ) -> Result<SyncStatus, Error> {
         Ok(sync::status(repository, &options.data, options.keys).await?)
+    }
+
+    /// Installs the factory's shipped defaults into `factory/` at the checkout's root, and
+    /// reports each shipped file's state and the factory's paths no CODEOWNERS rule covers (RFC
+    /// 0006, "Installing the shipped defaults"). A missing file gets the current default; with
+    /// `update`, an earlier default is replaced by it. Nothing else is written, nothing is
+    /// deleted or committed, and the database is not touched.
+    pub fn factory_install(&self, update: bool) -> Result<Report, Error> {
+        let checkout = self.opened.checkout().ok_or(Error::NoCheckout)?;
+        install(&checkout.path, &Defaults::embedded(), update).map_err(Error::Install)
+    }
+
+    /// Writes `factory/GENESIS.md` from the template for the repository at or above
+    /// `repository`, only where the path is free, and reports what it found (RFC 0004,
+    /// "Installing the template"). It touches only files and the local git: it opens no database,
+    /// so it takes no engine. `update` applies to the guide only, never to GENESIS.
+    pub fn genesis_create(
+        repository: &Path,
+        update: bool,
+    ) -> Result<genesis::Report, genesis::GenesisError> {
+        genesis::create(repository, update)
     }
 
     fn new(opened: Opened, options: Options) -> Self {
