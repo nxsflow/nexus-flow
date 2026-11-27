@@ -242,10 +242,8 @@ pub async fn add(
     if role.is_empty() {
         return Err(MemberError::EmptyRole);
     }
-    if !role_file::is_frame_role(role) {
-        if let Some(checkout) = opened.checkout() {
-            role_file::role_file(&checkout.path, role)?;
-        }
+    if let Some(checkout) = opened.checkout() {
+        role_file::role_file(&checkout.path, role)?;
     }
     let ticket = ticket.map(str::parse::<TicketRef>).transpose()?;
     let targets = targets(opened, role)?;
