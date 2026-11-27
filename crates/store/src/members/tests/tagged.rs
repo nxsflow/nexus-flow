@@ -13,11 +13,14 @@ use super::add::find;
 use super::{block_on, Repo};
 use crate::members::record;
 use crate::members::tags::{self, Tag};
-use crate::members::{Member, MemberError};
+use crate::members::{Member, MemberError, MemberKind};
 
 /// The device's own member: the one that created the space.
 fn device(repo: &Repo) -> Member {
-    repo.list().remove(0)
+    let list = repo.list();
+    list.into_iter()
+        .find(|m| m.kind == MemberKind::Device)
+        .expect("the device that created the space is a member")
 }
 
 /// Writes one role record for `member` per tag in `tags`, in the repository space, as two
@@ -49,7 +52,16 @@ fn set_tag(repo: &Repo, member: &str, tag: &str) {
     let space = space.as_ref().unwrap();
     let member: MemberId = member.parse().unwrap();
     let tag: Tag = tag.parse().unwrap();
-    block_on(record::write(&opened, id, space, member, "coder", None, Some(&tag))).unwrap();
+    block_on(record::write(
+        &opened,
+        id,
+        space,
+        member,
+        "coder",
+        None,
+        Some(&tag),
+    ))
+    .unwrap();
 }
 
 fn is_tag(text: Option<&str>) -> bool {
@@ -90,7 +102,10 @@ fn a_text_that_is_no_tag_is_refused_and_nothing_changes() {
 
     for bad in ["K1", "1k", "kab", "k", ""] {
         let err = repo.add_tagged(&invitation, "coder", bad).unwrap_err();
-        assert!(matches!(err, MemberError::NotATag { .. }), "{bad:?}: {err:?}");
+        assert!(
+            matches!(err, MemberError::NotATag { .. }),
+            "{bad:?}: {err:?}"
+        );
         assert!(err.to_string().contains("^[a-z][a-z0-9]$"), "{err}");
     }
     assert_eq!(repo.list(), before);
@@ -102,7 +117,9 @@ fn a_tag_a_current_member_holds_is_refused_and_nothing_changes() {
     repo.add_tagged(&repo.agent("a"), "coder", "ka").unwrap();
     let before = repo.list();
 
-    let err = repo.add_tagged(&repo.agent("b"), "coder", "ka").unwrap_err();
+    let err = repo
+        .add_tagged(&repo.agent("b"), "coder", "ka")
+        .unwrap_err();
 
     assert!(matches!(err, MemberError::TagHeld { .. }), "{err:?}");
     assert!(err.to_string().contains("ka"), "{err}");
@@ -126,7 +143,11 @@ fn with_every_tag_held_adding_fails_with_no_free_tag_and_nothing_changes() {
 fn a_free_tag_is_picked_even_when_only_one_is_left() {
     let repo = Repo::new("member-tag-last-free");
     let device = device(&repo);
-    write_records(&repo, &device.member, tags::all().filter(|t| t.as_str() != "q3"));
+    write_records(
+        &repo,
+        &device.member,
+        tags::all().filter(|t| t.as_str() != "q3"),
+    );
 
     let added = repo.add(&repo.agent("a"), "coder", None).unwrap();
 
@@ -155,9 +176,15 @@ fn a_tag_a_removed_member_held_is_not_handed_out_again() {
     let removed = repo.add_tagged(&repo.agent("a"), "coder", "ka").unwrap();
     block_on(crate::members::remove(&repo.opened(), &removed.member)).unwrap();
     let device = device(&repo);
-    write_records(&repo, &device.member, tags::all().filter(|t| t.as_str() != "ka"));
+    write_records(
+        &repo,
+        &device.member,
+        tags::all().filter(|t| t.as_str() != "ka"),
+    );
 
-    let err = repo.add_tagged(&repo.agent("b"), "coder", "ka").unwrap_err();
+    let err = repo
+        .add_tagged(&repo.agent("b"), "coder", "ka")
+        .unwrap_err();
     assert!(matches!(err, MemberError::TagFreed { .. }), "{err:?}");
     let err = repo.add(&repo.agent("c"), "coder", None).unwrap_err();
     assert!(matches!(err, MemberError::NoFreeTag), "{err:?}");

@@ -180,18 +180,20 @@ impl Engine {
         })
     }
 
-    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
-    /// started on, written `<space id>/<object id>`: to the repository space, and to the
-    /// coordination space unless it is a role session or the migration member, each with its
-    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
-    /// spaces adds, and a refusal changes nothing.
+    /// Adds the member of `invitation` with the role `role`, the ticket `ticket` it was started
+    /// on, written `<space id>/<object id>`, and the ticket tag `tag`, or a free one when it is
+    /// `None`: to the repository space, and to the coordination space unless it is a role session
+    /// or the migration member, each with its `spaceMember` record. Returns it as
+    /// [`Engine::members`] lists it. Only an admin of those spaces adds, and a refusal changes
+    /// nothing.
     pub async fn member_add(
         &self,
         invitation: &str,
         role: &str,
         ticket: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Member, Error> {
-        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+        Ok(members::add(&self.opened, invitation, role, ticket, tag).await?)
     }
 
     /// Removes the member `member`, by its id, from every open space it is a member of, and

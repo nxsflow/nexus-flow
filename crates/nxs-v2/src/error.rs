@@ -142,6 +142,10 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotAMemberId { .. }
         | MemberError::NotATicket { .. }
         | MemberError::EmptyRole
+        | MemberError::NotATag { .. }
+        | MemberError::TagHeld { .. }
+        | MemberError::TagFreed { .. }
+        | MemberError::NoFreeTag
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,

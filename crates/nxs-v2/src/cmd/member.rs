@@ -75,8 +75,13 @@ pub fn run(
     let engine = block_on(Engine::open_with(dir, options()?))?;
     Ok(match command {
         MemberCommand::Add(args) => Printed::One(
-            block_on(engine.member_add(&args.invitation, &args.role, args.ticket.as_deref()))?
-                .into(),
+            block_on(engine.member_add(
+                &args.invitation,
+                &args.role,
+                args.ticket.as_deref(),
+                None,
+            ))?
+            .into(),
         ),
         MemberCommand::Remove(args) => {
             Printed::One(block_on(engine.member_remove(&args.member))?.into())

@@ -13,7 +13,9 @@ fn a_tag_is_a_letter_then_a_letter_or_a_digit() {
         assert_eq!(tag.as_str(), good);
         assert_eq!(tag.to_string(), good);
     }
-    for bad in ["", "k", "kab", "7a", "Ka", "kA", "k-", "k ", " k", "é1", "k\u{e9}"] {
+    for bad in [
+        "", "k", "kab", "7a", "Ka", "kA", "k-", "k ", " k", "é1", "k\u{e9}",
+    ] {
         assert!(bad.parse::<Tag>().is_err(), "{bad:?} is no tag");
     }
 }
@@ -36,7 +38,10 @@ fn a_picked_tag_is_one_that_is_not_taken() {
     let taken: BTreeSet<Tag> = tags::all().filter(|t| t.as_str() != "q3").collect();
 
     for seed in [[0u8; 32], [7u8; 32], [255u8; 32]] {
-        assert_eq!(tags::pick(&taken, &seed).map(|t| t.to_string()), Some("q3".into()));
+        assert_eq!(
+            tags::pick(&taken, &seed).map(|t| t.to_string()),
+            Some("q3".into())
+        );
     }
 }
 
