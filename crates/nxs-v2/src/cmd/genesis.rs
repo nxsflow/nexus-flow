@@ -164,17 +164,23 @@ impl File {
 
 impl From<GenesisError> for CliError {
     fn from(e: GenesisError) -> Self {
-        let msg = e.to_string();
-        let kind = match &e {
-            GenesisError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-            GenesisError::Root(_) => Kind::Validation,
-            GenesisError::Config(config) => match config.problem {
-                Problem::Io { .. } => Kind::Io,
-                _ => Kind::Validation,
-            },
-            // An unreadable shipped list is a bug in this release, read from nxs's own bytes.
-            GenesisError::Io { .. } | GenesisError::Git(_) | GenesisError::Shipped(_) => Kind::Io,
-        };
-        CliError { kind, msg }
+        CliError {
+            kind: genesis_kind(&e),
+            msg: e.to_string(),
+        }
+    }
+}
+
+/// The stable code of an error of GENESIS's create, from `nxs genesis create` or `nxs init`.
+pub fn genesis_kind(e: &GenesisError) -> Kind {
+    match e {
+        GenesisError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
+        GenesisError::Root(_) => Kind::Validation,
+        GenesisError::Config(config) => match config.problem {
+            Problem::Io { .. } => Kind::Io,
+            _ => Kind::Validation,
+        },
+        // An unreadable shipped list is a bug in this release, read from nxs's own bytes.
+        GenesisError::Io { .. } | GenesisError::Git(_) | GenesisError::Shipped(_) => Kind::Io,
     }
 }

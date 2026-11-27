@@ -1,9 +1,10 @@
 //! `nxs init` (RFC 0001, "Creating and finding a space"): gives the repository its space through
-//! the seam's `init`, and prints what it did. The factory and genesis steps join it later (NEX-139).
+//! the seam's `init`, which ends with the factory's install and GENESIS's create (RFC 0006, RFC
+//! 0004), and prints what it did to the space.
 
 use std::path::Path;
 
-use nexus_flow_seam::{init_with, DataDirError, InitReport, Options, SyncMode};
+use nexus_flow_seam::{init_with, DataDirError, Init as Report, Options, SyncMode};
 use serde::Serialize;
 
 use crate::block_on::block_on;
@@ -33,8 +34,8 @@ pub fn run(
     Ok(Init::from(report))
 }
 
-impl From<InitReport> for Init {
-    fn from(report: InitReport) -> Self {
+impl From<Report> for Init {
+    fn from(report: Report) -> Self {
         Init {
             space: report.space,
             created: report.created,

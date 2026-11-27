@@ -60,7 +60,11 @@ fn init_installs_the_factory_defaults_then_genesis_and_its_guide() {
         let written = fs::read(repo.join("factory").join(path)).unwrap();
         assert_eq!(Some(written.as_slice()), defaults.text(path), "{path}");
     }
-    assert!(report.factory.files.iter().all(|f| f.state == State::Written));
+    assert!(report
+        .factory
+        .files
+        .iter()
+        .all(|f| f.state == State::Written));
     assert_eq!(fs::read_to_string(repo.join(PATH)).unwrap(), TEMPLATE);
     assert!(repo.join(GUIDE_PATH).is_file());
     assert_eq!(
@@ -80,8 +84,15 @@ fn init_run_twice_leaves_every_factory_file_and_genesis_as_the_first_run_left_th
     let report = init(&base);
 
     assert_eq!(snapshot(&repo.join("factory")), first);
-    assert!(report.factory.files.iter().all(|f| f.state == State::Current));
-    assert_eq!(genesis_state(&report), FileState::Genesis(GenesisState::Team));
+    assert!(report
+        .factory
+        .files
+        .iter()
+        .all(|f| f.state == State::Current));
+    assert_eq!(
+        genesis_state(&report),
+        FileState::Genesis(GenesisState::Team)
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -90,7 +101,12 @@ fn init_run_again_leaves_the_teams_factory_files_and_genesis_as_the_team_left_th
     let base = scratch("init-installs-team");
     let repo = base.join("repo");
     init(&base);
-    for path in ["CONFIG.md", "roles/coder.md", "GENESIS.md", "genesis-guide.md"] {
+    for path in [
+        "CONFIG.md",
+        "roles/coder.md",
+        "GENESIS.md",
+        "genesis-guide.md",
+    ] {
         fs::write(repo.join("factory").join(path), format!("# ours: {path}\n")).unwrap();
     }
     fs::remove_file(repo.join("factory/roles/pm.md")).unwrap();
@@ -104,7 +120,10 @@ fn init_run_again_leaves_the_teams_factory_files_and_genesis_as_the_team_left_th
     expected.push((PathBuf::from("roles/pm.md"), pm));
     expected.sort();
     assert_eq!(snapshot(&repo.join("factory")), expected);
-    assert_eq!(genesis_state(&report), FileState::Genesis(GenesisState::Team));
+    assert_eq!(
+        genesis_state(&report),
+        FileState::Genesis(GenesisState::Team)
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -127,7 +146,10 @@ fn init_leaves_an_existing_genesis_unchanged_whatever_its_bytes() {
             let report = init(&base);
 
             assert_eq!(fs::read(repo.join(PATH)).unwrap(), bytes, "{name}");
-            assert_eq!(genesis_state(&report), FileState::Genesis(GenesisState::Team));
+            assert_eq!(
+                genesis_state(&report),
+                FileState::Genesis(GenesisState::Team)
+            );
         }
         fs::remove_dir_all(&base).unwrap();
     }

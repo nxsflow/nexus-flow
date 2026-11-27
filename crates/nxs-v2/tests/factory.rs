@@ -22,12 +22,13 @@ const SHIPPED: [&str; 5] = [
     "factory/status-note.md",
 ];
 
-/// A repository given its space by `nxs init`.
+/// A repository given its space by `nxs init`, without the `factory/` it installs.
 fn repository(test: &str) -> (PathBuf, PathBuf) {
     let base = scratch(test);
     let repo = base.join("repo");
     let out = nxs(&base, &repo, &["init"]);
     assert_eq!(out.code, 0, "{}", stdout(&out));
+    fs::remove_dir_all(repo.join("factory")).unwrap();
     (base, repo)
 }
 
