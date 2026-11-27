@@ -9,9 +9,19 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! [`Engine::space_join_coordination`], the counterpart of `nxs space join-coordination`,
+//! records the repository's coordination space in `nexus-flow.toml`; like the other seam
+//! functions of commands that open no database (NEX-232), it takes the repository.
+//!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
-//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
-//! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
+//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`],
+//! [`Engine::member_retag`] and [`Engine::members`], the counterparts of `nxs member add`,
+//! `remove`, `retag` and `list`.
+//!
+//! An open engine writes a decision with its topics, subjects and supersessions, after the
+//! checks of RFC 0003, "Writing a decision": [`Engine::decision_add`], the counterpart of
+//! `nxs decision add`. [`Engine::decisions_with_handle`] finds every decision of a handle, so a
+//! writer learns that the handle it wrote was taken already.
 //!
 //! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
 //! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
@@ -26,7 +36,9 @@ use std::time::Duration;
 use crate::genesis;
 use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_merge_gate::rules::GitError;
+use nexus_flow_store::coordination::{self, JoinError, JoinReport};
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
+use nexus_flow_store::decisions::{self, Decision, DecisionError, NewDecision};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
@@ -75,6 +87,10 @@ pub enum Error {
     Genesis(genesis::GenesisError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// A decision was refused, or could not be written.
+    Decision(DecisionError),
+    /// The coordination space could not be recorded in `nexus-flow.toml`.
+    Coordination(JoinError),
     /// The local git could not give what the merge gate reads: the base names no commit.
     Git(GitError),
 }
@@ -93,6 +109,8 @@ impl fmt::Display for Error {
             Error::Install(e) => e.fmt(f),
             Error::Genesis(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Decision(e) => e.fmt(f),
+            Error::Coordination(e) => e.fmt(f),
             Error::Git(e) => e.fmt(f),
         }
     }
@@ -133,9 +151,21 @@ impl From<SyncError> for Error {
     }
 }
 
+impl From<JoinError> for Error {
+    fn from(e: JoinError) -> Self {
+        Error::Coordination(e)
+    }
+}
+
 impl From<MemberError> for Error {
     fn from(e: MemberError) -> Self {
         Error::Member(e)
+    }
+}
+
+impl From<DecisionError> for Error {
+    fn from(e: DecisionError) -> Self {
+        Error::Decision(e)
     }
 }
 
@@ -159,6 +189,14 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Records the coordination space `space` in the `nexus-flow.toml` of the repository at or
+    /// above `repository`, the counterpart of `nxs space join-coordination`. It opens no
+    /// database. The same space again writes nothing; another coordination space, or the
+    /// repository's own space, is refused, and nothing is written.
+    pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
+        Ok(coordination::join(repository, space)?)
+    }
+
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
     /// names, for the repository at or above `repository`.
     pub async fn open(repository: &Path) -> Result<Self, Error> {
@@ -205,18 +243,22 @@ impl Engine {
         })
     }
 
-    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
-    /// started on, written `<space id>/<object id>`: to the repository space, and to the
-    /// coordination space unless it is a role session or the migration member, each with its
-    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
-    /// spaces adds, and a refusal changes nothing.
+    /// Adds the member of `invitation` with the role `role`, the ticket `ticket` it was started
+    /// on, written `<space id>/<object id>`, and the ticket tag `tag`, or a free one when it is
+    /// `None`: to the repository space, and to the coordination space unless it is a role session
+    /// or the migration member, each with its `spaceMember` record. Returns it as
+    /// [`Engine::members`] lists it. A role other than the frame's own (`owner`, `developer`,
+    /// `app`, `migration`) must name a file `factory/roles/<role>.md` in the checkout (RFC 0006,
+    /// "The factory's files"), so an engine without a checkout adds only those. Only an admin of
+    /// those spaces adds, and a refusal changes nothing.
     pub async fn member_add(
         &self,
         invitation: &str,
         role: &str,
         ticket: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Member, Error> {
-        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+        Ok(members::add(&self.opened, invitation, role, ticket, tag).await?)
     }
 
     /// Removes the member `member`, by its id, from every open space it is a member of, and
@@ -225,9 +267,31 @@ impl Engine {
         Ok(members::remove(&self.opened, member).await?)
     }
 
+    /// Gives the member `member`, by its id, the ticket tag `tag` in every open space it is a
+    /// member of, and returns it as [`Engine::members`] lists it (RFC 0002, "Two members with one
+    /// tag"). The keys it already wrote keep their tag. Only an admin retags, and a tag a current
+    /// member holds is refused.
+    pub async fn member_retag(&self, member: &str, tag: &str) -> Result<Member, Error> {
+        Ok(members::retag(&self.opened, member, tag).await?)
+    }
+
     /// The current members of the repository space, in member-id order, with their role records.
     pub async fn members(&self) -> Result<Vec<Member>, Error> {
         Ok(members::list(&self.opened).await?)
+    }
+
+    /// Writes `decision` into the repository space with its topics, subjects and supersessions,
+    /// as one change, after the checks of RFC 0003, "Writing a decision", and returns it in full.
+    /// A refusal names its problem and writes nothing. A handle taken already is written all the
+    /// same: [`Engine::decisions_with_handle`] then finds more than this decision.
+    pub async fn decision_add(&self, decision: NewDecision) -> Result<Decision, Error> {
+        Ok(decisions::add(&self.opened, decision).await?)
+    }
+
+    /// The object ids of every decision of the repository space with the handle `handle`, as the
+    /// local copy holds them.
+    pub async fn decisions_with_handle(&self, handle: &str) -> Result<Vec<String>, Error> {
+        Ok(decisions::with_handle(&self.opened, handle).await?)
     }
 
     /// Waits until nothing in the open spaces is behind or unconfirmed, and reports the sync

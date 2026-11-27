@@ -4,7 +4,8 @@
 //! names. `main.rs` calls it with the environment's options.
 //!
 //! Output is JSON by default and Markdown with `--md` (`output`); an error is v1's error object
-//! (`error`).
+//! (`error`). A command that succeeds with a warning, such as `nxs decision add` writing a handle
+//! taken already, prints `warning: <text>` on stderr, in both formats.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -42,11 +43,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a decision with its topics, tickets and the decisions it supersedes.
+    #[command(subcommand)]
+    Decision(cmd::decision::DecisionCommand),
     /// Create the repository space and nexus-flow.toml, or name the space the file holds.
     Init,
     /// Add, remove and list the members of the repository's spaces, with their role records.
     #[command(subcommand)]
     Member(cmd::member::MemberCommand),
+    /// Record the repository's coordination space in nexus-flow.toml.
+    #[command(subcommand)]
+    Space(cmd::space::SpaceCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
     /// Install the factory's shipped defaults under factory/.
@@ -94,6 +101,7 @@ fn dispatch(
     format: Format,
 ) -> Outcome {
     let result = match command {
+        Command::Decision(command) => return cmd::decision::run(dir, options, command, format),
         Command::Init => return cmd::init::run(dir, options, format),
         Command::Member(command) => {
             cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
@@ -106,6 +114,7 @@ fn dispatch(
         Command::Factory(command) => {
             cmd::factory::run(dir, options, command).map(|r| (format.render(&r), 0))
         }
+        Command::Space(command) => cmd::space::run(dir, command).map(|r| (format.render(&r), 0)),
     };
     match result {
         Ok((stdout, code)) => Outcome {

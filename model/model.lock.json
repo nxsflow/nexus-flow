@@ -311,6 +311,15 @@
           "fields": [{ "direction": "asc", "field": "member" }],
           "scope": "space",
           "since": 7
+        },
+        "byTag": {
+          "equal": 0,
+          "fields": [
+            { "direction": "asc", "field": "tag" },
+            { "direction": "asc", "field": "member" }
+          ],
+          "scope": "space",
+          "since": 8
         }
       },
       "since": 1
@@ -796,9 +805,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:f97a092354260ff76b798e8c753a56bdad267b04da587c814dfe28085bba6ebe",
+    "hash": "sha256:a7344ac8f53fba5b7c637cf51d6e2a6951bbb57e784e68c17343e117f6238dde",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 7
+    "version": 8
   },
   "plugins": {}
 }

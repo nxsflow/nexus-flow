@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::{block_on, data_dir, keys, scratch};
+use super::{block_on, data_dir, keys, role_files, scratch};
 use crate::data_dir::DataDir;
 use crate::members::{self, Member, MemberError};
 use crate::opened::{self, Opened};
@@ -25,6 +25,7 @@ impl Repo {
         let space = block_on(init(&base.join("repo"), &data, keys(&data)))
             .unwrap()
             .space;
+        role_files(&base.join("repo"), &["pm", "coder"]);
         Repo { base, data, space }
     }
 
@@ -50,7 +51,7 @@ impl Repo {
     }
 
     fn add(&self, invitation: &str, role: &str) -> Member {
-        block_on(members::add(&self.open(), invitation, role, None)).unwrap()
+        block_on(members::add(&self.open(), invitation, role, None, None)).unwrap()
     }
 
     fn remove(&self, member: &str) -> Result<Member, MemberError> {
