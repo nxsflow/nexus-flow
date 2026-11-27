@@ -56,10 +56,14 @@ fn no_dependency_on_nocentraldb_but_through_store() {
 
 #[test]
 fn links_only_the_workspace_crates_it_may() {
-    let workspace: Vec<String> = dependencies()
+    // A crate named in two tables, such as a dev-dependency that only enables a feature, is
+    // linked once.
+    let mut workspace: Vec<String> = dependencies()
         .into_iter()
         .filter(|(_, p)| *p)
         .map(|(n, _)| n)
         .collect();
+    workspace.sort_unstable();
+    workspace.dedup();
     assert_eq!(workspace, WORKSPACE_DEPS, "workspace dependencies");
 }

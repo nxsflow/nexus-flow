@@ -26,6 +26,12 @@ export const model = nc.model({
     // The member's ticket tag, two characters such as `ka`, which starts the keys of the
     // tickets it creates; unset for a member that has none (RFC 0002, "Ticket ids").
     tag: nc.string(),
+  }, {
+    indexes: {
+      // A member's record in one space: `nxs member list` reads the role of each current member
+      // by it, and `nxs member add` finds the record of a member it adds again.
+      byMember: nc.index(["member"], { equal: 1, scope: "space" }),
+    },
   }),
   ...tickets,
   ...decisions,
