@@ -12,6 +12,12 @@ pub use nexus_flow_store::data_dir::{DataDir, DataDirError, Platform};
 pub use nexus_flow_store::device::{NotARelayUrl, RelayUrl, SettingsError};
 pub use nexus_flow_store::id::{NotASessionId, NotASpaceId, SessionId, SpaceId};
 pub use nexus_flow_store::member_select::SessionVarError;
+pub use nexus_flow_store::members::{Member, MemberError, MemberKind, TicketRef};
 pub use nexus_flow_store::repo_root::RootError;
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};
 pub use nexus_flow_store::sync::{Behind, SpaceBehind, SyncError, SyncStatus};
+
+/// The store's test helpers, for the tests of the crates above the seam: invitations of members
+/// nexus-flow cannot start yet.
+#[cfg(feature = "test-support")]
+pub use nexus_flow_store::testing;

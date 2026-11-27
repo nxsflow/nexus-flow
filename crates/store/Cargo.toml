@@ -13,3 +13,8 @@ nocentraldb.workspace = true
 # Reads and writes nexus-flow.toml (RFC 0001, "Creating and finding a space"), at the version the
 # workspace already declares.
 toml.workspace = true
+
+# The test helpers the crates above the store use for members nexus-flow cannot start yet
+# (`testing`); never enabled in a build that ships. The store's own tests have them without it.
+[features]
+test-support = []

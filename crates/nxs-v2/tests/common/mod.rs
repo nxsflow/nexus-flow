@@ -4,7 +4,12 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, Thread};
 
 use nexus_flow_seam::{DataDir, DeviceKeys, Options, Platform};
 use nxs_v2::Outcome;
@@ -45,4 +50,24 @@ pub fn stdout(outcome: &Outcome) -> String {
 pub fn json(outcome: &Outcome) -> serde_json::Value {
     serde_json::from_slice(&outcome.stdout)
         .unwrap_or_else(|e| panic!("stdout is JSON ({e}): {:?}", stdout(outcome)))
+}
+
+/// Runs `future` to completion on this thread. A database without a relay does no I/O that
+/// needs a runtime.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => thread::park(),
+        }
+    }
 }

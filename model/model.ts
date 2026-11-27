@@ -7,6 +7,12 @@
 // a field or collection, once on v2, is never renamed or removed.
 import { nc } from "@nocentraldb/sdk";
 
+import { decisions } from "./decisions.ts";
+import { goals } from "./goals.ts";
+import { migration } from "./migration.ts";
+import { status } from "./status.ts";
+import { tickets } from "./tickets.ts";
+
 export const model = nc.model({
   // The role record (RFC 0001, "The role record"): one record per member nexus-flow added to a
   // space, written by the member that adds it.
@@ -15,9 +21,21 @@ export const model = nc.model({
     member: nc.string(),
     // `owner`, `developer`, `pm`, `app`, `migration`, or the role of a session (`coder`, ...).
     role: nc.string(),
-    // For a session: the ticket it was started on, if any. It refers only to collections that
-    // exist, so it has no target until the tickets module declares its collection; adding a
-    // target is additive.
-    ticket: nc.ref([]),
+    // For a session: the ticket it was started on, if any.
+    ticket: nc.ref(["ticketsTicket"]),
+    // The member's ticket tag, two characters such as `ka`, which starts the keys of the
+    // tickets it creates; unset for a member that has none (RFC 0002, "Ticket ids").
+    tag: nc.string(),
+  }, {
+    indexes: {
+      // A member's record in one space: `nxs member list` reads the role of each current member
+      // by it, and `nxs member add` finds the record of a member it adds again.
+      byMember: nc.index(["member"], { equal: 1, scope: "space" }),
+    },
   }),
+  ...tickets,
+  ...decisions,
+  ...goals,
+  ...migration,
+  ...status,
 });

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 const RFC: &str = "RFC 0001";
-const WORKSPACE_DEPS: &[&str] = &["nexus-flow-store", "nexus-flow-merge-gate"];
+const WORKSPACE_DEPS: &[&str] = &["nexus-flow-merge-gate", "nexus-flow-store"];
 
 fn read(file: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -56,10 +56,14 @@ fn no_dependency_on_nocentraldb_but_through_store() {
 
 #[test]
 fn links_only_the_workspace_crates_it_may() {
-    let workspace: Vec<String> = dependencies()
+    // A crate named in two tables, such as a dev-dependency that only enables a feature, is
+    // linked once.
+    let mut workspace: Vec<String> = dependencies()
         .into_iter()
         .filter(|(_, p)| *p)
         .map(|(n, _)| n)
         .collect();
+    workspace.sort_unstable();
+    workspace.dedup();
     assert_eq!(workspace, WORKSPACE_DEPS, "workspace dependencies");
 }

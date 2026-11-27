@@ -57,7 +57,7 @@ fixture() {
   repo="$(mktemp -d "$WORK/repo.XXXXXX")"
   mkdir -p "$repo/model"
   cp "$ROOT/Cargo.lock" "$repo/"
-  cp "$ROOT/model/model.ts" "$ROOT/model/model.lock.json" "$ROOT/model/package.json" \
+  cp "$ROOT"/model/*.ts "$ROOT/model/model.lock.json" "$ROOT/model/package.json" \
      "$ROOT/model/package-lock.json" "$repo/model/"
   ln -s "$ROOT/model/node_modules" "$repo/model/node_modules"
   printf 'node_modules\n' > "$repo/.gitignore"
@@ -68,9 +68,9 @@ fixture() {
   printf '%s\n' "$repo"
 }
 
-# Adds a field to spaceMember in model.ts, after `ticket`.
+# Adds a field to spaceMember in model.ts, after `member`.
 add_field() { # <repo> <name>
-  sed -i.bak "s|^    ticket: nc.ref(\[\]),|    ticket: nc.ref([]),\n    $2: nc.string(),|" "$1/model/model.ts"
+  sed -i.bak "s|^    member: nc.string(),|    member: nc.string(),\n    $2: nc.string(),|" "$1/model/model.ts"
   rm -f "$1/model/model.ts.bak"
 }
 # Rebuilds the committed lock the way a coder does.
@@ -150,9 +150,10 @@ r="$(fixture)"; rebuild_fresh "$r"; commit "$r"
 expect_fail "a lock rebuilt from nothing fails, though model.ts is unchanged: its model id is new" "$r" "model id"
 
 r="$(fixture)"; add_field "$r" note; rebuild "$r"; commit "$r"; git -C "$r" tag -f base >/dev/null
-set_lock "$r" 's/"version": 2/"version": 1/'; commit "$r"
+V="$(sed -n 's/^ *"version": \([0-9]*\).*/\1/p' "$r/model/model.lock.json")"
+set_lock "$r" "s/\"version\": $V/\"version\": $((V - 1))/"; commit "$r"
 expect_fail "a lock whose model version went down fails, though ncdb rebuilds it alike" "$r" "model version"
-if grep -qF "below the base's 2" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
+if grep -qF "below the base's $V" <<<"$OUT"; then ok "it names both versions"; else bad "it names both versions ($OUT)"; fi
 
 r="$(fixture)"
 check "$r" no-such-ref
