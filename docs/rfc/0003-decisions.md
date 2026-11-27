@@ -128,7 +128,7 @@ The command checks before it writes, and refuses with a message that names the p
 - Each decision it supersedes exists in the local copy, is not this decision, and is not dated after it.
 - `pr`, when given, is an `https` URL.
 
-`decidedBy` defaults to the role of the member that writes, from its role record (RFC 0001, "The role record"): `pm`, or `coder on NEX-42` for a coder on that ticket. An agent that records a decision the owner made writes the owner's name, as today. `author` is always the writing member's id and cannot be given.
+`decidedBy` defaults to the role of the member that writes, from its role record (RFC 0001, "The role record"): `pm`, or `coder on NEX-42` for a coder on that ticket. An agent that records a decision the owner made writes the owner's name, as today. When the writing member has no role record, or its record's ticket cannot be read, there is no default: the write is refused with `validation`, naming `--decided-by`, so the writer says who decided. `author` is always the writing member's id and cannot be given.
 
 ### Append-only
 
@@ -331,9 +331,12 @@ None. The owner answered them on 2026-11-20 (NEX-51 to NEX-53), and the answers 
 
 - **A taken handle is read through `Engine::decisions_with_handle`** ("The handle", "Commands, JSON and the seam"). Decided by the owner on 2026-11-27 (NEX-237). Why: `nxs` reaches the store only through the seam, so the warning needs a public read; a separate read keeps `decision_add`'s signature as written and serves a view too. *Not taken:* a `handle_taken` field in `decision_add`'s result and in the JSON `nxs decision add` prints; dropping the warning.
 
+- **A writer with no role record must give `--decided-by`** ("Who decided"). Decided by the owner on 2026-11-27 (NEX-238). Why: a decision record must never guess who decided; the cost is that the owner types `--decided-by` on their own device. *Not taken:* defaulting to the account's display name; defaulting to `owner` for the space's creator.
+
 ## History
 
 - 2026-11-17: published as a draft in #159.
 - 2026-11-20: `nxs decision list` prints the index by default and `--full` prints every decision in full, decided by the owner, in #159.
 - 2026-11-20: decided by the owner: the handle (NEX-51), the PR's commit or else the triggering ticket for "on main" (NEX-52), and no redaction before R13 (NEX-53), in #159.
 - 2026-11-27: the owner's answer to NEX-237 (`Engine::decisions_with_handle` for a taken handle) written into the text.
+- 2026-11-27: the owner's answer to NEX-238 (no role record: refuse, naming `--decided-by`) written into the text.
