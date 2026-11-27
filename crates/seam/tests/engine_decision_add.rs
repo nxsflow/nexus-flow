@@ -44,7 +44,7 @@ fn an_engine_writes_a_decision_and_returns_it_in_full() {
     assert!(!added.edited && !added.deleted);
     assert_eq!(
         block_on(engine.decisions_with_handle(&added.handle)).unwrap(),
-        [added.id.clone()]
+        [added.id]
     );
     fs::remove_dir_all(&base).unwrap();
 }

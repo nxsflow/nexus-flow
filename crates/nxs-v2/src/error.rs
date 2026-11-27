@@ -2,10 +2,13 @@
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
-//! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99).
+//! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
+//! `nxs decision add` refuses with `validation`, or `not_found` for a decision to supersede that
+//! the local copy does not hold.
 
 use nexus_flow_seam::{
-    ConfigError, DataDirError, Error, InitError, MemberError, Problem, RootError, SyncError,
+    ConfigError, DataDirError, DecisionError, Error, InitError, MemberError, Problem, RootError,
+    SyncError,
 };
 
 use crate::output::Format;
@@ -106,6 +109,7 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
             Error::Member(member) => member_kind(member),
+            Error::Decision(decision) => decision_kind(decision),
         };
         CliError { kind, msg }
     }
@@ -145,5 +149,13 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,
+    }
+}
+
+fn decision_kind(e: &DecisionError) -> Kind {
+    match e {
+        DecisionError::SupersedesUnknown { .. } => Kind::NotFound,
+        DecisionError::Database { .. } => Kind::Io,
+        _ => Kind::Validation,
     }
 }

@@ -13,6 +13,11 @@
 //! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
 //! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
 //!
+//! An open engine writes a decision with its topics, subjects and supersessions, after the
+//! checks of RFC 0003, "Writing a decision": [`Engine::decision_add`], the counterpart of
+//! `nxs decision add`. [`Engine::decisions_with_handle`] finds every decision of a handle, so a
+//! writer learns that the handle it wrote was taken already.
+//!
 //! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
 //! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
 //! reads the device's sync state from the local database without the network. [`set_relay`] sets
@@ -24,6 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
+use nexus_flow_store::decisions::{self, Decision, DecisionError, NewDecision};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
@@ -65,6 +71,8 @@ pub enum Error {
     Sync(SyncError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// A decision was refused, or could not be written.
+    Decision(DecisionError),
 }
 
 impl fmt::Display for Error {
@@ -75,6 +83,7 @@ impl fmt::Display for Error {
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Decision(e) => e.fmt(f),
         }
     }
 }
@@ -111,6 +120,12 @@ impl From<SyncError> for Error {
 impl From<MemberError> for Error {
     fn from(e: MemberError) -> Self {
         Error::Member(e)
+    }
+}
+
+impl From<DecisionError> for Error {
+    fn from(e: DecisionError) -> Self {
+        Error::Decision(e)
     }
 }
 
@@ -203,6 +218,20 @@ impl Engine {
     /// The current members of the repository space, in member-id order, with their role records.
     pub async fn members(&self) -> Result<Vec<Member>, Error> {
         Ok(members::list(&self.opened).await?)
+    }
+
+    /// Writes `decision` into the repository space with its topics, subjects and supersessions,
+    /// as one change, after the checks of RFC 0003, "Writing a decision", and returns it in full.
+    /// A refusal names its problem and writes nothing. A handle taken already is written all the
+    /// same: [`Engine::decisions_with_handle`] then finds more than this decision.
+    pub async fn decision_add(&self, decision: NewDecision) -> Result<Decision, Error> {
+        Ok(decisions::add(&self.opened, decision).await?)
+    }
+
+    /// The object ids of every decision of the repository space with the handle `handle`, as the
+    /// local copy holds them.
+    pub async fn decisions_with_handle(&self, handle: &str) -> Result<Vec<String>, Error> {
+        Ok(decisions::with_handle(&self.opened, handle).await?)
     }
 
     /// Waits until nothing in the open spaces is behind or unconfirmed, and reports the sync
