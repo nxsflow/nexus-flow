@@ -6,8 +6,9 @@
 //! "Roles in a space" gives it ([`space_role`]): the repository space, and the coordination space
 //! for every role but a role session's and the migration member's. In each it adds the member and
 //! then writes its `spaceMember` record, or rewrites the one a member added before still has. It
-//! checks first that this member is an admin of each of those spaces, that each is held, and that
-//! the new member is in none of them, so a refusal changes nothing.
+//! checks first that a session's role names its file in `factory/roles/` of the working tree
+//! (RFC 0006, "The factory's files"), that this member is an admin of each of those spaces, that
+//! each is held, and that the new member is in none of them, so a refusal changes nothing.
 //!
 //! **Removing.** `remove` removes a member from every open space it is a member of, after the same
 //! checks. Its record stays: who wrote what stays readable after its member is gone (RFC 0001,

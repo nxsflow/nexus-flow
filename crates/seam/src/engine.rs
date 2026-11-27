@@ -205,8 +205,11 @@ impl Engine {
     /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
     /// started on, written `<space id>/<object id>`: to the repository space, and to the
     /// coordination space unless it is a role session or the migration member, each with its
-    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
-    /// spaces adds, and a refusal changes nothing.
+    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. A role other than the
+    /// frame's own (`owner`, `developer`, `app`, `migration`) must name a file
+    /// `factory/roles/<role>.md` in the checkout (RFC 0006, "The factory's files"), so an engine
+    /// without a checkout adds only those. Only an admin of those spaces adds, and a refusal
+    /// changes nothing.
     pub async fn member_add(
         &self,
         invitation: &str,

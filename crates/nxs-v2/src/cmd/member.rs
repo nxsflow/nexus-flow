@@ -32,7 +32,8 @@ pub enum MemberCommand {
 pub struct AddArgs {
     /// The invitation the new member printed (`ncdb-invite-…`).
     invitation: String,
-    /// The member's role: owner, developer, pm, app, migration, or a session's role.
+    /// The member's role: owner, developer, app, migration, or a session's role (pm, coder, …),
+    /// which names its file factory/roles/<role>.md.
     #[arg(long)]
     role: String,
     /// The ticket a session was started on, as <space id>/<object id>.
