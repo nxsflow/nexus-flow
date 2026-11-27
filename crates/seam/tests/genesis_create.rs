@@ -8,7 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nexus_flow_seam::genesis::{GenesisError, GenesisState, Report, OWNER_RULES_MARK, TEMPLATE};
+use nexus_flow_seam::genesis::{
+    FileState, GenesisError, GenesisState, Report, OWNER_RULES_MARK, TEMPLATE,
+};
 use nexus_flow_seam::{Engine, RootError};
 
 const GENESIS: &str = "factory/GENESIS.md";
@@ -55,11 +57,15 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-/// The one file entry of a report, as `(path, state, found)`.
+/// GENESIS's entry of a report, as `(path, state, found)`; the report holds it exactly once.
 fn only_file(report: &Report) -> (&str, GenesisState, Option<&str>) {
-    assert_eq!(report.files.len(), 1, "{report:?}");
-    let file = &report.files[0];
-    (file.path.as_str(), file.state, file.found.as_deref())
+    let mut genesis = report.files.iter().filter(|f| f.path == GENESIS);
+    let file = genesis.next().expect("the report names GENESIS");
+    assert!(genesis.next().is_none(), "{report:?}");
+    let FileState::Genesis(state) = file.state else {
+        panic!("GENESIS has a state of its own: {report:?}");
+    };
+    (file.path.as_str(), state, file.found.as_deref())
 }
 
 fn cleanup(repo: &Path) {
@@ -235,11 +241,12 @@ fn a_lowercase_genesis_blocks_the_write_and_is_named() {
         only_file(&report),
         (GENESIS, GenesisState::Team, Some("factory/genesis.md"))
     );
-    let names: Vec<_> = fs::read_dir(repo.join("factory"))
+    let mut names: Vec<_> = fs::read_dir(repo.join("factory"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names, ["genesis.md"]);
+    names.sort();
+    assert_eq!(names, ["genesis-guide.md", "genesis.md"]);
     assert_eq!(
         fs::read(repo.join("factory/genesis.md")).unwrap(),
         ARBITRARY
