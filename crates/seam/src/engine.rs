@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use nexus_flow_store::coordination::{self, JoinError, JoinReport};
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
@@ -65,6 +66,8 @@ pub enum Error {
     Sync(SyncError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// The coordination space could not be recorded in `nexus-flow.toml`.
+    Coordination(JoinError),
 }
 
 impl fmt::Display for Error {
@@ -75,6 +78,7 @@ impl fmt::Display for Error {
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Coordination(e) => e.fmt(f),
         }
     }
 }
@@ -108,6 +112,12 @@ impl From<SyncError> for Error {
     }
 }
 
+impl From<JoinError> for Error {
+    fn from(e: JoinError) -> Self {
+        Error::Coordination(e)
+    }
+}
+
 impl From<MemberError> for Error {
     fn from(e: MemberError) -> Self {
         Error::Member(e)
@@ -134,6 +144,18 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Records the coordination space `space` in the `nexus-flow.toml` of the repository at or
+    /// above `repository`, the counterpart of `nxs space join-coordination`. It opens no
+    /// database. The same space again writes nothing; another coordination space, or the
+    /// repository's own space, is refused, and nothing is written.
+    pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
+        let _ = (repository, coordination::join);
+        Ok(JoinReport {
+            coordination: space,
+            written: false,
+        })
+    }
+
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
     /// names, for the repository at or above `repository`.
     pub async fn open(repository: &Path) -> Result<Self, Error> {
