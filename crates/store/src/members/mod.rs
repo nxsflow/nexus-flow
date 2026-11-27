@@ -32,6 +32,7 @@ use crate::write::WriteError;
 
 mod record;
 mod roles;
+pub mod tags;
 
 pub use roles::{space_role, SpaceRole};
 
