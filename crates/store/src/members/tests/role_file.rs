@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use super::{block_on, data_dir, keys, role_files, scratch};
 use crate::data_dir::DataDir;
+use crate::members::role_file::role_file;
 use crate::members::{self, Member, MemberError};
 use crate::opened;
 use crate::space::init;
@@ -106,4 +107,18 @@ fn the_frame_roles_need_no_file() {
 
         assert_eq!(added.role.as_deref(), Some(role));
     }
+}
+
+#[test]
+fn a_file_named_after_a_frame_role_is_not_a_role() {
+    let repo = Repo::new("member-role-file-frame-file");
+    role_files(&repo.repo(), &["owner", "developer", "app", "migration", "pm"]);
+
+    for frame in ["owner", "developer", "app", "migration"] {
+        assert_eq!(role_file(&repo.repo(), frame), Ok(None), "{frame}");
+    }
+    assert_eq!(
+        role_file(&repo.repo(), "pm"),
+        Ok(Some(repo.repo().join("factory/roles/pm.md")))
+    );
 }
