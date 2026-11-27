@@ -75,7 +75,7 @@ where
     };
     let format = if cli.md { Format::Md } else { Format::Json };
     let result = match cli.command {
-        Command::Init => cmd::init::run(dir, options).map(|r| (format.render(&r), 0)),
+        Command::Init => return cmd::init::run(dir, options, format),
         Command::Member(command) => {
             cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
         }
