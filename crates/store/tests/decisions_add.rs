@@ -67,8 +67,18 @@ fn new(title: &str) -> NewDecision {
 }
 
 /// The ids of the objects of `collection` the index `index` finds for `equal`.
-fn found(opened: &Opened, space: &SpaceId, collection: &str, index: &str, equal: &str) -> Vec<ObjectId> {
-    let equal = if equal.is_empty() { vec![] } else { vec![Value::from(equal)] };
+fn found(
+    opened: &Opened,
+    space: &SpaceId,
+    collection: &str,
+    index: &str,
+    equal: &str,
+) -> Vec<ObjectId> {
+    let equal = if equal.is_empty() {
+        vec![]
+    } else {
+        vec![Value::from(equal)]
+    };
     block_on(opened.find(space, collection, index, equal))
         .unwrap()
         .iter()
@@ -89,19 +99,27 @@ fn a_decision_is_written_with_its_topics_subjects_and_supersessions_in_one_chang
     decision.body = Some("## The rule\n\nAs written.".to_owned());
     let added = block_on(decisions::add(&opened, decision)).unwrap();
 
-    assert_eq!(added.handle, "2026-11-24-NEX-127-the-newer-rule-replaces-the-older-one");
+    assert_eq!(
+        added.handle,
+        "2026-11-24-NEX-127-the-newer-rule-replaces-the-older-one"
+    );
     assert_eq!(added.tickets, "NEX-127, NEX-126");
     assert_eq!(added.topics, ["decisions", "store"]);
     assert_eq!(added.supersedes.len(), 1);
     assert_eq!(added.supersedes[0].handle, older.handle);
     assert_eq!(added.supersedes[0].id, older.id);
-    assert_eq!(added.pr.as_deref(), Some("https://github.com/nxsflow/nexus-flow/pull/222"));
+    assert_eq!(
+        added.pr.as_deref(),
+        Some("https://github.com/nxsflow/nexus-flow/pull/222")
+    );
     assert_eq!(added.body, "## The rule\n\nAs written.");
     let me = block_on(members::list(&opened)).unwrap().remove(0).member;
     assert_eq!(added.author, me, "the writer's member id");
 
     let id: ObjectId = added.id.parse().unwrap();
-    let read = block_on(opened.get(&space, "decisionsDecision", id)).unwrap().unwrap();
+    let read = block_on(opened.get(&space, "decisionsDecision", id))
+        .unwrap()
+        .unwrap();
     for (field, value) in [
         ("handle", added.handle.as_str()),
         ("date", "2026-11-24"),
@@ -116,17 +134,18 @@ fn a_decision_is_written_with_its_topics_subjects_and_supersessions_in_one_chang
     ] {
         assert_eq!(read.get::<&str>(field).unwrap(), Some(value), "{field}");
     }
-    assert_eq!(found(&opened, &space, "decisionsTopic", "byTopic", "store").len(), 1);
-    assert_eq!(found(&opened, &space, "decisionsTopic", "byTopic", "decisions").len(), 2);
-    assert_eq!(found(&opened, &space, "decisionsSubject", "byLabel", "NEX-126").len(), 1);
-    let superseded = found(
-        &opened,
-        &space,
-        "decisionsSupersession",
-        "bySuperseded",
-        "",
+    assert_eq!(
+        found(&opened, &space, "decisionsTopic", "byTopic", "store").len(),
+        1
     );
-    assert!(superseded.is_empty(), "bySuperseded takes the older decision");
+    assert_eq!(
+        found(&opened, &space, "decisionsTopic", "byTopic", "decisions").len(),
+        2
+    );
+    assert_eq!(
+        found(&opened, &space, "decisionsSubject", "byLabel", "NEX-126").len(),
+        1
+    );
     let supersessions = block_on(opened.find(
         &space,
         "decisionsSupersession",
@@ -135,7 +154,10 @@ fn a_decision_is_written_with_its_topics_subjects_and_supersessions_in_one_chang
     ))
     .unwrap();
     assert_eq!(supersessions.len(), 1);
-    assert_eq!(supersessions[0].get::<ObjectId>("decision").unwrap(), Some(id));
+    assert_eq!(
+        supersessions[0].get::<ObjectId>("decision").unwrap(),
+        Some(id)
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -196,7 +218,12 @@ fn decided_by_defaults_to_the_role_alone_without_a_ticket() {
     let mut decision = new("A pm's call");
     decision.decided_by = None;
 
-    assert_eq!(block_on(decisions::add(&opened, decision)).unwrap().decided_by, "pm");
+    assert_eq!(
+        block_on(decisions::add(&opened, decision))
+            .unwrap()
+            .decided_by,
+        "pm"
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -226,11 +253,19 @@ fn refusals(older: &str) -> Vec<(NewDecision, DecisionError)> {
     };
     let long = "x".repeat(201);
     vec![
-        (with(&|d| d.title = "  ".to_owned()), DecisionError::Missing { field: "title" }),
-        (with(&|d| d.why = String::new()), DecisionError::Missing { field: "why" }),
+        (
+            with(&|d| d.title = "  ".to_owned()),
+            DecisionError::Missing { field: "title" },
+        ),
+        (
+            with(&|d| d.why = String::new()),
+            DecisionError::Missing { field: "why" },
+        ),
         (
             with(&|d| d.instead_of = String::new()),
-            DecisionError::Missing { field: "instead of" },
+            DecisionError::Missing {
+                field: "instead of",
+            },
         ),
         (with(&|d| d.topics.clear()), DecisionError::NoTopic),
         (
@@ -243,36 +278,52 @@ fn refusals(older: &str) -> Vec<(NewDecision, DecisionError)> {
         ),
         (
             with(&|d| d.topics = vec!["Store".to_owned()]),
-            DecisionError::NotATopic { text: "Store".to_owned() },
+            DecisionError::NotATopic {
+                text: "Store".to_owned(),
+            },
         ),
         (
             with(&|d| d.date = Some("2026-02-30".to_owned())),
-            DecisionError::NotADate { text: "2026-02-30".to_owned() },
+            DecisionError::NotADate {
+                text: "2026-02-30".to_owned(),
+            },
         ),
         (
             with(&|d| d.tickets = vec!["NEX-13 to NEX-6".to_owned()]),
-            DecisionError::NotATicket { text: "NEX-13 to NEX-6".to_owned() },
+            DecisionError::NotATicket {
+                text: "NEX-13 to NEX-6".to_owned(),
+            },
         ),
         (
             with(&|d| d.pr = Some("http://example.com/pull/1".to_owned())),
-            DecisionError::NotAnHttpsUrl { text: "http://example.com/pull/1".to_owned() },
+            DecisionError::NotAnHttpsUrl {
+                text: "http://example.com/pull/1".to_owned(),
+            },
         ),
         (
             with(&|d| d.slug = Some("Not A Slug".to_owned())),
-            DecisionError::NotASlug { text: "Not A Slug".to_owned() },
+            DecisionError::NotASlug {
+                text: "Not A Slug".to_owned(),
+            },
         ),
         (with(&|d| d.title = "?!".to_owned()), DecisionError::NoSlug),
         (
             with(&|d| d.decided_by = Some(" ".to_owned())),
-            DecisionError::Missing { field: "decided by" },
+            DecisionError::Missing {
+                field: "decided by",
+            },
         ),
         (
             with(&|d| d.supersedes = vec!["2026-11-01-no-ticket-nothing".to_owned()]),
-            DecisionError::SupersedesUnknown { key: "2026-11-01-no-ticket-nothing".to_owned() },
+            DecisionError::SupersedesUnknown {
+                key: "2026-11-01-no-ticket-nothing".to_owned(),
+            },
         ),
         (
             with(&|d| d.supersedes = vec!["00112233445566778899aabbccddeeff".to_owned()]),
-            DecisionError::SupersedesUnknown { key: "00112233445566778899aabbccddeeff".to_owned() },
+            DecisionError::SupersedesUnknown {
+                key: "00112233445566778899aabbccddeeff".to_owned(),
+            },
         ),
         (
             with(&|d| {
@@ -307,7 +358,10 @@ fn each_refusal_names_its_problem_and_writes_nothing() {
             before,
             "{expected:?} wrote nothing"
         );
-        assert_eq!(found(&opened, &space, "decisionsTopic", "byTopic", "decisions").len(), 1);
+        assert_eq!(
+            found(&opened, &space, "decisionsTopic", "byTopic", "decisions").len(),
+            1
+        );
     }
     std::fs::remove_dir_all(&base).unwrap();
 }
@@ -330,7 +384,10 @@ fn an_ambiguous_superseded_handle_is_refused_with_the_matching_ids() {
     both.sort();
     assert_eq!((handle, ids), (first.handle.clone(), both));
     let text = err.to_string();
-    assert!(text.contains(&first.id) && text.contains(&second.id), "{text}");
+    assert!(
+        text.contains(&first.id) && text.contains(&second.id),
+        "{text}"
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 

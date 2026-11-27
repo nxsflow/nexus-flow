@@ -30,7 +30,7 @@ use crate::opened::Opened;
 use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
-mod record;
+pub(crate) mod record;
 mod roles;
 
 pub use roles::{space_role, SpaceRole};
