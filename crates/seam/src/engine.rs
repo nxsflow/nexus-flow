@@ -9,6 +9,10 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! [`Engine::space_join_coordination`], the counterpart of `nxs space join-coordination`,
+//! records the repository's coordination space in `nexus-flow.toml`; like the other seam
+//! functions of commands that open no database (NEX-232), it takes the repository.
+//!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
 //! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
 //! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
@@ -149,11 +153,7 @@ impl Engine {
     /// database. The same space again writes nothing; another coordination space, or the
     /// repository's own space, is refused, and nothing is written.
     pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
-        let _ = (repository, coordination::join);
-        Ok(JoinReport {
-            coordination: space,
-            written: false,
-        })
+        Ok(coordination::join(repository, space)?)
     }
 
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
