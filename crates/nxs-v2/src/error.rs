@@ -7,7 +7,8 @@
 
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
-    ConfigError, DataDirError, Error, InitError, MemberError, Problem, RootError, SyncError,
+    ConfigError, DataDirError, Error, InitError, JoinError, MemberError, Problem, RootError,
+    SyncError,
 };
 
 use crate::output::Format;
@@ -114,6 +115,7 @@ impl From<Error> for CliError {
             Error::NoCheckout => Kind::Validation,
             Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
+            Error::Coordination(join) => join_kind(join),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
@@ -123,13 +125,8 @@ impl From<Error> for CliError {
 
 fn open_kind(e: &InitError) -> Kind {
     match e {
-        InitError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-        InitError::Root(RootError::DataDirInside { .. }) => Kind::Validation,
-        InitError::Config(ConfigError { problem, .. }) => match problem {
-            Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
-            Problem::Io { .. } => Kind::Io,
-            _ => Kind::Validation,
-        },
+        InitError::Root(root) => root_kind(root),
+        InitError::Config(config) => config_kind(config),
         InitError::DataDir { .. } => Kind::Io,
         InitError::SpaceId { .. } => Kind::Validation,
         InitError::KeyStoreUnavailable => Kind::NoKeyStore,
@@ -137,6 +134,32 @@ fn open_kind(e: &InitError) -> Kind {
         InitError::Database { .. } => Kind::Io,
         // NXS_SESSION names a session that is not running on this device: a setting nxs refuses.
         InitError::NoSession { .. } => Kind::Validation,
+    }
+}
+
+fn root_kind(e: &RootError) -> Kind {
+    match e {
+        RootError::NotFound { .. } => Kind::NoWorkspace,
+        RootError::DataDirInside { .. } => Kind::Validation,
+    }
+}
+
+fn config_kind(e: &ConfigError) -> Kind {
+    match e.problem {
+        Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
+        Problem::Io { .. } => Kind::Io,
+        _ => Kind::Validation,
+    }
+}
+
+/// A second coordination space is `conflict`: the file already names one, and nxs does not
+/// overwrite it (NEX-104).
+fn join_kind(e: &JoinError) -> Kind {
+    match e {
+        JoinError::Root(root) => root_kind(root),
+        JoinError::Config(config) => config_kind(config),
+        JoinError::OtherCoordination { .. } => Kind::Conflict,
+        JoinError::OwnSpace { .. } | JoinError::CannotPlace { .. } => Kind::Validation,
     }
 }
 

@@ -9,6 +9,10 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! [`Engine::space_join_coordination`], the counterpart of `nxs space join-coordination`,
+//! records the repository's coordination space in `nexus-flow.toml`; like the other seam
+//! functions of commands that open no database (NEX-232), it takes the repository.
+//!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
 //! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
 //! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
@@ -26,6 +30,7 @@ use std::time::Duration;
 use crate::genesis;
 use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_merge_gate::rules::GitError;
+use nexus_flow_store::coordination::{self, JoinError, JoinReport};
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
@@ -73,6 +78,8 @@ pub enum Error {
     Install(InstallError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// The coordination space could not be recorded in `nexus-flow.toml`.
+    Coordination(JoinError),
     /// The local git could not give what the merge gate reads: the base names no commit.
     Git(GitError),
 }
@@ -90,6 +97,7 @@ impl fmt::Display for Error {
             ),
             Error::Install(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Coordination(e) => e.fmt(f),
             Error::Git(e) => e.fmt(f),
         }
     }
@@ -130,6 +138,12 @@ impl From<SyncError> for Error {
     }
 }
 
+impl From<JoinError> for Error {
+    fn from(e: JoinError) -> Self {
+        Error::Coordination(e)
+    }
+}
+
 impl From<MemberError> for Error {
     fn from(e: MemberError) -> Self {
         Error::Member(e)
@@ -156,6 +170,14 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Records the coordination space `space` in the `nexus-flow.toml` of the repository at or
+    /// above `repository`, the counterpart of `nxs space join-coordination`. It opens no
+    /// database. The same space again writes nothing; another coordination space, or the
+    /// repository's own space, is refused, and nothing is written.
+    pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
+        Ok(coordination::join(repository, space)?)
+    }
+
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
     /// names, for the repository at or above `repository`.
     pub async fn open(repository: &Path) -> Result<Self, Error> {
