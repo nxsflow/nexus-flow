@@ -122,3 +122,29 @@ fn a_file_named_after_a_frame_role_is_not_a_role() {
         Ok(Some(repo.repo().join("factory/roles/pm.md")))
     );
 }
+
+#[test]
+fn a_role_that_is_no_role_name_is_refused_even_with_a_file_of_its_name() {
+    let repo = Repo::new("member-role-file-name");
+    role_files(&repo.repo(), &["Legal", "1st", "a_b"]);
+    let long = format!("a{}", "b".repeat(63));
+    let invitation = repo.agent("legal");
+    let before = repo.list();
+
+    for role in ["Legal", "1st", "a_b", "../roles/legal", long.as_str()] {
+        let err = repo.add(&invitation, role).unwrap_err();
+
+        assert_eq!(
+            err,
+            MemberError::NotARoleName {
+                role: role.to_owned()
+            },
+            "{role}"
+        );
+        assert!(err.to_string().contains("[a-z][a-z0-9-]{0,62}"), "{err}");
+    }
+    assert_eq!(repo.list(), before);
+    let longest = format!("a{}", "b".repeat(62));
+    role_files(&repo.repo(), &[&longest]);
+    assert!(role_file(&repo.repo(), &longest).unwrap().is_some());
+}
