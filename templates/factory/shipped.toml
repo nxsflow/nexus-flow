@@ -1,0 +1,24 @@
+# The factory's shipped defaults (RFC 0006, "Installing the shipped defaults"): for each path,
+# relative to a repository's factory/, the SHA-256 of every version nexus-flow has shipped, oldest
+# first, taken after CRLF becomes LF; the last is the current default. A release adds to this list
+# and never removes from it, and a path no longer shipped stays with retired = true.
+
+[[file]]
+path = "CONFIG.md"
+sha256 = ["61a1abf71e69f2a3b44e4b967b01fb924840382ca5374ff254b4b07ef3711ac8"]
+
+[[file]]
+path = "FACTORY.md"
+sha256 = ["bbd4e2bd55fcf22f990ee7886461481d696ea4e5ea729c64ec840842018fc5c0"]
+
+[[file]]
+path = "roles/coder.md"
+sha256 = ["be6d77aecde1b029afc4f868b1c1c3a022f5e4b8b571415e56951795531761bc"]
+
+[[file]]
+path = "roles/pm.md"
+sha256 = ["8e7ccf0a2c5a36a26f780ff2d9d55fbea095dd4bb5d72cb62c5088bbcd60433a"]
+
+[[file]]
+path = "status-note.md"
+sha256 = ["7e8130e766a286d92166de505720a48838c35fbc6edf9f4aff956ff03605a6fb"]

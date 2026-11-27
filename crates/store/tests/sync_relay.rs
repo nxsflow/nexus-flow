@@ -21,7 +21,7 @@ use common::{block_on, data_dir, keys, scratch};
 use nexus_flow_store::data_dir::DataDir;
 use nexus_flow_store::device::DeviceSettings;
 use nexus_flow_store::opened;
-use nexus_flow_store::space::init;
+use nexus_flow_store::space::{init, SyncMode};
 use nexus_flow_store::sync::{self, SyncError};
 
 /// A relay that never answers: it accepts every connection, counts it and holds it open.
@@ -92,6 +92,28 @@ fn setting_the_relay_keeps_the_last_sync_and_leaves_nexus_flow_toml_alone() {
     assert_eq!(
         fs::read(base.join("repo").join("nexus-flow.toml")).unwrap(),
         file
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn init_with_a_relay_set_reports_the_relay_mode() {
+    let base = scratch("sync-init-relay");
+    let relay = SilentRelay::start();
+    let data = repository_with_relay(&base, &relay.url);
+
+    let report = block_on(init(&base.join("repo"), &data, keys(&data))).unwrap();
+
+    assert_eq!(report.sync, SyncMode::Relay);
+    assert!(
+        report.lines().iter().any(|l| l.contains("relay")),
+        "{:?}",
+        report.lines()
+    );
+    assert!(
+        !report.lines().iter().any(|l| l.contains("island mode")),
+        "{:?}",
+        report.lines()
     );
     fs::remove_dir_all(&base).unwrap();
 }

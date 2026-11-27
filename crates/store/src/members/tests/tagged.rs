@@ -3,9 +3,8 @@
 //! member holds; with no tag left it fails with `no_free_tag`. Two current members holding one
 //! tag are both marked `tag_shared`.
 //!
-//! Until the owner decides when a freed tag may be handed out again (see the PR of NEX-108), a
-//! tag that a removed member held is neither picked nor taken by `--tag`; a member added again
-//! gets its own tag back.
+//! Until NEX-244 lets a freed tag pass on again, a tag that a removed member held is neither
+//! picked nor taken by `--tag`; a member added again gets its own tag back.
 
 use nocentraldb::{MemberId, Value};
 

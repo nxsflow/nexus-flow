@@ -111,7 +111,7 @@ A decision can supersede several decisions, and be superseded by several, as tod
 
 Every decision has a handle, which agents and people type and read: `YYYY-MM-DD-<ticket>-<slug>`, the same name a file in `factory/decisions/` has today without `.md`, for example `2026-11-15-NEX-15-one-space-per-repository`. `<ticket>` is the triggering ticket's label, or `no-ticket`; `<slug>` is the title in lowercase words joined by `-`, cut at 60 characters on a word boundary, unless the writer gives a slug of their own with `--slug`.
 
-The handle is written once with the decision, so a moved file keeps its name as its handle and every `Supersedes:` line and every reference in a text still leads to it. NoCentralDB cannot keep a field unique across members that write concurrently, so two decisions can share a handle; that needs the same day, the same ticket and the same title. A command that takes a handle refuses an ambiguous one and lists the matching decisions with their object ids, and every command takes an object id as well (32 lowercase hex digits, NoCentralDB RFC 0009, "The Rust SDK"). The writer of a decision gets a warning when its handle is taken already in its local copy.
+The handle is written once with the decision, so a moved file keeps its name as its handle and every `Supersedes:` line and every reference in a text still leads to it. NoCentralDB cannot keep a field unique across members that write concurrently, so two decisions can share a handle; that needs the same day, the same ticket and the same title. A command that takes a handle refuses an ambiguous one and lists the matching decisions with their object ids, and every command takes an object id as well (32 lowercase hex digits, NoCentralDB RFC 0009, "The Rust SDK"). The writer of a decision gets a warning when its handle is taken already in its local copy: `nxs decision add` prints it on stderr, and a library caller reads the same through `Engine::decisions_with_handle` (NEX-237).
 
 The owner chose this handle on 2026-11-20 (NEX-51). *Not taken:* the object id alone (never ambiguous, but unreadable in a prompt, and a moved file would lose the name that other decisions cite), a short prefix of the object id, as git abbreviates commits (short, but just as unreadable, with the same loss), and a running number such as `D-42` (members that write offline cannot agree on the next number).
 
@@ -128,7 +128,7 @@ The command checks before it writes, and refuses with a message that names the p
 - Each decision it supersedes exists in the local copy, is not this decision, and is not dated after it.
 - `pr`, when given, is an `https` URL.
 
-`decidedBy` defaults to the role of the member that writes, from its role record (RFC 0001, "The role record"): `pm`, or `coder on NEX-42` for a coder on that ticket. An agent that records a decision the owner made writes the owner's name, as today. `author` is always the writing member's id and cannot be given.
+`decidedBy` defaults to the role of the member that writes, from its role record (RFC 0001, "The role record"): `pm`, or `coder on NEX-42` for a coder on that ticket. An agent that records a decision the owner made writes the owner's name, as today. When the writing member has no role record, or its record's ticket cannot be read, there is no default: the write is refused with `validation`, naming `--decided-by`, so the writer says who decided. `author` is always the writing member's id and cannot be given.
 
 ### Append-only
 
@@ -252,6 +252,7 @@ In Markdown, a decision in full, as `nxs decision show` and `--full --md` print 
 | `Engine::decisions(&DecisionFilter) -> Vec<DecisionIndexLine>` | The index lines of the decisions the filter selects, with their derived state, in date order: `nxs decision list` |
 | `Engine::decisions_full(&DecisionFilter) -> Vec<Decision>` | The same decisions in full: `nxs decision list --full` |
 | `Engine::decision(&DecisionKey) -> Decision` | One decision by handle or object id; an ambiguous handle is an error that lists the matches |
+| `Engine::decisions_with_handle(&str) -> Vec<String>` | The object ids (32 lowercase hex digits, as `Decision.id`) of the decisions in the local copy that carry this handle; `nxs decision add` calls it after the write and warns on stderr when another decision holds the handle (decided by the owner, NEX-237) |
 | `Engine::rules_in_force() -> Vec<DecisionIndexLine>` | What `nxs prime` prints as its decisions part |
 
 `NewDecision`, `Decision`, `DecisionFilter` (`current`, `ticket`, `topic`, `since`), `DecisionKey` (a handle or an `ObjectId`), `DecisionIndexLine` and `Subject` are the types they take and return; their fields are the JSON fields above. The index and the full text are two symbols with two return types rather than one with a flag, so a caller's type says which it holds. Every `nxs decision` verb has its counterpart here (the decision on CLI and library parity stays in force). There is deliberately no symbol that changes or deletes a decision.
@@ -326,8 +327,16 @@ A file has no PR link, and its decision is on main, since the file itself was me
 
 None. The owner answered them on 2026-11-20 (NEX-51 to NEX-53), and the answers are written into the text above: the handle under "Handles", when a decision's PR counts as on main under "Derived state", and that nothing is offered before R13 under "Personal data and erasure".
 
+## Decisions
+
+- **A taken handle is read through `Engine::decisions_with_handle`** ("The handle", "Commands, JSON and the seam"). Decided by the owner on 2026-11-27 (NEX-237). Why: `nxs` reaches the store only through the seam, so the warning needs a public read; a separate read keeps `decision_add`'s signature as written and serves a view too. *Not taken:* a `handle_taken` field in `decision_add`'s result and in the JSON `nxs decision add` prints; dropping the warning.
+
+- **A writer with no role record must give `--decided-by`** ("Who decided"). Decided by the owner on 2026-11-27 (NEX-238). Why: a decision record must never guess who decided; the cost is that the owner types `--decided-by` on their own device. *Not taken:* defaulting to the account's display name; defaulting to `owner` for the space's creator.
+
 ## History
 
 - 2026-11-17: published as a draft in #159.
 - 2026-11-20: `nxs decision list` prints the index by default and `--full` prints every decision in full, decided by the owner, in #159.
 - 2026-11-20: decided by the owner: the handle (NEX-51), the PR's commit or else the triggering ticket for "on main" (NEX-52), and no redaction before R13 (NEX-53), in #159.
+- 2026-11-27: the owner's answer to NEX-237 (`Engine::decisions_with_handle` for a taken handle) written into the text.
+- 2026-11-27: the owner's answer to NEX-238 (no role record: refuse, naming `--decided-by`) written into the text.

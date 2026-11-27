@@ -2,10 +2,10 @@
 //! new member gets.
 //!
 //! A tag is **held** while a current member's record carries it, and **freed** once only removed
-//! members' records carry it. RFC 0002 lets a freed tag pass on, to a member whose first sync has
-//! completed; how `nxs member add` can know that is not decided yet (asked in NEX-108), so until
-//! then a freed tag is neither picked nor taken by `--tag`. The one exception is a member added
-//! again: it gets its own tag back, since the keys with it are its own.
+//! members' records carry it. RFC 0002 lets a freed tag pass on, and the owner put the guard on
+//! that at minting (NEX-236). Until NEX-244 lifts it, a freed tag is neither picked nor taken by
+//! `--tag`. The one exception is a member added again: it gets its own tag back, since the keys
+//! with it are its own.
 
 use std::collections::BTreeSet;
 

@@ -3,10 +3,13 @@
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
-//! `no_free_tag` from RFC 0002 (NEX-108).
+//! `no_free_tag` from RFC 0002 (NEX-108); a retired v1 entry point is `retired_entry_point`
+//! (RFC 0008, NEX-191).
 
+use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
-    ConfigError, DataDirError, Error, InitError, MemberError, Problem, RootError, SyncError,
+    ConfigError, DataDirError, Error, InitError, JoinError, MemberError, Problem, RootError,
+    SyncError,
 };
 
 use crate::output::Format;
@@ -33,6 +36,8 @@ pub enum Kind {
     NotFound,
     /// Every one of the 936 ticket tags is held, so `nxs member add` has none to give (RFC 0002).
     NoFreeTag,
+    /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
+    RetiredEntryPoint,
 }
 
 impl Kind {
@@ -47,6 +52,7 @@ impl Kind {
             Kind::Forbidden => "forbidden",
             Kind::NotFound => "not_found",
             Kind::NoFreeTag => "no_free_tag",
+            Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
 }
@@ -109,7 +115,13 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
+            // nxs opens a repository, which always has a checkout.
+            Error::NoCheckout => Kind::Validation,
+            Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
+            Error::Coordination(join) => join_kind(join),
+            Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
+            Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
         CliError { kind, msg }
     }
@@ -117,13 +129,8 @@ impl From<Error> for CliError {
 
 fn open_kind(e: &InitError) -> Kind {
     match e {
-        InitError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-        InitError::Root(RootError::DataDirInside { .. }) => Kind::Validation,
-        InitError::Config(ConfigError { problem, .. }) => match problem {
-            Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
-            Problem::Io { .. } => Kind::Io,
-            _ => Kind::Validation,
-        },
+        InitError::Root(root) => root_kind(root),
+        InitError::Config(config) => config_kind(config),
         InitError::DataDir { .. } => Kind::Io,
         InitError::SpaceId { .. } => Kind::Validation,
         InitError::KeyStoreUnavailable => Kind::NoKeyStore,
@@ -131,6 +138,32 @@ fn open_kind(e: &InitError) -> Kind {
         InitError::Database { .. } => Kind::Io,
         // NXS_SESSION names a session that is not running on this device: a setting nxs refuses.
         InitError::NoSession { .. } => Kind::Validation,
+    }
+}
+
+fn root_kind(e: &RootError) -> Kind {
+    match e {
+        RootError::NotFound { .. } => Kind::NoWorkspace,
+        RootError::DataDirInside { .. } => Kind::Validation,
+    }
+}
+
+fn config_kind(e: &ConfigError) -> Kind {
+    match e.problem {
+        Problem::AlreadyNamesSpace { .. } | Problem::AlreadyExists => Kind::Conflict,
+        Problem::Io { .. } => Kind::Io,
+        _ => Kind::Validation,
+    }
+}
+
+/// A second coordination space is `conflict`: the file already names one, and nxs does not
+/// overwrite it (NEX-104).
+fn join_kind(e: &JoinError) -> Kind {
+    match e {
+        JoinError::Root(root) => root_kind(root),
+        JoinError::Config(config) => config_kind(config),
+        JoinError::OtherCoordination { .. } => Kind::Conflict,
+        JoinError::OwnSpace { .. } | JoinError::CannotPlace { .. } => Kind::Validation,
     }
 }
 
