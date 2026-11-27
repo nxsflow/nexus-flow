@@ -182,6 +182,9 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotAMemberId { .. }
         | MemberError::NotATicket { .. }
         | MemberError::EmptyRole
+        | MemberError::NotARoleName { .. }
+        | MemberError::NoRoleFile { .. }
+        | MemberError::NoWorkingTree { .. }
         | MemberError::NotATag { .. }
         | MemberError::TagFreed { .. }
         | MemberError::NotHeld { .. }

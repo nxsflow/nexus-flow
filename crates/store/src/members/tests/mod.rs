@@ -7,6 +7,7 @@ mod add;
 mod list;
 mod remove;
 mod retag;
+mod role_file;
 mod roles;
 mod tagged;
 mod tags;
@@ -81,6 +82,7 @@ impl Repo {
         let space = block_on(init(&base.join("repo"), &data, keys(&data)))
             .unwrap()
             .space;
+        role_files(&base.join("repo"), &["pm", "coder"]);
         Repo { base, data, space }
     }
 
@@ -140,5 +142,15 @@ impl Repo {
 impl Drop for Repo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+/// Writes `factory/roles/<role>.md` for each of `roles` in the repository at `repo`: a session's
+/// role names a role file (RFC 0006, "The factory's files").
+pub(super) fn role_files(repo: &Path, roles: &[&str]) {
+    let dir = repo.join("factory/roles");
+    fs::create_dir_all(&dir).unwrap();
+    for role in roles {
+        fs::write(dir.join(format!("{role}.md")), format!("# {role}\n")).unwrap();
     }
 }

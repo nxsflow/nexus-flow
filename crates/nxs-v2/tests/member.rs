@@ -12,7 +12,8 @@ use common::{block_on, json, nxs, options, scratch, stdout};
 use nexus_flow_seam::{testing, Engine, Member};
 use serde_json::{json, Value};
 
-/// A repository given its space by `nxs init`.
+/// A repository given its space by `nxs init`, and the factory's shipped roles `pm` and `coder` by
+/// `nxs factory install`.
 struct Repo {
     base: PathBuf,
     space: String,
@@ -24,6 +25,8 @@ impl Repo {
         let out = nxs(&base, &base.join("repo"), &["init"]);
         assert_eq!(out.code, 0, "{}", stdout(&out));
         let space = json(&out)["space"].as_str().unwrap().to_owned();
+        let out = nxs(&base, &base.join("repo"), &["factory", "install"]);
+        assert_eq!(out.code, 0, "{}", stdout(&out));
         Repo { base, space }
     }
 
@@ -272,4 +275,22 @@ fn several_members_print_the_same_bytes_every_time() {
         assert_eq!(first.code, 0, "{}", stdout(&first));
         assert_eq!(second.stdout, first.stdout, "{args:?}");
     }
+}
+
+#[test]
+fn a_session_role_without_its_role_file_is_a_validation_error_naming_the_file() {
+    let repo = Repo::new("member-no-role-file");
+    let invitation = repo.agent("legal");
+    let before = repo.nxs(&["member", "list"]).stdout;
+
+    let out = repo.nxs(&["member", "add", &invitation, "--role", "legal"]);
+
+    assert_eq!(kind(&out), "validation");
+    let message = json(&out)["error"]["msg"].as_str().unwrap().to_owned();
+    let missing = repo.repo().join("factory/roles/legal.md");
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "{message}"
+    );
+    assert_eq!(repo.nxs(&["member", "list"]).stdout, before);
 }

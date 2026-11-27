@@ -7,9 +7,10 @@
 //! for every role but a role session's and the migration member's. In each it adds the member and
 //! then writes its `spaceMember` record, or rewrites the one a member added before still has. The
 //! record carries the member's ticket tag (RFC 0002, "Ticket ids"), the same in every space: the
-//! one `--tag` names, or a free one ([`taken`] says which). It checks first that this member is an
-//! admin of each of those spaces, that each is held, that the new member is in none of them, and
-//! that the tag can be given, so a refusal changes nothing.
+//! one `--tag` names, or a free one ([`taken`] says which). It checks first that a session's role
+//! names its file in `factory/roles/` of the working tree (RFC 0006, "The factory's files"), that
+//! this member is an admin of each of those spaces, that each is held, that the new member is in
+//! none of them, and that the tag can be given, so a refusal changes nothing.
 //!
 //! **Removing.** `remove` removes a member from every open space it is a member of, after the same
 //! checks. Its record stays: who wrote what stays readable after its member is gone (RFC 0001,
@@ -21,6 +22,7 @@
 //! device that created the space, has no record: its role, ticket and tag are `None`.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use nocentraldb::{
@@ -34,6 +36,7 @@ use crate::write::WriteError;
 
 pub(crate) mod record;
 mod retag;
+mod role_file;
 mod roles;
 pub mod tags;
 mod taken;
@@ -130,6 +133,12 @@ pub enum MemberError {
     NotATicket { text: String },
     /// The role is empty.
     EmptyRole,
+    /// A session's role does not match `^[a-z][a-z0-9-]{0,62}$`.
+    NotARoleName { role: String },
+    /// A session's role cannot be checked: the database is open on a space without a checkout.
+    NoWorkingTree { role: String },
+    /// A session's role names no file in `factory/roles/` of the working tree.
+    NoRoleFile { role: String, path: PathBuf },
     /// The text is not a tag.
     NotATag { text: String },
     /// A current member holds the tag.
@@ -175,6 +184,19 @@ impl fmt::Display for MemberError {
                 "{text:?} is not a reference to a ticket: one is <space id>/<object id>"
             ),
             MemberError::EmptyRole => f.write_str("the role is empty"),
+            MemberError::NotARoleName { role } => write!(
+                f,
+                "{role:?} is not a role name: one matches ^[a-z][a-z0-9-]{{0,62}}$"
+            ),
+            MemberError::NoWorkingTree { role } => write!(
+                f,
+                "the role {role} names a file in factory/roles/, and this space was opened without a checkout to read it from"
+            ),
+            MemberError::NoRoleFile { role, path } => write!(
+                f,
+                "the role {role} has no role file: {} is missing",
+                path.display()
+            ),
             MemberError::NotATag { text } => write!(
                 f,
                 "{text:?} is not a tag: one is two characters matching ^[a-z][a-z0-9]$"
@@ -270,6 +292,7 @@ pub async fn add(
     if role.is_empty() {
         return Err(MemberError::EmptyRole);
     }
+    role_file::role_file(opened.checkout().map(|c| c.path.as_path()), role)?;
     let ticket = ticket.map(str::parse::<TicketRef>).transpose()?;
     let named = tag.map(parse_tag).transpose()?;
     let targets = targets(opened, role)?;

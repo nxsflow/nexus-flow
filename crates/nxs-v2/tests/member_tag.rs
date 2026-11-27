@@ -22,6 +22,8 @@ impl Repo {
         let base = scratch(test);
         let out = nxs(&base, &base.join("repo"), &["init"]);
         assert_eq!(out.code, 0, "{}", stdout(&out));
+        let out = nxs(&base, &base.join("repo"), &["factory", "install"]);
+        assert_eq!(out.code, 0, "{}", stdout(&out));
         Repo { base }
     }
 
