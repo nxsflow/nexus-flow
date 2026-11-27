@@ -4,7 +4,8 @@
 //! names. `main.rs` calls it with the environment's options.
 //!
 //! Output is JSON by default and Markdown with `--md` (`output`); an error is v1's error object
-//! (`error`).
+//! (`error`). A command that succeeds with a warning, such as `nxs decision add` writing a handle
+//! taken already, prints `warning: <text>` on stderr, in both formats.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -40,6 +41,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a decision with its topics, tickets and the decisions it supersedes.
+    #[command(subcommand)]
+    Decision(cmd::decision::DecisionCommand),
     /// Create the repository space and nexus-flow.toml, or name the space the file holds.
     Init,
     /// Add, remove and list the members of the repository's spaces, with their role records.
@@ -66,17 +70,24 @@ where
         Err(e) => return parse_error(e, &args),
     };
     let format = if cli.md { Format::Md } else { Format::Json };
+    let alone = |stdout: String| (stdout, Vec::new());
     let result = match cli.command {
-        Command::Init => cmd::init::run(dir, options).map(|r| format.render(&r)),
+        Command::Decision(command) => cmd::decision::run(dir, options, command)
+            .map(|(r, warnings)| (format.render(&r), warnings)),
+        Command::Init => cmd::init::run(dir, options).map(|r| alone(format.render(&r))),
         Command::Member(command) => {
-            cmd::member::run(dir, options, command).map(|r| format.render(&r))
+            cmd::member::run(dir, options, command).map(|r| alone(format.render(&r)))
         }
-        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
+        Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| alone(format.render(&r))),
     };
     match result {
-        Ok(stdout) => Outcome {
+        Ok((stdout, warnings)) => Outcome {
             stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
+            stderr: warnings
+                .iter()
+                .map(|w| format!("warning: {w}\n"))
+                .collect::<String>()
+                .into_bytes(),
             code: 0,
         },
         Err(e) => e.outcome(format),
