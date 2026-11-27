@@ -47,6 +47,9 @@ enum Command {
     Member(cmd::member::MemberCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
+    /// Install the factory's shipped defaults under factory/.
+    #[command(subcommand)]
+    Factory(cmd::factory::FactoryCommand),
     /// Read the merge gate's rules from the base commit.
     MergeGate(cmd::merge_gate::MergeGateArgs),
     /// Write the repository's GENESIS from the template, only where none exists.
@@ -81,6 +84,9 @@ where
             cmd::merge_gate::run(dir, args).map(|r| (format.render(&r), r.code()))
         }
         Command::Genesis(command) => return cmd::genesis::run(dir, command, format),
+        Command::Factory(command) => {
+            cmd::factory::run(dir, options, command).map(|r| (format.render(&r), 0))
+        }
     };
     match result {
         Ok((stdout, code)) => Outcome {
