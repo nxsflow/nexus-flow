@@ -47,6 +47,20 @@ impl Repo {
         block_on(members::list(&opened.unwrap())).unwrap()
     }
 
+    /// Adds as a member opened on the repository space by its id, with no checkout.
+    fn add_without_checkout(&self, invitation: &str, role: &str) -> Result<Member, MemberError> {
+        let space = block_on(opened::repository(
+            &self.repo(),
+            &self.data,
+            keys(&self.data),
+        ))
+        .unwrap()
+        .spaces()[0]
+            .0;
+        let opened = block_on(opened::space(space, None, &self.data, keys(&self.data)));
+        block_on(members::add(&opened.unwrap(), invitation, role, None))
+    }
+
     fn add(&self, invitation: &str, role: &str) -> Result<Member, MemberError> {
         let opened = block_on(opened::repository(
             &self.repo(),
@@ -147,4 +161,22 @@ fn a_role_that_is_no_role_name_is_refused_even_with_a_file_of_its_name() {
     let longest = format!("a{}", "b".repeat(62));
     role_files(&repo.repo(), &[&longest]);
     assert!(role_file(&repo.repo(), &longest).unwrap().is_some());
+}
+
+#[test]
+fn a_session_role_is_refused_without_a_working_tree_to_read_its_file_from() {
+    let repo = Repo::new("member-role-file-no-checkout");
+    role_files(&repo.repo(), &["legal"]);
+    let invitation = repo.agent("legal");
+    let before = repo.list();
+
+    let err = repo.add_without_checkout(&invitation, "legal").unwrap_err();
+
+    assert_eq!(
+        err,
+        MemberError::NoWorkingTree {
+            role: "legal".to_owned()
+        }
+    );
+    assert_eq!(repo.list(), before);
 }
