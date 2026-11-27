@@ -9,6 +9,10 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! An open engine adds, removes and lists the members of its spaces, each with its role record
+//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
+//! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
+//!
 //! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
 //! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
 //! reads the device's sync state from the local database without the network. [`set_relay`] sets
@@ -25,6 +29,7 @@ use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
+use nexus_flow_store::members::{self, Member, MemberError};
 use nexus_flow_store::opened::{self, Opened};
 use nexus_flow_store::space::{DeviceKeys, InitError};
 use nexus_flow_store::sync::{self, SyncError, SyncStatus};
@@ -65,6 +70,8 @@ pub enum Error {
     NoCheckout,
     /// Installing the factory's defaults could not read or write a file.
     Install(InstallError),
+    /// A member could not be added, removed or listed.
+    Member(MemberError),
 }
 
 impl fmt::Display for Error {
@@ -79,6 +86,7 @@ impl fmt::Display for Error {
                 "the engine is open on a space without a checkout, so there is no factory/ to install into"
             ),
             Error::Install(e) => e.fmt(f),
+            Error::Member(e) => e.fmt(f),
         }
     }
 }
@@ -109,6 +117,12 @@ impl From<SyncError> for Error {
             SyncError::Open(e) => Error::Open(e),
             e => Error::Sync(e),
         }
+    }
+}
+
+impl From<MemberError> for Error {
+    fn from(e: MemberError) -> Self {
+        Error::Member(e)
     }
 }
 
@@ -176,6 +190,31 @@ impl Engine {
             opened,
             data: self.data,
         })
+    }
+
+    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
+    /// started on, written `<space id>/<object id>`: to the repository space, and to the
+    /// coordination space unless it is a role session or the migration member, each with its
+    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
+    /// spaces adds, and a refusal changes nothing.
+    pub async fn member_add(
+        &self,
+        invitation: &str,
+        role: &str,
+        ticket: Option<&str>,
+    ) -> Result<Member, Error> {
+        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+    }
+
+    /// Removes the member `member`, by its id, from every open space it is a member of, and
+    /// returns it as it was listed. Its role record stays. Only an admin removes.
+    pub async fn member_remove(&self, member: &str) -> Result<Member, Error> {
+        Ok(members::remove(&self.opened, member).await?)
+    }
+
+    /// The current members of the repository space, in member-id order, with their role records.
+    pub async fn members(&self) -> Result<Vec<Member>, Error> {
+        Ok(members::list(&self.opened).await?)
     }
 
     /// Waits until nothing in the open spaces is behind or unconfirmed, and reports the sync

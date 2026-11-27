@@ -7,15 +7,23 @@ use nocentraldb as _;
 
 pub mod config;
 pub mod data_dir;
+pub mod decisions;
 pub mod device;
 pub mod goals;
 pub mod id;
 pub mod member_select;
+pub mod members;
+pub mod migration;
 pub mod model;
 mod open;
 pub mod opened;
+mod read;
 pub mod repo_root;
 pub mod space;
 pub mod space_kind;
 pub mod status;
 pub mod sync;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+pub mod write;
+pub mod write_once;

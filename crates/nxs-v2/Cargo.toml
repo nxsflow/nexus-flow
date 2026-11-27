@@ -12,3 +12,7 @@ nexus-flow-seam = { path = "../seam" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# The seam's test helpers make the invitations of members nexus-flow cannot start yet.
+[dev-dependencies]
+nexus-flow-seam = { path = "../seam", features = ["test-support"] }

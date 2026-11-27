@@ -14,3 +14,12 @@ nexus-flow-store = { path = "../store" }
 serde.workspace = true
 sha2 = "0.10"
 toml.workspace = true
+
+# The store's test helpers, for the tests of the crates above the seam (`nxs-v2`), which reach
+# the store only through it; never enabled in a build that ships.
+[features]
+test-support = ["nexus-flow-store/test-support"]
+
+# The seam's own tests make invitations with the store's test helpers.
+[dev-dependencies]
+nexus-flow-store = { path = "../store", features = ["test-support"] }

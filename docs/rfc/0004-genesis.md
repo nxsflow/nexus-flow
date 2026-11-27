@@ -137,7 +137,7 @@ GENESIS.md reserves these for the owner:
 
 - **Command:** `nxs genesis create [--update]` (`--update` for the guide only), which `nxs init` also runs, without `--update`.
 - **JSON output** of `nxs genesis create`: `files` (each with `path`, `state`: `written`, `team` or `tracked` for GENESIS, one of RFC 0006's states for the guide, and `found` where a case variant was found), `codeowners` (`file`, `uncovered`, or `null`).
-- **Library seam:** `Engine::genesis_create(update: bool)`, the counterpart of the command, returning the same report (the decision on CLI and library parity stays in force).
+- **Library seam:** `Engine::genesis_create(repository: &Path, update: bool)`, the counterpart of the command, returning the same report (the decision on CLI and library parity stays in force). It is an associated function that takes the repository and opens no NoCentralDB database, as the command opens none (see "Decisions").
 - **Stored formats:** `factory/GENESIS.md` as the fixed path of a team's GENESIS; the mark `<!-- nexus-flow: owner-rules -->` and the rule that reads the list directly after it; `factory/genesis-guide.md` as the guide's path; `templates/genesis/shipped.toml` in RFC 0006's format.
 
 ### What nexus-flow needs from NoCentralDB
@@ -173,8 +173,11 @@ None. The owner answered them on 2026-11-20 (NEX-70, NEX-71), and the answers ar
 
 - **The rules are the list directly after the mark** ("The rules on what comes back to the owner"). Decided by the owner on 2026-11-20 (NEX-77), with RFC 0010 (#171). This narrows "the first list after the mark": only blank lines may stand between the mark and the list's first item. Why: if the list under the mark is deleted, the merge gate must read no rules and send every pull request to the owner, not read some later list in GENESIS as the rules, silently. *Not taken:* the first list anywhere after the mark, which matched this RFC's words most literally.
 
+- **`Engine::genesis_create` takes the repository and opens no database** ("Public surfaces this RFC brings"). Decided by the owner on 2026-11-25 (NEX-232), with RFC 0010. Why: the command opens no NoCentralDB database and touches only files and the local git, so a method on an open `Engine` would need a key store and a member database the command never uses; an associated function with the command's own inputs keeps CLI and library giving the same report, as `Engine::sync_status` does (NEX-102). *Not taken:* a free function outside `Engine`; a method on an open `Engine`, as first written.
+
 ## History
 
 - 2026-11-17: published as a draft in #163.
 - 2026-11-20: decided by the owner (NEX-70, NEX-71), in #163.
 - 2026-11-20: the list of rules narrowed to the one directly after the mark, from RFC 0010 (see "Decisions"), in #173 (NEX-83).
+- 2026-11-25: the owner's answer to NEX-232 (`Engine::genesis_create` takes the repository and opens no database) written into the text.
