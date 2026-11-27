@@ -146,6 +146,35 @@ fn status_prints_member_relay_unconfirmed_and_synced_at_without_the_network() {
 }
 
 #[test]
+fn init_reports_the_relay_mode_once_a_relay_is_set() {
+    let (base, repo) = repository("sync-init-relay");
+    let relay = SilentRelay::start();
+    set_relay(&base, &repo, &relay.url);
+
+    let out = nxs(&base, &repo, &["init"]);
+    let md = nxs(&base, &repo, &["init", "--md"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(json(&out)["sync"], "relay");
+    assert_eq!(md.code, 0, "{}", stdout(&md));
+    let md = stdout(&md);
+    assert!(!md.contains("island mode"), "{md}");
+    assert!(md.contains("relay"), "{md}");
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn init_without_a_relay_reports_the_island_mode() {
+    let (base, repo) = repository("sync-init-island");
+
+    let out = nxs(&base, &repo, &["init"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    assert_eq!(json(&out)["sync"], "island");
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
 fn status_without_a_relay_reports_relay_null() {
     let (base, repo) = repository("sync-status-island");
 
