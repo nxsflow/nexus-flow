@@ -106,6 +106,7 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
             Error::Member(member) => member_kind(member),
+            Error::Coordination(_) => Kind::Io,
         };
         CliError { kind, msg }
     }

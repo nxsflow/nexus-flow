@@ -45,6 +45,9 @@ enum Command {
     /// Add, remove and list the members of the repository's spaces, with their role records.
     #[command(subcommand)]
     Member(cmd::member::MemberCommand),
+    /// Record the repository's coordination space in nexus-flow.toml.
+    #[command(subcommand)]
+    Space(cmd::space::SpaceCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
 }
@@ -71,6 +74,7 @@ where
         Command::Member(command) => {
             cmd::member::run(dir, options, command).map(|r| format.render(&r))
         }
+        Command::Space(command) => cmd::space::run(dir, command).map(|r| format.render(&r)),
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| format.render(&r)),
     };
     match result {
