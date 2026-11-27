@@ -46,7 +46,7 @@ fn write_records(repo: &Repo, member: &str, tags: impl IntoIterator<Item = Tag>)
 }
 
 /// Rewrites `member`'s record to hold `tag`, as a second inviter's offline add would.
-fn set_tag(repo: &Repo, member: &str, tag: &str) {
+pub(super) fn set_tag(repo: &Repo, member: &str, tag: &str) {
     let opened = repo.opened();
     let (id, space) = &opened.spaces()[0];
     let space = space.as_ref().unwrap();

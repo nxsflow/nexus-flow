@@ -6,6 +6,7 @@
 mod add;
 mod list;
 mod remove;
+mod retag;
 mod roles;
 mod tagged;
 mod tags;
