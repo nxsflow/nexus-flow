@@ -311,3 +311,18 @@ fn an_entry_without_a_rule_id_makes_it_invalid() {
 
     assert_one_problem_naming(&problems(&f, &v), &["5"]);
 }
+
+#[test]
+fn a_decision_path_is_the_plain_path_from_the_root() {
+    let f = fixture("plain-path");
+    for path in [
+        "/docs/rfc/0010-merge-gate.md",
+        "./docs/rfc/0010-merge-gate.md",
+        "docs//rfc/0010-merge-gate.md",
+        "docs/../docs/rfc/0010-merge-gate.md",
+    ] {
+        let mut v = verdict(&f.base);
+        entry(&mut v, "genesis.1")["decision"]["path"] = json!(path);
+        assert_one_problem_naming(&problems(&f, &v), &["genesis.1", path]);
+    }
+}
