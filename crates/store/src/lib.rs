@@ -6,6 +6,7 @@
 use nocentraldb as _;
 
 pub mod config;
+pub mod coordination;
 pub mod data_dir;
 pub mod decisions;
 pub mod device;

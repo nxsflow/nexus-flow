@@ -3,78 +3,14 @@
 //! refusal changes nothing: the members and their records are as they were.
 
 use std::fs;
-use std::path::PathBuf;
 
-use super::{block_on, data_dir, keys, role_files, scratch};
+use super::{block_on, keys, Repo};
 use crate::config::Config;
-use crate::data_dir::DataDir;
 use crate::members::{self, Member, MemberError, MemberKind};
 use crate::opened;
-use crate::space::init;
 use crate::testing;
 
-/// A repository with its space, the device's data directory and the space's id.
-struct Repo {
-    base: PathBuf,
-    data: DataDir,
-    space: String,
-}
-
-impl Repo {
-    fn new(test: &str) -> Repo {
-        let base = scratch(test);
-        let data = data_dir(&base.join("data"));
-        let space = block_on(init(&base.join("repo"), &data, keys(&data)))
-            .unwrap()
-            .space;
-        role_files(&base.join("repo"), &["pm", "coder"]);
-        Repo { base, data, space }
-    }
-
-    fn repo(&self) -> PathBuf {
-        self.base.join("repo")
-    }
-
-    /// The invitation of a new agent paired into the device's account, in `name/`.
-    fn agent(&self, name: &str) -> String {
-        block_on(testing::paired_agent(
-            &self.data,
-            keys(&self.data),
-            &self.base.join(name),
-        ))
-    }
-
-    fn list(&self) -> Vec<Member> {
-        let opened = block_on(opened::repository(
-            &self.repo(),
-            &self.data,
-            keys(&self.data),
-        ));
-        block_on(members::list(&opened.unwrap())).unwrap()
-    }
-
-    fn add(
-        &self,
-        invitation: &str,
-        role: &str,
-        ticket: Option<&str>,
-    ) -> Result<Member, MemberError> {
-        let opened = block_on(opened::repository(
-            &self.repo(),
-            &self.data,
-            keys(&self.data),
-        ));
-        block_on(members::add(&opened.unwrap(), invitation, role, ticket))
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.base);
-    }
-}
-
-fn find<'a>(list: &'a [Member], member: &str) -> &'a Member {
+pub(super) fn find<'a>(list: &'a [Member], member: &str) -> &'a Member {
     list.iter()
         .find(|m| m.member == member)
         .unwrap_or_else(|| panic!("{member} is not listed: {list:?}"))

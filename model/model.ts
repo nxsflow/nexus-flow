@@ -31,6 +31,9 @@ export const model = nc.model({
       // A member's record in one space: `nxs member list` reads the role of each current member
       // by it, and `nxs member add` finds the record of a member it adds again.
       byMember: nc.index(["member"], { equal: 1, scope: "space" }),
+      // Every record in one space, in tag order: `nxs member add` and `nxs member retag` read the
+      // tags in use by it, and `nxs member list` finds the tags two current members share.
+      byTag: nc.index(["tag", "member"], { equal: 0, scope: "space" }),
     },
   }),
   ...tickets,

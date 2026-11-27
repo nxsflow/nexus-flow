@@ -17,7 +17,7 @@ pub struct Init {
     space: String,
     /// Whether this run created the space; `false` when the file already named one.
     created: bool,
-    /// How the space syncs: `island` while no relay is set.
+    /// How the space syncs: `island` while no relay is set, `relay` once one is.
     sync: &'static str,
     /// Whether the root holds a v1 workspace, `.nxs/`, which was left as it was.
     v1_workspace: bool,
@@ -40,6 +40,7 @@ impl From<InitReport> for Init {
             created: report.created,
             sync: match report.sync {
                 SyncMode::Island => "island",
+                SyncMode::Relay => "relay",
             },
             v1_workspace: report.v1_workspace,
         }
@@ -59,10 +60,10 @@ impl Render for Init {
                 "`nexus-flow.toml` already names the repository space `{space}`; nothing was created"
             ));
         }
-        lines.push(
-            "no relay is set, so the space stays on this device in island mode; `nxs sync --relay <url>` connects it"
-                .to_owned(),
-        );
+        lines.push(match self.sync {
+            "relay" => "the space syncs through the relay set on this device; `nxs sync` waits until nothing is behind or unconfirmed".to_owned(),
+            _ => "no relay is set, so the space stays on this device in island mode; `nxs sync --relay <url>` connects it".to_owned(),
+        });
         if self.v1_workspace {
             lines.push(
                 "the v1 data in `.nxs/` was not moved into the space and is left as it was"

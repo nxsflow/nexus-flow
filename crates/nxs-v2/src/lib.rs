@@ -4,7 +4,8 @@
 //! names. `main.rs` calls it with the environment's options.
 //!
 //! Output is JSON by default and Markdown with `--md` (`output`); an error is v1's error object
-//! (`error`).
+//! (`error`). A command that succeeds with a warning, such as `nxs decision add` writing a handle
+//! taken already, prints `warning: <text>` on stderr, in both formats.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -16,6 +17,8 @@ mod block_on;
 mod cmd;
 mod error;
 mod output;
+mod retired;
+mod v1_notice;
 
 use error::CliError;
 use output::Format;
@@ -40,11 +43,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a decision with its topics, tickets and the decisions it supersedes.
+    #[command(subcommand)]
+    Decision(cmd::decision::DecisionCommand),
     /// Create the repository space and nexus-flow.toml, or name the space the file holds.
     Init,
     /// Add, remove and list the members of the repository's spaces, with their role records.
     #[command(subcommand)]
     Member(cmd::member::MemberCommand),
+    /// Record the repository's coordination space in nexus-flow.toml.
+    #[command(subcommand)]
+    Space(cmd::space::SpaceCommand),
     /// Sync this device's database with its relay, report its sync state, or set its relay.
     Sync(cmd::sync::SyncArgs),
     /// Install the factory's shipped defaults under factory/.
@@ -69,12 +78,30 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if let Some(e) = args.first().and_then(|argv0| retired::check(argv0)) {
+        return e.outcome(md_requested(&args));
+    }
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(e) => return parse_error(e, &args),
     };
     let format = if cli.md { Format::Md } else { Format::Json };
-    let result = match cli.command {
+    let mut outcome = dispatch(cli.command, dir, options, format);
+    if let Some(notice) = v1_notice::check(dir) {
+        outcome.stderr.extend_from_slice(notice.as_bytes());
+    }
+    outcome
+}
+
+/// Runs a parsed command and returns what it prints, before any notice is added.
+fn dispatch(
+    command: Command,
+    dir: &Path,
+    options: impl FnOnce() -> Result<Options, DataDirError>,
+    format: Format,
+) -> Outcome {
+    let result = match command {
+        Command::Decision(command) => return cmd::decision::run(dir, options, command, format),
         Command::Init => cmd::init::run(dir, options).map(|r| (format.render(&r), 0)),
         Command::Member(command) => {
             cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
@@ -87,6 +114,7 @@ where
         Command::Factory(command) => {
             cmd::factory::run(dir, options, command).map(|r| (format.render(&r), 0))
         }
+        Command::Space(command) => cmd::space::run(dir, command).map(|r| (format.render(&r), 0)),
     };
     match result {
         Ok((stdout, code)) => Outcome {
@@ -109,7 +137,15 @@ fn parse_error(e: clap::Error, args: &[OsString]) -> Outcome {
             code: 0,
         };
     }
-    let md = args.iter().skip(1).any(|a| a == "--md");
-    let format = if md { Format::Md } else { Format::Json };
-    CliError::usage(&e).outcome(format)
+    CliError::usage(&e).outcome(md_requested(args))
+}
+
+/// The format of an error printed before the command line is parsed: Markdown when any argument
+/// is `--md`, JSON otherwise.
+fn md_requested(args: &[OsString]) -> Format {
+    if args.iter().skip(1).any(|a| a == "--md") {
+        Format::Md
+    } else {
+        Format::Json
+    }
 }

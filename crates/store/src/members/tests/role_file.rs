@@ -58,7 +58,7 @@ impl Repo {
         .spaces()[0]
             .0;
         let opened = block_on(opened::space(space, None, &self.data, keys(&self.data)));
-        block_on(members::add(&opened.unwrap(), invitation, role, None))
+        block_on(members::add(&opened.unwrap(), invitation, role, None, None))
     }
 
     fn add(&self, invitation: &str, role: &str) -> Result<Member, MemberError> {
@@ -67,7 +67,7 @@ impl Repo {
             &self.data,
             keys(&self.data),
         ));
-        block_on(members::add(&opened.unwrap(), invitation, role, None))
+        block_on(members::add(&opened.unwrap(), invitation, role, None, None))
     }
 }
 

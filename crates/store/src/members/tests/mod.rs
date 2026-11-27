@@ -6,8 +6,11 @@
 mod add;
 mod list;
 mod remove;
+mod retag;
 mod role_file;
 mod roles;
+mod tagged;
+mod tags;
 
 use std::fs;
 use std::future::Future;
@@ -18,7 +21,10 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 use crate::data_dir::{DataDir, Platform};
-use crate::space::DeviceKeys;
+use crate::members::{self, Member, MemberError};
+use crate::opened::{self, Opened};
+use crate::space::{init, DeviceKeys};
+use crate::testing;
 
 /// Runs `future` to completion on this thread. A database without a relay does no I/O that
 /// needs a runtime.
@@ -60,6 +66,83 @@ pub(super) fn data_dir(path: &Path) -> DataDir {
 /// The device's keys in a file in the data directory: the test machine has no key store.
 pub(super) fn keys(data: &DataDir) -> DeviceKeys {
     DeviceKeys::File(data.root().join("device.keys"))
+}
+
+/// A repository with its space, the device's data directory and the space's id.
+pub(super) struct Repo {
+    pub base: PathBuf,
+    pub data: DataDir,
+    pub space: String,
+}
+
+impl Repo {
+    pub fn new(test: &str) -> Repo {
+        let base = scratch(test);
+        let data = data_dir(&base.join("data"));
+        let space = block_on(init(&base.join("repo"), &data, keys(&data)))
+            .unwrap()
+            .space;
+        role_files(&base.join("repo"), &["pm", "coder"]);
+        Repo { base, data, space }
+    }
+
+    pub fn repo(&self) -> PathBuf {
+        self.base.join("repo")
+    }
+
+    /// The repository's spaces, open as the device's member.
+    pub fn opened(&self) -> Opened {
+        block_on(opened::repository(
+            &self.repo(),
+            &self.data,
+            keys(&self.data),
+        ))
+        .unwrap()
+    }
+
+    /// The invitation of a new agent paired into the device's account, in `name/`.
+    pub fn agent(&self, name: &str) -> String {
+        block_on(testing::paired_agent(
+            &self.data,
+            keys(&self.data),
+            &self.base.join(name),
+        ))
+    }
+
+    pub fn list(&self) -> Vec<Member> {
+        block_on(members::list(&self.opened())).unwrap()
+    }
+
+    pub fn add(
+        &self,
+        invitation: &str,
+        role: &str,
+        ticket: Option<&str>,
+    ) -> Result<Member, MemberError> {
+        block_on(members::add(&self.opened(), invitation, role, ticket, None))
+    }
+
+    /// Adds with `--tag tag`.
+    pub fn add_tagged(
+        &self,
+        invitation: &str,
+        role: &str,
+        tag: &str,
+    ) -> Result<Member, MemberError> {
+        block_on(members::add(
+            &self.opened(),
+            invitation,
+            role,
+            None,
+            Some(tag),
+        ))
+    }
+}
+
+impl Drop for Repo {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.base);
+    }
 }
 
 /// Writes `factory/roles/<role>.md` for each of `roles` in the repository at `repo`: a session's

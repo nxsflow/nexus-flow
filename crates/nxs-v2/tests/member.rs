@@ -70,6 +70,8 @@ fn row(member: &Member) -> Value {
         "role": member.role,
         "ticket": member.ticket.map(|t| t.to_string()),
         "parent": member.parent,
+        "tag": member.tag,
+        "tag_shared": member.tag_shared,
         "account": member.account,
     })
 }

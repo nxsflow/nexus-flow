@@ -9,7 +9,11 @@ pub mod merge_gate;
 pub use engine::{set_relay, Engine, Error, Options};
 pub use init::{init, init_with};
 pub use nexus_flow_store::config::{ConfigError, Problem};
+pub use nexus_flow_store::coordination::{JoinError, JoinReport};
 pub use nexus_flow_store::data_dir::{DataDir, DataDirError, Platform};
+pub use nexus_flow_store::decisions::{
+    Decision, DecisionError, Linked, NewDecision, Subject, SubjectKind,
+};
 pub use nexus_flow_store::device::{NotARelayUrl, RelayUrl, SettingsError};
 pub use nexus_flow_store::id::{NotASessionId, NotASpaceId, SessionId, SpaceId};
 pub use nexus_flow_store::member_select::SessionVarError;
