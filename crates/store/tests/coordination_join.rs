@@ -2,7 +2,8 @@
 //! "Creating and finding a space"; "Spaces": a repository belongs to at most one coordination
 //! space). It writes `[space] coordination` into a file that names none, leaving the rest of the
 //! file as the team wrote it; joining the same space again writes nothing; and a file that already
-//! names another coordination space is refused and left byte for byte as it was.
+//! names another coordination space, or that nxs cannot add the line to, is refused and left byte
+//! for byte as it was.
 
 mod common;
 
@@ -121,7 +122,10 @@ fn joining_the_repository_space_as_coordination_is_refused() {
     let err = join(&repo, id(REPOSITORY)).unwrap_err();
 
     assert!(matches!(err, JoinError::OwnSpace { .. }), "{err:?}");
-    assert_eq!(fs::read_to_string(repo.join("nexus-flow.toml")).unwrap(), FILE);
+    assert_eq!(
+        fs::read_to_string(repo.join("nexus-flow.toml")).unwrap(),
+        FILE
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -134,5 +138,23 @@ fn joining_outside_a_repository_is_refused() {
 
     assert!(matches!(err, JoinError::Root(_)), "{err:?}");
     assert!(!repo.join("nexus-flow.toml").exists());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_layout_without_a_space_header_is_refused_and_left_as_it_was() {
+    let base = scratch("join-inline");
+    let repo = base.join("repo");
+    let file = format!("format = 1\nspace = {{ repository = \"{REPOSITORY}\" }}\n");
+    fs::write(repo.join("nexus-flow.toml"), &file).unwrap();
+
+    let err = join(&repo, id(COORDINATION)).unwrap_err();
+
+    assert!(matches!(err, JoinError::CannotPlace { .. }), "{err:?}");
+    assert!(err.to_string().contains(COORDINATION), "{err}");
+    assert_eq!(
+        fs::read_to_string(repo.join("nexus-flow.toml")).unwrap(),
+        file
+    );
     fs::remove_dir_all(&base).unwrap();
 }
