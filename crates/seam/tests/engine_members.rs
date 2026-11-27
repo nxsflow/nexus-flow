@@ -15,6 +15,8 @@ fn an_engine_adds_lists_and_removes_a_member_with_its_role_record() {
     let base = scratch("engine-members");
     let setup = options(&base.join("data"));
     block_on(init(&base.join("repo"), &setup.data, setup.keys.clone())).unwrap();
+    fs::create_dir_all(base.join("repo/factory/roles")).unwrap();
+    fs::write(base.join("repo/factory/roles/pm.md"), "# pm\n").unwrap();
     let invitation = block_on(testing::paired_agent(
         &setup.data,
         setup.keys.clone(),
