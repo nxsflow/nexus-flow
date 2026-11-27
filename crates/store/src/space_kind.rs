@@ -2,8 +2,8 @@
 //! of space.**). nexus-flow's one model declares every collection of every module, so NoCentralDB
 //! would let any of them be written into any space; the store refuses a write of a collection
 //! into a space of a kind the table does not name for it. The module RFCs say which kind each
-//! collection belongs in: tickets, decisions and status notes in the repository space (RFC 0002,
-//! RFC 0003, RFC 0007), goals and requests in the coordination space (RFC 0005, RFC 0009), and
+//! collection belongs in: tickets, decisions, status notes and the move's runs and records in the
+//! repository space (RFC 0002, RFC 0003, RFC 0007, RFC 0008), goals and requests in the coordination space (RFC 0005, RFC 0009), and
 //! in an ad-hoc space only copies of requests (RFC 0009, "Members and roles"). `spaceMember`,
 //! the frame's own, goes into every space nexus-flow adds members to through `nxs member add`:
 //! the repository and the coordination space.
@@ -45,10 +45,26 @@ impl SpaceKind {
 }
 
 /// Every collection of the model, with the kinds of space it may be written into.
-pub const KINDS: &[(&str, &[SpaceKind])] = &[(
-    "spaceMember",
-    &[SpaceKind::Repository, SpaceKind::Coordination],
-)];
+pub const KINDS: &[(&str, &[SpaceKind])] = &[
+    (
+        "spaceMember",
+        &[SpaceKind::Repository, SpaceKind::Coordination],
+    ),
+    ("ticketsTicket", &[SpaceKind::Repository]),
+    ("ticketsNote", &[SpaceKind::Repository]),
+    ("ticketsWork", &[SpaceKind::Repository]),
+    ("ticketsReference", &[SpaceKind::Repository]),
+    ("decisionsDecision", &[SpaceKind::Repository]),
+    ("decisionsTopic", &[SpaceKind::Repository]),
+    ("decisionsSubject", &[SpaceKind::Repository]),
+    ("decisionsSupersession", &[SpaceKind::Repository]),
+    ("goalsGoal", &[SpaceKind::Coordination]),
+    ("migrationRun", &[SpaceKind::Repository]),
+    ("migrationRecord", &[SpaceKind::Repository]),
+    ("statusNote", &[SpaceKind::Repository]),
+    ("statusItem", &[SpaceKind::Repository]),
+    ("statusGoal", &[SpaceKind::Repository]),
+];
 
 /// Why a write was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]

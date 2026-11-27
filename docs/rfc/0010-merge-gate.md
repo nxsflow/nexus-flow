@@ -258,7 +258,7 @@ GENESIS.md reserves these for the owner:
 
 - **Commands:** `nxs merge-gate rules [--base <ref>]` and `nxs merge-gate decide --base <sha> --head <sha> [--comments <file> | --verdict <file>] [--reviews <file>]`, both with `--md`. The noun is `merge-gate`, not `gate`, because "gate" already names CI's gate command in a factory's CONFIG.md.
 - **JSON output** of `nxs merge-gate rules`: `base`, `readable`, `default`, `owners`, `verdict_authors`, `rules` (each with `id`, `effect`, `source`, `text`), `errors` (each with `source`, `code`, and `rule` where it concerns one), with the error codes above. Of `nxs merge-gate decide`: `base`, `head`, `decision`, `reasons` (each with `code` and, by code, `errors`, `detail`, `paths`, `by`, `rule`, `reason`, `rules`), `owner_approved`, `status`, `description`.
-- **Library seam:** `Engine::merge_gate_rules(base: &str)`, returning the rules report, and `Engine::merge_gate_decide(base: &str, head: &str, comments: Option<&[u8]>, verdict: Option<&[u8]>, reviews: Option<&[u8]>)`, returning the decision report: the counterparts of the commands (the decision on CLI and library parity stays in force).
+- **Library seam:** `Engine::merge_gate_rules(repository: &Path, base: Option<&str>)`, returning the rules report, where `None` reads the branch `[git] base` names, as the command does without `--base`; and `Engine::merge_gate_decide(repository: &Path, base: &str, head: &str, comments: Option<&[u8]>, verdict: Option<&[u8]>, reviews: Option<&[u8]>)`, returning the decision report: the counterparts of the commands (the decision on CLI and library parity stays in force). Both are associated functions that take the repository and open no NoCentralDB database, as the commands open none (see "Decisions").
 - **Stored formats:** `factory/merge-gate/gate.toml` (format 1: `format`, `default`, `owners`, `verdict_authors`, `[[rule]]` with `id`, `effect`, `text`); the GENESIS rule ids `genesis.<n>`; the verdict's format 1 and `factory/merge-gate/verdict.schema.json`; the verdict comment, with the mark `<!-- nexus-flow: merge-gate-verdict -->` and a fenced `json` block; `factory/merge-gate/prompt.md` and `factory/merge-gate/github-workflow.yml` as shipped files.
 - **Forge surface:** the commit status context `merge-gate` and its states `success` and `pending`; the comments and reviews inputs in GitHub's formats.
 
@@ -294,7 +294,12 @@ For this repository, the gate takes effect in steps that each change a path unde
 
 None. The owner answered them on 2026-11-20 (NEX-75, NEX-76, NEX-77), and the answers are written into the text above.
 
+## Decisions
+
+- **The merge-gate seam functions take the repository and open no database** ("Public surfaces this RFC brings"). Decided by the owner on 2026-11-25 (NEX-232). Why: the commands open no NoCentralDB database and run in CI, where there is no key store, so a method on an open `Engine` could not serve CI; an associated function with the inputs the command really has keeps CLI and library giving the same bytes, as `Engine::sync_status` does (NEX-102). *Not taken:* free functions outside `Engine`, after the `init` precedent; methods on an open `Engine`, as first written.
+
 ## History
 
 - 2026-11-20: published as a draft in #171.
 - 2026-11-20: decided by the owner (NEX-75, NEX-76, NEX-77), in #171.
+- 2026-11-25: the owner's answer to NEX-232 (the seam functions take the repository and open no database) written into the text.

@@ -2,9 +2,13 @@
 //! `{"error":{"kind":"<code>","msg":"<message>"}}` on stdout with exit code 1, where `kind` is a
 //! stable code an agent matches on and `msg` is for a person. With `--md`, `error: <msg>` goes to
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
-//! `timeout` (NEX-102), and `retired_entry_point` (RFC 0008, NEX-191).
+//! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99), and
+//! a retired v1 entry point is `retired_entry_point` (RFC 0008, NEX-191).
 
-use nexus_flow_seam::{ConfigError, DataDirError, Error, InitError, Problem, RootError, SyncError};
+use nexus_flow_seam::merge_gate::GitError;
+use nexus_flow_seam::{
+    ConfigError, DataDirError, Error, InitError, MemberError, Problem, RootError, SyncError,
+};
 
 use crate::output::Format;
 use crate::Outcome;
@@ -24,6 +28,10 @@ pub enum Kind {
     NoKeyStore,
     /// `nxs sync --timeout` passed while something was still behind or unconfirmed (NEX-102).
     Timeout,
+    /// This member may not do it, such as a member that is not an admin adding or removing one.
+    Forbidden,
+    /// What the command names does not exist, such as a member that is not one.
+    NotFound,
     /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
     RetiredEntryPoint,
 }
@@ -37,6 +45,8 @@ impl Kind {
             Kind::Io => "io",
             Kind::NoKeyStore => "no_key_store",
             Kind::Timeout => "timeout",
+            Kind::Forbidden => "forbidden",
+            Kind::NotFound => "not_found",
             Kind::RetiredEntryPoint => "retired_entry_point",
         }
     }
@@ -100,6 +110,12 @@ impl From<Error> for CliError {
             Error::Sync(SyncError::TimedOut(_)) => Kind::Timeout,
             Error::Sync(SyncError::NoRelay) => Kind::Validation,
             Error::Sync(SyncError::Open(open)) => open_kind(open),
+            // nxs opens a repository, which always has a checkout.
+            Error::NoCheckout => Kind::Validation,
+            Error::Install(_) => Kind::Io,
+            Error::Member(member) => member_kind(member),
+            Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
+            Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
         CliError { kind, msg }
     }
@@ -121,5 +137,23 @@ fn open_kind(e: &InitError) -> Kind {
         InitError::Database { .. } => Kind::Io,
         // NXS_SESSION names a session that is not running on this device: a setting nxs refuses.
         InitError::NoSession { .. } => Kind::Validation,
+    }
+}
+
+fn member_kind(e: &MemberError) -> Kind {
+    match e {
+        MemberError::NotAdmin { .. }
+        | MemberError::NotAllowed { .. }
+        | MemberError::UnknownAccount { .. } => Kind::Forbidden,
+        MemberError::AlreadyMember { .. } => Kind::Conflict,
+        MemberError::NotFound { .. } => Kind::NotFound,
+        MemberError::Database { .. } => Kind::Io,
+        MemberError::NotAnInvitation { .. }
+        | MemberError::NotAMemberId { .. }
+        | MemberError::NotATicket { .. }
+        | MemberError::EmptyRole
+        | MemberError::NotHeld { .. }
+        | MemberError::Invalid { .. }
+        | MemberError::WrongSpace(_) => Kind::Validation,
     }
 }

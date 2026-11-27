@@ -77,6 +77,7 @@ fn the_prefix_table_follows_rfc_0001() {
             (Module::Goals, "goals"),
             (Module::Requests, "requests"),
             (Module::Status, "status"),
+            (Module::Migration, "migration"),
         ]
     );
 }
@@ -90,6 +91,7 @@ fn a_name_is_its_module_prefix_and_an_upper_camel_case_name() {
         ("goalsGoal", Module::Goals),
         ("requestsRequest", Module::Requests),
         ("statusNote", Module::Status),
+        ("migrationRun", Module::Migration),
         ("ticketsTicketLink2", Module::Tickets),
     ] {
         assert!(model::is_collection_name(name, module), "{name}");

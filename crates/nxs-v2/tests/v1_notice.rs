@@ -109,3 +109,12 @@ fn an_error_beside_a_v1_workspace_keeps_its_object_and_gives_the_notice() {
     assert_eq!(common::json(&out)["error"]["kind"], "no_workspace");
     says_not_moved(&stderr(&out));
 }
+
+#[test]
+fn a_command_that_prints_its_own_outcome_gives_the_notice_too() {
+    let base = scratch("v1-notice-genesis");
+    let repo = base.join("repo");
+    v1_workspace(&repo);
+    let out = nxs(&base, &repo, &["genesis", "create"]);
+    says_not_moved(&stderr(&out));
+}

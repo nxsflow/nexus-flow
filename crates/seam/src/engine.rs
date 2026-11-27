@@ -9,6 +9,10 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
+//! An open engine adds, removes and lists the members of its spaces, each with its role record
+//! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`] and
+//! [`Engine::members`], the counterparts of `nxs member add`, `remove` and `list`.
+//!
 //! An open engine syncs through the relay the device's settings name (RFC 0001, "Sync"):
 //! [`Engine::sync`] waits until nothing is behind or unconfirmed, and [`Engine::sync_status`]
 //! reads the device's sync state from the local database without the network. [`set_relay`] sets
@@ -19,10 +23,14 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::genesis;
+use crate::install::factory::{install, Defaults, InstallError, Report};
+use nexus_flow_merge_gate::rules::GitError;
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
+use nexus_flow_store::members::{self, Member, MemberError};
 use nexus_flow_store::opened::{self, Opened};
 use nexus_flow_store::space::{DeviceKeys, InitError};
 use nexus_flow_store::sync::{self, SyncError, SyncStatus};
@@ -58,6 +66,15 @@ pub enum Error {
     Open(InitError),
     /// Sync did not finish: no relay is set, or the timeout passed.
     Sync(SyncError),
+    /// The engine was opened on a space without a checkout, so it has no `factory/` to install
+    /// into.
+    NoCheckout,
+    /// Installing the factory's defaults could not read or write a file.
+    Install(InstallError),
+    /// A member could not be added, removed or listed.
+    Member(MemberError),
+    /// The local git could not give what the merge gate reads: the base names no commit.
+    Git(GitError),
 }
 
 impl fmt::Display for Error {
@@ -67,6 +84,13 @@ impl fmt::Display for Error {
             Error::Session(e) => e.fmt(f),
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
+            Error::NoCheckout => write!(
+                f,
+                "the engine is open on a space without a checkout, so there is no factory/ to install into"
+            ),
+            Error::Install(e) => e.fmt(f),
+            Error::Member(e) => e.fmt(f),
+            Error::Git(e) => e.fmt(f),
         }
     }
 }
@@ -76,6 +100,12 @@ impl std::error::Error for Error {}
 impl From<DataDirError> for Error {
     fn from(e: DataDirError) -> Self {
         Error::DataDir(e)
+    }
+}
+
+impl From<GitError> for Error {
+    fn from(e: GitError) -> Self {
+        Error::Git(e)
     }
 }
 
@@ -97,6 +127,12 @@ impl From<SyncError> for Error {
             SyncError::Open(e) => Error::Open(e),
             e => Error::Sync(e),
         }
+    }
+}
+
+impl From<MemberError> for Error {
+    fn from(e: MemberError) -> Self {
+        Error::Member(e)
     }
 }
 
@@ -166,6 +202,31 @@ impl Engine {
         })
     }
 
+    /// Adds the member of `invitation` with the role `role`, and the ticket `ticket` it was
+    /// started on, written `<space id>/<object id>`: to the repository space, and to the
+    /// coordination space unless it is a role session or the migration member, each with its
+    /// `spaceMember` record. Returns it as [`Engine::members`] lists it. Only an admin of those
+    /// spaces adds, and a refusal changes nothing.
+    pub async fn member_add(
+        &self,
+        invitation: &str,
+        role: &str,
+        ticket: Option<&str>,
+    ) -> Result<Member, Error> {
+        Ok(members::add(&self.opened, invitation, role, ticket).await?)
+    }
+
+    /// Removes the member `member`, by its id, from every open space it is a member of, and
+    /// returns it as it was listed. Its role record stays. Only an admin removes.
+    pub async fn member_remove(&self, member: &str) -> Result<Member, Error> {
+        Ok(members::remove(&self.opened, member).await?)
+    }
+
+    /// The current members of the repository space, in member-id order, with their role records.
+    pub async fn members(&self) -> Result<Vec<Member>, Error> {
+        Ok(members::list(&self.opened).await?)
+    }
+
     /// Waits until nothing in the open spaces is behind or unconfirmed, and reports the sync
     /// state. With `timeout`, a wait that outlasts it fails with what is still behind. Without a
     /// relay it fails at once: there is nothing to sync with.
@@ -185,6 +246,27 @@ impl Engine {
         options: Options,
     ) -> Result<SyncStatus, Error> {
         Ok(sync::status(repository, &options.data, options.keys).await?)
+    }
+
+    /// Installs the factory's shipped defaults into `factory/` at the checkout's root, and
+    /// reports each shipped file's state and the factory's paths no CODEOWNERS rule covers (RFC
+    /// 0006, "Installing the shipped defaults"). A missing file gets the current default; with
+    /// `update`, an earlier default is replaced by it. Nothing else is written, nothing is
+    /// deleted or committed, and the database is not touched.
+    pub fn factory_install(&self, update: bool) -> Result<Report, Error> {
+        let checkout = self.opened.checkout().ok_or(Error::NoCheckout)?;
+        install(&checkout.path, &Defaults::embedded(), update).map_err(Error::Install)
+    }
+
+    /// Writes `factory/GENESIS.md` from the template for the repository at or above
+    /// `repository`, only where the path is free, and reports what it found (RFC 0004,
+    /// "Installing the template"). It touches only files and the local git: it opens no database,
+    /// so it takes no engine. `update` applies to the guide only, never to GENESIS.
+    pub fn genesis_create(
+        repository: &Path,
+        update: bool,
+    ) -> Result<genesis::Report, genesis::GenesisError> {
+        genesis::create(repository, update)
     }
 
     fn new(opened: Opened, options: Options) -> Self {
