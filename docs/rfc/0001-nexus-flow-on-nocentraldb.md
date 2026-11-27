@@ -89,7 +89,7 @@ A NoCentralDB member is a device, an agent or a sub-agent, each with its own key
 
 #### The role record
 
-NoCentralDB has no member names: an invitation carries a member id, its public keys and, for a device or an agent, a certificate and an account fingerprint, nothing else (NoCentralDB RFC 0003, RFC 0009). The role therefore lives in nexus-flow's own model. Each space nexus-flow uses holds a collection `spaceMember`, owned by this RFC, with one record per member nexus-flow added:
+NoCentralDB has no member names: an invitation carries a member id, its public keys and, for a device or an agent, a certificate and an account fingerprint, nothing else (NoCentralDB RFC 0003, RFC 0009). The role therefore lives in nexus-flow's own model. Each space nexus-flow uses holds a collection `spaceMember`, owned by this RFC, with one record per member nexus-flow added, and one, with role `owner`, for the device that created the space, which `nxs init` writes (decided by the owner, NEX-240; RFC 0002, "Ticket ids"):
 
 | Field | Holds |
 | --- | --- |
@@ -356,3 +356,4 @@ None. The owner answered them on 2026-11-17 (NEX-38), and the answers are writte
 - 2026-11-21: the owner's answers to NEX-211 (crates.io pin) and NEX-204 (temporary names) written into the text.
 - 2026-11-23: the owner's answer to NEX-226 (session keys in a key file) written into the text.
 - 2026-11-23: the owner's answer to NEX-227 (`Engine::subscribe`'s item type, and waiting for NoCentralDB) written into the text.
+- 2026-11-27: the owner's answer to NEX-240 (`nxs init` writes the first device's role record) written into the text, with RFC 0002.

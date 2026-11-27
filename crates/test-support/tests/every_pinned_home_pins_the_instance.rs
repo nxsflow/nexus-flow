@@ -117,7 +117,14 @@ fn runs_init(body: &str) -> bool {
 /// in-process tests run no binary and name the data directory in `Options`, and its binary tests
 /// set `NXS_DATA_DIR`, which wins over `$HOME`. Pinning a home there would also need
 /// `nxs_test_support`, a dependency that `nxs-v2` may not take without a lockfile change (NEX-212).
-const V2_INIT_SUITES: &[&str] = &["crates/nxs-v2/tests"];
+/// The seam's and the merge gate's suites (NEX-171, NEX-133) are v2's too: they link nothing of
+/// v1, and the only `init` they run is `git init`, for the scratch repositories the merge gate
+/// reads its rules from and `genesis create` checks for a tracked GENESIS.
+const V2_INIT_SUITES: &[&str] = &[
+    "crates/nxs-v2/tests",
+    "crates/seam/tests",
+    "crates/merge-gate/tests",
+];
 
 /// Does `body` reach a pinned `$HOME` at all — by any of the three sanctioned routes?
 fn reaches_a_pinned_home(body: &str) -> bool {
