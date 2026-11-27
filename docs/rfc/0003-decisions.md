@@ -252,7 +252,7 @@ In Markdown, a decision in full, as `nxs decision show` and `--full --md` print 
 | `Engine::decisions(&DecisionFilter) -> Vec<DecisionIndexLine>` | The index lines of the decisions the filter selects, with their derived state, in date order: `nxs decision list` |
 | `Engine::decisions_full(&DecisionFilter) -> Vec<Decision>` | The same decisions in full: `nxs decision list --full` |
 | `Engine::decision(&DecisionKey) -> Decision` | One decision by handle or object id; an ambiguous handle is an error that lists the matches |
-| `Engine::decisions_with_handle(&str) -> Vec<ObjectId>` | The object ids of the decisions in the local copy that carry this handle; `nxs decision add` calls it after the write and warns on stderr when another decision holds the handle (decided by the owner, NEX-237) |
+| `Engine::decisions_with_handle(&str) -> Vec<String>` | The object ids (32 lowercase hex digits, as `Decision.id`) of the decisions in the local copy that carry this handle; `nxs decision add` calls it after the write and warns on stderr when another decision holds the handle (decided by the owner, NEX-237) |
 | `Engine::rules_in_force() -> Vec<DecisionIndexLine>` | What `nxs prime` prints as its decisions part |
 
 `NewDecision`, `Decision`, `DecisionFilter` (`current`, `ticket`, `topic`, `since`), `DecisionKey` (a handle or an `ObjectId`), `DecisionIndexLine` and `Subject` are the types they take and return; their fields are the JSON fields above. The index and the full text are two symbols with two return types rather than one with a flag, so a caller's type says which it holds. Every `nxs decision` verb has its counterpart here (the decision on CLI and library parity stays in force). There is deliberately no symbol that changes or deletes a decision.
