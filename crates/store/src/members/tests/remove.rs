@@ -50,7 +50,7 @@ impl Repo {
     }
 
     fn add(&self, invitation: &str, role: &str) -> Member {
-        block_on(members::add(&self.open(), invitation, role, None)).unwrap()
+        block_on(members::add(&self.open(), invitation, role, None, None)).unwrap()
     }
 
     fn remove(&self, member: &str) -> Result<Member, MemberError> {

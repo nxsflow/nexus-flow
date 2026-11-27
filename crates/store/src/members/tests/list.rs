@@ -43,7 +43,7 @@ fn members_are_listed_in_member_id_order() {
     for name in ["a", "b", "c"] {
         let invitation = block_on(testing::paired_agent(&data, keys(&data), &base.join(name)));
         let opened = block_on(opened::repository(&base.join("repo"), &data, keys(&data)));
-        block_on(members::add(&opened.unwrap(), &invitation, "coder", None)).unwrap();
+        block_on(members::add(&opened.unwrap(), &invitation, "coder", None, None)).unwrap();
     }
     let opened = block_on(opened::repository(&base.join("repo"), &data, keys(&data))).unwrap();
 
