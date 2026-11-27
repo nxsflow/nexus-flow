@@ -51,3 +51,29 @@ fn a_refused_add_is_a_member_error() {
     );
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn an_engine_adds_with_a_tag_and_retags() {
+    let base = scratch("engine-members-retag");
+    let setup = options(&base.join("data"));
+    block_on(init(&base.join("repo"), &setup.data, setup.keys.clone())).unwrap();
+    let invitation = block_on(testing::paired_agent(
+        &setup.data,
+        setup.keys.clone(),
+        &base.join("coder"),
+    ));
+    let engine = block_on(Engine::open_with(&base.join("repo"), setup)).unwrap();
+
+    let added = block_on(engine.member_add(&invitation, "coder", None, Some("ka"))).unwrap();
+    let retagged = block_on(engine.member_retag(&added.member, "kb")).unwrap();
+    let held = block_on(engine.member_retag(&added.member, "K1")).unwrap_err();
+
+    assert_eq!(added.tag.as_deref(), Some("ka"));
+    assert_eq!(retagged.tag.as_deref(), Some("kb"));
+    assert!(block_on(engine.members()).unwrap().contains(&retagged));
+    assert!(
+        matches!(held, Error::Member(MemberError::NotATag { .. })),
+        "{held:?}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
