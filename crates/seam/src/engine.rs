@@ -23,9 +23,10 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use nexus_flow_store::data_dir::{DataDir, DataDirError};
-
+use crate::genesis;
 use crate::install::factory::{install, Defaults, InstallError, Report};
+use nexus_flow_merge_gate::rules::GitError;
+use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
@@ -72,6 +73,8 @@ pub enum Error {
     Install(InstallError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// The local git could not give what the merge gate reads: the base names no commit.
+    Git(GitError),
 }
 
 impl fmt::Display for Error {
@@ -87,6 +90,7 @@ impl fmt::Display for Error {
             ),
             Error::Install(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Git(e) => e.fmt(f),
         }
     }
 }
@@ -96,6 +100,12 @@ impl std::error::Error for Error {}
 impl From<DataDirError> for Error {
     fn from(e: DataDirError) -> Self {
         Error::DataDir(e)
+    }
+}
+
+impl From<GitError> for Error {
+    fn from(e: GitError) -> Self {
+        Error::Git(e)
     }
 }
 
@@ -246,6 +256,17 @@ impl Engine {
     pub fn factory_install(&self, update: bool) -> Result<Report, Error> {
         let checkout = self.opened.checkout().ok_or(Error::NoCheckout)?;
         install(&checkout.path, &Defaults::embedded(), update).map_err(Error::Install)
+    }
+
+    /// Writes `factory/GENESIS.md` from the template for the repository at or above
+    /// `repository`, only where the path is free, and reports what it found (RFC 0004,
+    /// "Installing the template"). It touches only files and the local git: it opens no database,
+    /// so it takes no engine. `update` applies to the guide only, never to GENESIS.
+    pub fn genesis_create(
+        repository: &Path,
+        update: bool,
+    ) -> Result<genesis::Report, genesis::GenesisError> {
+        genesis::create(repository, update)
     }
 
     fn new(opened: Opened, options: Options) -> Self {

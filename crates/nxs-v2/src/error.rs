@@ -4,6 +4,7 @@
 //! stderr instead, as v1's human output does. The codes are v1's, `no_key_store` (NEX-224) and
 //! `timeout` (NEX-102); the member commands use v1's `forbidden` and `not_found` (NEX-99).
 
+use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
     ConfigError, DataDirError, Error, InitError, MemberError, Problem, RootError, SyncError,
 };
@@ -109,6 +110,8 @@ impl From<Error> for CliError {
             Error::NoCheckout => Kind::Validation,
             Error::Install(_) => Kind::Io,
             Error::Member(member) => member_kind(member),
+            Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
+            Error::Git(GitError::Failed { .. }) => Kind::Io,
         };
         CliError { kind, msg }
     }
