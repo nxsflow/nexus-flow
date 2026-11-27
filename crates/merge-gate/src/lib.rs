@@ -3,4 +3,5 @@
 pub mod gate_toml;
 pub mod genesis_rules;
 mod git;
+mod markdown;
 pub mod rules;

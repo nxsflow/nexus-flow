@@ -5,8 +5,10 @@
 //! that reads exactly `<!-- nexus-flow: owner-rules -->` apart from surrounding whitespace. Each
 //! top-level item of that list is one rule, with the effect `owner` and the id `genesis.<n>`.
 
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use std::ops::Range;
+
+use crate::markdown::{fences, mark_lines, next_non_blank_line};
 
 /// The line that marks the list of rules.
 pub const MARK: &str = "<!-- nexus-flow: owner-rules -->";
@@ -61,37 +63,14 @@ pub fn read_genesis_rules(genesis: Option<&str>) -> Result<Vec<GenesisRule>, Gen
         .collect())
 }
 
-/// The byte ranges of the fenced code blocks, their fences included.
-fn fences(events: &[(Event, Range<usize>)]) -> Vec<Range<usize>> {
-    events
-        .iter()
-        .filter(|(event, _)| {
-            matches!(
-                event,
-                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
-            )
-        })
-        .map(|(_, range)| range.clone())
-        .collect()
-}
-
 /// The offset just after the line that is the mark, the one such line outside `fences`.
 fn mark_end(source: &str, fences: &[Range<usize>]) -> Result<usize, GenesisError> {
-    let mut marks = lines(source).filter(|line| {
-        source[line.clone()].trim() == MARK && !fences.iter().any(|f| f.contains(&line.start))
-    });
+    let mut marks = mark_lines(source, fences, MARK);
     let mark = marks.next().ok_or(GenesisError::MarkMissing)?;
     match marks.next() {
         Some(_) => Err(GenesisError::MarkDoubled),
         None => Ok(mark.end),
     }
-}
-
-/// The first line from `from` on that holds more than whitespace.
-fn next_non_blank_line(source: &str, from: usize) -> Option<Range<usize>> {
-    lines(&source[from..])
-        .map(|line| line.start + from..line.end + from)
-        .find(|line| !source[line.clone()].trim().is_empty())
 }
 
 /// The ranges of the top-level items of the list that starts on `line`, each from its marker to
@@ -124,15 +103,6 @@ fn top_level_items(
             .map(|(s, e)| s..e)
             .collect(),
     )
-}
-
-/// The byte range of each line, its line ending included.
-fn lines(source: &str) -> impl Iterator<Item = Range<usize>> + '_ {
-    source.split_inclusive('\n').scan(0, |start, line| {
-        let range = *start..*start + line.len();
-        *start = range.end;
-        Some(range)
-    })
 }
 
 /// An item's text: its source without the list marker, a bullet or a number with its `.` or `)`,
