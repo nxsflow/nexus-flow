@@ -126,13 +126,16 @@ fn the_frame_roles_need_no_file() {
 #[test]
 fn a_file_named_after_a_frame_role_is_not_a_role() {
     let repo = Repo::new("member-role-file-frame-file");
-    role_files(&repo.repo(), &["owner", "developer", "app", "migration", "pm"]);
+    role_files(
+        &repo.repo(),
+        &["owner", "developer", "app", "migration", "pm"],
+    );
 
     for frame in ["owner", "developer", "app", "migration"] {
-        assert_eq!(role_file(&repo.repo(), frame), Ok(None), "{frame}");
+        assert_eq!(role_file(Some(&repo.repo()), frame), Ok(None), "{frame}");
     }
     assert_eq!(
-        role_file(&repo.repo(), "pm"),
+        role_file(Some(&repo.repo()), "pm"),
         Ok(Some(repo.repo().join("factory/roles/pm.md")))
     );
 }
@@ -160,7 +163,7 @@ fn a_role_that_is_no_role_name_is_refused_even_with_a_file_of_its_name() {
     assert_eq!(repo.list(), before);
     let longest = format!("a{}", "b".repeat(62));
     role_files(&repo.repo(), &[&longest]);
-    assert!(role_file(&repo.repo(), &longest).unwrap().is_some());
+    assert!(role_file(Some(&repo.repo()), &longest).unwrap().is_some());
 }
 
 #[test]

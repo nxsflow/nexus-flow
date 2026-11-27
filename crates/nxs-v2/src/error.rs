@@ -150,6 +150,7 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::EmptyRole
         | MemberError::NotARoleName { .. }
         | MemberError::NoRoleFile { .. }
+        | MemberError::NoWorkingTree { .. }
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,

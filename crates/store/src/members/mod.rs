@@ -120,6 +120,8 @@ pub enum MemberError {
     EmptyRole,
     /// A session's role does not match `^[a-z][a-z0-9-]{0,62}$`.
     NotARoleName { role: String },
+    /// A session's role cannot be checked: the database is open on a space without a checkout.
+    NoWorkingTree { role: String },
     /// A session's role names no file in `factory/roles/` of the working tree.
     NoRoleFile { role: String, path: PathBuf },
     /// A space the change needs is named but not held yet: this database has not synced it.
@@ -162,6 +164,10 @@ impl fmt::Display for MemberError {
             MemberError::NotARoleName { role } => write!(
                 f,
                 "{role:?} is not a role name: one matches ^[a-z][a-z0-9-]{{0,62}}$"
+            ),
+            MemberError::NoWorkingTree { role } => write!(
+                f,
+                "the role {role} names a file in factory/roles/, and this space was opened without a checkout to read it from"
             ),
             MemberError::NoRoleFile { role, path } => write!(
                 f,
@@ -248,9 +254,7 @@ pub async fn add(
     if role.is_empty() {
         return Err(MemberError::EmptyRole);
     }
-    if let Some(checkout) = opened.checkout() {
-        role_file::role_file(&checkout.path, role)?;
-    }
+    role_file::role_file(opened.checkout().map(|c| c.path.as_path()), role)?;
     let ticket = ticket.map(str::parse::<TicketRef>).transpose()?;
     let targets = targets(opened, role)?;
     for (_, space, _) in &targets {

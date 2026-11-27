@@ -12,7 +12,9 @@ const FRAME_ROLES: [&str; 4] = ["owner", "developer", "app", "migration"];
 
 /// The role file of `role` in the working tree at `root`: `None` for a role of the frame, even
 /// when a file of its name exists, and refused when a session's role is no role name or has none.
-pub(super) fn role_file(root: &Path, role: &str) -> Result<Option<PathBuf>, MemberError> {
+/// Without a working tree (`root` is `None`), a session's role is refused: there is no file to
+/// find.
+pub(super) fn role_file(root: Option<&Path>, role: &str) -> Result<Option<PathBuf>, MemberError> {
     if FRAME_ROLES.contains(&role) {
         return Ok(None);
     }
@@ -21,7 +23,15 @@ pub(super) fn role_file(root: &Path, role: &str) -> Result<Option<PathBuf>, Memb
             role: role.to_owned(),
         });
     }
-    let path = root.join("factory").join("roles").join(format!("{role}.md"));
+    let Some(root) = root else {
+        return Err(MemberError::NoWorkingTree {
+            role: role.to_owned(),
+        });
+    };
+    let path = root
+        .join("factory")
+        .join("roles")
+        .join(format!("{role}.md"));
     if path.is_file() {
         Ok(Some(path))
     } else {
