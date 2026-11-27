@@ -6,6 +6,7 @@
 mod add;
 mod list;
 mod remove;
+mod role_file;
 mod roles;
 
 use std::fs;
@@ -59,4 +60,14 @@ pub(super) fn data_dir(path: &Path) -> DataDir {
 /// The device's keys in a file in the data directory: the test machine has no key store.
 pub(super) fn keys(data: &DataDir) -> DeviceKeys {
     DeviceKeys::File(data.root().join("device.keys"))
+}
+
+/// Writes `factory/roles/<role>.md` for each of `roles` in the repository at `repo`: a session's
+/// role names a role file (RFC 0006, "The factory's files").
+pub(super) fn role_files(repo: &Path, roles: &[&str]) {
+    let dir = repo.join("factory/roles");
+    fs::create_dir_all(&dir).unwrap();
+    for role in roles {
+        fs::write(dir.join(format!("{role}.md")), format!("# {role}\n")).unwrap();
+    }
 }

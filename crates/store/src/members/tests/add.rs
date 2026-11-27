@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::{block_on, data_dir, keys, scratch};
+use super::{block_on, data_dir, keys, role_files, scratch};
 use crate::config::Config;
 use crate::data_dir::DataDir;
 use crate::members::{self, Member, MemberError, MemberKind};
@@ -27,6 +27,7 @@ impl Repo {
         let space = block_on(init(&base.join("repo"), &data, keys(&data)))
             .unwrap()
             .space;
+        role_files(&base.join("repo"), &["pm", "coder"]);
         Repo { base, data, space }
     }
 

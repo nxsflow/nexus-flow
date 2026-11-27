@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use super::{block_on, data_dir, keys, scratch};
+use super::{block_on, data_dir, keys, role_files, scratch};
 use crate::members::{self, MemberKind};
 use crate::opened;
 use crate::space::init;
@@ -40,6 +40,7 @@ fn members_are_listed_in_member_id_order() {
     let base = scratch("member-list-order");
     let data = data_dir(&base.join("data"));
     block_on(init(&base.join("repo"), &data, keys(&data))).unwrap();
+    role_files(&base.join("repo"), &["coder"]);
     for name in ["a", "b", "c"] {
         let invitation = block_on(testing::paired_agent(&data, keys(&data), &base.join(name)));
         let opened = block_on(opened::repository(&base.join("repo"), &data, keys(&data)));
