@@ -29,7 +29,8 @@ const PAGE: usize = 1000;
 /// What a member's record holds besides its member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Record {
-    pub role: String,
+    /// `None` for a record only `nxs member retag` wrote, for a member nexus-flow did not add.
+    pub role: Option<String>,
     pub ticket: Option<TicketRef>,
     /// The member's ticket tag as written; `None` when it has none.
     pub tag: Option<String>,
@@ -48,7 +49,7 @@ pub(crate) async fn read(
     let ticket: Option<Reference> = object.get("ticket")?;
     let tag: Option<&str> = object.get("tag")?;
     Ok(Some(Record {
-        role: role.unwrap_or_default().to_owned(),
+        role: role.map(str::to_owned),
         ticket: ticket.map(|r| TicketRef {
             space: SpaceId(r.space),
             object: r.id,
@@ -119,6 +120,31 @@ pub(crate) async fn write(
                 let member = Value::from(member.to_string());
                 let values = std::iter::once(("member", member)).chain(values);
                 w.create(COLLECTION, values).map(|_| ())
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// Sets the tag of `member`'s record in the open space `id` to `tag`, keeping the rest of it; a
+/// member without a record, such as the device that created the space, gets one with its member
+/// and tag only.
+pub(crate) async fn set_tag(
+    opened: &Opened,
+    id: &SpaceId,
+    space: &Space,
+    member: MemberId,
+    tag: &Tag,
+) -> Result<(), MemberError> {
+    let existing = find(opened.db(), space, member).await?.map(|o| o.id());
+    let tag = Value::from(tag.as_str());
+    opened
+        .write(id, |w| match existing {
+            Some(object) => w.update(COLLECTION, object, [("tag", tag)]),
+            None => {
+                let member = Value::from(member.to_string());
+                w.create(COLLECTION, [("member", member), ("tag", tag)])
+                    .map(|_| ())
             }
         })
         .await?;

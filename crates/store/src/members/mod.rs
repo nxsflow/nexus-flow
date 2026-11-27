@@ -33,10 +33,12 @@ use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
 mod record;
+mod retag;
 mod roles;
 pub mod tags;
 mod taken;
 
+pub use retag::retag;
 pub use roles::{space_role, SpaceRole};
 
 use tags::Tag;
@@ -315,6 +317,21 @@ pub async fn add(
 /// Removes `member` from every open space it is a member of, and returns it as the first of
 /// them listed it. Its `spaceMember` records stay.
 pub async fn remove(opened: &Opened, member: &str) -> Result<Member, MemberError> {
+    let (id, spaces) = spaces_of(opened, member).await?;
+    let (_, first) = spaces[0];
+    let removed = listed(opened.db(), first, id).await?;
+    for (_, space) in &spaces {
+        space.members().remove(id).await?;
+    }
+    Ok(removed)
+}
+
+/// The member id `member` and the open spaces it is a current member of, at least one, after
+/// checking that this member is an admin of each.
+pub(crate) async fn spaces_of<'a>(
+    opened: &'a Opened,
+    member: &str,
+) -> Result<(MemberId, Vec<(SpaceId, &'a Space)>), MemberError> {
     let id: MemberId = member.parse().map_err(|_| MemberError::NotAMemberId {
         text: member.to_owned(),
     })?;
@@ -325,19 +342,15 @@ pub async fn remove(opened: &Opened, member: &str) -> Result<Member, MemberError
             spaces.push((*space_id, space));
         }
     }
-    let Some(&(_, first)) = spaces.first() else {
+    if spaces.is_empty() {
         return Err(MemberError::NotFound {
             member: member.to_owned(),
         });
-    };
+    }
     for (_, space) in &spaces {
         admin(space).await?;
     }
-    let removed = listed(opened.db(), first, id).await?;
-    for (_, space) in &spaces {
-        space.members().remove(id).await?;
-    }
-    Ok(removed)
+    Ok((id, spaces))
 }
 
 /// The current members of the repository space, in member-id order, with their records. A
@@ -372,7 +385,7 @@ pub(crate) async fn list_in(db: &Db, space: &Space) -> Result<Vec<Member>, Membe
 }
 
 /// `text` as a tag.
-fn parse_tag(text: &str) -> Result<Tag, MemberError> {
+pub(crate) fn parse_tag(text: &str) -> Result<Tag, MemberError> {
     text.parse().map_err(|_| MemberError::NotATag {
         text: text.to_owned(),
     })
@@ -427,7 +440,7 @@ async fn admin(space: &Space) -> Result<(), MemberError> {
 }
 
 /// The ids of the current members of `space`.
-async fn ids(space: &Space) -> Result<Vec<MemberId>, MemberError> {
+pub(crate) async fn ids(space: &Space) -> Result<Vec<MemberId>, MemberError> {
     Ok(space
         .members()
         .list()
@@ -450,16 +463,12 @@ async fn new_member(space: &Space, before: &[MemberId]) -> Result<MemberId, Memb
 
 /// `member` as `space` lists it, with its record.
 async fn listed(db: &Db, space: &Space, member: MemberId) -> Result<Member, MemberError> {
-    let info = space
-        .members()
-        .list()
+    let member = member.to_string();
+    list_in(db, space)
         .await?
         .into_iter()
-        .find(|m| m.id == member)
-        .ok_or_else(|| MemberError::NotFound {
-            member: member.to_string(),
-        })?;
-    self::member(db, space, &info).await
+        .find(|m| m.member == member)
+        .ok_or(MemberError::NotFound { member })
 }
 
 /// The member `info` describes, with its record in `space`.
@@ -468,7 +477,7 @@ async fn member(db: &Db, space: &Space, info: &MemberInfo) -> Result<Member, Mem
     Ok(Member {
         member: info.id.to_string(),
         kind: kind(info.kind),
-        role: record.as_ref().map(|r| r.role.clone()),
+        role: record.as_ref().and_then(|r| r.role.clone()),
         ticket: record.as_ref().and_then(|r| r.ticket),
         parent: None,
         tag: record.and_then(|r| r.tag),

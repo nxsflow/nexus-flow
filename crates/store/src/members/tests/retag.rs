@@ -100,7 +100,10 @@ fn each_refusal_of_retag_changes_nothing() {
     assert!(matches!(freed, MemberError::TagFreed { .. }), "{freed:?}");
     assert!(matches!(bad, MemberError::NotATag { .. }), "{bad:?}");
     assert!(matches!(gone, MemberError::NotFound { .. }), "{gone:?}");
-    assert!(matches!(no_id, MemberError::NotAMemberId { .. }), "{no_id:?}");
+    assert!(
+        matches!(no_id, MemberError::NotAMemberId { .. }),
+        "{no_id:?}"
+    );
     assert_eq!(repo.list(), before);
     assert_eq!(find(&before, &first.member).tag.as_deref(), Some("ka"));
 }
