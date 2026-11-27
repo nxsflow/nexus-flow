@@ -7,6 +7,7 @@ mod add;
 mod list;
 mod remove;
 mod roles;
+mod tags;
 
 use std::fs;
 use std::future::Future;
