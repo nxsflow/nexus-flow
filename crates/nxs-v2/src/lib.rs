@@ -49,6 +49,9 @@ enum Command {
     Sync(cmd::sync::SyncArgs),
     /// Read the merge gate's rules from the base commit.
     MergeGate(cmd::merge_gate::MergeGateArgs),
+    /// Write the repository's GENESIS from the template, only where none exists.
+    #[command(subcommand)]
+    Genesis(cmd::genesis::GenesisCommand),
 }
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
@@ -77,6 +80,7 @@ where
         Command::MergeGate(args) => {
             cmd::merge_gate::run(dir, args).map(|r| (format.render(&r), r.code()))
         }
+        Command::Genesis(command) => return cmd::genesis::run(dir, command, format),
     };
     match result {
         Ok((stdout, code)) => Outcome {
