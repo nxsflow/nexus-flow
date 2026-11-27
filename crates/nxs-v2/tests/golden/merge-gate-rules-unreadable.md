@@ -1,0 +1,5 @@
+- the rules at `0dbc9a1184910126e1f7cc2f3519e3b924d91124` cannot be read, so the gate sends every pull request to the owner
+- `factory/GENESIS.md`: `mark_missing`
+- `factory/merge-gate/gate.toml`: `verdict_authors_empty`
+- `factory/merge-gate/gate.toml`: `effect_invalid`, rule `a`
+- `factory/merge-gate/gate.toml`: `rule_id_invalid`, rule 2
