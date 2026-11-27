@@ -1,11 +1,10 @@
 //! The tags in use in the spaces a member is added to (RFC 0002, "Ticket ids"), and the tag the
 //! new member gets.
 //!
-//! A tag is **held** while a current member's record carries it, and **freed** once only removed
-//! members' records carry it. RFC 0002 lets a freed tag pass on, and the owner put the guard on
-//! that at minting (NEX-236). Until NEX-244 lifts it, a freed tag is neither picked nor taken by
-//! `--tag`. The one exception is a member added again: it gets its own tag back, since the keys
-//! with it are its own.
+//! A tag is **held** while a current member's record carries it, and **free** otherwise, a tag
+//! only removed members' records carry included: RFC 0002 lets a freed tag pass on, and the guard
+//! on that sits at minting (NEX-236). A member added again gets its own tag back when no current
+//! member holds it, since the keys with it are its own.
 
 use std::collections::BTreeSet;
 
@@ -14,11 +13,10 @@ use nocentraldb::{Db, MemberId, Space};
 use super::tags::{self, Tag};
 use super::{ids, record, MemberError};
 
-/// The tags held and freed in one or more spaces.
+/// The tags current members hold in one or more spaces.
 #[derive(Debug, Default)]
 pub(crate) struct Taken {
     held: BTreeSet<Tag>,
-    freed: BTreeSet<Tag>,
 }
 
 impl Taken {
@@ -28,41 +26,31 @@ impl Taken {
         spaces: impl IntoIterator<Item = &'a Space>,
     ) -> Result<Taken, MemberError> {
         let mut taken = Taken::default();
-        let mut gone = BTreeSet::new();
         for space in spaces {
             let current: BTreeSet<String> =
                 ids(space).await?.iter().map(MemberId::to_string).collect();
             for (member, tag) in record::tags(db, space).await? {
-                let Some(tag) = tag else { continue };
-                if current.contains(&member) {
+                if let (Some(tag), true) = (tag, current.contains(&member)) {
                     taken.held.insert(tag);
-                } else {
-                    gone.insert(tag);
                 }
             }
         }
-        taken.freed = gone.difference(&taken.held).copied().collect();
         Ok(taken)
     }
 
-    /// Refuses `tag` when it is held or freed.
+    /// Refuses `tag` when a current member holds it.
     pub(crate) fn check(&self, tag: Tag) -> Result<(), MemberError> {
         if self.held.contains(&tag) {
             return Err(MemberError::TagHeld {
                 tag: tag.to_string(),
             });
         }
-        if self.freed.contains(&tag) {
-            return Err(MemberError::TagFreed {
-                tag: tag.to_string(),
-            });
-        }
         Ok(())
     }
 
-    /// Refuses when no tag is free.
+    /// Refuses when current members hold every tag.
     pub(crate) fn any_free(&self) -> Result<(), MemberError> {
-        if self.held.len() + self.freed.len() >= tags::all().count() {
+        if self.held.len() >= tags::all().count() {
             return Err(MemberError::NoFreeTag);
         }
         Ok(())
@@ -84,8 +72,7 @@ impl Taken {
                 return Ok(own);
             }
         }
-        let taken: BTreeSet<Tag> = self.held.union(&self.freed).copied().collect();
-        tags::pick(&taken, &seed(member)).ok_or(MemberError::NoFreeTag)
+        tags::pick(&self.held, &seed(member)).ok_or(MemberError::NoFreeTag)
     }
 }
 
