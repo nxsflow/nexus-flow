@@ -243,7 +243,7 @@ fn read_decision(
             return Ok(None);
         }
     };
-    if !is_file(root, base, path)? {
+    if !is_plain_relative(path) || !is_file(root, base, path)? {
         problems.push(format!(
             "rule {rule}: the decision's path {path} is not a file at the base commit"
         ));
@@ -253,4 +253,13 @@ fn read_decision(
         path: path.to_string(),
         section,
     }))
+}
+
+/// Whether `path` is relative to the repository's root and stays inside it: no leading `/`, and no
+/// empty, `.` or `..` part.
+fn is_plain_relative(path: &str) -> bool {
+    !path.starts_with('/')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
