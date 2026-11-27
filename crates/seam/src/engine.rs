@@ -24,6 +24,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::genesis;
+use nexus_flow_merge_gate::rules::GitError;
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
 use nexus_flow_store::id::{SessionId, SpaceId};
@@ -66,6 +67,8 @@ pub enum Error {
     Sync(SyncError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
+    /// The local git could not give what the merge gate reads: the base names no commit.
+    Git(GitError),
 }
 
 impl fmt::Display for Error {
@@ -76,6 +79,7 @@ impl fmt::Display for Error {
             Error::Open(e) => e.fmt(f),
             Error::Sync(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
+            Error::Git(e) => e.fmt(f),
         }
     }
 }
@@ -85,6 +89,12 @@ impl std::error::Error for Error {}
 impl From<DataDirError> for Error {
     fn from(e: DataDirError) -> Self {
         Error::DataDir(e)
+    }
+}
+
+impl From<GitError> for Error {
+    fn from(e: GitError) -> Self {
+        Error::Git(e)
     }
 }
 

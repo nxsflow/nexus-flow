@@ -4,6 +4,7 @@ mod engine;
 pub mod genesis;
 mod init;
 pub mod install;
+pub mod merge_gate;
 
 pub use engine::{set_relay, Engine, Error, Options};
 pub use init::{init, init_with};
