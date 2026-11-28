@@ -1,10 +1,12 @@
 //! Creating, joining and leaving the coordination space from a checkout (RFC 0009, "Creating
 //! it", "Repositories in the space"): each checks the file's edit and the name first, writes the
-//! repository record, then `nexus-flow.toml`.
+//! repository record, then `nexus-flow.toml`. A create also writes the creating device's own
+//! `spaceMember` record in the new space, with role `owner`, before the repository record.
 
 use crate::config::Config;
 use crate::coordination::{plan_join, plan_leave, JoinError};
 use crate::id::SpaceId;
+use crate::members;
 use crate::open::InitError;
 use crate::opened::Opened;
 use crate::repo_root::RepoRoot;
@@ -25,8 +27,9 @@ fn checkout(opened: &Opened) -> Result<(RepoRoot, String), CoordinationError> {
     Ok((root, config.repository))
 }
 
-/// Creates a coordination space with the member as its first admin, writes the checkout's record
-/// named `name`, or by `origin`, and names the space in `nexus-flow.toml`. A file that already
+/// Creates a coordination space with the member as its first admin, writes the member's `owner`
+/// record there and the checkout's record named `name`, or by `origin`, and names the space in
+/// `nexus-flow.toml`. A file that already
 /// names a coordination space is refused, and nothing is created.
 pub async fn create(
     opened: &mut Opened,
@@ -52,6 +55,11 @@ pub async fn create(
             .id(),
     );
     opened.open_coordination(space).await?;
+    members::write_owner(opened, &space)
+        .await
+        .map_err(|e| CoordinationError::Database {
+            message: e.to_string(),
+        })?;
     repositories::upsert(opened, &space, &[], &own, &name).await?;
     if let Some(edit) = plan_join(&root, space)? {
         edit.apply()?;
