@@ -24,6 +24,9 @@ use crate::opened::Opened;
 /// The collection of the tickets.
 pub(crate) const TICKETS: &str = "ticketsTicket";
 
+/// The fewest digits of an object id that [`shown`] gives after a shared key, as in `ka.42~3f9a`.
+pub const SHORTEST: usize = 4;
+
 /// The index of the tickets by key.
 const BY_KEY: &str = "byKey";
 
@@ -218,20 +221,72 @@ async fn every_key(opened: &Opened, space: &SpaceId) -> Result<Vec<Key>, KeyErro
     Ok(keys)
 }
 
-/// The object id of the ticket in the open space `space` that `text` names, found through
-/// `byKey`.
+/// The object id of the ticket in the open space `space` that `text` names: an object id, a key
+/// found through `byKey`, or a key, `~` and the first digits of the object id of one of the
+/// tickets that hold it, as [`shown`] gives it.
 pub async fn resolve(opened: &Opened, space: &SpaceId, text: &str) -> Result<ObjectId, KeyError> {
     let not_found = || KeyError::KeyNotFound {
         key: text.to_owned(),
     };
-    let found = opened
-        .find(space, TICKETS, BY_KEY, vec![Value::from(text)])
-        .await?;
-    found.first().map(|t| t.id()).ok_or_else(not_found)
+    if let Ok(id) = text.parse::<ObjectId>() {
+        return match opened.get(space, TICKETS, id).await? {
+            Some(ticket) if !ticket.deleted() => Ok(id),
+            _ => Err(not_found()),
+        };
+    }
+    let (key, prefix) = match text.split_once('~') {
+        Some((key, prefix)) if is_prefix(prefix) => (key, prefix),
+        Some(_) => return Err(not_found()),
+        None => (text, ""),
+    };
+    let mut holders: Vec<ObjectId> = opened
+        .find(space, TICKETS, BY_KEY, vec![Value::from(key)])
+        .await?
+        .iter()
+        .map(|ticket| ticket.id())
+        .collect();
+    holders.sort_by_key(ObjectId::to_string);
+    let listed: Vec<(String, ObjectId)> = holders.iter().map(|&id| (key.to_owned(), id)).collect();
+    let matching: Vec<(String, ObjectId)> = shown(&listed)
+        .into_iter()
+        .zip(holders)
+        .filter(|(_, id)| id.to_string().starts_with(prefix))
+        .collect();
+    match matching.as_slice() {
+        [] => Err(not_found()),
+        [(_, id)] => Ok(*id),
+        _ => Err(KeyError::AmbiguousKey {
+            key: text.to_owned(),
+            tickets: matching.into_iter().map(|(shown, _)| shown).collect(),
+        }),
+    }
+}
+
+/// Whether `text` can begin an object id: one or more of its lowercase hex digits.
+fn is_prefix(text: &str) -> bool {
+    (1..=32).contains(&text.len()) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Each ticket's key as `nxs` shows it, in the order given: the key alone, or, for a key another
-/// ticket in `tickets` holds too, the key, `~` and the first digits of its object id.
+/// ticket in `tickets` holds too, the key, `~` and the first digits of its object id, at least
+/// [`SHORTEST`] and as many as tell it apart from the others, the way git abbreviates a hash.
 pub fn shown(tickets: &[(String, ObjectId)]) -> Vec<String> {
-    tickets.iter().map(|(key, _)| key.clone()).collect()
+    tickets
+        .iter()
+        .map(|(key, id)| {
+            let hex = id.to_string();
+            let others: Vec<String> = tickets
+                .iter()
+                .filter(|(other, other_id)| other == key && other_id != id)
+                .map(|(_, other_id)| other_id.to_string())
+                .collect();
+            if others.is_empty() {
+                return key.clone();
+            }
+            let digits = (SHORTEST..hex.len())
+                .find(|&n| others.iter().all(|other| other[..n] != hex[..n]))
+                .unwrap_or(hex.len());
+            format!("{key}~{}", &hex[..digits])
+        })
+        .collect()
 }
