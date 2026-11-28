@@ -6,7 +6,7 @@ use nocentraldb::{Object, Value};
 
 use crate::members::tests::{block_on, Repo, DEVICE_TAG};
 use crate::opened::Opened;
-use crate::tickets::{self, keys, NewTicket, Ticket};
+use crate::tickets::{self, keys, NewTicket, Ticket, TicketError};
 
 /// A ticket with everything `nxs ticket create` requires.
 pub(super) fn new(kind: &str, title: &str) -> NewTicket {
@@ -114,4 +114,128 @@ fn the_next_ticket_counts_up() {
     let second = create(&opened, new("bug", "The second"));
 
     assert_eq!(second.key, format!("{DEVICE_TAG}.2"));
+}
+
+#[test]
+fn a_priority_is_stored_as_its_ordinal_from_the_label_or_the_number() {
+    let repo = Repo::new("ticket-create-priority");
+    let opened = repo.opened();
+
+    for (given, ordinal) in [("P2", 2), ("2", 2), ("P0", 0), ("4", 4)] {
+        let new = NewTicket {
+            priority: Some(given.to_owned()),
+            ..new("feature", given)
+        };
+        let ticket = create(&opened, new);
+        let object = stored(&opened, &ticket.id);
+        assert_eq!(object.get::<i64>("priority").unwrap(), Some(ordinal), "{given}");
+        assert_eq!(ticket.priority, Some(ordinal), "{given}");
+    }
+    let unset = create(&opened, new("feature", "No priority"));
+    assert_eq!(unset.priority, None);
+}
+
+/// The tickets of the repository space, deleted or not, as the local copy holds them.
+fn count(opened: &Opened) -> usize {
+    let (space, _) = &opened.spaces()[0];
+    block_on(opened.find(space, keys::TICKETS, "byUpdatedAt", Vec::new()))
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn each_field_a_writer_gets_wrong_is_refused_and_nothing_is_written() {
+    let repo = Repo::new("ticket-create-refused");
+    let opened = repo.opened();
+    let cases = [
+        (new("", "A ticket"), TicketError::Missing { field: "type" }),
+        (
+            new("story", "A ticket"),
+            TicketError::NotAType {
+                text: "story".to_owned(),
+            },
+        ),
+        (new("feature", " "), TicketError::Missing { field: "title" }),
+        (new("feature", "Two\nlines"), TicketError::TitleNotOneLine),
+        (
+            NewTicket {
+                description: "\n".to_owned(),
+                ..new("feature", "A ticket")
+            },
+            TicketError::Missing {
+                field: "description",
+            },
+        ),
+        (
+            NewTicket {
+                priority: Some("P5".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotAPriority {
+                text: "P5".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                priority: Some("high".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotAPriority {
+                text: "high".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                due: Some("tomorrow".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotATime {
+                field: "due",
+                text: "tomorrow".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                defer_until: Some("2026-13-01".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotATime {
+                field: "defer",
+                text: "2026-13-01".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                assignee: Some("Carsten".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotAnIdentity {
+                text: "Carsten".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                assignee: Some("member:".to_owned()),
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotAnIdentity {
+                text: "member:".to_owned(),
+            },
+        ),
+        (
+            NewTicket {
+                labels: vec!["rfc".to_owned(), " ".to_owned()],
+                ..new("feature", "A ticket")
+            },
+            TicketError::NotALabel {
+                text: " ".to_owned(),
+            },
+        ),
+    ];
+
+    for (new, expected) in cases {
+        let refused = block_on(tickets::create(&opened, new));
+        assert_eq!(refused, Err(expected));
+    }
+    assert_eq!(count(&opened), 0, "nothing is written");
 }
