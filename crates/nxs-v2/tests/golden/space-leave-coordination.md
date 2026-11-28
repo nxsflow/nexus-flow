@@ -1,0 +1,2 @@
+- left the coordination space `<coordination>` and took it out of `nexus-flow.toml`; commit the file
+- the record of `app`, its space `<repository>`, stays, marked as left

@@ -1,112 +1,214 @@
-//! `nxs space join-coordination <space id>` (RFC 0001, "Creating and finding a space"; "Spaces":
-//! a repository belongs to at most one coordination space): it writes `[space] coordination` into
-//! `nexus-flow.toml` and prints what `Engine::space_join_coordination` returns. Joining again
-//! with the same id writes nothing; a second, different coordination space is refused with
-//! `conflict`, and a refusal leaves the file as it was.
+//! `nxs space create-coordination [--name]`, `join-coordination <space id> [--name]` and
+//! `leave-coordination` (RFC 0001, "Creating and finding a space"; RFC 0009, "Creating it",
+//! "Repositories in the space"). Each prints the coordination space, whether the run wrote
+//! anything, and the repository's record as `nxs repository list` prints it. Creating refuses a
+//! `nexus-flow.toml` that already names a coordination space, with `conflict`; joining the same
+//! space again writes nothing; another coordination space and a name another repository holds are
+//! `conflict`; leaving sets `left` on the record, which stays, and takes the id out of the file. A
+//! refusal leaves the file as it was.
 
 mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use common::{json, nxs, scratch, stdout};
 
-const REPOSITORY: &str = "0123456789abcdef0123456789abcdef";
-const COORDINATION: &str = "00112233445566778899aabbccddeeff";
 const OTHER: &str = "ffeeddccbbaa99887766554433221100";
 
-/// A repository whose `nexus-flow.toml` names only its repository space.
-fn repo(test: &str) -> (PathBuf, PathBuf) {
-    let base = scratch(test);
-    let repo = base.join("repo");
-    fs::write(
-        repo.join("nexus-flow.toml"),
-        format!("format = 1\n\n[space]\nrepository = \"{REPOSITORY}\"\n"),
-    )
-    .unwrap();
-    (base, repo)
+/// A repository `folder` beside the data directory, with its space and the git remote `origin`
+/// `https://example.com/<folder>.git`.
+fn repo(base: &Path, folder: &str) -> PathBuf {
+    let repo = base.join(folder);
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            &format!("https://example.com/{folder}.git"),
+        ],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let out = nxs(base, &repo, &["init"]);
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    repo
 }
 
 fn file(repo: &Path) -> String {
     fs::read_to_string(repo.join("nexus-flow.toml")).unwrap()
 }
 
-fn join(base: &Path, repo: &Path, space: &str, md: bool) -> nxs_v2::Outcome {
-    let mut args = vec!["space", "join-coordination", space];
-    if md {
-        args.push("--md");
-    }
-    nxs(base, repo, &args)
+fn space_of(repo: &Path) -> String {
+    let text = file(repo);
+    let line = text.lines().find(|l| l.starts_with("repository")).unwrap();
+    line.split('"').nth(1).unwrap().to_owned()
 }
 
-fn golden(name: &str) -> String {
+fn run(base: &Path, repo: &Path, args: &[&str]) -> nxs_v2::Outcome {
+    let out = nxs(base, repo, args);
+    assert!(
+        out.stderr.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+/// Creates a coordination space from `repo` and returns its id.
+fn create(base: &Path, repo: &Path) -> String {
+    let out = run(base, repo, &["space", "create-coordination"]);
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    json(&out)["coordination"].as_str().unwrap().to_owned()
+}
+
+fn error_kind(out: &nxs_v2::Outcome) -> String {
+    assert_eq!(out.code, 1, "{}", stdout(out));
+    json(out)["error"]["kind"].as_str().unwrap().to_owned()
+}
+
+/// The golden file `name`, with `<coordination>` and `<repository>` replaced.
+fn golden(name: &str, coordination: &str, repository: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name);
-    fs::read_to_string(path).unwrap()
+    fs::read_to_string(path)
+        .unwrap()
+        .replace("<coordination>", coordination)
+        .replace("<repository>", repository)
 }
 
 #[test]
-fn joining_writes_the_id_and_prints_it() {
-    let (base, repo) = repo("space-join");
+fn creating_names_the_space_and_prints_the_record_named_after_origin() {
+    let base = scratch("space-create");
+    let repo = repo(&base, "nexus-flow");
 
-    let out = join(&base, &repo, COORDINATION, false);
+    let out = run(&base, &repo, &["space", "create-coordination"]);
 
     assert_eq!(out.code, 0, "{}", stdout(&out));
-    assert!(out.stderr.is_empty());
     let printed = json(&out);
-    assert_eq!(printed["coordination"], COORDINATION);
+    let coordination = printed["coordination"].as_str().unwrap();
     assert_eq!(printed["written"], true);
-    assert!(
-        file(&repo).contains(&format!("coordination = \"{COORDINATION}\"")),
-        "{}",
-        file(&repo)
-    );
+    assert_eq!(printed["repository"]["name"], "nexus-flow");
+    assert_eq!(printed["repository"]["space"], space_of(&repo).as_str());
+    assert_eq!(printed["repository"]["left"], false);
+    assert!(file(&repo).contains(&format!("coordination = \"{coordination}\"")));
     fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
-fn joining_again_with_the_same_id_is_a_no_op() {
-    let (base, repo) = repo("space-join-again");
-    join(&base, &repo, COORDINATION, false);
+fn creating_with_a_name_takes_it() {
+    let base = scratch("space-create-name");
+    let repo = repo(&base, "repo");
+
+    let out = run(
+        &base,
+        &repo,
+        &["space", "create-coordination", "--name", "central-infra"],
+    );
+
+    assert_eq!(json(&out)["repository"]["name"], "central-infra");
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn creating_again_is_refused_as_a_conflict() {
+    let base = scratch("space-create-twice");
+    let repo = repo(&base, "repo");
+    let first = create(&base, &repo);
     let before = file(&repo);
 
-    let out = join(&base, &repo, COORDINATION, false);
+    let out = run(&base, &repo, &["space", "create-coordination"]);
 
-    assert_eq!(out.code, 0, "{}", stdout(&out));
-    assert_eq!(json(&out)["written"], false);
+    assert_eq!(error_kind(&out), "conflict");
+    assert!(json(&out)["error"]["msg"]
+        .as_str()
+        .unwrap()
+        .contains(&first));
     assert_eq!(file(&repo), before);
     fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
-fn joining_a_second_coordination_space_is_refused_as_a_conflict() {
-    let (base, repo) = repo("space-join-other");
-    join(&base, &repo, COORDINATION, false);
-    let before = file(&repo);
+fn joining_writes_the_record_and_again_writes_nothing() {
+    let base = scratch("space-join");
+    let first = repo(&base, "central-infra");
+    let second = repo(&base, "app");
+    let coordination = create(&base, &first);
 
-    let out = join(&base, &repo, OTHER, false);
-
-    assert_eq!(out.code, 1);
-    let error = &json(&out)["error"];
-    assert_eq!(error["kind"], "conflict");
-    assert!(
-        error["msg"].as_str().unwrap().contains(COORDINATION),
-        "{error}"
+    let joined = run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
     );
-    assert_eq!(file(&repo), before);
+    let before = file(&second);
+    let again = run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
+
+    assert_eq!(joined.code, 0, "{}", stdout(&joined));
+    assert_eq!(json(&joined)["written"], true);
+    assert_eq!(json(&joined)["repository"]["name"], "app");
+    assert_eq!(json(&again)["written"], false);
+    assert_eq!(file(&second), before);
     fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
-fn the_repository_space_and_a_text_that_is_no_space_id_are_refused_as_validation() {
-    let (base, repo) = repo("space-join-invalid");
-    let before = file(&repo);
+fn a_second_coordination_space_or_a_name_another_repository_holds_is_a_conflict() {
+    let base = scratch("space-join-conflict");
+    let first = repo(&base, "central-infra");
+    let second = repo(&base, "app");
+    let coordination = create(&base, &first);
+    let before = file(&second);
 
-    for space in [REPOSITORY, "not-a-space"] {
-        let out = join(&base, &repo, space, false);
-        assert_eq!(out.code, 1, "{space}");
-        assert_eq!(json(&out)["error"]["kind"], "validation", "{space}");
+    let taken = run(
+        &base,
+        &second,
+        &[
+            "space",
+            "join-coordination",
+            &coordination,
+            "--name",
+            "central-infra",
+        ],
+    );
+    run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
+    let joined = file(&second);
+    let other = run(&base, &second, &["space", "join-coordination", OTHER]);
+
+    assert_eq!(error_kind(&taken), "conflict");
+    assert_ne!(before, joined);
+    assert_eq!(error_kind(&other), "conflict");
+    assert_eq!(file(&second), joined);
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn the_own_space_a_text_that_is_no_space_id_and_an_unheld_space_are_validation() {
+    let base = scratch("space-join-invalid");
+    let repo = repo(&base, "repo");
+    let before = file(&repo);
+    let own = space_of(&repo);
+
+    for space in [own.as_str(), "not-a-space", OTHER] {
+        let out = run(&base, &repo, &["space", "join-coordination", space]);
+        assert_eq!(error_kind(&out), "validation", "{space}");
     }
     assert_eq!(file(&repo), before);
     fs::remove_dir_all(&base).unwrap();
@@ -116,29 +218,108 @@ fn the_repository_space_and_a_text_that_is_no_space_id_are_refused_as_validation
 fn joining_outside_a_repository_is_no_workspace() {
     let base = scratch("space-join-none");
 
-    let out = join(&base, &base.join("repo"), COORDINATION, false);
+    let out = run(
+        &base,
+        &base.join("repo"),
+        &["space", "join-coordination", OTHER],
+    );
 
-    assert_eq!(out.code, 1);
-    assert_eq!(json(&out)["error"]["kind"], "no_workspace");
+    assert_eq!(error_kind(&out), "no_workspace");
     fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
-fn joining_prints_the_same_bytes_as_the_golden_files() {
-    let (base, repo) = repo("space-join-golden");
+fn leaving_marks_the_record_left_and_takes_the_id_out_of_the_file() {
+    let base = scratch("space-leave");
+    let first = repo(&base, "central-infra");
+    let second = repo(&base, "app");
+    let coordination = create(&base, &first);
+    let before = file(&second);
+    run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
 
-    let written = join(&base, &repo, COORDINATION, false);
-    let again_md = join(&base, &repo, COORDINATION, true);
-    let again_json = join(&base, &repo, COORDINATION, false);
+    let left = run(&base, &second, &["space", "leave-coordination"]);
+    let again = run(&base, &second, &["space", "leave-coordination"]);
 
-    assert_eq!(stdout(&written), golden("space-join-coordination.json"));
+    assert_eq!(left.code, 0, "{}", stdout(&left));
+    assert_eq!(json(&left)["coordination"], coordination.as_str());
+    assert_eq!(json(&left)["repository"]["left"], true);
+    assert_eq!(file(&second), before);
+    assert_eq!(error_kind(&again), "validation");
+    let listed = json(&run(&base, &first, &["repository", "list"]));
+    assert_eq!(listed[0]["name"], "app");
+    assert_eq!(listed[0]["left"], true);
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn the_space_commands_print_the_same_bytes_as_the_golden_files() {
+    let base = scratch("space-golden");
+    let first = repo(&base, "central-infra");
+    let second = repo(&base, "app");
+
+    let created = run(&base, &first, &["space", "create-coordination"]);
+    let coordination = json(&created)["coordination"].as_str().unwrap().to_owned();
+    let created_md = {
+        let other = repo(&base, "other");
+        let out = run(&base, &other, &["space", "create-coordination", "--md"]);
+        let id = stdout(&out).split('`').nth(1).unwrap().to_owned();
+        (out, id, space_of(&other))
+    };
+    let joined = run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
+    let again_md = run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination, "--md"],
+    );
+    let again = run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
+    let left = run(&base, &second, &["space", "leave-coordination"]);
+    run(
+        &base,
+        &second,
+        &["space", "join-coordination", &coordination],
+    );
+    let left_md = run(&base, &second, &["space", "leave-coordination", "--md"]);
+
+    let (one, two) = (space_of(&first), space_of(&second));
     assert_eq!(
-        stdout(&again_json),
-        golden("space-join-coordination-again.json")
+        stdout(&created),
+        golden("space-create-coordination.json", &coordination, &one)
+    );
+    assert_eq!(
+        stdout(&created_md.0),
+        golden("space-create-coordination.md", &created_md.1, &created_md.2)
+    );
+    assert_eq!(
+        stdout(&joined),
+        golden("space-join-coordination.json", &coordination, &two)
+    );
+    assert_eq!(
+        stdout(&again),
+        golden("space-join-coordination-again.json", &coordination, &two)
     );
     assert_eq!(
         stdout(&again_md),
-        golden("space-join-coordination-again.md")
+        golden("space-join-coordination-again.md", &coordination, &two)
+    );
+    assert_eq!(
+        stdout(&left),
+        golden("space-leave-coordination.json", &coordination, &two)
+    );
+    assert_eq!(
+        stdout(&left_md),
+        golden("space-leave-coordination.md", &coordination, &two)
     );
     fs::remove_dir_all(&base).unwrap();
 }
