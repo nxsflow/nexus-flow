@@ -64,6 +64,9 @@ pub enum KeyError {
     NotHeld { space: SpaceId },
     /// The member has no tag in the space, so it cannot mint a key there.
     NoTag { space: SpaceId },
+    /// The member's tag was another member's before, and the member's copy has not completed a
+    /// sync: a key the earlier holder created may not have reached it yet.
+    NotSynced { space: SpaceId, tag: String },
     /// The database failed.
     Database { message: String },
 }
@@ -78,6 +81,10 @@ impl fmt::Display for KeyError {
             KeyError::NoTag { space } => write!(
                 f,
                 "this member has no tag in the space {space}; nxs member retag gives it one"
+            ),
+            KeyError::NotSynced { space, tag } => write!(
+                f,
+                "the tag {tag} was another member's before, and this copy of the space {space} has not synced yet; sync with nxs sync first"
             ),
             KeyError::Database { message } => f.write_str(message),
         }
