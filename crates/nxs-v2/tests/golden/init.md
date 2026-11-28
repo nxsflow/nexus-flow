@@ -1,2 +1,4 @@
 - `nexus-flow.toml` already names the repository space `0123456789abcdef0123456789abcdef`; nothing was created
 - no relay is set, so the space stays on this device in island mode; `nxs sync --relay <url>` connects it
+- `nxs factory install` wrote `factory/CONFIG.md`, `factory/FACTORY.md`, `factory/roles/coder.md`, `factory/roles/pm.md`, `factory/status-note.md`; commit them; there is no CODEOWNERS file, so no code owner reviews a change to the factory's files
+- `nxs genesis create` wrote `factory/GENESIS.md`, `factory/genesis-guide.md`; fill in GENESIS and commit them; there is no CODEOWNERS file, so no rule sends a change of `factory/GENESIS.md` to the owner
