@@ -24,7 +24,22 @@ impl Repo {
         assert_eq!(out.code, 0, "{}", stdout(&out));
         let out = nxs(&base, &base.join("repo"), &["factory", "install"]);
         assert_eq!(out.code, 0, "{}", stdout(&out));
-        Repo { base }
+        let repo = Repo { base };
+        repo.retag_device();
+        repo
+    }
+
+    /// Gives the device [`DEVICE_TAG`], in place of the tag `nxs init` picked for it.
+    fn retag_device(&self) {
+        let list = self.ok(&["member", "list"]);
+        let device = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "device")
+            .expect("the device that created the space is a member");
+        let member = device["member"].as_str().unwrap();
+        self.ok(&["member", "retag", member, DEVICE_TAG]);
     }
 
     fn repo(&self) -> PathBuf {
