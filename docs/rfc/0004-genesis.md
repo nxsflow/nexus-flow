@@ -110,7 +110,7 @@ The write never replaces anything: it creates the file only if the path is free 
 
 *Not taken* (decided by the owner, NEX-71): the guide as comments inside the template (it would live in the team's file, never get newer, and be gone once the team deletes the comments); and the guide only in nexus-flow's online documentation (an agent would have to fetch it, which a cloud container's network may not allow, and its version may not match the `nxs` installed). Also not taken: listing the guide among RFC 0006's factory defaults, so that `nxs factory install` writes it (a file of the `genesis` module would be installed by the `factory` module's command, and RFC 0006 would have to change for it).
 
-**`nxs init`** (RFC 0001) runs `nxs genesis create` after `nxs factory install`, without `--update`, so a new factory has a GENESIS to fill in on day one, which its roles and FACTORY.md can point at. On an upgrade of nexus-flow nothing is installed until someone runs `nxs genesis create`.
+**`nxs init`** (RFC 0001) runs `nxs genesis create` after `nxs factory install`, without `--update`, so a new factory has a GENESIS to fill in on day one, which its roles and FACTORY.md can point at. Its JSON carries the genesis report under a `genesis` key, as RFC 0006 says (NEX-243). On an upgrade of nexus-flow nothing is installed until someone runs `nxs genesis create`.
 
 **Finding the repository.** `create` finds the repository's root as RFC 0001 does, from the working directory up to the folder holding `nexus-flow.toml`. Without one it exits non-zero and says to run `nxs init`. It opens no NoCentralDB database: it touches only files and the local git.
 

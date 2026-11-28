@@ -98,7 +98,7 @@ nexus-flow ships the least a factory needs to run (GENESIS.md, the `factory` row
 
 It never deletes a file, never writes a path the shipped list does not name, and never touches a role the team added. It never commits: what it writes lands in the working tree and reaches the base branch through a pull request, which CODEOWNERS sends to the owner. Even `--update` therefore changes nothing in force without the owner's review.
 
-`nxs init` (RFC 0001) runs the same install as its last step, without `--update`. On an upgrade of nexus-flow, nothing is installed until someone runs `nxs factory install`.
+`nxs init` (RFC 0001) runs the same install as its last step, without `--update`. Its JSON carries the install's report under a `factory` key, and the genesis report (RFC 0004) under a `genesis` key, each exactly as the command prints it; `--md` adds a line for each. So the person who ran it sees which files to commit. On an upgrade of nexus-flow, nothing is installed until someone runs `nxs factory install`.
 
 **CODEOWNERS is reported, never written.** The roles and the merge rules must be under CODEOWNERS for the merge gate to hold (GENESIS.md, "The merge gate"). `nxs factory install` reads the repository's CODEOWNERS file, in the places and order GitHub looks for it (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`), and reports which of the factory's paths no rule in it covers. It never writes CODEOWNERS: that file is the team's own, and a change to it comes back to the owner (GENESIS.md, "What has to come back through me").
 
@@ -212,9 +212,11 @@ None. The owner answered the one question this draft left open on 2026-11-20 (NE
 ## Decisions
 
 - **`migration` joins the frame's own roles** ("The factory's files"). Decided by the owner on 2026-11-20, when deciding RFC 0008 (#172). Why: the member that moves a v1 workspace holds the role `migration` in its `spaceMember` record, and a role file of that name would make it a session role. *Not taken:* writing the move as the device's own member, which would need no role of its own but could not tell the move's changes from the developer's work.
+- **`nxs init` reports what factory install and genesis create wrote** ("Installing the shipped defaults"). Decided by the owner on 2026-11-28 (NEX-243). Why: `nxs init` writes files a person must commit, and its output should name them. *Not taken:* keeping `nxs init`'s output as it was, which leaves `git status` as the only way to find them.
 
 ## History
 
 - 2026-11-17: published as a draft in #157.
 - 2026-11-20: decided by the owner (NEX-44), in #157.
 - 2026-11-20: `migration` added to the frame's roles, from RFC 0008 (see "Decisions"), in #173 (NEX-83).
+- 2026-11-28: the owner's answer to NEX-243 (`nxs init` reports the factory and genesis reports) written into the text.
