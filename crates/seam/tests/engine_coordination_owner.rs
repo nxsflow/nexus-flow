@@ -36,6 +36,29 @@ fn the_device_that_creates_a_coordination_space_is_listed_there_as_owner_with_it
     remove(&base);
 }
 
+#[test]
+fn the_creator_takes_the_tag_it_holds_in_the_repository_space() {
+    let base = scratch("engine-coordination-owner-tag");
+    let repo = base.join("repo");
+    let data = base.join("data");
+    block_on(init_with(&repo, options(&data))).unwrap();
+    let mut engine = block_on(Engine::open_with(&repo, options(&data))).unwrap();
+    let device = block_on(engine.members()).unwrap().remove(0);
+    // A tag other than the one a free pick by the device's id gives in an empty space.
+    let tag = if device.tag.as_deref() == Some("zy") { "zx" } else { "zy" };
+    block_on(engine.member_retag(&device.member, tag)).unwrap();
+
+    let created = block_on(engine.coordination_create(Some("central-infra"))).unwrap();
+    drop(engine);
+    let coordination =
+        block_on(Engine::open_space_with(created.coordination, None, options(&data))).unwrap();
+    let listed = block_on(coordination.members()).unwrap();
+
+    assert_eq!(listed[0].member, device.member);
+    assert_eq!(listed[0].tag.as_deref(), Some(tag));
+    remove(&base);
+}
+
 fn remove(base: &Path) {
     fs::remove_dir_all(base).unwrap();
 }
