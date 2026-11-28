@@ -1,0 +1,6 @@
+# 2026-11-28 · NEX-109 · A freed tag mints only after a sync in the same open
+
+- Decided by: coder on NEX-109; provisional until the owner answers NEX-246, how a copy remembers its first sync
+- Why: RFC 0002 puts the guard for a freed tag at minting (NEX-236): a member waits for its first sync before it creates a ticket. The store calls a tag freed when a record of a member that is no longer a member of the space carries it; a tag a current member also holds is two members with one tag, which `tag_shared` marks, not a freed one. The only sync fact NoCentralDB 0.1.0-beta.1 gives per space is `initial_sync_complete`, true once a pull reached the relay's head since the database opened, and nothing records it across opens (the device's `synced_at` is one time for every space the device holds, and a session's member has none). So `mint` refuses with a freed tag until the open's copy of the space has completed a sync: stricter than the RFC, since every open must sync again, but it never mints before a first sync.
+- Instead of: the device's `synced_at`, which a sync of another repository's spaces also sets; or exempting a member once its copy holds a key it minted with the tag, which no acceptance criterion asks for here and which NEX-246 puts to the owner.
+- Topics: tickets, members, sync, v2

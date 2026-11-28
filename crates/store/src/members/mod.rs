@@ -519,4 +519,4 @@ fn kind(kind: nocentraldb::MemberKind) -> MemberKind {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
