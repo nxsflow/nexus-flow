@@ -125,6 +125,7 @@ impl From<Error> for CliError {
             Error::Coordination(join) => join_kind(join),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
+            Error::MergeGateInput(_) => Kind::Validation,
         };
         CliError { kind, msg }
     }

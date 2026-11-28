@@ -72,8 +72,16 @@ fn an_owner_decision_prints_the_rfcs_json_and_exits_zero() {
     let out = nxs(
         &pr,
         &[
-            "merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--comments",
-            &comments, "--reviews", &reviews,
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--comments",
+            &comments,
+            "--reviews",
+            &reviews,
         ],
     );
 
@@ -100,8 +108,16 @@ fn an_owner_decision_prints_the_rfcs_json_and_exits_zero() {
 fn the_same_inputs_give_the_golden_bytes_every_time() {
     let (pr, comments, reviews) = owner_pr("decide-golden");
     let args = [
-        "merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--comments", &comments,
-        "--reviews", &reviews,
+        "merge-gate",
+        "decide",
+        "--base",
+        &pr.base,
+        "--head",
+        &pr.head,
+        "--comments",
+        &comments,
+        "--reviews",
+        &reviews,
     ];
 
     let first = nxs(&pr, &args);
@@ -122,8 +138,16 @@ fn the_output_is_the_seams_report() {
     let out = nxs(
         &pr,
         &[
-            "merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--comments",
-            &comments, "--reviews", &reviews,
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--comments",
+            &comments,
+            "--reviews",
+            &reviews,
         ],
     );
     let report = Engine::merge_gate_decide(
@@ -140,7 +164,10 @@ fn the_output_is_the_seams_report() {
     assert_eq!(json["decision"], report.decision.as_str());
     assert_eq!(json["status"], report.status.as_str());
     assert_eq!(json["description"], report.description.as_str());
-    assert_eq!(json["reasons"].as_array().unwrap().len(), report.reasons.len());
+    assert_eq!(
+        json["reasons"].as_array().unwrap().len(),
+        report.reasons.len()
+    );
 }
 
 #[test]
@@ -150,14 +177,26 @@ fn a_pm_decision_exits_zero_with_status_success() {
 
     let out = nxs(
         &pr,
-        &["merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--verdict", &verdict],
+        &[
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--verdict",
+            &verdict,
+        ],
     );
 
     assert_eq!(out.code, 0, "{}", stdout(&out));
     let json = json_of(&out);
     assert_eq!(json["decision"], "pm");
     assert_eq!(json["status"], "success");
-    assert_eq!(json["reasons"], json!([{ "code": "pm_rule", "rules": ["decided-design"] }]));
+    assert_eq!(
+        json["reasons"],
+        json!([{ "code": "pm_rule", "rules": ["decided-design"] }])
+    );
 }
 
 #[test]
@@ -168,7 +207,13 @@ fn a_comments_file_that_does_not_exist_is_no_valid_verdict() {
     let out = nxs(
         &pr,
         &[
-            "merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--comments",
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--comments",
             missing.to_str().unwrap(),
         ],
     );
@@ -177,7 +222,9 @@ fn a_comments_file_that_does_not_exist_is_no_valid_verdict() {
     let json = json_of(&out);
     assert_eq!(json["decision"], "owner");
     assert_eq!(json["reasons"][0]["code"], "verdict_invalid");
-    assert!(json["reasons"][0]["detail"].as_array().is_some_and(|d| !d.is_empty()));
+    assert!(json["reasons"][0]["detail"]
+        .as_array()
+        .is_some_and(|d| !d.is_empty()));
 }
 
 #[test]
@@ -187,7 +234,16 @@ fn unreadable_rules_are_a_decision_and_exit_zero() {
 
     let out = nxs(
         &pr,
-        &["merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--verdict", &verdict],
+        &[
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--verdict",
+            &verdict,
+        ],
     );
 
     assert_eq!(out.code, 0, "{}", stdout(&out));
@@ -226,7 +282,17 @@ fn a_missing_base_cannot_be_decided() {
 #[test]
 fn a_head_that_is_no_commit_cannot_be_decided() {
     let pr = Pr::new("decide-head-no-commit");
-    let out = nxs(&pr, &["merge-gate", "decide", "--base", &pr.base, "--head", "nowhere"]);
+    let out = nxs(
+        &pr,
+        &[
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            "nowhere",
+        ],
+    );
     assert_cannot_decide(&out);
     assert_eq!(json_of(&out)["error"]["kind"], "validation");
 }
@@ -239,8 +305,16 @@ fn comments_and_a_verdict_together_cannot_be_decided() {
     let out = nxs(
         &pr,
         &[
-            "merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--comments",
-            &comments, "--verdict", &verdict,
+            "merge-gate",
+            "decide",
+            "--base",
+            &pr.base,
+            "--head",
+            &pr.head,
+            "--comments",
+            &comments,
+            "--verdict",
+            &verdict,
         ],
     );
     assert_cannot_decide(&out);
@@ -252,9 +326,22 @@ fn reviews_that_cannot_be_read_cannot_be_decided() {
     let verdict = input(&pr, "verdict.json", &pr.verdict());
     let reviews = input(&pr, "reviews.json", &json!({ "not": "a list" }));
     let missing = pr.path.join(".git/no-reviews.json");
-    let base = ["merge-gate", "decide", "--base", &pr.base, "--head", &pr.head, "--verdict", &verdict];
+    let base = [
+        "merge-gate",
+        "decide",
+        "--base",
+        &pr.base,
+        "--head",
+        &pr.head,
+        "--verdict",
+        &verdict,
+    ];
 
-    let bad: Vec<&str> = base.iter().copied().chain(["--reviews", &reviews]).collect();
+    let bad: Vec<&str> = base
+        .iter()
+        .copied()
+        .chain(["--reviews", &reviews])
+        .collect();
     let gone: Vec<&str> = base
         .iter()
         .copied()

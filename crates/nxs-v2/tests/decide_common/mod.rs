@@ -54,7 +54,8 @@ impl Pr {
 
     /// As [`Pr::new`], with `files` at the base in place of the rules.
     pub fn with_base(test: &str, files: &[(&str, &str)]) -> Pr {
-        let path = std::env::temp_dir().join(format!("nxs-v2-decide-{test}-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("nxs-v2-decide-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         let mut pr = Pr {

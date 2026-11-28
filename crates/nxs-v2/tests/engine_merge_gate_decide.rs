@@ -25,7 +25,11 @@ fn decide_at_base(test: &str, genesis: Option<&str>, gate: Option<&str>) -> Vec<
     let Reason::RulesUnreadable { errors } = &report.reasons[0] else {
         panic!("expected rules_unreadable, got {report:?}");
     };
-    assert_eq!(report.reasons.len(), 1, "nothing else is checked: {report:?}");
+    assert_eq!(
+        report.reasons.len(),
+        1,
+        "nothing else is checked: {report:?}"
+    );
     errors.iter().map(|e| e.code).collect()
 }
 
@@ -55,7 +59,11 @@ fn genesis_missing_at_the_base_goes_to_the_owner() {
 
 #[test]
 fn genesis_without_the_mark_goes_to_the_owner() {
-    let errors = decide_at_base("genesis-no-mark", Some("# GENESIS\n\n- a rule\n"), Some(GATE));
+    let errors = decide_at_base(
+        "genesis-no-mark",
+        Some("# GENESIS\n\n- a rule\n"),
+        Some(GATE),
+    );
     assert_eq!(errors, ["mark_missing"]);
 }
 
@@ -101,7 +109,10 @@ fn a_gate_toml_without_owners_goes_to_the_owner() {
 
 #[test]
 fn a_gate_toml_without_verdict_authors_goes_to_the_owner() {
-    let gate = GATE.replace("verdict_authors = [\"nexusflow-ug\"]", "verdict_authors = []");
+    let gate = GATE.replace(
+        "verdict_authors = [\"nexusflow-ug\"]",
+        "verdict_authors = []",
+    );
     let errors = decide_at_base("gate-no-authors", Some(GENESIS), Some(&gate));
     assert_eq!(errors, ["verdict_authors_empty"]);
 }
@@ -174,9 +185,10 @@ fn a_verdict_missing_a_rule_goes_to_the_owner() {
 fn a_verdict_with_an_unknown_rule_goes_to_the_owner() {
     let pr = Pr::new("verdict-unknown-rule");
     let mut verdict = pr.verdict();
-    verdict["verdicts"].as_array_mut().unwrap().push(
-        json!({ "rule": "made-up", "outcome": "met", "reason": "A rule nobody wrote." }),
-    );
+    verdict["verdicts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "rule": "made-up", "outcome": "met", "reason": "A rule nobody wrote." }));
     invalid(&pr, &verdict);
 }
 
@@ -255,8 +267,18 @@ fn the_newest_verdict_comment_for_an_older_head_goes_to_the_owner_though_an_olde
     let mut stale = pr.verdict();
     stale["head"] = json!(old_head);
     let comments = json!([
-        comment(1, "nexusflow-ug", "2026-11-27T10:00:00Z", verdict_body(&matching)),
-        comment(2, "nexusflow-ug", "2026-11-27T11:00:00Z", verdict_body(&stale)),
+        comment(
+            1,
+            "nexusflow-ug",
+            "2026-11-27T10:00:00Z",
+            verdict_body(&matching)
+        ),
+        comment(
+            2,
+            "nexusflow-ug",
+            "2026-11-27T11:00:00Z",
+            verdict_body(&stale)
+        ),
     ]);
 
     let report = pr.decide_with(Some(&comments), None, None).unwrap();
@@ -306,7 +328,10 @@ fn comments_and_a_verdict_together_cannot_be_decided() {
     let pr = Pr::new("both-inputs");
     let comments = json!([]);
     let result = pr.decide_with(Some(&comments), Some(&pr.verdict()), None);
-    assert!(matches!(result, Err(Error::MergeGateInput(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(Error::MergeGateInput(_))),
+        "{result:?}"
+    );
 }
 
 #[test]

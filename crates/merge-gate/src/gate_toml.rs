@@ -15,6 +15,14 @@ pub enum Effect {
 }
 
 impl Effect {
+    /// The effect as `gate.toml` and the gate's JSON write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effect::Owner => "owner",
+            Effect::Pm => "pm",
+        }
+    }
+
     /// The effect written as a string in `gate.toml`, or `None` for any other value.
     fn parse(value: Option<&Value>) -> Option<Effect> {
         match value?.as_str()? {

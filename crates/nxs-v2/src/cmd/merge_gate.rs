@@ -1,16 +1,18 @@
 //! `nxs merge-gate` (RFC 0010): `rules [--base <ref>]` prints every rule the gate judges, read from
-//! the base commit through the seam's `Engine::merge_gate_rules`. It opens no database. Rules that
-//! cannot be read are printed as the report, and the command exits non-zero.
+//! the base commit through the seam's `Engine::merge_gate_rules`; rules that cannot be read are
+//! printed as the report, and the command exits non-zero. `decide` prints the gate's decision on a
+//! pull request (`merge_gate_decide`). Neither opens a database.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use nexus_flow_seam::merge_gate::{Effect, RuleRef, RulesReport};
 use nexus_flow_seam::Engine;
 use serde::Serialize;
 
+use crate::cmd::merge_gate_decide::{self, DecideFiles, Decision};
 use crate::error::CliError;
-use crate::output::Render;
+use crate::output::{Format, Render};
 
 /// The subcommands of `nxs merge-gate`.
 #[derive(Debug, Args)]
@@ -26,6 +28,24 @@ enum MergeGateCommand {
         /// The commit to read the rules from; the branch `[git] base` names when not given.
         #[arg(long, value_name = "ref")]
         base: Option<String>,
+    },
+    /// Decide whether pm may merge the pull request or the owner reviews it first.
+    Decide {
+        /// The commit the pull request's base branch points at.
+        #[arg(long, value_name = "sha")]
+        base: String,
+        /// The pull request's head commit.
+        #[arg(long, value_name = "sha")]
+        head: String,
+        /// The pull request's comments, as the forge lists them, to find the verdict in.
+        #[arg(long, value_name = "file", conflicts_with = "verdict")]
+        comments: Option<PathBuf>,
+        /// A file that holds the verdict alone.
+        #[arg(long, value_name = "file")]
+        verdict: Option<PathBuf>,
+        /// The pull request's reviews, as the forge lists them.
+        #[arg(long, value_name = "file")]
+        reviews: Option<PathBuf>,
     },
 }
 
@@ -76,11 +96,27 @@ impl Rules {
     }
 }
 
-/// Runs `nxs merge-gate` in `dir`.
-pub fn run(dir: &Path, args: MergeGateArgs) -> Result<Rules, CliError> {
+/// Runs `nxs merge-gate` in `dir`, and returns what it prints in `format` and its exit code.
+pub fn run(dir: &Path, args: MergeGateArgs, format: Format) -> Result<(String, i32), CliError> {
     match args.command {
         MergeGateCommand::Rules { base } => {
-            Ok(Engine::merge_gate_rules(dir, base.as_deref())?.into())
+            let rules: Rules = Engine::merge_gate_rules(dir, base.as_deref())?.into();
+            Ok((format.render(&rules), rules.code()))
+        }
+        MergeGateCommand::Decide {
+            base,
+            head,
+            comments,
+            verdict,
+            reviews,
+        } => {
+            let files = DecideFiles {
+                comments,
+                verdict,
+                reviews,
+            };
+            let decision: Decision = merge_gate_decide::run(dir, &base, &head, files)?;
+            Ok((format.render(&decision), 0))
         }
     }
 }

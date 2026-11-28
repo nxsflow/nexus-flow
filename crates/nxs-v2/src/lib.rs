@@ -59,7 +59,7 @@ enum Command {
     /// Install the factory's shipped defaults under factory/.
     #[command(subcommand)]
     Factory(cmd::factory::FactoryCommand),
-    /// Read the merge gate's rules from the base commit.
+    /// Read the merge gate's rules from the base commit, or decide who merges a pull request.
     MergeGate(cmd::merge_gate::MergeGateArgs),
     /// Write the repository's GENESIS from the template, only where none exists.
     #[command(subcommand)]
@@ -107,9 +107,7 @@ fn dispatch(
             cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
         }
         Command::Sync(args) => cmd::sync::run(dir, options, args).map(|r| (format.render(&r), 0)),
-        Command::MergeGate(args) => {
-            cmd::merge_gate::run(dir, args).map(|r| (format.render(&r), r.code()))
-        }
+        Command::MergeGate(args) => cmd::merge_gate::run(dir, args, format),
         Command::Genesis(command) => return cmd::genesis::run(dir, command, format),
         Command::Factory(command) => {
             cmd::factory::run(dir, options, command).map(|r| (format.render(&r), 0))

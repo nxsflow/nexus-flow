@@ -71,14 +71,27 @@ fn every_reason_is_collected_in_order() {
     entry(&mut verdict, "genesis.1")["outcome"] = json!("applies");
     entry(&mut verdict, "decided-design")["outcome"] = json!("unsure");
     entry(&mut verdict, "stored-format")["outcome"] = json!("applies");
-    let reviews = json!([review("cabcookie", "CHANGES_REQUESTED", &pr.base, "2026-11-27T10:00:00Z")]);
+    let reviews = json!([review(
+        "cabcookie",
+        "CHANGES_REQUESTED",
+        &pr.base,
+        "2026-11-27T10:00:00Z"
+    )]);
 
-    let report = pr.decide_with(None, Some(&verdict), Some(&reviews)).unwrap();
+    let report = pr
+        .decide_with(None, Some(&verdict), Some(&reviews))
+        .unwrap();
 
     assert_waits_for_owner(&report);
     assert_eq!(
         codes(&report),
-        ["codeowners", "changes_requested", "applies", "unsure", "applies"]
+        [
+            "codeowners",
+            "changes_requested",
+            "applies",
+            "unsure",
+            "applies"
+        ]
     );
 }
 
@@ -137,6 +150,7 @@ fn the_old_path_of_a_rename_under_codeowners_goes_to_the_owner() {
             (".github/release.sh", "echo release\n"),
         ],
     );
+    std::fs::create_dir_all(pr.path.join("scripts")).unwrap();
     pr.git(&["mv", ".github/release.sh", "scripts/release.sh"]);
     pr.head = pr.commit("move the release script out of .github");
 
@@ -183,7 +197,11 @@ fn changes_on_the_base_after_the_merge_base_are_not_the_pull_requests() {
 fn a_rule_loosened_only_on_the_head_still_holds() {
     let mut pr = Pr::with_base(
         "loosened",
-        &[(GENESIS_PATH, GENESIS), (GATE_PATH, GATE), (".github/CODEOWNERS", "")],
+        &[
+            (GENESIS_PATH, GENESIS),
+            (GATE_PATH, GATE),
+            (".github/CODEOWNERS", ""),
+        ],
     );
     let loose = GATE.replace("default = \"owner\"", "default = \"pm\"");
     let loose = &loose[..loose.find("[[rule]]\nid = \"stored-format\"").unwrap()];
@@ -211,7 +229,10 @@ fn the_description_stays_within_140_characters() {
             "\n[[rule]]\nid = \"a-rather-long-rule-id-number-{n}\"\neffect = \"owner\"\ntext = \"t\"\n"
         ));
     }
-    let pr = Pr::with_base("description", &[(GENESIS_PATH, GENESIS), (GATE_PATH, &gate)]);
+    let pr = Pr::with_base(
+        "description",
+        &[(GENESIS_PATH, GENESIS), (GATE_PATH, &gate)],
+    );
     let mut verdict = pr.verdict();
     for n in 0..30 {
         verdict["verdicts"].as_array_mut().unwrap().push(json!({
@@ -222,8 +243,16 @@ fn the_description_stays_within_140_characters() {
     let report = pr.decide(&verdict);
 
     assert_waits_for_owner(&report);
-    assert!(report.description.chars().count() <= 140, "{}", report.description);
-    assert!(report.description.starts_with("Waits for the owner"), "{}", report.description);
+    assert!(
+        report.description.chars().count() <= 140,
+        "{}",
+        report.description
+    );
+    assert!(
+        report.description.starts_with("Waits for the owner"),
+        "{}",
+        report.description
+    );
 }
 
 /// A review of GitHub's "list reviews for a pull request" response.
