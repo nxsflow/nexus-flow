@@ -1,9 +1,10 @@
 //! Recording the repository's coordination space (RFC 0001, "Creating and finding a space";
-//! "Spaces": a repository belongs to at most one coordination space): the store half of
-//! `nxs space join-coordination <space id>`.
+//! "Spaces": a repository belongs to at most one coordination space): the `nexus-flow.toml` half
+//! of `nxs space create-coordination`, `join-coordination` and `leave-coordination`, whose record
+//! half is `crate::requests`.
 //!
 //! `join` writes `[space] coordination` into the `nexus-flow.toml` of the repository at or above
-//! a folder. It opens no database: the file is what every clone reads. The line goes right after
+//! a folder, and opens no database: the file is what every clone reads. The line goes right after
 //! `repository` in `[space]`, and every other byte of the file stays as the team wrote it, its
 //! comments included. Before the file is replaced, the edited text is read back and must name
 //! exactly what the old one did plus the coordination space; a layout where the line cannot be
