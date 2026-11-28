@@ -15,7 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use nocentraldb::{MemberId, ObjectId, Space};
+use nocentraldb::{MemberId, ObjectId, Space, Value};
 
 use crate::id::SpaceId;
 use crate::members::{self, record, tags::Tag, MemberError};
@@ -23,6 +23,9 @@ use crate::opened::Opened;
 
 /// The collection of the tickets.
 pub(crate) const TICKETS: &str = "ticketsTicket";
+
+/// The index of the tickets by key.
+const BY_KEY: &str = "byKey";
 
 /// The index that holds every ticket of a space.
 const EVERY_TICKET: &str = "byUpdatedAt";
@@ -207,9 +210,14 @@ async fn every_key(opened: &Opened, space: &SpaceId) -> Result<Vec<Key>, KeyErro
     Ok(keys)
 }
 
-/// The object id of the ticket in the open space `space` that `text` names.
-pub async fn resolve(_opened: &Opened, _space: &SpaceId, _text: &str) -> Result<ObjectId, KeyError> {
-    Err(KeyError::Database {
-        message: "not resolved yet".to_owned(),
-    })
+/// The object id of the ticket in the open space `space` that `text` names, found through
+/// `byKey`.
+pub async fn resolve(opened: &Opened, space: &SpaceId, text: &str) -> Result<ObjectId, KeyError> {
+    let not_found = || KeyError::KeyNotFound {
+        key: text.to_owned(),
+    };
+    let found = opened
+        .find(space, TICKETS, BY_KEY, vec![Value::from(text)])
+        .await?;
+    found.first().map(|t| t.id()).ok_or_else(not_found)
 }
