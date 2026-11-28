@@ -143,9 +143,7 @@ pub enum MemberError {
     NotATag { text: String },
     /// A current member holds the tag.
     TagHeld { tag: String },
-    /// Only removed members held the tag, and nxs does not hand a freed tag out again yet.
-    TagFreed { tag: String },
-    /// Every tag is held.
+    /// Current members hold every tag.
     NoFreeTag,
     /// A space the change needs is named but not held yet: this database has not synced it.
     NotHeld { space: SpaceId },
@@ -204,10 +202,6 @@ impl fmt::Display for MemberError {
             MemberError::TagHeld { tag } => {
                 write!(f, "the tag {tag} is held by a current member of the space")
             }
-            MemberError::TagFreed { tag } => write!(
-                f,
-                "the tag {tag} was held by a removed member, and nxs does not hand a freed tag out again yet"
-            ),
             MemberError::NoFreeTag => f.write_str(
                 "every one of the 936 tags is in use; remove a member to free one",
             ),

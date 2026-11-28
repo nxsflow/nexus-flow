@@ -113,6 +113,12 @@ pub async fn demote_device(data: &DataDir, keys: DeviceKeys, space: SpaceId, adm
 /// Writes one role record per ticket tag in the repository space of `repo`, each naming the
 /// device's own member, so that every tag is held and `nxs member add` finds none free.
 pub async fn hold_every_tag(repo: &Path, data: &DataDir, keys: DeviceKeys) {
+    hold_every_tag_but(repo, data, keys, None).await;
+}
+
+/// Writes one role record per ticket tag but `but` in the repository space of `repo`, each naming
+/// the device's own member, so that every other tag is held.
+pub async fn hold_every_tag_but(repo: &Path, data: &DataDir, keys: DeviceKeys, but: Option<&str>) {
     let opened = crate::opened::repository(repo, data, keys)
         .await
         .expect("the repository's spaces");
@@ -130,7 +136,7 @@ pub async fn hold_every_tag(repo: &Path, data: &DataDir, keys: DeviceKeys) {
         .to_string();
     opened
         .write(id, |w| {
-            for tag in crate::members::tags::all() {
+            for tag in crate::members::tags::all().filter(|t| Some(t.as_str()) != but) {
                 w.create(
                     "spaceMember",
                     [

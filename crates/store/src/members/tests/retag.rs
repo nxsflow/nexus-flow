@@ -82,6 +82,19 @@ fn retag_to_the_tag_a_member_already_holds_changes_nothing() {
 }
 
 #[test]
+fn retag_to_a_tag_only_a_removed_member_held_writes_it() {
+    let repo = Repo::new("member-retag-freed");
+    let removed = repo.add_tagged(&repo.agent("a"), "coder", "kc").unwrap();
+    block_on(members::remove(&repo.opened(), &removed.member)).unwrap();
+    let other = repo.add_tagged(&repo.agent("b"), "coder", "kb").unwrap();
+
+    let retagged = retag(&repo, &other.member, "kc").unwrap();
+
+    assert_eq!(retagged.tag.as_deref(), Some("kc"));
+    assert_eq!(find(&repo.list(), &other.member), &retagged);
+}
+
+#[test]
 fn each_refusal_of_retag_changes_nothing() {
     let repo = Repo::new("member-retag-refused");
     let first = repo.add_tagged(&repo.agent("a"), "coder", "ka").unwrap();
@@ -91,13 +104,11 @@ fn each_refusal_of_retag_changes_nothing() {
     let before = repo.list();
 
     let held = retag(&repo, &second.member, "ka").unwrap_err();
-    let freed = retag(&repo, &second.member, "kc").unwrap_err();
     let bad = retag(&repo, &second.member, "K1").unwrap_err();
     let gone = retag(&repo, &removed.member, "kd").unwrap_err();
     let no_id = retag(&repo, "pm", "kd").unwrap_err();
 
     assert!(matches!(held, MemberError::TagHeld { .. }), "{held:?}");
-    assert!(matches!(freed, MemberError::TagFreed { .. }), "{freed:?}");
     assert!(matches!(bad, MemberError::NotATag { .. }), "{bad:?}");
     assert!(matches!(gone, MemberError::NotFound { .. }), "{gone:?}");
     assert!(
