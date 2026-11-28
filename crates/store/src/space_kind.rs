@@ -64,6 +64,7 @@ pub const KINDS: &[(&str, &[SpaceKind])] = &[
     ("decisionsSubject", &[SpaceKind::Repository]),
     ("decisionsSupersession", &[SpaceKind::Repository]),
     ("goalsGoal", &[SpaceKind::Coordination]),
+    ("requestsRepository", &[SpaceKind::Coordination]),
     ("migrationRun", &[SpaceKind::Repository]),
     ("migrationRecord", &[SpaceKind::Repository]),
     ("statusNote", &[SpaceKind::Repository]),

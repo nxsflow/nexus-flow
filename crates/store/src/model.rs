@@ -65,6 +65,7 @@ pub const COLLECTIONS: &[(&str, Module)] = &[
     ("decisionsSubject", Module::Decisions),
     ("decisionsSupersession", Module::Decisions),
     ("goalsGoal", Module::Goals),
+    ("requestsRepository", Module::Requests),
     ("migrationRun", Module::Migration),
     ("migrationRecord", Module::Migration),
     ("statusNote", Module::Status),

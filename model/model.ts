@@ -10,6 +10,7 @@ import { nc } from "@nocentraldb/sdk";
 import { decisions } from "./decisions.ts";
 import { goals } from "./goals.ts";
 import { migration } from "./migration.ts";
+import { requests } from "./requests.ts";
 import { status } from "./status.ts";
 import { tickets } from "./tickets.ts";
 
@@ -51,6 +52,7 @@ export const model = nc.model({
   ...tickets,
   ...decisions,
   ...goals,
+  ...requests,
   ...migration,
   ...status,
 });

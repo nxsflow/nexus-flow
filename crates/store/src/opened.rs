@@ -143,6 +143,26 @@ impl Opened {
         &self.spaces
     }
 
+    /// Opens the space `id` beside the others as the repository's coordination space, as
+    /// `nexus-flow.toml` will name it once a create or a join has written it; a space already
+    /// open stays as it is.
+    pub(crate) async fn open_coordination(&mut self, id: SpaceId) -> Result<(), InitError> {
+        if self.held(&id).is_none() {
+            let space = get(&self.db, id).await?;
+            self.spaces.push((id, space));
+            self.kinds.push((id, SpaceKind::Coordination));
+            self.mark().await?;
+        }
+        Ok(())
+    }
+
+    /// Closes the open space `id`, as a leave does once `nexus-flow.toml` no longer names it.
+    pub(crate) fn close(&mut self, id: &SpaceId) {
+        self.spaces.retain(|(open, _)| open != id);
+        self.kinds.retain(|(named, _)| named != id);
+        self.marked.retain(|(held, _)| held != id);
+    }
+
     /// Looks again for the open spaces the database did not hold, which sync may have brought.
     pub(crate) async fn refresh(&mut self) -> Result<(), InitError> {
         for (id, space) in &mut self.spaces {
