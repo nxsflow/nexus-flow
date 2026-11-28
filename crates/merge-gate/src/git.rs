@@ -53,16 +53,22 @@ pub fn resolve_commit(dir: &Path, reference: &str) -> Result<String, GitError> {
 /// no file there.
 pub fn read_file(dir: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
     // `./` makes the path relative to `dir`, which may lie below the git repository's root.
-    let object = format!("{commit}:./{path}");
-    let kind = git(dir, &["cat-file", "-t", &object])?;
-    if !kind.status.success() || kind.stdout.trim_ascii() != b"blob" {
+    if !is_file(dir, commit, path)? {
         return Ok(None);
     }
+    let object = format!("{commit}:./{path}");
     let blob = git(dir, &["cat-file", "blob", &object])?;
     if !blob.status.success() {
         return Err(failed(&blob));
     }
     Ok(Some(blob.stdout))
+}
+
+/// Whether `commit` holds a file at `path`, relative to `dir`: a blob, not a tree or nothing.
+pub fn is_file(dir: &Path, commit: &str, path: &str) -> Result<bool, GitError> {
+    let object = format!("{commit}:./{path}");
+    let kind = git(dir, &["cat-file", "-t", &object])?;
+    Ok(kind.status.success() && kind.stdout.trim_ascii() == b"blob")
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Output, GitError> {
