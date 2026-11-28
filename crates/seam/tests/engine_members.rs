@@ -82,6 +82,21 @@ fn an_engine_adds_with_a_tag_and_retags() {
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// The tag the device holds in every [`coder_space`]: `init` picks the device's tag by its random
+/// id, so the tests give it one that no test names (NEX-248).
+const DEVICE_TAG: &str = "zy";
+
+#[test]
+fn the_device_of_a_coder_space_holds_the_tag_no_test_names() {
+    let (base, _) = coder_space("engine-members-device", &[]);
+
+    let members = block_on(engine(&base).members()).unwrap();
+
+    let device = members.iter().find(|m| m.kind == MemberKind::Device);
+    assert_eq!(device.and_then(|m| m.tag.as_deref()), Some(DEVICE_TAG));
+    fs::remove_dir_all(&base).unwrap();
+}
+
 /// An engine on a fresh repository space whose roles include `coder`, and the invitations of
 /// `agents` new agents paired into its account.
 fn coder_space(test: &str, agents: &[&str]) -> (std::path::PathBuf, Vec<String>) {
