@@ -65,7 +65,7 @@ pub(super) fn data_dir(path: &Path) -> DataDir {
 }
 
 /// The device's keys in a file in the data directory: the test machine has no key store.
-pub(super) fn keys(data: &DataDir) -> DeviceKeys {
+pub(crate) fn keys(data: &DataDir) -> DeviceKeys {
     DeviceKeys::File(data.root().join("device.keys"))
 }
 

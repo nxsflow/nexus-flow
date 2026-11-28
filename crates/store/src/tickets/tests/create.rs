@@ -239,3 +239,23 @@ fn each_field_a_writer_gets_wrong_is_refused_and_nothing_is_written() {
     }
     assert_eq!(count(&opened), 0, "nothing is written");
 }
+
+#[test]
+fn a_space_that_holds_no_tickets_is_not_a_ticket_space() {
+    let repo = Repo::new("ticket-create-wrong-space");
+    let space = block_on(crate::testing::create_space(
+        &repo.data,
+        crate::members::tests::keys(&repo.data),
+    ));
+    let opened = block_on(crate::opened::space(
+        space,
+        None,
+        &repo.data,
+        crate::members::tests::keys(&repo.data),
+    ))
+    .unwrap();
+
+    let refused = block_on(tickets::create(&opened, new("feature", "Misplaced")));
+
+    assert_eq!(refused, Err(TicketError::NotATicketSpace { space }));
+}
