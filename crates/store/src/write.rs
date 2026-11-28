@@ -1,11 +1,12 @@
 //! The store's one write path (RFC 0001, "Reading and writing"): every write of nexus-flow goes
 //! through [`Opened::write`], for every member and every caller, as one change of one open space.
 //! Each write a caller records is checked before NoCentralDB sees it: the collection must belong
-//! in the space's kind ([`Opened::check_write`]), and a set, delete or restore of an existing object
-//! must not be one of a write-once collection (`crate::write_once`), such as a decision. A
-//! collection only the move from v1 writes (`crate::migration`) is written only through
-//! [`Opened::write_as_move`]. A refused write refuses the whole change, so nothing of it is
-//! written.
+//! in the space's kind ([`Opened::check_write`]); it must not be the marker that names the
+//! space's kind (`crate::space_marker`), which only the creation of a space writes; and a set,
+//! delete or restore of an existing object must not be one of a write-once collection
+//! (`crate::write_once`), such as a decision. A collection only the move from v1 writes
+//! (`crate::migration`) is written only through [`Opened::write_as_move`]. A refused write
+//! refuses the whole change, so nothing of it is written.
 
 use std::fmt;
 
@@ -15,7 +16,7 @@ use crate::id::SpaceId;
 use crate::migration::{self, MoveOnly};
 use crate::opened::Opened;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
-use crate::space_marker::MarkerWrite;
+use crate::space_marker::{self, MarkerWrite};
 use crate::write_once::{self, Change, WriteOnce};
 
 /// Why a write was refused or failed. A refusal writes nothing of the change.
@@ -76,6 +77,12 @@ impl From<MoveOnly> for WriteError {
     }
 }
 
+impl From<MarkerWrite> for WriteError {
+    fn from(e: MarkerWrite) -> Self {
+        WriteError::Marker(e)
+    }
+}
+
 impl From<nocentraldb::Error> for WriteError {
     fn from(e: nocentraldb::Error) -> Self {
         WriteError::Database(e)
@@ -129,6 +136,7 @@ impl Write<'_, '_> {
 
     fn check(&self, collection: &str) -> Result<(), WriteError> {
         space_kind::check(collection, self.kind)?;
+        space_marker::check(collection)?;
         Ok(migration::check(collection, self.by_move)?)
     }
 

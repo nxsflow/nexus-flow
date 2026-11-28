@@ -3,6 +3,9 @@
 //! object naming the kind in the change right after it creates a space. Every reader reads it,
 //! a caller that opens the space by id alone through `Engine::open_space` included.
 //!
+//! Only the store's creation of a space writes the marker: [`check`] refuses every write of it
+//! through `Opened::write`, so no caller adds a second marker or changes the first.
+//!
 //! A space created before the marker existed has none, and keeps the kind `nexus-flow.toml` gives
 //! it. A space whose markers name more than one kind, which only a write outside the store can
 //! make, is of no known kind.
@@ -71,6 +74,18 @@ pub(crate) async fn read(opened: &Opened, space: &SpaceId) -> Result<Marked, noc
         };
     }
     Ok(marked)
+}
+
+/// Whether a write of `collection` may go through the store's write path: every collection but
+/// the marker, which only [`create`] writes.
+pub fn check(collection: &str) -> Result<(), MarkerWrite> {
+    if collection == COLLECTION {
+        Err(MarkerWrite {
+            collection: collection.to_owned(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Why a write was refused: its collection is the marker, which the store writes only when it
