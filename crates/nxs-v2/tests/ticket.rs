@@ -3,7 +3,7 @@
 //! ticket as show prints it, or its key alone with `-q`. Both print what their `Engine`
 //! counterparts return, as one record with every key, `[]` and `null` for empty values, in JSON
 //! by default and in Markdown with `--md`. A refusal is v1's error object, with RFC 0002's codes
-//! `key_not_found` and `ambiguous_key`, and writes nothing.
+//! `key_not_found`, `ambiguous_key`, `not_synced` and `no_tag`, and writes nothing.
 
 mod common;
 
@@ -505,4 +505,67 @@ fn the_same_local_copy_prints_the_same_bytes_as_the_golden_files() {
     assert_eq!(json_second.stdout, json_first.stdout);
     assert_eq!(stdout(&md_first), golden("ticket-show.md", &ticket));
     assert_eq!(md_second.stdout, md_first.stdout);
+}
+
+/// The golden error file `name`, with the repository space's id filled in.
+fn golden_error(repo: &Repo, name: &str) -> String {
+    let space = json(&repo.nxs(&["init"]))["space"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        .replace("{space}", &space)
+}
+
+const CREATE: &[&str] = &[
+    "ticket",
+    "create",
+    "--type",
+    "feature",
+    "--title",
+    "Minted",
+    "--description",
+    "Why",
+];
+
+#[test]
+fn a_freed_tag_before_a_sync_is_not_synced() {
+    let repo = Repo::new("ticket-not-synced");
+    let setup = options(&repo.base.join("data"));
+    block_on(nexus_flow_seam::testing::take_over_freed_tag(
+        &repo.base.join("repo"),
+        &setup.data,
+        setup.keys,
+    ));
+
+    let out = repo.nxs(CREATE);
+
+    assert_eq!(kind(&out), "not_synced");
+    assert_eq!(
+        stdout(&out),
+        golden_error(&repo, "ticket-create-not-synced.json")
+    );
+}
+
+#[test]
+fn a_member_without_a_tag_is_no_tag() {
+    let repo = Repo::new("ticket-no-tag");
+    let setup = options(&repo.base.join("data"));
+    block_on(nexus_flow_seam::testing::clear_device_tag(
+        &repo.base.join("repo"),
+        &setup.data,
+        setup.keys,
+    ));
+
+    let out = repo.nxs(CREATE);
+
+    assert_eq!(kind(&out), "no_tag");
+    assert_eq!(
+        stdout(&out),
+        golden_error(&repo, "ticket-create-no-tag.json")
+    );
 }
