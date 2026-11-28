@@ -112,3 +112,12 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
         v1_workspace: root.path().join(V1_WORKSPACE).symlink_metadata().is_ok(),
     })
 }
+
+/// Creates a space of kind `kind` with the device member as its first admin, and returns its id.
+pub async fn create(
+    _data: &DataDir,
+    _keys: DeviceKeys,
+    _kind: crate::space_kind::SpaceKind,
+) -> Result<crate::id::SpaceId, InitError> {
+    todo!("NEX-242")
+}
