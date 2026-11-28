@@ -112,8 +112,9 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
         Some(space) => (space, false),
         None => {
             let space = space_marker::create(&db, SpaceKind::Repository).await?;
-            let opened = opened::created(db, relay, data, SpaceId(space.id())).await?;
-            members::write_owner(&opened)
+            let id = SpaceId(space.id());
+            let opened = opened::created(db, relay, data, id).await?;
+            members::write_owner(&opened, &id)
                 .await
                 .map_err(|e| InitError::Database {
                     message: e.to_string(),
