@@ -39,3 +39,21 @@ fn init_run_twice_changes_nothing() {
     assert_eq!(fs::read(repo.join("nexus-flow.toml")).unwrap(), file);
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn init_gives_the_device_its_owner_record_with_a_tag_once() {
+    let base = scratch("init-owner");
+    let repo = base.join("repo");
+    block_on(init_with(&repo, options(&base.join("data")))).unwrap();
+    block_on(init_with(&repo, options(&base.join("data")))).unwrap();
+
+    let engine = block_on(Engine::open_with(&repo, options(&base.join("data")))).unwrap();
+    let members = block_on(engine.members()).unwrap();
+
+    assert_eq!(members.len(), 1, "{members:?}");
+    assert_eq!(members[0].role.as_deref(), Some("owner"));
+    let tag = members[0].tag.as_deref().expect("the device has a tag");
+    assert_eq!(tag.len(), 2, "{tag}");
+    drop(engine);
+    fs::remove_dir_all(&base).unwrap();
+}

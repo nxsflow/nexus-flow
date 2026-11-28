@@ -3,8 +3,8 @@
 //! after the checks `nxs member add` makes of a named tag, so a refusal changes nothing. Only the
 //! records change: the keys already written keep the tag they were written with.
 //!
-//! A member without a record, such as the device that created the space, gets one holding only
-//! its member and tag.
+//! A member without a record, such as the device that created a space before `nxs init` wrote
+//! one, gets one holding only its member and tag.
 
 use super::taken::Taken;
 use super::{listed, parse_tag, record, spaces_of, Member, MemberError};

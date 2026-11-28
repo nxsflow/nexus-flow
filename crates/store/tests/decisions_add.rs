@@ -26,9 +26,19 @@ fn repository(test: &str) -> (PathBuf, Opened, SpaceId) {
 }
 
 /// Gives the device a role record naming `role` and, when `key` is given, a ticket of the space
-/// with that key: what `nxs member add` writes for a member it adds.
+/// with that key: what `nxs member add` writes for a member it adds. The record `init` wrote for
+/// the device is rewritten, so the device keeps one record.
 fn role_record(opened: &Opened, space: &SpaceId, role: &str, key: Option<&str>) {
     let me = block_on(members::list(opened)).unwrap().remove(0).member;
+    let existing = block_on(opened.find(
+        space,
+        "spaceMember",
+        "byMember",
+        vec![Value::from(me.clone())],
+    ))
+    .unwrap()
+    .first()
+    .map(|record| record.id());
     block_on(opened.write(space, |w| {
         let ticket = match key {
             Some(key) => {
@@ -40,15 +50,15 @@ fn role_record(opened: &Opened, space: &SpaceId, role: &str, key: Option<&str>) 
             }
             None => Value::clear(),
         };
-        w.create(
-            "spaceMember",
-            [
-                ("member", Value::from(me.clone())),
-                ("role", Value::from(role)),
-                ("ticket", ticket),
-            ],
-        )
-        .map(drop)
+        let values = [("role", Value::from(role)), ("ticket", ticket)];
+        match existing {
+            Some(record) => w.update("spaceMember", record, values),
+            None => {
+                let member = ("member", Value::from(me.clone()));
+                w.create("spaceMember", std::iter::once(member).chain(values))
+                    .map(drop)
+            }
+        }
     }))
     .unwrap();
 }
@@ -223,6 +233,20 @@ fn decided_by_defaults_to_the_role_alone_without_a_ticket() {
             .unwrap()
             .decided_by,
         "pm"
+    );
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_writer_whose_record_says_only_owner_must_name_who_decided() {
+    let (base, opened, space) = repository("decision-role-owner");
+    role_record(&opened, &space, "owner", None);
+    let mut decision = new("The owner's call");
+    decision.decided_by = None;
+
+    assert_eq!(
+        block_on(decisions::add(&opened, decision)).unwrap_err(),
+        DecisionError::NoRole
     );
     std::fs::remove_dir_all(&base).unwrap();
 }
