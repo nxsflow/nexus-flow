@@ -22,7 +22,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 use crate::data_dir::{DataDir, Platform};
-use crate::members::{self, Member, MemberError};
+use crate::members::{self, Member, MemberError, MemberKind};
 use crate::opened::{self, Opened};
 use crate::space::{init, DeviceKeys};
 use crate::testing;
@@ -88,7 +88,20 @@ impl Repo {
             .unwrap()
             .space;
         role_files(&base.join("repo"), &["pm", "coder"]);
-        Repo { base, data, space }
+        let repo = Repo { base, data, space };
+        repo.retag_device();
+        repo
+    }
+
+    /// Gives the device [`DEVICE_TAG`], in place of the tag `init` picked for it.
+    fn retag_device(&self) {
+        let opened = self.opened();
+        let device = block_on(members::list(&opened))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == MemberKind::Device)
+            .expect("the device that created the space is a member");
+        block_on(members::retag(&opened, &device.member, DEVICE_TAG)).unwrap();
     }
 
     pub fn repo(&self) -> PathBuf {
