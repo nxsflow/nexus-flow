@@ -131,6 +131,7 @@ impl From<Error> for CliError {
             Error::Coordination(coordination) => coordination_kind(coordination),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
+            Error::Ticket(_) => Kind::Validation,
         };
         CliError { kind, msg }
     }

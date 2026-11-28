@@ -49,6 +49,7 @@ use nexus_flow_store::opened::{self, Opened};
 use nexus_flow_store::requests::{self, Coordination, CoordinationError, Repository};
 use nexus_flow_store::space::{DeviceKeys, InitError};
 use nexus_flow_store::sync::{self, SyncError, SyncStatus};
+use nexus_flow_store::tickets::TicketError;
 
 /// Where the device member's database and keys live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +97,8 @@ pub enum Error {
     Coordination(CoordinationError),
     /// The local git could not give what the merge gate reads: the base names no commit.
     Git(GitError),
+    /// A ticket was refused, could not be written, or is not in the local copy.
+    Ticket(TicketError),
 }
 
 impl fmt::Display for Error {
@@ -115,6 +118,7 @@ impl fmt::Display for Error {
             Error::Decision(e) => e.fmt(f),
             Error::Coordination(e) => e.fmt(f),
             Error::Git(e) => e.fmt(f),
+            Error::Ticket(e) => e.fmt(f),
         }
     }
 }
@@ -172,6 +176,12 @@ impl From<DecisionError> for Error {
     }
 }
 
+impl From<TicketError> for Error {
+    fn from(e: TicketError) -> Self {
+        Error::Ticket(e)
+    }
+}
+
 impl From<SettingsError> for Error {
     fn from(e: SettingsError) -> Self {
         Error::Open(InitError::Settings(e))
@@ -187,7 +197,7 @@ pub fn set_relay(options: &Options, relay: &RelayUrl) -> Result<(), Error> {
 /// A member's database, open on the spaces a caller reads.
 #[derive(Debug)]
 pub struct Engine {
-    opened: Opened,
+    pub(crate) opened: Opened,
     data: DataDir,
 }
 
