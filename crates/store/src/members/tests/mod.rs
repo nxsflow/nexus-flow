@@ -69,6 +69,10 @@ pub(super) fn keys(data: &DataDir) -> DeviceKeys {
     DeviceKeys::File(data.root().join("device.keys"))
 }
 
+/// The tag the device holds in every [`Repo`]: `init` picks the device's tag by its random id,
+/// so the tests give it one that no test names (NEX-248).
+pub(super) const DEVICE_TAG: &str = "zy";
+
 /// A repository with its space, the device's data directory and the space's id.
 pub(super) struct Repo {
     pub base: PathBuf,
