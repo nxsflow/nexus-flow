@@ -8,6 +8,7 @@
 //! taken already, prints `warning: <text>` on stderr, in both formats.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -71,6 +72,7 @@ enum Command {
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
 /// data directory and the device's keys; it is called only by a command that opens the database.
+/// A command that reads stdin, such as `nxs ticket create -`, reads the process's.
 pub fn run<I, T>(
     args: I,
     dir: &Path,
@@ -80,6 +82,21 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_with_stdin(args, dir, options, &mut std::io::stdin().lock())
+}
+
+/// [`run`], with `stdin` as what a command reads from stdin.
+pub fn run_with_stdin<I, T>(
+    args: I,
+    dir: &Path,
+    options: impl FnOnce() -> Result<Options, DataDirError>,
+    stdin: &mut dyn Read,
+) -> Outcome
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let _ = stdin;
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     if let Some(e) = args.first().and_then(|argv0| retired::check(argv0)) {
         return e.outcome(md_requested(&args));

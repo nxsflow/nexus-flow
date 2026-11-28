@@ -150,3 +150,35 @@ pub async fn hold_every_tag_but(repo: &Path, data: &DataDir, keys: DeviceKeys, b
         .await
         .expect("the records are written");
 }
+
+/// Writes a second ticket with the key `key` into the repository space of the checkout at
+/// `repo`, as two members holding one tag leave it (RFC 0002, "Two members with one tag"), and
+/// returns its key as `nxs` shows it, with `~` and the first digits of its object id.
+pub async fn ticket_with_key(repo: &Path, data: &DataDir, keys: DeviceKeys, key: &str) -> String {
+    use nocentraldb::Value;
+
+    let opened = crate::opened::repository(repo, data, keys)
+        .await
+        .expect("the repository opens");
+    let (space, _) = &opened.spaces()[0];
+    let mut twin = None;
+    opened
+        .write(space, |w| {
+            let values = [
+                ("key", Value::from(key)),
+                ("type", Value::from("chore")),
+                ("title", Value::from("The twin")),
+                ("description", Value::from("A key two tickets hold")),
+                ("status", Value::from("open")),
+            ];
+            twin = Some(w.create(crate::tickets::keys::TICKETS, values)?);
+            Ok(())
+        })
+        .await
+        .expect("the twin is written");
+    let twin = twin.expect("the twin is created");
+    crate::tickets::show(&opened, &twin.to_string())
+        .await
+        .expect("the twin reads")
+        .key
+}
