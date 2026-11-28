@@ -3,10 +3,12 @@
 //! edges, notes, work links and references read `None` or empty until the tickets that compute
 //! and write them land.
 
-use nocentraldb::{Object, ObjectId};
+use std::cmp::Ordering;
 
-use super::keys::TICKETS;
-use super::{Derived, Ticket, TicketError};
+use nocentraldb::{Object, ObjectId, Value};
+
+use super::keys::{shown, Key, BY_KEY, TICKETS};
+use super::{Derived, Edge, Ticket, TicketError};
 use crate::id::SpaceId;
 use crate::opened::Opened;
 
@@ -27,17 +29,34 @@ pub(super) async fn read(
         .ok_or_else(|| TicketError::Database {
             message: format!("the ticket {id} is not in the local copy"),
         })?;
+    let parent = match object.get::<ObjectId>("parent")? {
+        Some(parent) => linked(opened, space, parent).await?.map(|(key, _)| key),
+        None => None,
+    };
+    let mut deps = Vec::new();
+    for dep in links(&object, "dependsOn")? {
+        if let Some((key, status)) = linked(opened, space, dep).await? {
+            deps.push(Edge {
+                key,
+                status,
+                done: None,
+                on_main: None,
+            });
+        }
+    }
+    deps.sort_by(|a, b| by_key(&a.key, &b.key));
+    let key = shown_key(opened, space, &object).await?;
     let text = |field| text(&object, field);
     Ok(Ticket {
         id: id.to_string(),
-        key: text("key")?.unwrap_or_default(),
+        key,
         kind: text("type")?.unwrap_or_default(),
         title: text("title")?.unwrap_or_default(),
         status: text("status")?.unwrap_or_default(),
         resolution: text("resolution")?,
         priority: object.get::<i64>("priority")?,
         assignee: None,
-        parent: None,
+        parent,
         labels: strings(&object, "labels")?,
         due: text("due")?,
         defer_until: text("deferUntil")?,
@@ -53,7 +72,7 @@ pub(super) async fn read(
         closing_comment: text("closingComment")?,
         replaced_by: None,
         replaces: Vec::new(),
-        deps: Vec::new(),
+        deps,
         dependents: Vec::new(),
         children: Vec::new(),
         contributes_to: Vec::new(),
@@ -65,6 +84,65 @@ pub(super) async fn read(
     })
 }
 
+/// The key, as `nxs` shows it, and the status of the ticket `id` a link names; `None` when the
+/// local copy does not hold it.
+async fn linked(
+    opened: &Opened,
+    space: &SpaceId,
+    id: ObjectId,
+) -> Result<Option<(String, String)>, TicketError> {
+    let Some(object) = opened.get(space, TICKETS, id).await? else {
+        return Ok(None);
+    };
+    let key = shown_key(opened, space, &object).await?;
+    Ok(Some((key, text(&object, "status")?.unwrap_or_default())))
+}
+
+/// The key of the ticket `object` as `nxs` shows it: with `~` and the first digits of its object
+/// id when another ticket of the space holds the same key.
+async fn shown_key(
+    opened: &Opened,
+    space: &SpaceId,
+    object: &Object,
+) -> Result<String, TicketError> {
+    let key = text(object, "key")?.unwrap_or_default();
+    let mut holders: Vec<(String, ObjectId)> = opened
+        .find(space, TICKETS, BY_KEY, vec![Value::from(key.as_str())])
+        .await?
+        .iter()
+        .map(|t| (key.clone(), t.id()))
+        .collect();
+    if !holders.iter().any(|(_, id)| *id == object.id()) {
+        holders.push((key.clone(), object.id()));
+    }
+    let at = holders
+        .iter()
+        .position(|(_, id)| *id == object.id())
+        .expect("the ticket is among the holders");
+    Ok(shown(&holders).swap_remove(at))
+}
+
+/// Keys in key order: by tag, then by number, then as text; a text that is no key after every
+/// key.
+pub(super) fn by_key(a: &str, b: &str) -> Ordering {
+    let parse = |text: &str| text.split('~').next().and_then(|k| k.parse::<Key>().ok());
+    match (parse(a), parse(b)) {
+        (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
+}
+
+/// The object ids of the many links `field`.
+fn links(object: &Object, field: &str) -> Result<Vec<ObjectId>, TicketError> {
+    let mut list = Vec::new();
+    for value in object.get::<&[Value]>(field)?.unwrap_or_default() {
+        list.push(ObjectId::try_from(value)?);
+    }
+    Ok(list)
+}
+
 fn text(object: &Object, field: &str) -> Result<Option<String>, TicketError> {
     Ok(object.get::<&str>(field)?.map(str::to_owned))
 }
@@ -72,7 +150,7 @@ fn text(object: &Object, field: &str) -> Result<Option<String>, TicketError> {
 /// The elements of the set `field`, in byte order.
 fn strings(object: &Object, field: &str) -> Result<Vec<String>, TicketError> {
     let mut list = Vec::new();
-    for value in object.get::<&[nocentraldb::Value]>(field)?.unwrap_or_default() {
+    for value in object.get::<&[Value]>(field)?.unwrap_or_default() {
         list.push(<&str>::try_from(value)?.to_owned());
     }
     list.sort();

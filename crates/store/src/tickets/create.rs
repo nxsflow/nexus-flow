@@ -4,9 +4,9 @@
 //! database runs as (the session's member when `NXS_SESSION` names one, else the device's), and
 //! `createdAt` and `updatedAt` the same instant. It returns the ticket as `show` reads it.
 
-use nocentraldb::{MemberId, Space, Value};
+use nocentraldb::{MemberId, ObjectId, Space, Value};
 
-use super::check::{check, Checked};
+use super::check::{check, Checked, EPIC};
 use super::keys::{self, TICKETS};
 use super::show::read;
 use super::time;
@@ -19,6 +19,17 @@ use crate::opened::Opened;
 pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketError> {
     let Checked { new, priority } = check(new)?;
     let (space_id, space) = repository(opened)?;
+    let parent = match &new.parent {
+        Some(text) => Some(parent(opened, &space_id, &new.kind, text).await?),
+        None => None,
+    };
+    let mut depends_on: Vec<ObjectId> = Vec::new();
+    for text in &new.depends_on {
+        let id = keys::resolve(opened, &space_id, text).await?;
+        if !depends_on.contains(&id) {
+            depends_on.push(id);
+        }
+    }
     let key = keys::mint(opened, &space_id).await?.to_string();
     let me = me(space).await?.to_string();
     let now = time::now();
@@ -51,6 +62,12 @@ pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketErr
             if let Some(priority) = priority {
                 values.push(("priority", Value::from(priority)));
             }
+            if let Some(parent) = parent {
+                values.push(("parent", Value::from(parent)));
+            }
+            if !depends_on.is_empty() {
+                values.push(("dependsOn", Value::add(depends_on.iter().copied())));
+            }
             if !new.labels.is_empty() {
                 values.push(("labels", Value::add(new.labels.iter().map(String::as_str))));
             }
@@ -60,6 +77,31 @@ pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketErr
         .await?;
     let id = ticket.expect("the ticket is created in the change");
     read(opened, &space_id, id).await
+}
+
+/// The epic `text` names, as the parent of a new ticket of type `kind`: only an epic may be a
+/// parent, and an epic has none.
+async fn parent(
+    opened: &Opened,
+    space: &SpaceId,
+    kind: &str,
+    text: &str,
+) -> Result<ObjectId, TicketError> {
+    if kind == EPIC {
+        return Err(TicketError::EpicWithParent);
+    }
+    let id = keys::resolve(opened, space, text).await?;
+    let epic = opened
+        .get(space, TICKETS, id)
+        .await?
+        .and_then(|t| t.get::<&str>("type").ok().flatten().map(|k| k == EPIC))
+        .unwrap_or(false);
+    if !epic {
+        return Err(TicketError::ParentNotEpic {
+            key: text.to_owned(),
+        });
+    }
+    Ok(id)
 }
 
 /// The repository space: the first open space, which must be held.
