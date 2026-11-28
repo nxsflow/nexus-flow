@@ -8,7 +8,8 @@ use nexus_flow_seam::{init_with, DataDirError, Init as Report, Options, SyncMode
 use serde::Serialize;
 
 use crate::block_on::block_on;
-use crate::cmd::genesis::refused_unless_written;
+use crate::cmd::factory::Install;
+use crate::cmd::genesis::{refused_unless_written, Create};
 use crate::error::CliError;
 use crate::output::{Format, Render};
 use crate::Outcome;
@@ -24,6 +25,10 @@ pub struct Init {
     sync: &'static str,
     /// Whether the root holds a v1 workspace, `.nxs/`, which was left as it was.
     v1_workspace: bool,
+    /// What the factory's install did, as `nxs factory install` prints it.
+    factory: Install,
+    /// What GENESIS's create did, as `nxs genesis create` prints it.
+    genesis: Create,
 }
 
 /// Runs `nxs init` in `dir`, printed in `format`. A GENESIS git still tracks is not written: the
@@ -55,6 +60,8 @@ impl From<&Report> for Init {
                 SyncMode::Relay => "relay",
             },
             v1_workspace: report.v1_workspace,
+            factory: Install::from(&report.factory),
+            genesis: Create::from(&report.genesis),
         }
     }
 }

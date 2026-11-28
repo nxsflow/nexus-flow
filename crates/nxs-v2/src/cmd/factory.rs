@@ -62,18 +62,24 @@ pub fn run(
 
 impl From<Report> for Install {
     fn from(report: Report) -> Self {
+        Install::from(&report)
+    }
+}
+
+impl From<&Report> for Install {
+    fn from(report: &Report) -> Self {
         Install {
             files: report
                 .files
-                .into_iter()
+                .iter()
                 .map(|f| File {
-                    path: f.path,
+                    path: f.path.clone(),
                     state: f.state.as_str(),
                 })
                 .collect(),
-            codeowners: report.codeowners.map(|c| Codeowners {
-                file: c.file,
-                uncovered: c.uncovered,
+            codeowners: report.codeowners.as_ref().map(|c| Codeowners {
+                file: c.file.clone(),
+                uncovered: c.uncovered.clone(),
             }),
         }
     }
