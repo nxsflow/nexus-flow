@@ -75,7 +75,7 @@ fn add_prints_a_free_tag_and_list_prints_tag_and_tag_shared() {
     let list = list.as_array().unwrap();
     assert!(list.contains(&added), "{list:?}");
     let device = list.iter().find(|m| m["kind"] == "device").unwrap();
-    assert_eq!(device["tag"], Value::Null);
+    assert_ne!(device["tag"], added["tag"], "{list:?}");
     assert_eq!(device["tag_shared"], false);
 }
 

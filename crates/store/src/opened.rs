@@ -239,6 +239,24 @@ pub(crate) async fn repository_on(
     open(member, ids, kinds, Some(checkout)).await
 }
 
+/// The device member's database `db`, which has just created the space `id`, open on that space
+/// alone, without a checkout: what `crate::space::init` writes the device's own record through
+/// before `nexus-flow.toml` names the space. Its kind comes from the marker its creation wrote.
+pub(crate) async fn created(
+    db: Db,
+    relay: Option<RelayUrl>,
+    data: &DataDir,
+    id: SpaceId,
+) -> Result<Opened, InitError> {
+    let member = Member {
+        db,
+        data,
+        session: None,
+        relay,
+    };
+    open(member, vec![id], Vec::new(), None).await
+}
+
 /// Opens the device member's database on the space `id`. With `git`, the checkout is the
 /// repository at or above it, whose `nexus-flow.toml` gives the base branch; without it there
 /// is none, and "on main" is `null`.

@@ -94,7 +94,7 @@ fn adding_prints_the_member_with_its_record_and_list_shows_both() {
     assert_eq!(list.len(), 2, "{list:?}");
     assert!(list.contains(&added), "{list:?}");
     let device = list.iter().find(|m| m["kind"] == "device").unwrap();
-    assert_eq!(device["role"], Value::Null);
+    assert_eq!(device["role"], "owner");
     assert_eq!(device["account"], added["account"]);
 }
 
@@ -233,8 +233,8 @@ fn outside_a_repository_it_says_to_run_nxs_init() {
     fs::remove_dir_all(&base).unwrap();
 }
 
-/// The golden file `name`, with the device's member id and account filled in: both are drawn
-/// anew in every test.
+/// The golden file `name`, with the device's member id, tag and account filled in: all three are
+/// drawn anew in every test, the tag picked by the member id.
 fn golden(name: &str, device: &Member) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
@@ -242,6 +242,10 @@ fn golden(name: &str, device: &Member) -> String {
     fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
         .replace("{member}", &device.member)
+        .replace(
+            "{tag}",
+            device.tag.as_deref().expect("the device has a tag"),
+        )
         .replace("{account}", &device.account)
 }
 

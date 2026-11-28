@@ -5,6 +5,7 @@
 
 mod add;
 mod list;
+mod owner;
 mod remove;
 mod retag;
 mod role_file;

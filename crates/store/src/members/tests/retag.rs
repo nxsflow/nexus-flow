@@ -7,7 +7,7 @@ use nocentraldb::Value;
 use super::add::find;
 use super::tagged::set_tag;
 use super::{block_on, Repo};
-use crate::members::{self, Member, MemberError, MemberKind};
+use crate::members::{self, record, Member, MemberError, MemberKind};
 
 fn retag(repo: &Repo, member: &str, tag: &str) -> Result<Member, MemberError> {
     block_on(members::retag(&repo.opened(), member, tag))
@@ -57,14 +57,35 @@ fn keys_already_written_keep_their_tag() {
     assert_eq!(object.get::<&str>("key").unwrap(), Some("ka.1"));
 }
 
+/// Deletes the record `init` wrote for `member`, as a space created before `init` wrote one
+/// holds none.
+fn without_record(repo: &Repo, member: &str) {
+    let opened = repo.opened();
+    let (id, _) = &opened.spaces()[0];
+    let found = block_on(opened.find(
+        id,
+        record::COLLECTION,
+        "byMember",
+        vec![Value::from(member)],
+    ))
+    .unwrap();
+    block_on(opened.write(id, |w| {
+        found
+            .iter()
+            .try_for_each(|object| w.delete(record::COLLECTION, object.id()))
+    }))
+    .unwrap();
+}
+
 #[test]
-fn the_device_without_a_record_gets_one_with_its_tag() {
+fn a_device_without_a_record_gets_one_with_its_tag() {
     let repo = Repo::new("member-retag-device");
     let device = repo
         .list()
         .into_iter()
         .find(|m| m.kind == MemberKind::Device)
         .unwrap();
+    without_record(&repo, &device.member);
 
     let retagged = retag(&repo, &device.member, "ka").unwrap();
 
