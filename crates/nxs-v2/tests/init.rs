@@ -162,3 +162,83 @@ fn after_init_member_list_shows_the_device_as_owner_with_a_tag_and_a_rerun_keeps
     assert_eq!(list[0]["tag_shared"], false);
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn init_prints_the_factory_and_genesis_reports_as_their_commands_print_them() {
+    let base = scratch("init-reports");
+    let repo = base.join("repo");
+    let report = json(&nxs(&base, &repo, &["init"]));
+    // A second repository, after the same init, has the files removed again, so the two
+    // commands write them afresh and print what `nxs init` wrote.
+    let other = scratch("init-reports-other");
+    let again = other.join("repo");
+    assert_eq!(nxs(&other, &again, &["init"]).code, 0);
+    fs::remove_dir_all(again.join("factory")).unwrap();
+
+    let factory = json(&nxs(&other, &again, &["factory", "install"]));
+    let genesis = json(&nxs(&other, &again, &["genesis", "create"]));
+
+    assert_eq!(report["factory"], factory);
+    assert_eq!(report["genesis"], genesis);
+    assert_eq!(report["genesis"]["files"][0]["state"], "written");
+    fs::remove_dir_all(&base).unwrap();
+    fs::remove_dir_all(&other).unwrap();
+}
+
+#[test]
+fn init_with_md_names_the_paths_codeowners_leaves_uncovered_and_a_rerun_wrote_nothing() {
+    let base = scratch("init-md-codeowners");
+    let repo = base.join("repo");
+    fs::write(repo.join("CODEOWNERS"), "/factory/roles/ @owner\n").unwrap();
+
+    let out = nxs(&base, &repo, &["init", "--md"]);
+    let rerun = nxs(&base, &repo, &["init", "--md"]);
+
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains(
+            "- `nxs factory install` wrote `factory/CONFIG.md`, `factory/FACTORY.md`, `factory/roles/coder.md`, `factory/roles/pm.md`, `factory/status-note.md`; commit them; `CODEOWNERS` gives no code owner to `factory/CONFIG.md`, `factory/FACTORY.md`, `factory/status-note.md`\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "- `nxs genesis create` wrote `factory/GENESIS.md`, `factory/genesis-guide.md`; fill in GENESIS and commit them; no rule in `CODEOWNERS` covers `factory/GENESIS.md`; add one so that its changes come back to the owner\n"
+        ),
+        "{text}"
+    );
+    let text = stdout(&rerun);
+    assert!(
+        text.contains("- `nxs factory install` wrote nothing; `CODEOWNERS` gives no code owner to"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- `nxs genesis create` wrote nothing; no rule in `CODEOWNERS` covers"),
+        "{text}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn init_with_md_says_a_tracked_genesis_was_not_written() {
+    let base = scratch("init-md-tracked");
+    let repo = base.join("repo");
+    git(&repo, &["init", "-q"]);
+    fs::create_dir_all(repo.join("factory")).unwrap();
+    fs::write(repo.join(GENESIS), "ours").unwrap();
+    git(&repo, &["add", GENESIS]);
+    git(&repo, &["commit", "-q", "-m", "genesis"]);
+    fs::remove_file(repo.join(GENESIS)).unwrap();
+
+    let out = nxs(&base, &repo, &["init", "--md"]);
+
+    let text = stdout(&out);
+    assert!(
+        text.contains(
+            "- `nxs genesis create` wrote `factory/genesis-guide.md`; `factory/GENESIS.md` is missing here but tracked in git, so nothing was written there; restore it from git; "
+        ),
+        "{text}"
+    );
+    fs::remove_dir_all(&base).unwrap();
+}

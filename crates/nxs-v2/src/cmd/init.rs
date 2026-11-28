@@ -1,6 +1,7 @@
 //! `nxs init` (RFC 0001, "Creating and finding a space"): gives the repository its space through
 //! the seam's `init`, which ends with the factory's install and GENESIS's create (RFC 0006, RFC
-//! 0004), and prints what it did to the space.
+//! 0004), and prints what it did to the space, followed by the two installs' reports as `nxs
+//! factory install` and `nxs genesis create` print them (NEX-243).
 
 use std::path::Path;
 
@@ -8,7 +9,8 @@ use nexus_flow_seam::{init_with, DataDirError, Init as Report, Options, SyncMode
 use serde::Serialize;
 
 use crate::block_on::block_on;
-use crate::cmd::genesis::refused_unless_written;
+use crate::cmd::factory::Install;
+use crate::cmd::genesis::{refused_unless_written, Create};
 use crate::error::CliError;
 use crate::output::{Format, Render};
 use crate::Outcome;
@@ -24,6 +26,10 @@ pub struct Init {
     sync: &'static str,
     /// Whether the root holds a v1 workspace, `.nxs/`, which was left as it was.
     v1_workspace: bool,
+    /// What the factory's install did, as `nxs factory install` prints it.
+    factory: Install,
+    /// What GENESIS's create did, as `nxs genesis create` prints it.
+    genesis: Create,
 }
 
 /// Runs `nxs init` in `dir`, printed in `format`. A GENESIS git still tracks is not written: the
@@ -55,6 +61,8 @@ impl From<&Report> for Init {
                 SyncMode::Relay => "relay",
             },
             v1_workspace: report.v1_workspace,
+            factory: Install::from(&report.factory),
+            genesis: Create::from(&report.genesis),
         }
     }
 }
@@ -88,6 +96,9 @@ impl Render for Init {
                     .to_owned(),
             );
         }
-        lines.iter().map(|line| format!("- {line}\n")).collect()
+        let mut text: String = lines.iter().map(|line| format!("- {line}\n")).collect();
+        text.push_str(&self.factory.summary());
+        text.push_str(&self.genesis.summary());
+        text
     }
 }

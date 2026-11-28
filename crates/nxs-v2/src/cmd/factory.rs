@@ -62,21 +62,67 @@ pub fn run(
 
 impl From<Report> for Install {
     fn from(report: Report) -> Self {
+        Install::from(&report)
+    }
+}
+
+impl From<&Report> for Install {
+    fn from(report: &Report) -> Self {
         Install {
             files: report
                 .files
-                .into_iter()
+                .iter()
                 .map(|f| File {
-                    path: f.path,
+                    path: f.path.clone(),
                     state: f.state.as_str(),
                 })
                 .collect(),
-            codeowners: report.codeowners.map(|c| Codeowners {
-                file: c.file,
-                uncovered: c.uncovered,
+            codeowners: report.codeowners.as_ref().map(|c| Codeowners {
+                file: c.file.clone(),
+                uncovered: c.uncovered.clone(),
             }),
         }
     }
+}
+
+impl Install {
+    /// The report in one Markdown line, as `nxs init --md` prints it: the files written, and
+    /// the factory's paths no CODEOWNERS rule covers.
+    pub fn summary(&self) -> String {
+        let written = list(
+            self.files
+                .iter()
+                .filter(|f| f.state == "written")
+                .map(|f| &f.path),
+        );
+        let mut line = match written {
+            Some(written) => format!("- `nxs factory install` wrote {written}; commit them"),
+            None => "- `nxs factory install` wrote nothing".to_owned(),
+        };
+        match &self.codeowners {
+            None => line.push_str(
+                "; there is no CODEOWNERS file, so no code owner reviews a change to the factory's files",
+            ),
+            Some(c) => match list(c.uncovered.iter()) {
+                None => line.push_str(&format!(
+                    "; `{}` gives each of the factory's files a code owner",
+                    c.file
+                )),
+                Some(uncovered) => line.push_str(&format!(
+                    "; `{}` gives no code owner to {uncovered}",
+                    c.file
+                )),
+            },
+        }
+        line.push('\n');
+        line
+    }
+}
+
+/// `paths` in backticks, joined by commas; `None` when there are none.
+pub fn list<'a>(paths: impl Iterator<Item = &'a String>) -> Option<String> {
+    let paths: Vec<_> = paths.map(|p| format!("`{p}`")).collect();
+    (!paths.is_empty()).then(|| paths.join(", "))
 }
 
 impl Render for Install {
