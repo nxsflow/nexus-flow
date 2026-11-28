@@ -6,7 +6,9 @@ description = "The merge gate of the factory module (RFC 0010): reads the rules 
 publish = false
 
 # The CommonMark parser NEX-169 reads the owner-rules list in GENESIS.md with, declared here so that
-# the lockfile settles in NEX-212 and not in the ticket after it.
+# the lockfile settles in NEX-212 and not in the ticket after it. serde_json reads the pull
+# request's comments and the verdict they carry (NEX-172).
 [dependencies]
 pulldown-cmark.workspace = true
+serde_json.workspace = true
 toml.workspace = true
