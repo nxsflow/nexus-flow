@@ -36,6 +36,18 @@ export const model = nc.model({
       byTag: nc.index(["tag", "member"], { equal: 0, scope: "space" }),
     },
   }),
+  // The space's kind (RFC 0001, "The model", **One model, both kinds of space.**): one object,
+  // written in the change after the space is created, which every reader reads, a caller that
+  // opens the space by id alone included. The storage crate writes it only when it creates the
+  // space, and refuses every later write of it.
+  spaceKind: nc.collection({
+    kind: nc.oneOf(["repository", "coordination", "ad-hoc"]),
+  }, {
+    indexes: {
+      // Every marker of one space: the storage crate reads the kind by it when it opens the space.
+      byKind: nc.index(["kind"], { equal: 0, scope: "space" }),
+    },
+  }),
   ...tickets,
   ...decisions,
   ...goals,

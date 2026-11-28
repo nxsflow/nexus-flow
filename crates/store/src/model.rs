@@ -9,7 +9,7 @@ pub const LOCK: &str = include_str!("../../../model/model.lock.json");
 /// collections.**). The frame's own collections belong to [`Module::Space`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Module {
-    /// The frame itself: members and their role records.
+    /// The frame itself: members and their role records, and the space's kind.
     Space,
     /// RFC 0002.
     Tickets,
@@ -55,6 +55,7 @@ impl Module {
 /// the collections of [`LOCK`].
 pub const COLLECTIONS: &[(&str, Module)] = &[
     ("spaceMember", Module::Space),
+    ("spaceKind", Module::Space),
     ("ticketsTicket", Module::Tickets),
     ("ticketsNote", Module::Tickets),
     ("ticketsWork", Module::Tickets),

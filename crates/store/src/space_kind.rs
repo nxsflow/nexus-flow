@@ -6,10 +6,13 @@
 //! repository space (RFC 0002, RFC 0003, RFC 0007, RFC 0008), goals and requests in the coordination space (RFC 0005, RFC 0009), and
 //! in an ad-hoc space only copies of requests (RFC 0009, "Members and roles"). `spaceMember`,
 //! the frame's own, goes into every space nexus-flow adds members to through `nxs member add`:
-//! the repository and the coordination space.
+//! the repository and the coordination space. `spaceKind`, the marker that names a space's kind,
+//! goes into every kind of space.
 //!
-//! A space whose kind the store does not know, such as one opened by id without a checkout that
-//! names it, takes no write of a collection that is restricted to some kinds.
+//! The store knows a space's kind from its marker (`crate::space_marker`), or, for a space
+//! without one, from `nexus-flow.toml`. A space whose kind it does not know, such as an unmarked
+//! one opened by id without a checkout that names it, takes no write of a collection that is
+//! restricted to some kinds.
 
 use std::fmt;
 
@@ -35,7 +38,8 @@ impl SpaceKind {
         SpaceKind::AdHoc,
     ];
 
-    fn name(self) -> &'static str {
+    /// The kind's name, as messages and the `spaceKind` marker write it.
+    pub fn name(self) -> &'static str {
         match self {
             SpaceKind::Repository => "repository",
             SpaceKind::Coordination => "coordination",
@@ -50,6 +54,7 @@ pub const KINDS: &[(&str, &[SpaceKind])] = &[
         "spaceMember",
         &[SpaceKind::Repository, SpaceKind::Coordination],
     ),
+    ("spaceKind", &SpaceKind::ALL),
     ("ticketsTicket", &[SpaceKind::Repository]),
     ("ticketsNote", &[SpaceKind::Repository]),
     ("ticketsWork", &[SpaceKind::Repository]),
@@ -123,7 +128,7 @@ impl fmt::Display for WrongSpace {
             ),
             None => write!(
                 f,
-                "{collection} belongs in {kinds}, and the kind of this space is not known: it was opened by id without a checkout whose nexus-flow.toml names it"
+                "{collection} belongs in {kinds}, and the kind of this space is not known: it holds no spaceKind marker that names one, and no nexus-flow.toml read names it"
             ),
         }
     }

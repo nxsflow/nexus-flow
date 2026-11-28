@@ -12,7 +12,10 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 use nexus_flow_store::data_dir::{DataDir, Platform};
+use nexus_flow_store::id::SpaceId;
+use nexus_flow_store::model;
 use nexus_flow_store::space::DeviceKeys;
+use nocentraldb::{Db, OpenOptions};
 
 /// Runs `future` to completion on this thread. A database without a relay does no I/O that
 /// needs a runtime.
@@ -54,4 +57,15 @@ pub fn data_dir(path: &Path) -> DataDir {
 /// The device's keys in a file in the data directory: the test machine has no key store.
 pub fn keys(data: &DataDir) -> DeviceKeys {
     DeviceKeys::File(data.root().join("device.keys"))
+}
+
+/// Creates a space without the marker that names its kind, as one created before the marker
+/// existed, in the database of the device in `data`, and returns its id.
+pub fn unmarked_space(data: &DataDir) -> SpaceId {
+    let options = OpenOptions::new(model::LOCK)
+        .path(data.device())
+        .key_file(data.root().join("device.keys"));
+    let db = block_on(Db::open(options)).unwrap();
+    let space = block_on(db.spaces().create()).unwrap();
+    space.id().to_string().parse().unwrap()
 }
