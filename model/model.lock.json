@@ -293,6 +293,31 @@
       },
       "since": 5
     },
+    "requestsRepository": {
+      "fields": {
+        "left": { "rule": 1, "since": 10, "type": "ncdb/boolean" },
+        "name": { "rule": 1, "since": 10, "type": "ncdb/string" },
+        "space": { "rule": 1, "since": 10, "type": "ncdb/string" }
+      },
+      "indexes": {
+        "byName": {
+          "equal": 0,
+          "fields": [
+            { "direction": "asc", "field": "name" },
+            { "direction": "asc", "field": "space" }
+          ],
+          "scope": "space",
+          "since": 10
+        },
+        "bySpace": {
+          "equal": 1,
+          "fields": [{ "direction": "asc", "field": "space" }],
+          "scope": "space",
+          "since": 10
+        }
+      },
+      "since": 10
+    },
     "spaceKind": {
       "fields": {
         "kind": {
@@ -824,9 +849,9 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:92cea7cfdedadc02fe729dbc2fafffb9389bbddb277b23d6cec2fd5d9f520bde",
+    "hash": "sha256:f1d961b99193d01620c5f7877bfb86a88778ceba7685ae16ace12f8d6e1da2cc",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
-    "version": 9
+    "version": 10
   },
   "plugins": {}
 }

@@ -20,6 +20,7 @@ mod open;
 pub mod opened;
 mod read;
 pub mod repo_root;
+pub mod requests;
 pub mod space;
 pub mod space_kind;
 pub mod space_marker;
@@ -27,5 +28,6 @@ pub mod status;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+pub mod tickets;
 pub mod write;
 pub mod write_once;

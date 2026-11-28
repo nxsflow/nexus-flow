@@ -119,11 +119,15 @@ fn runs_init(body: &str) -> bool {
 /// `nxs_test_support`, a dependency that `nxs-v2` may not take without a lockfile change (NEX-212).
 /// The seam's and the merge gate's suites (NEX-171, NEX-133) are v2's too: they link nothing of
 /// v1, and the only `init` they run is `git init`, for the scratch repositories the merge gate
-/// reads its rules from and `genesis create` checks for a tracked GENESIS.
+/// reads its rules from and `genesis create` checks for a tracked GENESIS. The storage crate's
+/// suites (NEX-158) are v2's as well: they call the store's `init` as a function with the data
+/// directory named, and the only `init` verb they run is `git init`, for the scratch repositories
+/// whose remote `origin` names a repository in a coordination space.
 const V2_INIT_SUITES: &[&str] = &[
     "crates/nxs-v2/tests",
     "crates/seam/tests",
     "crates/merge-gate/tests",
+    "crates/store/tests",
 ];
 
 /// Does `body` reach a pinned `$HOME` at all — by any of the three sanctioned routes?

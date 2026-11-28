@@ -1,0 +1,3 @@
+- created the coordination space `<coordination>` and recorded it in `nexus-flow.toml`; commit the file
+- this repository is `other` in it, its space `<repository>`
+- this device is the space's only admin: if it is lost, nobody can add or remove members again; add a second admin device

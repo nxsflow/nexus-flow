@@ -56,19 +56,10 @@ fn a_refused_add_is_a_member_error() {
 
 #[test]
 fn an_engine_adds_with_a_tag_and_retags() {
-    let base = scratch("engine-members-retag");
-    let setup = options(&base.join("data"));
-    block_on(init(&base.join("repo"), &setup.data, setup.keys.clone())).unwrap();
-    fs::create_dir_all(base.join("repo/factory/roles")).unwrap();
-    fs::write(base.join("repo/factory/roles/coder.md"), "# coder\n").unwrap();
-    let invitation = block_on(testing::paired_agent(
-        &setup.data,
-        setup.keys.clone(),
-        &base.join("coder"),
-    ));
-    let engine = block_on(Engine::open_with(&base.join("repo"), setup)).unwrap();
+    let (base, invitations) = coder_space("engine-members-retag", &["coder"]);
+    let engine = engine(&base);
 
-    let added = block_on(engine.member_add(&invitation, "coder", None, Some("ka"))).unwrap();
+    let added = block_on(engine.member_add(&invitations[0], "coder", None, Some("ka"))).unwrap();
     let retagged = block_on(engine.member_retag(&added.member, "kb")).unwrap();
     let held = block_on(engine.member_retag(&added.member, "K1")).unwrap_err();
 
@@ -79,6 +70,21 @@ fn an_engine_adds_with_a_tag_and_retags() {
         matches!(held, Error::Member(MemberError::NotATag { .. })),
         "{held:?}"
     );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// The tag the device holds in every [`coder_space`]: `init` picks the device's tag by its random
+/// id, so the tests give it one that no test names (NEX-248).
+const DEVICE_TAG: &str = "zy";
+
+#[test]
+fn the_device_of_a_coder_space_holds_the_tag_no_test_names() {
+    let (base, _) = coder_space("engine-members-device", &[]);
+
+    let members = block_on(engine(&base).members()).unwrap();
+
+    let device = members.iter().find(|m| m.kind == MemberKind::Device);
+    assert_eq!(device.and_then(|m| m.tag.as_deref()), Some(DEVICE_TAG));
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -100,7 +106,18 @@ fn coder_space(test: &str, agents: &[&str]) -> (std::path::PathBuf, Vec<String>)
             ))
         })
         .collect();
+    retag_device(&engine(&base));
     (base, invitations)
+}
+
+/// Gives the device [`DEVICE_TAG`], in place of the tag `init` picked for it.
+fn retag_device(engine: &Engine) {
+    let device = block_on(engine.members())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.kind == MemberKind::Device)
+        .expect("the device that created the space is a member");
+    block_on(engine.member_retag(&device.member, DEVICE_TAG)).unwrap();
 }
 
 fn engine(base: &std::path::Path) -> Engine {

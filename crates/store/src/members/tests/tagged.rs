@@ -9,7 +9,7 @@
 use nocentraldb::{MemberId, Value};
 
 use super::add::find;
-use super::{block_on, Repo};
+use super::{block_on, Repo, DEVICE_TAG};
 use crate::members::record;
 use crate::members::tags::{self, Tag};
 use crate::members::{Member, MemberError, MemberKind};
@@ -65,6 +65,13 @@ pub(super) fn set_tag(repo: &Repo, member: &str, tag: &str) {
 
 fn is_tag(text: Option<&str>) -> bool {
     text.is_some_and(|t| t.parse::<Tag>().is_ok())
+}
+
+#[test]
+fn the_device_of_a_test_repo_holds_the_tag_no_test_names() {
+    let repo = Repo::new("member-tag-device");
+
+    assert_eq!(device(&repo).tag.as_deref(), Some(DEVICE_TAG));
 }
 
 #[test]
