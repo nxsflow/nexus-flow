@@ -1,7 +1,7 @@
 //! Listing the members (RFC 0001, "Public surfaces this RFC brings", `nxs member list`): every
 //! current member of the repository space, in member-id order, with its kind and account from its
-//! certificate and its role and ticket from its `spaceMember` record. A member nexus-flow did not
-//! add, such as the device that created the space, has no record, and its role is `None`.
+//! certificate and its role and ticket from its `spaceMember` record. The device that created the
+//! space has the record `init` wrote, with role `owner` (`owner.rs` tests it).
 
 use std::fs;
 
@@ -12,7 +12,7 @@ use crate::space::init;
 use crate::testing;
 
 #[test]
-fn a_new_space_lists_its_device_without_a_record() {
+fn a_new_space_lists_its_device() {
     let base = scratch("member-list-new");
     let data = data_dir(&base.join("data"));
     block_on(init(&base.join("repo"), &data, keys(&data))).unwrap();
@@ -24,7 +24,7 @@ fn a_new_space_lists_its_device_without_a_record() {
     let device = &list[0];
     assert_eq!(device.kind, MemberKind::Device);
     assert_eq!(device.member.len(), 64, "{}", device.member);
-    assert_eq!(device.role, None);
+    assert_eq!(device.role.as_deref(), Some("owner"));
     assert_eq!(device.ticket, None);
     assert_eq!(device.parent, None);
     let blocks: Vec<&str> = device.account.split(' ').collect();

@@ -1,7 +1,10 @@
 //! Creating the repository space (RFC 0001, "Creating and finding a space", "Migration"): the
 //! store half of `nxs init`. A repository whose `nexus-flow.toml` already names a space keeps
-//! it, and the report names it; otherwise the device member creates the space as its first admin
-//! and records its id in a new `nexus-flow.toml` at the root. Every space the store creates gets
+//! it, and the report names it; otherwise the device member creates the space as its first admin,
+//! writes its own `spaceMember` record there, with role `owner` and a free tag (RFC 0001, "The
+//! role record"; RFC 0002, "Ticket ids"; NEX-240), and records the space's id in a new
+//! `nexus-flow.toml` at the root. Only the creation writes that record, so `init` run again
+//! writes no second one. Every space the store creates gets
 //! the marker that names its kind (`crate::space_marker`): `init` a repository space, [`create`]
 //! a space of the kind its caller names.
 //!
@@ -14,7 +17,9 @@ use crate::config::Config;
 use crate::data_dir::DataDir;
 use crate::id::SpaceId;
 use crate::member_select::RunAs;
+use crate::members;
 use crate::open::{open_in, open_member, Network};
+use crate::opened;
 use crate::repo_root::{RepoRoot, RootError};
 use crate::space_kind::SpaceKind;
 use crate::space_marker;
@@ -99,13 +104,21 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
         Err(e) => return Err(e.into()),
     };
     let (db, relay) = open_in(&root, data, RunAs::Device(keys), Network::Relay).await?;
+    let sync = match relay {
+        Some(_) => SyncMode::Relay,
+        None => SyncMode::Island,
+    };
     let (space, created) = match existing {
         Some(space) => (space, false),
         None => {
-            let space = space_marker::create(&db, SpaceKind::Repository)
-                .await?
-                .id()
-                .to_string();
+            let space = space_marker::create(&db, SpaceKind::Repository).await?;
+            let opened = opened::created(db, relay, data, SpaceId(space.id())).await?;
+            members::write_owner(&opened)
+                .await
+                .map_err(|e| InitError::Database {
+                    message: e.to_string(),
+                })?;
+            let space = space.id().to_string();
             Config::new(&space).write_new(root.path())?;
             (space, true)
         }
@@ -113,10 +126,7 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
     Ok(InitReport {
         space,
         created,
-        sync: match relay {
-            Some(_) => SyncMode::Relay,
-            None => SyncMode::Island,
-        },
+        sync,
         v1_workspace: root.path().join(V1_WORKSPACE).symlink_metadata().is_ok(),
     })
 }

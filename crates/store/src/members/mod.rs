@@ -18,8 +18,9 @@
 //!
 //! **Listing.** `list` gives the repository space's current members in member-id order, each with
 //! its kind and account from its certificate and its role, ticket and tag from its record, and
-//! whether another current member holds the same tag. A member nexus-flow did not add, such as the
-//! device that created the space, has no record: its role, ticket and tag are `None`.
+//! whether another current member holds the same tag. The device that created the space has the
+//! record `nxs init` wrote, with role `owner` (`owner`). A member without a record, such as the
+//! device that created a space before `nxs init` wrote one, has its role, ticket and tag `None`.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -42,6 +43,7 @@ mod roles;
 pub mod tags;
 mod taken;
 
+pub(crate) use owner::write as write_owner;
 pub use owner::OWNER;
 pub use retag::retag;
 pub use roles::{space_role, SpaceRole};

@@ -1,6 +1,7 @@
 //! The role record (RFC 0001, "The role record"): one `spaceMember` object per member nexus-flow
-//! added to a space, with `member`, `role`, `ticket` and the member's ticket `tag` (RFC 0002,
-//! "Ticket ids"), written by the member that adds it. It is found by its member through the index
+//! added to a space, and one for the device that created it (`super::owner`), with `member`,
+//! `role`, `ticket` and the member's ticket `tag` (RFC 0002, "Ticket ids"), written by the member
+//! that adds it, or by the creating device itself. It is found by its member through the index
 //! `byMember`; every record of a space, a removed member's included, is read through `byTag`.
 //!
 //! A member added again after its removal gets the record it had, rewritten, so that a space
@@ -127,8 +128,8 @@ pub(crate) async fn write(
 }
 
 /// Sets the tag of `member`'s record in the open space `id` to `tag`, keeping the rest of it; a
-/// member without a record, such as the device that created the space, gets one with its member
-/// and tag only.
+/// member without a record, such as the device that created a space before `nxs init` wrote one,
+/// gets one with its member and tag only.
 pub(crate) async fn set_tag(
     opened: &Opened,
     id: &SpaceId,
