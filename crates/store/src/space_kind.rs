@@ -38,7 +38,8 @@ impl SpaceKind {
         SpaceKind::AdHoc,
     ];
 
-    fn name(self) -> &'static str {
+    /// The kind's name, as messages and the `spaceKind` marker write it.
+    pub fn name(self) -> &'static str {
         match self {
             SpaceKind::Repository => "repository",
             SpaceKind::Coordination => "coordination",

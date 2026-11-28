@@ -35,22 +35,13 @@ pub(crate) enum Marked {
     Conflict,
 }
 
-/// The value of the marker's `kind` field for `kind`.
-fn stored(kind: SpaceKind) -> &'static str {
-    match kind {
-        SpaceKind::Repository => "repository",
-        SpaceKind::Coordination => "coordination",
-        SpaceKind::AdHoc => "adHoc",
-    }
-}
-
 /// Creates a space of kind `kind` in `db`, whose member becomes its first admin, and writes its
 /// marker.
 pub(crate) async fn create(db: &Db, kind: SpaceKind) -> Result<Space, nocentraldb::Error> {
     let space = db.spaces().create().await?;
     space
         .write(|tx| {
-            tx.create(COLLECTION, [("kind", Value::from(stored(kind)))])
+            tx.create(COLLECTION, [("kind", Value::from(kind.name()))])
                 .map(drop)
         })
         .await?;
@@ -62,11 +53,9 @@ pub(crate) async fn create(db: &Db, kind: SpaceKind) -> Result<Space, nocentrald
 pub(crate) async fn read(opened: &Opened, space: &SpaceId) -> Result<Marked, nocentraldb::Error> {
     let mut marked = Marked::None;
     for marker in opened.find(space, COLLECTION, BY_KIND, Vec::new()).await? {
-        let kind = marker.get::<&str>("kind")?.and_then(|text| {
-            SpaceKind::ALL
-                .into_iter()
-                .find(|&kind| stored(kind) == text)
-        });
+        let kind = marker
+            .get::<&str>("kind")?
+            .and_then(|text| SpaceKind::ALL.into_iter().find(|&kind| kind.name() == text));
         marked = match (marked, kind) {
             (Marked::None, Some(kind)) => Marked::Kind(kind),
             (Marked::Kind(known), Some(kind)) if known == kind => marked,

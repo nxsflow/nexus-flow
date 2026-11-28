@@ -296,7 +296,7 @@
     "spaceKind": {
       "fields": {
         "kind": {
-          "options": ["repository", "coordination", "adHoc"],
+          "options": ["repository", "coordination", "ad-hoc"],
           "rule": 1,
           "since": 9,
           "type": "ncdb/choice"
@@ -824,7 +824,7 @@
   },
   "format": 1,
   "model": {
-    "hash": "sha256:3694375bbd074939ec661fb2ed75e54c5de6161eda4d69193aca9fc4fc6038e9",
+    "hash": "sha256:92cea7cfdedadc02fe729dbc2fafffb9389bbddb277b23d6cec2fd5d9f520bde",
     "id": "e8a10b62deb8f08993d64c9e60053a9f",
     "version": 9
   },

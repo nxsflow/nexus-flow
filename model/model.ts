@@ -41,7 +41,7 @@ export const model = nc.model({
   // opens the space by id alone included. The storage crate writes it only when it creates the
   // space, and refuses every later write of it.
   spaceKind: nc.collection({
-    kind: nc.oneOf(["repository", "coordination", "adHoc"]),
+    kind: nc.oneOf(["repository", "coordination", "ad-hoc"]),
   }, {
     indexes: {
       // Every marker of one space: the storage crate reads the kind by it when it opens the space.
