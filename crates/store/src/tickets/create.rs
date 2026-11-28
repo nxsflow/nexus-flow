@@ -19,6 +19,9 @@ use crate::opened::Opened;
 pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketError> {
     let Checked { new, priority } = check(new)?;
     let (space_id, space) = repository(opened)?;
+    if opened.check_write(&space_id, TICKETS).is_err() {
+        return Err(TicketError::NotATicketSpace { space: space_id });
+    }
     let parent = match &new.parent {
         Some(text) => Some(parent(opened, &space_id, &new.kind, text).await?),
         None => None,
