@@ -139,3 +139,26 @@ fn init_with_a_tracked_genesis_writes_nothing_there_and_exits_non_zero() {
         fs::remove_dir_all(&base).unwrap();
     }
 }
+
+#[test]
+fn after_init_member_list_shows_the_device_as_owner_with_a_tag_and_a_rerun_keeps_it() {
+    let base = scratch("init-owner");
+    let repo = base.join("repo");
+    let out = nxs(&base, &repo, &["init"]);
+    assert_eq!(out.code, 0, "{}", stdout(&out));
+    let first = json(&nxs(&base, &repo, &["member", "list"]));
+
+    let rerun = nxs(&base, &repo, &["init"]);
+
+    assert_eq!(rerun.code, 0, "{}", stdout(&rerun));
+    let list = json(&nxs(&base, &repo, &["member", "list"]));
+    assert_eq!(list, first);
+    let list = list.as_array().expect("member list prints an array");
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0]["kind"], "device");
+    assert_eq!(list[0]["role"], "owner");
+    let tag = list[0]["tag"].as_str().expect("the device has a tag");
+    assert_eq!(tag.len(), 2, "{tag}");
+    assert_eq!(list[0]["tag_shared"], false);
+    fs::remove_dir_all(&base).unwrap();
+}
