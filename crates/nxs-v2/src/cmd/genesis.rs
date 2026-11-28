@@ -11,6 +11,7 @@ use nexus_flow_seam::install::codeowners;
 use nexus_flow_seam::{Engine, Problem, RootError};
 use serde::Serialize;
 
+use crate::cmd::factory::list;
 use crate::error::{CliError, Kind};
 use crate::output::{Format, Render};
 use crate::Outcome;
@@ -133,6 +134,49 @@ impl Render for Create {
             }
         });
         text
+    }
+}
+
+impl Create {
+    /// The report in one Markdown line, as `nxs init --md` prints it: the files written, a
+    /// GENESIS that was not written because git tracks it, and whether CODEOWNERS covers GENESIS.
+    pub fn summary(&self) -> String {
+        let written = list(
+            self.files
+                .iter()
+                .filter(|f| f.state == "written")
+                .map(|f| &f.path),
+        );
+        let genesis_written = self
+            .files
+            .iter()
+            .any(|f| f.path == PATH && f.state == "written");
+        let mut line = match written {
+            Some(written) if genesis_written => {
+                format!("- `nxs genesis create` wrote {written}; fill in GENESIS and commit them")
+            }
+            Some(written) => format!("- `nxs genesis create` wrote {written}"),
+            None => "- `nxs genesis create` wrote nothing".to_owned(),
+        };
+        if self.files.iter().any(|f| f.state == "tracked") {
+            line.push_str(&format!(
+                "; `{PATH}` is missing here but tracked in git, so nothing was written there; restore it from git"
+            ));
+        }
+        line.push_str(&match &self.codeowners {
+            None => format!(
+                "; there is no CODEOWNERS file, so no rule sends a change of `{PATH}` to the owner"
+            ),
+            Some(c) => match list(c.uncovered.iter()) {
+                None => format!("; `{}` covers `{PATH}`", c.file),
+                Some(uncovered) => format!(
+                    "; no rule in `{}` covers {uncovered}; add one so that its changes come back to the owner",
+                    c.file
+                ),
+            },
+        });
+        line.push('\n');
+        line
     }
 }
 

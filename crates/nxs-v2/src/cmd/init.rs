@@ -1,6 +1,7 @@
 //! `nxs init` (RFC 0001, "Creating and finding a space"): gives the repository its space through
 //! the seam's `init`, which ends with the factory's install and GENESIS's create (RFC 0006, RFC
-//! 0004), and prints what it did to the space.
+//! 0004), and prints what it did to the space, followed by the two installs' reports as `nxs
+//! factory install` and `nxs genesis create` print them (NEX-243).
 
 use std::path::Path;
 
@@ -95,6 +96,9 @@ impl Render for Init {
                     .to_owned(),
             );
         }
-        lines.iter().map(|line| format!("- {line}\n")).collect()
+        let mut text: String = lines.iter().map(|line| format!("- {line}\n")).collect();
+        text.push_str(&self.factory.summary());
+        text.push_str(&self.genesis.summary());
+        text
     }
 }
