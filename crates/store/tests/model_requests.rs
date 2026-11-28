@@ -55,7 +55,11 @@ fn a_repository_record_holds_its_name_space_and_left() {
 fn records_are_listed_by_name_and_found_by_their_space() {
     let (db, space) = open();
     let infra = record(&space, "central-infra", "11111111111111111111111111111111");
-    let app = record(&space, "app-foundations", "22222222222222222222222222222222");
+    let app = record(
+        &space,
+        "app-foundations",
+        "22222222222222222222222222222222",
+    );
 
     assert_eq!(found(&db, &space, "byName", Vec::new()), vec![app, infra]);
     assert_eq!(

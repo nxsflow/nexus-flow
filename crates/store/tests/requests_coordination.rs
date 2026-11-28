@@ -109,7 +109,10 @@ fn creating_names_the_space_writes_the_record_and_takes_the_name_from_origin() {
         created.repository,
         Some(repository("nexus-flow", &repo, false))
     );
-    assert_eq!(opened.kind(&created.coordination), Some(SpaceKind::Coordination));
+    assert_eq!(
+        opened.kind(&created.coordination),
+        Some(SpaceKind::Coordination)
+    );
     assert_eq!(
         block_on(requests::list(&opened)).unwrap(),
         [repository("nexus-flow", &repo, false)]
@@ -120,9 +123,21 @@ fn creating_names_the_space_writes_the_record_and_takes_the_name_from_origin() {
 fn the_default_name_is_the_last_segment_of_origin_without_dot_git() {
     let group = Group::new("coordination-default-name");
     for (folder, url, name) in [
-        ("a", "https://github.com/nxsflow/central-infra.git", "central-infra"),
-        ("b", "https://github.com/nxsflow/app-foundations", "app-foundations"),
-        ("c", "git@github.com:nxsflow/nexflowit-app.git", "nexflowit-app"),
+        (
+            "a",
+            "https://github.com/nxsflow/central-infra.git",
+            "central-infra",
+        ),
+        (
+            "b",
+            "https://github.com/nxsflow/app-foundations",
+            "app-foundations",
+        ),
+        (
+            "c",
+            "git@github.com:nxsflow/nexflowit-app.git",
+            "nexflowit-app",
+        ),
         ("d", "/srv/git/manufakt-io.git/", "manufakt-io"),
     ] {
         let repo = group.repo(folder, Some(url));
@@ -141,7 +156,7 @@ fn without_origin_or_name_creating_is_refused_and_writes_nothing() {
 
     let refused = block_on(requests::create(&mut opened, None)).unwrap_err();
 
-    assert!(matches!(refused, CoordinationError::NoName { .. }), "{refused:?}");
+    assert!(matches!(refused, CoordinationError::NoName), "{refused:?}");
     assert_eq!(file(&repo), before);
     let created = block_on(requests::create(&mut opened, Some("own-name"))).unwrap();
     assert_eq!(created.repository.unwrap().name, "own-name");
@@ -226,8 +241,7 @@ fn a_name_another_repository_holds_is_refused_and_nothing_is_written() {
     let before = file(&second);
     let mut opened = group.open(&second);
 
-    let refused =
-        block_on(requests::join(&mut opened, space, Some("central-infra"))).unwrap_err();
+    let refused = block_on(requests::join(&mut opened, space, Some("central-infra"))).unwrap_err();
 
     match refused {
         CoordinationError::NameTaken { name, holders } => {
@@ -274,7 +288,11 @@ fn leaving_sets_left_keeps_the_record_and_removes_the_id_from_the_file() {
     assert!(left.written);
     assert_eq!(left.repository, Some(repository("app", &second, true)));
     assert_eq!(config(&second).coordination, None);
-    assert_eq!(file(&second), before, "the file is as it was before the join");
+    assert_eq!(
+        file(&second),
+        before,
+        "the file is as it was before the join"
+    );
     let opened = group.open(&first);
     assert_eq!(
         block_on(requests::list(&opened)).unwrap(),
@@ -309,9 +327,12 @@ fn leaving_a_repository_in_no_coordination_space_is_refused() {
 
     let refused = block_on(requests::leave(&mut opened)).unwrap_err();
 
-    assert!(matches!(refused, CoordinationError::NotJoined { .. }), "{refused:?}");
+    assert!(
+        matches!(refused, CoordinationError::NotJoined),
+        "{refused:?}"
+    );
     let listed = block_on(requests::list(&opened)).unwrap_err();
-    assert!(matches!(listed, CoordinationError::NotJoined { .. }), "{listed:?}");
+    assert!(matches!(listed, CoordinationError::NotJoined), "{listed:?}");
 }
 
 #[test]
@@ -333,7 +354,11 @@ fn a_name_two_records_hold_is_ambiguous_and_names_both() {
         .unwrap()[0]
         .id();
     block_on(opened.write(&space, |w| {
-        w.update("requestsRepository", record, [("name", "central-infra".into())])
+        w.update(
+            "requestsRepository",
+            record,
+            [("name", "central-infra".into())],
+        )
     }))
     .unwrap();
 
