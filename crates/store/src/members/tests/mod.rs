@@ -29,7 +29,7 @@ use crate::testing;
 
 /// Runs `future` to completion on this thread. A database without a relay does no I/O that
 /// needs a runtime.
-pub(super) fn block_on<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     struct Unpark(Thread);
     impl Wake for Unpark {
         fn wake(self: Arc<Self>) {
@@ -70,7 +70,7 @@ pub(super) fn keys(data: &DataDir) -> DeviceKeys {
 }
 
 /// A repository with its space, the device's data directory and the space's id.
-pub(super) struct Repo {
+pub(crate) struct Repo {
     pub base: PathBuf,
     pub data: DataDir,
     pub space: String,
