@@ -1,7 +1,9 @@
 //! Creating the repository space (RFC 0001, "Creating and finding a space", "Migration"): the
 //! store half of `nxs init`. A repository whose `nexus-flow.toml` already names a space keeps
 //! it, and the report names it; otherwise the device member creates the space as its first admin
-//! and records its id in a new `nexus-flow.toml` at the root.
+//! and records its id in a new `nexus-flow.toml` at the root. Every space the store creates gets
+//! the marker that names its kind (`crate::space_marker`): `init` a repository space, [`create`]
+//! a space of the kind its caller names.
 //!
 //! A v1 workspace (`.nxs/`) beside it is never opened or written: the space starts empty, and
 //! the report says the v1 data was not moved (RFC 0008 designs the move).
@@ -10,9 +12,12 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::data_dir::DataDir;
+use crate::id::SpaceId;
 use crate::member_select::RunAs;
-use crate::open::{open_in, Network};
+use crate::open::{open_in, open_member, Network};
 use crate::repo_root::{RepoRoot, RootError};
+use crate::space_kind::SpaceKind;
+use crate::space_marker;
 
 pub use crate::open::{DeviceKeys, InitError};
 
@@ -97,7 +102,10 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
     let (space, created) = match existing {
         Some(space) => (space, false),
         None => {
-            let space = db.spaces().create().await?.id().to_string();
+            let space = space_marker::create(&db, SpaceKind::Repository)
+                .await?
+                .id()
+                .to_string();
             Config::new(&space).write_new(root.path())?;
             (space, true)
         }
@@ -113,11 +121,14 @@ pub async fn init(dir: &Path, data: &DataDir, keys: DeviceKeys) -> Result<InitRe
     })
 }
 
-/// Creates a space of kind `kind` with the device member as its first admin, and returns its id.
+/// Creates a space of kind `kind`, with the device member as its first admin and the marker that
+/// names its kind, and returns its id: a coordination space, or the ad-hoc space pm gives a role
+/// session. [`init`] creates the repository space the same way.
 pub async fn create(
-    _data: &DataDir,
-    _keys: DeviceKeys,
-    _kind: crate::space_kind::SpaceKind,
-) -> Result<crate::id::SpaceId, InitError> {
-    todo!("NEX-242")
+    data: &DataDir,
+    keys: DeviceKeys,
+    kind: SpaceKind,
+) -> Result<SpaceId, InitError> {
+    let (db, _) = open_member(data, RunAs::Device(keys), Network::Relay).await?;
+    Ok(SpaceId(space_marker::create(&db, kind).await?.id()))
 }

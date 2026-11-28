@@ -22,6 +22,7 @@ mod read;
 pub mod repo_root;
 pub mod space;
 pub mod space_kind;
+pub mod space_marker;
 pub mod status;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]

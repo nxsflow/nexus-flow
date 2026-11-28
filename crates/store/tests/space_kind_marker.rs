@@ -9,24 +9,13 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{block_on, data_dir, keys, scratch};
+use common::{block_on, data_dir, keys, scratch, unmarked_space};
 use nexus_flow_store::config::Config;
 use nexus_flow_store::id::SpaceId;
 use nexus_flow_store::opened;
 use nexus_flow_store::repo_root::RepoRoot;
 use nexus_flow_store::space::{self, init};
 use nexus_flow_store::space_kind::SpaceKind;
-use nocentraldb::{Db, OpenOptions};
-
-/// Creates a space without a marker, as one created before the marker existed, in the device's
-/// database in `data`.
-fn unmarked_space(data: &nexus_flow_store::data_dir::DataDir) -> SpaceId {
-    let options = OpenOptions::new(nexus_flow_store::model::LOCK)
-        .path(data.device())
-        .key_file(data.root().join("device.keys"));
-    let db = block_on(Db::open(options)).unwrap();
-    block_on(db.spaces().create()).unwrap().id().to_string().parse().unwrap()
-}
 
 /// Names `coordination` as the coordination space in the file at `repo`.
 fn name_coordination(repo: &Path, coordination: SpaceId) {

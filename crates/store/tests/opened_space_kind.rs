@@ -1,14 +1,14 @@
-//! The store knows a space's kind from `nexus-flow.toml` (NEX-95, until the open question of how
-//! it knows the kind of a space opened by id alone is answered): `[space] repository` is the
-//! repository space, `[space] coordination` the coordination space. A space opened by id with
-//! no checkout that names it is of no known kind, and takes no kind-restricted write.
+//! For a space without the marker that names its kind (`space_kind_marker.rs`), the store knows
+//! its kind from `nexus-flow.toml` (NEX-95): `[space] repository` is the repository space,
+//! `[space] coordination` the coordination space. Such a space opened by id with no checkout
+//! that names it is of no known kind, and takes no kind-restricted write.
 
 mod common;
 
 use std::fs;
 use std::path::Path;
 
-use common::{block_on, data_dir, keys, scratch};
+use common::{block_on, data_dir, keys, scratch, unmarked_space};
 use nexus_flow_store::config::Config;
 use nexus_flow_store::id::SpaceId;
 use nexus_flow_store::opened;
@@ -47,11 +47,10 @@ fn a_repository_names_the_kind_of_each_of_its_spaces() {
 }
 
 #[test]
-fn a_space_opened_by_id_without_a_checkout_takes_no_kind_restricted_write() {
+fn an_unmarked_space_opened_by_id_without_a_checkout_takes_no_kind_restricted_write() {
     let base = scratch("kind-no-git");
     let data = data_dir(&base.join("data"));
-    let report = block_on(init(&base.join("repo"), &data, keys(&data))).unwrap();
-    let space: SpaceId = report.space.parse().unwrap();
+    let space = unmarked_space(&data);
 
     let opened = block_on(opened::space(space, None, &data, keys(&data))).unwrap();
 

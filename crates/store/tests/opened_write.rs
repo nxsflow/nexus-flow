@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{block_on, data_dir, keys, scratch};
+use common::{block_on, data_dir, keys, scratch, unmarked_space};
 use nexus_flow_store::id::SpaceId;
 use nexus_flow_store::opened::{self, Opened};
 use nexus_flow_store::space::init;
@@ -105,8 +105,7 @@ fn an_object_that_is_not_write_once_takes_a_set_a_delete_and_a_restore() {
 fn a_collection_written_into_a_space_of_no_known_kind_is_refused_and_nothing_is_written() {
     let base = scratch("write-no-kind");
     let data = data_dir(&base.join("data"));
-    let report = block_on(init(&base.join("repo"), &data, keys(&data))).unwrap();
-    let space: SpaceId = report.space.parse().unwrap();
+    let space = unmarked_space(&data);
     let opened = block_on(opened::space(space, None, &data, keys(&data))).unwrap();
 
     let err = block_on(opened.write(&space, |w| {

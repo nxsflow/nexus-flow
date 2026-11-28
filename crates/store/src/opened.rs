@@ -9,10 +9,13 @@
 //! (RFC 0001, "Reading and writing": the member a command runs as); an open opened as the device
 //! reopens as a session with [`Opened::as_session`].
 //!
-//! A space's kind comes from `nexus-flow.toml` too: the space it names as `repository` or
-//! `coordination`, in the repository opened or the checkout named. A space no file names, such
-//! as one opened by id without a checkout, is of no known kind, and every write checks
-//! [`Opened::check_write`] first, so it takes no write of a collection restricted to some kinds.
+//! A space's kind comes from its marker (`crate::space_marker`), which the store reads for every
+//! open space it holds, so a space opened by id alone has its kind too. A space without a
+//! marker, created before the marker existed, takes its kind from `nexus-flow.toml`: the space it
+//! names as `repository` or `coordination`, in the repository opened or the checkout named. A
+//! space of neither, such as an unmarked one opened by id without a checkout, is of no known
+//! kind, and every write checks [`Opened::check_write`] first, so it takes no write of a
+//! collection restricted to some kinds.
 //!
 //! A named space the database does not hold yet, such as on a device added but not yet synced,
 //! is open as not held: no read touches the network, so a read answers from what the database
@@ -31,6 +34,7 @@ use crate::member_select::RunAs;
 use crate::open::{open_in, open_member, DeviceKeys, InitError, Network};
 use crate::repo_root::RepoRoot;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
+use crate::space_marker::{self, Marked};
 
 /// The local git a caller reads "on main" from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +58,8 @@ pub struct Opened {
     spaces: Vec<(SpaceId, Option<Space>)>,
     /// The kinds `nexus-flow.toml` names, for the spaces it names.
     kinds: Vec<(SpaceId, SpaceKind)>,
+    /// What the markers of each held space say of its kind.
+    marked: Vec<(SpaceId, Marked)>,
     checkout: Option<Checkout>,
 }
 
@@ -90,10 +96,16 @@ impl Opened {
             .map(|(_, space)| space.is_some())
     }
 
-    /// The kind of the open space `id`, as `nexus-flow.toml` names it; `None` when no file the
-    /// store read names it.
+    /// The kind of the open space `id`: the one its marker names, or, for a space without a
+    /// marker, the one `nexus-flow.toml` names; `None` when neither names it, or its markers
+    /// disagree.
     pub fn kind(&self, id: &SpaceId) -> Option<SpaceKind> {
         self.held(id)?;
+        match self.marked.iter().find(|(held, _)| held == id) {
+            Some(&(_, Marked::Kind(kind))) => return Some(kind),
+            Some((_, Marked::Conflict)) => return None,
+            Some((_, Marked::None)) | None => {}
+        }
         self.kinds
             .iter()
             .find(|(named, _)| named == id)
@@ -138,6 +150,20 @@ impl Opened {
                 *space = get(&self.db, *id).await?;
             }
         }
+        self.mark().await
+    }
+}
+
+impl Opened {
+    /// Reads the markers of every held space.
+    async fn mark(&mut self) -> Result<(), InitError> {
+        let mut marked = Vec::with_capacity(self.spaces.len());
+        for (id, space) in &self.spaces {
+            if space.is_some() {
+                marked.push((*id, space_marker::read(self, id).await?));
+            }
+        }
+        self.marked = marked;
         Ok(())
     }
 }
@@ -149,6 +175,7 @@ impl fmt::Debug for Opened {
             .field("relay", &self.relay)
             .field("spaces", &self.spaces)
             .field("kinds", &self.kinds)
+            .field("marked", &self.marked)
             .field("checkout", &self.checkout)
             .finish_non_exhaustive()
     }
@@ -273,15 +300,18 @@ async fn open(
     for id in ids {
         spaces.push((id, get(&member.db, id).await?));
     }
-    Ok(Opened {
+    let mut opened = Opened {
         db: member.db,
         data: member.data.clone(),
         session: member.session,
         relay: member.relay,
         spaces,
         kinds,
+        marked: Vec::new(),
         checkout,
-    })
+    };
+    opened.mark().await?;
+    Ok(opened)
 }
 
 /// The space `id`, or `None` while the database holds none of it.

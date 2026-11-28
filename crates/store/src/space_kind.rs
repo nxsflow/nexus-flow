@@ -9,8 +9,10 @@
 //! the repository and the coordination space. `spaceKind`, the marker that names a space's kind,
 //! goes into every kind of space.
 //!
-//! A space whose kind the store does not know, such as one opened by id without a checkout that
-//! names it, takes no write of a collection that is restricted to some kinds.
+//! The store knows a space's kind from its marker (`crate::space_marker`), or, for a space
+//! without one, from `nexus-flow.toml`. A space whose kind it does not know, such as an unmarked
+//! one opened by id without a checkout that names it, takes no write of a collection that is
+//! restricted to some kinds.
 
 use std::fmt;
 
@@ -125,7 +127,7 @@ impl fmt::Display for WrongSpace {
             ),
             None => write!(
                 f,
-                "{collection} belongs in {kinds}, and the kind of this space is not known: it was opened by id without a checkout whose nexus-flow.toml names it"
+                "{collection} belongs in {kinds}, and the kind of this space is not known: it holds no spaceKind marker that names one, and no nexus-flow.toml read names it"
             ),
         }
     }
