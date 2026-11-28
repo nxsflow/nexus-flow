@@ -1,1 +1,2 @@
-- `nexus-flow.toml` already names the coordination space `00112233445566778899aabbccddeeff`; nothing was written
+- `nexus-flow.toml` already names the coordination space `<coordination>`; nothing was written
+- this repository is `app` in it, its space `<repository>`
