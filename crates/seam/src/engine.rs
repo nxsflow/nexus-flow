@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use crate::genesis;
 use crate::install::factory::{install, Defaults, InstallError, Report};
+use nexus_flow_merge_gate::decide::InputError;
 use nexus_flow_merge_gate::rules::GitError;
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::decisions::{self, Decision, DecisionError, NewDecision};
@@ -95,10 +96,14 @@ pub enum Error {
     Decision(DecisionError),
     /// The coordination space could not be created, joined, left or read.
     Coordination(CoordinationError),
-    /// The local git could not give what the merge gate reads: the base names no commit.
+    /// The local git could not give what the merge gate reads: the base or the head names no
+    /// commit.
     Git(GitError),
     /// A ticket was refused, could not be written, or is not in the local copy.
     Ticket(TicketError),
+    /// The merge gate's inputs cannot be decided on: both the comments and a verdict were given,
+    /// or the reviews are not the forge's list of reviews.
+    MergeGateInput(InputError),
 }
 
 impl fmt::Display for Error {
@@ -119,6 +124,7 @@ impl fmt::Display for Error {
             Error::Coordination(e) => e.fmt(f),
             Error::Git(e) => e.fmt(f),
             Error::Ticket(e) => e.fmt(f),
+            Error::MergeGateInput(e) => e.fmt(f),
         }
     }
 }

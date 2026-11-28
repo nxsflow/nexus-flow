@@ -148,6 +148,7 @@ impl From<Error> for CliError {
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
             Error::Ticket(ticket) => ticket_kind(ticket),
+            Error::MergeGateInput(_) => Kind::Validation,
         };
         CliError { kind, msg }
     }
