@@ -76,3 +76,14 @@ fn a_member_waits_for_its_first_sync_before_minting_with_a_freed_tag() {
         })
     );
 }
+
+#[test]
+fn numbers_continue_after_a_freed_tag_is_taken_over() {
+    let repo = taken_over("key-mint-freed-synced");
+    let opened = repo.opened();
+    let (space, _) = &opened.spaces()[0];
+
+    let key = block_on(keys::mint_synced(&opened, space, true)).unwrap();
+
+    assert_eq!(key.to_string(), "zz.6");
+}
