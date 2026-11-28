@@ -87,9 +87,9 @@ pub enum CoordinationError {
     },
     /// The space could not be opened or created.
     Open(InitError),
-    /// The record was refused, or could not be written.
+    /// The record was refused: it may not be written into this space.
     Write(WriteError),
-    /// The database failed.
+    /// The database failed, a write of the record included.
     Database { message: String },
 }
 
@@ -155,7 +155,10 @@ impl From<InitError> for CoordinationError {
 
 impl From<WriteError> for CoordinationError {
     fn from(e: WriteError) -> Self {
-        CoordinationError::Write(e)
+        match e {
+            WriteError::Database(e) => e.into(),
+            e => CoordinationError::Write(e),
+        }
     }
 }
 

@@ -22,7 +22,6 @@ pub use nexus_flow_store::repo_root::RootError;
 pub use nexus_flow_store::requests::{Coordination, CoordinationError, Repository};
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};
 pub use nexus_flow_store::sync::{Behind, SpaceBehind, SyncError, SyncStatus};
-pub use nexus_flow_store::write::WriteError;
 
 /// The store's test helpers, for the tests of the crates above the seam: invitations of members
 /// nexus-flow cannot start yet.

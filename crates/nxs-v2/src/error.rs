@@ -13,7 +13,7 @@
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
     ConfigError, CoordinationError, DataDirError, DecisionError, Error, InitError, JoinError,
-    MemberError, Problem, RootError, SyncError, WriteError,
+    MemberError, Problem, RootError, SyncError,
 };
 
 use crate::output::Format;
@@ -187,9 +187,7 @@ fn coordination_kind(e: &CoordinationError) -> Kind {
         CoordinationError::NameTaken { .. } => Kind::Conflict,
         CoordinationError::NotFound { .. } => Kind::NotFound,
         CoordinationError::Ambiguous { .. } => Kind::RepositoryNameAmbiguous,
-        CoordinationError::Database { .. } | CoordinationError::Write(WriteError::Database(_)) => {
-            Kind::Io
-        }
+        CoordinationError::Database { .. } => Kind::Io,
         CoordinationError::Write(_)
         | CoordinationError::NoCheckout
         | CoordinationError::NotJoined
