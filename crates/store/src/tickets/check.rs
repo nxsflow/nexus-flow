@@ -67,10 +67,11 @@ pub fn priority(text: &str) -> Result<i64, TicketError> {
     }
 }
 
-/// `member:` or `account:`, then an id without whitespace.
+/// `member:` or `account:`, then an id on one line: a member id, or an account fingerprint,
+/// which is written in blocks of five digits with spaces between.
 fn is_identity(text: &str) -> bool {
     ["member:", "account:"].iter().any(|prefix| {
         text.strip_prefix(prefix)
-            .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+            .is_some_and(|id| !id.trim().is_empty() && !id.contains(['\n', '\r']))
     })
 }

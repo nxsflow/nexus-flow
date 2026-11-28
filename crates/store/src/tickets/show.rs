@@ -7,14 +7,18 @@ use std::cmp::Ordering;
 
 use nocentraldb::{Object, ObjectId, Value};
 
-use super::keys::{shown, Key, BY_KEY, TICKETS};
-use super::{Derived, Edge, Ticket, TicketError};
+use super::create::repository;
+use super::keys::{self, shown, Key, BY_KEY, TICKETS};
+use super::{Derived, Edge, Holder, Ticket, TicketError};
+use crate::members::{self, OWNER};
 use crate::id::SpaceId;
 use crate::opened::Opened;
 
 /// The ticket of the repository space of `opened` that `text` names, by key or object id.
-pub async fn show(_opened: &Opened, _text: &str) -> Result<Ticket, TicketError> {
-    unimplemented!("NEX-110: show")
+pub async fn show(opened: &Opened, text: &str) -> Result<Ticket, TicketError> {
+    let (space, _) = repository(opened)?;
+    let id = keys::resolve(opened, &space, text).await?;
+    read(opened, &space, id).await
 }
 
 /// The ticket `id` of the open space `space`, as `show` prints it.
@@ -45,6 +49,18 @@ pub(super) async fn read(
         }
     }
     deps.sort_by(|a, b| by_key(&a.key, &b.key));
+    let mut children = Vec::new();
+    for child in opened
+        .find(space, TICKETS, BY_PARENT, vec![Value::from(id)])
+        .await?
+    {
+        children.push(shown_key(opened, space, &child).await?);
+    }
+    children.sort_by(|a, b| by_key(a, b));
+    let assignee = match text(&object, "assignee")? {
+        Some(assignee) => Some(holder(opened, &assignee).await?),
+        None => None,
+    };
     let key = shown_key(opened, space, &object).await?;
     let text = |field| text(&object, field);
     Ok(Ticket {
@@ -55,7 +71,7 @@ pub(super) async fn read(
         status: text("status")?.unwrap_or_default(),
         resolution: text("resolution")?,
         priority: object.get::<i64>("priority")?,
-        assignee: None,
+        assignee,
         parent,
         labels: strings(&object, "labels")?,
         due: text("due")?,
@@ -74,13 +90,42 @@ pub(super) async fn read(
         replaces: Vec::new(),
         deps,
         dependents: Vec::new(),
-        children: Vec::new(),
+        children,
         contributes_to: Vec::new(),
         mentions: Vec::new(),
         mentioned_by: Vec::new(),
         notes: Vec::new(),
         work: Vec::new(),
         references: Vec::new(),
+    })
+}
+
+/// The index of the tickets by their parent epic.
+const BY_PARENT: &str = "byParent";
+
+/// The holder `assignee` names (RFC 0002, "Who holds a ticket"): a member with the role its
+/// record gives it, a person, `owner` when a member of the person's account holds the role
+/// `owner`, or text as the move from v1 wrote it.
+async fn holder(opened: &Opened, assignee: &str) -> Result<Holder, TicketError> {
+    let members = members::list(opened).await?;
+    let (kind, id, role) = if let Some(id) = assignee.strip_prefix("member:") {
+        let role = members
+            .iter()
+            .find(|m| m.member == id)
+            .and_then(|m| m.role.clone());
+        ("member", id, role)
+    } else if let Some(id) = assignee.strip_prefix("account:") {
+        let owner = members
+            .iter()
+            .any(|m| m.account == id && m.role.as_deref() == Some(OWNER));
+        ("person", id, owner.then(|| OWNER.to_owned()))
+    } else {
+        ("text", assignee, None)
+    };
+    Ok(Holder {
+        kind: kind.to_owned(),
+        id: id.to_owned(),
+        role,
     })
 }
 
