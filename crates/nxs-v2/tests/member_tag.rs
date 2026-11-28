@@ -57,6 +57,28 @@ impl Drop for Repo {
     }
 }
 
+/// The tag the device holds in every [`Repo`]: `nxs init` picks the device's tag by its random
+/// id, so the tests give it one that no test names (NEX-248).
+const DEVICE_TAG: &str = "zy";
+
+#[test]
+fn the_device_of_a_test_repo_holds_the_tag_no_test_names() {
+    let repo = Repo::new("member-tag-device");
+
+    let list = repo.ok(&["member", "list"]);
+
+    let device = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["kind"] == "device");
+    assert_eq!(
+        device.map(|m| &m["tag"]),
+        Some(&Value::from(DEVICE_TAG)),
+        "{list}"
+    );
+}
+
 fn kind(out: &nxs_v2::Outcome) -> String {
     assert_eq!(out.code, 1, "{}", stdout(out));
     json(out)["error"]["kind"].as_str().unwrap().to_owned()
