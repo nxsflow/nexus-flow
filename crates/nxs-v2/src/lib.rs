@@ -102,7 +102,7 @@ fn dispatch(
 ) -> Outcome {
     let result = match command {
         Command::Decision(command) => return cmd::decision::run(dir, options, command, format),
-        Command::Init => cmd::init::run(dir, options).map(|r| (format.render(&r), 0)),
+        Command::Init => return cmd::init::run(dir, options, format),
         Command::Member(command) => {
             cmd::member::run(dir, options, command).map(|r| (format.render(&r), 0))
         }

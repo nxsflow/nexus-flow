@@ -62,6 +62,12 @@ pub fn run(dir: &Path, command: GenesisCommand, format: Format) -> Outcome {
         Err(e) => return CliError::from(e).outcome(format),
     };
     let stdout = format.render(&Create::from(&report)).into_bytes();
+    refused_unless_written(&report, stdout)
+}
+
+/// The outcome of a command that ran GENESIS's create, printing `stdout`: when `report` is
+/// refused, the error naming GENESIS goes to stderr and the exit code is 1.
+pub fn refused_unless_written(report: &Report, stdout: Vec<u8>) -> Outcome {
     if report.is_refused() {
         let msg = format!(
             "{PATH} is missing from the working tree but git still tracks it; nothing was written. Restore it from git, such as with `git checkout -- {PATH}` or `git restore {PATH}`"
@@ -164,17 +170,23 @@ impl File {
 
 impl From<GenesisError> for CliError {
     fn from(e: GenesisError) -> Self {
-        let msg = e.to_string();
-        let kind = match &e {
-            GenesisError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
-            GenesisError::Root(_) => Kind::Validation,
-            GenesisError::Config(config) => match config.problem {
-                Problem::Io { .. } => Kind::Io,
-                _ => Kind::Validation,
-            },
-            // An unreadable shipped list is a bug in this release, read from nxs's own bytes.
-            GenesisError::Io { .. } | GenesisError::Git(_) | GenesisError::Shipped(_) => Kind::Io,
-        };
-        CliError { kind, msg }
+        CliError {
+            kind: genesis_kind(&e),
+            msg: e.to_string(),
+        }
+    }
+}
+
+/// The stable code of an error of GENESIS's create, from `nxs genesis create` or `nxs init`.
+pub fn genesis_kind(e: &GenesisError) -> Kind {
+    match e {
+        GenesisError::Root(RootError::NotFound { .. }) => Kind::NoWorkspace,
+        GenesisError::Root(_) => Kind::Validation,
+        GenesisError::Config(config) => match config.problem {
+            Problem::Io { .. } => Kind::Io,
+            _ => Kind::Validation,
+        },
+        // An unreadable shipped list is a bug in this release, read from nxs's own bytes.
+        GenesisError::Io { .. } | GenesisError::Git(_) | GenesisError::Shipped(_) => Kind::Io,
     }
 }

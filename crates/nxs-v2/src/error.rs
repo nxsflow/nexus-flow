@@ -119,6 +119,7 @@ impl From<Error> for CliError {
             // nxs opens a repository, which always has a checkout.
             Error::NoCheckout => Kind::Validation,
             Error::Install(_) => Kind::Io,
+            Error::Genesis(genesis) => crate::cmd::genesis::genesis_kind(genesis),
             Error::Member(member) => member_kind(member),
             Error::Decision(decision) => decision_kind(decision),
             Error::Coordination(join) => join_kind(join),

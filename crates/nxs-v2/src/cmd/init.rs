@@ -1,14 +1,17 @@
 //! `nxs init` (RFC 0001, "Creating and finding a space"): gives the repository its space through
-//! the seam's `init`, and prints what it did. The factory and genesis steps join it later (NEX-139).
+//! the seam's `init`, which ends with the factory's install and GENESIS's create (RFC 0006, RFC
+//! 0004), and prints what it did to the space.
 
 use std::path::Path;
 
-use nexus_flow_seam::{init_with, DataDirError, InitReport, Options, SyncMode};
+use nexus_flow_seam::{init_with, DataDirError, Init as Report, Options, SyncMode};
 use serde::Serialize;
 
 use crate::block_on::block_on;
+use crate::cmd::genesis::refused_unless_written;
 use crate::error::CliError;
-use crate::output::Render;
+use crate::output::{Format, Render};
+use crate::Outcome;
 
 /// What `nxs init` prints.
 #[derive(Debug, Serialize)]
@@ -23,20 +26,29 @@ pub struct Init {
     v1_workspace: bool,
 }
 
-/// Runs `nxs init` in `dir`.
+/// Runs `nxs init` in `dir`, printed in `format`. A GENESIS git still tracks is not written: the
+/// record goes to stdout as always, the error naming GENESIS to stderr, and the exit code is 1,
+/// as with `nxs genesis create`.
 pub fn run(
     dir: &Path,
     options: impl FnOnce() -> Result<Options, DataDirError>,
-) -> Result<Init, CliError> {
-    let options = options()?;
-    let report = block_on(init_with(dir, options))?;
-    Ok(Init::from(report))
+    format: Format,
+) -> Outcome {
+    let report = match options()
+        .map_err(CliError::from)
+        .and_then(|options| block_on(init_with(dir, options)).map_err(CliError::from))
+    {
+        Ok(report) => report,
+        Err(e) => return e.outcome(format),
+    };
+    let stdout = format.render(&Init::from(&report)).into_bytes();
+    refused_unless_written(&report.genesis, stdout)
 }
 
-impl From<InitReport> for Init {
-    fn from(report: InitReport) -> Self {
+impl From<&Report> for Init {
+    fn from(report: &Report) -> Self {
         Init {
-            space: report.space,
+            space: report.space.clone(),
             created: report.created,
             sync: match report.sync {
                 SyncMode::Island => "island",
