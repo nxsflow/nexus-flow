@@ -77,6 +77,8 @@ pub enum KeyError {
     NotSynced { space: SpaceId, tag: String },
     /// No ticket of the space holds the key or the object id.
     KeyNotFound { key: String },
+    /// Two or more tickets hold the key; `tickets` lists each as [`shown`] gives it, in order.
+    AmbiguousKey { key: String, tickets: Vec<String> },
     /// The database failed.
     Database { message: String },
 }
@@ -97,6 +99,12 @@ impl fmt::Display for KeyError {
                 "the tag {tag} was another member's before, and this copy of the space {space} has not synced yet; sync with nxs sync first"
             ),
             KeyError::KeyNotFound { key } => write!(f, "no ticket of this space is {key}"),
+            KeyError::AmbiguousKey { key, tickets } => write!(
+                f,
+                "{key} names {} tickets: {}; name one of them",
+                tickets.len(),
+                tickets.join(", ")
+            ),
             KeyError::Database { message } => f.write_str(message),
         }
     }
@@ -220,4 +228,10 @@ pub async fn resolve(opened: &Opened, space: &SpaceId, text: &str) -> Result<Obj
         .find(space, TICKETS, BY_KEY, vec![Value::from(text)])
         .await?;
     found.first().map(|t| t.id()).ok_or_else(not_found)
+}
+
+/// Each ticket's key as `nxs` shows it, in the order given: the key alone, or, for a key another
+/// ticket in `tickets` holds too, the key, `~` and the first digits of its object id.
+pub fn shown(tickets: &[(String, ObjectId)]) -> Vec<String> {
+    tickets.iter().map(|(key, _)| key.clone()).collect()
 }
