@@ -9,3 +9,4 @@ pub mod merge_gate;
 pub mod repository;
 pub mod space;
 pub mod sync;
+pub mod ticket;

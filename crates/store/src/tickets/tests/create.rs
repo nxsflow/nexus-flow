@@ -128,7 +128,11 @@ fn a_priority_is_stored_as_its_ordinal_from_the_label_or_the_number() {
         };
         let ticket = create(&opened, new);
         let object = stored(&opened, &ticket.id);
-        assert_eq!(object.get::<i64>("priority").unwrap(), Some(ordinal), "{given}");
+        assert_eq!(
+            object.get::<i64>("priority").unwrap(),
+            Some(ordinal),
+            "{given}"
+        );
         assert_eq!(ticket.priority, Some(ordinal), "{given}");
     }
     let unset = create(&opened, new("feature", "No priority"));

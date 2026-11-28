@@ -65,6 +65,9 @@ enum Command {
     Factory(cmd::factory::FactoryCommand),
     /// Read the merge gate's rules from the base commit.
     MergeGate(cmd::merge_gate::MergeGateArgs),
+    /// Create a ticket, or show one.
+    #[command(subcommand)]
+    Ticket(cmd::ticket::TicketCommand),
     /// Write the repository's GENESIS from the template, only where none exists.
     #[command(subcommand)]
     Genesis(cmd::genesis::GenesisCommand),
@@ -96,7 +99,6 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let _ = stdin;
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     if let Some(e) = args.first().and_then(|argv0| retired::check(argv0)) {
         return e.outcome(md_requested(&args));
@@ -106,7 +108,7 @@ where
         Err(e) => return parse_error(e, &args),
     };
     let format = if cli.md { Format::Md } else { Format::Json };
-    let mut outcome = dispatch(cli.command, dir, options, format);
+    let mut outcome = dispatch(cli.command, dir, options, format, stdin);
     if let Some(notice) = v1_notice::check(dir) {
         outcome.stderr.extend_from_slice(notice.as_bytes());
     }
@@ -119,8 +121,10 @@ fn dispatch(
     dir: &Path,
     options: impl FnOnce() -> Result<Options, DataDirError>,
     format: Format,
+    stdin: &mut dyn Read,
 ) -> Outcome {
     let result = match command {
+        Command::Ticket(command) => return cmd::ticket::run(dir, options, command, format, stdin),
         Command::Decision(command) => return cmd::decision::run(dir, options, command, format),
         Command::Init => return cmd::init::run(dir, options, format),
         Command::Member(command) => {

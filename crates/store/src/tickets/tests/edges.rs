@@ -41,7 +41,9 @@ fn a_ticket_belongs_to_the_epic_its_parent_names() {
         },
     );
 
-    let parent = stored(&opened, &child.id).get::<ObjectId>("parent").unwrap();
+    let parent = stored(&opened, &child.id)
+        .get::<ObjectId>("parent")
+        .unwrap();
     assert_eq!(parent.map(|p| p.to_string()), Some(epic.id));
     assert_eq!(child.parent, Some(epic.key));
 }

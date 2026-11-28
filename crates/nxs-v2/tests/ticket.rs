@@ -190,7 +190,11 @@ fn create_takes_every_flag_and_prints_the_ticket_as_the_engine_returns_it() {
 fn show_prints_the_ticket_as_the_engine_returns_it_by_key_or_object_id() {
     let repo = Repo::new("ticket-show");
     let epic = repo.create("epic", "The epic", &[]);
-    let child = repo.create("bug", "A child", &["--parent", epic["key"].as_str().unwrap()]);
+    let child = repo.create(
+        "bug",
+        "A child",
+        &["--parent", epic["key"].as_str().unwrap()],
+    );
 
     let by_key = repo.nxs(&["ticket", "show", epic["key"].as_str().unwrap()]);
     let by_id = repo.nxs(&["ticket", "show", epic["id"].as_str().unwrap()]);
@@ -215,8 +219,8 @@ fn a_priority_is_its_ordinal_from_the_label_or_the_number_and_unset_is_null() {
     assert_eq!(unset["priority"], Value::Null);
 }
 
-/// The keys of `show`'s record, in the order it prints them (RFC 0002, "Commands, JSON and the
-/// seam").
+/// The keys of `show`'s record (RFC 0002, "Commands, JSON and the seam"); the golden file holds
+/// the order they print in, which a parsed JSON object does not keep.
 const KEYS: [&str; 40] = [
     "id",
     "key",
@@ -267,13 +271,16 @@ fn every_record_has_every_key_with_empty_values_as_empty_arrays_and_null() {
     let shown = json(&repo.nxs(&["ticket", "show", created["key"].as_str().unwrap()]));
 
     for record in [&created, &shown] {
-        let keys: Vec<&str> = record
+        let mut keys: Vec<&str> = record
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, KEYS);
+        let mut expected = KEYS.to_vec();
+        keys.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
         for key in [
             "resolution",
             "priority",
@@ -399,7 +406,14 @@ fn a_refusal_is_an_error_object_with_its_code_and_writes_nothing() {
         "--parent",
         &key,
     ]);
-    let no_type = repo.nxs(&["ticket", "create", "--title", "No type", "--description", "Why"]);
+    let no_type = repo.nxs(&[
+        "ticket",
+        "create",
+        "--title",
+        "No type",
+        "--description",
+        "Why",
+    ]);
     let unknown = repo.nxs(&["ticket", "show", &format!("{tag}.9")]);
     let unknown_dep = repo.nxs(&[
         "ticket",
@@ -415,7 +429,10 @@ fn a_refusal_is_an_error_object_with_its_code_and_writes_nothing() {
     ]);
 
     assert_eq!(kind(&under_feature), "validation");
-    let msg = json(&under_feature)["error"]["msg"].as_str().unwrap().to_owned();
+    let msg = json(&under_feature)["error"]["msg"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(msg.contains(&key) && msg.contains("epic"), "{msg}");
     assert_eq!(kind(&no_type), "validation");
     assert_eq!(kind(&unknown), "key_not_found");

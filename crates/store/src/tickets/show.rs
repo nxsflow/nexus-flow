@@ -10,8 +10,8 @@ use nocentraldb::{Object, ObjectId, Value};
 use super::create::repository;
 use super::keys::{self, shown, Key, BY_KEY, TICKETS};
 use super::{Derived, Edge, Holder, Ticket, TicketError};
-use crate::members::{self, OWNER};
 use crate::id::SpaceId;
+use crate::members::{self, OWNER};
 use crate::opened::Opened;
 
 /// The ticket of the repository space of `opened` that `text` names, by key or object id.
