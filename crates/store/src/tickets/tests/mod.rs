@@ -5,3 +5,4 @@ mod create;
 mod edges;
 mod mint;
 mod resolve;
+mod show;
