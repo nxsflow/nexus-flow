@@ -50,6 +50,11 @@ pub enum Kind {
     AmbiguousKey,
     /// The space holds no tickets, such as a coordination space (RFC 0002).
     NotATicketSpace,
+    /// The member holds a freed tag and its copy has not synced yet: run `nxs sync` (RFC 0002,
+    /// NEX-247).
+    NotSynced,
+    /// The writing member's record has no tag: run `nxs member retag` (RFC 0002, NEX-247).
+    NoTag,
 }
 
 impl Kind {
@@ -69,6 +74,8 @@ impl Kind {
             Kind::KeyNotFound => "key_not_found",
             Kind::AmbiguousKey => "ambiguous_key",
             Kind::NotATicketSpace => "not_a_ticket_space",
+            Kind::NotSynced => "not_synced",
+            Kind::NoTag => "no_tag",
         }
     }
 }
@@ -235,6 +242,8 @@ fn ticket_kind(e: &TicketError) -> Kind {
         TicketError::Key(KeyError::KeyNotFound { .. }) => Kind::KeyNotFound,
         TicketError::Key(KeyError::AmbiguousKey { .. }) => Kind::AmbiguousKey,
         TicketError::NotATicketSpace { .. } => Kind::NotATicketSpace,
+        TicketError::Key(KeyError::NotSynced { .. }) => Kind::NotSynced,
+        TicketError::Key(KeyError::NoTag { .. }) => Kind::NoTag,
         TicketError::Key(KeyError::Database { .. }) | TicketError::Database { .. } => Kind::Io,
         _ => Kind::Validation,
     }
