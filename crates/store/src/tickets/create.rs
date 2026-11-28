@@ -6,6 +6,7 @@
 
 use nocentraldb::{MemberId, Space, Value};
 
+use super::check::{check, Checked};
 use super::keys::{self, TICKETS};
 use super::show::read;
 use super::time;
@@ -16,6 +17,7 @@ use crate::opened::Opened;
 /// Checks `new` and writes it into the repository space of `opened`, as one change, with a key
 /// minted for it; returns it as [`show`](super::show) reads it.
 pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketError> {
+    let Checked { new, priority } = check(new)?;
     let (space_id, space) = repository(opened)?;
     let key = keys::mint(opened, &space_id).await?.to_string();
     let me = me(space).await?.to_string();
@@ -45,6 +47,9 @@ pub async fn create(opened: &Opened, new: NewTicket) -> Result<Ticket, TicketErr
                 if let Some(value) = value {
                     values.push((field, Value::from(value.as_str())));
                 }
+            }
+            if let Some(priority) = priority {
+                values.push(("priority", Value::from(priority)));
             }
             if !new.labels.is_empty() {
                 values.push(("labels", Value::add(new.labels.iter().map(String::as_str))));
