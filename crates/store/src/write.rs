@@ -15,6 +15,7 @@ use crate::id::SpaceId;
 use crate::migration::{self, MoveOnly};
 use crate::opened::Opened;
 use crate::space_kind::{self, SpaceKind, WrongSpace};
+use crate::space_marker::MarkerWrite;
 use crate::write_once::{self, Change, WriteOnce};
 
 /// Why a write was refused or failed. A refusal writes nothing of the change.
@@ -27,6 +28,9 @@ pub enum WriteError {
     WriteOnce(WriteOnce),
     /// The collection is written only by the move from v1, and the write is not the move's.
     MoveOnly(MoveOnly),
+    /// The collection is the marker that names the space's kind, written only when the space is
+    /// created.
+    Marker(MarkerWrite),
     /// The space is not one of the open spaces.
     NotOpen(SpaceId),
     /// The space is open, but the database holds none of it yet.
@@ -41,6 +45,7 @@ impl fmt::Display for WriteError {
             WriteError::WrongSpace(e) => e.fmt(f),
             WriteError::WriteOnce(e) => e.fmt(f),
             WriteError::MoveOnly(e) => e.fmt(f),
+            WriteError::Marker(e) => e.fmt(f),
             WriteError::NotOpen(space) => write!(f, "the space {space} is not open"),
             WriteError::NotHeld(space) => write!(
                 f,

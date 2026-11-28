@@ -16,6 +16,8 @@ use nexus_flow_store::opened;
 use nexus_flow_store::repo_root::RepoRoot;
 use nexus_flow_store::space::{self, init};
 use nexus_flow_store::space_kind::SpaceKind;
+use nexus_flow_store::write::WriteError;
+use nocentraldb::Value;
 
 /// Names `coordination` as the coordination space in the file at `repo`.
 fn name_coordination(repo: &Path, coordination: SpaceId) {
@@ -87,5 +89,36 @@ fn a_space_without_a_marker_keeps_the_kind_nexus_flow_toml_gives_it() {
     let opened = block_on(opened::space(unmarked, None, &data, keys(&data))).unwrap();
     assert_eq!(opened.kind(&unmarked), None);
     assert!(opened.check_write(&unmarked, "spaceMember").is_err());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn the_marker_takes_no_write_after_the_space_is_created() {
+    let base = scratch("marker-no-write");
+    let repo = base.join("repo");
+    let data = data_dir(&base.join("data"));
+    let report = block_on(init(&repo, &data, keys(&data))).unwrap();
+    let space: SpaceId = report.space.parse().unwrap();
+    let opened = block_on(opened::repository(&repo, &data, keys(&data))).unwrap();
+    let marker = block_on(opened.find(&space, "spaceKind", "byKind", Vec::new())).unwrap()[0].id();
+
+    let created = block_on(opened.write(&space, |w| {
+        w.create("spaceKind", [("kind", Value::from("coordination"))])
+            .map(drop)
+    }));
+    let set = block_on(opened.write(&space, |w| {
+        w.update("spaceKind", marker, [("kind", Value::from("coordination"))])
+    }));
+    let deleted = block_on(opened.write(&space, |w| w.delete("spaceKind", marker)));
+
+    for result in [created, set, deleted] {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, WriteError::Marker(ref e) if e.collection == "spaceKind"),
+            "{err:?}"
+        );
+    }
+    let opened = block_on(opened::space(space, None, &data, keys(&data))).unwrap();
+    assert_eq!(opened.kind(&space), Some(SpaceKind::Repository));
     fs::remove_dir_all(&base).unwrap();
 }

@@ -7,6 +7,8 @@
 //! it. A space whose markers name more than one kind, which only a write outside the store can
 //! make, is of no known kind.
 
+use std::fmt;
+
 use nocentraldb::{Db, Space, Value};
 
 use crate::id::SpaceId;
@@ -70,3 +72,23 @@ pub(crate) async fn read(opened: &Opened, space: &SpaceId) -> Result<Marked, noc
     }
     Ok(marked)
 }
+
+/// Why a write was refused: its collection is the marker, which the store writes only when it
+/// creates a space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerWrite {
+    /// The collection the write was for.
+    pub collection: String,
+}
+
+impl fmt::Display for MarkerWrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} names the space's kind and is written only when the space is created, so this write is refused",
+            self.collection
+        )
+    }
+}
+
+impl std::error::Error for MarkerWrite {}

@@ -252,6 +252,9 @@ impl From<WriteError> for MemberError {
             WriteError::MoveOnly(e) => MemberError::Invalid {
                 message: e.to_string(),
             },
+            WriteError::Marker(e) => MemberError::Invalid {
+                message: e.to_string(),
+            },
             WriteError::Database(e) => e.into(),
         }
     }
