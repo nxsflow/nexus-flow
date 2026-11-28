@@ -75,7 +75,8 @@ enum Command {
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
 /// data directory and the device's keys; it is called only by a command that opens the database.
-/// A command that reads stdin, such as `nxs ticket create -`, reads the process's.
+/// A command that reads stdin, such as `nxs ticket create -`, reads the process's, which is
+/// locked only while it reads, so no other command waits on it.
 pub fn run<I, T>(
     args: I,
     dir: &Path,
@@ -85,7 +86,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    run_with_stdin(args, dir, options, &mut std::io::stdin().lock())
+    run_with_stdin(args, dir, options, &mut std::io::stdin())
 }
 
 /// [`run`], with `stdin` as what a command reads from stdin.
