@@ -9,7 +9,7 @@ pub mod merge_gate;
 pub use engine::{set_relay, Engine, Error, Options};
 pub use init::{init, init_with, Init};
 pub use nexus_flow_store::config::{ConfigError, Problem};
-pub use nexus_flow_store::coordination::{JoinError, JoinReport};
+pub use nexus_flow_store::coordination::JoinError;
 pub use nexus_flow_store::data_dir::{DataDir, DataDirError, Platform};
 pub use nexus_flow_store::decisions::{
     Decision, DecisionError, Linked, NewDecision, Subject, SubjectKind,
@@ -19,6 +19,7 @@ pub use nexus_flow_store::id::{NotASessionId, NotASpaceId, SessionId, SpaceId};
 pub use nexus_flow_store::member_select::SessionVarError;
 pub use nexus_flow_store::members::{Member, MemberError, MemberKind, TicketRef};
 pub use nexus_flow_store::repo_root::RootError;
+pub use nexus_flow_store::requests::{Coordination, CoordinationError, Repository};
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};
 pub use nexus_flow_store::sync::{Behind, SpaceBehind, SyncError, SyncStatus};
 

@@ -20,6 +20,7 @@ mod open;
 pub mod opened;
 mod read;
 pub mod repo_root;
+pub mod requests;
 pub mod space;
 pub mod space_kind;
 pub mod space_marker;

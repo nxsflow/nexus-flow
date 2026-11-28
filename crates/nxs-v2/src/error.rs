@@ -6,11 +6,14 @@
 //! `no_free_tag` from RFC 0002 (NEX-108); a retired v1 entry point is `retired_entry_point`
 //! (RFC 0008, NEX-191); `nxs decision add` refuses with
 //! `validation`, or `not_found` for a decision to supersede that the local copy does not hold.
+//! The coordination commands refuse a second coordination space and a repository name another
+//! repository holds with `conflict`, and a name two records hold with RFC 0009's
+//! `repository_name_ambiguous`.
 
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
-    ConfigError, DataDirError, DecisionError, Error, InitError, JoinError, MemberError, Problem,
-    RootError, SyncError,
+    ConfigError, CoordinationError, DataDirError, DecisionError, Error, InitError, JoinError,
+    MemberError, Problem, RootError, SyncError,
 };
 
 use crate::output::Format;
@@ -39,6 +42,8 @@ pub enum Kind {
     NoFreeTag,
     /// `nxs` was started as `nxf`, `nxm` or `nxc`, which v2 retires (RFC 0008, NEX-191).
     RetiredEntryPoint,
+    /// More than one repository record holds the name (RFC 0009).
+    RepositoryNameAmbiguous,
 }
 
 impl Kind {
@@ -54,6 +59,7 @@ impl Kind {
             Kind::NotFound => "not_found",
             Kind::NoFreeTag => "no_free_tag",
             Kind::RetiredEntryPoint => "retired_entry_point",
+            Kind::RepositoryNameAmbiguous => "repository_name_ambiguous",
         }
     }
 }
@@ -122,7 +128,7 @@ impl From<Error> for CliError {
             Error::Genesis(genesis) => crate::cmd::genesis::genesis_kind(genesis),
             Error::Member(member) => member_kind(member),
             Error::Decision(decision) => decision_kind(decision),
-            Error::Coordination(join) => join_kind(join),
+            Error::Coordination(coordination) => coordination_kind(coordination),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
             Error::MergeGateInput(_) => Kind::Validation,
@@ -167,7 +173,28 @@ fn join_kind(e: &JoinError) -> Kind {
         JoinError::Root(root) => root_kind(root),
         JoinError::Config(config) => config_kind(config),
         JoinError::OtherCoordination { .. } => Kind::Conflict,
-        JoinError::OwnSpace { .. } | JoinError::CannotPlace { .. } => Kind::Validation,
+        JoinError::OwnSpace { .. }
+        | JoinError::CannotPlace { .. }
+        | JoinError::CannotRemove { .. } => Kind::Validation,
+    }
+}
+
+/// A name another repository holds is `conflict`, as a second coordination space is; a space the
+/// device does not hold yet is `validation`, as for the member commands (NEX-99).
+fn coordination_kind(e: &CoordinationError) -> Kind {
+    match e {
+        CoordinationError::File(join) => join_kind(join),
+        CoordinationError::Open(open) => open_kind(open),
+        CoordinationError::NameTaken { .. } => Kind::Conflict,
+        CoordinationError::NotFound { .. } => Kind::NotFound,
+        CoordinationError::Ambiguous { .. } => Kind::RepositoryNameAmbiguous,
+        CoordinationError::Database { .. } => Kind::Io,
+        CoordinationError::Write(_)
+        | CoordinationError::NoCheckout
+        | CoordinationError::NotJoined
+        | CoordinationError::NotHeld { .. }
+        | CoordinationError::NoName
+        | CoordinationError::NotAName { .. } => Kind::Validation,
     }
 }
 

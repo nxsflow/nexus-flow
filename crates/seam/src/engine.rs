@@ -9,9 +9,12 @@
 //! store, names both with `open_with` and `open_space_with`, which open the device's member;
 //! `as_session` reopens any engine on a running session's member.
 //!
-//! [`Engine::space_join_coordination`], the counterpart of `nxs space join-coordination`,
-//! records the repository's coordination space in `nexus-flow.toml`; like the other seam
-//! functions of commands that open no database (NEX-232), it takes the repository.
+//! An engine open on a checkout creates, joins and leaves the repository's coordination space,
+//! with the repository's record in it (RFC 0009, "Creating it", "Repositories in the space"):
+//! [`Engine::coordination_create`], [`Engine::coordination_join`] and
+//! [`Engine::coordination_leave`], the counterparts of `nxs space create-coordination`,
+//! `join-coordination` and `leave-coordination`. [`Engine::repositories`], the counterpart of
+//! `nxs repository list`, lists the records of the open coordination space.
 //!
 //! An open engine adds, removes and lists the members of its spaces, each with its role record
 //! (RFC 0001, "Members"): [`Engine::member_add`], [`Engine::member_remove`],
@@ -37,7 +40,6 @@ use crate::genesis;
 use crate::install::factory::{install, Defaults, InstallError, Report};
 use nexus_flow_merge_gate::decide::InputError;
 use nexus_flow_merge_gate::rules::GitError;
-use nexus_flow_store::coordination::{self, JoinError, JoinReport};
 use nexus_flow_store::data_dir::{DataDir, DataDirError};
 use nexus_flow_store::decisions::{self, Decision, DecisionError, NewDecision};
 use nexus_flow_store::device::{RelayUrl, SettingsError};
@@ -45,6 +47,7 @@ use nexus_flow_store::id::{SessionId, SpaceId};
 use nexus_flow_store::member_select::{RunAs, SessionVarError};
 use nexus_flow_store::members::{self, Member, MemberError};
 use nexus_flow_store::opened::{self, Opened};
+use nexus_flow_store::requests::{self, Coordination, CoordinationError, Repository};
 use nexus_flow_store::space::{DeviceKeys, InitError};
 use nexus_flow_store::sync::{self, SyncError, SyncStatus};
 
@@ -90,8 +93,8 @@ pub enum Error {
     Member(MemberError),
     /// A decision was refused, or could not be written.
     Decision(DecisionError),
-    /// The coordination space could not be recorded in `nexus-flow.toml`.
-    Coordination(JoinError),
+    /// The coordination space could not be created, joined, left or read.
+    Coordination(CoordinationError),
     /// The local git could not give what the merge gate reads: the base or the head names no
     /// commit.
     Git(GitError),
@@ -157,8 +160,8 @@ impl From<SyncError> for Error {
     }
 }
 
-impl From<JoinError> for Error {
-    fn from(e: JoinError) -> Self {
+impl From<CoordinationError> for Error {
+    fn from(e: CoordinationError) -> Self {
         Error::Coordination(e)
     }
 }
@@ -195,14 +198,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Records the coordination space `space` in the `nexus-flow.toml` of the repository at or
-    /// above `repository`, the counterpart of `nxs space join-coordination`. It opens no
-    /// database. The same space again writes nothing; another coordination space, or the
-    /// repository's own space, is refused, and nothing is written.
-    pub fn space_join_coordination(repository: &Path, space: SpaceId) -> Result<JoinReport, Error> {
-        Ok(coordination::join(repository, space)?)
-    }
-
     /// Opens the database of the member a command runs as and the spaces `nexus-flow.toml`
     /// names, for the repository at or above `repository`.
     pub async fn open(repository: &Path) -> Result<Self, Error> {
@@ -284,6 +279,39 @@ impl Engine {
     /// The current members of the repository space, in member-id order, with their role records.
     pub async fn members(&self) -> Result<Vec<Member>, Error> {
         Ok(members::list(&self.opened).await?)
+    }
+
+    /// Creates a coordination space with this member as its first admin, writes the record of
+    /// the checkout's repository, named `name` or by the git remote `origin`, and names the space
+    /// in `nexus-flow.toml` (RFC 0009, "Creating it"). A file that already names a coordination
+    /// space is refused, and nothing is created.
+    pub async fn coordination_create(&mut self, name: Option<&str>) -> Result<Coordination, Error> {
+        Ok(requests::create(&mut self.opened, name).await?)
+    }
+
+    /// Joins the coordination space `space`, which this database must hold: writes the record of
+    /// the checkout's repository, or clears `left` on it and renames it to `name`, and names the
+    /// space in `nexus-flow.toml` (RFC 0009, "Joining"). A name another repository's record holds,
+    /// another coordination space and the repository's own space are refused, and nothing is
+    /// written.
+    pub async fn coordination_join(
+        &mut self,
+        space: SpaceId,
+        name: Option<&str>,
+    ) -> Result<Coordination, Error> {
+        Ok(requests::join(&mut self.opened, space, name).await?)
+    }
+
+    /// Leaves the coordination space `nexus-flow.toml` names: sets `left` on the repository's
+    /// record, which is never deleted, and takes the space out of the file (RFC 0009, "Leaving").
+    pub async fn coordination_leave(&mut self) -> Result<Coordination, Error> {
+        Ok(requests::leave(&mut self.opened).await?)
+    }
+
+    /// The repository records of the open coordination space, in name order, as the local copy
+    /// holds them.
+    pub async fn repositories(&self) -> Result<Vec<Repository>, Error> {
+        Ok(requests::list(&self.opened).await?)
     }
 
     /// Writes `decision` into the repository space with its topics, subjects and supersessions,
