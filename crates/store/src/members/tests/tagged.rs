@@ -3,8 +3,8 @@
 //! member holds; with no tag left it fails with `no_free_tag`. Two current members holding one
 //! tag are both marked `tag_shared`.
 //!
-//! Until NEX-244 lets a freed tag pass on again, a tag that a removed member held is neither
-//! picked nor taken by `--tag`; a member added again gets its own tag back.
+//! A tag that only removed members held is free again (NEX-236): it is picked and taken by
+//! `--tag`; a member added again gets its own tag back.
 
 use nocentraldb::{MemberId, Value};
 
@@ -170,7 +170,7 @@ fn two_members_holding_one_tag_are_both_marked_shared() {
 }
 
 #[test]
-fn a_tag_a_removed_member_held_is_not_handed_out_again() {
+fn a_tag_only_a_removed_member_held_is_handed_out_again() {
     let repo = Repo::new("member-tag-freed");
     let removed = repo.add_tagged(&repo.agent("a"), "coder", "ka").unwrap();
     block_on(crate::members::remove(&repo.opened(), &removed.member)).unwrap();
@@ -181,11 +181,12 @@ fn a_tag_a_removed_member_held_is_not_handed_out_again() {
         tags::all().filter(|t| t.as_str() != "ka"),
     );
 
-    let err = repo
-        .add_tagged(&repo.agent("b"), "coder", "ka")
-        .unwrap_err();
-    assert!(matches!(err, MemberError::TagFreed { .. }), "{err:?}");
-    let err = repo.add(&repo.agent("c"), "coder", None).unwrap_err();
+    let picked = repo.add(&repo.agent("b"), "coder", None).unwrap();
+    assert_eq!(picked.tag.as_deref(), Some("ka"));
+    block_on(crate::members::remove(&repo.opened(), &picked.member)).unwrap();
+    let named = repo.add_tagged(&repo.agent("c"), "coder", "ka").unwrap();
+    assert_eq!(named.tag.as_deref(), Some("ka"));
+    let err = repo.add(&repo.agent("d"), "coder", None).unwrap_err();
     assert!(matches!(err, MemberError::NoFreeTag), "{err:?}");
 }
 

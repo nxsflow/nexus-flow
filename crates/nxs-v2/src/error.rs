@@ -187,7 +187,6 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NoRoleFile { .. }
         | MemberError::NoWorkingTree { .. }
         | MemberError::NotATag { .. }
-        | MemberError::TagFreed { .. }
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,
