@@ -89,7 +89,7 @@ fn read_comment(item: &Value) -> Option<Comment> {
 
 /// Whether `text` is a time in the one form GitHub gives, `YYYY-MM-DDTHH:MM:SSZ`, whose byte order
 /// is its time order.
-fn is_utc_timestamp(text: &str) -> bool {
+pub(crate) fn is_utc_timestamp(text: &str) -> bool {
     let shape = b"dddd-dd-ddTdd:dd:ddZ";
     text.len() == shape.len()
         && text.bytes().zip(shape).all(|(b, &s)| match s {
