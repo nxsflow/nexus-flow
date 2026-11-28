@@ -34,6 +34,7 @@ use crate::opened::Opened;
 use crate::space_kind::WrongSpace;
 use crate::write::WriteError;
 
+mod owner;
 pub(crate) mod record;
 mod retag;
 mod role_file;
@@ -41,6 +42,7 @@ mod roles;
 pub mod tags;
 mod taken;
 
+pub use owner::OWNER;
 pub use retag::retag;
 pub use roles::{space_role, SpaceRole};
 

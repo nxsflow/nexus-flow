@@ -4,8 +4,10 @@
 //! at all. Every check runs before the write, and a refusal writes nothing.
 //!
 //! `decidedBy` defaults to the writer's role from its role record (RFC 0001, "The role record"):
-//! `pm`, or `coder on <ticket key>` for a member started on a ticket. `author` is always the
-//! writer's member id.
+//! `pm`, or `coder on <ticket key>` for a member started on a ticket. The record `nxs init`
+//! writes for the device that creates the space names the role `owner`, which says no one's name,
+//! so a writer whose record says `owner` names who decided, as one without a record does
+//! (NEX-238). `author` is always the writer's member id.
 //!
 //! A subject is written with its label alone; `ticket` and `elsewhere` are left for the reads
 //! that resolve a label. The handle is not unique (RFC 0003, "Handles"), so a taken handle is
@@ -19,7 +21,7 @@ use super::handle::{handle, is_slug, slug};
 use super::labels::expand;
 use super::{Decision, DecisionError, Linked, NewDecision, Subject, SubjectKind};
 use crate::id::SpaceId;
-use crate::members::record;
+use crate::members::{self, record};
 use crate::opened::Opened;
 
 const DECISION: &str = "decisionsDecision";
@@ -343,7 +345,8 @@ async fn me(space: &Space) -> Result<MemberId, DecisionError> {
 }
 
 /// Who decided, by the role record of `me`: its role, and `on <ticket key>` when it names a
-/// ticket. A record without a role, such as one only `nxs member retag` wrote, does not say it.
+/// ticket. A record without a role, such as one only `nxs member retag` wrote, or with the role
+/// `owner`, does not say it.
 async fn role(opened: &Opened, space: &Space, me: MemberId) -> Result<String, DecisionError> {
     let record = record::read(opened.db(), space, me)
         .await
@@ -353,7 +356,7 @@ async fn role(opened: &Opened, space: &Space, me: MemberId) -> Result<String, De
         .ok_or(DecisionError::NoRole)?;
     let role = record
         .role
-        .filter(|role| !role.trim().is_empty())
+        .filter(|role| !role.trim().is_empty() && role.trim() != members::OWNER)
         .ok_or(DecisionError::NoRole)?;
     let Some(ticket) = record.ticket else {
         return Ok(role);
