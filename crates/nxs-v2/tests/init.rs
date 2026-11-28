@@ -162,3 +162,25 @@ fn after_init_member_list_shows_the_device_as_owner_with_a_tag_and_a_rerun_keeps
     assert_eq!(list[0]["tag_shared"], false);
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn init_prints_the_factory_and_genesis_reports_as_their_commands_print_them() {
+    let base = scratch("init-reports");
+    let repo = base.join("repo");
+    let report = json(&nxs(&base, &repo, &["init"]));
+    // A second repository, after the same init, has the files removed again, so the two
+    // commands write them afresh and print what `nxs init` wrote.
+    let other = scratch("init-reports-other");
+    let again = other.join("repo");
+    assert_eq!(nxs(&other, &again, &["init"]).code, 0);
+    fs::remove_dir_all(again.join("factory")).unwrap();
+
+    let factory = json(&nxs(&other, &again, &["factory", "install"]));
+    let genesis = json(&nxs(&other, &again, &["genesis", "create"]));
+
+    assert_eq!(report["factory"], factory);
+    assert_eq!(report["genesis"], genesis);
+    assert_eq!(report["genesis"]["files"][0]["state"], "written");
+    fs::remove_dir_all(&base).unwrap();
+    fs::remove_dir_all(&other).unwrap();
+}
