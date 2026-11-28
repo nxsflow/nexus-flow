@@ -6,6 +6,7 @@ mod create;
 mod error;
 pub mod keys;
 mod show;
+pub mod time;
 mod types;
 
 pub use create::create;
