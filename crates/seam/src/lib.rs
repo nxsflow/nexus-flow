@@ -5,6 +5,7 @@ pub mod genesis;
 mod init;
 pub mod install;
 pub mod merge_gate;
+mod tickets;
 
 pub use engine::{set_relay, Engine, Error, Options};
 pub use init::{init, init_with, Init};
@@ -22,6 +23,11 @@ pub use nexus_flow_store::repo_root::RootError;
 pub use nexus_flow_store::requests::{Coordination, CoordinationError, Repository};
 pub use nexus_flow_store::space::{DeviceKeys, InitError, InitReport, SyncMode};
 pub use nexus_flow_store::sync::{Behind, SpaceBehind, SyncError, SyncStatus};
+pub use nexus_flow_store::tickets::keys::{Key as TicketKey, KeyError};
+pub use nexus_flow_store::tickets::{
+    Derived, Edge, FocusGoal, Holder, NewTicket, Note, Reference, Ticket, TicketError,
+    TicketRequest, WorkLink,
+};
 
 /// The store's test helpers, for the tests of the crates above the seam: invitations of members
 /// nexus-flow cannot start yet.

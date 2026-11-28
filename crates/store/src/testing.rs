@@ -150,3 +150,105 @@ pub async fn hold_every_tag_but(repo: &Path, data: &DataDir, keys: DeviceKeys, b
         .await
         .expect("the records are written");
 }
+
+/// Writes a second ticket with the key `key` into the repository space of the checkout at
+/// `repo`, as two members holding one tag leave it (RFC 0002, "Two members with one tag"), and
+/// returns its key as `nxs` shows it, with `~` and the first digits of its object id.
+pub async fn ticket_with_key(repo: &Path, data: &DataDir, keys: DeviceKeys, key: &str) -> String {
+    use nocentraldb::Value;
+
+    let opened = crate::opened::repository(repo, data, keys)
+        .await
+        .expect("the repository opens");
+    let (space, _) = &opened.spaces()[0];
+    let mut twin = None;
+    opened
+        .write(space, |w| {
+            let values = [
+                ("key", Value::from(key)),
+                ("type", Value::from("chore")),
+                ("title", Value::from("The twin")),
+                ("description", Value::from("A key two tickets hold")),
+                ("status", Value::from("open")),
+            ];
+            twin = Some(w.create(crate::tickets::keys::TICKETS, values)?);
+            Ok(())
+        })
+        .await
+        .expect("the twin is written");
+    let twin = twin.expect("the twin is created");
+    crate::tickets::show(&opened, &twin.to_string())
+        .await
+        .expect("the twin reads")
+        .key
+}
+
+/// Makes the device of the checkout at `repo` take over the tag `zz` after a member that is no
+/// longer one held it: a record of that removed member carries `zz`, and the device is retagged
+/// to it, so it mints only once its copy has synced (RFC 0002, "Ticket ids").
+pub async fn take_over_freed_tag(repo: &Path, data: &DataDir, keys: DeviceKeys) {
+    use nocentraldb::Value;
+
+    const GONE: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let opened = crate::opened::repository(repo, data, keys)
+        .await
+        .expect("the repository opens");
+    let (space, _) = &opened.spaces()[0];
+    opened
+        .write(space, |w| {
+            let values = [
+                ("member", Value::from(GONE)),
+                ("role", Value::from("coder")),
+                ("tag", Value::from("zz")),
+            ];
+            w.create(crate::members::record::COLLECTION, values)
+                .map(drop)
+        })
+        .await
+        .expect("the removed member's record is written");
+    let me = crate::members::list(&opened)
+        .await
+        .expect("the members list")
+        .remove(0)
+        .member;
+    crate::members::retag(&opened, &me, "zz")
+        .await
+        .expect("the device takes zz over");
+}
+
+/// Clears the tag of the device's own record in the repository space of the checkout at
+/// `repo`, so it has no tag to mint a key with.
+pub async fn clear_device_tag(repo: &Path, data: &DataDir, keys: DeviceKeys) {
+    use nocentraldb::Value;
+
+    let opened = crate::opened::repository(repo, data, keys)
+        .await
+        .expect("the repository opens");
+    let me = crate::members::list(&opened)
+        .await
+        .expect("the members list")
+        .remove(0)
+        .member;
+    let (space, _) = &opened.spaces()[0];
+    let record = opened
+        .find(
+            space,
+            crate::members::record::COLLECTION,
+            "byMember",
+            vec![Value::from(me)],
+        )
+        .await
+        .expect("the device's record is found")
+        .remove(0)
+        .id();
+    opened
+        .write(space, |w| {
+            w.update(
+                crate::members::record::COLLECTION,
+                record,
+                [("tag", Value::clear())],
+            )
+        })
+        .await
+        .expect("the tag is cleared");
+}

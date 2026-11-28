@@ -10,3 +10,4 @@ pub mod merge_gate_decide;
 pub mod repository;
 pub mod space;
 pub mod sync;
+pub mod ticket;

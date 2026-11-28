@@ -8,6 +8,7 @@
 //! taken already, prints `warning: <text>` on stderr, in both formats.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -64,6 +65,9 @@ enum Command {
     Factory(cmd::factory::FactoryCommand),
     /// Read the merge gate's rules from the base commit, or decide who merges a pull request.
     MergeGate(cmd::merge_gate::MergeGateArgs),
+    /// Create a ticket, or show one.
+    #[command(subcommand)]
+    Ticket(cmd::ticket::TicketCommand),
     /// Write the repository's GENESIS from the template, only where none exists.
     #[command(subcommand)]
     Genesis(cmd::genesis::GenesisCommand),
@@ -71,10 +75,26 @@ enum Command {
 
 /// Runs `nxs` with `args`, the program's name first, in the folder `dir`. `options` gives the
 /// data directory and the device's keys; it is called only by a command that opens the database.
+/// A command that reads stdin, such as `nxs ticket create -`, reads the process's, which is
+/// locked only while it reads, so no other command waits on it.
 pub fn run<I, T>(
     args: I,
     dir: &Path,
     options: impl FnOnce() -> Result<Options, DataDirError>,
+) -> Outcome
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with_stdin(args, dir, options, &mut std::io::stdin())
+}
+
+/// [`run`], with `stdin` as what a command reads from stdin.
+pub fn run_with_stdin<I, T>(
+    args: I,
+    dir: &Path,
+    options: impl FnOnce() -> Result<Options, DataDirError>,
+    stdin: &mut dyn Read,
 ) -> Outcome
 where
     I: IntoIterator<Item = T>,
@@ -89,7 +109,7 @@ where
         Err(e) => return parse_error(e, &args),
     };
     let format = if cli.md { Format::Md } else { Format::Json };
-    let mut outcome = dispatch(cli.command, dir, options, format);
+    let mut outcome = dispatch(cli.command, dir, options, format, stdin);
     if let Some(notice) = v1_notice::check(dir) {
         outcome.stderr.extend_from_slice(notice.as_bytes());
     }
@@ -102,8 +122,10 @@ fn dispatch(
     dir: &Path,
     options: impl FnOnce() -> Result<Options, DataDirError>,
     format: Format,
+    stdin: &mut dyn Read,
 ) -> Outcome {
     let result = match command {
+        Command::Ticket(command) => return cmd::ticket::run(dir, options, command, format, stdin),
         Command::Decision(command) => return cmd::decision::run(dir, options, command, format),
         Command::Init => return cmd::init::run(dir, options, format),
         Command::Member(command) => {

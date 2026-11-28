@@ -13,7 +13,7 @@
 use nexus_flow_seam::merge_gate::GitError;
 use nexus_flow_seam::{
     ConfigError, CoordinationError, DataDirError, DecisionError, Error, InitError, JoinError,
-    MemberError, Problem, RootError, SyncError,
+    KeyError, MemberError, Problem, RootError, SyncError, TicketError,
 };
 
 use crate::output::Format;
@@ -44,6 +44,17 @@ pub enum Kind {
     RetiredEntryPoint,
     /// More than one repository record holds the name (RFC 0009).
     RepositoryNameAmbiguous,
+    /// No ticket of the space holds the key or object id (RFC 0002).
+    KeyNotFound,
+    /// More than one ticket holds the key; the message lists each (RFC 0002).
+    AmbiguousKey,
+    /// The space holds no tickets, such as a coordination space (RFC 0002).
+    NotATicketSpace,
+    /// The member holds a freed tag and its copy has not synced yet: run `nxs sync` (RFC 0002,
+    /// NEX-247).
+    NotSynced,
+    /// The writing member's record has no tag: run `nxs member retag` (RFC 0002, NEX-247).
+    NoTag,
 }
 
 impl Kind {
@@ -60,6 +71,11 @@ impl Kind {
             Kind::NoFreeTag => "no_free_tag",
             Kind::RetiredEntryPoint => "retired_entry_point",
             Kind::RepositoryNameAmbiguous => "repository_name_ambiguous",
+            Kind::KeyNotFound => "key_not_found",
+            Kind::AmbiguousKey => "ambiguous_key",
+            Kind::NotATicketSpace => "not_a_ticket_space",
+            Kind::NotSynced => "not_synced",
+            Kind::NoTag => "no_tag",
         }
     }
 }
@@ -131,6 +147,7 @@ impl From<Error> for CliError {
             Error::Coordination(coordination) => coordination_kind(coordination),
             Error::Git(GitError::NotACommit { .. }) => Kind::Validation,
             Error::Git(GitError::Failed { .. }) => Kind::Io,
+            Error::Ticket(ticket) => ticket_kind(ticket),
             Error::MergeGateInput(_) => Kind::Validation,
         };
         CliError { kind, msg }
@@ -218,6 +235,18 @@ fn member_kind(e: &MemberError) -> Kind {
         | MemberError::NotHeld { .. }
         | MemberError::Invalid { .. }
         | MemberError::WrongSpace(_) => Kind::Validation,
+    }
+}
+
+fn ticket_kind(e: &TicketError) -> Kind {
+    match e {
+        TicketError::Key(KeyError::KeyNotFound { .. }) => Kind::KeyNotFound,
+        TicketError::Key(KeyError::AmbiguousKey { .. }) => Kind::AmbiguousKey,
+        TicketError::NotATicketSpace { .. } => Kind::NotATicketSpace,
+        TicketError::Key(KeyError::NotSynced { .. }) => Kind::NotSynced,
+        TicketError::Key(KeyError::NoTag { .. }) => Kind::NoTag,
+        TicketError::Key(KeyError::Database { .. }) | TicketError::Database { .. } => Kind::Io,
+        _ => Kind::Validation,
     }
 }
 
