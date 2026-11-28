@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
-use nexus_flow_seam::merge_gate::{Effect, RuleRef, RulesReport};
+use nexus_flow_seam::merge_gate::{RuleRef, RulesReport};
 use nexus_flow_seam::Engine;
 use serde::Serialize;
 
@@ -121,13 +121,6 @@ pub fn run(dir: &Path, args: MergeGateArgs, format: Format) -> Result<(String, i
     }
 }
 
-fn effect(effect: Effect) -> &'static str {
-    match effect {
-        Effect::Owner => "owner",
-        Effect::Pm => "pm",
-    }
-}
-
 impl From<RulesReport> for Rules {
     fn from(report: RulesReport) -> Self {
         let readable = report.readable();
@@ -135,7 +128,7 @@ impl From<RulesReport> for Rules {
         Rules {
             base: report.base,
             readable,
-            default: settings.as_ref().map(|s| effect(s.default)),
+            default: settings.as_ref().map(|s| s.default.as_str()),
             owners: settings.as_ref().map(|s| s.owners.clone()),
             verdict_authors: settings.map(|s| s.verdict_authors),
             rules: report
@@ -143,7 +136,7 @@ impl From<RulesReport> for Rules {
                 .into_iter()
                 .map(|rule| Rule {
                     id: rule.id,
-                    effect: effect(rule.effect),
+                    effect: rule.effect.as_str(),
                     source: rule.source,
                     text: rule.text,
                 })
