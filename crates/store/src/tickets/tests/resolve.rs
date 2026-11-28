@@ -70,7 +70,10 @@ fn two_tickets_with_one_key_both_list_with_a_suffix() {
             .expect("two object ids differ");
         format!("ka.42~{}", prefix(id, n))
     };
-    assert_eq!(shown, vec![suffix(first), suffix(second), "ka.43".to_owned()]);
+    assert_eq!(
+        shown,
+        vec![suffix(first), suffix(second), "ka.43".to_owned()]
+    );
 }
 
 #[test]

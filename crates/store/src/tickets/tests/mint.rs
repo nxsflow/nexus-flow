@@ -8,7 +8,11 @@ use crate::tickets::keys::{self, Key, KeyError};
 
 /// The tag of the device's own record in `repo`, which `nxs init` wrote.
 fn own_tag(repo: &Repo) -> String {
-    let me = repo.list().into_iter().next().expect("the device is listed");
+    let me = repo
+        .list()
+        .into_iter()
+        .next()
+        .expect("the device is listed");
     me.tag.expect("nxs init gave the device a tag")
 }
 
