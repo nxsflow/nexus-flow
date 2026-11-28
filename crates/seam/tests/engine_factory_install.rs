@@ -36,11 +36,13 @@ fn tree(dir: &Path) -> Vec<String> {
     out
 }
 
-/// A repository given its space, and an engine open on it.
+/// A repository given its space, without the `factory/` `init` installs, and an engine open on
+/// it.
 fn engine(test: &str) -> (PathBuf, Engine) {
     let base = scratch(test);
     let repo = base.join("repo");
     block_on(init_with(&repo, options(&base.join("data")))).unwrap();
+    fs::remove_dir_all(repo.join("factory")).unwrap();
     let engine = block_on(Engine::open_with(&repo, options(&base.join("data")))).unwrap();
     (repo, engine)
 }
@@ -153,6 +155,7 @@ fn factory_install_needs_a_checkout() {
     let base = scratch("engine-factory-no-checkout");
     let repo = base.join("repo");
     let report = block_on(init_with(&repo, options(&base.join("data")))).unwrap();
+    fs::remove_dir_all(repo.join("factory")).unwrap();
     let space = report.space.parse().unwrap();
     let engine = block_on(Engine::open_space_with(
         space,

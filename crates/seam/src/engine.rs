@@ -83,6 +83,8 @@ pub enum Error {
     NoCheckout,
     /// Installing the factory's defaults could not read or write a file.
     Install(InstallError),
+    /// `init` could not create GENESIS: a file or git could not be read, or a file written.
+    Genesis(genesis::GenesisError),
     /// A member could not be added, removed or listed.
     Member(MemberError),
     /// A decision was refused, or could not be written.
@@ -105,6 +107,7 @@ impl fmt::Display for Error {
                 "the engine is open on a space without a checkout, so there is no factory/ to install into"
             ),
             Error::Install(e) => e.fmt(f),
+            Error::Genesis(e) => e.fmt(f),
             Error::Member(e) => e.fmt(f),
             Error::Decision(e) => e.fmt(f),
             Error::Coordination(e) => e.fmt(f),
