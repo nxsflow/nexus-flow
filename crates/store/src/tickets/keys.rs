@@ -15,7 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use nocentraldb::{MemberId, Space};
+use nocentraldb::{MemberId, ObjectId, Space};
 
 use crate::id::SpaceId;
 use crate::members::{self, record, tags::Tag, MemberError};
@@ -72,6 +72,8 @@ pub enum KeyError {
     /// The member's tag was another member's before, and the member's copy has not completed a
     /// sync: a key the earlier holder created may not have reached it yet.
     NotSynced { space: SpaceId, tag: String },
+    /// No ticket of the space holds the key or the object id.
+    KeyNotFound { key: String },
     /// The database failed.
     Database { message: String },
 }
@@ -91,6 +93,7 @@ impl fmt::Display for KeyError {
                 f,
                 "the tag {tag} was another member's before, and this copy of the space {space} has not synced yet; sync with nxs sync first"
             ),
+            KeyError::KeyNotFound { key } => write!(f, "no ticket of this space is {key}"),
             KeyError::Database { message } => f.write_str(message),
         }
     }
@@ -202,4 +205,11 @@ async fn every_key(opened: &Opened, space: &SpaceId) -> Result<Vec<Key>, KeyErro
         }
     }
     Ok(keys)
+}
+
+/// The object id of the ticket in the open space `space` that `text` names.
+pub async fn resolve(_opened: &Opened, _space: &SpaceId, _text: &str) -> Result<ObjectId, KeyError> {
+    Err(KeyError::Database {
+        message: "not resolved yet".to_owned(),
+    })
 }

@@ -2,3 +2,4 @@
 //! are, so they reach `crate::members`' tests' repository and the store's internals.
 
 mod mint;
+mod resolve;
